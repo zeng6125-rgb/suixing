@@ -37,7 +37,9 @@ fun CapabilityScreen() {
     val state by Core.capabilities.state.collectAsState()
     val scope = rememberCoroutineScope()
     var probing by remember { mutableStateOf(false) }
-    val allFiles = Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+    var notice by remember { mutableStateOf<String?>(null) }
+    val supportsAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    val allFiles = supportsAllFiles && Environment.isExternalStorageManager()
 
     LaunchedEffect(Unit) { Core.capabilities.refresh() }
 
@@ -54,6 +56,14 @@ fun CapabilityScreen() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        notice?.let { text ->
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
 
         CapabilityCard(
             title = "无障碍服务",
@@ -81,8 +91,13 @@ fun CapabilityScreen() {
                 else -> "重新授权"
             },
             onAction = {
-                if (state.shizukuInstalled) Core.capabilities.requestShizuku()
-                else Core.capabilities.openShizukuApp()
+                if (!state.shizukuInstalled) {
+                    Core.capabilities.openShizukuApp()
+                } else if (Core.capabilities.requestShizuku()) {
+                    notice = null
+                } else {
+                    notice = "Shizuku 服务未运行：先打开 Shizuku 应用并启动服务，再回来请求授权。"
+                }
             },
         )
 
@@ -113,16 +128,25 @@ fun CapabilityScreen() {
             Column(Modifier.weight(1f)) {
                 Text("所有文件访问权限", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    text = if (allFiles) {
-                        "已授予，文件工具可直接读写 /sdcard"
-                    } else {
-                        "未授予，文件工具只能访问应用私有目录"
+                    text = when {
+                        !supportsAllFiles ->
+                            "本机是 Android 10 及以下，没有这个开关，改用 Shizuku 或 root 访问 /sdcard"
+                        allFiles -> "已授予，文件工具可直接读写 /sdcard"
+                        else -> "未授予，文件工具只能访问应用私有目录"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            TextButton(onClick = { Core.capabilities.openAllFilesSettings() }) { Text("设置") }
+            TextButton(
+                onClick = {
+                    if (Core.capabilities.openAllFilesSettings()) {
+                        notice = null
+                    } else {
+                        notice = "本机无法打开「所有文件访问权限」设置，请改用 Shizuku 或 root 获取全盘访问。"
+                    }
+                },
+            ) { Text("设置") }
         }
 
         Row(verticalAlignment = Alignment.CenterVertically) {

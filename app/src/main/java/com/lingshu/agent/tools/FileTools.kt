@@ -2,6 +2,8 @@ package com.lingshu.agent.tools
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.File
@@ -273,23 +275,26 @@ class FileTools(private val context: Context) : ToolGroup() {
     private suspend fun deletePath(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         try {
             val file = resolve(args.str("path"))
-            if (file.absolutePath == "/" || file.absolutePath.length < 2) {
-                return@withContext ToolResult.failure("拒绝删除文件系统根目录")
-            }
             if (!file.exists()) return@withContext ToolResult.failure("路径不存在：${file.absolutePath}")
-            if (file.isDirectory && !args.bool("recursive", true)) {
+            val canonical = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+            if (canonical.length < 2 || canonical in PROTECTED_PATHS || canonical == workspace.canonicalPath) {
+                return@withContext ToolResult.failure(
+                    "拒绝删除受保护路径：$canonical（可以删除它下面的具体文件或子目录）",
+                )
+            }
+            if (file.isDirectory && !args.bool("recursive", false)) {
                 val empty = file.delete()
                 return@withContext if (empty) {
-                    ToolResult.success("已删除空目录 ${file.absolutePath}")
+                    ToolResult.success("已删除空目录 $canonical")
                 } else {
-                    ToolResult.failure("目录非空且 recursive=false：${file.absolutePath}")
+                    ToolResult.failure("$canonical 是非空目录；确认要整树删除时请显式传 recursive=true")
                 }
             }
             val removed = deleteRecursive(file)
             if (removed > 0) {
-                ToolResult.success("已删除 ${file.absolutePath}（${removed} 项）")
+                ToolResult.success("已删除 $canonical（$removed 项）")
             } else {
-                ToolResult.failure("删除失败：${file.absolutePath}（可能没有权限）")
+                ToolResult.failure("删除失败：$canonical（可能没有权限）")
             }
         } catch (error: Exception) {
             ToolResult.failure("删除失败：${error.message ?: error.javaClass.simpleName}")
@@ -305,15 +310,14 @@ class FileTools(private val context: Context) : ToolGroup() {
             val maxDepth = args.int("max_depth", 8).coerceIn(1, 30)
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
-            walk(root, 0, maxDepth) { file ->
-                if (hits.size < limit && file.name.contains(keyword, ignoreCase = true)) {
-                    hits.add(file.absolutePath)
-                }
+            walk(root, 0, maxDepth, { hits.size >= limit }) { file ->
+                if (file.name.contains(keyword, ignoreCase = true)) hits.add(file.absolutePath)
             }
             if (hits.isEmpty()) {
                 ToolResult.success("没有找到名称包含「$keyword」的文件")
             } else {
-                ToolResult.success("找到 ${hits.size} 个：\n" + hits.joinToString("\n"))
+                val more = if (hits.size >= limit) "（已达 limit 上限，可能还有更多）" else ""
+                ToolResult.success("找到 ${hits.size} 个$more：\n" + hits.joinToString("\n"))
             }
         } catch (error: Exception) {
             ToolResult.failure("查找失败：${error.message ?: error.javaClass.simpleName}")
@@ -337,7 +341,7 @@ class FileTools(private val context: Context) : ToolGroup() {
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
             var scanned = 0
-            walk(root, 0, 12) { file ->
+            walk(root, 0, 12, { hits.size >= limit || scanned >= maxFiles }) { file ->
                 if (hits.size >= limit || scanned >= maxFiles || !file.isFile) return@walk
                 if (file.length() > MAX_SEARCH_BYTES) return@walk
                 scanned++
@@ -362,12 +366,24 @@ class FileTools(private val context: Context) : ToolGroup() {
         }
     }
 
-    private fun walk(root: File, depth: Int, maxDepth: Int, action: (File) -> Unit) {
-        if (depth > maxDepth) return
+    /**
+     * Depth-first walk that stops as soon as [stop] says so and cooperates with
+     * coroutine cancellation, so a search over `/sdcard` cannot pin the IO
+     * dispatcher after the user taps stop.
+     */
+    private suspend fun walk(
+        root: File,
+        depth: Int,
+        maxDepth: Int,
+        stop: () -> Boolean,
+        action: (File) -> Unit,
+    ) {
+        if (depth > maxDepth || stop() || !currentCoroutineContext().isActive) return
         val children = root.listFiles() ?: return
         for (child in children) {
+            if (stop() || !currentCoroutineContext().isActive) return
             action(child)
-            if (child.isDirectory) walk(child, depth + 1, maxDepth, action)
+            if (child.isDirectory) walk(child, depth + 1, maxDepth, stop, action)
         }
     }
 
@@ -396,5 +412,14 @@ class FileTools(private val context: Context) : ToolGroup() {
     private companion object {
         const val MAX_TEXT_BYTES = 4L * 1024 * 1024
         const val MAX_SEARCH_BYTES = 2L * 1024 * 1024
+
+        /**
+         * `delete_path` is the one tool that cannot be undone, so whole trees that
+         * a single wrong argument would wipe out are refused outright.
+         */
+        val PROTECTED_PATHS = setOf(
+            "/", "/sdcard", "/storage", "/storage/emulated", "/storage/emulated/0",
+            "/system", "/system/bin", "/data", "/data/data", "/vendor", "/proc", "/sys", "/etc",
+        )
     }
 }

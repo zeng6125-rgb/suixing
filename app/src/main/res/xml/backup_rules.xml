@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Used on Android 11 and below (android:fullBackupContent), where cloud backup and
+  device transfer share one rule set. The API key lives in the same DataStore file
+  as every other setting, so the whole `datastore` directory stays out of backups.
+-->
 <full-backup-content>
-    <include domain="sharedpref" path="." />
-    <exclude domain="sharedpref" path="lingshu_secrets.preferences_pb" />
+    <exclude domain="file" path="datastore" />
 </full-backup-content>

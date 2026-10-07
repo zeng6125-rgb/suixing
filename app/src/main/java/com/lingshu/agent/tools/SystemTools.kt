@@ -106,7 +106,9 @@ class SystemTools(private val context: Context) : ToolGroup() {
         else -> ToolResult.failure("未知工具：$name")
     }
 
-    private fun deviceInfo(): ToolResult = try {
+    private suspend fun deviceInfo(): ToolResult = withContext(Dispatchers.IO) { readDeviceInfo() }
+
+    private fun readDeviceInfo(): ToolResult = try {
         val metrics = context.resources.displayMetrics
         val versionName = context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
         val stat = StatFs(Environment.getDataDirectory().absolutePath)

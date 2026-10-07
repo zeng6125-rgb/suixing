@@ -1,6 +1,7 @@
 package com.lingshu.agent.core
 
 import android.content.Context
+import com.lingshu.agent.agent.ApprovalGate
 import com.lingshu.agent.capability.CapabilityHub
 import com.lingshu.agent.data.ChatRepository
 import com.lingshu.agent.data.SettingsRepository
@@ -25,6 +26,14 @@ object Core {
     lateinit var tools: ToolRegistry
         private set
 
+    /**
+     * Shared on purpose: an approval prompt must be visible no matter which tab
+     * the user is on, so the gate lives here and the dialog is rendered above the
+     * navigation host rather than inside the chat screen.
+     */
+    lateinit var gate: ApprovalGate
+        private set
+
     fun init(context: Context) {
         if (initialized) return
         synchronized(this) {
@@ -34,6 +43,7 @@ object Core {
             chats = ChatRepository(appContext)
             capabilities = CapabilityHub(appContext)
             tools = ToolRegistry(appContext, capabilities)
+            gate = ApprovalGate()
             initialized = true
         }
     }

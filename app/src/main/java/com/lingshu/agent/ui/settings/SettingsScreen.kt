@@ -84,6 +84,21 @@ fun SettingsScreen() {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("模型支持图片输入", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "开启后截图会随消息发给模型，需要 gpt-4o / qwen-vl / gemini 这类视觉模型；" +
+                            "文字模型开着会直接报错。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = form.imageInput,
+                    onCheckedChange = { form = form.copy(imageInput = it) },
+                )
+            }
 
             LabeledSlider(
                 label = "温度 ${"%.1f".format(form.temperature)}",
@@ -119,6 +134,14 @@ fun SettingsScreen() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (form.approvalMode == ApprovalMode.ASK) {
+                OutlinedButton(
+                    onClick = {
+                        Core.gate.forgetAlways()
+                        scope.launch { snackbar.showSnackbar("已清除「总是允许」的记忆") }
+                    },
+                ) { Text("清除「总是允许」") }
+            }
 
             HorizontalDivider()
             Text("系统提示词", style = MaterialTheme.typography.titleMedium)

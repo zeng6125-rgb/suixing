@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,18 +42,38 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+private class Entry(val file: File, val subtitle: String)
+
 @Composable
 fun FilesScreen() {
     val root = remember { Core.appContext.getExternalFilesDir(null) ?: Core.appContext.filesDir }
     var current by remember { mutableStateOf(root) }
+    var entries by remember { mutableStateOf<List<Entry>>(emptyList()) }
+    var listError by remember { mutableStateOf<String?>(null) }
+    var listing by remember { mutableStateOf(true) }
     var preview by remember { mutableStateOf<Pair<String, String>?>(null) }
     var loading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    val entries = remember(current) {
-        current.listFiles()
-            ?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
-            ?: emptyList()
+    // Directory listing and per-entry sizes are disk IO, so they run off the main
+    // thread and land in state; doing it inside composition stutters the list.
+    LaunchedEffect(current) {
+        listing = true
+        val children = withContext(Dispatchers.IO) {
+            current.listFiles()?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+        }
+        if (children == null) {
+            listError = "无法读取该目录，可能缺少「所有文件访问权限」"
+            entries = emptyList()
+        } else {
+            listError = null
+            entries = withContext(Dispatchers.IO) {
+                children.map { file ->
+                    Entry(file, if (file.isDirectory) "文件夹" else humanSize(file.length()))
+                }
+            }
+        }
+        listing = false
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -77,14 +98,24 @@ fun FilesScreen() {
             }
         }
 
-        if (loading) {
+        if (listing || loading) {
             Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.Center) {
                 CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
         }
 
+        listError?.let { message ->
+            Text(
+                text = message,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
         LazyColumn(Modifier.fillMaxSize()) {
-            items(entries, key = { it.absolutePath }) { file ->
+            items(entries, key = { it.file.absolutePath }) { entry ->
+                val file = entry.file
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -112,7 +143,7 @@ fun FilesScreen() {
                     Column(Modifier.weight(1f)) {
                         Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
-                            text = if (file.isDirectory) "文件夹" else humanSize(file.length()),
+                            text = entry.subtitle,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -148,7 +179,8 @@ private fun readPreview(file: File): String {
     }.getOrElse { "（读取失败：${it.message ?: it::class.java.simpleName}）" }
 }
 
-private const val MAX_PREVIEW_BYTES = 512L * 1024L
+/** Kept small: every byte ends up in a single Text, and a big blob freezes layout. */
+private const val MAX_PREVIEW_BYTES = 20L * 1024L
 
 private fun humanSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"

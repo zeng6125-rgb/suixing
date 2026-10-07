@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingshu.agent.agent.AgentEngine
 import com.lingshu.agent.agent.AgentEvent
-import com.lingshu.agent.agent.ApprovalGate
 import com.lingshu.agent.core.Core
 import com.lingshu.agent.data.Conversation
 import com.lingshu.agent.data.Roles
@@ -12,11 +11,13 @@ import com.lingshu.agent.data.StoredMessage
 import com.lingshu.agent.service.AgentForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 data class ChatUiState(
@@ -27,13 +28,12 @@ data class ChatUiState(
     val running: Boolean = false,
     val status: String = "",
     val error: String? = null,
-    val pending: ApprovalGate.Request? = null,
 )
 
 class ChatViewModel : ViewModel() {
 
     private val engine = AgentEngine()
-    private val gate = ApprovalGate()
+    private val gate = Core.gate
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -56,9 +56,6 @@ class ChatViewModel : ViewModel() {
                     messages = existing.messages,
                 )
             }
-        }
-        viewModelScope.launch {
-            gate.pending.collect { request -> _state.update { it.copy(pending = request) } }
         }
     }
 
@@ -99,11 +96,12 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    fun send(text: String, imageBase64: String? = null) {
+    /** Returns false when the message was dropped, so the caller keeps the input text. */
+    fun send(text: String, imageBase64: String? = null): Boolean {
         val body = text.trim()
-        if (body.isEmpty() && imageBase64 == null) return
-        if (_state.value.running) return
-        if (_state.value.conversationId.isEmpty()) return
+        if (body.isEmpty() && imageBase64 == null) return false
+        if (_state.value.running) return false
+        if (_state.value.conversationId.isEmpty()) return false
 
         job = viewModelScope.launch {
             val user = StoredMessage(
@@ -121,9 +119,9 @@ class ChatViewModel : ViewModel() {
                     error = null,
                 )
             }
-            persist()
             AgentForegroundService.start(Core.appContext, "灵枢正在执行任务")
             try {
+                persist()
                 val settings = Core.settings.current()
                 engine.run(
                     history = _state.value.messages,
@@ -148,23 +146,18 @@ class ChatViewModel : ViewModel() {
                 }
             } finally {
                 AgentForegroundService.stop(Core.appContext)
-                persist()
+                // A cancelled coroutine refuses to suspend, so the final save has to
+                // run in a NonCancellable block or a stopped run loses its messages.
+                withContext(NonCancellable) { persist() }
             }
         }
+        return true
     }
 
     fun stop() {
         gate.cancelPending()
         job?.cancel()
         job = null
-    }
-
-    fun approve(always: Boolean = false) {
-        gate.resolve(true, always)
-    }
-
-    fun reject() {
-        gate.resolve(false)
     }
 
     fun dismissError() {

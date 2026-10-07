@@ -3,6 +3,7 @@ package com.lingshu.agent.capability
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import com.lingshu.agent.service.LingshuAccessibilityService
 import kotlinx.coroutines.Dispatchers
@@ -66,9 +67,11 @@ class CapabilityHub(private val context: Context) {
         available
     }
 
-    fun requestShizuku() {
-        ShizukuManager.requestPermission()
+    /** Returns false when Shizuku is not running, so the UI can explain the no-op. */
+    fun requestShizuku(): Boolean {
+        val requested = ShizukuManager.requestPermission()
         refresh()
+        return requested
     }
 
     fun openShizukuApp() {
@@ -86,19 +89,23 @@ class CapabilityHub(private val context: Context) {
         runCatching { context.startActivity(intent) }
     }
 
-    fun openAllFilesSettings() {
+    /**
+     * Returns false when the settings screen could not be opened. "All files access"
+     * only exists from Android 11 (API 30); on older releases both intents fail.
+     */
+    fun openAllFilesSettings(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
         val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
             .setData(android.net.Uri.parse("package:${context.packageName}"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        runCatching { context.startActivity(intent) }
-            .onFailure {
-                runCatching {
-                    context.startActivity(
-                        Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
-                }
+        return runCatching { context.startActivity(intent) }
+            .recoverCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
             }
+            .isSuccess
     }
 
     fun openAppDetails() {

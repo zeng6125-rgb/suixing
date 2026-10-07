@@ -22,6 +22,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
 
 /** Everything the UI needs to render while the agent is working. */
 sealed interface AgentEvent {
@@ -77,9 +78,15 @@ class ApprovalGate {
         waiter?.complete(Decision(approved, always))
     }
 
-    /** Used when the user stops the run while a prompt is on screen. */
+    /**
+     * Used when the user stops the run while a prompt is on screen. The state is
+     * cleared here rather than in [request] because a cancelled coroutine never
+     * resumes, which would otherwise leave the dialog on screen forever.
+     */
     fun cancelPending() {
         waiter?.complete(Decision(false, false))
+        waiter = null
+        _pending.value = null
     }
 
     fun forgetAlways() {
@@ -104,7 +111,7 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
         val produced = mutableListOf<StoredMessage>()
         val wire = mutableListOf<ChatMessage>()
         wire += ChatMessage.system(systemPrompt(settings, registry))
-        history.forEach { appendToWire(wire, it) }
+        sanitize(history).forEach { appendToWire(wire, it, settings) }
 
         val maxRounds = settings.maxToolRounds.coerceIn(1, MAX_ROUNDS)
         var round = 0
@@ -112,6 +119,11 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
             round++
             val turn = llm.complete(settings, wire, registry.all().map { it.spec }) { piece ->
                 onEvent(AgentEvent.TextDelta(piece))
+            }
+            // A truncated turn can end mid-tool-call, so say so instead of silently
+            // presenting half an answer as a finished one.
+            if (turn.finishReason == "length") {
+                onEvent(AgentEvent.Failed("模型输出达到长度上限被截断，内容可能不完整。"))
             }
             if (turn.toolCalls.isEmpty()) {
                 val assistant = StoredMessage(
@@ -149,6 +161,7 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
                             ToolResult.failure("用户拒绝了这次调用。")
                         } else {
                             runCatching { tool.run(parseArgs(call.arguments)) }.getOrElse { error ->
+                                if (error is CancellationException) throw error
                                 ToolResult.failure("工具执行异常：${error.message ?: error::class.java.simpleName}")
                             }
                         }
@@ -170,7 +183,13 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
                 onEvent(AgentEvent.ToolMessage(stored))
                 wire += ChatMessage.tool(call.id, output)
                 result.imageBase64?.let { base64 ->
-                    wire += ChatMessage.user("（这是上一步 $call.name 返回的截图）", base64)
+                    if (settings.imageInput) {
+                        wire += ChatMessage.user("（这是上一步 $call.name 返回的截图）", base64)
+                    } else {
+                        wire += ChatMessage.user(
+                            "（上一步 $call.name 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
+                        )
+                    }
                 }
                 onEvent(AgentEvent.ToolFinished(call.name, result.ok, output))
             }
@@ -179,9 +198,33 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
         return produced
     }
 
-    private fun appendToWire(wire: MutableList<ChatMessage>, message: StoredMessage) {
+    /**
+     * A run stopped in the middle of a tool call leaves an assistant message whose
+     * `tool_calls` were never answered. Replaying that to an OpenAI-compatible
+     * endpoint is a hard 400, so any such message is dropped before sending.
+     */
+    private fun sanitize(messages: List<StoredMessage>): List<StoredMessage> {
+        val answered = messages.filter { it.role == Roles.TOOL }.mapNotNull { it.toolCallId }.toSet()
+        return messages.filterNot { message ->
+            message.role == Roles.ASSISTANT && message.toolCalls.any { it.id !in answered }
+        }
+    }
+
+    private fun appendToWire(
+        wire: MutableList<ChatMessage>,
+        message: StoredMessage,
+        settings: AppSettings,
+    ) {
+        // Images only go out when the configured model can read them; a text-only
+        // endpoint rejects the whole request otherwise.
+        val image = message.imageBase64.takeIf { settings.imageInput }
+        val note = if (message.imageBase64 != null && image == null) {
+            "\n（图片已省略：当前未开启「模型支持图片输入」）"
+        } else {
+            ""
+        }
         when (message.role) {
-            Roles.USER -> wire += ChatMessage.user(message.text, message.imageBase64)
+            Roles.USER -> wire += ChatMessage.user(message.text + note, image)
             Roles.SYSTEM -> wire += ChatMessage.system(message.text)
             Roles.ASSISTANT -> wire += ChatMessage.assistant(
                 message.text,
@@ -192,7 +235,7 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
                     message.toolCallId ?: message.toolName.orEmpty(),
                     message.toolOutput.orEmpty(),
                 )
-                message.imageBase64?.let { wire += ChatMessage.user("（上一步工具的截图）", it) }
+                if (image != null) wire += ChatMessage.user("（上一步工具的截图）", image)
             }
         }
     }

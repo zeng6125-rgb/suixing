@@ -19,11 +19,16 @@ object ShizukuManager {
         isBinderAlive() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     }.getOrDefault(false)
 
-    fun requestPermission() {
-        runCatching {
-            if (isBinderAlive() && !isGranted()) Shizuku.requestPermission(REQUEST_CODE)
-        }
-    }
+    /**
+     * Returns false when Shizuku is not running (or already granted), so the caller
+     * can tell the user why pressing the button appeared to do nothing.
+     */
+    fun requestPermission(): Boolean = runCatching {
+        if (!isBinderAlive()) return@runCatching false
+        if (isGranted()) return@runCatching true
+        Shizuku.requestPermission(REQUEST_CODE)
+        true
+    }.getOrDefault(false)
 
     fun addPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener) {
         runCatching { Shizuku.addRequestPermissionResultListener(listener) }

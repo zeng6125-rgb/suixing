@@ -27,8 +27,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,7 +44,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -58,6 +55,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,6 +63,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingshu.agent.data.Roles
 import com.lingshu.agent.data.StoredMessage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -167,8 +167,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                             onClick = {
                                 if (state.running) {
                                     viewModel.stop()
-                                } else {
-                                    viewModel.send(input)
+                                } else if (viewModel.send(input)) {
                                     input = ""
                                 }
                             },
@@ -204,34 +203,6 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 }
             }
         }
-    }
-
-    state.pending?.let { request ->
-        AlertDialog(
-            onDismissRequest = { viewModel.reject() },
-            icon = { Icon(Icons.Filled.Warning, contentDescription = null) },
-            title = { Text("需要确认") },
-            text = {
-                Column {
-                    Text("灵枢想调用工具：${request.toolName}")
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = request.args,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 10,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            },
-            confirmButton = { TextButton(onClick = { viewModel.approve(false) }) { Text("允许一次") } },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = { viewModel.approve(true) }) { Text("总是允许") }
-                    TextButton(onClick = { viewModel.reject() }) { Text("拒绝") }
-                }
-            },
-        )
     }
 }
 
@@ -364,16 +335,21 @@ private fun ToolCard(message: StoredMessage) {
 
 @Composable
 private fun ImageBlock(base64: String) {
-    val bitmap = remember(base64) {
-        runCatching {
-            val bytes = Base64.decode(base64, Base64.DEFAULT)
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
-        }.getOrNull()
+    // Decoding a 1080p screenshot costs tens of milliseconds; doing it inside
+    // composition stalls the frame and can ANR while the list scrolls.
+    var bitmap by remember(base64) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(base64) {
+        bitmap = withContext(Dispatchers.Default) {
+            runCatching {
+                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }.getOrNull()
+        }
     }
-    if (bitmap != null) {
+    bitmap?.let { decoded ->
         Spacer(Modifier.height(6.dp))
         Image(
-            bitmap = bitmap,
+            bitmap = decoded,
             contentDescription = null,
             modifier = Modifier.fillMaxWidth(),
         )

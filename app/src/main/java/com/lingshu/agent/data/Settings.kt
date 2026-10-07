@@ -38,6 +38,11 @@ data class AppSettings(
     val dynamicColor: Boolean = true,
     val themeMode: Int = 0,
     val enableRoot: Boolean = false,
+    /**
+     * Off by default because the default endpoint (deepseek-chat) is text-only and
+     * rejects any request carrying an image. Turn it on for vision models.
+     */
+    val imageInput: Boolean = false,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 }
