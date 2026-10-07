@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">灵枢</string>
+    <string name="accessibility_service_label">灵枢 · 屏幕操作</string>
+    <string name="accessibility_service_description">允许灵枢读取屏幕内容、点击与滑动、截取屏幕。用于代替你操作手机上的其他应用。只有在你主动下达任务时才会被调用。</string>
+</resources>

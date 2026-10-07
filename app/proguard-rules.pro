@@ -1,0 +1,3 @@
+-keep class rikka.shizuku.** { *; }
+-keep class kotlinx.serialization.** { *; }
+-dontwarn org.jetbrains.annotations.**
