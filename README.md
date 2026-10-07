@@ -13,6 +13,8 @@
 **对话**
 - 多会话、流式输出、Markdown 渲染、前台服务保活（切后台不中断）
 - 支持发送图片（多模态模型可直接看图；用纯文本模型时请保持设置里「模型支持图片输入」关闭，否则带图请求会被接口拒绝）
+- 语音输入：输入框左边的麦克风调用系统语音识别，识别结果直接落到输入框
+- 语音输出：可选「朗读回复」，每条回复结束后用系统 TTS 读出；模型也能自己调 `speak` 工具主动说话
 
 **三档权限**（对应「能力」页三张卡片）
 
@@ -31,16 +33,24 @@
 
 审批弹窗挂在导航栏之上，切到「能力」「文件」「设置」页也会照常弹出；被记住的「总是允许」可在「设置」页一键清除。
 
-## 内置工具（33 个）
+## 内置工具（38 个）
 
 - 系统（8）：`device_info` `list_apps` `open_app` `open_url` `clipboard_read` `clipboard_write` `memory_write` `memory_read`
 - 文件（9）：`read_file` `write_file` `list_dir` `make_dir` `stat_path` `move_path` `delete_path` `find_files` `search_in_files`
 - Shell（2）：`run_shell` `app_action`（start / force_stop / clear_data / uninstall / disable / enable / info / permissions / install）
 - UI 自动化（11）：`ui_dump` `ui_screenshot` `ui_tap` `ui_long_press` `ui_swipe` `ui_click_text` `ui_type` `ui_type_into` `ui_key` `ui_current_app` `ui_wait`
 - 技能（3）：`skill_list` `skill_read` `skill_save`
+- 网络（3）：`web_fetch` `web_download` `web_search`
+- 语音（2）：`speak` `stop_speaking`
 - MCP（数量取决于你接的服务器）：每个远程工具注册为 `mcp__服务器名__工具名`
 
 文件工具的默认工作目录是 `Android/data/com.lingshu.agent/files`（应用外部私有目录，不需要任何存储权限）；`~` 即该目录，绝对路径原样使用。想访问全盘就开 Shizuku 或 Root。
+
+## 联网
+
+三个网络工具让模型自己查资料，而不是靠记忆编：`web_fetch` 抓网页（HTML 自动转纯文本，带编码嗅探）、`web_download` 存文件到本机（上限 64 MB）、`web_search` 搜网页。
+
+搜索默认走内置的 DuckDuckGo 抓取，零配置但容易被限流。想要稳定就在「设置 → 联网搜索」里填一个 Tavily 兼容接口（地址 + Key），`web_search` 会自动改走它。
 
 ## MCP（外挂工具）
 
@@ -93,7 +103,7 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 gradle :app:assembleDebug
 # 产物 app/build/outputs/apk/debug/app-debug.apk
 
-# 单元测试（MCP 协议层与 stdio 传输的真实往返，无需设备）
+# 单元测试（MCP 协议层与 stdio 传输的真实往返、HTML 转纯文本，无需设备）
 gradle :app:testDebugUnitTest
 ```
 
@@ -107,13 +117,14 @@ gradle :app:testDebugUnitTest
 app/src/main/java/com/lingshu/agent/
 ├── MainActivity.kt              入口，主题与导航
 ├── LingshuApplication.kt        初始化 Core
-├── core/Core.kt                 全局单例（settings / chats / capabilities / skills / tools / mcp）
+├── core/Core.kt                 全局单例（settings / chats / capabilities / skills / speaker / tools / mcp）
 ├── data/                        设置（DataStore）、会话存储（JSON 文件）、MCP 配置
 ├── capability/                  能力探测：无障碍状态、Shizuku 绑定、root 探测、Shell 执行
 ├── service/                     无障碍服务、前台保活服务
-├── tools/                       工具层：Tool 契约 + ToolRegistry + 五组工具
+├── tools/                       工具层：Tool 契约 + ToolRegistry + 七组工具
 ├── mcp/                         MCP 客户端：协议、stdio/http 传输、连接管理
 ├── skills/SkillStore.kt         技能库：扫描 / 解析 frontmatter / 导入导出
+├── voice/Speaker.kt             系统 TTS 封装（朗读回复、speak 工具）
 ├── llm/LlmClient.kt             OpenAI 兼容流式客户端（SSE + tool_calls 组装）
 ├── agent/AgentEngine.kt         主循环：模型 → 工具 → 模型，含审批闸门
 └── ui/                          会话 / 能力 / 文件 / 扩展（MCP + 技能）/ 设置 五个界面

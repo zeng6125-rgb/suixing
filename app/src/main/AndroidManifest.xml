@@ -74,4 +74,15 @@
 
     </application>
 
+    <!-- Android 11+ hides other packages unless they are declared here; without
+         this the TTS engine cannot be discovered and speak() silently no-ops. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
 </manifest>

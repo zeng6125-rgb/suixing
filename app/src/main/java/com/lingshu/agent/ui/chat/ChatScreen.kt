@@ -1,7 +1,12 @@
 package com.lingshu.agent.ui.chat
 
+import android.app.Activity
 import android.graphics.BitmapFactory
+import android.content.Intent
+import android.speech.RecognizerIntent
 import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -26,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -51,6 +57,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,6 +71,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingshu.agent.data.Roles
 import com.lingshu.agent.data.StoredMessage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -73,8 +81,24 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     val conversations by viewModel.conversations.collectAsState()
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     var input by rememberSaveable { mutableStateOf("") }
     var historyOpen by remember { mutableStateOf(false) }
+
+    val voiceLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                .orEmpty()
+                .trim()
+            if (spoken.isNotEmpty()) {
+                input = if (input.isBlank()) spoken else "$input $spoken"
+            }
+        }
+    }
 
     val itemCount = state.messages.size + if (state.streaming.isNotEmpty()) 1 else 0
     LaunchedEffect(itemCount) {
@@ -155,6 +179,28 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                         Spacer(Modifier.height(6.dp))
                     }
                     Row(verticalAlignment = Alignment.Bottom) {
+                        IconButton(
+                            onClick = {
+                                // The recognizer runs in its own app, so this needs no
+                                // RECORD_AUDIO permission from us.
+                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                    putExtra(
+                                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                                    )
+                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
+                                }
+                                runCatching { voiceLauncher.launch(intent) }.onFailure {
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("没有可用的语音识别应用")
+                                    }
+                                }
+                            },
+                            enabled = !state.running,
+                        ) {
+                            Icon(Icons.Filled.Mic, contentDescription = "语音输入")
+                        }
                         OutlinedTextField(
                             value = input,
                             onValueChange = { input = it },

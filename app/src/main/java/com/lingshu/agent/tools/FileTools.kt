@@ -135,26 +135,11 @@ class FileTools(private val context: Context) : ToolGroup() {
         else -> ToolResult.failure("未知工具：$name")
     }
 
-    private fun resolve(raw: String?): File {
-        val path = raw?.trim().orEmpty()
-        return when {
-            path.isEmpty() || path == "~" -> workspace
-            path.startsWith("~/") -> File(workspace, path.removePrefix("~/"))
-            File(path).isAbsolute -> File(path)
-            else -> File(workspace, path)
-        }
-    }
+    private fun resolve(raw: String?): File = resolveUserPath(context, raw)
 
     private fun describe(file: File): String = when {
         file.isDirectory -> "[目录]"
         else -> "[文件 ${humanSize(file.length())}]"
-    }
-
-    private fun humanSize(bytes: Long): String = when {
-        bytes < 1024 -> "${bytes} B"
-        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
-        bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
-        else -> "%.2f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
     }
 
     private suspend fun readFile(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
@@ -422,4 +407,30 @@ class FileTools(private val context: Context) : ToolGroup() {
             "/system", "/system/bin", "/data", "/data/data", "/vendor", "/proc", "/sys", "/etc",
         )
     }
+}
+
+/**
+ * The agent's default working directory. App-private external storage needs no
+ * runtime permission, so relative paths work on a freshly installed phone.
+ */
+internal fun workspaceDir(context: Context): File =
+    context.getExternalFilesDir(null) ?: context.filesDir
+
+/** Shared by the file tools and the download tool so `~` means the same thing in both. */
+internal fun resolveUserPath(context: Context, raw: String?): File {
+    val workspace = workspaceDir(context)
+    val path = raw?.trim().orEmpty()
+    return when {
+        path.isEmpty() || path == "~" -> workspace
+        path.startsWith("~/") -> File(workspace, path.removePrefix("~/"))
+        File(path).isAbsolute -> File(path)
+        else -> File(workspace, path)
+    }
+}
+
+internal fun humanSize(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+    bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
+    else -> "%.2f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
 }

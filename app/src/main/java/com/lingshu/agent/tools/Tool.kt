@@ -2,7 +2,9 @@ package com.lingshu.agent.tools
 
 import android.content.Context
 import com.lingshu.agent.capability.CapabilityHub
+import com.lingshu.agent.data.SettingsRepository
 import com.lingshu.agent.skills.SkillStore
+import com.lingshu.agent.voice.Speaker
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -101,7 +103,13 @@ fun JsonObject.int(key: String, fallback: Int): Int = (this[key] as? JsonPrimiti
 fun JsonObject.bool(key: String, fallback: Boolean): Boolean =
     (this[key] as? JsonPrimitive)?.booleanOrNull ?: fallback
 
-class ToolRegistry(context: Context, capabilities: CapabilityHub, skills: SkillStore) {
+class ToolRegistry(
+    context: Context,
+    capabilities: CapabilityHub,
+    skills: SkillStore,
+    speaker: Speaker,
+    settings: SettingsRepository,
+) {
     private val builtin = LinkedHashMap<String, Tool>()
     private val dynamic = LinkedHashMap<String, Tool>()
 
@@ -111,6 +119,8 @@ class ToolRegistry(context: Context, capabilities: CapabilityHub, skills: SkillS
         add(ShellTools(capabilities))
         add(UiTools(capabilities))
         add(SkillTools(skills))
+        add(WebTools(context, settings))
+        add(VoiceTools(speaker))
     }
 
     fun add(group: ToolGroup) {

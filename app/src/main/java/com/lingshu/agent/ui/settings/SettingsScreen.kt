@@ -115,6 +115,52 @@ fun SettingsScreen() {
                 onValueChange = { form = form.copy(maxToolRounds = it.toInt()) },
             )
 
+            Text("联网搜索", style = MaterialTheme.typography.titleMedium)
+            OutlinedTextField(
+                value = form.searchEndpoint,
+                onValueChange = { form = form.copy(searchEndpoint = it) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("搜索接口（可留空）") },
+                placeholder = { Text("https://api.tavily.com/search") },
+                singleLine = true,
+                supportingText = {
+                    Text("留空时用内置的 DuckDuckGo 抓取，容易被限流；填一个 Tavily 兼容接口更稳。")
+                },
+            )
+            OutlinedTextField(
+                value = form.searchApiKey,
+                onValueChange = { form = form.copy(searchApiKey = it) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("搜索接口 Key（可留空）") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+            )
+
+            Text("语音", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("朗读回复", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "每条回复结束后用系统语音引擎读出来。语音引擎状态：${Core.speaker.languageLabel()}。" +
+                            "输入框左边的麦克风按钮负责语音输入。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = form.speakReplies,
+                    onCheckedChange = { form = form.copy(speakReplies = it) },
+                )
+            }
+            if (form.speakReplies) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { Core.speaker.speak("你好，我是灵枢。") }) {
+                        Text("试听")
+                    }
+                    OutlinedButton(onClick = { Core.speaker.stop() }) { Text("停止朗读") }
+                }
+            }
+
             Text("工具审批", style = MaterialTheme.typography.titleMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ApprovalMode.entries.forEach { mode ->

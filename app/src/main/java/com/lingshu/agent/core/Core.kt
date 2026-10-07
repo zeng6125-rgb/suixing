@@ -9,6 +9,7 @@ import com.lingshu.agent.data.SettingsRepository
 import com.lingshu.agent.mcp.McpManager
 import com.lingshu.agent.skills.SkillStore
 import com.lingshu.agent.tools.ToolRegistry
+import com.lingshu.agent.voice.Speaker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,6 +31,8 @@ object Core {
     lateinit var capabilities: CapabilityHub
         private set
     lateinit var skills: SkillStore
+        private set
+    lateinit var speaker: Speaker
         private set
     lateinit var tools: ToolRegistry
         private set
@@ -56,7 +59,8 @@ object Core {
             chats = ChatRepository(appContext)
             capabilities = CapabilityHub(appContext)
             skills = SkillStore(appContext)
-            tools = ToolRegistry(appContext, capabilities, skills)
+            speaker = Speaker(appContext)
+            tools = ToolRegistry(appContext, capabilities, skills, speaker, settings)
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate()
             initialized = true

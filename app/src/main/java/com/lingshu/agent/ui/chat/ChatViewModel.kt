@@ -123,7 +123,7 @@ class ChatViewModel : ViewModel() {
             try {
                 persist()
                 val settings = Core.settings.current()
-                engine.run(
+                val produced = engine.run(
                     history = _state.value.messages,
                     settings = settings,
                     registry = Core.tools,
@@ -132,6 +132,12 @@ class ChatViewModel : ViewModel() {
                     gate = gate,
                     onEvent = ::handleEvent,
                 )
+                // Only the run's own last reply is read out, not the whole history.
+                if (settings.speakReplies) {
+                    produced.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }
+                        ?.text
+                        ?.let { Core.speaker.speak(it) }
+                }
                 _state.update { it.copy(running = false, streaming = "", status = "") }
             } catch (cancellation: CancellationException) {
                 _state.update { it.copy(running = false, streaming = "", status = "已停止") }
@@ -157,6 +163,7 @@ class ChatViewModel : ViewModel() {
 
     fun stop() {
         gate.cancelPending()
+        Core.speaker.stop()
         job?.cancel()
         job = null
     }

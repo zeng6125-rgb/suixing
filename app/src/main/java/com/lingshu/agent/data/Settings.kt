@@ -43,6 +43,14 @@ data class AppSettings(
      * rejects any request carrying an image. Turn it on for vision models.
      */
     val imageInput: Boolean = false,
+    /**
+     * Optional Tavily-compatible search endpoint. Empty means the built-in
+     * DuckDuckGo fallback, which needs no key but is easier to rate-limit.
+     */
+    val searchEndpoint: String = "",
+    val searchApiKey: String = "",
+    /** Read every finished reply out loud through the system TTS engine. */
+    val speakReplies: Boolean = false,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 }
@@ -54,6 +62,7 @@ const val DEFAULT_SYSTEM_PROMPT = """你是灵枢，运行在用户安卓手机�
 工作方式：
 - 先想清楚要做什么，再调用工具，不要凭猜测描述手机状态。
 - 每一步只做必要的操作，拿到结果后再决定下一步。
+- 需要外部信息时用 web_fetch 或 web_search 查，不要凭记忆编造事实与链接。
 - 涉及删除、发送、支付、卸载等不可逆操作时，先向用户说明再执行。
 - 用简洁的中文回答，必要时用短列表。"""
 
