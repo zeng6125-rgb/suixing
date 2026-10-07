@@ -35,7 +35,11 @@ data class AppSettings(
     val maxToolRounds: Int = 16,
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
-    val dynamicColor: Boolean = true,
+    /**
+     * 0 = the hand-tuned 灵枢 palette, 1 = follow the system wallpaper (Material You).
+     * The brand palette is the default because the whole UI is built around it.
+     */
+    val paletteMode: Int = 0,
     val themeMode: Int = 0,
     val enableRoot: Boolean = false,
     /**

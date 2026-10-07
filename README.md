@@ -8,6 +8,16 @@
 - 支持 MCP：任何 MCP 服务器提供的工具都会并进模型可调用的工具表
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 
+## 界面
+
+配色与排版对齐 [Aether 扶摇](https://github.com/Zhou-Shilin/Aether) 的视觉取值（暖黑底 `#151619`、柔紫主色 `#C0AEFF`、米白正文 `#F3F1EC`，浅色侧则是白底 + `#AD7BF9`），布局与交互为本项目自研。几个刻意的选择：
+
+- **不跟随 Material 动态取色**。默认用一套手调的「灵枢配色」，想要跟壁纸就在「设置 → 外观 → 配色」里切过去。
+- **不用阴影**。层级靠三层表面阶梯（`surfaceContainerLow` / `surfaceContainer` / `surfaceContainerHigh`）加 1dp 发丝描边区分。
+- **卡片 20dp 圆角、导航是浮动胶囊**。底部导航不占满整宽，键盘弹起时整条隐藏。
+- **edge-to-edge**。状态栏与导航栏透明，内容自己处理 insets；顶栏自带 `statusBarsPadding()`。
+- 会话页空状态是一个径向光晕的品牌标记加四条建议提示词，点一下直接填进输入框。
+
 ## 功能
 
 **对话**
@@ -127,7 +137,10 @@ app/src/main/java/com/lingshu/agent/
 ├── voice/Speaker.kt             系统 TTS 封装（朗读回复、speak 工具）
 ├── llm/LlmClient.kt             OpenAI 兼容流式客户端（SSE + tool_calls 组装）
 ├── agent/AgentEngine.kt         主循环：模型 → 工具 → 模型，含审批闸门
-└── ui/                          会话 / 能力 / 文件 / 扩展（MCP + 技能）/ 设置 五个界面
+└── ui/
+    ├── theme/                   配色（手调 M3 角色）、排版、圆角
+    ├── components/              品牌标记、卡片、顶栏、分段控件等共用件
+    └── chat / capability / files / extension / settings   五个界面
 ```
 
 ## 首次使用

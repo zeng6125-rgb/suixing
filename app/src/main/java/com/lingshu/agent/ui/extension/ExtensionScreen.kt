@@ -11,49 +11,43 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingshu.agent.core.Core
@@ -61,18 +55,26 @@ import com.lingshu.agent.data.McpServerConfig
 import com.lingshu.agent.mcp.McpServerState
 import com.lingshu.agent.mcp.McpStatus
 import com.lingshu.agent.skills.Skill
+import com.lingshu.agent.ui.components.LingshuCard
+import com.lingshu.agent.ui.components.LingshuTopBar
+import com.lingshu.agent.ui.components.SegmentedPill
+import com.lingshu.agent.ui.components.SoftIcon
+import com.lingshu.agent.ui.components.StatusPill
+import com.lingshu.agent.ui.theme.LocalDarkTheme
+import com.lingshu.agent.ui.theme.MonoStyle
+import com.lingshu.agent.ui.theme.Tone
+import com.lingshu.agent.ui.theme.color
 import kotlinx.coroutines.launch
 
 /**
  * One screen for everything that adds capability at runtime: MCP servers, which
  * contribute tools, and skills, which contribute instructions.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExtensionScreen() {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    var tab by remember { mutableStateOf(0) }
+    var tab by remember { mutableIntStateOf(0) }
 
     var mcpEditorOpen by remember { mutableStateOf(false) }
     var mcpEditing by remember { mutableStateOf<McpServerConfig?>(null) }
@@ -80,7 +82,7 @@ fun ExtensionScreen() {
 
     var skillViewing by remember { mutableStateOf<Skill?>(null) }
     var skillDeleting by remember { mutableStateOf<Skill?>(null) }
-    var skillRefresh by remember { mutableStateOf(0) }
+    var skillRefresh by remember { mutableIntStateOf(0) }
 
     fun notify(text: String) {
         scope.launch { snackbar.showSnackbar(text) }
@@ -102,56 +104,50 @@ fun ExtensionScreen() {
         }
     }
 
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = { Text("扩展") },
-                    actions = {
-                        IconButton(
-                            onClick = {
-                                if (tab == 0) {
-                                    scope.launch {
-                                        Core.mcp.load()
-                                        notify("已重新加载 MCP 配置")
-                                    }
-                                } else {
-                                    skillRefresh++
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            LingshuTopBar(
+                title = "扩展",
+                subtitle = if (tab == 0) "MCP 给模型加工具" else "技能给模型加知识",
+                actions = {
+                    IconButton(
+                        onClick = {
+                            if (tab == 0) {
+                                scope.launch {
+                                    Core.mcp.load()
+                                    notify("已重新加载 MCP 配置")
                                 }
-                            },
-                        ) {
-                            Icon(Icons.Filled.Refresh, contentDescription = "刷新")
-                        }
-                    },
-                )
-                TabRow(selectedTabIndex = tab) {
-                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("MCP") })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("技能") })
-                }
-            }
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = {
-                    if (tab == 0) {
-                        mcpEditing = null
-                        mcpEditorOpen = true
-                    } else {
-                        importer.launch(null)
+                            } else {
+                                skillRefresh++
+                            }
+                        },
+                    ) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
+                    }
+                    IconButton(
+                        onClick = {
+                            if (tab == 0) {
+                                mcpEditing = null
+                                mcpEditorOpen = true
+                            } else {
+                                importer.launch(null)
+                            }
+                        },
+                    ) {
+                        Icon(
+                            imageVector = if (tab == 0) Icons.Outlined.Add else Icons.Outlined.FileDownload,
+                            contentDescription = if (tab == 0) "添加服务器" else "导入技能",
+                            modifier = Modifier.size(20.dp),
+                        )
                     }
                 },
-                icon = {
-                    Icon(
-                        imageVector = if (tab == 0) Icons.Filled.Add else Icons.Filled.FileDownload,
-                        contentDescription = null,
-                    )
-                },
-                text = { Text(if (tab == 0) "添加服务器" else "导入技能") },
             )
-        },
-    ) { padding ->
-        Box(modifier = Modifier.padding(padding)) {
+
+            Box(Modifier.padding(horizontal = 16.dp, vertical = 2.dp)) {
+                SegmentedPill(options = listOf("MCP", "技能"), selectedIndex = tab, onSelect = { tab = it })
+            }
+            Spacer(Modifier.height(12.dp))
+
             when (tab) {
                 0 -> McpSection(
                     onEdit = {
@@ -169,6 +165,14 @@ fun ExtensionScreen() {
                 )
             }
         }
+
+        SnackbarHost(
+            hostState = snackbar,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        )
     }
 
     if (mcpEditorOpen) {
@@ -243,7 +247,7 @@ private fun McpSection(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { McpIntroCard() }
@@ -251,7 +255,7 @@ private fun McpSection(
         if (servers.isEmpty()) {
             item {
                 Text(
-                    text = "还没有配置服务器。点右下角「添加服务器」，填一条启动命令（stdio）或一个地址（http）即可。",
+                    text = "还没有配置服务器。点右上角「+」，填一条启动命令（stdio）或一个地址（http）即可。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -288,29 +292,28 @@ private fun McpSection(
 
 @Composable
 private fun McpIntroCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Text("什么是 MCP", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "MCP（Model Context Protocol）是给模型外挂工具的标准协议。接上服务器后，" +
-                    "它提供的每个工具都会以 mcp__服务器名__工具名 出现在模型可调用的工具列表里，" +
-                    "和内置工具一样受审批闸门管控。",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "stdio：填一条启动命令，灵枢会把它当子进程跑，用管道收发 JSON-RPC。" +
-                    "手机上的进程默认以应用身份运行，读不到 Termux 私有目录；" +
-                    "装了 Magisk/KernelSU 的话可以用 su -c \"...\" 前缀借 root 跑。\n" +
-                    "http：填服务器地址（如 http://127.0.0.1:3000/mcp），适合跑在 Termux、电脑或公网的服务。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    LingshuCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SoftIcon(Icons.Outlined.Info, size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            Spacer(Modifier.width(12.dp))
+            Text("什么是 MCP", style = MaterialTheme.typography.titleMedium)
         }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = "MCP（Model Context Protocol）是给模型外挂工具的标准协议。接上服务器后，" +
+                "它提供的每个工具都会以 mcp__服务器名__工具名 出现在模型可调用的工具列表里，" +
+                "和内置工具一样受审批闸门管控。",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "stdio：填一条启动命令，灵枢会把它当子进程跑，用管道收发 JSON-RPC。" +
+                "手机上的进程默认以应用身份运行，读不到 Termux 私有目录；" +
+                "装了 Magisk/KernelSU 的话可以用 su -c \"...\" 前缀借 root 跑。\n" +
+                "http：填服务器地址（如 http://127.0.0.1:3000/mcp），适合跑在 Termux、电脑或公网的服务。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -323,67 +326,74 @@ private fun ServerCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+    val dark = LocalDarkTheme.current
+    val tone = when (state.status) {
+        McpStatus.READY -> Tone.OK
+        McpStatus.ERROR -> Tone.WARN
+        McpStatus.CONNECTING -> Tone.INFO
+        McpStatus.DISCONNECTED -> Tone.OFF
+    }
+    LingshuCard(contentPadding = PaddingValues(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SoftIcon(Icons.Outlined.Dns, tint = tone.color(dark))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
                 Text(
                     text = state.config.name,
                     style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                AssistChip(
-                    onClick = { },
-                    label = { Text(if (state.config.isStdio) "stdio" else "http") },
+                Text(
+                    text = state.statusLine(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Switch(checked = state.config.enabled, onCheckedChange = onToggleEnabled)
             }
+            Spacer(Modifier.width(8.dp))
+            Switch(checked = state.config.enabled, onCheckedChange = onToggleEnabled)
+        }
 
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = state.statusLine(),
-                style = MaterialTheme.typography.bodySmall,
-                color = when (state.status) {
-                    McpStatus.READY -> MaterialTheme.colorScheme.primary
-                    McpStatus.ERROR -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-
-            val target = if (state.config.isStdio) state.config.command else state.config.url
-            if (target.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
+        val target = if (state.config.isStdio) state.config.command else state.config.url
+        if (target.isNotBlank()) {
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+            ) {
                 Text(
                     text = target,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.fillMaxWidth().padding(10.dp),
+                    style = MonoStyle,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
 
-            Spacer(Modifier.height(8.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(4.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (state.status == McpStatus.READY) {
-                    TextButton(onClick = onDisconnect) { Text("断开") }
-                    TextButton(onClick = { onConnect() }) { Text("刷新工具") }
-                } else {
-                    TextButton(onClick = onConnect, enabled = state.status != McpStatus.CONNECTING) {
-                        Text(if (state.status == McpStatus.CONNECTING) "连接中…" else "连接")
-                    }
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusPill(
+                text = if (state.config.isStdio) "stdio" else "http",
+                tone = Tone.INFO,
+            )
+            Spacer(Modifier.weight(1f))
+            if (state.status == McpStatus.READY) {
+                TextButton(onClick = onDisconnect) { Text("断开") }
+                TextButton(onClick = onConnect) { Text("刷新工具") }
+            } else {
+                TextButton(onClick = onConnect, enabled = state.status != McpStatus.CONNECTING) {
+                    Text(if (state.status == McpStatus.CONNECTING) "连接中…" else "连接")
                 }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = onEdit) {
-                    Icon(Icons.Filled.Edit, contentDescription = "编辑")
-                }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Filled.Delete, contentDescription = "删除")
-                }
+            }
+            IconButton(onClick = onEdit) {
+                Icon(Icons.Outlined.Edit, contentDescription = "编辑", modifier = Modifier.size(20.dp))
+            }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除", modifier = Modifier.size(20.dp))
             }
         }
     }
@@ -436,26 +446,26 @@ private fun McpEditorDialog(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
             ) {
+                SegmentedPill(
+                    options = listOf("stdio", "http"),
+                    selectedIndex = if (stdio) 0 else 1,
+                    onSelect = { index ->
+                        transport = if (index == 0) {
+                            McpServerConfig.TRANSPORT_STDIO
+                        } else {
+                            McpServerConfig.TRANSPORT_HTTP
+                        }
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("名称（会进工具名，建议用英文）") },
                     singleLine = true,
+                    shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = stdio,
-                        onClick = { transport = McpServerConfig.TRANSPORT_STDIO },
-                        label = { Text("stdio") },
-                    )
-                    FilterChip(
-                        selected = !stdio,
-                        onClick = { transport = McpServerConfig.TRANSPORT_HTTP },
-                        label = { Text("http") },
-                    )
-                }
                 Spacer(Modifier.height(10.dp))
 
                 if (stdio) {
@@ -465,6 +475,7 @@ private fun McpEditorDialog(
                         label = { Text("启动命令") },
                         placeholder = { Text("python /sdcard/mcp/server.py") },
                         minLines = 2,
+                        shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(10.dp))
@@ -473,6 +484,7 @@ private fun McpEditorDialog(
                         onValueChange = { env = it },
                         label = { Text("环境变量（每行 KEY=VALUE，可空）") },
                         minLines = 2,
+                        shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 } else {
@@ -482,6 +494,7 @@ private fun McpEditorDialog(
                         label = { Text("服务器地址") },
                         placeholder = { Text("http://127.0.0.1:3000/mcp") },
                         singleLine = true,
+                        shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(10.dp))
@@ -490,14 +503,15 @@ private fun McpEditorDialog(
                         onValueChange = { headers = it },
                         label = { Text("请求头（每行 Name: value，可空）") },
                         minLines = 2,
+                        shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
 
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(14.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(checked = enabled, onCheckedChange = { enabled = it })
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(10.dp))
                     Text("启用（启动时自动连接）", style = MaterialTheme.typography.bodyMedium)
                 }
 

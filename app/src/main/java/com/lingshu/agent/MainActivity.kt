@@ -6,11 +6,14 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import com.lingshu.agent.core.Core
 import com.lingshu.agent.data.AppSettings
 import com.lingshu.agent.ui.LingshuApp
@@ -19,6 +22,9 @@ import com.lingshu.agent.ui.theme.LingshuTheme
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The app draws its own headers and a floating nav bar, so it owns the
+        // whole window instead of leaving two system-coloured strips behind.
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         requestNotificationPermission()
         setContent {
@@ -29,7 +35,12 @@ class MainActivity : ComponentActivity() {
                 2 -> true
                 else -> systemDark
             }
-            LingshuTheme(darkTheme = dark, dynamicColor = settings.dynamicColor) {
+            // Forcing light or dark in settings must also flip the status bar icons.
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView)
+                    .isAppearanceLightStatusBars = !dark
+            }
+            LingshuTheme(darkTheme = dark, dynamicColor = settings.paletteMode == 1) {
                 LingshuApp()
             }
         }
