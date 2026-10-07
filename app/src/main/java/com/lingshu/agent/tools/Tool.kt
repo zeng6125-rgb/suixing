@@ -2,6 +2,7 @@ package com.lingshu.agent.tools
 
 import android.content.Context
 import com.lingshu.agent.capability.CapabilityHub
+import com.lingshu.agent.skills.SkillStore
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -100,20 +101,22 @@ fun JsonObject.int(key: String, fallback: Int): Int = (this[key] as? JsonPrimiti
 fun JsonObject.bool(key: String, fallback: Boolean): Boolean =
     (this[key] as? JsonPrimitive)?.booleanOrNull ?: fallback
 
-class ToolRegistry(context: Context, capabilities: CapabilityHub) {
-    private val tools = LinkedHashMap<String, Tool>()
+class ToolRegistry(context: Context, capabilities: CapabilityHub, skills: SkillStore) {
+    private val builtin = LinkedHashMap<String, Tool>()
+    private val dynamic = LinkedHashMap<String, Tool>()
 
     init {
         add(SystemTools(context))
         add(FileTools(context))
         add(ShellTools(capabilities))
         add(UiTools(capabilities))
+        add(SkillTools(skills))
     }
 
     fun add(group: ToolGroup) {
         for (spec in group.specs) {
-            check(!tools.containsKey(spec.name)) { "工具名重复：${spec.name}" }
-            tools[spec.name] = object : Tool {
+            check(!builtin.containsKey(spec.name)) { "工具名重复：${spec.name}" }
+            builtin[spec.name] = object : Tool {
                 override val spec: ToolSpec = spec
                 override val tier: String = group.tier
                 override suspend fun run(args: JsonObject): ToolResult = group.execute(spec.name, args)
@@ -121,12 +124,26 @@ class ToolRegistry(context: Context, capabilities: CapabilityHub) {
         }
     }
 
-    fun all(): List<Tool> = tools.values.toList()
+    /**
+     * Replaces every runtime-contributed tool whose name starts with [prefix].
+     * MCP servers connect and drop at runtime, so they never touch the builtin
+     * map; a name that would collide with a builtin is rejected instead of
+     * silently shadowing it.
+     */
+    fun replaceDynamic(prefix: String, tools: List<Tool>) {
+        dynamic.keys.removeAll { it.startsWith(prefix) }
+        for (tool in tools) {
+            check(!builtin.containsKey(tool.spec.name)) { "工具名与内置工具冲突：${tool.spec.name}" }
+            dynamic[tool.spec.name] = tool
+        }
+    }
 
-    fun find(name: String): Tool? = tools[name]
+    fun all(): List<Tool> = builtin.values.toList() + dynamic.values.toList()
 
-    fun names(): List<String> = tools.keys.toList()
+    fun find(name: String): Tool? = builtin[name] ?: dynamic[name]
+
+    fun names(): List<String> = builtin.keys.toList() + dynamic.keys.toList()
 
     /** One-line-per-tool summary injected into the system prompt. */
-    fun promptSummary(): String = tools.values.joinToString("\n") { "- ${it.spec.name}: ${it.spec.description}" }
+    fun promptSummary(): String = all().joinToString("\n") { "- ${it.spec.name}: ${it.spec.description}" }
 }

@@ -28,6 +28,17 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
+      - name: Unit tests
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lingshu-test-report
+          path: app/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore
+
       - name: Assemble debug and release
         run: gradle :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
 

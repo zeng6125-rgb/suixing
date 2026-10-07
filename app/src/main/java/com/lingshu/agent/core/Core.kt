@@ -4,8 +4,14 @@ import android.content.Context
 import com.lingshu.agent.agent.ApprovalGate
 import com.lingshu.agent.capability.CapabilityHub
 import com.lingshu.agent.data.ChatRepository
+import com.lingshu.agent.data.McpStore
 import com.lingshu.agent.data.SettingsRepository
+import com.lingshu.agent.mcp.McpManager
+import com.lingshu.agent.skills.SkillStore
 import com.lingshu.agent.tools.ToolRegistry
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 /**
  * Process-wide service locator. The app is small enough that a hand-rolled
@@ -23,8 +29,15 @@ object Core {
         private set
     lateinit var capabilities: CapabilityHub
         private set
+    lateinit var skills: SkillStore
+        private set
     lateinit var tools: ToolRegistry
         private set
+    lateinit var mcp: McpManager
+        private set
+
+    /** Outlives any screen: MCP servers keep running while the UI is gone. */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
      * Shared on purpose: an approval prompt must be visible no matter which tab
@@ -42,7 +55,9 @@ object Core {
             settings = SettingsRepository(appContext)
             chats = ChatRepository(appContext)
             capabilities = CapabilityHub(appContext)
-            tools = ToolRegistry(appContext, capabilities)
+            skills = SkillStore(appContext)
+            tools = ToolRegistry(appContext, capabilities, skills)
+            mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate()
             initialized = true
         }

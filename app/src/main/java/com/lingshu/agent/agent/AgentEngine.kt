@@ -9,6 +9,7 @@ import com.lingshu.agent.data.StoredToolCall
 import com.lingshu.agent.llm.ChatMessage
 import com.lingshu.agent.llm.LlmClient
 import com.lingshu.agent.llm.ToolCallRequest
+import com.lingshu.agent.skills.SkillStore
 import com.lingshu.agent.tools.TIER_ACCESSIBILITY
 import com.lingshu.agent.tools.TIER_ROOT
 import com.lingshu.agent.tools.TIER_SHELL
@@ -105,12 +106,13 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
         settings: AppSettings,
         registry: ToolRegistry,
         capabilities: CapabilityHub,
+        skills: SkillStore,
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
     ): List<StoredMessage> {
         val produced = mutableListOf<StoredMessage>()
         val wire = mutableListOf<ChatMessage>()
-        wire += ChatMessage.system(systemPrompt(settings, registry))
+        wire += ChatMessage.system(systemPrompt(settings, registry, skills.catalog(skills.list())))
         sanitize(history).forEach { appendToWire(wire, it, settings) }
 
         val maxRounds = settings.maxToolRounds.coerceIn(1, MAX_ROUNDS)
@@ -257,10 +259,18 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
         runCatching { Json.parseToJsonElement(raw.ifBlank { "{}" }).jsonObject }
             .getOrElse { JsonObject(emptyMap()) }
 
-    private fun systemPrompt(settings: AppSettings, registry: ToolRegistry): String = buildString {
+    private fun systemPrompt(
+        settings: AppSettings,
+        registry: ToolRegistry,
+        skillCatalog: String,
+    ): String = buildString {
         append(settings.systemPrompt.trim())
         append("\n\n## 可用工具\n")
         append(registry.promptSummary())
+        if (skillCatalog.isNotBlank()) {
+            append("\n\n")
+            append(skillCatalog)
+        }
         append(
             "\n\n调用工具时，参数必须是合法 JSON 对象。一次可以并行调用多个工具。" +
                 "工具返回失败时先分析原因，不要重复同样的调用。" +

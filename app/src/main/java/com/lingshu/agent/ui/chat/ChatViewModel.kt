@@ -128,6 +128,7 @@ class ChatViewModel : ViewModel() {
                     settings = settings,
                     registry = Core.tools,
                     capabilities = Core.capabilities,
+                    skills = Core.skills,
                     gate = gate,
                     onEvent = ::handleEvent,
                 )

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Security
@@ -36,6 +37,7 @@ import androidx.navigation.compose.rememberNavController
 import com.lingshu.agent.core.Core
 import com.lingshu.agent.ui.capability.CapabilityScreen
 import com.lingshu.agent.ui.chat.ChatScreen
+import com.lingshu.agent.ui.extension.ExtensionScreen
 import com.lingshu.agent.ui.files.FilesScreen
 import com.lingshu.agent.ui.settings.SettingsScreen
 
@@ -45,6 +47,7 @@ private val destinations = listOf(
     Destination("chat", "会话", Icons.Outlined.Forum),
     Destination("capability", "能力", Icons.Outlined.Security),
     Destination("files", "文件", Icons.Outlined.FolderOpen),
+    Destination("extension", "扩展", Icons.Outlined.Extension),
     Destination("settings", "设置", Icons.Outlined.Settings),
 )
 
@@ -84,6 +87,7 @@ fun LingshuApp() {
             composable("chat") { ChatScreen() }
             composable("capability") { CapabilityScreen() }
             composable("files") { FilesScreen() }
+            composable("extension") { ExtensionScreen() }
             composable("settings") { SettingsScreen() }
         }
     }
