@@ -233,6 +233,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                         if (row.showTimeLabel) TimeLabel(row.message.timestamp)
                         MessageRow(
                             row = row,
+                            avatar = assistant?.face ?: "🪶",
                             onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
                             onRegenerate = { viewModel.regenerate() },
                         )
@@ -630,6 +631,7 @@ private fun groupRows(
 @Composable
 private fun MessageRow(
     row: ChatRow,
+    avatar: String,
     onBranch: (String, String) -> Unit,
     onRegenerate: () -> Unit,
 ) {
@@ -643,13 +645,20 @@ private fun MessageRow(
             reasoning = row.message.reasoning.orEmpty(),
             streaming = false,
             tools = row.tools,
+            avatar = avatar,
             branch = row.branch,
             onBranch = onBranch,
             onRegenerate = onRegenerate,
         )
 
         // A tool result with no bubble above it still renders as one, chips only.
-        else -> AssistantRow(text = "", reasoning = "", streaming = false, tools = listOf(row.message))
+        else -> AssistantRow(
+            text = "",
+            reasoning = "",
+            streaming = false,
+            tools = listOf(row.message),
+            avatar = avatar,
+        )
     }
 }
 
