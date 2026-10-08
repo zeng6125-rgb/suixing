@@ -103,17 +103,20 @@ fun JsonObject.int(key: String, fallback: Int): Int = (this[key] as? JsonPrimiti
 fun JsonObject.bool(key: String, fallback: Boolean): Boolean =
     (this[key] as? JsonPrimitive)?.booleanOrNull ?: fallback
 
-class ToolRegistry(
-    context: Context,
-    capabilities: CapabilityHub,
-    skills: SkillStore,
-    speaker: Speaker,
-    settings: SettingsRepository,
-) {
+class ToolRegistry private constructor() {
     private val builtin = LinkedHashMap<String, Tool>()
     private val dynamic = LinkedHashMap<String, Tool>()
 
-    init {
+    /** Tool names this view hides; empty for the registry the app builds at startup. */
+    private var hidden: Set<String> = emptySet()
+
+    constructor(
+        context: Context,
+        capabilities: CapabilityHub,
+        skills: SkillStore,
+        speaker: Speaker,
+        settings: SettingsRepository,
+    ) : this() {
         add(SystemTools(context))
         add(FileTools(context))
         add(ShellTools(capabilities))
@@ -148,11 +151,28 @@ class ToolRegistry(
         }
     }
 
-    fun all(): List<Tool> = builtin.values.toList() + dynamic.values.toList()
+    /**
+     * A live view without [names], for a persona that must not reach for them.
+     *
+     * The maps are shared, not copied, so an MCP server that connects later still
+     * shows up in the filtered view.
+     */
+    fun excluding(names: Set<String>): ToolRegistry {
+        if (names.isEmpty()) return this
+        return ToolRegistry().also {
+            it.builtin.putAll(builtin)
+            it.dynamic.putAll(dynamic)
+            it.hidden = names
+        }
+    }
 
-    fun find(name: String): Tool? = builtin[name] ?: dynamic[name]
+    fun all(): List<Tool> =
+        (builtin.values + dynamic.values).filter { it.spec.name !in hidden }
 
-    fun names(): List<String> = builtin.keys.toList() + dynamic.keys.toList()
+    fun find(name: String): Tool? =
+        if (name in hidden) null else builtin[name] ?: dynamic[name]
+
+    fun names(): List<String> = all().map { it.spec.name }
 
     /** One-line-per-tool summary injected into the system prompt. */
     fun promptSummary(): String = all().joinToString("\n") { "- ${it.spec.name}: ${it.spec.description}" }

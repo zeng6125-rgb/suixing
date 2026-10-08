@@ -5,9 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.lingshu.agent.agent.AgentEngine
 import com.lingshu.agent.agent.AgentEvent
 import com.lingshu.agent.core.Core
+import com.lingshu.agent.data.Assistant
 import com.lingshu.agent.data.Conversation
 import com.lingshu.agent.data.Roles
 import com.lingshu.agent.data.StoredMessage
+import com.lingshu.agent.data.Transcript
+import com.lingshu.agent.data.forAssistant
 import com.lingshu.agent.service.AgentForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -24,13 +27,20 @@ data class ChatUiState(
     val conversationId: String = "",
     val title: String = "新会话",
     val messages: List<StoredMessage> = emptyList(),
+    /** Which run of each turn is on screen; see [Transcript]. */
+    val activeRuns: Map<String, String> = emptyMap(),
+    /** The persona this conversation speaks as. */
+    val assistantId: String = "",
     val streaming: String = "",
     /** The thinking streamed ahead of [streaming], shown in its own block. */
     val reasoning: String = "",
     val running: Boolean = false,
     val status: String = "",
     val error: String? = null,
-)
+) {
+    /** The transcript as drawn: one run per turn, newest first pick wins. */
+    val visible: List<StoredMessage> get() = Transcript.active(messages, activeRuns)
+}
 
 class ChatViewModel : ViewModel() {
 
@@ -44,19 +54,23 @@ class ChatViewModel : ViewModel() {
 
     private var job: Job? = null
 
+    /** The run the in-flight engine pass writes into; stamped on every message it emits. */
+    private var runId: String = ""
+
     init {
         viewModelScope.launch {
             Core.chats.load()
+            val settings = Core.settings.current()
             val existing = Core.chats.conversations.value.firstOrNull()
             if (existing == null) {
                 val created = Core.chats.create()
-                _state.value = ChatUiState(conversationId = created.id, title = created.title)
-            } else {
                 _state.value = ChatUiState(
-                    conversationId = existing.id,
-                    title = existing.title,
-                    messages = existing.messages,
+                    conversationId = created.id,
+                    title = created.title,
+                    assistantId = settings.activeAssistant()?.id.orEmpty(),
                 )
+            } else {
+                _state.value = existing.toUiState(settings.activeAssistant()?.id.orEmpty())
             }
         }
     }
@@ -64,39 +78,94 @@ class ChatViewModel : ViewModel() {
     fun newConversation() {
         if (_state.value.running) return
         viewModelScope.launch {
+            val settings = Core.settings.current()
             val created = Core.chats.create()
-            _state.value = ChatUiState(conversationId = created.id, title = created.title)
+            _state.value = ChatUiState(
+                conversationId = created.id,
+                title = created.title,
+                assistantId = settings.activeAssistant()?.id.orEmpty(),
+            )
         }
     }
 
     fun openConversation(conversation: Conversation) {
         if (_state.value.running) return
-        _state.value = ChatUiState(
-            conversationId = conversation.id,
-            title = conversation.title,
-            messages = conversation.messages,
-        )
+        // A conversation that never picked a persona keeps the one already on screen,
+        // which was seeded from the settings when this screen was created.
+        _state.value = conversation.toUiState(_state.value.assistantId)
     }
 
     fun deleteConversation(conversation: Conversation) {
         if (_state.value.running) return
         viewModelScope.launch {
             Core.chats.delete(conversation.id)
-            if (conversation.id == _state.value.conversationId) {
-                val next = Core.chats.conversations.value.firstOrNull()
-                if (next == null) {
-                    val created = Core.chats.create()
-                    _state.value = ChatUiState(conversationId = created.id, title = created.title)
-                } else {
-                    _state.value = ChatUiState(
-                        conversationId = next.id,
-                        title = next.title,
-                        messages = next.messages,
-                    )
-                }
+            if (conversation.id != _state.value.conversationId) return@launch
+            val settings = Core.settings.current()
+            val next = Core.chats.conversations.value.firstOrNull()
+            _state.value = if (next == null) {
+                val created = Core.chats.create()
+                ChatUiState(
+                    conversationId = created.id,
+                    title = created.title,
+                    assistantId = settings.activeAssistant()?.id.orEmpty(),
+                )
+            } else {
+                next.toUiState(settings.activeAssistant()?.id.orEmpty())
             }
         }
     }
+
+    // ---------------------------------------------------------------- assistants
+
+    /** Makes [assistant] the face of this conversation and the app-wide default. */
+    fun useAssistant(assistant: Assistant) {
+        if (_state.value.running) return
+        _state.update { it.copy(assistantId = assistant.id) }
+        viewModelScope.launch {
+            Core.settings.update { it.copy(activeAssistantId = assistant.id) }
+            persist()
+        }
+    }
+
+    fun saveAssistant(assistant: Assistant) {
+        viewModelScope.launch {
+            Core.settings.update { settings ->
+                val exists = settings.assistants.any { it.id == assistant.id }
+                val list = if (exists) {
+                    settings.assistants.map { if (it.id == assistant.id) assistant else it }
+                } else {
+                    settings.assistants + assistant
+                }
+                settings.copy(assistants = list, activeAssistantId = assistant.id)
+            }
+            _state.update { it.copy(assistantId = assistant.id) }
+            persist()
+        }
+    }
+
+    fun deleteAssistant(assistant: Assistant) {
+        viewModelScope.launch {
+            Core.settings.update { settings ->
+                // The app always needs one persona to fall back on.
+                if (settings.assistants.size <= 1) return@update settings
+                val list = settings.assistants.filterNot { it.id == assistant.id }
+                settings.copy(
+                    assistants = list,
+                    activeAssistantId = if (settings.activeAssistantId == assistant.id) {
+                        list.first().id
+                    } else {
+                        settings.activeAssistantId
+                    },
+                )
+            }
+            val settings = Core.settings.current()
+            val next = settings.assistant(_state.value.assistantId) ?: settings.activeAssistant()
+            _state.update { it.copy(assistantId = next?.id.orEmpty()) }
+            persist()
+        }
+    }
+
+    // -------------------------------------------------------------------- turns
 
     /** Returns false when the message was dropped, so the caller keeps the input text. */
     fun send(text: String, imageBase64: String? = null): Boolean {
@@ -105,38 +174,91 @@ class ChatViewModel : ViewModel() {
         if (_state.value.running) return false
         if (_state.value.conversationId.isEmpty()) return false
 
-        job = viewModelScope.launch {
-            val user = StoredMessage(
-                id = UUID.randomUUID().toString(),
-                role = Roles.USER,
-                text = body,
-                imageBase64 = imageBase64,
+        val user = StoredMessage(
+            id = UUID.randomUUID().toString(),
+            role = Roles.USER,
+            text = body,
+            imageBase64 = imageBase64,
+        )
+        val fresh = UUID.randomUUID().toString()
+        runId = fresh
+        _state.update {
+            it.copy(
+                messages = it.messages + user,
+                activeRuns = it.activeRuns + (user.id to fresh),
+                running = true,
+                streaming = "",
+                reasoning = "",
+                status = "正在思考…",
+                error = null,
             )
-            _state.update {
-                it.copy(
-                    messages = it.messages + user,
-                    running = true,
-                    streaming = "",
-                    reasoning = "",
-                    status = "正在思考…",
-                    error = null,
-                )
-            }
+        }
+        start(_state.value.messages)
+        return true
+    }
+
+    /** Answers the last question again, keeping the old reply as a branch. */
+    fun regenerate() {
+        if (_state.value.running) return
+        val snapshot = _state.value
+        val active = Transcript.active(snapshot.messages, snapshot.activeRuns)
+        val question = active.lastOrNull { it.role == Roles.USER } ?: return
+        val prompt = Transcript.withoutLastAnswer(active)
+        val fresh = UUID.randomUUID().toString()
+        runId = fresh
+        _state.update {
+            it.copy(
+                activeRuns = it.activeRuns + (question.id to fresh),
+                running = true,
+                streaming = "",
+                reasoning = "",
+                status = "正在重新回答…",
+                error = null,
+            )
+        }
+        start(prompt)
+    }
+
+    /** Draws another candidate answer for [turnId]; the transcript itself is untouched. */
+    fun switchBranch(turnId: String, runId: String) {
+        if (_state.value.running) return
+        if (_state.value.activeRuns[turnId] == runId) return
+        _state.update { it.copy(activeRuns = it.activeRuns + (turnId to runId)) }
+        viewModelScope.launch { persist() }
+    }
+
+    fun stop() {
+        gate.cancelPending()
+        Core.speaker.stop()
+        job?.cancel()
+        job = null
+    }
+
+    fun dismissError() {
+        _state.update { it.copy(error = null) }
+    }
+
+    private fun start(history: List<StoredMessage>) {
+        job = viewModelScope.launch {
             AgentForegroundService.start(Core.appContext, "灵枢正在执行任务")
             try {
                 persist()
                 val settings = Core.settings.current()
+                val assistant = settings.assistant(_state.value.assistantId) ?: settings.activeAssistant()
+                // The persona bends the live settings; anything it left blank stays as-is.
+                val effective = settings.forAssistant(assistant)
+                val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
                 val produced = engine.run(
-                    history = _state.value.messages,
-                    settings = settings,
-                    registry = Core.tools,
+                    history = history,
+                    settings = effective,
+                    registry = registry,
                     capabilities = Core.capabilities,
                     skills = Core.skills,
                     gate = gate,
                     onEvent = ::handleEvent,
                 )
                 // Only the run's own last reply is read out, not the whole history.
-                if (settings.speakReplies) {
+                if (effective.speakReplies) {
                     produced.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }
                         ?.text
                         ?.let { Core.speaker.speak(it) }
@@ -162,18 +284,6 @@ class ChatViewModel : ViewModel() {
                 withContext(NonCancellable) { persist() }
             }
         }
-        return true
-    }
-
-    fun stop() {
-        gate.cancelPending()
-        Core.speaker.stop()
-        job?.cancel()
-        job = null
-    }
-
-    fun dismissError() {
-        _state.update { it.copy(error = null) }
     }
 
     private fun handleEvent(event: AgentEvent) {
@@ -187,7 +297,7 @@ class ChatViewModel : ViewModel() {
             is AgentEvent.AssistantMessage ->
                 _state.update {
                     it.copy(
-                        messages = it.messages + event.message,
+                        messages = it.messages + event.message.copy(runId = runId),
                         streaming = "",
                         reasoning = "",
                     )
@@ -197,7 +307,9 @@ class ChatViewModel : ViewModel() {
                 _state.update { it.copy(status = "调用 ${event.name}") }
 
             is AgentEvent.ToolMessage ->
-                _state.update { it.copy(messages = it.messages + event.message, status = "") }
+                _state.update {
+                    it.copy(messages = it.messages + event.message.copy(runId = runId), status = "")
+                }
 
             is AgentEvent.ToolFinished -> Unit
 
@@ -228,6 +340,8 @@ class ChatViewModel : ViewModel() {
                 title = title,
                 createdAt = previous?.createdAt ?: System.currentTimeMillis(),
                 messages = snapshot.messages,
+                assistantId = snapshot.assistantId,
+                activeRuns = snapshot.activeRuns,
             ),
         )
         if (title != snapshot.title) _state.update { it.copy(title = title) }
@@ -239,3 +353,11 @@ class ChatViewModel : ViewModel() {
         super.onCleared()
     }
 }
+
+private fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = ChatUiState(
+    conversationId = id,
+    title = title,
+    messages = messages,
+    activeRuns = activeRuns,
+    assistantId = assistantId.ifBlank { fallbackAssistantId },
+)

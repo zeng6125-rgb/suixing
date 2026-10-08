@@ -42,12 +42,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Close
@@ -83,17 +86,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingshu.agent.data.AppSettings
+import com.lingshu.agent.data.Assistant
 import com.lingshu.agent.data.Conversation
 import com.lingshu.agent.data.ProviderConfig
 import com.lingshu.agent.data.Roles
 import com.lingshu.agent.data.StoredMessage
+import com.lingshu.agent.data.Transcript
 import com.lingshu.agent.core.Core
-import com.lingshu.agent.ui.components.LingshuMark
+import com.lingshu.agent.ui.assistant.AssistantSheet
 import com.lingshu.agent.ui.components.LingshuOrb
 import com.lingshu.agent.ui.components.LingshuTopBar
 import kotlinx.coroutines.Dispatchers
@@ -135,10 +142,16 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
         }
     }
 
+    var assistantsOpen by remember { mutableStateOf(false) }
+
     // Tool-only assistant turns carry no text of their own, so their tool calls are
     // folded into the bubble above them instead of standing alone in the transcript.
-    val visible = remember(state.messages) { groupRows(state.messages) }
+    // Only the branch the user picked is drawn; the other answers stay on disk.
+    val visible = remember(state.messages, state.activeRuns, state.running) {
+        groupRows(state.messages, state.activeRuns, state.running)
+    }
     val live = state.streaming.isNotEmpty() || state.reasoning.isNotEmpty()
+    val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
 
     val itemCount = visible.size + if (live) 1 else 0
     LaunchedEffect(itemCount) {
@@ -150,9 +163,14 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
         topBar = {
             ChatHeader(
                 title = state.title,
-                subtitle = if (settings.configured) settings.model else "还没配置模型",
+                subtitle = listOf(
+                    assistant?.label ?: "灵枢",
+                    if (settings.configured) settings.shortModel else "还没配置模型",
+                ).joinToString(" · "),
+                assistant = assistant,
                 settings = settings,
                 conversations = conversations,
+                onOpenAssistants = { assistantsOpen = true },
                 onOpen = { viewModel.openConversation(it) },
                 onDelete = { viewModel.deleteConversation(it) },
                 onNew = { viewModel.newConversation() },
@@ -213,7 +231,11 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 ) {
                     itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
                         if (row.showTimeLabel) TimeLabel(row.message.timestamp)
-                        MessageRow(row)
+                        MessageRow(
+                            row = row,
+                            onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
+                            onRegenerate = { viewModel.regenerate() },
+                        )
                     }
                     if (live) {
                         item(key = "streaming") {
@@ -221,6 +243,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                                 text = state.streaming,
                                 reasoning = state.reasoning,
                                 streaming = true,
+                                avatar = assistant?.face ?: "🪶",
                             )
                         }
                     }
@@ -228,14 +251,28 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
             }
         }
     }
+
+    if (assistantsOpen) {
+        AssistantSheet(
+            assistants = settings.assistants,
+            activeId = state.assistantId.ifBlank { settings.activeAssistantId },
+            settings = settings,
+            onUse = { viewModel.useAssistant(it) },
+            onSave = { viewModel.saveAssistant(it) },
+            onDelete = { viewModel.deleteAssistant(it) },
+            onDismiss = { assistantsOpen = false },
+        )
+    }
 }
 
 @Composable
 private fun ChatHeader(
     title: String,
     subtitle: String,
+    assistant: Assistant?,
     settings: AppSettings,
     conversations: List<Conversation>,
+    onOpenAssistants: () -> Unit,
     onOpen: (Conversation) -> Unit,
     onDelete: (Conversation) -> Unit,
     onNew: () -> Unit,
@@ -247,12 +284,17 @@ private fun ChatHeader(
         title = title,
         subtitle = subtitle,
         leading = {
+            // The face in the corner is the way into the assistant picker, which is
+            // why it is a button rather than decoration.
             Surface(
+                onClick = onOpenAssistants,
                 modifier = Modifier.size(38.dp),
                 shape = RoundedCornerShape(13.dp),
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
             ) {
-                Box(contentAlignment = Alignment.Center) { LingshuMark(size = 20.dp) }
+                Box(contentAlignment = Alignment.Center) {
+                    Text(text = assistant?.face ?: "🪶", fontSize = 19.sp)
+                }
             }
         },
         actions = {
@@ -469,6 +511,21 @@ private data class ChatRow(
     val message: StoredMessage,
     val showTimeLabel: Boolean,
     val tools: List<StoredMessage> = emptyList(),
+    val branch: Branch? = null,
+)
+
+/**
+ * The `‹ 2/3 ›` switcher under a reply that has siblings, plus 重新回答.
+ *
+ * [index] is where [runs] the user is looking at, so the arrows are pure
+ * navigation and never rewrite the transcript.
+ */
+private data class Branch(
+    val turnId: String,
+    val runs: List<String>,
+    val index: Int,
+    /** Only the last question in the transcript is worth answering again. */
+    val canRegenerate: Boolean,
 )
 
 /**
@@ -492,12 +549,48 @@ private fun StoredMessage.isVisible(): Boolean = when (role) {
  * tools it ran read as one block; a text-less assistant turn is skipped rather than
  * drawn as an empty bubble.
  */
-private fun groupRows(messages: List<StoredMessage>): List<ChatRow> {
+private fun groupRows(
+    messages: List<StoredMessage>,
+    activeRuns: Map<String, String>,
+    running: Boolean,
+): List<ChatRow> {
+    val turnOf = Transcript.turnOf(messages)
+    val runs = Transcript.runsByTurn(messages, turnOf)
+    val chosen = Transcript.chosenRuns(messages, activeRuns)
+    val shown = Transcript.active(messages, activeRuns)
+    val lastQuestion = shown.lastOrNull { it.role == Roles.USER }?.id.orEmpty()
+
+    // The switcher hangs off the last reply a turn actually drew, so a text-less
+    // turn of the model cannot swallow it.
+    val tail = HashMap<String, String>()
+    shown.forEach { message ->
+        val turn = turnOf[message.id].orEmpty()
+        if (message.role == Roles.ASSISTANT && message.isVisible() && turn.isNotEmpty()) {
+            tail[turn] = message.id
+        }
+    }
+
+    fun branchFor(message: StoredMessage): Branch? {
+        val turn = turnOf[message.id].orEmpty()
+        if (turn.isEmpty() || tail[turn] != message.id) return null
+        val siblings = runs[turn].orEmpty()
+        // Re-answering is only offered on the newest question; older ones would have
+        // to invalidate everything below them, which branch switching never does.
+        val regenerate = turn == lastQuestion && !running
+        if (siblings.size < 2 && !regenerate) return null
+        return Branch(
+            turnId = turn,
+            runs = siblings,
+            index = siblings.indexOf(chosen[turn]).coerceAtLeast(0),
+            canRegenerate = regenerate,
+        )
+    }
+
     val rows = mutableListOf<ChatRow>()
     var previous: StoredMessage? = null
     var bucket: MutableList<StoredMessage>? = null
 
-    messages.forEach { message ->
+    shown.forEach { message ->
         when {
             message.role == Roles.TOOL -> {
                 val open = bucket
@@ -513,7 +606,7 @@ private fun groupRows(messages: List<StoredMessage>): List<ChatRow> {
 
             message.role == Roles.ASSISTANT && message.isVisible() -> {
                 val tools = mutableListOf<StoredMessage>()
-                rows += ChatRow(message, needsTimeLabel(previous, message), tools)
+                rows += ChatRow(message, needsTimeLabel(previous, message), tools, branchFor(message))
                 previous = message
                 bucket = tools
             }
@@ -535,7 +628,11 @@ private fun groupRows(messages: List<StoredMessage>): List<ChatRow> {
 }
 
 @Composable
-private fun MessageRow(row: ChatRow) {
+private fun MessageRow(
+    row: ChatRow,
+    onBranch: (String, String) -> Unit,
+    onRegenerate: () -> Unit,
+) {
     when (row.message.role) {
         Roles.USER -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             UserBubble(row.message)
@@ -546,6 +643,9 @@ private fun MessageRow(row: ChatRow) {
             reasoning = row.message.reasoning.orEmpty(),
             streaming = false,
             tools = row.tools,
+            branch = row.branch,
+            onBranch = onBranch,
+            onRegenerate = onRegenerate,
         )
 
         // A tool result with no bubble above it still renders as one, chips only.
@@ -576,6 +676,10 @@ private fun AssistantRow(
     streaming: Boolean,
     reasoning: String = "",
     tools: List<StoredMessage> = emptyList(),
+    avatar: String = "🪶",
+    branch: Branch? = null,
+    onBranch: (String, String) -> Unit = { _, _ -> },
+    onRegenerate: () -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         Surface(
@@ -584,47 +688,135 @@ private fun AssistantRow(
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
-            Box(contentAlignment = Alignment.Center) { LingshuMark(size = 14.dp) }
+            Box(contentAlignment = Alignment.Center) {
+                Text(text = avatar, fontSize = 13.sp)
+            }
         }
-        Surface(
-            modifier = Modifier.widthIn(max = 320.dp),
-            shape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
-                if (reasoning.isNotBlank()) {
-                    // The thinking is only "live" while no answer text has arrived yet.
-                    ReasoningBlock(reasoning, streaming = streaming && text.isBlank())
-                    if (text.isNotBlank() || streaming || tools.isNotEmpty()) {
-                        Spacer(Modifier.height(10.dp))
-                    }
-                }
-                when {
-                    text.isBlank() && streaming -> TypingDots()
-                    text.isBlank() -> Unit
-                    else -> {
-                        SelectionContainer {
-                            Text(text, style = MaterialTheme.typography.bodyLarge)
-                        }
-                        if (streaming) {
-                            Spacer(Modifier.height(4.dp))
-                            BlinkingCursor()
+        // The branch switcher hangs under the bubble, so the width cap belongs to the
+        // whole column rather than to the bubble on its own.
+        Column(Modifier.widthIn(max = 320.dp)) {
+            Surface(
+                shape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ) {
+                Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
+                    if (reasoning.isNotBlank()) {
+                        // The thinking is only "live" while no answer text has arrived yet.
+                        ReasoningBlock(reasoning, streaming = streaming && text.isBlank())
+                        if (text.isNotBlank() || streaming || tools.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
                         }
                     }
-                }
-                // The tools this reply ran live inside the same bubble, so a turn
-                // reads as one block instead of a bubble followed by loose chips.
-                if (tools.isNotEmpty()) {
-                    if (text.isNotBlank() || reasoning.isNotBlank()) {
-                        Spacer(Modifier.height(10.dp))
+                    when {
+                        text.isBlank() && streaming -> TypingDots()
+                        text.isBlank() -> Unit
+                        else -> {
+                            SelectionContainer {
+                                Text(text, style = MaterialTheme.typography.bodyLarge)
+                            }
+                            if (streaming) {
+                                Spacer(Modifier.height(4.dp))
+                                BlinkingCursor()
+                            }
+                        }
                     }
-                    tools.forEachIndexed { index, tool ->
-                        if (index > 0) Spacer(Modifier.height(8.dp))
-                        ToolChip(tool)
+                    // The tools this reply ran live inside the same bubble, so a turn
+                    // reads as one block instead of a bubble followed by loose chips.
+                    if (tools.isNotEmpty()) {
+                        if (text.isNotBlank() || reasoning.isNotBlank()) {
+                            Spacer(Modifier.height(10.dp))
+                        }
+                        tools.forEachIndexed { index, tool ->
+                            if (index > 0) Spacer(Modifier.height(8.dp))
+                            ToolChip(tool)
+                        }
                     }
                 }
             }
+            if (branch != null) {
+                Spacer(Modifier.height(6.dp))
+                BranchBar(branch = branch, onBranch = onBranch, onRegenerate = onRegenerate)
+            }
         }
+    }
+}
+
+/**
+ * The row under a reply that says "this answer is one of several". Arrows only
+ * appear once a second answer exists; re-answering is offered on the newest
+ * question alone, because replacing an older answer would orphan everything the
+ * conversation built on top of it.
+ */
+@Composable
+private fun BranchBar(
+    branch: Branch,
+    onBranch: (String, String) -> Unit,
+    onRegenerate: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier.padding(start = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (branch.runs.size > 1) {
+            val atStart = branch.index <= 0
+            val atEnd = branch.index >= branch.runs.lastIndex
+            BranchArrow(
+                icon = Icons.Filled.ChevronLeft,
+                label = "上一个回答",
+                enabled = !atStart,
+                onClick = { onBranch(branch.turnId, branch.runs[branch.index - 1]) },
+            )
+            Text(
+                text = "${branch.index + 1}/${branch.runs.size}",
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+            )
+            BranchArrow(
+                icon = Icons.Filled.ChevronRight,
+                label = "下一个回答",
+                enabled = !atEnd,
+                onClick = { onBranch(branch.turnId, branch.runs[branch.index + 1]) },
+            )
+        }
+        if (branch.canRegenerate) {
+            BranchArrow(
+                icon = Icons.Filled.Refresh,
+                label = "重新回答",
+                enabled = true,
+                onClick = onRegenerate,
+            )
+            Text(
+                text = "重新回答",
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BranchArrow(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Box(
+        modifier = Modifier
+            .size(26.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = scheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.35f),
+            modifier = Modifier.size(16.dp),
+        )
     }
 }
 

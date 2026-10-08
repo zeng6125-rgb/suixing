@@ -1,0 +1,358 @@
+package com.lingshu.agent.ui.assistant
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.Badge
+import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.lingshu.agent.data.ASSISTANT_AVATARS
+import com.lingshu.agent.data.AppSettings
+import com.lingshu.agent.data.Assistant
+import com.lingshu.agent.data.DEFAULT_SYSTEM_PROMPT
+import com.lingshu.agent.ui.components.LingshuTopBar
+import com.lingshu.agent.ui.components.SectionCard
+import com.lingshu.agent.ui.components.SettingRow
+
+/**
+ * Create or edit one persona.
+ *
+ * A full-screen dialog rather than a route, so the chat screen never loses its
+ * scroll position while the user fiddles with a prompt.
+ */
+@Composable
+fun AssistantEditor(
+    initial: Assistant,
+    settings: AppSettings,
+    toolNames: List<String>,
+    onSave: (Assistant) -> Unit,
+    onDelete: (() -> Unit)?,
+    onDismiss: () -> Unit,
+) {
+    var draft by remember(initial) { mutableStateOf(initial) }
+    val isNew = settings.assistant(initial.id) == null
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Scaffold(
+                containerColor = MaterialTheme.colorScheme.background,
+                topBar = {
+                    LingshuTopBar(
+                        title = if (isNew) "新建助手" else "编辑助手",
+                        subtitle = draft.label,
+                        leading = {
+                            Surface(
+                                modifier = Modifier.size(38.dp),
+                                shape = MaterialTheme.shapes.medium,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(draft.face, fontSize = 19.sp)
+                                }
+                            }
+                        },
+                        actions = {
+                            TextButton(onClick = { onSave(draft) }) { Text("保存") }
+                        },
+                    )
+                },
+            ) { padding ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 12.dp, bottom = 30.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    IdentitySection(draft = draft, onDraft = { draft = it })
+                    PromptSection(draft = draft, onDraft = { draft = it })
+                    ModelSection(draft = draft, settings = settings, onDraft = { draft = it })
+                    ToolSection(draft = draft, toolNames = toolNames, onDraft = { draft = it })
+                    if (onDelete != null) {
+                        OutlinedButton(
+                            onClick = onDelete,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("删除这个助手", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    Text(
+                        text = "留空的项会跟随「设置」里的当前值，所以只改名字也能用。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun IdentitySection(draft: Assistant, onDraft: (Assistant) -> Unit) {
+    SectionCard(title = "身份", icon = Icons.Outlined.Badge, subtitle = "名字与头像") {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ASSISTANT_AVATARS.forEach { emoji ->
+                val selected = draft.avatar == emoji
+                Surface(
+                    onClick = { onDraft(draft.copy(avatar = emoji)) },
+                    shape = CircleShape,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHigh
+                    },
+                    border = BorderStroke(
+                        1.dp,
+                        if (selected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant
+                        },
+                    ),
+                ) {
+                    Box(Modifier.size(42.dp), contentAlignment = Alignment.Center) {
+                        Text(emoji, fontSize = 19.sp)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        OutlinedTextField(
+            value = draft.name,
+            onValueChange = { onDraft(draft.copy(name = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("名字") },
+            singleLine = true,
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = draft.description,
+            onValueChange = { onDraft(draft.copy(description = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("一句话说明") },
+            placeholder = { Text("例如：只读代码、不改文件") },
+            singleLine = true,
+        )
+    }
+}
+
+@Composable
+private fun PromptSection(draft: Assistant, onDraft: (Assistant) -> Unit) {
+    SectionCard(
+        title = "系统提示词",
+        icon = Icons.Outlined.Tune,
+        subtitle = "这个助手是谁、该怎么做事",
+        trailing = {
+            TextButton(
+                onClick = { onDraft(draft.copy(systemPrompt = DEFAULT_SYSTEM_PROMPT)) },
+            ) {
+                Text("用默认")
+            }
+        },
+    ) {
+        OutlinedTextField(
+            value = draft.systemPrompt,
+            onValueChange = { onDraft(draft.copy(systemPrompt = it)) },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 150.dp),
+            placeholder = { Text("留空则沿用「设置」里的系统提示词") },
+        )
+    }
+}
+
+@Composable
+private fun ModelSection(
+    draft: Assistant,
+    settings: AppSettings,
+    onDraft: (Assistant) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val pairs = settings.enabledModels()
+    val follow = !draft.pinsModel
+    val label = when {
+        follow -> "跟随当前（${settings.shortModel.ifBlank { "未设置" }}）"
+        else -> draft.model.substringAfter('/')
+    }
+
+    SectionCard(title = "模型", icon = Icons.Outlined.Memory, subtitle = "可以让这个助手用另一个模型") {
+        Surface(
+            onClick = { open = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                DropdownMenuItem(
+                    text = { Text("跟随当前模型") },
+                    onClick = {
+                        onDraft(draft.copy(providerId = "", model = ""))
+                        open = false
+                    },
+                )
+                pairs.forEach { (provider, modelId) ->
+                    DropdownMenuItem(
+                        text = { Text(modelId, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = {
+                            onDraft(draft.copy(providerId = provider.id, model = modelId))
+                            open = false
+                        },
+                    )
+                }
+                if (pairs.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("还没启用模型，去「设置」里拉取") },
+                        onClick = { open = false },
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        SettingRow(
+            title = "单独设置温度",
+            subtitle = "关闭则跟随全局温度",
+            control = {
+                Switch(
+                    checked = draft.temperature != null,
+                    onCheckedChange = { on ->
+                        onDraft(draft.copy(temperature = if (on) 0.6 else null))
+                    },
+                )
+            },
+        )
+        draft.temperature?.let { value ->
+            Slider(
+                value = value.toFloat(),
+                onValueChange = { onDraft(draft.copy(temperature = it.toDouble())) },
+                valueRange = 0f..2f,
+                steps = 19,
+            )
+            Text(
+                text = "温度 ${"%.1f".format(value)}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ToolSection(
+    draft: Assistant,
+    toolNames: List<String>,
+    onDraft: (Assistant) -> Unit,
+) {
+    val off = draft.disabledTools.toSet()
+    SectionCard(
+        title = "工具",
+        icon = Icons.Outlined.Build,
+        subtitle = "关掉的工具这个助手不能调用",
+        trailing = {
+            TextButton(onClick = { onDraft(draft.copy(disabledTools = emptyList())) }) {
+                Text("全开")
+            }
+        },
+    ) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            toolNames.forEach { name ->
+                val enabled = name !in off
+                FilterChip(
+                    selected = enabled,
+                    onClick = {
+                        onDraft(
+                            draft.copy(
+                                disabledTools = if (enabled) {
+                                    draft.disabledTools + name
+                                } else {
+                                    draft.disabledTools - name
+                                },
+                            ),
+                        )
+                    },
+                    label = { Text(name, style = MaterialTheme.typography.labelSmall) },
+                )
+            }
+        }
+        if (toolNames.isEmpty()) {
+            Text(
+                text = "工具还在加载…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}

@@ -109,8 +109,17 @@ data class AppSettings(
      * the app has to know that providers exist.
      */
     val providers: List<ProviderConfig> = emptyList(),
+    /** The personas the user built. Never empty once [migrated] has run. */
+    val assistants: List<Assistant> = emptyList(),
+    val activeAssistantId: String = "",
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
+
+    /** The persona new conversations start with; falls back to the first one. */
+    fun activeAssistant(): Assistant? =
+        assistants.firstOrNull { it.id == activeAssistantId } ?: assistants.firstOrNull()
+
+    fun assistant(id: String): Assistant? = assistants.firstOrNull { it.id == id }
 
     /** The provider the active triple points at, matched on address. */
     fun activeProvider(): ProviderConfig? =
@@ -166,7 +175,9 @@ class SettingsRepository(private val context: Context) {
  * `apiKey` / `model` triple. Wrap that in a single provider so the picker and the
  * switcher have something to show without the user re-entering anything.
  */
-private fun AppSettings.migrated(): AppSettings {
+private fun AppSettings.migrated(): AppSettings = withProviders().withAssistants()
+
+private fun AppSettings.withProviders(): AppSettings {
     if (providers.isNotEmpty() || baseUrl.isBlank()) return this
     val seeded = ProviderConfig(
         id = "default",
@@ -177,4 +188,34 @@ private fun AppSettings.migrated(): AppSettings {
         enabled = listOf(model).filter { it.isNotBlank() },
     )
     return copy(providers = listOf(seeded))
+}
+
+/**
+ * Settings written before assistants existed carry a single global prompt. Wrap it
+ * in the house persona so the picker has a card to show and the chat header has a
+ * face, without the user re-typing anything.
+ */
+private fun AppSettings.withAssistants(): AppSettings {
+    if (assistants.isEmpty()) {
+        val seeded = defaultAssistant(systemPrompt)
+        return copy(assistants = listOf(seeded), activeAssistantId = seeded.id)
+    }
+    if (assistants.any { it.id == activeAssistantId }) return this
+    return copy(activeAssistantId = assistants.first().id)
+}
+
+/**
+ * [this] with the persona's overrides applied. Blank fields inherit, so an
+ * assistant that only sets a name changes nothing about how the agent runs.
+ */
+fun AppSettings.forAssistant(assistant: Assistant?): AppSettings {
+    if (assistant == null) return this
+    val provider = providers.firstOrNull { it.id == assistant.providerId }
+    return copy(
+        systemPrompt = assistant.systemPrompt.ifBlank { systemPrompt },
+        model = assistant.model.ifBlank { model },
+        baseUrl = provider?.baseUrl?.ifBlank { null } ?: baseUrl,
+        apiKey = provider?.apiKey?.ifBlank { null } ?: apiKey,
+        temperature = assistant.temperature ?: temperature,
+    )
 }
