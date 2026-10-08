@@ -328,7 +328,9 @@ private fun CoroutineScope.persist(block: (AppSettings) -> AppSettings) {
 @Composable
 private fun ModelSettingsPage(onBack: () -> Unit) {
     val stored by Core.settings.flow.collectAsState(initial = AppSettings())
-    var form by remember(stored) { mutableStateOf(stored) }
+    // Keyless on purpose: a write-through below rewrites `stored`, and a keyed remember
+    // would reset the draft and throw away unsaved edits to baseUrl/apiKey/model.
+    var form by remember { mutableStateOf(stored) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val client = remember { LlmClient() }
@@ -560,17 +562,17 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             .coerceAtLeast(0),
                         onSelect = { index ->
                             val tokens = CONTEXT_PRESETS[index].first
-                            // 与模型列表里那枚 chip 同一条写路径：窗口属于模型本身，
-                            // 不归页面底部的「保存」管。
-                            scope.persist { settings ->
-                                settings.copy(
-                                    modelContexts = if (tokens <= 0) {
-                                        settings.modelContexts - model
-                                    } else {
-                                        settings.modelContexts + (model to tokens)
-                                    },
-                                )
-                            }
+                            // Draft first, disk second: the window belongs to the model and
+                            // lands immediately, but routing it through the draft keeps
+                            // whatever else is unsaved on this page intact.
+                            form = form.copy(
+                                modelContexts = if (tokens <= 0) {
+                                    form.modelContexts - model
+                                } else {
+                                    form.modelContexts + (model to tokens)
+                                },
+                            )
+                            scope.persist { it.copy(modelContexts = form.modelContexts) }
                         },
                     )
                     if (window > 0 && CONTEXT_PRESETS.none { it.first == window }) {
@@ -754,16 +756,16 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             contexts = form.modelContexts,
             onContext = { model, window ->
                 // Written through immediately: the window belongs to the model, and the
-                // dialog's confirm button is about which models are enabled.
-                scope.persist { settings ->
-                    settings.copy(
-                        modelContexts = if (window <= 0) {
-                            settings.modelContexts - model
-                        } else {
-                            settings.modelContexts + (model to window)
-                        },
-                    )
-                }
+                // dialog's confirm button is about which models are enabled. The draft is
+                // updated first so the page's other unsaved edits survive the write.
+                form = form.copy(
+                    modelContexts = if (window <= 0) {
+                        form.modelContexts - model
+                    } else {
+                        form.modelContexts + (model to window)
+                    },
+                )
+                scope.persist { it.copy(modelContexts = form.modelContexts) }
             },
             onConfirm = { picked ->
                 form = form.mapProvider(selected.id) { it.copy(enabled = picked) }
