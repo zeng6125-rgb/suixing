@@ -101,14 +101,31 @@ import kotlinx.coroutines.launch
 private data class TestOutcome(val ok: Boolean, val message: String)
 
 /**
- * The values the OpenAI-compatible `reasoning_effort` field accepts. The empty
- * string means "say nothing", which leaves the model on its own default.
+ * The values the OpenAI-compatible `reasoning_effort` field accepts, wire value to
+ * 档位名，按滑杆的顺序排列。The empty string means "say nothing", which leaves the model
+ * on its own default; `minimal` / `xhigh` are the two ends only some vendors know.
  */
 private val REASONING_LEVELS = listOf(
     "" to "默认",
+    "minimal" to "minimal",
     "low" to "低",
     "medium" to "中",
     "high" to "高",
+    "xhigh" to "xhigh",
+)
+
+/**
+ * The context-window presets for the current model, tokens to 档位名。0 是「不限」，
+ * written as a deleted key rather than a stored 0, so 「没设过」 and 「设成不限」 stay
+ * indistinguishable — which is what [AppSettings.contextWindowFor] already assumes.
+ */
+private val CONTEXT_PRESETS = listOf(
+    0 to "不限",
+    32_000 to "32k",
+    64_000 to "64k",
+    128_000 to "128k",
+    256_000 to "256k",
+    1_000_000 to "1M",
 )
 
 /** Rewrites one saved endpoint in place; a null or unknown id is a no-op. */
@@ -527,6 +544,47 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item {
+                // 模型列表里那枚 chip 要先进对话框、再展开输入框才能改一个数；当前模型
+                // 的窗口是天天要调的，所以在页面上直接给一档预设。
+                val model = form.model
+                val window = form.contextWindowFor(model)
+                LabeledBlock(
+                    label = "上下文窗口",
+                    hint = "只影响当前模型（$model）：超过这个长度就丢掉最早的对话，不限则整段发过去。",
+                ) {
+                    SegmentedPill(
+                        options = CONTEXT_PRESETS.map { it.second },
+                        // 存了个预设之外的值时停在「不限」，下面那行把真实值说出来。
+                        selectedIndex = CONTEXT_PRESETS
+                            .indexOfFirst { it.first == window }
+                            .coerceAtLeast(0),
+                        onSelect = { index ->
+                            val tokens = CONTEXT_PRESETS[index].first
+                            // 与模型列表里那枚 chip 同一条写路径：窗口属于模型本身，
+                            // 不归页面底部的「保存」管。
+                            scope.persist { settings ->
+                                settings.copy(
+                                    modelContexts = if (tokens <= 0) {
+                                        settings.modelContexts - model
+                                    } else {
+                                        settings.modelContexts + (model to tokens)
+                                    },
+                                )
+                            }
+                        },
+                    )
+                    if (window > 0 && CONTEXT_PRESETS.none { it.first == window }) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "自定义：$window",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
                         enabled = !loadingModels,
@@ -667,20 +725,23 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         onValueChange = { form = form.copy(topP = it) },
                     )
                     Spacer(Modifier.height(12.dp))
-                    LabeledBlock(
-                        label = "思考强度",
-                        hint = "对应接口的 reasoning_effort。只对支持档位的模型有效，不支持的会忽略这一项。",
-                    ) {
-                        SegmentedPill(
-                            options = REASONING_LEVELS.map { it.second },
-                            selectedIndex = REASONING_LEVELS
-                                .indexOfFirst { it.first == form.reasoningEffort }
-                                .coerceAtLeast(0),
-                            onSelect = { index ->
-                                form = form.copy(reasoningEffort = REASONING_LEVELS[index].first)
-                            },
-                        )
-                    }
+                    // 滑杆而不是 pill：六档在一行 pill 上每格只剩两个字的宽度，滑杆顺带
+                    // 把线上值写进标题，不用另起一行解释 reasoning_effort 收到的是什么。
+                    val effort = REASONING_LEVELS
+                        .indexOfFirst { it.first == form.reasoningEffort }
+                        // 旧的/接口自造的值只显示成「默认」，不写回：拨动滑杆才落盘。
+                        .coerceAtLeast(0)
+                    val (wire, name) = REASONING_LEVELS[effort]
+                    LabeledSlider(
+                        label = "思考强度 · " + if (wire.isEmpty() || wire == name) name else "$name ($wire)",
+                        hint = "对应接口的 reasoning_effort；xhigh 仅部分模型支持，不支持的忽略。",
+                        value = effort.toFloat(),
+                        range = 0f..REASONING_LEVELS.lastIndex.toFloat(),
+                        steps = REASONING_LEVELS.size - 2,
+                        onValueChange = { index ->
+                            form = form.copy(reasoningEffort = REASONING_LEVELS[index.toInt()].first)
+                        },
+                    )
                 }
             }
         }

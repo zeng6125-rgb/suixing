@@ -419,6 +419,36 @@ fun PageTopBar(
  * jump-to-latest button, so the four of them cannot drift apart in size, colour or
  * shadow — they were built separately once and did.
  */
+/**
+ * A bar button with no container of its own: the bar is the container.
+ *
+ * The chat header's controls used to be filled circles sitting on the bar, which read as
+ * three buttons floating over the transcript rather than one header.
+ */
+@Composable
+fun FlatIconButton(
+    icon: ImageVector,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+        )
+    }
+}
+
 @Composable
 fun CircleActionButton(
     icon: ImageVector,
@@ -430,6 +460,8 @@ fun CircleActionButton(
     contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
     enabled: Boolean = true,
     iconSize: Dp = 20.dp,
+    /** 0.dp for a button that must not cast one — the send button is flat by design. */
+    shadowElevation: Dp = 2.dp,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -440,7 +472,7 @@ fun CircleActionButton(
         shape = CircleShape,
         color = containerColor,
         contentColor = contentColor,
-        shadowElevation = if (pressed) 4.dp else 2.dp,
+        shadowElevation = if (pressed) shadowElevation + 2.dp else shadowElevation,
         interactionSource = interaction,
     ) {
         Box(contentAlignment = Alignment.Center) {

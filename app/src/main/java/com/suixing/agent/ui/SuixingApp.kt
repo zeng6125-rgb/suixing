@@ -78,12 +78,14 @@ import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
+import com.suixing.agent.ui.chat.SessionStats
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.SettingsScreen
 import kotlinx.coroutines.flow.distinctUntilChanged
+import java.util.Locale
 import kotlinx.coroutines.flow.map
 
 /**
@@ -117,6 +119,10 @@ fun SuixingApp() {
     val assistantId by remember(chat) {
         chat.state.map { it.assistantId }.distinctUntilChanged()
     }.collectAsState(initial = "")
+
+    // The conversation's own tally, for the drawer's status line. Its own flow, so the
+    // shell does not recompose once per streamed token.
+    val sessionStats by chat.sessionStats.collectAsState(initial = null)
 
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
     var assistantsOpen by rememberSaveable { mutableStateOf(false) }
@@ -201,6 +207,7 @@ fun SuixingApp() {
                     assistantsOpen = true
                 },
                 onNavigate = open,
+                stats = sessionStats,
             )
         }
     }
@@ -239,6 +246,7 @@ private fun BoxScope.Drawer(
     onOpenConversation: (Conversation) -> Unit,
     onDeleteConversation: (Conversation) -> Unit,
     onOpenAssistants: () -> Unit,
+    stats: SessionStats?,
     onNavigate: (String) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -306,6 +314,49 @@ private fun BoxScope.Drawer(
                 }
 
                 Spacer(Modifier.height(14.dp))
+                // What this conversation has cost so far, from its own stored usage rows.
+                // Hidden until there is something to say.
+                stats?.let { tally ->
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = buildString {
+                                append("${tally.turns} 轮 ${tally.steps} 步")
+                                if (tally.perSecond > 0) {
+                                    append(" · 均 ")
+                                    append(String.format(Locale.US, "%.1f", tally.perSecond))
+                                    append(" tok/s")
+                                }
+                                if (tally.tokens > 0) append(" · ${tally.tokens / 1000}k tok")
+                                if (tally.cachePercent > 0) append(" · 缓存 ${tally.cachePercent}%")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Spacer(Modifier.weight(1f))
+                        if (tally.contextTokens > 0) {
+                            Text(
+                                text = if (tally.contextWindow > 0) {
+                                    "上下文 ${tally.contextTokens * 100 / tally.contextWindow}%"
+                                } else {
+                                    "上下文 ${tally.contextTokens / 1000}k"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = scheme.onSurfaceVariant,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
                 HorizontalDivider(
                     modifier = Modifier.padding(horizontal = 16.dp),
                     color = scheme.outlineVariant,

@@ -216,6 +216,16 @@ data class StreamStats(
      */
     val lastPromptTokens: Int = 0,
     /**
+     * Where the prompt goes, split three ways, for the breakdown bar in the UI.
+     *
+     * Estimated from characters, so the three do not have to add up to [lastPromptTokens]:
+     * one is counted and the other is reported. They are still worth having, because the
+     * question the bar answers — 「是历史太长，还是工具太多」 — only needs proportions.
+     */
+    val breakSystem: Int = 0,
+    val breakTools: Int = 0,
+    val breakHistory: Int = 0,
+    /**
      * One line about the run that is not a statistic, e.g. that the context was just
      * compressed. It rides here rather than in a new event because this flow is
      * already the live channel both the chat screen and the floating console read.
@@ -286,6 +296,16 @@ class AgentEngine(
     /** Wire size in characters when [lastPromptTokens] was recorded, to price the growth. */
     @Volatile
     private var lastPromptChars = 0
+
+    /** The three parts of the prompt, in estimated tokens, for the UI's breakdown bar. */
+    @Volatile
+    private var breakSystem = 0
+
+    @Volatile
+    private var breakTools = 0
+
+    @Volatile
+    private var breakHistory = 0
 
     /** A one-line note about the run, shown by whoever renders [runState]. */
     @Volatile
@@ -393,6 +413,9 @@ class AgentEngine(
         thinkingChars.set(0)
         lastPromptTokens = 0
         lastPromptChars = 0
+        breakSystem = 0
+        breakTools = 0
+        breakHistory = 0
         contextNote = ""
         startedAt = System.nanoTime()
         running.set(true)
@@ -410,9 +433,12 @@ class AgentEngine(
         // not paint Idle over Cancelled or Failed — the UI would lose the one fact it
         // needs to leave the running state.
         var settled = false
-        wire += ChatMessage.system(
-            systemPrompt(settings, registry, skills.catalog(skills.list()), memory.entries.value),
-        )
+        // Built once and measured once: the system prompt carries the skills catalogue and
+        // the memory entries, so it is both the largest fixed part of the prompt and the one
+        // the user can do least about.
+        val systemText = systemPrompt(settings, registry, skills.catalog(skills.list()), memory.entries.value)
+        breakSystem = systemText.length / 4
+        wire += ChatMessage.system(systemText)
         sanitize(trim(history, settings.contextWindowFor(settings.model))).forEach { appendToWire(wire, it, settings) }
 
         // A ceiling of 0 (or less) means the user set none: the loop then ends only when
@@ -437,6 +463,14 @@ class AgentEngine(
                     return produced
                 }
 
+                // Measured here, where the wire for this round is final: steering has landed
+                // and compression has already run, so the numbers match what is about to be
+                // sent rather than what the round started with.
+                val toolSpecs = registry.all().map { it.spec }
+                breakTools = toolSpecs.sumOf {
+                    it.name.length + it.description.length + it.parameters.toString().length
+                } / 4
+                breakHistory = wire.filter { it.role != ROLE_SYSTEM }.sumOf { messageChars(it) } / 4
                 val turnStartedAt = System.currentTimeMillis()
                 // Cleared here rather than after the call: an abort from `steer` can only
                 // belong to the round it interrupted, so nothing else may inherit the flag.
@@ -448,7 +482,7 @@ class AgentEngine(
                     llm.complete(
                         settings = settings,
                         messages = wire,
-                        tools = registry.all().map { it.spec },
+                        tools = toolSpecs,
                         onDelta = { piece ->
                             outChars.addAndGet(piece.length)
                             streamed.append(piece)
@@ -735,8 +769,16 @@ class AgentEngine(
         return reported + (chars - lastPromptChars).coerceAtLeast(0) / 4
     }
 
-    private fun wireChars(wire: List<ChatMessage>): Int =
-        wire.sumOf { it.text.length + it.imageBase64.orEmpty().length }
+    private fun wireChars(wire: List<ChatMessage>): Int = wire.sumOf { messageChars(it) }
+
+    /**
+     * What one message costs in characters: its text, its images, and the arguments of any
+     * tool call it asks for. All three travel to the endpoint, and leaving the arguments out
+     * would undercount the part of a history that is made almost entirely of tool calls.
+     */
+    private fun messageChars(message: ChatMessage): Int =
+        message.text.length + message.imageBase64.orEmpty().length +
+            message.toolCalls.sumOf { it.name.length + it.arguments.length }
 
     private fun emitRunning() = emit(runSeq.get(), RunState.Running(stats()))
 
@@ -755,6 +797,9 @@ class AgentEngine(
             elapsedMs = elapsedMs,
             tokPerSec = if (elapsedMs <= 0L) 0f else tokens * 1000f / elapsedMs,
             lastPromptTokens = lastPromptTokens,
+            breakSystem = breakSystem,
+            breakTools = breakTools,
+            breakHistory = breakHistory,
             note = contextNote,
         )
     }

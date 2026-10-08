@@ -16,7 +16,10 @@ import com.suixing.agent.service.AgentForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -52,10 +55,20 @@ data class ChatUiState(
      * frozen record and this is ignored.
      */
     val stats: StreamStats? = null,
+    /** The live bubble's pieces; empty unless this conversation owns the running run. */
+    val liveParts: List<LivePart> = emptyList(),
+    /**
+     * The run whose rounds are streaming. Its stored rounds are hidden from the
+     * transcript while it runs — the live bubble already draws them, and showing both is
+     * what split one reply into two bubbles that later merged.
+     */
+    val liveRunId: String = "",
     val error: String? = null,
 ) {
     /** The transcript as drawn: one run per turn, newest first pick wins. */
-    val visible: List<StoredMessage> get() = Transcript.active(messages, activeRuns)
+    val visible: List<StoredMessage>
+        get() = Transcript.active(messages, activeRuns)
+            .filterNot { liveRunId.isNotEmpty() && it.runId == liveRunId }
 
     /** The live run is writing into the conversation on screen, not some other one. */
     val runningHere: Boolean get() = running && runningChatId == conversationId
@@ -69,6 +82,27 @@ data class ChatUiState(
  * the one that started it. Fusing the two is what used to lock the drawer for the whole
  * length of a run — the run's own conversation was the only one the UI could hold.
  */
+/**
+ * A tool call as it happens.
+ *
+ * The row exists from the moment the call starts, so a run that spends ten seconds inside
+ * a shell command shows what it is doing for those ten seconds instead of a gap.
+ */
+data class LiveTool(
+    val name: String,
+    val args: String,
+    val startedAt: Long,
+    val done: Boolean = false,
+    val ok: Boolean = true,
+    val elapsedMs: Long = 0,
+)
+
+/** One piece of the reply being streamed, in the order the engine produced it. */
+sealed interface LivePart {
+    data class Thinking(val text: String) : LivePart
+    data class Tools(val calls: List<LiveTool>) : LivePart
+    data class Text(val text: String) : LivePart
+}
 private data class RunSession(
     val chatId: String,
     val title: String,
@@ -80,9 +114,51 @@ private data class RunSession(
     val reasoning: String = "",
     val status: String = "",
     val runningTool: String? = null,
+    /** What the live bubble draws, in arrival order. */
+    val parts: List<LivePart> = emptyList(),
     val error: String? = null,
 )
 
+/**
+ * The conversation's own tally, for the drawer's status line.
+ *
+ * Aggregated from the stored usage rows rather than from the engine: the numbers have to
+ * survive the run that produced them, and a reopened conversation has no engine state.
+ */
+data class SessionStats(
+    val turns: Int,
+    val steps: Int,
+    val tokens: Int,
+    val cachePercent: Int,
+    val perSecond: Double,
+    val contextTokens: Int,
+    val contextWindow: Int,
+) {
+    companion object {
+        fun of(messages: List<StoredMessage>, contextWindow: Int): SessionStats? {
+            val turns = messages.count { it.role == Roles.USER && !it.steer }
+            val steps = messages.count { it.role == Roles.TOOL }
+            val prompt = messages.sumOf { it.promptTokens }
+            val completion = messages.sumOf { it.completionTokens }
+            val cached = messages.sumOf { it.cachedTokens }
+            val elapsed = messages.sumOf { it.elapsedMs }
+            val tokens = prompt + completion
+            // Nothing to say about an empty conversation, or one whose endpoint never
+            // reported usage.
+            if (tokens == 0 && steps == 0) return null
+            val newest = messages.lastOrNull { it.usageKnown }
+            return SessionStats(
+                turns = turns,
+                steps = steps,
+                tokens = tokens,
+                cachePercent = if (prompt > 0) cached * 100 / prompt else 0,
+                perSecond = if (elapsed > 0) completion * 1000.0 / elapsed else 0.0,
+                contextTokens = newest?.promptTokens ?: 0,
+                contextWindow = contextWindow,
+            )
+        }
+    }
+}
 class ChatViewModel : ViewModel() {
 
     // The process-wide instance, not a private one: the floating console has to be
@@ -94,6 +170,14 @@ class ChatViewModel : ViewModel() {
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
+
+    /**
+     * The on-screen conversation's tally for the drawer. distinctUntilChanged matters: the
+     * state itself changes on every token, while these numbers change once a reply lands.
+     */
+    val sessionStats: Flow<SessionStats?> = combine(state, Core.settings.flow) { snapshot, settings ->
+        SessionStats.of(snapshot.messages, settings.contextWindowFor(settings.model))
+    }.distinctUntilChanged()
 
     private var job: Job? = null
 
@@ -482,21 +566,29 @@ class ChatViewModel : ViewModel() {
     private fun handleEvent(event: AgentEvent) {
         val live = session ?: return
         val next = when (event) {
-            is AgentEvent.TextDelta ->
-                live.copy(streaming = live.streaming + event.text, status = "")
+            is AgentEvent.TextDelta -> live.copy(
+                streaming = live.streaming + event.text,
+                parts = live.parts.appendText(event.text),
+                status = "",
+            )
 
-            is AgentEvent.ReasoningDelta ->
-                live.copy(reasoning = live.reasoning + event.text, status = "")
+            is AgentEvent.ReasoningDelta -> live.copy(
+                reasoning = live.reasoning + event.text,
+                parts = live.parts.appendThinking(event.text),
+                status = "",
+            )
 
+            // The round is stored, but it is not drawn from the transcript: the live
+            // bubble keeps drawing it until the run lands, so the reply stays one bubble
+            // from the first token to the last.
             is AgentEvent.AssistantMessage -> live.copy(
                 messages = live.messages + event.message.copy(runId = live.runId),
-                streaming = "",
-                reasoning = "",
             )
 
             is AgentEvent.ToolStarted -> live.copy(
                 status = "调用 ${event.name}",
                 runningTool = event.name,
+                parts = live.parts.startTool(event.name, event.args),
             )
 
             is AgentEvent.ToolMessage -> live.copy(
@@ -505,7 +597,10 @@ class ChatViewModel : ViewModel() {
                 runningTool = null,
             )
 
-            is AgentEvent.ToolFinished -> live.copy(runningTool = null)
+            is AgentEvent.ToolFinished -> live.copy(
+                runningTool = null,
+                parts = live.parts.finishTool(event.name, event.ok),
+            )
 
             // The error rides with the run: it shows on the error card only while that
             // conversation is the one on screen, and travels with it otherwise.
@@ -517,6 +612,53 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
+     * Appends a text delta to the piece being written, or opens a new one.
+     *
+     * A tool call between two stretches of prose starts a second piece: the two stretches
+     * are not one paragraph, and merging them would draw the model's "let me check" before
+     * a tool and its answer after it as a single run-on line.
+     */
+    private fun List<LivePart>.appendText(delta: String): List<LivePart> =
+        when (val last = lastOrNull()) {
+            is LivePart.Text -> dropLast(1) + last.copy(text = last.text + delta)
+            else -> this + LivePart.Text(delta)
+        }
+
+    private fun List<LivePart>.appendThinking(delta: String): List<LivePart> =
+        when (val last = lastOrNull()) {
+            is LivePart.Thinking -> dropLast(1) + last.copy(text = last.text + delta)
+            else -> this + LivePart.Thinking(delta)
+        }
+
+    /** A call joins the round of tools already open, or starts one. */
+    private fun List<LivePart>.startTool(name: String, args: String): List<LivePart> {
+        val call = LiveTool(name = name, args = args, startedAt = System.currentTimeMillis())
+        return when (val last = lastOrNull()) {
+            is LivePart.Tools -> dropLast(1) + last.copy(calls = last.calls + call)
+            else -> this + LivePart.Tools(listOf(call))
+        }
+    }
+
+    /**
+     * Marks the oldest still-running call of that name as done.
+     *
+     * Matched by name, not by index: the engine reports the finish by name, and a run that
+     * calls the same tool twice must not have the second result close the first row.
+     */
+    private fun List<LivePart>.finishTool(name: String, ok: Boolean): List<LivePart> = map { part ->
+        if (part !is LivePart.Tools) return@map part
+        val index = part.calls.indexOfFirst { it.name == name && !it.done }
+        if (index < 0) return@map part
+        val calls = part.calls.toMutableList()
+        val call = calls[index]
+        calls[index] = call.copy(
+            done = true,
+            ok = ok,
+            elapsedMs = System.currentTimeMillis() - call.startedAt,
+        )
+        part.copy(calls = calls)
+    }
+    /**
      * Installs [next] as the run's copy of its conversation and, when that conversation is
      * the one on screen, copies the live parts of it onto the screen. A run in some other
      * conversation changes nothing here except the "who is running" line.
@@ -525,8 +667,13 @@ class ChatViewModel : ViewModel() {
         session = next
         _state.update { snapshot ->
             when {
-                next == null ->
-                    snapshot.copy(running = false, runningChatId = "", runningTitle = "")
+                next == null -> snapshot.copy(
+                    running = false,
+                    runningChatId = "",
+                    runningTitle = "",
+                    liveParts = emptyList(),
+                    liveRunId = "",
+                )
 
                 snapshot.conversationId != next.chatId -> snapshot.copy(
                     running = true,
@@ -545,6 +692,8 @@ class ChatViewModel : ViewModel() {
                     reasoning = next.reasoning,
                     status = next.status,
                     runningTool = next.runningTool,
+                    liveParts = next.parts,
+                    liveRunId = next.runId,
                     error = next.error ?: snapshot.error,
                 )
             }
@@ -571,6 +720,8 @@ class ChatViewModel : ViewModel() {
                     stats = null,
                     status = status,
                     runningTool = null,
+                    liveParts = emptyList(),
+                    liveRunId = "",
                     notice = null,
                     error = failure ?: snapshot.error,
                 )
