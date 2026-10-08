@@ -21,11 +21,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.outlined.Refresh
@@ -105,8 +108,15 @@ private fun AppSettings.mapProvider(id: String?, block: (ProviderConfig) -> Prov
     return copy(providers = providers.map { if (it.id == id) block(it) else it })
 }
 
+/**
+ * Everything that used to be scattered across its own screen or dropdown, in one page.
+ *
+ * [onOpen] is how a row that is really another screen gets there — MCP, memory and the
+ * capability list each keep their own page, because they are lists the user manages,
+ * not settings the user toggles.
+ */
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(onOpen: (String) -> Unit) {
     val stored by Core.settings.flow.collectAsState(initial = AppSettings())
     var form by remember(stored) { mutableStateOf(stored) }
     val scope = rememberCoroutineScope()
@@ -434,12 +444,12 @@ fun SettingsScreen() {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 LabeledSlider(
                     label = "上下文条数 " +
-                        if (form.contextMessages <= 0) "不限" else "${form.contextMessages}",
+                        if (form.contextWindow <= 0) "不限" else "${form.contextWindow}",
                     hint = "每次请求只带最近多少条消息。不限时历史一长就变慢、也更贵。",
-                    value = form.contextMessages.toFloat(),
+                    value = form.contextWindow.toFloat(),
                     range = 0f..80f,
                     steps = 79,
-                    onValueChange = { form = form.copy(contextMessages = it.toInt()) },
+                    onValueChange = { form = form.copy(contextWindow = it.toInt()) },
                 )
                 LabeledSlider(
                     label = "Top P ${"%.2f".format(form.topP)}",
@@ -541,19 +551,106 @@ fun SettingsScreen() {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (form.approvalMode == ApprovalMode.ASK) {
-                    TextButton(
-                        onClick = {
-                            Core.gate.forgetAlways()
-                            scope.launch { snackbar.showSnackbar("已清除「总是允许」的记忆") }
-                        },
-                    ) { Text("清除「总是允许」的记忆") }
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(10.dp))
+                    val remembered by Core.gate.alwaysAllowedTools.collectAsState()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("总是允许的工具", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                text = if (remembered.isEmpty()) {
+                                    "还没有。审批时选「总是允许」，这里会记住它，重启也在。"
+                                } else {
+                                    "${remembered.size} 个，重启后依然有效"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (remembered.isNotEmpty()) {
+                            TextButton(
+                                onClick = {
+                                    Core.gate.forgetAlways()
+                                    scope.launch { snackbar.showSnackbar("已清除全部记忆") }
+                                },
+                            ) { Text("全部清除") }
+                        }
+                    }
+                    remembered.sorted().forEach { name ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = { Core.gate.forgetAlways(name) }) {
+                                Icon(
+                                    Icons.Outlined.Close,
+                                    contentDescription = "忘记 $name",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(10.dp))
+                    val refused by Core.gate.alwaysDeniedTools.collectAsState()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("总是拒绝的工具", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                text = if (refused.isEmpty()) {
+                                    "还没有。审批时选「总是拒绝」，它不会再问第二次。"
+                                } else {
+                                    "${refused.size} 个，重启后依然有效"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (refused.isNotEmpty()) {
+                            TextButton(
+                                onClick = {
+                                    Core.gate.forgetDenied()
+                                    scope.launch { snackbar.showSnackbar("已清除全部拒绝记忆") }
+                                },
+                            ) { Text("全部清除") }
+                        }
+                    }
+                    refused.sorted().forEach { name ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = { Core.gate.forgetDenied(name) }) {
+                                Icon(
+                                    Icons.Outlined.Close,
+                                    contentDescription = "不再拒绝 $name",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
             SectionCard(
                 title = "外观",
                 icon = Icons.Outlined.Palette,
-                subtitle = "主题与配色",
+                subtitle = "主题、配色与排版",
             ) {
                 SegmentedPill(
                     options = listOf("跟随系统", "浅色", "深色"),
@@ -572,6 +669,117 @@ fun SettingsScreen() {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(12.dp))
+                Text(text = "字号", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "正文字号，立即生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(9.dp))
+                SegmentedPill(
+                    options = listOf("小", "标准", "大", "特大"),
+                    selectedIndex = form.fontScale.coerceIn(0, 3),
+                    onSelect = { form = form.copy(fontScale = it) },
+                )
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(12.dp))
+                Text(text = "气泡宽度", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "助手回复最多占屏幕的宽度比例。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(9.dp))
+                SegmentedPill(
+                    options = listOf("窄", "标准", "宽"),
+                    selectedIndex = form.bubbleWidth.coerceIn(0, 2),
+                    onSelect = { form = form.copy(bubbleWidth = it) },
+                )
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(12.dp))
+                Text(text = "圆角", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "卡片、按钮与输入框的圆角大小。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(9.dp))
+                SegmentedPill(
+                    options = listOf("方正", "标准", "圆润"),
+                    selectedIndex = form.cornerScale.coerceIn(0, 2),
+                    onSelect = { form = form.copy(cornerScale = it) },
+                )
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "显示时间",
+                    subtitle = "在每条消息下面显示发送时间。",
+                    control = {
+                        Switch(
+                            checked = form.showTimestamps,
+                            onCheckedChange = { form = form.copy(showTimestamps = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "工具调用默认展开",
+                    subtitle = "关掉时工具卡片折叠成一行，点开才看参数与结果。",
+                    control = {
+                        Switch(
+                            checked = form.expandTools,
+                            onCheckedChange = { form = form.copy(expandTools = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "思考过程默认展开",
+                    subtitle = "关掉时思考过程默认收起，只显示用时和 token 数。",
+                    control = {
+                        Switch(
+                            checked = form.expandReasoning,
+                            onCheckedChange = { form = form.copy(expandReasoning = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "自动跟随新消息",
+                    subtitle = "在底部时新回复自动滚到底；上滑看历史就暂停跟随。",
+                    control = {
+                        Switch(
+                            checked = form.autoFollow,
+                            onCheckedChange = { form = form.copy(autoFollow = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(6.dp))
+                TextButton(
+                    onClick = {
+                        val defaults = AppSettings()
+                        form = form.copy(
+                            themeMode = defaults.themeMode,
+                            paletteMode = defaults.paletteMode,
+                            fontScale = defaults.fontScale,
+                            bubbleWidth = defaults.bubbleWidth,
+                            cornerScale = defaults.cornerScale,
+                            showTimestamps = defaults.showTimestamps,
+                            expandTools = defaults.expandTools,
+                            expandReasoning = defaults.expandReasoning,
+                            autoFollow = defaults.autoFollow,
+                        )
+                    },
+                ) { Text("恢复默认外观") }
             }
 
             SectionCard(
@@ -607,6 +815,48 @@ fun SettingsScreen() {
                 TextButton(
                     onClick = { form = form.copy(systemPrompt = AppSettings().systemPrompt) },
                 ) { Text("恢复默认") }
+            }
+
+            SectionCard(
+                title = "更多",
+                icon = Icons.Outlined.Extension,
+                subtitle = "MCP、记忆与权限",
+            ) {
+                SettingsLink(
+                    title = "MCP 服务器",
+                    subtitle = "给模型外挂工具",
+                    onClick = { onOpen("extension?tab=0") },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingsLink(
+                    title = "记忆",
+                    subtitle = "模型自己写下的长期备忘",
+                    onClick = { onOpen("extension?tab=2") },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingsLink(
+                    title = "权限与能力",
+                    subtitle = "无障碍、Shizuku、root 检测",
+                    onClick = { onOpen("capability") },
+                )
+            }
+
+            SectionCard(
+                title = "关于",
+                icon = Icons.Outlined.Info,
+                subtitle = "随行 Suixing",
+            ) {
+                Text(
+                    text = "跟着你走的手机智能体：说一句话，它就能读屏、点按、跑命令、翻文件。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "回答由你自己配置的模型服务提供；对话、记忆与密钥都只留在这台手机上。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -804,6 +1054,34 @@ private fun ModelCheckRow(id: String, checked: Boolean, onToggle: () -> Unit) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** A row that leaves this page: the chevron is what says so before it is tapped. */
+@Composable
+private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(text = title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Icon(
+            imageVector = Icons.Filled.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
         )
     }
 }

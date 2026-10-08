@@ -40,7 +40,12 @@ class MainActivity : ComponentActivity() {
                 WindowCompat.getInsetsController(window, window.decorView)
                     .isAppearanceLightStatusBars = !dark
             }
-            SuixingTheme(darkTheme = dark, dynamicColor = settings.paletteMode == 1) {
+            SuixingTheme(
+                darkTheme = dark,
+                dynamicColor = settings.paletteMode == 1,
+                fontScale = settings.fontScale,
+                cornerScale = settings.cornerScale,
+            ) {
                 SuixingApp()
             }
         }

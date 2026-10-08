@@ -69,12 +69,15 @@ import kotlinx.coroutines.launch
 /**
  * One screen for everything that adds capability at runtime: MCP servers, which
  * contribute tools, and skills, which contribute instructions.
+ *
+ * [initialTab] lets a row elsewhere (the settings page) open straight onto the tab it
+ * is talking about, instead of dropping the user on MCP and making them swipe.
  */
 @Composable
-fun ExtensionScreen() {
+fun ExtensionScreen(initialTab: Int = 0) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by remember { mutableIntStateOf(initialTab) }
 
     var mcpEditorOpen by remember { mutableStateOf(false) }
     var mcpEditing by remember { mutableStateOf<McpServerConfig?>(null) }
@@ -83,6 +86,9 @@ fun ExtensionScreen() {
     var skillViewing by remember { mutableStateOf<Skill?>(null) }
     var skillDeleting by remember { mutableStateOf<Skill?>(null) }
     var skillRefresh by remember { mutableIntStateOf(0) }
+
+    var memoryRefresh by remember { mutableIntStateOf(0) }
+    var memoryNew by remember { mutableIntStateOf(0) }
 
     fun notify(text: String) {
         scope.launch { snackbar.showSnackbar(text) }
@@ -108,17 +114,22 @@ fun ExtensionScreen() {
         Column(Modifier.fillMaxSize()) {
             SuixingTopBar(
                 title = "扩展",
-                subtitle = if (tab == 0) "MCP 给模型加工具" else "技能给模型加知识",
+                subtitle = when (tab) {
+                    0 -> "MCP 给模型加工具"
+                    1 -> "技能给模型加知识"
+                    else -> "记忆是模型自己写下的长期备忘"
+                },
                 actions = {
                     IconButton(
                         onClick = {
-                            if (tab == 0) {
-                                scope.launch {
+                            when (tab) {
+                                0 -> scope.launch {
                                     Core.mcp.load()
                                     notify("已重新加载 MCP 配置")
                                 }
-                            } else {
-                                skillRefresh++
+
+                                1 -> skillRefresh++
+                                else -> memoryRefresh++
                             }
                         },
                     ) {
@@ -126,17 +137,28 @@ fun ExtensionScreen() {
                     }
                     IconButton(
                         onClick = {
-                            if (tab == 0) {
-                                mcpEditing = null
-                                mcpEditorOpen = true
-                            } else {
-                                importer.launch(null)
+                            when (tab) {
+                                0 -> {
+                                    mcpEditing = null
+                                    mcpEditorOpen = true
+                                }
+
+                                1 -> importer.launch(null)
+                                else -> memoryNew++
                             }
                         },
                     ) {
                         Icon(
-                            imageVector = if (tab == 0) Icons.Outlined.Add else Icons.Outlined.FileDownload,
-                            contentDescription = if (tab == 0) "添加服务器" else "导入技能",
+                            imageVector = when (tab) {
+                                0 -> Icons.Outlined.Add
+                                1 -> Icons.Outlined.FileDownload
+                                else -> Icons.Outlined.Add
+                            },
+                            contentDescription = when (tab) {
+                                0 -> "添加服务器"
+                                1 -> "导入技能"
+                                else -> "新增记忆"
+                            },
                             modifier = Modifier.size(20.dp),
                         )
                     }
@@ -144,7 +166,11 @@ fun ExtensionScreen() {
             )
 
             Box(Modifier.padding(horizontal = 16.dp, vertical = 2.dp)) {
-                SegmentedPill(options = listOf("MCP", "技能"), selectedIndex = tab, onSelect = { tab = it })
+                SegmentedPill(
+                    options = listOf("MCP", "技能", "记忆"),
+                    selectedIndex = tab,
+                    onSelect = { tab = it },
+                )
             }
             Spacer(Modifier.height(12.dp))
 
@@ -158,10 +184,16 @@ fun ExtensionScreen() {
                     onNotify = ::notify,
                 )
 
-                else -> SkillsSection(
+                1 -> SkillsSection(
                     refresh = skillRefresh,
                     onView = { skillViewing = it },
                     onDelete = { skillDeleting = it },
+                )
+
+                else -> MemorySection(
+                    refresh = memoryRefresh,
+                    newRequest = memoryNew,
+                    onNotify = ::notify,
                 )
             }
         }

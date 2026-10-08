@@ -208,6 +208,11 @@ app/src/main/java/com/suixing/agent/
 - 安卓 16+ 的「高级保护模式」会拦截未知来源安装并限制无障碍，请勿开启
 - Shizuku 在设备重启后需要重新启动（无线调试或 root 方式）
 
+## 路线图
+
+- **v0.8（进行中）**：左侧栏导航（对话列表 + 底部设置）、Gemini 式悬浮对话框（附件/追底/对齐）、点停即停与插话、悬浮窗控制台、真屏注入补齐（tap/长按/滑动/输入/截屏/读节点树）、状态落盘（root 探测结果与审批「总是允许/拒绝」重启不丢、回前台刷新无障碍与 Shizuku）
+- **v0.9**：虚拟屏（Shower 式虚拟显示，独立 native 组件），真屏注入已在 v0.8 覆盖日常自动化
+
 ## 致谢
 
 功能设计参照了 [Operit](https://github.com/AAswordman/Operit)（LGPL-3.0）与 [Aether 扶摇](https://github.com/Zhou-Shilin/Aether)（GPL-3.0）的能力清单与交互约定，CI 约定参考了后者的构建流程。本项目为独立实现，未复制上述项目的源代码。

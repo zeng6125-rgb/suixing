@@ -1,6 +1,7 @@
 package com.suixing.agent.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.GestureResultCallback
 import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.accessibilityservice.AccessibilityService.ScreenshotResult
@@ -62,13 +63,13 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     // ---------------------------------------------------------------- gestures
 
-    fun tap(x: Float, y: Float, durationMs: Long = 60L): Boolean =
+    suspend fun tap(x: Float, y: Float, durationMs: Long = 60L): Boolean =
         gesture(Path().apply { moveTo(x, y) }, durationMs)
 
-    fun longPress(x: Float, y: Float): Boolean =
+    suspend fun longPress(x: Float, y: Float): Boolean =
         gesture(Path().apply { moveTo(x, y) }, 700L)
 
-    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300L): Boolean =
+    suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300L): Boolean =
         gesture(
             Path().apply {
                 moveTo(x1, y1)
@@ -77,10 +78,32 @@ class SuixingAccessibilityService : AccessibilityService() {
             durationMs.coerceIn(60L, 5_000L),
         )
 
-    private fun gesture(path: Path, durationMs: Long): Boolean = runCatching {
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(30L))
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
-    }.getOrDefault(false)
+    /**
+     * Dispatches the gesture and waits for the system to say it finished.
+     *
+     * `dispatchGesture` returning true means only that the gesture was *accepted* —
+     * the touch events are delivered over the following [durationMs]. Reporting
+     * success at that point lets the next step read the screen before this tap has
+     * landed, which shows up as 「点了没反应」 followed by a redundant second tap.
+     * Waiting also serialises gestures: a second one dispatched while the first is in
+     * flight is rejected by the system, and now it simply cannot happen.
+     */
+    private suspend fun gesture(path: Path, durationMs: Long): Boolean =
+        suspendCancellableCoroutine { continuation ->
+            val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(30L))
+            val description = GestureDescription.Builder().addStroke(stroke).build()
+            val callback = object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (continuation.isActive) continuation.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (continuation.isActive) continuation.resume(false)
+                }
+            }
+            val dispatched = runCatching { dispatchGesture(description, callback, null) }.getOrDefault(false)
+            if (!dispatched && continuation.isActive) continuation.resume(false)
+        }
 
     fun global(action: Int): Boolean = runCatching { performGlobalAction(action) }.getOrDefault(false)
 
@@ -172,7 +195,7 @@ class SuixingAccessibilityService : AccessibilityService() {
     }
 
     /** Clicks the node, the nearest clickable ancestor, or its centre as a last resort. */
-    fun clickNode(node: AccessibilityNodeInfo): Boolean {
+    suspend fun clickNode(node: AccessibilityNodeInfo): Boolean {
         var current: AccessibilityNodeInfo? = node
         while (current != null) {
             if (current.isClickable) {
@@ -188,7 +211,7 @@ class SuixingAccessibilityService : AccessibilityService() {
         return tap(bounds.centerX().toFloat(), bounds.centerY().toFloat())
     }
 
-    fun clickByText(text: String, exact: Boolean = false): Boolean {
+    suspend fun clickByText(text: String, exact: Boolean = false): Boolean {
         val node = findNodeByText(text, exact) ?: return false
         return clickNode(node)
     }
@@ -224,10 +247,16 @@ class SuixingAccessibilityService : AccessibilityService() {
      * Flattens the visible window into compact lines the model can reason about.
      * Only nodes a human could interact with are kept, otherwise the dump drowns
      * in layout containers.
+     *
+     * The screen size leads the dump because every coordinate in it is absolute: the
+     * model cannot aim a swipe at empty space — scrolling a list, for instance —
+     * without knowing how large the screen it is aiming at actually is.
      */
     fun dumpScreen(maxNodes: Int = 140, maxDepth: Int = 26): String {
         val root = rootInActiveWindow ?: return "(当前无法读取窗口内容)"
+        val (width, height) = screenSize()
         val builder = StringBuilder()
+        builder.append("屏幕: ").append(width).append('x').append(height).append('\n')
         builder.append("包名: ").append(root.packageName?.toString() ?: "未知").append('\n')
         val counter = intArrayOf(0)
         walk(root, 0, maxDepth, maxNodes, builder, counter)

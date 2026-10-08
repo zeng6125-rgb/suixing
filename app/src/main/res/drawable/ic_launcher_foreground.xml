@@ -4,21 +4,36 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- A trail of three dots rising into a spark: "walking along with you".
-         Geometry is the same as SuixingMark() in ui/components/Logo.kt, mapped
-         into the 72dp adaptive-icon safe zone (18..90) instead of the full canvas.
-         The dots fade out as the trail goes back, which is what makes the
-         direction readable at 48dp. -->
+    <!-- 白羽：一支微倾的羽毛，按经典羽毛字形的三段结构画。
+
+         ① 羽片是一条闭合轮廓：从基部(36,81.8)沿左缘扫到羽尖(76,24)，再沿右缘回基部；
+            两缘鼓度不对称（左缘比右缘宽），像真羽毛那样一边宽一边窄。
+         ② 羽轴是穿过羽片、并在基部外露出一截羽柄(calamus)的直线：32,87.5 → 76,24。
+         ③ 片内只留一根短横枝（羽轴连到右缘），再多就糊了。
+
+         上一版把羽枝画成横穿羽轴的独立短弧，缩到 400px 读成了麦穗/蕨叶——独立短弧是
+         「叶脉」的语汇，羽毛的语汇是「一片羽片轮廓 + 一根穿过它的轴」，所以这里一根
+         独立羽枝都不留。
+
+         单线描边 5.6 / round cap+join、纯 #FFFFFFFF 无 alpha 渐隐（渐隐的尾点在浅色
+         桌面上发灰，monochrome 层还会被拆成多种灰度）。含半描边余量仍在安全区 18..90
+         内：羽尖与羽柄端的圆头分别收到 x=78.8 与 y=89.8。 -->
     <path
-        android:fillColor="#66B9B4FF"
-        android:pathData="M21.24,82.08 a6.12,6.12 0 1,0 12.24,0 a6.12,6.12 0 1,0 -12.24,0 Z" />
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M36,81.8 C46,60 44.1,30.6 76,24 C73,42 52.1,72.9 36,81.8 Z" />
     <path
-        android:fillColor="#B3B9B4FF"
-        android:pathData="M33.84,65.52 a7.92,7.92 0 1,0 15.84,0 a7.92,7.92 0 1,0 -15.84,0 Z" />
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M32,87.5 L76,24" />
     <path
-        android:fillColor="#EBB9B4FF"
-        android:pathData="M47.16,48.96 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0 Z" />
-    <path
-        android:fillColor="#FFB9B4FF"
-        android:pathData="M74.16,19.44 Q75.8,31.48 87.84,33.12 Q75.8,34.76 74.16,46.8 Q72.52,34.76 60.48,33.12 Q72.52,31.48 74.16,19.44 Z" />
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M51.8,58.9 L58.6,59.5" />
 </vector>

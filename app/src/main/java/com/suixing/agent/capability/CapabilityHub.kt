@@ -5,11 +5,15 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.service.SuixingAccessibilityService
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** The three privilege tiers the agent can act through. */
@@ -37,15 +41,40 @@ data class CapabilityState(
     val allFilesAccess: Boolean get() = shellReady || rootReady
 }
 
-class CapabilityHub(private val context: Context) {
+class CapabilityHub(
+    private val context: Context,
+    private val settings: SettingsRepository,
+) {
     private val _state = MutableStateFlow(CapabilityState())
     val state: StateFlow<CapabilityState> = _state.asStateFlow()
+
+    /** Outlives any screen: probing must not be tied to a composable's lifetime. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
         ShizukuManager.addBinderAliveListener { refresh() }
         ShizukuManager.addBinderDeadListener { refresh() }
         ShizukuManager.addPermissionResultListener { _, _ -> refresh() }
         refresh()
+        scope.launch { restoreRoot() }
+    }
+
+    /**
+     * Puts the remembered root answer on screen without asking for it again.
+     *
+     * `su -c id` is not free: the superuser app shows a prompt, and on a cold start
+     * that prompt arrives before the user has asked for anything. The answer was
+     * written down last time precisely so it does not have to be asked twice; only a
+     * device that has never been probed ([rootCheckedAt] == 0) gets looked at, and
+     * even then only after the cached cards are already on screen.
+     */
+    private suspend fun restoreRoot() {
+        val saved = runCatching { settings.current() }.getOrNull() ?: return
+        if (saved.rootCheckedAt > 0L) {
+            _state.value = _state.value.copy(root = saved.rootAvailable, rootProbed = true)
+            return
+        }
+        probeRoot()
     }
 
     fun refresh() {
@@ -64,6 +93,9 @@ class CapabilityHub(private val context: Context) {
     suspend fun probeRoot(): Boolean = withContext(Dispatchers.IO) {
         val available = Shell.rootAvailable()
         _state.value = _state.value.copy(root = available, rootProbed = true)
+        runCatching {
+            settings.update { it.copy(rootAvailable = available, rootCheckedAt = System.currentTimeMillis()) }
+        }
         available
     }
 

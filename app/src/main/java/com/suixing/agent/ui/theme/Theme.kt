@@ -7,6 +7,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
 
@@ -20,7 +21,9 @@ val LocalDarkTheme = staticCompositionLocalOf { false }
 @Composable
 fun SuixingTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = false,
+    dynamicColor: Boolean = true,
+    fontScale: Int = 1,
+    cornerScale: Int = 1,
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
@@ -29,11 +32,15 @@ fun SuixingTheme(
     } else {
         brandScheme(darkTheme)
     }
+    // Rebuilding the ramp is cheap but not free, and a tier only moves in settings,
+    // so the two of them are keyed on the setting instead of running every recomposition.
+    val typography = remember(fontScale) { suixingTypography(fontScale) }
+    val shapes = remember(cornerScale) { suixingShapes(cornerScale) }
     CompositionLocalProvider(LocalDarkTheme provides darkTheme) {
         MaterialTheme(
             colorScheme = scheme,
-            typography = SuixingTypography,
-            shapes = SuixingShapes,
+            typography = typography,
+            shapes = shapes,
             content = content,
         )
     }

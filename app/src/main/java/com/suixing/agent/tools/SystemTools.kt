@@ -9,15 +9,11 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
+import com.suixing.agent.data.MemoryStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -27,9 +23,10 @@ import kotlin.coroutines.resume
  * Things every phone agent needs and that need no extra privilege: what device
  * this is, what is installed, launching apps, the clipboard and long-term notes.
  */
-class SystemTools(private val context: Context) : ToolGroup() {
-
-    private val memoryFile: File get() = File(context.filesDir, "memory.json")
+class SystemTools(
+    private val context: Context,
+    private val memory: MemoryStore,
+) : ToolGroup() {
 
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
@@ -217,45 +214,29 @@ class SystemTools(private val context: Context) : ToolGroup() {
         return if (done) ToolResult.success("已写入剪贴板（${text.length} 字）") else ToolResult.failure("写入剪贴板失败")
     }
 
-    private suspend fun memoryWrite(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        runCatching {
-            val key = args.str("key")?.trim().orEmpty()
-            val value = args.str("value").orEmpty()
-            if (key.isEmpty()) return@runCatching ToolResult.failure("缺少参数 key")
-            val map = readMemory().toMutableMap()
-            map[key] = value
-            writeMemory(map)
+    private suspend fun memoryWrite(args: JsonObject): ToolResult {
+        val key = args.str("key")?.trim().orEmpty()
+        val value = args.str("value").orEmpty()
+        if (key.isEmpty()) return ToolResult.failure("缺少参数 key")
+        val ok = memory.put(key, value)
+        return if (ok) {
             ToolResult.success("已记住「$key」")
-        }.getOrElse { ToolResult.failure("写入记忆失败：${it.message ?: it.javaClass.simpleName}") }
+        } else {
+            ToolResult.failure("写入记忆失败，检查应用存储空间")
+        }
     }
 
-    private suspend fun memoryRead(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        runCatching {
-            val key = args.str("key")?.trim()
-            val map = readMemory()
-            if (map.isEmpty()) return@runCatching ToolResult.success("（还没有任何备忘）")
-            if (!key.isNullOrEmpty()) {
-                val value = map[key] ?: return@runCatching ToolResult.success("没有找到「$key」")
-                return@runCatching ToolResult.success("$key = $value")
-            }
-            ToolResult.success(map.entries.joinToString("\n") { "${it.key} = ${it.value}" })
-        }.getOrElse { ToolResult.failure("读取记忆失败：${it.message ?: it.javaClass.simpleName}") }
-    }
-
-    private fun readMemory(): Map<String, String> {
-        if (!memoryFile.exists()) return emptyMap()
-        val text = runCatching { memoryFile.readText() }.getOrNull().orEmpty()
-        if (text.isBlank()) return emptyMap()
-        val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return emptyMap()
-        return root.entries.mapNotNull { (key, value) ->
-            (value as? JsonPrimitive)?.content?.let { key to it }
-        }.toMap()
-    }
-
-    private fun writeMemory(map: Map<String, String>) {
-        val json = buildJsonObject { map.forEach { (key, value) -> put(key, JsonPrimitive(value)) } }
-        memoryFile.parentFile?.mkdirs()
-        memoryFile.writeText(json.toString())
+    private suspend fun memoryRead(args: JsonObject): ToolResult {
+        val key = args.str("key")?.trim()
+        val map = memory.entries.value
+        if (map.isEmpty()) return ToolResult.success("（还没有任何备忘）")
+        if (!key.isNullOrEmpty()) {
+            val entry = map[key] ?: return ToolResult.success("没有找到「$key」")
+            return ToolResult.success("$key = ${entry.value}")
+        }
+        return ToolResult.success(
+            map.entries.joinToString("\n") { "${it.key} = ${it.value.value}" },
+        )
     }
 
     private suspend fun <T> onMainThread(block: () -> T): T = suspendCancellableCoroutine { continuation ->

@@ -1,11 +1,16 @@
 package com.suixing.agent.ui.chat
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -17,6 +22,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +41,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -42,15 +49,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Mic
@@ -59,6 +66,9 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -80,12 +90,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -97,7 +109,9 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -105,10 +119,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
-import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
@@ -120,6 +134,7 @@ import com.suixing.agent.ui.components.SuixingTopBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -134,7 +149,6 @@ private val SUGGESTIONS = listOf(
 @Composable
 fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
-    val conversations by viewModel.conversations.collectAsState()
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -158,6 +172,32 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     }
 
     var assistantsOpen by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var attachment by remember { mutableStateOf<Attachment?>(null) }
+
+    fun attach(uri: Uri?, kind: AttachKind) {
+        if (uri == null) return
+        scope.launch {
+            val picked = withContext(Dispatchers.IO) { readAttachment(context, uri, kind) }
+            if (picked == null) {
+                snackbarHostState.showSnackbar(if (kind == AttachKind.FILE) "读不到这个文件" else "读不到这张图片")
+            } else {
+                attachment = picked
+            }
+        }
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> attach(uri, AttachKind.IMAGE) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicturePreview(),
+    ) { bitmap -> if (bitmap != null) attachment = bitmapAttachment(bitmap) }
+
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> attach(uri, AttachKind.FILE) }
 
     // Tool-only assistant turns carry no text of their own, so their tool calls are
     // folded into the bubble above them instead of standing alone in the transcript.
@@ -170,8 +210,38 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
 
     val itemCount = visible.size + if (live) 1 else 0
-    LaunchedEffect(itemCount) {
-        if (itemCount > 0) listState.scrollToItem(itemCount - 1)
+
+    // Auto-scrolling is the scroll position's decision, not the transcript's: while the
+    // list sits at the end a growing reply keeps it there, and the moment the user drags
+    // up to read something the view stops being yanked back down.
+    var following by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.atEnd() }
+            .collect { (scrolling, atEnd) ->
+                if (scrolling && !atEnd) following = false else if (atEnd) following = true
+            }
+    }
+    // A new conversation starts at its newest message, whoever was reading what before.
+    LaunchedEffect(state.conversationId) { following = true }
+    // The streamed text grows without changing the item count, so its length is part of
+    // the trigger too.
+    LaunchedEffect(itemCount, state.streaming.length, state.reasoning.length, settings.autoFollow) {
+        if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
+        listState.scrollToItem(itemCount - 1)
+        // Clamped by the list itself: a reply taller than the viewport should keep its
+        // end on screen rather than its first line.
+        listState.scrollBy(FOLLOW_SCROLL_PX)
+    }
+    val atEnd by remember { derivedStateOf { listState.atEnd() } }
+
+    fun jumpToLatest() {
+        scope.launch {
+            following = true
+            if (itemCount > 0) {
+                listState.scrollToItem(itemCount - 1)
+                listState.scrollBy(FOLLOW_SCROLL_PX)
+            }
+        }
     }
 
     Scaffold(
@@ -182,11 +252,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 subtitle = assistant?.label ?: "随行",
                 assistant = assistant,
                 settings = settings,
-                conversations = conversations,
                 onOpenAssistants = { assistantsOpen = true },
-                onOpen = { viewModel.openConversation(it) },
-                onDelete = { viewModel.deleteConversation(it) },
-                onNew = { viewModel.newConversation() },
                 onPickModel = { provider, model ->
                     scope.launch {
                         Core.settings.update {
@@ -206,9 +272,31 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 input = input,
                 onInput = { input = it },
                 running = state.running,
-                status = state.status,
-                onSend = { if (viewModel.send(input)) input = "" },
+                // 运行在别的会话里时，状态行得点名是哪一个：否则「正在思考…」会让人以为
+                // 是眼前这条对话在跑。
+                status = when {
+                    !state.running -> ""
+                    state.runningHere -> state.status
+                    else -> "『${state.runningTitle}』正在运行"
+                },
+                notice = state.notice,
+                attachment = attachment,
+                onClearAttachment = { attachment = null },
+                onPickImage = {
+                    imagePicker.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                },
+                onTakePhoto = { cameraLauncher.launch(null) },
+                onPickFile = { filePicker.launch("*/*") },
+                onSend = {
+                    if (viewModel.send(input, attachment?.base64)) {
+                        input = ""
+                        attachment = null
+                    }
+                },
                 onStop = { viewModel.stop() },
+                onSteer = { viewModel.steer(it) },
                 onFocused = {
                     // Tapping the field with the keyboard still down should reveal the
                     // newest message rather than leaving the user mid-transcript.
@@ -232,42 +320,75 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
             )
         },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            state.error?.let { message ->
-                ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
-            }
-            if (visible.isEmpty() && !live) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    EmptyHero(onPick = { input = it })
+        // The transcript and the jump button share one box: the button belongs to the
+        // reading area, not to the composer, so it must not sit under the pill.
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            Column(Modifier.fillMaxSize()) {
+                state.error?.let { message ->
+                    ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
                 }
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
-                        if (row.showTimeLabel) TimeLabel(row.message.timestamp)
-                        MessageRow(
-                            row = row,
-                            avatar = assistant?.face ?: "🪶",
-                            showReasoning = settings.showReasoning,
-                            onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
-                            onRegenerate = { viewModel.regenerate() },
-                            onEdit = { editing = it },
-                        )
+                if (visible.isEmpty() && !live) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        EmptyHero(onPick = { input = it })
                     }
-                    if (live) {
-                        item(key = "streaming") {
-                            AssistantRow(
-                                text = state.streaming,
-                                reasoning = reasoning,
-                                streaming = true,
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
+                            if (row.showTimeLabel) TimeLabel(row.message.timestamp)
+                            MessageRow(
+                                row = row,
                                 avatar = assistant?.face ?: "🪶",
+                                showReasoning = settings.showReasoning,
+                                expandReasoning = settings.expandReasoning,
+                                expandTools = settings.expandTools,
+                                onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
+                                onRegenerate = { viewModel.regenerate() },
+                                onEdit = { editing = it },
                             )
                         }
+                        if (live) {
+                            item(key = "streaming") {
+                                AssistantRow(
+                                    text = state.streaming,
+                                    reasoning = reasoning,
+                                    streaming = true,
+                                    avatar = assistant?.face ?: "🪶",
+                                    liveStats = state.stats,
+                                    expandReasoning = settings.expandReasoning,
+                                    expandTools = settings.expandTools,
+                                )
+                            }
+                        }
                     }
+                }
+            }
+            if (!atEnd) {
+                // Bottom-right corner of the reading area: thumb-reachable, and it only
+                // exists while the transcript is scrolled away from its end.
+                Surface(
+                    onClick = { jumpToLatest() },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 14.dp),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shadowElevation = 6.dp,
+                    border = BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                    ),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.ArrowDownward,
+                        contentDescription = "回到最新",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(11.dp).size(20.dp),
+                    )
                 }
             }
         }
@@ -311,14 +432,9 @@ private fun ChatHeader(
     subtitle: String,
     assistant: Assistant?,
     settings: AppSettings,
-    conversations: List<Conversation>,
     onOpenAssistants: () -> Unit,
-    onOpen: (Conversation) -> Unit,
-    onDelete: (Conversation) -> Unit,
-    onNew: () -> Unit,
     onPickModel: (ProviderConfig, String) -> Unit,
 ) {
-    var historyOpen by remember { mutableStateOf(false) }
     var modelsOpen by remember { mutableStateOf(false) }
     SuixingTopBar(
         title = title,
@@ -356,47 +472,8 @@ private fun ChatHeader(
                 }
             }
         },
-        actions = {
-            Box {
-                IconButton(onClick = { historyOpen = true }) {
-                    Icon(Icons.Filled.History, contentDescription = "历史会话")
-                }
-                DropdownMenu(
-                    expanded = historyOpen,
-                    onDismissRequest = { historyOpen = false },
-                ) {
-                    if (conversations.isEmpty()) {
-                        DropdownMenuItem(
-                            text = { Text("还没有会话") },
-                            onClick = { historyOpen = false },
-                        )
-                    }
-                    conversations.forEach { conversation ->
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    text = conversation.title,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            },
-                            trailingIcon = {
-                                IconButton(onClick = { onDelete(conversation) }) {
-                                    Icon(Icons.Filled.Delete, contentDescription = "删除")
-                                }
-                            },
-                            onClick = {
-                                onOpen(conversation)
-                                historyOpen = false
-                            },
-                        )
-                    }
-                }
-            }
-            IconButton(onClick = onNew) {
-                Icon(Icons.Filled.Add, contentDescription = "新会话")
-            }
-        },
+        // The conversation list and 「新会话」 moved into the drawer, where the whole
+        // history is visible at once instead of one dropdown tap deep.
     )
 }
 
@@ -556,7 +633,61 @@ private data class ChatRow(
     val showTimeLabel: Boolean,
     val tools: List<StoredMessage> = emptyList(),
     val branch: Branch? = null,
-)
+    /**
+     * Every round the reply took, oldest first.
+     *
+     * The engine stores one assistant message per round, so a reply that ran a tool
+     * arrives as two or three of them. They are one answer to the user, so they are
+     * folded into one bubble here; [message] stays the newest round because that is
+     * the one the action row and the time label belong to.
+     */
+    val rounds: List<StoredMessage> = listOf(message),
+) {
+    /** The prose of every round, blank rounds dropped, as one body. */
+    val text: String
+        get() = rounds.map { it.text.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
+
+    /** The thinking of every round, so the header's numbers cover the whole reply. */
+    val reasoning: String
+        get() = rounds.mapNotNull { it.reasoning?.trim()?.takeIf(String::isNotEmpty) }
+            .joinToString("\n\n")
+
+    val usage: Usage? get() = Usage.of(rounds)
+}
+
+/**
+ * What a reply cost.
+ *
+ * Context size is cumulative, so only the newest round knows the real prompt size and
+ * only its cache count is meaningful; tokens and time add up across rounds instead.
+ */
+private data class Usage(
+    val prompt: Int = 0,
+    val completion: Int = 0,
+    val reasoning: Int = 0,
+    val cached: Int = 0,
+    val elapsedMs: Long = 0,
+) {
+    val known: Boolean get() = prompt > 0 || completion > 0
+
+    /** Output tokens per second, or zero when the endpoint never said how long it took. */
+    val perSecond: Double
+        get() = if (elapsedMs <= 0 || completion <= 0) 0.0 else completion * 1000.0 / elapsedMs
+
+    companion object {
+        fun of(rounds: List<StoredMessage>): Usage? {
+            if (rounds.none { it.usageKnown }) return null
+            val newest = rounds.last()
+            return Usage(
+                prompt = newest.promptTokens,
+                completion = rounds.sumOf { it.completionTokens },
+                reasoning = rounds.sumOf { it.reasoningTokens },
+                cached = newest.cachedTokens,
+                elapsedMs = rounds.sumOf { it.elapsedMs },
+            )
+        }
+    }
+}
 
 /**
  * The `‹ 2/3 ›` switcher under a reply that has siblings, plus 重新回答.
@@ -632,14 +763,17 @@ private fun groupRows(
 
     val rows = mutableListOf<ChatRow>()
     var previous: StoredMessage? = null
-    var bucket: MutableList<StoredMessage>? = null
+    // The bubble that is still collecting, and the run it belongs to. Another round
+    // of that same run folds into it rather than starting a second bubble.
+    var openIndex = -1
+    var openRun: String? = null
 
     shown.forEach { message ->
         when {
             message.role == Roles.TOOL -> {
-                val open = bucket
-                if (open != null) {
-                    open.add(message)
+                val index = openIndex
+                if (index >= 0) {
+                    rows[index] = rows[index].copy(tools = rows[index].tools + message)
                 } else {
                     // A tool result with no bubble above it (a transcript that starts
                     // mid-turn) still gets drawn, just on its own.
@@ -649,10 +783,27 @@ private fun groupRows(
             }
 
             message.role == Roles.ASSISTANT && message.isVisible() -> {
-                val tools = mutableListOf<StoredMessage>()
-                rows += ChatRow(message, needsTimeLabel(previous, message), tools, branchFor(message))
+                val run = message.runId.orEmpty()
+                val index = openIndex
+                if (index >= 0 && run.isNotEmpty() && run == openRun) {
+                    val open = rows[index]
+                    rows[index] = open.copy(
+                        message = message,
+                        rounds = open.rounds + message,
+                        // The switcher only hangs off the reply's last round, which
+                        // is this one.
+                        branch = branchFor(message) ?: open.branch,
+                    )
+                } else {
+                    rows += ChatRow(
+                        message = message,
+                        showTimeLabel = needsTimeLabel(previous, message),
+                        branch = branchFor(message),
+                    )
+                    openIndex = rows.lastIndex
+                    openRun = run
+                }
                 previous = message
-                bucket = tools
             }
 
             // A text-less assistant turn: nothing to draw, and its tools fall through
@@ -662,7 +813,8 @@ private fun groupRows(
             message.isVisible() -> {
                 rows += ChatRow(message, needsTimeLabel(previous, message))
                 previous = message
-                bucket = null
+                openIndex = -1
+                openRun = null
             }
 
             else -> Unit
@@ -676,6 +828,8 @@ private fun MessageRow(
     row: ChatRow,
     avatar: String,
     showReasoning: Boolean,
+    expandReasoning: Boolean,
+    expandTools: Boolean,
     onBranch: (String, String) -> Unit,
     onRegenerate: () -> Unit,
     onEdit: (StoredMessage) -> Unit,
@@ -690,13 +844,16 @@ private fun MessageRow(
         }
 
         Roles.ASSISTANT -> AssistantRow(
-            text = row.message.text,
-            reasoning = if (showReasoning) row.message.reasoning.orEmpty() else "",
+            text = row.text,
+            reasoning = if (showReasoning) row.reasoning else "",
             streaming = false,
             tools = row.tools,
             avatar = avatar,
             branch = row.branch,
+            usage = row.usage,
             message = row.message,
+            expandReasoning = expandReasoning,
+            expandTools = expandTools,
             onBranch = onBranch,
             onRegenerate = onRegenerate,
             onEdit = onEdit,
@@ -783,7 +940,12 @@ private fun AssistantRow(
     tools: List<StoredMessage> = emptyList(),
     avatar: String = "🪶",
     branch: Branch? = null,
+    usage: Usage? = null,
+    /** The engine's live speed, present only while this bubble is the one streaming. */
+    liveStats: StreamStats? = null,
     message: StoredMessage? = null,
+    expandReasoning: Boolean = false,
+    expandTools: Boolean = false,
     onBranch: (String, String) -> Unit = { _, _ -> },
     onRegenerate: () -> Unit = {},
     onEdit: (StoredMessage) -> Unit = {},
@@ -811,8 +973,12 @@ private fun AssistantRow(
                         ReasoningBlock(
                             text = reasoning,
                             streaming = streaming && text.isBlank(),
-                            reasoningTokens = message?.reasoningTokens ?: 0,
-                            elapsedMs = message?.elapsedMs ?: 0,
+                            reasoningTokens = usage?.reasoning ?: 0,
+                            elapsedMs = usage?.elapsedMs ?: 0,
+                            // Thinking is the reason to run a thinking model at all, so a
+                            // live block starts open; it settles into the setting's state
+                            // once the reply is stored and drawn as its own message.
+                            startExpanded = expandReasoning || streaming,
                         )
                         if (text.isNotBlank() || streaming || tools.isNotEmpty()) {
                             Spacer(Modifier.height(10.dp))
@@ -831,17 +997,21 @@ private fun AssistantRow(
                             }
                         }
                     }
-                    // Every tool the turn ran shares one card, so a turn that fired ten
-                    // of them reads as one block rather than ten stacked bubbles.
+                    // Every tool the turn ran shares one folding row, so a turn that fired
+                    // ten of them reads as one block rather than ten stacked bubbles.
                     if (tools.isNotEmpty()) {
                         if (text.isNotBlank() || reasoning.isNotBlank()) {
                             Spacer(Modifier.height(10.dp))
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
+                            )
                         }
-                        ToolBundle(tools)
+                        ToolBundle(tools, startExpanded = expandTools)
                     }
-                    if (message != null && message.usageKnown) {
+                    val settled = usage?.takeIf { it.known }
+                    if (settled != null || liveStats != null) {
                         Spacer(Modifier.height(9.dp))
-                        UsageLine(message)
+                        UsageLine(settled, liveStats)
                     }
                 }
             }
@@ -935,12 +1105,15 @@ private fun BranchArrow(
 }
 
 /**
- * The model's thinking.
+ * The model's thinking, folded into the reply's own bubble.
  *
  * It is drawn in its own [LazyColumn] so a 10k-character chain of thought only ever
  * composes the handful of lines on screen — laying the whole string out as one
  * [Text] is what makes a long think stutter. The header stays tappable, and whether
  * it is open survives scrolling away because it is remembered per message.
+ *
+ * There is deliberately no surface of its own: thinking belongs to the reply, and a
+ * second card inside the bubble is what made one answer read as three stacked blocks.
  */
 @Composable
 private fun ReasoningBlock(
@@ -948,84 +1121,82 @@ private fun ReasoningBlock(
     streaming: Boolean,
     reasoningTokens: Int = 0,
     elapsedMs: Long = 0,
+    startExpanded: Boolean = false,
 ) {
-    var expanded by rememberSaveable { mutableStateOf(true) }
+    // The setting only decides where a block starts; once the user taps the header the
+    // choice sticks to that message for as long as it stays in the list.
+    var expanded by rememberSaveable { mutableStateOf(startExpanded) }
     val lines = remember(text) { text.split('\n') }
     val inner = rememberLazyListState()
     LaunchedEffect(lines.size, expanded) {
         if (expanded && streaming && lines.isNotEmpty()) inner.scrollToItem(lines.lastIndex)
     }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-    ) {
-        Column(Modifier.padding(horizontal = 11.dp, vertical = 9.dp)) {
-            Row(
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.small)
+                .clickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Psychology,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = if (streaming) "正在思考…" else "思考过程",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(8.dp))
+            val meta = buildList {
+                if (reasoningTokens > 0) add("$reasoningTokens tokens")
+                if (elapsedMs > 0) add(formatDuration(elapsedMs))
+            }
+            if (meta.isNotEmpty()) {
+                Text(
+                    text = meta.joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            Icon(
+                imageVector = if (expanded) {
+                    Icons.Filled.KeyboardArrowUp
+                } else {
+                    Icons.Filled.KeyboardArrowDown
+                },
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(7.dp))
+            LazyColumn(
+                state = inner,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
+                    .heightIn(max = 280.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.Psychology,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(14.dp),
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = if (streaming) "正在思考…" else "思考过程",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.width(8.dp))
-                val meta = buildList {
-                    if (reasoningTokens > 0) add("$reasoningTokens tokens")
-                    if (elapsedMs > 0) add(formatDuration(elapsedMs))
-                }
-                if (meta.isNotEmpty()) {
-                    Text(
-                        text = meta.joinToString(" · "),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                        modifier = Modifier.weight(1f),
-                    )
-                } else {
-                    Spacer(Modifier.weight(1f))
-                }
-                Icon(
-                    imageVector = if (expanded) {
-                        Icons.Filled.KeyboardArrowUp
+                itemsIndexed(lines) { index, line ->
+                    if (line.isBlank()) {
+                        Spacer(Modifier.height(4.dp))
                     } else {
-                        Icons.Filled.KeyboardArrowDown
-                    },
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-            if (expanded) {
-                Spacer(Modifier.height(7.dp))
-                LazyColumn(
-                    state = inner,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 280.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    itemsIndexed(lines) { index, line ->
-                        if (line.isBlank()) {
-                            Spacer(Modifier.height(4.dp))
-                        } else {
-                            MarkdownText(
-                                text = line,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (index == lines.lastIndex && streaming) BlinkingCursor()
+                        MarkdownText(
+                            text = line,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
+                    if (index == lines.lastIndex && streaming) BlinkingCursor()
                 }
             }
         }
@@ -1033,56 +1204,51 @@ private fun ReasoningBlock(
 }
 
 /**
- * Every tool call of one turn in a single card: one line per tool, tapped open to
+ * Every tool call of one turn in one folding row: one line per tool, tapped open to
  * reveal its arguments and output.
+ *
+ * Flat on purpose: the bubble is the only surface in a reply, so the tools read as
+ * part of it rather than as a card stacked under the answer.
  */
 @Composable
-private fun ToolBundle(tools: List<StoredMessage>) {
-    var open by remember { mutableStateOf(-1) }
+private fun ToolBundle(tools: List<StoredMessage>, startExpanded: Boolean = false) {
+    // -1 keeps every tool collapsed; the setting opens the first one, and tapping a row
+    // moves the detail to that row instead.
+    var open by remember { mutableStateOf(if (startExpanded) 0 else -1) }
     val failures = tools.count { it.toolOk == false }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(Modifier.padding(vertical = 4.dp)) {
-            Row(
-                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Bolt,
-                    contentDescription = null,
-                    tint = if (failures > 0) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.secondary
-                    },
-                    modifier = Modifier.size(15.dp),
-                )
-                Spacer(Modifier.width(7.dp))
+    Column(Modifier.fillMaxWidth().padding(top = 7.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Outlined.Bolt,
+                contentDescription = null,
+                tint = if (failures > 0) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.secondary
+                },
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(7.dp))
+            Text(
+                text = if (tools.size == 1) "调用 1 个工具" else "调用 ${tools.size} 个工具",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (failures > 0) {
                 Text(
-                    text = if (tools.size == 1) "调用 1 个工具" else "调用 ${tools.size} 个工具",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
-                if (failures > 0) {
-                    Text(
-                        text = "$failures 个失败",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-            tools.forEachIndexed { index, tool ->
-                ToolRow(
-                    message = tool,
-                    expanded = open == index,
-                    onToggle = { open = if (open == index) -1 else index },
+                    text = "$failures 个失败",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
+        }
+        tools.forEachIndexed { index, tool ->
+            ToolRow(
+                message = tool,
+                expanded = open == index,
+                onToggle = { open = if (open == index) -1 else index },
+            )
         }
     }
 }
@@ -1094,8 +1260,9 @@ private fun ToolRow(message: StoredMessage, expanded: Boolean, onToggle: () -> U
     Column(
         Modifier
             .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
             .clickable(onClick = onToggle)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(vertical = 6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -1157,13 +1324,27 @@ private fun ToolRow(message: StoredMessage, expanded: Boolean, onToggle: () -> U
 
 /** What the reply cost, in the provider's own numbers. */
 @Composable
-private fun UsageLine(message: StoredMessage) {
+private fun UsageLine(usage: Usage?, live: StreamStats? = null) {
     val parts = buildList {
-        if (message.promptTokens > 0) add("入 ${message.promptTokens}")
-        if (message.completionTokens > 0) add("出 ${message.completionTokens}")
-        if (message.reasoningTokens > 0) add("思考 ${message.reasoningTokens}")
-        if (message.cachedTokens > 0) add("缓存 ${message.cachedTokens}")
-        if (message.elapsedMs > 0) add(formatDuration(message.elapsedMs))
+        if (live != null) {
+            // The provider only reports its counts with the last chunk, so a running
+            // bubble shows the engine's estimate — the numbers that actually move.
+            add("出 ${live.tokensOut}")
+            if (live.thinkingTokens > 0) add("思考 ${live.thinkingTokens}")
+            if (live.tokPerSec > 0) {
+                add(String.format(Locale.US, "%.1f tok/s", live.tokPerSec))
+            }
+            if (live.elapsedMs > 0) add(formatDuration(live.elapsedMs))
+        } else if (usage != null) {
+            if (usage.prompt > 0) add("入 ${usage.prompt}")
+            if (usage.completion > 0) add("出 ${usage.completion}")
+            if (usage.reasoning > 0) add("思考 ${usage.reasoning}")
+            if (usage.cached > 0) add("缓存 ${usage.cached}")
+            if (usage.perSecond > 0) {
+                add(String.format(Locale.US, "%.1f tok/s", usage.perSecond))
+            }
+            if (usage.elapsedMs > 0) add(formatDuration(usage.elapsedMs))
+        }
     }
     if (parts.isEmpty()) return
     Text(
@@ -1236,23 +1417,35 @@ private fun Composer(
     onInput: (String) -> Unit,
     running: Boolean,
     status: String,
+    /** 被拦下的动作或别的会话里跑挂的 run，说给用户听的那一句。 */
+    notice: String?,
+    attachment: Attachment?,
+    onClearAttachment: () -> Unit,
+    onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickFile: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    /** Queues a line for the running model; false means it was dropped. */
+    onSteer: (String) -> Boolean,
     onFocused: () -> Unit,
     onMic: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    Surface(color = scheme.background) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 12.dp)
-                .padding(top = 4.dp, bottom = 10.dp),
-        ) {
+    var menuOpen by remember { mutableStateOf(false) }
+    // The pill floats over the transcript rather than sitting in an opaque bar, so the
+    // conversation stays readable right down to the bottom edge.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 12.dp)
+            .padding(top = 6.dp, bottom = 10.dp),
+    ) {
+        Column {
             if (running) {
                 Row(
-                    modifier = Modifier.padding(start = 6.dp, bottom = 8.dp),
+                    modifier = Modifier.padding(start = 14.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     CircularProgressIndicator(
@@ -1270,69 +1463,358 @@ private fun Composer(
                     )
                 }
             }
-            Row(verticalAlignment = Alignment.Bottom) {
-                Surface(
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(26.dp),
-                    color = scheme.surfaceContainerHigh,
-                    border = BorderStroke(1.dp, scheme.outlineVariant),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.Bottom,
-                    ) {
-                        IconButton(onClick = onMic, enabled = !running) {
-                            Icon(
-                                Icons.Filled.Mic,
-                                contentDescription = "语音输入",
-                                tint = if (running) scheme.onSurfaceVariant else scheme.primary,
-                            )
-                        }
-                        BasicTextField(
-                            value = input,
-                            onValueChange = onInput,
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(vertical = 12.dp)
-                                .onFocusChanged { focus ->
-                                    if (focus.isFocused) onFocused()
-                                },
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
-                            cursorBrush = SolidColor(scheme.primary),
-                            maxLines = 5,
-                            decorationBox = { inner ->
-                                Box {
-                                    if (input.isEmpty()) {
-                                        Text(
-                                            text = "让随行做点什么…",
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            color = scheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    inner()
-                                }
-                            },
-                        )
-                        Spacer(Modifier.width(6.dp))
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                FilledIconButton(
-                    onClick = { if (running) onStop() else onSend() },
-                    enabled = running || input.isNotBlank(),
-                    modifier = Modifier.size(50.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (running) scheme.error else scheme.primary,
-                    ),
+            notice?.let { text ->
+                Row(
+                    modifier = Modifier.padding(start = 14.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
-                        imageVector = if (running) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send,
-                        contentDescription = if (running) "停止" else "发送",
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = scheme.tertiary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        text = text,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = scheme.tertiary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            if (running) {
+                // 插话: a line the model reads at its next turn, instead of waiting for
+                // the whole run to finish before it hears anything.
+                SteerRow(onSteer = onSteer)
+                Spacer(Modifier.height(8.dp))
+            }
+            attachment?.let {
+                AttachmentChip(attachment = it, onRemove = onClearAttachment)
+                Spacer(Modifier.height(8.dp))
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                color = scheme.surfaceContainerHigh,
+                shadowElevation = 8.dp,
+                border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.55f)),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                    // Centred, not bottom-aligned: the icons are 44dp while a single line of
+                    // bodyLarge plus its padding is taller than that, so bottom alignment
+                    // left the send button riding high against the text.
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box {
+                        IconButton(
+                            onClick = { menuOpen = true },
+                            modifier = Modifier.size(44.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Add,
+                                contentDescription = "添加图片或文件",
+                                tint = scheme.onSurfaceVariant,
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("图片") },
+                                leadingIcon = { Icon(Icons.Outlined.Image, contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    onPickImage()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("拍照") },
+                                leadingIcon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    onTakePhoto()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("文件") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.AutoMirrored.Outlined.InsertDriveFile,
+                                        contentDescription = null,
+                                    )
+                                },
+                                onClick = {
+                                    menuOpen = false
+                                    onPickFile()
+                                },
+                            )
+                        }
+                    }
+                    BasicTextField(
+                        value = input,
+                        onValueChange = onInput,
+                        modifier = Modifier
+                            .weight(1f)
+                            // 10dp + 24dp line + 10dp = the 44dp of the icon buttons beside
+                            // it, so one line of text sits dead centre in the pill.
+                            .padding(vertical = 10.dp)
+                            .onFocusChanged { focus ->
+                                if (focus.isFocused) onFocused()
+                            },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
+                        cursorBrush = SolidColor(scheme.primary),
+                        maxLines = 5,
+                        decorationBox = { inner ->
+                            Box {
+                                if (input.isEmpty()) {
+                                    Text(
+                                        text = "让随行做点什么…",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = scheme.onSurfaceVariant,
+                                    )
+                                }
+                                inner()
+                            }
+                        },
+                    )
+                    IconButton(
+                        onClick = onMic,
+                        enabled = !running,
+                        modifier = Modifier.size(44.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Mic,
+                            contentDescription = "语音输入",
+                            tint = if (running) scheme.onSurfaceVariant else scheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(2.dp))
+                    FilledIconButton(
+                        onClick = { if (running) onStop() else onSend() },
+                        enabled = running || input.isNotBlank() || attachment != null,
+                        shape = CircleShape,
+                        modifier = Modifier.size(44.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = if (running) scheme.error else scheme.primary,
+                            contentColor = if (running) scheme.onError else scheme.onPrimary,
+                            disabledContainerColor = scheme.surfaceContainerHighest,
+                            disabledContentColor = scheme.onSurfaceVariant,
+                        ),
+                    ) {
+                        Icon(
+                            imageVector = if (running) Icons.Filled.Stop else Icons.Filled.ArrowUpward,
+                            contentDescription = if (running) "停止" else "发送",
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The interjection line, shown only while a run is live.
+ *
+ * It is a second, deliberately smaller field than the composer: the big one is for the
+ * next question, and one field for both would leave it unclear whether sending starts a
+ * new run or joins the one already going.
+ */
+@Composable
+private fun SteerRow(onSteer: (String) -> Boolean) {
+    val scheme = MaterialTheme.colorScheme
+    var text by rememberSaveable { mutableStateOf("") }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = scheme.surfaceContainer,
+        border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.5f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BasicTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.weight(1f).padding(vertical = 9.dp),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = scheme.onSurface),
+                cursorBrush = SolidColor(scheme.primary),
+                maxLines = 2,
+                decorationBox = { inner ->
+                    Box {
+                        if (text.isEmpty()) {
+                            Text(
+                                text = "插一句话，它下一步就能看到…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
+                        inner()
+                    }
+                },
+            )
+            IconButton(
+                onClick = { if (onSteer(text.trim())) text = "" },
+                enabled = text.isNotBlank(),
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.ArrowUpward,
+                    contentDescription = "插话",
+                    tint = if (text.isNotBlank()) scheme.primary else scheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/** What the next question carries along: an image for the model, or a file on disk. */
+private data class Attachment(
+    val base64: String,
+    val label: String,
+    val preview: ImageBitmap? = null,
+)
+
+private enum class AttachKind { IMAGE, FILE }
+
+/** The chip above the pill: a thumbnail, the name, and a way out of it. */
+@Composable
+private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Row(modifier = Modifier.padding(start = 10.dp)) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = scheme.surfaceContainerHigh,
+            border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.6f)),
+        ) {
+            Row(
+                modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val preview = attachment.preview
+                if (preview != null) {
+                    Image(
+                        bitmap = preview,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(RoundedCornerShape(8.dp)),
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                        contentDescription = null,
+                        tint = scheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = attachment.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = scheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 190.dp),
+                )
+                IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
+                    Icon(
+                        imageVector = Icons.Outlined.Close,
+                        contentDescription = "移除",
+                        tint = scheme.onSurfaceVariant,
+                        modifier = Modifier.size(15.dp),
                     )
                 }
             }
         }
     }
+}
+
+/** True while the last item is on screen — the state that lets a reply auto-scroll. */
+private fun LazyListState.atEnd(slack: Int = 24): Boolean {
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return true
+    return last.index >= info.totalItemsCount - 1 &&
+        last.offset + last.size <= info.viewportEndOffset + slack
+}
+
+/** Far more than any transcript: the list clamps this to its own end. */
+private const val FOLLOW_SCROLL_PX = 200_000f
+
+private const val ATTACHMENT_MAX_WIDTH = 1280
+
+private fun readAttachment(context: Context, uri: Uri, kind: AttachKind): Attachment? = when (kind) {
+    AttachKind.IMAGE -> decodeImage(context, uri)
+    AttachKind.FILE -> importFile(context, uri)
+}
+
+private fun decodeImage(context: Context, uri: Uri): Attachment? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+
+    var scale = 1
+    while (bounds.outWidth / scale > ATTACHMENT_MAX_WIDTH || bounds.outHeight / scale > ATTACHMENT_MAX_WIDTH) {
+        scale *= 2
+    }
+    val options = BitmapFactory.Options().apply { inSampleSize = scale }
+    val bitmap = context.contentResolver.openInputStream(uri)?.use {
+        BitmapFactory.decodeStream(it, null, options)
+    } ?: return@runCatching null
+    bitmapAttachment(bitmap, displayName(context, uri) ?: "图片")
+}.getOrNull()
+
+/** Camera and gallery both land here: one JPEG, small enough to send every turn. */
+private fun bitmapAttachment(bitmap: Bitmap, label: String = "照片"): Attachment {
+    val scaled = if (bitmap.width > ATTACHMENT_MAX_WIDTH) {
+        val ratio = ATTACHMENT_MAX_WIDTH.toFloat() / bitmap.width
+        Bitmap.createScaledBitmap(
+            bitmap,
+            ATTACHMENT_MAX_WIDTH,
+            (bitmap.height * ratio).toInt().coerceAtLeast(1),
+            true,
+        )
+    } else {
+        bitmap
+    }
+    val bytes = java.io.ByteArrayOutputStream()
+    scaled.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
+    return Attachment(
+        base64 = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP),
+        label = label,
+        preview = scaled.asImageBitmap(),
+    )
+}
+
+/**
+ * A picked file is copied into the app's own folder, because the agent reads absolute
+ * paths and a `content://` handle means nothing to it. The path goes into the question.
+ */
+private fun importFile(context: Context, uri: Uri): Attachment? = runCatching {
+    val name = displayName(context, uri) ?: "文件"
+    val inbox = File(context.getExternalFilesDir(null) ?: context.filesDir, "inbox").apply { mkdirs() }
+    val target = File(inbox, name)
+    context.contentResolver.openInputStream(uri)?.use { input ->
+        target.outputStream().use { output -> input.copyTo(output) }
+    } ?: return@runCatching null
+    Attachment(base64 = "", label = target.absolutePath)
+}.getOrNull()
+
+private fun displayName(context: Context, uri: Uri): String? {
+    if (uri.scheme == "file") return uri.lastPathSegment
+    return runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+        }
+    }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
 }
 
 /**

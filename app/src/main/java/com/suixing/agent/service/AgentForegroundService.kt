@@ -40,7 +40,24 @@ class AgentForegroundService : Service() {
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "正在执行任务"
         ensureChannel()
         startForeground(NOTIFICATION_ID, buildNotification(text))
+        // Started after startForeground, not in onCreate: a process that is already
+        // running a foreground service may start another one on Android 12+, and one
+        // that is merely about to is not.
+        FloatConsoleService.start(this)
         return START_NOT_STICKY
+    }
+
+    /**
+     * The console lives exactly as long as the run does.
+     *
+     * A run is the only thing it can control, so it appears when one starts and goes
+     * away with it — the user never has to remember to close it. [FloatConsoleService.start]
+     * declines when the overlay permission has not been granted, and then there is
+     * simply no console.
+     */
+    override fun onDestroy() {
+        FloatConsoleService.stop(this)
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

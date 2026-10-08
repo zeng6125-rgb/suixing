@@ -272,9 +272,17 @@ fun SuixingTopBar(
             modifier = Modifier
                 .statusBarsPadding()
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+                .padding(start = 8.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // On the left, because the drawer it opens is on the left: a handle on the
+            // far side of the header from the panel it reveals reads as a bug even when
+            // it works.
+            val openSidebar = LocalOpenSidebar.current
+            if (openSidebar != null) {
+                SidebarButton(openSidebar)
+                Spacer(Modifier.width(10.dp))
+            }
             if (leading != null) {
                 leading()
                 Spacer(Modifier.width(12.dp))
@@ -332,11 +340,6 @@ fun SuixingTopBar(
                 }
             }
             actions()
-            val openSidebar = LocalOpenSidebar.current
-            if (openSidebar != null) {
-                Spacer(Modifier.width(4.dp))
-                SidebarButton(openSidebar)
-            }
         }
     }
 }

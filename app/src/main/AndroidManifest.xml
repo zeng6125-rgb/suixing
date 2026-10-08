@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -63,6 +65,17 @@
             android:name=".service.AgentForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- The console is a window over other apps, which is what `specialUse` covers;
+             Android 14+ refuses to start a typed service without the matching subtype. -->
+        <service
+            android:name=".service.FloatConsoleService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="floating console that stops or steers an in-progress agent run" />
+        </service>
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

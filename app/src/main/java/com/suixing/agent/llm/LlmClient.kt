@@ -15,6 +15,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -137,6 +138,13 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         tools: List<ToolSpec>,
         onDelta: (String) -> Unit = {},
         onReasoning: (String) -> Unit = {},
+        /**
+         * Handed the live call just before it goes on the wire, so the caller can
+         * `cancel()` it. Coroutine cancellation alone cannot interrupt a blocking
+         * `execute()`; an OkHttp call cancel can, and that is what makes 「点停即停」
+         * real instead of "stops when the model gets around to it".
+         */
+        onCall: (Call) -> Unit = {},
     ): AssistantTurn = withContext(Dispatchers.IO) {
         val url = endpoint(settings.baseUrl)
         val payload = buildJsonObject {
@@ -165,7 +173,9 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             .post(payload.toString().toRequestBody(JSON_MEDIA))
             .build()
 
-        clientFor(settings).newCall(request).execute().use { response ->
+        val call = clientFor(settings).newCall(request)
+        onCall(call)
+        call.execute().use { response ->
             val body = response.body
             if (!response.isSuccessful || body == null) {
                 throw LlmException(friendlyHttp(response.code, body?.string().orEmpty()))

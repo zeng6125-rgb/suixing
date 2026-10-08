@@ -2,6 +2,7 @@ package com.suixing.agent.tools
 
 import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
+import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.voice.Speaker
@@ -116,11 +117,12 @@ class ToolRegistry private constructor() {
         skills: SkillStore,
         speaker: Speaker,
         settings: SettingsRepository,
+        memory: MemoryStore,
     ) : this() {
-        add(SystemTools(context))
+        add(SystemTools(context, memory))
         add(FileTools(context))
         add(ShellTools(capabilities))
-        add(UiTools(capabilities))
+        add(UiTools(context, capabilities))
         add(SkillTools(skills))
         add(WebTools(context, settings))
         add(VoiceTools(speaker))

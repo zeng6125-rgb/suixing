@@ -28,22 +28,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Extension
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Forum
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ShieldMoon
-import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
-import androidx.compose.material.icons.outlined.Forum
-import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -64,68 +62,70 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.navigation.NavDestination.Companion.hierarchy
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.suixing.agent.core.Core
+import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
+import com.suixing.agent.ui.chat.ChatViewModel
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.SettingsScreen
-
-private data class Destination(
-    val route: String,
-    val label: String,
-    val hint: String,
-    val icon: ImageVector,
-    val activeIcon: ImageVector,
-)
-
-private val destinations = listOf(
-    Destination("chat", "会话", "和随行对话", Icons.Outlined.Forum, Icons.Filled.Forum),
-    Destination("capability", "能力", "权限与开关", Icons.Outlined.Security, Icons.Filled.Security),
-    Destination("files", "文件", "浏览与编辑", Icons.Outlined.FolderOpen, Icons.Filled.FolderOpen),
-    Destination("extension", "扩展", "技能与 MCP", Icons.Outlined.Extension, Icons.Filled.Extension),
-    Destination("settings", "设置", "模型与外观", Icons.Outlined.Settings, Icons.Filled.Settings),
-)
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 /**
  * The app shell.
  *
- * There is no bottom bar: the composer owns the bottom of the screen, and every
- * other destination is reached through the sidebar that slides in from the right.
- * The handle for it is drawn by [com.suixing.agent.ui.components.SuixingTopBar],
- * which is why the shell only has to publish [LocalOpenSidebar] once.
+ * Navigation lives in the left drawer, and the drawer is mostly a conversation list:
+ * switching conversations is what a chat app is for, so it gets the top of the panel
+ * and everything that is not a conversation sits at the bottom, out of the way. The
+ * handle is drawn by [com.suixing.agent.ui.components.SuixingTopBar], which is why the
+ * shell only has to publish [LocalOpenSidebar] once.
  */
 @Composable
 fun SuixingApp() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
-    val current = backStackEntry?.destination
+    val route = backStackEntry?.destination?.route?.substringBefore('?') ?: "chat"
     val pending by Core.gate.pending.collectAsState()
-    val route = destinations
-        .firstOrNull { destination -> current?.hierarchy?.any { it.route == destination.route } == true }
-        ?.route
-        ?: "chat"
 
-    var sidebarOpen by rememberSaveable { mutableStateOf(false) }
+    // Owned here rather than inside the chat screen: the drawer lists and switches the
+    // very conversations the screen is showing.
+    val chat: ChatViewModel = viewModel()
+    val conversations by chat.conversations.collectAsState()
+    // The two ids alone, not the whole chat state: the shell must not recompose once per
+    // streamed token just to keep one row highlighted and one dot lit.
+    val shellIds by remember(chat) {
+        chat.state.map { it.conversationId to it.runningChatId }.distinctUntilChanged()
+    }.collectAsState(initial = "" to "")
+    val activeConversationId = shellIds.first
+    val runningChatId = shellIds.second
 
-    val navigate: (String) -> Unit = { target ->
-        sidebarOpen = false
+    var drawerOpen by rememberSaveable { mutableStateOf(false) }
+
+    // Top-level destinations replace each other: the drawer is a switch, not a stack.
+    val open: (String) -> Unit = { target ->
+        drawerOpen = false
         navController.navigate(target) {
             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
             launchSingleTop = true
             restoreState = true
         }
     }
+    // A row inside the settings page pushes, so back returns to the list it came from.
+    val push: (String) -> Unit = { target -> navController.navigate(target) }
 
-    CompositionLocalProvider(LocalOpenSidebar provides { sidebarOpen = true }) {
+    CompositionLocalProvider(LocalOpenSidebar provides { drawerOpen = true }) {
         Box(Modifier.fillMaxSize()) {
             Scaffold(
                 modifier = Modifier.imePadding(),
@@ -146,38 +146,64 @@ fun SuixingApp() {
                     popEnterTransition = { fadeIn(tween(220)) },
                     popExitTransition = { fadeOut(tween(120)) },
                 ) {
-                    composable("chat") { ChatScreen() }
-                    composable("capability") { CapabilityScreen() }
+                    composable("chat") { ChatScreen(viewModel = chat) }
                     composable("files") { FilesScreen() }
-                    composable("extension") { ExtensionScreen() }
-                    composable("settings") { SettingsScreen() }
+                    composable("settings") { SettingsScreen(onOpen = push) }
+                    composable("capability") { CapabilityScreen() }
+                    composable(
+                        route = "extension?tab={tab}",
+                        arguments = listOf(
+                            navArgument("tab") {
+                                type = NavType.IntType
+                                defaultValue = 0
+                            },
+                        ),
+                    ) { entry ->
+                        ExtensionScreen(initialTab = entry.arguments?.getInt("tab") ?: 0)
+                    }
                 }
             }
-            Sidebar(
-                open = sidebarOpen,
+            Drawer(
+                open = drawerOpen,
                 route = route,
-                onSelect = navigate,
-                onClose = { sidebarOpen = false },
+                conversations = conversations,
+                activeId = activeConversationId,
+                runningId = runningChatId,
+                onClose = { drawerOpen = false },
+                onNew = {
+                    chat.newConversation()
+                    open("chat")
+                },
+                onOpenConversation = { conversation ->
+                    chat.openConversation(conversation)
+                    open("chat")
+                },
+                onDeleteConversation = { chat.deleteConversation(it) },
+                onNavigate = open,
             )
         }
     }
 
     // Rendered outside the navigation host so a prompt cannot be missed while the
-    // user is on another tab — the agent is blocked until it is answered.
+    // user is on another screen — the agent is blocked until it is answered.
     pending?.let { request -> ApprovalDialog(request.toolName, request.args) }
 }
 
 /**
- * The right-hand drawer. Everything the bottom bar used to hold lives here, with
- * room for a one-line explanation of each destination that a five-column bar
- * never had.
+ * The left drawer: conversations on top, everything else at the bottom.
  */
 @Composable
-private fun BoxScope.Sidebar(
+private fun BoxScope.Drawer(
     open: Boolean,
     route: String,
-    onSelect: (String) -> Unit,
+    conversations: List<Conversation>,
+    activeId: String,
+    runningId: String,
     onClose: () -> Unit,
+    onNew: () -> Unit,
+    onOpenConversation: (Conversation) -> Unit,
+    onDeleteConversation: (Conversation) -> Unit,
+    onNavigate: (String) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
 
@@ -200,15 +226,15 @@ private fun BoxScope.Sidebar(
 
     AnimatedVisibility(
         visible = open,
-        modifier = Modifier.align(Alignment.CenterEnd),
-        enter = slideInHorizontally(tween(240)) { it },
-        exit = slideOutHorizontally(tween(200)) { it },
+        modifier = Modifier.align(Alignment.CenterStart),
+        enter = slideInHorizontally(tween(240)) { -it },
+        exit = slideOutHorizontally(tween(200)) { -it },
     ) {
         Surface(
             modifier = Modifier
                 .fillMaxHeight()
-                .width(280.dp),
-            shape = RoundedCornerShape(topStart = 30.dp, bottomStart = 30.dp),
+                .width(300.dp),
+            shape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp),
             color = scheme.surfaceContainerHigh,
         ) {
             Column(
@@ -216,15 +242,17 @@ private fun BoxScope.Sidebar(
                     .fillMaxHeight()
                     .statusBarsPadding()
                     .navigationBarsPadding()
-                    .padding(vertical = 20.dp),
+                    // The keyboard can be up when the drawer is opened mid-sentence.
+                    .imePadding()
+                    .padding(vertical = 18.dp),
             ) {
                 Row(
-                    modifier = Modifier.padding(start = 22.dp, end = 22.dp),
+                    modifier = Modifier.padding(start = 20.dp, end = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     SuixingMark(size = 30.dp)
                     Spacer(Modifier.width(11.dp))
-                    Column {
+                    Column(Modifier.weight(1f)) {
                         Text("随行", style = MaterialTheme.typography.titleMedium)
                         Text(
                             text = "跟着你走的手机智能体",
@@ -232,30 +260,56 @@ private fun BoxScope.Sidebar(
                             color = scheme.onSurfaceVariant,
                         )
                     }
+                    IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
+                        Icon(
+                            imageVector = Icons.Filled.Add,
+                            contentDescription = "新对话",
+                            tint = scheme.primary,
+                        )
+                    }
                 }
 
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(14.dp))
                 HorizontalDivider(
-                    modifier = Modifier.padding(horizontal = 18.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp),
                     color = scheme.outlineVariant,
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(6.dp))
 
-                destinations.forEach { destination ->
-                    SidebarItem(
-                        destination = destination,
-                        selected = destination.route == route,
-                        onClick = { if (destination.route != route) onSelect(destination.route) else onClose() },
-                    )
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                ) {
+                    items(conversations, key = { it.id }) { conversation ->
+                        ConversationRow(
+                            conversation = conversation,
+                            selected = conversation.id == activeId,
+                            running = conversation.id == runningId,
+                            onClick = { onOpenConversation(conversation) },
+                            onDelete = { onDeleteConversation(conversation) },
+                        )
+                    }
                 }
 
-                Spacer(Modifier.weight(1f))
-
-                Text(
-                    text = "长按消息可以修改或重新发送。",
-                    modifier = Modifier.padding(horizontal = 22.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = scheme.onSurfaceVariant,
+                Spacer(Modifier.height(6.dp))
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    color = scheme.outlineVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                DrawerAction(
+                    label = "文件",
+                    hint = "浏览与编辑",
+                    icon = Icons.Outlined.FolderOpen,
+                    selected = route == "files",
+                    onClick = { onNavigate("files") },
+                )
+                DrawerAction(
+                    label = "设置",
+                    hint = "模型 · 外观 · 权限",
+                    icon = Icons.Outlined.Settings,
+                    selected = route == "settings",
+                    onClick = { onNavigate("settings") },
                 )
             }
         }
@@ -263,35 +317,92 @@ private fun BoxScope.Sidebar(
 }
 
 @Composable
-private fun SidebarItem(destination: Destination, selected: Boolean, onClick: () -> Unit) {
+private fun ConversationRow(
+    conversation: Conversation,
+    selected: Boolean,
+    running: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val scheme = MaterialTheme.colorScheme
     Surface(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 3.dp),
+            .padding(vertical = 2.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (running) {
+                // 运行中的会话可能在用户看不见的那一屏里跑，抽屉里得有个标记，
+                // 否则「谁在占着那个 run」只能靠猜。
+                Box(
+                    Modifier
+                        .size(7.dp)
+                        .background(scheme.primary, CircleShape),
+                )
+                Spacer(Modifier.width(9.dp))
+            }
+            Text(
+                text = conversation.title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (selected) scheme.primary else scheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    imageVector = Icons.Outlined.DeleteOutline,
+                    contentDescription = "删除会话",
+                    tint = scheme.onSurfaceVariant,
+                    modifier = Modifier.size(17.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrawerAction(
+    label: String,
+    hint: String,
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp),
         shape = RoundedCornerShape(16.dp),
         color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = if (selected) destination.activeIcon else destination.icon,
+                imageVector = icon,
                 contentDescription = null,
                 tint = if (selected) scheme.primary else scheme.onSurfaceVariant,
-                modifier = Modifier.size(21.dp),
+                modifier = Modifier.size(20.dp),
             )
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = destination.label,
+                    text = label,
                     style = MaterialTheme.typography.bodyLarge,
                     color = if (selected) scheme.primary else scheme.onSurface,
                 )
                 Text(
-                    text = destination.hint,
+                    text = hint,
                     style = MaterialTheme.typography.bodySmall,
                     color = scheme.onSurfaceVariant,
                 )
@@ -341,5 +452,5 @@ private fun ApprovalDialog(toolName: String, args: String) {
     )
 }
 
-/** Shared content padding so every tab lines up with the same gutters. */
+/** Shared content padding so every screen lines up with the same gutters. */
 internal val ScreenPadding = PaddingValues(horizontal = 16.dp)

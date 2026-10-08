@@ -78,16 +78,24 @@ data class AppSettings(
     val maxTokens: Int = 0,
     val topP: Float = 1f,
     /**
-     * How hard a reasoning model should think: `low` / `medium` / `high`, or empty to
-     * leave it to the server. Endpoints that do not know the field ignore it.
+     * How hard a reasoning model should think: `none` / `low` / `medium` / `high`, or
+     * empty to leave it to the server. `none` is sent as-is so a model that supports
+     * turning thinking off can be told to; endpoints that do not know the field
+     * ignore it either way.
      */
     val reasoningEffort: String = "",
     /**
-     * How many past messages to send. 0 sends the whole conversation; anything else
-     * trims from the front, keeping whole turns so a tool call never loses its result.
+     * How much of the conversation to replay, counted in tokens the way a desktop
+     * agent counts it rather than in messages. 0 sends everything; anything else
+     * drops the oldest turns until the estimate fits. Whatever the model actually
+     * supports is its own business — this is only a ceiling the user sets.
      */
-    val contextMessages: Int = 0,
-    val maxToolRounds: Int = 16,
+    val contextWindow: Int = 0,
+    /**
+     * Tool-calling rounds allowed in one turn. 0 means no limit, which is the
+     * default: a long task should not be cut off at an arbitrary number.
+     */
+    val maxToolRounds: Int = 0,
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     /**
@@ -131,8 +139,49 @@ data class AppSettings(
     /** The personas the user built. Never empty once [migrated] has run. */
     val assistants: List<Assistant> = emptyList(),
     val activeAssistantId: String = "",
+    /**
+     * Result of the last root probe. `su` is cheap but not free (the superuser app
+     * shows a toast, and on some ROMs a dialog), so the answer is written down and
+     * reused on the next launch instead of being thrown away with the process.
+     * [rootCheckedAt] = 0 means "never probed on this install".
+     */
+    val rootAvailable: Boolean = false,
+    val rootCheckedAt: Long = 0L,
+    /**
+     * Tools the user answered 「总是允许」 for. Persisted because an approval that
+     * evaporates on restart is not a memory, it is a nuisance.
+     */
+    val alwaysAllowedTools: List<String> = emptyList(),
+    /**
+     * Tools the user answered 「总是拒绝」 for. The mirror of [alwaysAllowedTools]:
+     * the same reasoning applies, and a refusal that has to be re-tapped every
+     * launch is the more annoying of the two.
+     */
+    val alwaysDeniedTools: List<String> = emptyList(),
+    /** 聊天：列表在底部时自动跟随新消息。 */
+    val autoFollow: Boolean = true,
+    /** 0 小, 1 标准, 2 大, 3 特大 */
+    val fontScale: Int = 1,
+    /** 0 窄, 1 标准, 2 宽 —— 助手气泡最多占屏宽的比例，由聊天页读取 */
+    val bubbleWidth: Int = 1,
+    /** 0 方正, 1 标准, 2 圆润 */
+    val cornerScale: Int = 1,
+    /** 是否在气泡下方显示时间 */
+    val showTimestamps: Boolean = true,
+    /** 工具调用卡片默认展开 */
+    val expandTools: Boolean = false,
+    /** 思考过程默认展开 */
+    val expandReasoning: Boolean = false,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
+
+    /** 助手气泡最多占屏宽的比例。 */
+    val bubbleWidthFraction: Float
+        get() = when (bubbleWidth) {
+            0 -> 0.82f
+            2 -> 1f
+            else -> 0.94f
+        }
 
     /** The persona new conversations start with; falls back to the first one. */
     fun activeAssistant(): Assistant? =

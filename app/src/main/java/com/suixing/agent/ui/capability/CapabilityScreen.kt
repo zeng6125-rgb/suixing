@@ -2,6 +2,8 @@ package com.suixing.agent.ui.capability
 
 import android.os.Build
 import android.os.Environment
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.outlined.AdminPanelSettings
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.FolderSpecial
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
+import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.ShieldMoon
 import androidx.compose.material.icons.outlined.Terminal
@@ -49,10 +52,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
+import com.suixing.agent.data.AppSettings
+import com.suixing.agent.service.FloatConsoleService
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
@@ -64,12 +70,21 @@ import kotlinx.coroutines.launch
 @Composable
 fun CapabilityScreen() {
     val state by Core.capabilities.state.collectAsState()
+    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val scope = rememberCoroutineScope()
     var probing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var explainerOpen by remember { mutableStateOf(false) }
     val supportsAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     val allFiles = supportsAllFiles && Environment.isExternalStorageManager()
+
+    // Overlay permission lives in the system settings app, not in our process, so it has
+    // to be re-read when the user comes back rather than remembered in state.
+    val context = LocalContext.current
+    var overlayGranted by remember { mutableStateOf(FloatConsoleService.canDrawOverlays(context)) }
+    val overlayLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { overlayGranted = FloatConsoleService.canDrawOverlays(context) }
 
     LaunchedEffect(Unit) { Core.capabilities.refresh() }
 
@@ -112,7 +127,13 @@ fun CapabilityScreen() {
                 summary = "读屏、点击、滑动、输入文字、截图",
                 granted = state.accessibility,
                 lines = listOf(
-                    if (state.accessibility) "已连接，ui_* 系列工具可用" else "未连接，ui_* 系列工具会被拒绝执行",
+                    if (state.accessibility) {
+                        "已连接，ui_* 系列工具可用"
+                    } else if (state.shellReady || state.rootReady) {
+                        "未连接。ui_* 会走 Shizuku / root 的 input、screencap 兜底，但打不了中文"
+                    } else {
+                        "未连接，且没有 Shizuku / root 兜底，ui_* 系列工具会被拒绝执行"
+                    },
                 ),
                 actionLabel = if (state.accessibility) "打开设置" else "去开启",
                 onAction = { Core.capabilities.openAccessibilitySettings() },
@@ -149,20 +170,44 @@ fun CapabilityScreen() {
                 icon = Icons.Outlined.AdminPanelSettings,
                 summary = "最高权限，可直接读写系统文件",
                 granted = state.rootReady,
-                lines = listOf(
+                lines = listOfNotNull(
                     when {
                         !state.rootProbed -> "尚未检测"
                         state.root -> "检测到 su 可用"
                         else -> "未检测到 su"
                     },
+                    if (state.rootProbed && settings.rootCheckedAt > 0L) {
+                        "上次检测：${formatAgo(settings.rootCheckedAt)}（结果已记住，下次打开自动复核）"
+                    } else {
+                        "检测一次即可，之后每次打开都会自动复核"
+                    },
                 ),
-                actionLabel = if (probing) "检测中…" else "检测 root",
+                actionLabel = if (probing) "检测中…" else "重新检测",
                 onAction = {
                     scope.launch {
                         probing = true
                         Core.capabilities.probeRoot()
                         probing = false
                     }
+                },
+            )
+
+            CapabilityCard(
+                title = "悬浮窗控制台",
+                icon = Icons.Outlined.PictureInPictureAlt,
+                summary = "agent 跑起来时，屏幕上有个能停止、能插话的悬浮球",
+                granted = overlayGranted,
+                lines = if (overlayGranted) {
+                    listOf("已授权：agent 运行时悬浮球自动出现，不用手动开")
+                } else {
+                    listOf(
+                        "未授权：任务跑起来后，屏幕上不会有悬浮球和停止按钮",
+                        "这个开关在系统设置里，只有你能打开",
+                    )
+                },
+                actionLabel = if (overlayGranted) "打开系统设置" else "去授权",
+                onAction = {
+                    overlayLauncher.launch(FloatConsoleService.overlayPermissionIntent(context))
                 },
             )
 
@@ -405,5 +450,16 @@ private fun CapabilityCard(
         } else {
             Button(onClick = onAction) { Text(actionLabel) }
         }
+    }
+}
+
+/** 「刚刚 / N 分钟前 / N 小时前 / N 天前」for the remembered root probe. */
+private fun formatAgo(timestamp: Long): String {
+    val delta = (System.currentTimeMillis() - timestamp).coerceAtLeast(0L)
+    return when {
+        delta < 60_000L -> "刚刚"
+        delta < 3_600_000L -> "${delta / 60_000L} 分钟前"
+        delta < 86_400_000L -> "${delta / 3_600_000L} 小时前"
+        else -> "${delta / 86_400_000L} 天前"
     }
 }

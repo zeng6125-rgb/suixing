@@ -2,8 +2,9 @@ package com.suixing.agent.ui.chat
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.suixing.agent.agent.AgentEngine
 import com.suixing.agent.agent.AgentEvent
+import com.suixing.agent.agent.RunState
+import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.Conversation
@@ -34,17 +35,56 @@ data class ChatUiState(
     val streaming: String = "",
     /** The thinking streamed ahead of [streaming], shown in its own block. */
     val reasoning: String = "",
+    /** A run is in flight somewhere in the app — not necessarily in this conversation. */
     val running: Boolean = false,
+    /** Which conversation owns that run; empty when nothing is running. */
+    val runningChatId: String = "",
+    /** Its title, so a refusal can name the conversation holding the one run slot. */
+    val runningTitle: String = "",
+    /** Why the last action was refused, or how a run in another conversation ended. */
+    val notice: String? = null,
     val status: String = "",
+    /**
+     * Speed of the run that is streaming, straight off the engine's `RunState`. Only the
+     * live bubble reads it; once the reply is stored, its own usage numbers are the
+     * frozen record and this is ignored.
+     */
+    val stats: StreamStats? = null,
     val error: String? = null,
 ) {
     /** The transcript as drawn: one run per turn, newest first pick wins. */
     val visible: List<StoredMessage> get() = Transcript.active(messages, activeRuns)
+
+    /** The live run is writing into the conversation on screen, not some other one. */
+    val runningHere: Boolean get() = running && runningChatId == conversationId
 }
+
+/**
+ * The conversation a run is writing into.
+ *
+ * Kept apart from [ChatUiState] because those answer two different questions: the screen
+ * shows whichever conversation the user last opened, while the run keeps streaming into
+ * the one that started it. Fusing the two is what used to lock the drawer for the whole
+ * length of a run — the run's own conversation was the only one the UI could hold.
+ */
+private data class RunSession(
+    val chatId: String,
+    val title: String,
+    val assistantId: String,
+    val runId: String,
+    val messages: List<StoredMessage>,
+    val activeRuns: Map<String, String>,
+    val streaming: String = "",
+    val reasoning: String = "",
+    val status: String = "",
+    val error: String? = null,
+)
 
 class ChatViewModel : ViewModel() {
 
-    private val engine = AgentEngine()
+    // The process-wide instance, not a private one: the floating console has to be
+    // able to stop and steer the very run this screen started.
+    private val engine = Core.engine
     private val gate = Core.gate
 
     private val _state = MutableStateFlow(ChatUiState())
@@ -54,10 +94,28 @@ class ChatViewModel : ViewModel() {
 
     private var job: Job? = null
 
-    /** The run the in-flight engine pass writes into; stamped on every message it emits. */
-    private var runId: String = ""
+    /** The run in flight and the conversation it belongs to; null when nothing runs. */
+    private var session: RunSession? = null
 
     init {
+        // The engine is shared with the floating console, so its run state is the one
+        // truth about whether a run is live — including one this screen never started.
+        viewModelScope.launch {
+            Core.engine.runState.collect { run ->
+                when (run) {
+                    is RunState.Running -> _state.update { it.copy(stats = run.stats) }
+                    // Back to typing the moment the run is stopped, without waiting for
+                    // the stream to wind down on its own. What already arrived is saved
+                    // first: the run is over either way, and only this copy has it.
+                    is RunState.Cancelled -> session?.let { live ->
+                        viewModelScope.launch { saveSession(live) }
+                        endSession("已停止")
+                    }
+
+                    else -> Unit
+                }
+            }
+        }
         viewModelScope.launch {
             Core.chats.load()
             val settings = Core.settings.current()
@@ -76,27 +134,51 @@ class ChatViewModel : ViewModel() {
     }
 
     fun newConversation() {
-        if (_state.value.running) return
         viewModelScope.launch {
             val settings = Core.settings.current()
             val created = Core.chats.create()
-            _state.value = ChatUiState(
-                conversationId = created.id,
-                title = created.title,
-                assistantId = settings.activeAssistant()?.id.orEmpty(),
+            _state.value = projected(
+                ChatUiState(
+                    conversationId = created.id,
+                    title = created.title,
+                    assistantId = settings.activeAssistant()?.id.orEmpty(),
+                ),
             )
         }
     }
 
     fun openConversation(conversation: Conversation) {
-        if (_state.value.running) return
-        // A conversation that never picked a persona keeps the one already on screen,
-        // which was seeded from the settings when this screen was created.
-        _state.value = conversation.toUiState(_state.value.assistantId)
+        val live = session
+        _state.value = if (live != null && live.chatId == conversation.id) {
+            // Coming back to the conversation a run owns: pick up what it has streamed
+            // since, rather than the older snapshot on disk.
+            ChatUiState(
+                conversationId = live.chatId,
+                title = live.title,
+                messages = live.messages,
+                activeRuns = live.activeRuns,
+                assistantId = live.assistantId,
+                streaming = live.streaming,
+                reasoning = live.reasoning,
+                status = live.status,
+                running = true,
+                runningChatId = live.chatId,
+                runningTitle = live.title,
+            )
+        } else {
+            // A conversation that never picked a persona keeps the one already on screen,
+            // which was seeded from the settings when this screen was created.
+            projected(conversation.toUiState(_state.value.assistantId))
+        }
     }
 
     fun deleteConversation(conversation: Conversation) {
-        if (_state.value.running) return
+        // The run owns its conversation until it ends: deleting it would only have the
+        // next save write it straight back.
+        if (session?.chatId == conversation.id) {
+            _state.update { it.copy(notice = runningNotice()) }
+            return
+        }
         viewModelScope.launch {
             Core.chats.delete(conversation.id)
             if (conversation.id != _state.value.conversationId) return@launch
@@ -104,26 +186,34 @@ class ChatViewModel : ViewModel() {
             val next = Core.chats.conversations.value.firstOrNull()
             _state.value = if (next == null) {
                 val created = Core.chats.create()
-                ChatUiState(
-                    conversationId = created.id,
-                    title = created.title,
-                    assistantId = settings.activeAssistant()?.id.orEmpty(),
+                projected(
+                    ChatUiState(
+                        conversationId = created.id,
+                        title = created.title,
+                        assistantId = settings.activeAssistant()?.id.orEmpty(),
+                    ),
                 )
             } else {
-                next.toUiState(settings.activeAssistant()?.id.orEmpty())
+                projected(next.toUiState(settings.activeAssistant()?.id.orEmpty()))
             }
         }
     }
+
+    /** Adds the "who is running" half of the picture to a freshly built conversation. */
+    private fun projected(state: ChatUiState): ChatUiState = state.copy(
+        running = session != null,
+        runningChatId = session?.chatId.orEmpty(),
+        runningTitle = session?.title.orEmpty(),
+    )
 
     // ---------------------------------------------------------------- assistants
 
     /** Makes [assistant] the face of this conversation and the app-wide default. */
     fun useAssistant(assistant: Assistant) {
-        if (_state.value.running) return
-        _state.update { it.copy(assistantId = assistant.id) }
+        editDisplayed { it.copy(assistantId = assistant.id) }
         viewModelScope.launch {
             Core.settings.update { it.copy(activeAssistantId = assistant.id) }
-            persist()
+            persistDisplayed()
         }
     }
 
@@ -138,8 +228,8 @@ class ChatViewModel : ViewModel() {
                 }
                 settings.copy(assistants = list, activeAssistantId = assistant.id)
             }
-            _state.update { it.copy(assistantId = assistant.id) }
-            persist()
+            editDisplayed { it.copy(assistantId = assistant.id) }
+            persistDisplayed()
         }
     }
 
@@ -160,8 +250,8 @@ class ChatViewModel : ViewModel() {
             }
             val settings = Core.settings.current()
             val next = settings.assistant(_state.value.assistantId) ?: settings.activeAssistant()
-            _state.update { it.copy(assistantId = next?.id.orEmpty()) }
-            persist()
+            editDisplayed { it.copy(assistantId = next?.id.orEmpty()) }
+            persistDisplayed()
         }
     }
 
@@ -171,8 +261,13 @@ class ChatViewModel : ViewModel() {
     fun send(text: String, imageBase64: String? = null): Boolean {
         val body = text.trim()
         if (body.isEmpty() && imageBase64 == null) return false
-        if (_state.value.running) return false
         if (_state.value.conversationId.isEmpty()) return false
+        // One engine, one run: while one is in flight nothing else may start, whichever
+        // conversation is on screen. The refusal names the conversation holding the slot.
+        if (session != null) {
+            _state.update { it.copy(notice = runningNotice()) }
+            return false
+        }
 
         val user = StoredMessage(
             id = UUID.randomUUID().toString(),
@@ -181,50 +276,49 @@ class ChatViewModel : ViewModel() {
             imageBase64 = imageBase64,
         )
         val fresh = UUID.randomUUID().toString()
-        runId = fresh
         _state.update {
             it.copy(
                 messages = it.messages + user,
                 activeRuns = it.activeRuns + (user.id to fresh),
-                running = true,
                 streaming = "",
                 reasoning = "",
                 status = "正在思考…",
                 error = null,
+                notice = null,
             )
         }
-        start(_state.value.messages)
+        start(fresh, _state.value.messages)
         return true
     }
 
     /** Answers the last question again, keeping the old reply as a branch. */
     fun regenerate() {
-        if (_state.value.running) return
+        if (session != null) {
+            _state.update { it.copy(notice = runningNotice()) }
+            return
+        }
         val snapshot = _state.value
         val active = Transcript.active(snapshot.messages, snapshot.activeRuns)
         val question = active.lastOrNull { it.role == Roles.USER } ?: return
         val prompt = Transcript.withoutLastAnswer(active)
         val fresh = UUID.randomUUID().toString()
-        runId = fresh
         _state.update {
             it.copy(
                 activeRuns = it.activeRuns + (question.id to fresh),
-                running = true,
                 streaming = "",
                 reasoning = "",
                 status = "正在重新回答…",
                 error = null,
             )
         }
-        start(prompt)
+        start(fresh, prompt)
     }
 
     /** Draws another candidate answer for [turnId]; the transcript itself is untouched. */
     fun switchBranch(turnId: String, runId: String) {
-        if (_state.value.running) return
         if (_state.value.activeRuns[turnId] == runId) return
-        _state.update { it.copy(activeRuns = it.activeRuns + (turnId to runId)) }
-        viewModelScope.launch { persist() }
+        editDisplayed { it.copy(activeRuns = it.activeRuns + (turnId to runId)) }
+        viewModelScope.launch { persistDisplayed() }
     }
 
     /**
@@ -234,14 +328,14 @@ class ChatViewModel : ViewModel() {
     fun editMessage(id: String, text: String) {
         val body = text.trim()
         if (body.isEmpty()) return
-        _state.update { snapshot ->
+        editDisplayed { snapshot ->
             snapshot.copy(
                 messages = snapshot.messages.map { message ->
                     if (message.id == id) message.copy(text = body, edited = true) else message
                 },
             )
         }
-        viewModelScope.launch { persist() }
+        viewModelScope.launch { persistDisplayed() }
     }
 
     /**
@@ -250,7 +344,10 @@ class ChatViewModel : ViewModel() {
      * exists, so keeping them would hang them off the wrong prompt.
      */
     fun editAndResend(id: String, text: String) {
-        if (_state.value.running) return
+        if (session != null) {
+            _state.update { it.copy(notice = runningNotice()) }
+            return
+        }
         val body = text.trim()
         if (body.isEmpty()) return
         val snapshot = _state.value
@@ -259,40 +356,64 @@ class ChatViewModel : ViewModel() {
         if (index < 0) return
         val kept = active.take(index) + active[index].copy(text = body, edited = true)
         val fresh = UUID.randomUUID().toString()
-        runId = fresh
         _state.update {
             it.copy(
                 messages = kept,
                 // Runs whose messages just disappeared would only leak memory.
                 activeRuns = it.activeRuns.filterKeys { key -> kept.any { row -> row.id == key } } + (id to fresh),
-                running = true,
                 streaming = "",
                 reasoning = "",
                 status = "正在重新回答…",
                 error = null,
             )
         }
-        start(kept)
+        start(fresh, kept)
     }
 
     fun stop() {
         gate.cancelPending()
         Core.speaker.stop()
+        // Ask the engine first: it cancels the OkHttp call that is on the wire, which
+        // is what makes the stop take effect now rather than at the next token. The
+        // job cancel below is only the belt to that pair of braces.
+        Core.engine.cancel()
         job?.cancel()
         job = null
     }
+
+    /**
+     * Slips a line to the model at its next turn instead of waiting for this run to end.
+     * False means nothing was running, so the caller keeps the text.
+     */
+    fun steer(text: String): Boolean = Core.engine.steer(text)
 
     fun dismissError() {
         _state.update { it.copy(error = null) }
     }
 
-    private fun start(history: List<StoredMessage>) {
+    private fun start(runId: String, history: List<StoredMessage>) {
+        val shown = _state.value
+        setSession(
+            RunSession(
+                chatId = shown.conversationId,
+                title = shown.title,
+                assistantId = shown.assistantId,
+                runId = runId,
+                messages = shown.messages,
+                activeRuns = shown.activeRuns,
+                status = shown.status,
+            ),
+        )
         job = viewModelScope.launch {
             AgentForegroundService.start(Core.appContext, "随行正在执行任务")
+            // Decided in the catches, applied once in the finally: there is exactly one
+            // place that saves and one that closes the run, whichever way it ended.
+            var status = ""
+            var failure: String? = null
             try {
-                persist()
+                persistSession()
                 val settings = Core.settings.current()
-                val assistant = settings.assistant(_state.value.assistantId) ?: settings.activeAssistant()
+                val assistant = settings.assistant(shown.assistantId) ?: settings.activeAssistant()
                 // The persona bends the live settings; anything it left blank stays as-is.
                 val effective = settings.forAssistant(assistant)
                 val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
@@ -302,6 +423,7 @@ class ChatViewModel : ViewModel() {
                     registry = registry,
                     capabilities = Core.capabilities,
                     skills = Core.skills,
+                    memory = Core.memory,
                     gate = gate,
                     onEvent = ::handleEvent,
                 )
@@ -311,88 +433,224 @@ class ChatViewModel : ViewModel() {
                         ?.text
                         ?.let { Core.speaker.speak(it) }
                 }
-                _state.update { it.copy(running = false, streaming = "", reasoning = "", status = "") }
             } catch (cancellation: CancellationException) {
-                _state.update { it.copy(running = false, streaming = "", reasoning = "", status = "已停止") }
+                // RunState.Cancelled usually released the screen first; this is the belt
+                // to that pair of braces.
+                status = "已停止"
                 throw cancellation
             } catch (error: Throwable) {
-                _state.update {
-                    it.copy(
-                        running = false,
-                        streaming = "",
-                        reasoning = "",
-                        status = "",
-                        error = error.message ?: error::class.java.simpleName,
-                    )
-                }
+                failure = error.message ?: error::class.java.simpleName
             } finally {
                 AgentForegroundService.stop(Core.appContext)
-                // A cancelled coroutine refuses to suspend, so the final save has to
-                // run in a NonCancellable block or a stopped run loses its messages.
-                withContext(NonCancellable) { persist() }
+                withContext(NonCancellable) {
+                    // A cancelled coroutine refuses to suspend, so the final save has to
+                    // run in a NonCancellable block or a stopped run loses its messages.
+                    session?.let { saveSession(it) }
+                    endSession(status, failure)
+                }
             }
         }
     }
 
     private fun handleEvent(event: AgentEvent) {
-        when (event) {
+        val live = session ?: return
+        val next = when (event) {
             is AgentEvent.TextDelta ->
-                _state.update { it.copy(streaming = it.streaming + event.text, status = "") }
+                live.copy(streaming = live.streaming + event.text, status = "")
 
             is AgentEvent.ReasoningDelta ->
-                _state.update { it.copy(reasoning = it.reasoning + event.text, status = "") }
+                live.copy(reasoning = live.reasoning + event.text, status = "")
 
-            is AgentEvent.AssistantMessage ->
-                _state.update {
-                    it.copy(
-                        messages = it.messages + event.message.copy(runId = runId),
-                        streaming = "",
-                        reasoning = "",
-                    )
-                }
+            is AgentEvent.AssistantMessage -> live.copy(
+                messages = live.messages + event.message.copy(runId = live.runId),
+                streaming = "",
+                reasoning = "",
+            )
 
-            is AgentEvent.ToolStarted ->
-                _state.update { it.copy(status = "调用 ${event.name}") }
+            is AgentEvent.ToolStarted -> live.copy(status = "调用 ${event.name}")
 
-            is AgentEvent.ToolMessage ->
-                _state.update {
-                    it.copy(messages = it.messages + event.message.copy(runId = runId), status = "")
-                }
+            is AgentEvent.ToolMessage -> live.copy(
+                messages = live.messages + event.message.copy(runId = live.runId),
+                status = "",
+            )
 
-            is AgentEvent.ToolFinished -> Unit
+            is AgentEvent.ToolFinished -> live
 
-            is AgentEvent.Failed ->
-                _state.update { it.copy(error = event.message) }
+            // The error rides with the run: it shows on the error card only while that
+            // conversation is the one on screen, and travels with it otherwise.
+            is AgentEvent.Failed -> live.copy(error = event.message)
 
-            is AgentEvent.Finished -> Unit
+            is AgentEvent.Finished -> live
+        }
+        setSession(next)
+    }
+
+    /**
+     * Installs [next] as the run's copy of its conversation and, when that conversation is
+     * the one on screen, copies the live parts of it onto the screen. A run in some other
+     * conversation changes nothing here except the "who is running" line.
+     */
+    private fun setSession(next: RunSession?) {
+        session = next
+        _state.update { snapshot ->
+            when {
+                next == null ->
+                    snapshot.copy(running = false, runningChatId = "", runningTitle = "")
+
+                snapshot.conversationId != next.chatId -> snapshot.copy(
+                    running = true,
+                    runningChatId = next.chatId,
+                    runningTitle = next.title,
+                )
+
+                else -> snapshot.copy(
+                    running = true,
+                    runningChatId = next.chatId,
+                    runningTitle = next.title,
+                    title = next.title,
+                    messages = next.messages,
+                    activeRuns = next.activeRuns,
+                    streaming = next.streaming,
+                    reasoning = next.reasoning,
+                    status = next.status,
+                    error = next.error ?: snapshot.error,
+                )
+            }
         }
     }
 
-    private suspend fun persist() {
-        val snapshot = _state.value
-        if (snapshot.conversationId.isEmpty()) return
-        val previous = Core.chats.conversations.value.firstOrNull { it.id == snapshot.conversationId }
-        val title = if (snapshot.title.isBlank() || snapshot.title == "新会话") {
-            snapshot.messages.firstOrNull { it.role == Roles.USER }
+    /**
+     * Drops the run's claim on its conversation. The screen keeps whatever the user was
+     * looking at: the run's own conversation loses its streaming state, any other one is
+     * left exactly as it was.
+     */
+    private fun endSession(status: String, error: String? = null) {
+        val live = session
+        session = null
+        _state.update { snapshot ->
+            val failure = error ?: live?.error
+            when {
+                live != null && snapshot.conversationId == live.chatId -> snapshot.copy(
+                    running = false,
+                    runningChatId = "",
+                    runningTitle = "",
+                    streaming = "",
+                    reasoning = "",
+                    stats = null,
+                    status = status,
+                    notice = null,
+                    error = failure ?: snapshot.error,
+                )
+
+                // A run in another conversation died: there is no error card to put it
+                // on, so say it in the notice line rather than let it vanish.
+                live != null && failure != null -> snapshot.copy(
+                    running = false,
+                    runningChatId = "",
+                    runningTitle = "",
+                    stats = null,
+                    notice = "『${live.title}』运行失败：$failure",
+                )
+
+                else -> snapshot.copy(
+                    running = false,
+                    runningChatId = "",
+                    runningTitle = "",
+                    stats = null,
+                )
+            }
+        }
+    }
+
+    /**
+     * Applies [change] to the conversation on screen. While that conversation is the one
+     * a run owns, the change goes into the run's copy as well — otherwise the next
+     * streamed token would mirror the older messages back over the edit.
+     */
+    private fun editDisplayed(change: (ChatUiState) -> ChatUiState) {
+        _state.update(change)
+        val live = session ?: return
+        val shown = _state.value
+        if (live.chatId != shown.conversationId) return
+        setSession(
+            live.copy(
+                title = shown.title,
+                assistantId = shown.assistantId,
+                messages = shown.messages,
+                activeRuns = shown.activeRuns,
+            ),
+        )
+    }
+
+    /** Names the conversation holding the single run slot, so the refusal is actionable. */
+    private fun runningNotice(): String {
+        val live = session ?: return "正在运行，先停止或切回"
+        return "『${live.title}』正在运行，先停止或切回"
+    }
+
+    /** Saves the conversation on screen. */
+    private suspend fun persistDisplayed() {
+        val shown = _state.value
+        val title = save(
+            chatId = shown.conversationId,
+            title = shown.title,
+            messages = shown.messages,
+            assistantId = shown.assistantId,
+            activeRuns = shown.activeRuns,
+        ) ?: return
+        if (title != shown.title) _state.update { it.copy(title = title) }
+    }
+
+    /** Saves the run's conversation — the only writer while a run is in flight. */
+    private suspend fun persistSession() {
+        session?.let { saveSession(it) }
+    }
+
+    private suspend fun saveSession(live: RunSession) {
+        val title = save(
+            chatId = live.chatId,
+            title = live.title,
+            messages = live.messages,
+            assistantId = live.assistantId,
+            activeRuns = live.activeRuns,
+        ) ?: return
+        val current = session
+        if (current != null && current.chatId == live.chatId && title != current.title) {
+            setSession(current.copy(title = title))
+        }
+    }
+
+    /** Writes one conversation to disk; returns the title it ended up with. */
+    private suspend fun save(
+        chatId: String,
+        title: String,
+        messages: List<StoredMessage>,
+        assistantId: String,
+        activeRuns: Map<String, String>,
+    ): String? {
+        if (chatId.isEmpty()) return null
+        val previous = Core.chats.conversations.value.firstOrNull { it.id == chatId }
+        val derived = if (title.isBlank() || title == "新会话") {
+            messages.firstOrNull { it.role == Roles.USER }
                 ?.text
                 ?.replace('\n', ' ')
                 ?.take(18)
                 ?.takeIf { it.isNotBlank() }
-                ?: snapshot.title.ifBlank { "新会话" }
+                ?: title.ifBlank { "新会话" }
         } else {
-            snapshot.title
+            title
         }
         Core.chats.save(
             Conversation(
-                id = snapshot.conversationId,
-                title = title,
+                id = chatId,
+                title = derived,
                 createdAt = previous?.createdAt ?: System.currentTimeMillis(),
-                messages = snapshot.messages,
-                assistantId = snapshot.assistantId,
-                activeRuns = snapshot.activeRuns,
+                messages = messages,
+                assistantId = assistantId,
+                activeRuns = activeRuns,
             ),
         )
-        if (title != snapshot.title) _state.update { it.copy(title = title) }
+        return derived
     }
 
     override fun onCleared() {
