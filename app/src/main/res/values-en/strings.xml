@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Lingshu</string>
-    <string name="accessibility_service_label">Lingshu · Screen control</string>
-    <string name="accessibility_service_description">Let Lingshu read the screen, tap and swipe, and take screenshots so it can operate other apps on your behalf. It is only invoked when you start a task.</string>
+    <string name="app_name">Suixing</string>
+    <string name="accessibility_service_label">Suixing · Screen control</string>
+    <string name="accessibility_service_description">Let Suixing read the screen, tap and swipe, and take screenshots so it can operate other apps on your behalf. It is only invoked when you start a task.</string>
 </resources>

@@ -6,15 +6,15 @@ plugins {
 }
 
 android {
-    namespace = "com.lingshu.agent"
+    namespace = "com.suixing.agent"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.lingshu.agent"
+        applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.6.0"
+        versionCode = 10
+        versionName = "0.7.0"
         resourceConfigurations += listOf("zh", "en")
     }
 

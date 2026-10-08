@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Android 12+ rules. `files/datastore/lingshu_settings.preferences_pb` holds both the
+  Android 12+ rules. `files/datastore/Suixing_settings.preferences_pb` holds both the
   settings and the API key, so it is excluded from cloud backup but included in
   device-to-device transfer (local, user initiated) to keep phone swaps painless.
 -->
