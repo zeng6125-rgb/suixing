@@ -37,6 +37,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -435,8 +436,8 @@ fun PageTopBar(
  */
 /**
  * A lifted disc button: the chat header floats over the transcript with no bar of its
- * own, so each of its buttons carries its own surface and a real shadow — a flat glyph
- * over scrolling content has nothing to sit on.
+ * own, so each of its buttons carries its own surface and the same soft shadow the
+ * composer's capsule casts — a flat glyph over scrolling content has nothing to sit on.
  */
 @Composable
 fun FlatIconButton(
@@ -445,20 +446,27 @@ fun FlatIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    iconSize: Dp = 22.dp,
 ) {
     Surface(
         onClick = onClick,
-        modifier = modifier.size(40.dp),
+        modifier = modifier
+            .size(44.dp)
+            .shadow(
+                elevation = 8.dp,
+                shape = CircleShape,
+                ambientColor = Color.Black.copy(alpha = 0.25f),
+                spotColor = Color.Black.copy(alpha = 0.25f),
+            ),
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         contentColor = tint,
-        shadowElevation = 2.dp,
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(iconSize),
             )
         }
     }

@@ -99,7 +99,12 @@ data class LiveTool(
 
 /** One piece of the reply being streamed, in the order the engine produced it. */
 sealed interface LivePart {
-    data class Thinking(val text: String) : LivePart
+    /**
+     * [tokens] and [elapsedMs] belong to this block alone: they are frozen when the run
+     * moves on to a tool or to prose, so two thinking blocks in one run never show the
+     * same clock — sharing the run-level tally is what made every block read 23.3s.
+     */
+    data class Thinking(val text: String, val tokens: Int = 0, val elapsedMs: Long = 0) : LivePart
     data class Tools(val calls: List<LiveTool>) : LivePart
     data class Text(val text: String) : LivePart
 }
@@ -114,6 +119,8 @@ private data class RunSession(
     val reasoning: String = "",
     val status: String = "",
     val runningTool: String? = null,
+    /** When the still-open thinking block started, so its clock is its own. */
+    val thinkingStartedAt: Long = 0L,
     /** What the live bubble draws, in arrival order. */
     val parts: List<LivePart> = emptyList(),
     val error: String? = null,
@@ -568,27 +575,34 @@ class ChatViewModel : ViewModel() {
         val next = when (event) {
             is AgentEvent.TextDelta -> live.copy(
                 streaming = live.streaming + event.text,
-                parts = live.parts.appendText(event.text),
+                parts = live.parts.sealThinking(live.thinkingStartedAt).appendText(event.text),
                 status = "",
             )
 
-            is AgentEvent.ReasoningDelta -> live.copy(
-                reasoning = live.reasoning + event.text,
-                parts = live.parts.appendThinking(event.text),
-                status = "",
-            )
+            is AgentEvent.ReasoningDelta -> {
+                // A delta after a tool or after prose opens a new block: its clock
+                // starts now, not at the run's start.
+                val opening = live.parts.lastOrNull() !is LivePart.Thinking
+                live.copy(
+                    reasoning = live.reasoning + event.text,
+                    parts = live.parts.appendThinking(event.text),
+                    status = "",
+                    thinkingStartedAt = if (opening) System.currentTimeMillis() else live.thinkingStartedAt,
+                )
+            }
 
             // The round is stored, but it is not drawn from the transcript: the live
             // bubble keeps drawing it until the run lands, so the reply stays one bubble
             // from the first token to the last.
             is AgentEvent.AssistantMessage -> live.copy(
                 messages = live.messages + event.message.copy(runId = live.runId),
+                parts = live.parts.sealThinking(live.thinkingStartedAt),
             )
 
             is AgentEvent.ToolStarted -> live.copy(
                 status = "调用 ${event.name}",
                 runningTool = event.name,
-                parts = live.parts.startTool(event.name, event.args),
+                parts = live.parts.sealThinking(live.thinkingStartedAt).startTool(event.name, event.args),
             )
 
             is AgentEvent.ToolMessage -> live.copy(
@@ -629,6 +643,17 @@ class ChatViewModel : ViewModel() {
             is LivePart.Thinking -> dropLast(1) + last.copy(text = last.text + delta)
             else -> this + LivePart.Thinking(delta)
         }
+
+    /**
+     * Freezes the still-open thinking block the moment the run moves on: its own text
+     * length stands in for its token count and its own clock stops here, so a later
+     * block cannot inherit this one's elapsed time.
+     */
+    private fun List<LivePart>.sealThinking(startedAt: Long): List<LivePart> {
+        val last = lastOrNull() as? LivePart.Thinking ?: return this
+        val elapsed = if (startedAt > 0) System.currentTimeMillis() - startedAt else 0L
+        return dropLast(1) + last.copy(tokens = last.text.length / 4, elapsedMs = elapsed)
+    }
 
     /** A call joins the round of tools already open, or starts one. */
     private fun List<LivePart>.startTool(name: String, args: String): List<LivePart> {

@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -25,8 +26,10 @@ import androidx.compose.ui.unit.dp
  *
  * The launcher asset is pure white for the home screen; here the colour is the
  * caller's tint, which is how the drawer puts white on the brand gradient and a
- * bubble puts the brand colour on a light disc. Stroke colour is left unset on
- * purpose: an [Icon] tints whatever the path does not pin down.
+ * bubble puts the brand colour on a light disc. The stroke colour is pinned to a
+ * placeholder black: a path with neither fill nor stroke draws no pixels at all,
+ * and an [Icon] tint only colour-filters pixels that exist — leaving it unset made
+ * every avatar an empty disc.
  */
 val FeatherIcon: ImageVector = ImageVector.Builder(
     name = "ic_feather",
@@ -36,6 +39,7 @@ val FeatherIcon: ImageVector = ImageVector.Builder(
     viewportHeight = 108f,
 ).apply {
     path(
+        stroke = SolidColor(Color.Black),
         strokeLineWidth = 5.6f,
         strokeLineCap = StrokeCap.Round,
         strokeLineJoin = StrokeJoin.Round,

@@ -1,8 +1,11 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.suixing.agent.ui.settings
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +51,8 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -64,6 +69,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -315,9 +321,20 @@ private fun CoroutineScope.persist(block: (AppSettings) -> AppSettings) {
 @Composable
 private fun ModelSettingsPage(onBack: () -> Unit) {
     val stored by Core.settings.flow.collectAsState(initial = AppSettings())
-    // Keyless on purpose: a write-through below rewrites `stored`, and a keyed remember
-    // would reset the draft and throw away unsaved edits to baseUrl/apiKey/model.
+    // The draft starts from whatever the repository holds at first emission. The flow's
+    // initial value is the raw default (no providers yet — migration runs inside the
+    // flow), so the draft is re-seeded once the migrated settings arrive; without that
+    // the provider chip row never appeared and the page reported unsaved changes on
+    // entry. Keyless on purpose: a write-through below rewrites `stored`, and a keyed
+    // remember would reset the draft and throw away unsaved edits to baseUrl/apiKey/model.
     var form by remember { mutableStateOf(stored) }
+    var seeded by remember { mutableStateOf(false) }
+    LaunchedEffect(stored) {
+        if (!seeded && stored.providers.isNotEmpty()) {
+            form = stored
+            seeded = true
+        }
+    }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val client = remember { LlmClient() }
@@ -328,7 +345,9 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     var selectedId by remember(stored) {
         mutableStateOf(stored.activeProvider()?.id ?: stored.providers.firstOrNull()?.id.orEmpty())
     }
-    val dirty = form != stored
+    // Only real edits count: the draft is compared against the migrated stored settings,
+    // and before the first emission there is nothing to be dirty about.
+    val dirty = seeded && form != stored
     // The endpoint the model fields edit; tapping a chip also makes it the active one.
     val selected = form.providers.firstOrNull { it.id == selectedId } ?: form.providers.firstOrNull()
 
@@ -412,94 +431,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
-                if (form.providers.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        form.providers.forEach { provider ->
-                            FilterChip(
-                                selected = provider.id == selected?.id,
-                                onClick = {
-                                    selectedId = provider.id
-                                    form = form.copy(
-                                        baseUrl = provider.baseUrl,
-                                        apiKey = provider.apiKey,
-                                        model = provider.enabled.firstOrNull() ?: form.model,
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = provider.shortLabel,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.widthIn(max = 110.dp),
-                                    )
-                                },
-                            )
-                        }
-                        AssistChip(
-                            onClick = {
-                                val id = "p" + System.currentTimeMillis().toString(36)
-                                selectedId = id
-                                form = form.copy(
-                                    providers = form.providers + ProviderConfig(id = id),
-                                    baseUrl = "",
-                                    apiKey = "",
-                                    model = "",
-                                )
-                                // 点选即落盘：新建的提供方若只留在草稿里，离开页面就没了。
-                                scope.persist {
-                                    it.copy(
-                                        providers = form.providers,
-                                        baseUrl = form.baseUrl,
-                                        apiKey = form.apiKey,
-                                        model = form.model,
-                                    )
-                                }
-                            },
-                            label = { Text("新建") },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Rounded.Add,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            },
-                        )
-                        if (form.providers.size > 1 && selected != null) {
-                            TextButton(
-                                onClick = {
-                                    val rest = form.providers.filterNot { it.id == selected.id }
-                                    val next = rest.first()
-                                    selectedId = next.id
-                                    form = form.copy(
-                                        providers = rest,
-                                        baseUrl = next.baseUrl,
-                                        apiKey = next.apiKey,
-                                        model = next.enabled.firstOrNull() ?: form.model,
-                                    )
-                                    // 同新建：删除也是结构操作，草稿里删了磁盘上还在会让
-                                    // 切换器继续列出已经不存在的提供方。
-                                    scope.persist {
-                                        it.copy(
-                                            providers = form.providers,
-                                            baseUrl = form.baseUrl,
-                                            apiKey = form.apiKey,
-                                            model = form.model,
-                                        )
-                                    }
-                                },
-                            ) { Text("删除") }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-            }
-            item {
                 OutlinedTextField(
                     value = form.baseUrl,
                     onValueChange = { value ->
@@ -556,17 +487,21 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // 的窗口是天天要调的，所以在页面上直接给一档预设。
                 val model = form.model
                 val window = form.contextWindowFor(model)
+                var customOpen by remember { mutableStateOf(false) }
+                val presetIndex = CONTEXT_PRESETS.indexOfFirst { it.first == window }
                 LabeledBlock(
                     label = "上下文窗口",
                     hint = "只影响当前模型（$model）：超过这个长度就丢掉最早的对话，不限则整段发过去。",
                 ) {
                     SegmentedPill(
-                        options = CONTEXT_PRESETS.map { it.second },
-                        // 存了个预设之外的值时停在「不限」，下面那行把真实值说出来。
-                        selectedIndex = CONTEXT_PRESETS
-                            .indexOfFirst { it.first == window }
-                            .coerceAtLeast(0),
+                        options = CONTEXT_PRESETS.map { it.second } + "自定义",
+                        // 存了个预设之外的值时停在「自定义」，下面那行把真实值说出来。
+                        selectedIndex = if (presetIndex >= 0) presetIndex else CONTEXT_PRESETS.size,
                         onSelect = { index ->
+                            if (index == CONTEXT_PRESETS.size) {
+                                customOpen = true
+                                return@SegmentedPill
+                            }
                             val tokens = CONTEXT_PRESETS[index].first
                             // Draft first, disk second: the window belongs to the model and
                             // lands immediately, but routing it through the draft keeps
@@ -590,7 +525,157 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         )
                     }
                 }
+                if (customOpen) {
+                    ContextCustomDialog(
+                        current = window,
+                        onDismiss = { customOpen = false },
+                        onConfirm = { tokens ->
+                            customOpen = false
+                            form = form.copy(
+                                modelContexts = if (tokens <= 0) {
+                                    form.modelContexts - model
+                                } else {
+                                    form.modelContexts + (model to tokens)
+                                },
+                            )
+                            scope.persist { it.copy(modelContexts = form.modelContexts) }
+                        },
+                    )
+                }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
+                // The provider row: one chip per endpoint, the active one filled, plus
+                // 新建. Renaming and deleting ride each chip's own long-press menu, so
+                // the row stays a row. It sits after the context presets, in the field
+                // order the page keeps.
+                if (form.providers.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        form.providers.forEach { provider ->
+                            var menuOpen by remember { mutableStateOf(false) }
+                            var renaming by remember { mutableStateOf(false) }
+                            Box {
+                                FilterChip(
+                                    selected = provider.id == selected?.id,
+                                    onClick = {
+                                        selectedId = provider.id
+                                        form = form.copy(
+                                            baseUrl = provider.baseUrl,
+                                            apiKey = provider.apiKey,
+                                            model = provider.enabled.firstOrNull() ?: form.model,
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = provider.label,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.widthIn(max = 110.dp),
+                                        )
+                                    },
+                                    modifier = Modifier.combinedClickable(
+                                        onClick = {
+                                            selectedId = provider.id
+                                            form = form.copy(
+                                                baseUrl = provider.baseUrl,
+                                                apiKey = provider.apiKey,
+                                                model = provider.enabled.firstOrNull() ?: form.model,
+                                            )
+                                        },
+                                        onLongClick = { menuOpen = true },
+                                    ),
+                                )
+                                DropdownMenu(
+                                    expanded = menuOpen,
+                                    onDismissRequest = { menuOpen = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("重命名") },
+                                        onClick = {
+                                            menuOpen = false
+                                            renaming = true
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("删除") },
+                                        enabled = form.providers.size > 1,
+                                        onClick = {
+                                            menuOpen = false
+                                            val rest = form.providers.filterNot { it.id == provider.id }
+                                            val next = rest.first()
+                                            selectedId = next.id
+                                            form = form.copy(
+                                                providers = rest,
+                                                baseUrl = next.baseUrl,
+                                                apiKey = next.apiKey,
+                                                model = next.enabled.firstOrNull() ?: form.model,
+                                            )
+                                            // 同新建：删除也是结构操作，草稿里删了磁盘上还在会让
+                                            // 切换器继续列出已经不存在的提供方。
+                                            scope.persist {
+                                                it.copy(
+                                                    providers = form.providers,
+                                                    baseUrl = form.baseUrl,
+                                                    apiKey = form.apiKey,
+                                                    model = form.model,
+                                                )
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                            if (renaming) {
+                                RenameDialog(
+                                    initial = provider.name,
+                                    onDismiss = { renaming = false },
+                                    onConfirm = { name ->
+                                        renaming = false
+                                        form = form.mapProvider(provider.id) { it.copy(name = name) }
+                                        scope.persist {
+                                            it.copy(providers = form.providers)
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                        AssistChip(
+                            onClick = {
+                                val id = "p" + System.currentTimeMillis().toString(36)
+                                selectedId = id
+                                form = form.copy(
+                                    providers = form.providers + ProviderConfig(id = id),
+                                    baseUrl = "",
+                                    apiKey = "",
+                                    model = "",
+                                )
+                                // 点选即落盘：新建的提供方若只留在草稿里，离开页面就没了。
+                                scope.persist {
+                                    it.copy(
+                                        providers = form.providers,
+                                        baseUrl = form.baseUrl,
+                                        apiKey = form.apiKey,
+                                        model = form.model,
+                                    )
+                                }
+                            },
+                            label = { Text("新建") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Add,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            },
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
             }
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1376,6 +1461,63 @@ private fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
             }
         }
     }
+}
+
+/** A provider's new name, asked for in place: renaming is a structural edit like
+ * 新建/删除, so it lands on disk the moment it is confirmed. */
+@Composable
+private fun RenameDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名提供方") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name) }) { Text("确定") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+/** The token count behind the context window's 自定义 segment. */
+@Composable
+private fun ContextCustomDialog(
+    current: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    var text by remember { mutableStateOf(if (current > 0) current.toString() else "") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义上下文窗口") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { value -> text = value.filter { it.isDigit() }.take(9) },
+                label = { Text("tokens") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(text.toIntOrNull() ?: 0) }) { Text("确定") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable

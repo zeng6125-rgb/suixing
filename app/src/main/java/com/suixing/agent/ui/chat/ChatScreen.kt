@@ -134,6 +134,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
@@ -375,10 +376,12 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                             top = 84.dp,
                             // The composer floats over the list, so the list leaves room
                             // for it; otherwise the last line of a reply sits under the
-                            // pill. The keyboard lifts the composer, so the room has to
-                            // grow with it or the pill lands on the bubble the user is
-                            // reading.
-                            bottom = 168.dp + with(LocalDensity.current) { WindowInsets.ime.getBottom(this).toDp() },
+                            // pill. Fixed, not ime-grown: the keyboard lifts the whole
+                            // composer stack, and growing the padding with the IME cut
+                            // the list off above the keyboard and left a blank band in
+                            // its rounded corners. Content now scrolls behind the
+                            // capsule and the lifted stack.
+                            bottom = 168.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
@@ -387,6 +390,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                             MessageRow(
                                 row = row,
                                 assistantName = assistant?.label ?: "随行",
+                                assistantFace = assistant?.face ?: "",
                                 showReasoning = settings.showReasoning,
                                 expandReasoning = settings.expandReasoning,
                                 expandTools = settings.expandTools,
@@ -404,8 +408,8 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                                             is LivePart.Thinking -> if (settings.showReasoning) {
                                                 Part.Thinking(
                                                     text = part.text,
-                                                    tokens = state.stats?.thinkingTokens ?: 0,
-                                                    elapsedMs = state.stats?.elapsedMs ?: 0,
+                                                    tokens = part.tokens,
+                                                    elapsedMs = part.elapsedMs,
                                                 )
                                             } else {
                                                 null
@@ -602,8 +606,11 @@ private fun ChatTopBar(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
+            // The whole bar sits 4dp lower than the status strip: the discs read as
+            // floating over the transcript, not glued to the notch.
+            .padding(top = 4.dp)
             .height(56.dp)
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -612,21 +619,32 @@ private fun ChatTopBar(
             contentDescription = "打开侧边栏",
             onClick = { openDrawer?.invoke() },
         )
-        Text(
-            text = title,
-            style = titleBarStyle(),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            // 8dp of row spacing plus 4dp here = the 12dp the title keeps from the
-            // drawer disc.
+        Surface(
             modifier = Modifier
                 .weight(1f)
-                .padding(start = 4.dp),
-        )
+                .padding(start = 4.dp)
+                .shadow(
+                    elevation = 8.dp,
+                    shape = CircleShape,
+                    ambientColor = Color.Black.copy(alpha = 0.25f),
+                    spotColor = Color.Black.copy(alpha = 0.25f),
+                ),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Text(
+                text = title,
+                style = titleBarStyle(),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            )
+        }
         FlatIconButton(
             icon = Icons.Rounded.PictureInPictureAlt,
             contentDescription = if (consoleOn) "关闭悬浮窗" else "开启悬浮窗",
             onClick = onToggleConsole,
+            iconSize = 20.dp,
             tint = if (consoleOn) {
                 MaterialTheme.colorScheme.primary
             } else {
@@ -653,9 +671,14 @@ private fun titleBarStyle(): TextStyle {
 private fun ModelChip(label: String, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
+        modifier = Modifier.shadow(
+            elevation = 8.dp,
+            shape = CircleShape,
+            ambientColor = Color.Black.copy(alpha = 0.25f),
+            spotColor = Color.Black.copy(alpha = 0.25f),
+        ),
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shadowElevation = 2.dp,
     ) {
         Row(
             modifier = Modifier.padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
@@ -1100,6 +1123,7 @@ private fun groupRows(
 private fun MessageRow(
     row: ChatRow,
     assistantName: String,
+    assistantFace: String = "",
     showReasoning: Boolean,
     expandReasoning: Boolean,
     expandTools: Boolean,
@@ -1123,6 +1147,7 @@ private fun MessageRow(
             parts = if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking },
             streaming = false,
             name = assistantName,
+            face = assistantFace,
             branch = row.branch,
             usage = row.usage,
             contextWindow = contextWindow,
@@ -1138,6 +1163,7 @@ private fun MessageRow(
         else -> AssistantRow(
             parts = listOf(Part.Tools(listOf(ToolLine.of(row.message)))),
             streaming = false,
+            face = assistantFace,
         )
     }
 }
@@ -1230,6 +1256,8 @@ private fun AssistantRow(
     streaming: Boolean,
     /** The assistant's name, for the card's own header line. */
     name: String = "随行",
+    /** The persona's emoji face; blank falls back to the brand feather. */
+    face: String = "",
     /** The tool this reply is waiting on right now, so its card can say so live. */
     runningTool: String? = null,
     branch: Branch? = null,
@@ -1258,23 +1286,27 @@ private fun AssistantRow(
             // The avatar sits in the card's header rather than beside it: the reply is one
             // object, and an avatar floating outside the card made it two.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // The brand feather on a light disc: the emoji avatar it replaces
-                // rendered as a brown glyph and was not the mark the launcher ships.
+                // The persona's own face first: a persona the user gave an emoji keeps
+                // it, and only a blank face falls back to the brand feather.
                 Surface(
                     modifier = Modifier.size(24.dp),
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 ) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = FeatherIcon,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(15.dp),
-                        )
+                        if (face.isNotBlank()) {
+                            Text(text = face, fontSize = 14.sp, maxLines = 1)
+                        } else {
+                            Icon(
+                                imageVector = FeatherIcon,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(15.dp),
+                            )
+                        }
                     }
                 }
-                Spacer(Modifier.width(7.dp))
+                Spacer(Modifier.width(12.dp))
                 Text(
                     text = name,
                     style = metaStyle(),
@@ -1293,11 +1325,13 @@ private fun AssistantRow(
                     usage = usage,
                     live = null,
                     contextWindow = contextWindow,
+                    expandReasoning = expandReasoning,
+                    onEdit = onEdit,
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(12.dp))
             }
             val lastText = parts.indexOfLast { it is Part.Text }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
             parts.forEachIndexed { index, part ->
                 val last = index == parts.lastIndex
                 when (part) {
@@ -1484,13 +1518,11 @@ private fun ProcessCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     // A minimum, not a fixed height: nothing in this row may wrap, and a
-                    // larger 字号 should grow the row rather than clip the title.
-                    .heightIn(min = 44.dp)
+                    // larger 字号 should grow the row rather than clip the title. 40dp
+                    // with 8dp of vertical padding keeps the card a strip, not a slab.
+                    .heightIn(min = 40.dp)
                     .clickable(onClick = onToggle)
-                    // 12dp above and below the header row: with the old 44dp minimum the
-                    // card's title sat hard against the card edge and against whatever
-                    // was above it.
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -1502,7 +1534,9 @@ private fun ProcessCard(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize * (13f / 14f),
+                    ),
                     color = scheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1821,6 +1855,8 @@ private fun TurnSummary(
     usage: Usage?,
     live: StreamStats?,
     contextWindow: Int,
+    expandReasoning: Boolean = false,
+    onEdit: (StoredMessage) -> Unit = {},
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val thoughts = parts.filterIsInstance<Part.Thinking>()
@@ -1874,51 +1910,44 @@ private fun TurnSummary(
             }
         },
     ) {
-        // 8dp between the card's rows: the 3dp the old segment rows kept read as one
-        // cramped block, which is what 「贴在一起」 was about.
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            thoughts.forEachIndexed { index, thought ->
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "思考 ${index + 1}",
-                            style = MaterialTheme.typography.labelLarge,
-                            modifier = Modifier.weight(1f),
-                        )
-                        val meta = buildList {
-                            if (thought.tokens > 0) add("${thought.tokens} tokens")
-                            if (thought.elapsedMs > 0) add(formatDuration(thought.elapsedMs))
-                        }.joinToString(" · ")
-                        if (meta.isNotEmpty()) ProcessStatus(meta)
+        // Expanding means the run as it happened: every piece in arrival order —
+        // thinking blocks (foldable, full text), tool rows, every stretch of prose
+        // including the mid-run transitions, steer bubbles — the same sequence the
+        // live bubble drew. The usage detail closes the list.
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            parts.forEach { part ->
+                when (part) {
+                    is Part.Thinking -> ReasoningBlock(
+                        text = part.text,
+                        streaming = false,
+                        reasoningTokens = part.tokens,
+                        elapsedMs = part.elapsedMs,
+                        startExpanded = expandReasoning,
+                    )
+
+                    is Part.Tools -> {
+                        var openTool by remember { mutableStateOf<String?>(null) }
+                        part.calls.forEachIndexed { index, call ->
+                            // Name + status on the row, arguments and output behind its
+                            // own tap — the same two-level row the live bundle draws.
+                            val key = call.message?.id ?: "summary-$index"
+                            ToolRow(
+                                line = call,
+                                expanded = openTool == key,
+                                onToggle = { openTool = if (openTool == key) null else key },
+                            )
+                        }
                     }
-                    Spacer(Modifier.height(4.dp))
-                    if (thought.text.isBlank()) {
-                        // A round that reported tokens but no text must say so in words:
-                        // an empty box under the header is what the user photographed.
-                        Text(
-                            text = "（本段无思考文本，${thought.tokens} tokens）",
-                            style = thinkingStyle(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    } else {
-                        Text(
-                            text = thought.text,
-                            style = thinkingStyle(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+
+                    is Part.Text -> SelectionContainer { MarkdownText(text = part.text) }
+
+                    is Part.Steer -> Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        UserBubble(message = part.message, onEdit = onEdit)
                     }
                 }
-            }
-            var openTool by remember { mutableStateOf<String?>(null) }
-            calls.forEachIndexed { index, call ->
-                // Name + status on the row, arguments and output behind its own tap —
-                // the same two-level row the live bundle draws.
-                val key = call.message?.id ?: "summary-$index"
-                ToolRow(
-                    line = call,
-                    expanded = openTool == key,
-                    onToggle = { openTool = if (openTool == key) null else key },
-                )
             }
             val detail = buildList {
                 if (settled != null) {
@@ -2025,7 +2054,7 @@ private fun TurnScrubber(
     }
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
         horizontalAlignment = Alignment.End,
     ) {
         shown.forEach { turn ->
@@ -2039,7 +2068,10 @@ private fun TurnScrubber(
             ) {
                 Box(
                     Modifier
-                        .width(if (active) 24.dp else 16.dp)
+                        // Reached turns are the long lines, the ones still ahead short:
+                        // the column doubles as a progress readout. The current turn is
+                        // the brand-coloured one among the long lines.
+                        .width(if (turn <= current - 1) 24.dp else 12.dp)
                         .height(2.dp)
                         .clip(RoundedCornerShape(1.dp))
                         .background(
@@ -2055,7 +2087,7 @@ private fun TurnScrubber(
     }
 }
 
-private const val SCRUBBER_MAX = 30
+private const val SCRUBBER_MAX = 24
 
 /**
  * Where the context went.
@@ -2264,7 +2296,12 @@ private fun Composer(
             // the next row is, end-aligned, so it can never hide behind the pill.
             if (showJump) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // Clear of the scrubber column on the right edge: 4dp edge gap +
+                        // 24dp longest line + 12dp of air, so the disc never sits on a
+                        // turn line.
+                        .padding(end = 40.dp),
                     horizontalArrangement = Arrangement.End,
                 ) {
                     CircleActionButton(
@@ -2290,7 +2327,15 @@ private fun Composer(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 4.dp, end = 4.dp, bottom = 8.dp),
+                        // 16dp of air above when this line opens the stack: it then sits
+                        // under the transcript's last card, not against it. With the jump
+                        // disc above, that disc's own 12dp spacer is the gap.
+                        .padding(
+                            start = 4.dp,
+                            end = 4.dp,
+                            top = if (showJump) 0.dp else 16.dp,
+                            bottom = 4.dp,
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (statusText.isNotEmpty()) {
@@ -2325,7 +2370,7 @@ private fun Composer(
             }
             // The pill row: model and 思考强度 side by side, both write-through.
             Row(
-                modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
+                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
