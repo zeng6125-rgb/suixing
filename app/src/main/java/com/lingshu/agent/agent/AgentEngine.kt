@@ -29,6 +29,9 @@ import kotlin.coroutines.cancellation.CancellationException
 sealed interface AgentEvent {
     data class TextDelta(val text: String) : AgentEvent
 
+    /** The model's thinking, when the endpoint streams it apart from the answer. */
+    data class ReasoningDelta(val text: String) : AgentEvent
+
     data class AssistantMessage(val message: StoredMessage) : AgentEvent
 
     data class ToolStarted(val name: String, val args: String) : AgentEvent
@@ -119,9 +122,14 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
         var round = 0
         while (round < maxRounds) {
             round++
-            val turn = llm.complete(settings, wire, registry.all().map { it.spec }) { piece ->
-                onEvent(AgentEvent.TextDelta(piece))
-            }
+            val turn = llm.complete(
+                settings = settings,
+                messages = wire,
+                tools = registry.all().map { it.spec },
+                onDelta = { piece -> onEvent(AgentEvent.TextDelta(piece)) },
+                onReasoning = { piece -> onEvent(AgentEvent.ReasoningDelta(piece)) },
+            )
+            val thinking = turn.reasoning.takeIf { it.isNotBlank() }
             // A truncated turn can end mid-tool-call, so say so instead of silently
             // presenting half an answer as a finished one.
             if (turn.finishReason == "length") {
@@ -132,6 +140,7 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
                     id = UUID.randomUUID().toString(),
                     role = Roles.ASSISTANT,
                     text = turn.text,
+                    reasoning = thinking,
                 )
                 produced += assistant
                 onEvent(AgentEvent.AssistantMessage(assistant))
@@ -142,6 +151,7 @@ class AgentEngine(private val llm: LlmClient = LlmClient()) {
                 id = UUID.randomUUID().toString(),
                 role = Roles.ASSISTANT,
                 text = turn.text,
+                reasoning = thinking,
                 toolCalls = turn.toolCalls.map { StoredToolCall(it.id, it.name, it.arguments) },
             )
             produced += assistant

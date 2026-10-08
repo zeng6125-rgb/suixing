@@ -26,6 +26,44 @@ enum class ApprovalMode {
     DENY,
 }
 
+/**
+ * One OpenAI-compatible endpoint the user set up.
+ *
+ * Aggregating proxies (one LAN address that fronts many upstream vendors) report
+ * model ids like `deepseek/deepseek-chat` or `openai/gpt-4o`, which is why the
+ * picker groups by [modelGroupOf].
+ */
+@Serializable
+data class ProviderConfig(
+    val id: String,
+    val name: String = "",
+    val baseUrl: String = "",
+    val apiKey: String = "",
+    /** Everything `/models` reported for this endpoint. */
+    val models: List<String> = emptyList(),
+    /** The subset the user ticked. Only these appear in the model switcher. */
+    val enabled: List<String> = emptyList(),
+) {
+    val label: String get() = name.ifBlank { baseUrl.ifBlank { "未命名" } }
+
+    /** Host-only label, short enough for a chip: `192.168.0.50:8914`. */
+    val shortLabel: String get() = name.ifBlank {
+        baseUrl.substringAfter("://").substringBefore('/').ifBlank { "未命名" }
+    }
+}
+
+/**
+ * Which bucket a model id belongs to. An aggregating proxy prefixes ids with the
+ * upstream vendor (`deepseek/deepseek-chat`), so the prefix is the provider. Bare
+ * ids have no owner and land in 其他.
+ */
+fun modelGroupOf(modelId: String): String =
+    modelId.substringBefore('/', "").trim().ifBlank { "其他" }
+
+/** Groups ids by [modelGroupOf], keeping the original order of both levels. */
+fun groupModels(ids: List<String>): List<Pair<String, List<String>>> =
+    ids.groupBy(::modelGroupOf).toList()
+
 @Serializable
 data class AppSettings(
     val baseUrl: String = "https://api.deepseek.com/v1",
@@ -65,8 +103,25 @@ data class AppSettings(
     val searchApiKey: String = "",
     /** Read every finished reply out loud through the system TTS engine. */
     val speakReplies: Boolean = false,
+    /**
+     * Every endpoint the user set up. [baseUrl] / [apiKey] / [model] above stay the
+     * *active* triple, so switching models is a single copy() and nothing else in
+     * the app has to know that providers exist.
+     */
+    val providers: List<ProviderConfig> = emptyList(),
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
+
+    /** The provider the active triple points at, matched on address. */
+    fun activeProvider(): ProviderConfig? =
+        providers.firstOrNull { it.baseUrl.trim().trimEnd('/') == baseUrl.trim().trimEnd('/') }
+
+    /** Every (provider, model) pair the user ticked anywhere, for the switcher. */
+    fun enabledModels(): List<Pair<ProviderConfig, String>> =
+        providers.flatMap { provider -> provider.enabled.map { provider to it } }
+
+    /** The active model with its provider prefix stripped, for display. */
+    val shortModel: String get() = model.substringAfter('/')
 }
 
 const val DEFAULT_SYSTEM_PROMPT = """你是灵枢，运行在用户安卓手机上的智能体。
@@ -91,7 +146,7 @@ class SettingsRepository(private val context: Context) {
         } else {
             runCatching { json.decodeFromString<AppSettings>(raw) }.getOrElse { AppSettings() }
         }
-    }
+    }.map { it.migrated() }
 
     suspend fun current(): AppSettings = flow.first()
 
@@ -104,4 +159,22 @@ class SettingsRepository(private val context: Context) {
     suspend fun update(block: (AppSettings) -> AppSettings) {
         save(block(current()))
     }
+}
+
+/**
+ * Settings written before providers existed only have the flat `baseUrl` /
+ * `apiKey` / `model` triple. Wrap that in a single provider so the picker and the
+ * switcher have something to show without the user re-entering anything.
+ */
+private fun AppSettings.migrated(): AppSettings {
+    if (providers.isNotEmpty() || baseUrl.isBlank()) return this
+    val seeded = ProviderConfig(
+        id = "default",
+        name = "默认",
+        baseUrl = baseUrl,
+        apiKey = apiKey,
+        models = listOf(model).filter { it.isNotBlank() },
+        enabled = listOf(model).filter { it.isNotBlank() },
+    )
+    return copy(providers = listOf(seeded))
 }

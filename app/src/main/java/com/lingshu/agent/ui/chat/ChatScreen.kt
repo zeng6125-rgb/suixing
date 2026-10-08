@@ -41,6 +41,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -87,6 +89,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingshu.agent.data.AppSettings
 import com.lingshu.agent.data.Conversation
+import com.lingshu.agent.data.ProviderConfig
 import com.lingshu.agent.data.Roles
 import com.lingshu.agent.data.StoredMessage
 import com.lingshu.agent.core.Core
@@ -132,7 +135,23 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
         }
     }
 
-    val itemCount = state.messages.size + if (state.streaming.isNotEmpty()) 1 else 0
+    // A tool-only assistant turn carries no text. Drawing its bubble anyway is what
+    // left the stray empty bubbles in the transcript, so those messages are dropped
+    // here and the time labels are computed over what actually renders.
+    val visible = remember(state.messages) {
+        val rows = mutableListOf<ChatRow>()
+        var previous: StoredMessage? = null
+        state.messages.forEach { message ->
+            if (message.isVisible()) {
+                rows += ChatRow(message, needsTimeLabel(previous, message))
+                previous = message
+            }
+        }
+        rows
+    }
+    val live = state.streaming.isNotEmpty() || state.reasoning.isNotEmpty()
+
+    val itemCount = visible.size + if (live) 1 else 0
     LaunchedEffect(itemCount) {
         if (itemCount > 0) listState.scrollToItem(itemCount - 1)
     }
@@ -143,10 +162,22 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
             ChatHeader(
                 title = state.title,
                 subtitle = if (settings.configured) settings.model else "还没配置模型",
+                settings = settings,
                 conversations = conversations,
                 onOpen = { viewModel.openConversation(it) },
                 onDelete = { viewModel.deleteConversation(it) },
                 onNew = { viewModel.newConversation() },
+                onPickModel = { provider, model ->
+                    scope.launch {
+                        Core.settings.update {
+                            it.copy(
+                                baseUrl = provider.baseUrl,
+                                apiKey = provider.apiKey,
+                                model = model,
+                            )
+                        }
+                    }
+                },
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -180,7 +211,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
             state.error?.let { message ->
                 ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
             }
-            if (state.messages.isEmpty() && state.streaming.isEmpty()) {
+            if (visible.isEmpty() && !live) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     EmptyHero(onPick = { input = it })
                 }
@@ -191,16 +222,17 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    itemsIndexed(state.messages, key = { _, message -> message.id }) { index, message ->
-                        val previous = state.messages.getOrNull(index - 1)
-                        if (needsTimeLabel(previous, message)) {
-                            TimeLabel(message.timestamp)
-                        }
-                        MessageRow(message)
+                    itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
+                        if (row.showTimeLabel) TimeLabel(row.message.timestamp)
+                        MessageRow(row.message)
                     }
-                    if (state.streaming.isNotEmpty()) {
+                    if (live) {
                         item(key = "streaming") {
-                            AssistantRow(text = state.streaming, streaming = true)
+                            AssistantRow(
+                                text = state.streaming,
+                                reasoning = state.reasoning,
+                                streaming = true,
+                            )
                         }
                     }
                 }
@@ -213,12 +245,15 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
 private fun ChatHeader(
     title: String,
     subtitle: String,
+    settings: AppSettings,
     conversations: List<Conversation>,
     onOpen: (Conversation) -> Unit,
     onDelete: (Conversation) -> Unit,
     onNew: () -> Unit,
+    onPickModel: (ProviderConfig, String) -> Unit,
 ) {
     var historyOpen by remember { mutableStateOf(false) }
+    var modelsOpen by remember { mutableStateOf(false) }
     LingshuTopBar(
         title = title,
         subtitle = subtitle,
@@ -232,6 +267,21 @@ private fun ChatHeader(
             }
         },
         actions = {
+            Box {
+                ModelChip(
+                    label = settings.shortModel.ifBlank { "选模型" },
+                    onClick = { modelsOpen = true },
+                )
+                DropdownMenu(
+                    expanded = modelsOpen,
+                    onDismissRequest = { modelsOpen = false },
+                ) {
+                    ModelMenu(settings = settings) { provider, model ->
+                        onPickModel(provider, model)
+                        modelsOpen = false
+                    }
+                }
+            }
             Box {
                 IconButton(onClick = { historyOpen = true }) {
                     Icon(Icons.Filled.History, contentDescription = "历史会话")
@@ -273,6 +323,78 @@ private fun ChatHeader(
             }
         },
     )
+}
+
+/** The model name in the header; tapping it opens the switcher. */
+@Composable
+private fun ModelChip(label: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 11.dp, end = 5.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 84.dp),
+            )
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowDown,
+                contentDescription = "切换模型",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Every model the user ticked, grouped by the provider it came from, so switching
+ * between a LAN proxy's upstream vendors takes two taps.
+ */
+@Composable
+private fun ModelMenu(settings: AppSettings, onPick: (ProviderConfig, String) -> Unit) {
+    val groups = settings.enabledModels().groupBy { it.first.id }.values
+    if (groups.isEmpty()) {
+        DropdownMenuItem(
+            text = { Text("还没启用模型，去「设置」里拉取") },
+            onClick = {},
+        )
+        return
+    }
+    groups.forEach { pairs ->
+        val provider = pairs.first().first
+        Text(
+            text = provider.label,
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        pairs.forEach { (owner, modelId) ->
+            val active = modelId == settings.model &&
+                owner.baseUrl.trimEnd('/') == settings.baseUrl.trimEnd('/')
+            DropdownMenuItem(
+                text = { Text(modelId, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                trailingIcon = {
+                    if (active) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "当前",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                },
+                onClick = { onPick(owner, modelId) },
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -350,6 +472,23 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
     }
 }
 
+/** One row of the transcript, plus whether it opens a new time bucket. */
+private data class ChatRow(val message: StoredMessage, val showTimeLabel: Boolean)
+
+/**
+ * Whether a stored message has anything to draw at all.
+ *
+ * A turn that only asked for tools stores an assistant message with empty text. It
+ * still belongs in the wire history, but drawing its bubble is what produced the
+ * stray empty bubbles that showed up between tool chips.
+ */
+private fun StoredMessage.isVisible(): Boolean = when (role) {
+    Roles.USER -> text.isNotBlank() || imageBase64 != null
+    Roles.ASSISTANT -> text.isNotBlank()
+    Roles.TOOL -> true
+    else -> false
+}
+
 @Composable
 private fun MessageRow(message: StoredMessage) {
     when (message.role) {
@@ -357,7 +496,11 @@ private fun MessageRow(message: StoredMessage) {
             UserBubble(message)
         }
 
-        Roles.ASSISTANT -> AssistantRow(text = message.text, streaming = false)
+        Roles.ASSISTANT -> AssistantRow(
+            text = message.text,
+            reasoning = message.reasoning.orEmpty(),
+            streaming = false,
+        )
 
         Roles.TOOL -> ToolChip(message)
 
@@ -383,7 +526,7 @@ private fun UserBubble(message: StoredMessage) {
 }
 
 @Composable
-private fun AssistantRow(text: String, streaming: Boolean) {
+private fun AssistantRow(text: String, streaming: Boolean, reasoning: String = "") {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         Surface(
             modifier = Modifier.size(28.dp),
@@ -399,17 +542,81 @@ private fun AssistantRow(text: String, streaming: Boolean) {
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
         ) {
             Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
-                if (text.isBlank() && streaming) {
-                    TypingDots()
-                } else {
-                    SelectionContainer {
-                        Text(text, style = MaterialTheme.typography.bodyLarge)
-                    }
-                    if (streaming) {
-                        Spacer(Modifier.height(4.dp))
-                        BlinkingCursor()
+                if (reasoning.isNotBlank()) {
+                    // The thinking is only "live" while no answer text has arrived yet.
+                    ReasoningBlock(reasoning, streaming = streaming && text.isBlank())
+                    if (text.isNotBlank() || streaming) Spacer(Modifier.height(10.dp))
+                }
+                when {
+                    text.isBlank() && streaming -> TypingDots()
+                    text.isBlank() -> Unit
+                    else -> {
+                        SelectionContainer {
+                            Text(text, style = MaterialTheme.typography.bodyLarge)
+                        }
+                        if (streaming) {
+                            Spacer(Modifier.height(4.dp))
+                            BlinkingCursor()
+                        }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The model's thinking. Open while it streams and collapsed once the answer is
+ * there, but tappable either way so a long chain of thought never buries the reply.
+ */
+@Composable
+private fun ReasoningBlock(text: String, streaming: Boolean) {
+    var expanded by remember { mutableStateOf(streaming) }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(Modifier.padding(horizontal = 11.dp, vertical = 9.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Psychology,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = if (streaming) "正在思考…" else "思考过程",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    imageVector = if (expanded) {
+                        Icons.Filled.KeyboardArrowUp
+                    } else {
+                        Icons.Filled.KeyboardArrowDown
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+            if (expanded) {
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 60,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

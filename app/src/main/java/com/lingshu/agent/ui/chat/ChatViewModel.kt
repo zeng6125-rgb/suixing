@@ -25,6 +25,8 @@ data class ChatUiState(
     val title: String = "新会话",
     val messages: List<StoredMessage> = emptyList(),
     val streaming: String = "",
+    /** The thinking streamed ahead of [streaming], shown in its own block. */
+    val reasoning: String = "",
     val running: Boolean = false,
     val status: String = "",
     val error: String? = null,
@@ -115,6 +117,7 @@ class ChatViewModel : ViewModel() {
                     messages = it.messages + user,
                     running = true,
                     streaming = "",
+                    reasoning = "",
                     status = "正在思考…",
                     error = null,
                 )
@@ -138,15 +141,16 @@ class ChatViewModel : ViewModel() {
                         ?.text
                         ?.let { Core.speaker.speak(it) }
                 }
-                _state.update { it.copy(running = false, streaming = "", status = "") }
+                _state.update { it.copy(running = false, streaming = "", reasoning = "", status = "") }
             } catch (cancellation: CancellationException) {
-                _state.update { it.copy(running = false, streaming = "", status = "已停止") }
+                _state.update { it.copy(running = false, streaming = "", reasoning = "", status = "已停止") }
                 throw cancellation
             } catch (error: Throwable) {
                 _state.update {
                     it.copy(
                         running = false,
                         streaming = "",
+                        reasoning = "",
                         status = "",
                         error = error.message ?: error::class.java.simpleName,
                     )
@@ -177,8 +181,17 @@ class ChatViewModel : ViewModel() {
             is AgentEvent.TextDelta ->
                 _state.update { it.copy(streaming = it.streaming + event.text, status = "") }
 
+            is AgentEvent.ReasoningDelta ->
+                _state.update { it.copy(reasoning = it.reasoning + event.text, status = "") }
+
             is AgentEvent.AssistantMessage ->
-                _state.update { it.copy(messages = it.messages + event.message, streaming = "") }
+                _state.update {
+                    it.copy(
+                        messages = it.messages + event.message,
+                        streaming = "",
+                        reasoning = "",
+                    )
+                }
 
             is AgentEvent.ToolStarted ->
                 _state.update { it.copy(status = "调用 ${event.name}") }

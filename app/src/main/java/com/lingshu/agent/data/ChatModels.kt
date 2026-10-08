@@ -7,6 +7,8 @@ data class StoredMessage(
     val id: String,
     val role: String,
     val text: String = "",
+    /** The model's thinking, when the endpoint streams it apart from the answer. */
+    val reasoning: String? = null,
     val toolName: String? = null,
     val toolArgs: String? = null,
     val toolOutput: String? = null,

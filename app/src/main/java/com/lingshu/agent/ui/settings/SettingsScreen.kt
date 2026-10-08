@@ -1,7 +1,7 @@
 package com.lingshu.agent.ui.settings
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,12 +14,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.EditNote
@@ -32,8 +33,11 @@ import androidx.compose.material.icons.outlined.TravelExplore
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,12 +62,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingshu.agent.core.Core
 import com.lingshu.agent.data.AppSettings
 import com.lingshu.agent.data.ApprovalMode
+import com.lingshu.agent.data.ProviderConfig
+import com.lingshu.agent.data.groupModels
 import com.lingshu.agent.llm.ChatMessage
 import com.lingshu.agent.llm.LlmClient
 import com.lingshu.agent.llm.describeError
@@ -80,6 +86,12 @@ import kotlinx.coroutines.launch
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
 
+/** Rewrites one saved endpoint in place; a null or unknown id is a no-op. */
+private fun AppSettings.mapProvider(id: String?, block: (ProviderConfig) -> ProviderConfig): AppSettings {
+    if (id == null || providers.none { it.id == id }) return this
+    return copy(providers = providers.map { if (it.id == id) block(it) else it })
+}
+
 @Composable
 fun SettingsScreen() {
     val stored by Core.settings.flow.collectAsState(initial = AppSettings())
@@ -89,10 +101,14 @@ fun SettingsScreen() {
     val client = remember { LlmClient() }
     var testing by remember { mutableStateOf(false) }
     var loadingModels by remember { mutableStateOf(false) }
-    var models by remember { mutableStateOf<List<String>>(emptyList()) }
     var pickerOpen by remember { mutableStateOf(false) }
     var outcome by remember { mutableStateOf<TestOutcome?>(null) }
+    var selectedId by remember(stored) {
+        mutableStateOf(stored.activeProvider()?.id ?: stored.providers.firstOrNull()?.id.orEmpty())
+    }
     val dirty = form != stored
+    // The endpoint the model fields edit; tapping a chip also makes it the active one.
+    val selected = form.providers.firstOrNull { it.id == selectedId } ?: form.providers.firstOrNull()
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -176,9 +192,79 @@ fun SettingsScreen() {
                 icon = Icons.Outlined.SmartToy,
                 subtitle = "OpenAI 兼容接口",
             ) {
+                if (form.providers.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        form.providers.forEach { provider ->
+                            FilterChip(
+                                selected = provider.id == selected?.id,
+                                onClick = {
+                                    selectedId = provider.id
+                                    form = form.copy(
+                                        baseUrl = provider.baseUrl,
+                                        apiKey = provider.apiKey,
+                                        model = provider.enabled.firstOrNull() ?: form.model,
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = provider.shortLabel,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.widthIn(max = 110.dp),
+                                    )
+                                },
+                            )
+                        }
+                        AssistChip(
+                            onClick = {
+                                val id = "p" + System.currentTimeMillis().toString(36)
+                                selectedId = id
+                                form = form.copy(
+                                    providers = form.providers + ProviderConfig(id = id),
+                                    baseUrl = "",
+                                    apiKey = "",
+                                    model = "",
+                                )
+                            },
+                            label = { Text("新建") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Outlined.Add,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            },
+                        )
+                        if (form.providers.size > 1 && selected != null) {
+                            TextButton(
+                                onClick = {
+                                    val rest = form.providers.filterNot { it.id == selected.id }
+                                    val next = rest.first()
+                                    selectedId = next.id
+                                    form = form.copy(
+                                        providers = rest,
+                                        baseUrl = next.baseUrl,
+                                        apiKey = next.apiKey,
+                                        model = next.enabled.firstOrNull() ?: form.model,
+                                    )
+                                },
+                            ) { Text("删除") }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
                 OutlinedTextField(
                     value = form.baseUrl,
-                    onValueChange = { form = form.copy(baseUrl = it) },
+                    onValueChange = { value ->
+                        form = form.copy(baseUrl = value)
+                            .mapProvider(selected?.id) { it.copy(baseUrl = value) }
+                    },
                     label = { Text("接口地址") },
                     supportingText = { Text("例如 https://api.deepseek.com/v1") },
                     singleLine = true,
@@ -201,7 +287,10 @@ fun SettingsScreen() {
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = form.apiKey,
-                    onValueChange = { form = form.copy(apiKey = it) },
+                    onValueChange = { value ->
+                        form = form.copy(apiKey = value)
+                            .mapProvider(selected?.id) { it.copy(apiKey = value) }
+                    },
                     label = { Text("API Key") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
@@ -212,7 +301,7 @@ fun SettingsScreen() {
                 OutlinedTextField(
                     value = form.model,
                     onValueChange = { form = form.copy(model = it) },
-                    label = { Text("模型") },
+                    label = { Text("当前模型") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth(),
@@ -226,9 +315,14 @@ fun SettingsScreen() {
                                 loadingModels = true
                                 outcome = null
                                 runCatching { client.listModels(form) }.fold(
-                                    onSuccess = {
-                                        models = it
-                                        pickerOpen = true
+                                    onSuccess = { fetched ->
+                                        val merged = (fetched + selected?.models.orEmpty()).distinct()
+                                        form = form.mapProvider(selected?.id) { it.copy(models = merged) }
+                                        if (merged.isEmpty()) {
+                                            outcome = TestOutcome(false, "接口没返回任何模型，直接手填吧。")
+                                        } else {
+                                            pickerOpen = true
+                                        }
                                     },
                                     onFailure = { outcome = TestOutcome(false, describeError(it)) },
                                 )
@@ -248,10 +342,16 @@ fun SettingsScreen() {
                         Spacer(Modifier.width(6.dp))
                         Text(if (loadingModels) "获取中…" else "获取模型列表")
                     }
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "已启用 ${selected?.enabled?.size ?: 0} 个",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "从接口的 /models 拉一份可用模型，省得手打；也可以直接填。",
+                    text = "从接口的 /models 拉一份清单，勾选后按提供方分组出现在顶部的模型切换里。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -448,12 +548,15 @@ fun SettingsScreen() {
         }
     }
 
-    if (pickerOpen && models.isNotEmpty()) {
+    if (pickerOpen && selected != null && selected.models.isNotEmpty()) {
         ModelPickerDialog(
-            models = models,
-            current = form.model,
-            onPick = {
-                form = form.copy(model = it)
+            models = selected.models,
+            enabled = selected.enabled,
+            onConfirm = { picked ->
+                form = form.mapProvider(selected.id) { it.copy(enabled = picked) }
+                if (form.model.isBlank() && picked.isNotEmpty()) {
+                    form = form.copy(model = picked.first())
+                }
                 pickerOpen = false
             },
             onDismiss = { pickerOpen = false },
@@ -495,17 +598,26 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
     }
 }
 
-/** Picks one of the ids the endpoint reported, with a filter for long lists. */
+/**
+ * Multi-select over everything `/models` reported, grouped by the upstream vendor
+ * that an aggregating proxy prefixes onto each id (`deepseek/deepseek-chat`).
+ */
 @Composable
 private fun ModelPickerDialog(
     models: List<String>,
-    current: String,
-    onPick: (String) -> Unit,
+    enabled: List<String>,
+    onConfirm: (List<String>) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
-    val shown = remember(models, query) {
-        if (query.isBlank()) models else models.filter { it.contains(query.trim(), ignoreCase = true) }
+    var picked by remember(models) { mutableStateOf(enabled.toSet()) }
+    val groups = remember(models, query) {
+        val shown = if (query.isBlank()) {
+            models
+        } else {
+            models.filter { it.contains(query.trim(), ignoreCase = true) }
+        }
+        groupModels(shown)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -523,53 +635,98 @@ private fun ModelPickerDialog(
                     )
                     Spacer(Modifier.height(8.dp))
                 }
-                if (shown.isEmpty()) {
+                if (groups.isEmpty()) {
                     Text(
                         text = "没有匹配的模型。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
-                    LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
-                        items(shown) { id ->
-                            val selected = id == current
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(MaterialTheme.shapes.small)
-                                    .background(
-                                        if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                                    )
-                                    .clickable { onPick(id) }
-                                    .padding(horizontal = 12.dp, vertical = 11.dp),
-                            ) {
-                                Text(
-                                    text = id,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (selected) {
-                                        MaterialTheme.colorScheme.onPrimaryContainer
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface
+                    LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
+                        groups.forEach { (group, ids) ->
+                            item(key = "group-$group") {
+                                GroupHeader(
+                                    group = group,
+                                    ids = ids,
+                                    picked = picked,
+                                    onToggle = { pickAll ->
+                                        picked = if (pickAll) picked + ids else picked - ids.toSet()
                                     },
-                                    modifier = Modifier.weight(1f),
                                 )
-                                if (selected) {
-                                    Icon(
-                                        imageVector = Icons.Outlined.Check,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(17.dp),
-                                    )
-                                }
+                            }
+                            items(ids, key = { "model-$it" }) { id ->
+                                ModelCheckRow(
+                                    id = id,
+                                    checked = id in picked,
+                                    onToggle = {
+                                        picked = if (id in picked) picked - id else picked + id
+                                    },
+                                )
                             }
                         }
                     }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(models.filter { it in picked }) }) {
+                Text("确定（${picked.size}）")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/** One upstream vendor's slice of the list, with a select-all shortcut. */
+@Composable
+private fun GroupHeader(
+    group: String,
+    ids: List<String>,
+    picked: Set<String>,
+    onToggle: (Boolean) -> Unit,
+) {
+    val all = ids.all { it in picked }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = group,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = { onToggle(!all) },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Text(
+                text = if (all) "取消全选" else "全选",
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModelCheckRow(id: String, checked: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onToggle)
+            .padding(end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = { onToggle() })
+        Text(
+            text = id,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
 }
 
 @Composable

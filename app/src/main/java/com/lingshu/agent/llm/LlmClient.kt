@@ -60,6 +60,8 @@ data class AssistantTurn(
     val text: String,
     val toolCalls: List<ToolCallRequest>,
     val finishReason: String?,
+    /** The thinking the endpoint streamed apart from the answer, if any. */
+    val reasoning: String = "",
 )
 
 class LlmException(message: String) : Exception(message)
@@ -106,6 +108,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         messages: List<ChatMessage>,
         tools: List<ToolSpec>,
         onDelta: (String) -> Unit = {},
+        onReasoning: (String) -> Unit = {},
     ): AssistantTurn = withContext(Dispatchers.IO) {
         val url = endpoint(settings.baseUrl)
         val payload = buildJsonObject {
@@ -132,6 +135,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                 throw LlmException(friendlyHttp(response.code, body?.string().orEmpty()))
             }
             val text = StringBuilder()
+            val thinking = StringBuilder()
             val calls = LinkedHashMap<Int, MutableToolCall>()
             var finishReason: String? = null
             val source = body.source()
@@ -151,6 +155,16 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                     if (element !is JsonNull) finishReason = element.jsonPrimitive.content
                 }
                 val delta = choice["delta"]?.jsonObject ?: continue
+                // Reasoning models stream their thinking in a side channel. DeepSeek
+                // and most Chinese gateways use `reasoning_content`; OpenRouter and
+                // the Anthropic-compatible shims use `reasoning`. Both may also
+                // arrive as a structured block, which has no plain-text form here.
+                (delta["reasoning_content"].asPlainText() ?: delta["reasoning"].asPlainText())
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { piece ->
+                        thinking.append(piece)
+                        onReasoning(piece)
+                    }
                 delta["content"]?.let { element ->
                     if (element !is JsonNull) {
                         val piece = element.jsonPrimitive.content
@@ -179,7 +193,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         arguments = call.arguments.toString().ifBlank { "{}" },
                     )
                 }
-            AssistantTurn(text.toString(), requests, finishReason)
+            AssistantTurn(text.toString(), requests, finishReason, thinking.toString())
         }
     }
 
@@ -345,6 +359,14 @@ internal fun extractApiError(body: String): String {
 
 private fun JsonElement?.asText(): String? =
     (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content?.takeIf { it.isNotBlank() }
+
+/**
+ * A streamed text fragment. Unlike [asText] this keeps blanks, and it returns null
+ * for anything that is not a plain string, so an endpoint that sends its reasoning
+ * as a structured block is skipped rather than crashing the parse.
+ */
+private fun JsonElement?.asPlainText(): String? =
+    (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content
 
 /** Turns an HTTP status into advice, not just a number. */
 internal fun friendlyHttp(code: Int, body: String): String {

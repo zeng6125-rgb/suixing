@@ -2,6 +2,7 @@ package com.lingshu.agent.ui.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -232,11 +235,16 @@ fun SegmentedPill(
 /**
  * A screen header with an optional gradient wash, so every tab opens with the
  * same visual anchor instead of a bare title bar.
+ *
+ * Pass [onSubtitleClick] to turn the subtitle into a control; it then renders in
+ * the accent colour with a chevron, which is how the chat header exposes the
+ * model switcher.
  */
 @Composable
 fun LingshuTopBar(
     title: String,
     subtitle: String? = null,
+    onSubtitleClick: (() -> Unit)? = null,
     leading: (@Composable () -> Unit)? = null,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
@@ -269,13 +277,35 @@ fun LingshuTopBar(
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (subtitle != null) {
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    val interactive = onSubtitleClick != null
+                    Row(
+                        modifier = if (interactive) {
+                            Modifier.clip(CircleShape).clickable(onClick = onSubtitleClick!!)
+                        } else {
+                            Modifier
+                        },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (interactive) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (interactive) {
+                            Icon(
+                                imageVector = Icons.Filled.ArrowDropDown,
+                                contentDescription = "切换",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
                 }
             }
             actions()
