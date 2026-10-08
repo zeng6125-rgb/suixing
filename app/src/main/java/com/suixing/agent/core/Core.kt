@@ -11,6 +11,7 @@ import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.TodoStore
+import com.suixing.agent.data.UsageStore
 import com.suixing.agent.mcp.McpManager
 import com.suixing.agent.service.SchedulerService
 import com.suixing.agent.skills.SkillStore
@@ -60,6 +61,10 @@ object Core {
     lateinit var schedules: ScheduleStore
         private set
 
+    /** Token usage aggregated from the chat transcripts; shared so one watermark serves all readers. */
+    lateinit var usage: UsageStore
+        private set
+
     lateinit var tools: ToolRegistry
         private set
     lateinit var mcp: McpManager
@@ -98,6 +103,7 @@ object Core {
             jobs = JobStore(File(appContext.filesDir, "jobs"), appScope)
             todos = TodoStore(File(appContext.filesDir, "todos.json"))
             schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))
+            usage = UsageStore(appContext)
             tools = ToolRegistry(
                 appContext, capabilities, skills, speaker, settings, memory, jobs, todos, schedules,
             )
