@@ -56,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.McpServerConfig
+import com.suixing.agent.mcp.MCP_MAX_RECONNECT_ATTEMPTS
 import com.suixing.agent.mcp.McpServerState
 import com.suixing.agent.mcp.McpStatus
 import com.suixing.agent.skills.Skill
@@ -371,6 +372,14 @@ private fun McpSection(
                         onNotify("已连接 ${state.config.name}")
                     }
                 },
+                onReconnect = {
+                    // Manual retry from FAILED/RECONNECTING: reconnect() resets the
+                    // backoff counter and starts a fresh attempt immediately.
+                    scope.launch {
+                        Core.mcp.reconnect(state.config.name)
+                        onNotify("正在重连 ${state.config.name}")
+                    }
+                },
                 onDisconnect = {
                     scope.launch {
                         Core.mcp.disconnect(state.config.name)
@@ -416,6 +425,7 @@ private fun ServerCard(
     state: McpServerState,
     onToggleEnabled: (Boolean) -> Unit,
     onConnect: () -> Unit,
+    onReconnect: () -> Unit,
     onDisconnect: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -423,8 +433,9 @@ private fun ServerCard(
     val dark = LocalDarkTheme.current
     val tone = when (state.status) {
         McpStatus.READY -> Tone.OK
-        McpStatus.ERROR -> Tone.WARN
         McpStatus.CONNECTING -> Tone.INFO
+        McpStatus.RECONNECTING -> Tone.INFO
+        McpStatus.FAILED -> Tone.WARN
         McpStatus.DISCONNECTED -> Tone.OFF
     }
     SuixingCard(contentPadding = PaddingValues(16.dp)) {
@@ -475,12 +486,24 @@ private fun ServerCard(
                 tone = Tone.INFO,
             )
             Spacer(Modifier.weight(1f))
-            if (state.status == McpStatus.READY) {
-                TextButton(onClick = onDisconnect) { Text("断开") }
-                TextButton(onClick = onConnect) { Text("刷新工具") }
-            } else {
-                TextButton(onClick = onConnect, enabled = state.status != McpStatus.CONNECTING) {
-                    Text(if (state.status == McpStatus.CONNECTING) "连接中…" else "连接")
+            when (state.status) {
+                McpStatus.READY -> {
+                    TextButton(onClick = onDisconnect) { Text("断开") }
+                    TextButton(onClick = onConnect) { Text("刷新工具") }
+                }
+
+                // A dropped server keeps retrying on its own; 重连 lets the user
+                // reset the backoff and try again right now instead of waiting.
+                McpStatus.FAILED, McpStatus.RECONNECTING -> {
+                    TextButton(onClick = onReconnect) { Text("重连") }
+                }
+
+                McpStatus.CONNECTING -> {
+                    TextButton(onClick = onConnect, enabled = false) { Text("连接中…") }
+                }
+
+                McpStatus.DISCONNECTED -> {
+                    TextButton(onClick = onConnect) { Text("连接") }
                 }
             }
             IconButton(onClick = onEdit) {
@@ -496,8 +519,9 @@ private fun ServerCard(
 private fun McpServerState.statusLine(): String = when (status) {
     McpStatus.DISCONNECTED -> if (config.enabled) "未连接" else "已停用"
     McpStatus.CONNECTING -> "正在连接…"
+    McpStatus.RECONNECTING -> "重连中（第 $attempt/$MCP_MAX_RECONNECT_ATTEMPTS 次）…"
     McpStatus.READY -> "已就绪 · $toolCount 个工具${if (serverName.isBlank()) "" else " · $serverName"}"
-    McpStatus.ERROR -> "出错：${error.orEmpty()}"
+    McpStatus.FAILED -> "连接失败：${error.orEmpty()}"
 }
 
 @Composable
