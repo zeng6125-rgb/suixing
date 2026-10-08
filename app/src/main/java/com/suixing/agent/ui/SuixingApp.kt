@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.ShieldMoon
 import androidx.compose.material.icons.rounded.SmartToy
+import androidx.compose.material.icons.rounded.TaskAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -50,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -74,6 +76,7 @@ import androidx.navigation.navArgument
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
+import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
@@ -84,9 +87,12 @@ import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.SettingsScreen
+import com.suixing.agent.ui.tasks.TasksScreen
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import java.util.Locale
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 /**
  * The app shell.
@@ -163,6 +169,7 @@ fun SuixingApp() {
                 ) {
                     composable("chat") { ChatScreen(viewModel = chat) }
                     composable("files") { FilesScreen(onBack = { navController.popBackStack() }) }
+                    composable("tasks") { TasksScreen(onBack = { navController.popBackStack() }) }
                     composable("settings") {
                         SettingsScreen(
                             onOpen = push,
@@ -250,6 +257,16 @@ private fun BoxScope.Drawer(
     onNavigate: (String) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // The board changes behind our back (the agent writes it mid-run), so the count is
+    // re-read every time the drawer opens rather than cached for the process.
+    var todoCount by remember { mutableStateOf(0) }
+    LaunchedEffect(open) {
+        if (open) {
+            todoCount = withContext(Dispatchers.IO) {
+                Core.todos.read().count { it.status != TODO_COMPLETED }
+            }
+        }
+    }
 
     AnimatedVisibility(
         visible = open,
@@ -392,6 +409,14 @@ private fun BoxScope.Drawer(
                     onClick = onOpenAssistants,
                 )
                 DrawerAction(
+                    label = "任务",
+                    hint = "待办 · 进行中 · 已完成",
+                    icon = Icons.Rounded.TaskAlt,
+                    selected = route == "tasks",
+                    onClick = { onNavigate("tasks") },
+                    badge = if (todoCount > 0) "$todoCount" else null,
+                )
+                DrawerAction(
                     label = "文件",
                     hint = "浏览与编辑",
                     icon = Icons.Rounded.FolderOpen,
@@ -468,6 +493,7 @@ private fun DrawerAction(
     icon: ImageVector,
     selected: Boolean,
     onClick: () -> Unit,
+    badge: String? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
@@ -499,6 +525,13 @@ private fun DrawerAction(
                     text = hint,
                     style = MaterialTheme.typography.bodySmall,
                     color = scheme.onSurfaceVariant,
+                )
+            }
+            if (badge != null) {
+                Text(
+                    text = badge,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = scheme.primary,
                 )
             }
         }

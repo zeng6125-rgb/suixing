@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.TravelExplore
@@ -101,6 +102,7 @@ import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
+import com.suixing.agent.ui.usage.UsageScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -138,6 +140,7 @@ private enum class SettingsPage(val title: String) {
     APPEARANCE("外观"),
     NETWORK("网络与语音"),
     DATA("数据"),
+    USAGE("用量"),
 }
 
 /**
@@ -168,6 +171,7 @@ fun SettingsScreen(onOpen: (String) -> Unit, onBack: () -> Unit) {
         SettingsPage.APPEARANCE -> AppearanceSettingsPage(onBack = { page = null })
         SettingsPage.NETWORK -> NetworkVoiceSettingsPage(onBack = { page = null })
         SettingsPage.DATA -> DataSettingsPage(onBack = { page = null }, onOpen = onOpen)
+        SettingsPage.USAGE -> UsageScreen(onBack = { page = null })
     }
 }
 
@@ -235,6 +239,14 @@ private fun SettingsRoot(
                     summary = "搜索走哪里、回复读不读出来",
                     icon = Icons.Rounded.TravelExplore,
                     onClick = { onOpenPage(SettingsPage.NETWORK) },
+                )
+            }
+            item {
+                SettingsEntry(
+                    title = "用量",
+                    summary = "tokens · 30 日柱状 · 按模型",
+                    icon = Icons.Rounded.Insights,
+                    onClick = { onOpenPage(SettingsPage.USAGE) },
                 )
             }
             item {
