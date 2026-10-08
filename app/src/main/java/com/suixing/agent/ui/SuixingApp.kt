@@ -156,9 +156,14 @@ fun SuixingApp() {
                     popExitTransition = { fadeOut(tween(120)) },
                 ) {
                     composable("chat") { ChatScreen(viewModel = chat) }
-                    composable("files") { FilesScreen() }
-                    composable("settings") { SettingsScreen(onOpen = push) }
-                    composable("capability") { CapabilityScreen() }
+                    composable("files") { FilesScreen(onBack = { navController.popBackStack() }) }
+                    composable("settings") {
+                        SettingsScreen(
+                            onOpen = push,
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+                    composable("capability") { CapabilityScreen(onBack = { navController.popBackStack() }) }
                     composable(
                         route = "extension?tab={tab}",
                         arguments = listOf(
@@ -168,7 +173,10 @@ fun SuixingApp() {
                             },
                         ),
                     ) { entry ->
-                        ExtensionScreen(initialTab = entry.arguments?.getInt("tab") ?: 0)
+                        ExtensionScreen(
+                            initialTab = entry.arguments?.getInt("tab") ?: 0,
+                            onBack = { navController.popBackStack() },
+                        )
                     }
                 }
             }

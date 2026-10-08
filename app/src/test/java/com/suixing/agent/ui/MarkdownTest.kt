@@ -95,6 +95,39 @@ class MarkdownTest {
     }
 
     @Test
+    fun `a nested list becomes its own indented block`() {
+        assertEquals(
+            listOf<MdBlock>(
+                MdBlock.Bullet(listOf("a"), ordered = false, depth = 0),
+                MdBlock.Bullet(listOf("b"), ordered = false, depth = 1),
+            ),
+            parseMarkdown("- a\n  - b"),
+        )
+    }
+
+    @Test
+    fun `a tab indents one level like two spaces`() {
+        assertEquals(
+            listOf<MdBlock>(
+                MdBlock.Bullet(listOf("a"), ordered = false, depth = 0),
+                MdBlock.Bullet(listOf("b"), ordered = false, depth = 1),
+            ),
+            parseMarkdown("- a\n\t- b"),
+        )
+    }
+
+    @Test
+    fun `indentation deeper than four levels is capped`() {
+        assertEquals(
+            listOf<MdBlock>(
+                MdBlock.Bullet(listOf("a"), ordered = false, depth = 0),
+                MdBlock.Bullet(listOf("b"), ordered = false, depth = 4),
+            ),
+            parseMarkdown("- a\n" + " ".repeat(20) + "- b"),
+        )
+    }
+
+    @Test
     fun `fenced code keeps its language and body`() {
         assertEquals(
             listOf<MdBlock>(MdBlock.Code("kotlin", "val x = 1\nfun main() {}")),
@@ -164,18 +197,21 @@ class MarkdownTest {
     @Test
     fun `inline markers become spans over stripped text`() {
         val result = inline("plain **bold** and *italic* and `code` and ~~gone~~")
-        assertEquals("plain bold and italic and code and gone", result.text)
+        // The code span is padded with thin spaces, which are real characters in the output.
+        assertEquals("plain bold and italic and \u2009code\u2009 and gone", result.text)
         assertEquals(4, result.spanStyles.size)
     }
 
     @Test
     fun `inline code carries the code colours and monospace`() {
         val result = inline("see `val x` here")
-        assertEquals("see val x here", result.text)
+        // Thin spaces around the code: a SpanStyle background cannot carry padding, so
+        // the breathing room is characters.
+        assertEquals("see \u2009val x\u2009 here", result.text)
         // Spans address the output text, where the backticks are already gone.
         val span = result.spanStyles.single()
         assertEquals(4, span.start)
-        assertEquals(9, span.end)
+        assertEquals(11, span.end)
         assertEquals(codeBackground, span.item.background)
         assertEquals(codeColor, span.item.color)
         assertEquals(FontFamily.Monospace, span.item.fontFamily)
@@ -228,7 +264,9 @@ class MarkdownTest {
         val middle = result.spanStyles[1]
         assertEquals(2, middle.start)
         assertEquals(3, middle.end)
-        assertEquals(FontWeight.Bold, middle.item.fontWeight)
+        // SemiBold, not Bold: the rendering spec rules bold text to 600 so it sits
+        // between the body weight and a heading without shouting inside a paragraph.
+        assertEquals(FontWeight.SemiBold, middle.item.fontWeight)
         assertEquals(FontStyle.Italic, middle.item.fontStyle)
     }
 }

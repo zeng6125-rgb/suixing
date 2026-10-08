@@ -46,7 +46,10 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
     }
 
     private suspend fun listSkills(): ToolResult {
-        val all = skills.list()
+        // Only what the user left switched on: the prompt catalogue is filtered the
+        // same way, and a tool that advertised a disabled skill would invite the
+        // model to reach for something the user deliberately turned off.
+        val all = skills.list().filter { it.enabled }
         if (all.isEmpty()) {
             return ToolResult.success("本机还没有技能。技能放在 ${skills.root.absolutePath}/<名称>/SKILL.md。")
         }

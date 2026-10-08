@@ -10,6 +10,12 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.suixing.agent.R
+import com.suixing.agent.core.Core
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /** Keeps the process alive (and visible) while a long agent task is running. */
 class AgentForegroundService : Service() {
@@ -36,6 +42,13 @@ class AgentForegroundService : Service() {
         private const val EXTRA_TEXT = "text"
     }
 
+    /**
+     * Settings live in DataStore, which only reads suspendingly, and `onStartCommand`
+     * is a synchronous callback — so the console's gate is read on this scope. The
+     * answer arrives milliseconds later, long before the run has anything to show.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "正在执行任务"
         ensureChannel()
@@ -43,7 +56,10 @@ class AgentForegroundService : Service() {
         // Started after startForeground, not in onCreate: a process that is already
         // running a foreground service may start another one on Android 12+, and one
         // that is merely about to is not.
-        FloatConsoleService.start(this)
+        // The console appears only when the user switched it on; a run is silent otherwise.
+        scope.launch {
+            if (Core.settings.current().floatingConsole) FloatConsoleService.start(this@AgentForegroundService)
+        }
         return START_NOT_STICKY
     }
 
@@ -56,6 +72,7 @@ class AgentForegroundService : Service() {
      * simply no console.
      */
     override fun onDestroy() {
+        scope.cancel()
         FloatConsoleService.stop(this)
         super.onDestroy()
     }

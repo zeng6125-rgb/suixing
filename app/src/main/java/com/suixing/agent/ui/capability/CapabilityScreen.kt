@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -60,7 +61,7 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.service.FloatConsoleService
 import com.suixing.agent.ui.components.SuixingCard
-import com.suixing.agent.ui.components.SuixingTopBar
+import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
@@ -68,7 +69,7 @@ import com.suixing.agent.ui.theme.Tone
 import kotlinx.coroutines.launch
 
 @Composable
-fun CapabilityScreen() {
+fun CapabilityScreen(onBack: () -> Unit) {
     val state by Core.capabilities.state.collectAsState()
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val scope = rememberCoroutineScope()
@@ -88,8 +89,8 @@ fun CapabilityScreen() {
 
     LaunchedEffect(Unit) { Core.capabilities.refresh() }
 
-    Column(Modifier.fillMaxSize()) {
-        SuixingTopBar(title = "能力", subtitle = "随行能碰到什么，取决于这里")
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        PageTopBar(title = "能力", subtitle = "随行能碰到什么，取决于这里", onBack = onBack)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -198,7 +199,16 @@ fun CapabilityScreen() {
                 summary = "agent 跑起来时，屏幕上有个能停止、能插话的悬浮球",
                 granted = overlayGranted,
                 lines = if (overlayGranted) {
-                    listOf("已授权：agent 运行时悬浮球自动出现，不用手动开")
+                    // Read-only here: the switch itself lives in the chat header, and two
+                    // places to flip it would disagree the moment one of them lagged.
+                    listOf(
+                        "已授权：系统权限已就绪",
+                        if (settings.floatingConsole) {
+                            "顶栏开关：已打开，agent 运行时悬浮球会出现"
+                        } else {
+                            "顶栏开关：已关闭，去聊天页顶栏的悬浮窗钮打开"
+                        },
+                    )
                 } else {
                     listOf(
                         "未授权：任务跑起来后，屏幕上不会有悬浮球和停止按钮",

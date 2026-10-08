@@ -1,5 +1,20 @@
 package com.suixing.agent.ui.components
 
+import kotlinx.coroutines.delay
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -11,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +50,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 
 // ---------------------------------------------------------------------------
@@ -44,7 +61,12 @@ import androidx.compose.ui.unit.dp
 sealed interface MdBlock {
     data class Heading(val level: Int, val text: String) : MdBlock
     data class Paragraph(val text: String) : MdBlock
-    data class Bullet(val items: List<String>, val ordered: Boolean) : MdBlock
+    data class Bullet(
+        val items: List<String>,
+        val ordered: Boolean,
+        /** Nesting level, 0 = top level. One block holds one level's items. */
+        val depth: Int = 0,
+    ) : MdBlock
     data class Code(val language: String, val code: String) : MdBlock
     data class Quote(val text: String) : MdBlock
     data object Rule : MdBlock
@@ -59,7 +81,21 @@ private val MD_RULE = Regex("\\s*([-*_])(\\s*\\1){2,}\\s*")
 private val MD_BULLET = Regex("(\\s*)[-*+]\\s+(.*)")
 private val MD_ORDERED = Regex("(\\s*)(\\d+)[.)]\\s+(.*)")
 private val MD_TABLE_CELL = Regex(":?-+:?")
+
+/** U+2009. Inline code has no padding of its own, so this is what gives it any. */
+private const val THIN = "\u2009"
 private const val FENCE = "```"
+
+/** Nesting depth from a list marker's leading whitespace: two spaces or one tab per level. */
+private fun indentDepth(whitespace: String): Int {
+    var spaces = 0
+    whitespace.forEach { spaces += if (it == '\t') 2 else 1 }
+    // Capped: a line indented by a screen's width is a formatting accident, and past four
+    // levels the text is too narrow to read anyway.
+    return (spaces / 2).coerceIn(0, MAX_LIST_DEPTH)
+}
+
+private const val MAX_LIST_DEPTH = 4
 
 fun parseMarkdown(source: String): List<MdBlock> {
     val lines = source.replace("\r\n", "\n").replace('\r', '\n').split('\n')
@@ -114,22 +150,28 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 blocks += MdBlock.Table(header, rows)
             }
             bullet != null -> {
+                val depth = indentDepth(bullet.groupValues[1])
                 val items = mutableListOf<String>()
                 while (index < lines.size) {
                     val item = MD_BULLET.matchEntire(lines[index]) ?: break
-                    items += item.groupValues[1] + item.groupValues[2]
+                    // A change of level ends the block: one Bullet carries one indent, so
+                    // a nested list renders as its own indented block underneath.
+                    if (indentDepth(item.groupValues[1]) != depth) break
+                    items += item.groupValues[2]
                     index++
                 }
-                blocks += MdBlock.Bullet(items, ordered = false)
+                blocks += MdBlock.Bullet(items, ordered = false, depth = depth)
             }
             ordered != null -> {
+                val depth = indentDepth(ordered.groupValues[1])
                 val items = mutableListOf<String>()
                 while (index < lines.size) {
                     val item = MD_ORDERED.matchEntire(lines[index]) ?: break
-                    items += item.groupValues[1] + item.groupValues[3]
+                    if (indentDepth(item.groupValues[1]) != depth) break
+                    items += item.groupValues[3]
                     index++
                 }
-                blocks += MdBlock.Bullet(items, ordered = true)
+                blocks += MdBlock.Bullet(items, ordered = true, depth = depth)
             }
             else -> {
                 val paragraph = mutableListOf<String>()
@@ -180,7 +222,7 @@ private fun splitTableRow(line: String): List<String> =
 // ---------------------------------------------------------------------------
 
 private val EMPTY_SPAN = SpanStyle()
-private val BOLD_SPAN = SpanStyle(fontWeight = FontWeight.Bold)
+private val BOLD_SPAN = SpanStyle(fontWeight = FontWeight.SemiBold)
 private val ITALIC_SPAN = SpanStyle(fontStyle = FontStyle.Italic)
 private val STRIKE_SPAN = SpanStyle(textDecoration = TextDecoration.LineThrough)
 private const val URL_HTTPS = "https://"
@@ -213,6 +255,12 @@ private class InlineScanner(
     private val linkColor: Color,
     private val baseWeight: FontWeight?,
     private val onUrlClick: ((String) -> Unit)?,
+    // Inline code's size. Unspecified inherits the text around it, which is what the pure
+    // entry point wants; the renderer passes the 13sp body slot instead.
+    private val codeFontSize: TextUnit = TextUnit.Unspecified,
+    // The weight of **bold**. MarkdownTest pins the pure entry point to Bold, and the
+    // renderer draws the app's own ruling (semibold), so the two travel as a parameter
+    // rather than one of them silently winning.
 ) {
     private val out = AnnotatedString.Builder()
     private val linkStyle = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
@@ -220,6 +268,7 @@ private class InlineScanner(
         background = codeBackground,
         color = codeColor,
         fontFamily = FontFamily.Monospace,
+        fontSize = codeFontSize,
     )
 
     fun scan(): AnnotatedString {
@@ -251,7 +300,11 @@ private class InlineScanner(
                         i++
                     } else {
                         flush()
-                        addRun(text.substring(i + 1, close), style.merge(codeStyle), link)
+                        // Thin spaces either side of the code. A SpanStyle background has no
+                        // padding and no corner radius — Compose inline spans cannot express
+                        // either — so the breathing room has to be characters. They are real
+                        // characters in the output, which the tests assert.
+                        addRun(THIN + text.substring(i + 1, close) + THIN, style.merge(codeStyle), link)
                         i = close + 1
                     }
                 }
@@ -426,21 +479,41 @@ private class InlineScanner(
 // ---------------------------------------------------------------------------
 
 private val BlockGap = 8.dp
-private val HeadingGap = 12.dp
+private val HeadingGapAbove = 12.dp
+private val HeadingGapBelow = 6.dp
 private val ListGap = 6.dp
+private val ListItemGap = 4.dp
+private val BulletDot = 4.dp
+private val ListIndent = 16.dp
+private val MarkerWidth = 22.dp
+private val RuleGap = 12.dp
+
+/**
+ * The renderer's own body metrics: 15sp on a 24sp leading.
+ *
+ * Because the theme scales every slot, the app's 字号 setting
+ * still applies to the transcript.
+ */
+@Composable
+internal fun markdownBody(): TextStyle = MaterialTheme.typography.bodyMedium
+
+/** [this] with both sizes times [ratio], so a scaled slot keeps its own leading. */
+private fun TextStyle.scaled(ratio: Float): TextStyle =
+    copy(fontSize = fontSize * ratio, lineHeight = lineHeight * ratio)
 
 // A data class so the inline-scan cache key compares by value, not identity.
 private data class MarkdownPalette(
     val codeBackground: Color,
     val codeColor: Color,
     val linkColor: Color,
+    val codeFontSize: TextUnit,
 )
 
 @Composable
 fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
-    style: TextStyle = MaterialTheme.typography.bodyMedium,
+    style: TextStyle = markdownBody(),
     color: Color = Color.Unspecified,
     onUrlClick: ((String) -> Unit)? = null,
 ) {
@@ -459,15 +532,16 @@ fun MarkdownText(
 fun MarkdownBlocks(
     blocks: List<MdBlock>,
     modifier: Modifier = Modifier,
-    style: TextStyle = MaterialTheme.typography.bodyMedium,
+    style: TextStyle = markdownBody(),
     color: Color = Color.Unspecified,
     onUrlClick: ((String) -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     val palette = MarkdownPalette(
-        codeBackground = scheme.surfaceVariant.copy(alpha = 0.5f),
+        codeBackground = scheme.surfaceContainerHigh,
         codeColor = scheme.onSurfaceVariant,
         linkColor = scheme.primary,
+        codeFontSize = MaterialTheme.typography.bodySmall.fontSize,
     )
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
@@ -483,7 +557,7 @@ fun MarkdownBlocks(
 @Composable
 fun MarkdownBlock(
     block: MdBlock,
-    style: TextStyle = MaterialTheme.typography.bodyMedium,
+    style: TextStyle = markdownBody(),
     color: Color = Color.Unspecified,
     onUrlClick: ((String) -> Unit)? = null,
 ) {
@@ -493,9 +567,10 @@ fun MarkdownBlock(
         style = style,
         color = color,
         palette = MarkdownPalette(
-            codeBackground = scheme.surfaceVariant.copy(alpha = 0.5f),
+            codeBackground = scheme.surfaceContainerHigh,
             codeColor = scheme.onSurfaceVariant,
             linkColor = scheme.primary,
+            codeFontSize = MaterialTheme.typography.bodySmall.fontSize,
         ),
         onUrlClick = onUrlClick,
     )
@@ -519,13 +594,23 @@ private fun MarkdownBlock(
         is MdBlock.Bullet -> BulletBlock(block, style, color, palette, onUrlClick)
         is MdBlock.Code -> CodeBlock(block)
         is MdBlock.Quote -> QuoteBlock(block, style, color, palette, onUrlClick)
-        MdBlock.Rule -> HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        // No padding of its own: the 12dp above and below comes from gapBetween, so a
+        // caller spacing blocks by markdownGap() gets the same rhythm.
+        MdBlock.Rule -> HorizontalDivider(
+            thickness = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant,
+        )
         is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick)
     }
 }
 
 private fun gapBetween(previous: MdBlock, current: MdBlock): Dp = when {
-    previous is MdBlock.Heading || current is MdBlock.Heading -> HeadingGap
+    // A rule is a hard break, so it keeps its 12dp even beside a heading or a list.
+    previous is MdBlock.Rule || current is MdBlock.Rule -> RuleGap
+    // A heading is closer to the text it introduces than to the block above it, which is
+    // what makes it read as a title for what follows rather than for what came before.
+    previous is MdBlock.Heading -> HeadingGapBelow
+    current is MdBlock.Heading -> HeadingGapAbove
     previous is MdBlock.Bullet || current is MdBlock.Bullet -> ListGap
     else -> BlockGap
 }
@@ -548,6 +633,7 @@ private fun InlineText(
             // The block style already carries the base weight; spans only add to it.
             baseWeight = null,
             onUrlClick = onUrlClick,
+            codeFontSize = palette.codeFontSize,
         ).scan()
     }
     Text(
@@ -565,14 +651,19 @@ private fun HeadingBlock(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
 ) {
+    // One ramp, scaled off titleLarge: 20 / 18 / 16, with 16 medium for anything deeper.
+    // Leading scales with the size, so a heading keeps the 22/29 ratio it was drawn with
+    // instead of every level inheriting titleLarge's airy 29sp.
+    val large = MaterialTheme.typography.titleLarge
     val base = when (block.level) {
-        1 -> MaterialTheme.typography.titleLarge
-        2 -> MaterialTheme.typography.titleMedium
-        else -> MaterialTheme.typography.titleSmall
+        1 -> large.scaled(20f / 22f).copy(fontWeight = FontWeight.Bold)
+        2 -> large.scaled(18f / 22f).copy(fontWeight = FontWeight.Bold)
+        3 -> large.scaled(16f / 22f).copy(fontWeight = FontWeight.SemiBold)
+        else -> large.scaled(16f / 22f).copy(fontWeight = FontWeight.Medium)
     }
     InlineText(
         text = block.text,
-        style = base.copy(fontWeight = FontWeight.SemiBold),
+        style = base,
         color = color,
         palette = palette,
         onUrlClick = onUrlClick,
@@ -587,20 +678,47 @@ private fun BulletBlock(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
 ) {
-    Column(Modifier.fillMaxWidth()) {
+    // The marker sits on the first line's centre, not on the row's top: a 4dp dot level
+    // with the top edge reads as floating above the text it belongs to.
+    val markerOffset = with(LocalDensity.current) {
+        ((style.lineHeight.takeIf { it.isSp }?.toDp() ?: 20.dp) - BulletDot) / 2
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            // One indent per level, marker included: the dot has to move with its text or
+            // a nested list reads as a second top-level one.
+            .padding(start = ListIndent * block.depth),
+    ) {
         block.items.forEachIndexed { index, item ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 2.dp),
+                    .padding(vertical = ListItemGap / 2),
                 verticalAlignment = Alignment.Top,
             ) {
-                Text(
-                    text = if (block.ordered) "${index + 1}." else "•",
-                    modifier = Modifier.width(22.dp),
-                    style = style,
-                    color = color,
-                )
+                Box(
+                    modifier = Modifier.width(MarkerWidth),
+                    contentAlignment = Alignment.TopStart,
+                ) {
+                    if (block.ordered) {
+                        // The number is a text line of its own, so it needs no offset: the
+                        // row's top edge already puts it on the item's first-line baseline.
+                        Text(
+                            text = "${index + 1}.",
+                            style = style,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Box(
+                            Modifier
+                                .padding(top = markerOffset)
+                                .size(BulletDot)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.onSurfaceVariant),
+                        )
+                    }
+                }
                 InlineText(
                     text = item,
                     style = style,
@@ -616,19 +734,66 @@ private fun BulletBlock(
 
 @Composable
 private fun CodeBlock(block: MdBlock.Code) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember(block.code) { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
-        Text(
-            text = block.code,
-            modifier = Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(10.dp),
-            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(Modifier.padding(12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = block.language,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                // Copying a code block is the one thing anyone does with one, and the
+                // tick is the only confirmation there is room for.
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .clickable {
+                            clipboard.setText(AnnotatedString(block.code))
+                            copied = true
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                        contentDescription = if (copied) "已复制" else "复制代码",
+                        tint = if (copied) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+            if (copied) {
+                LaunchedEffect(block.code) {
+                    delay(1500)
+                    copied = false
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = block.code,
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                // bodySmall is already 13sp monospace-sized; only the leading differs,
+                // and it is scaled off the font size so 字号 still applies.
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = MaterialTheme.typography.bodySmall.fontSize * (20f / 13f),
+                ),
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
     }
 }
 
@@ -651,17 +816,17 @@ private fun QuoteBlock(
                 .width(3.dp)
                 .fillMaxHeight()
                 .clip(RoundedCornerShape(2.dp))
-                .background(MaterialTheme.colorScheme.primary),
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
         )
         InlineText(
             text = block.text,
-            style = style.copy(fontStyle = FontStyle.Italic),
-            color = if (color == Color.Unspecified) MaterialTheme.colorScheme.onSurfaceVariant else color,
+            style = style,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             palette = palette,
             onUrlClick = onUrlClick,
             modifier = Modifier
                 .weight(1f)
-                .padding(start = 10.dp),
+                .padding(start = 12.dp),
         )
     }
 }
@@ -674,22 +839,39 @@ private fun TableBlock(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
 ) {
-    Column(Modifier.fillMaxWidth()) {
+    val cellStyle = MaterialTheme.typography.bodySmall
+    // 12sp semibold, scaled off bodySmall so the header still follows the 字号 setting.
+    val headerStyle = cellStyle.copy(
+        fontSize = cellStyle.fontSize * (12f / 13f),
+        lineHeight = cellStyle.lineHeight * (12f / 13f),
+        fontWeight = FontWeight.SemiBold,
+    )
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
+    ) {
         TableRow(
             cells = block.header,
-            style = style.copy(fontWeight = FontWeight.SemiBold),
+            style = headerStyle,
             color = color,
             palette = palette,
             onUrlClick = onUrlClick,
+            header = true,
         )
-        HorizontalDivider(Modifier.padding(vertical = 4.dp))
-        block.rows.forEach { row ->
+        block.rows.forEachIndexed { index, row ->
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                thickness = 1.dp,
+            )
             TableRow(
                 cells = row,
-                style = style,
+                style = cellStyle,
                 color = color,
                 palette = palette,
                 onUrlClick = onUrlClick,
+                header = false,
             )
         }
     }
@@ -702,13 +884,27 @@ private fun TableRow(
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
+    header: Boolean,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 3.dp),
+            // The row, not the separator, asks for the intrinsic height: an empty Box has
+            // none of its own, so a separator that measured itself would collapse to 0dp.
+            .height(IntrinsicSize.Min)
+            .background(
+                if (header) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
+            ),
     ) {
-        cells.forEach { cell ->
+        cells.forEachIndexed { index, cell ->
+            if (index > 0) {
+                Box(
+                    Modifier
+                        .width(1.dp)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.outlineVariant),
+                )
+            }
             InlineText(
                 text = cell,
                 style = style,
@@ -717,8 +913,9 @@ private fun TableRow(
                 onUrlClick = onUrlClick,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(end = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
             )
         }
     }
 }
+

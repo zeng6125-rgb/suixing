@@ -26,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,6 +55,7 @@ fun SkillsSection(
     refresh: Int,
     onView: (Skill) -> Unit,
     onDelete: (Skill) -> Unit,
+    onToggle: (Skill, Boolean) -> Unit,
 ) {
     var skills by remember { mutableStateOf<List<Skill>?>(null) }
     val rootPath = remember { Core.skills.root.absolutePath }
@@ -83,7 +85,12 @@ fun SkillsSection(
             }
 
             else -> items(loaded, key = { it.path }) { skill ->
-                SkillCard(skill = skill, onView = { onView(skill) }, onDelete = { onDelete(skill) })
+                SkillCard(
+                    skill = skill,
+                    onView = { onView(skill) },
+                    onDelete = { onDelete(skill) },
+                    onToggle = { enabled -> onToggle(skill, enabled) },
+                )
             }
         }
     }
@@ -131,7 +138,12 @@ private fun SkillIntroCard(rootPath: String) {
 }
 
 @Composable
-private fun SkillCard(skill: Skill, onView: () -> Unit, onDelete: () -> Unit) {
+private fun SkillCard(
+    skill: Skill,
+    onView: () -> Unit,
+    onDelete: () -> Unit,
+    onToggle: (Boolean) -> Unit,
+) {
     SuixingCard(contentPadding = PaddingValues(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(Icons.AutoMirrored.Rounded.MenuBook, tint = MaterialTheme.colorScheme.tertiary)
@@ -151,6 +163,10 @@ private fun SkillCard(skill: Skill, onView: () -> Unit, onDelete: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            Spacer(Modifier.width(4.dp))
+            // Off means the skill stays on disk but leaves the prompt catalogue and
+            // becomes unreadable to the model — the cheap way to park a skill.
+            Switch(checked = skill.enabled, onCheckedChange = onToggle)
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Rounded.DeleteOutline,
@@ -173,6 +189,14 @@ private fun SkillCard(skill: Skill, onView: () -> Unit, onDelete: () -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onView) { Text("查看全文") }
             Spacer(Modifier.weight(1f))
+            if (!skill.enabled) {
+                Text(
+                    text = "已停用",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             Text(
                 text = "${skill.body.length} 字",
                 style = MaterialTheme.typography.labelSmall,

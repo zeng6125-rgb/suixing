@@ -33,6 +33,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import okhttp3.Call
 import java.io.IOException
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -290,6 +291,18 @@ class AgentEngine(
     @Volatile
     private var contextNote = ""
 
+    /**
+     * What the run is doing at this instant, for the floating console: which tool is
+     * running, that the model is thinking, or the tail of the text it is writing.
+     *
+     * It is deliberately not part of [runState]: that flows at its own pace, and this
+     * changes on every tool and every delta. The console re-reads it whenever a state
+     * arrives, which is often enough for a line that is meant to look alive.
+     */
+    @Volatile
+    var liveLine: String = ""
+        private set
+
     private val outChars = AtomicInteger(0)
 
     private val thinkingChars = AtomicInteger(0)
@@ -400,7 +413,7 @@ class AgentEngine(
         wire += ChatMessage.system(
             systemPrompt(settings, registry, skills.catalog(skills.list()), memory.entries.value),
         )
-        sanitize(trim(history, settings.contextWindow)).forEach { appendToWire(wire, it, settings) }
+        sanitize(trim(history, settings.contextWindowFor(settings.model))).forEach { appendToWire(wire, it, settings) }
 
         // A ceiling of 0 (or less) means the user set none: the loop then ends only when
         // the model stops asking for tools, which is the only limit a long task should
@@ -415,6 +428,9 @@ class AgentEngine(
                 // next one, which is the only moment the wire can be edited safely.
                 drainSteering(wire)
                 compressContext(wire, settings)
+                // Cleared with the round: whatever the last one ended with is over, and a
+                // line that outlives its step reads as a stall.
+                liveLine = ""
                 if (cancelled.get()) {
                     settled = true
                     finishCancelled(onEvent)
@@ -425,6 +441,9 @@ class AgentEngine(
                 // Cleared here rather than after the call: an abort from `steer` can only
                 // belong to the round it interrupted, so nothing else may inherit the flag.
                 steeringCut.set(false)
+                // The console shows the tail of what is being written; the finished text only
+                // exists once the turn ends, which is far too late for a "still working" line.
+                val streamed = StringBuilder()
                 val turn = try {
                     llm.complete(
                         settings = settings,
@@ -432,10 +451,13 @@ class AgentEngine(
                         tools = registry.all().map { it.spec },
                         onDelta = { piece ->
                             outChars.addAndGet(piece.length)
+                            streamed.append(piece)
+                            liveLine = streamed.takeLast(LIVE_LINE_CHARS).toString()
                             onEvent(AgentEvent.TextDelta(piece))
                         },
                         onReasoning = { piece ->
                             thinkingChars.addAndGet(piece.length)
+                            liveLine = "思考中…"
                             onEvent(AgentEvent.ReasoningDelta(piece))
                         },
                         onCall = { inFlight = it },
@@ -508,6 +530,7 @@ class AgentEngine(
                     }
                     val argsPreview = call.arguments.take(600)
                     val tool = registry.find(call.name)
+                    var toolMs = 0L
                     val result = if (tool == null) {
                         ToolResult.failure("未知工具：${call.name}")
                     } else {
@@ -515,14 +538,16 @@ class AgentEngine(
                         if (blocked != null) {
                             ToolResult.failure(blocked)
                         } else {
+                            liveLine = "🔧 ${call.name}…"
                             onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
                             if (!gate.request(call.name, argsPreview, settings.approvalMode)) {
                                 ToolResult.failure("用户拒绝了这次调用。")
                             } else {
+                                val startedAt = System.currentTimeMillis()
                                 runCatching { tool.run(parseArgs(call.arguments)) }.getOrElse { error ->
                                     if (error is CancellationException) throw error
                                     ToolResult.failure("工具执行异常：${error.message ?: error::class.java.simpleName}")
-                                }
+                                }.also { toolMs = System.currentTimeMillis() - startedAt }
                             }
                         }
                     }
@@ -549,6 +574,11 @@ class AgentEngine(
                                 "（上一步 $call.name 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
                             )
                         }
+                    }
+                    liveLine = if (result.ok) {
+                        String.format(Locale.US, "✓ %s %.1fs", call.name, toolMs / 1000.0)
+                    } else {
+                        "✗ ${call.name}"
                     }
                     onEvent(AgentEvent.ToolFinished(call.name, result.ok, output))
                 }
@@ -621,7 +651,7 @@ class AgentEngine(
         wire: MutableList<ChatMessage>,
         settings: AppSettings,
     ) {
-        val window = settings.contextWindow
+        val window = settings.contextWindowFor(settings.model)
         if (window <= 0 || !settings.autoCompress) return
         if (wire.size <= MIN_MESSAGES) return
         if (estimatePromptTokens(wire) <= window * COMPRESS_AT) return
@@ -865,7 +895,10 @@ class AgentEngine(
             }
 
     companion object {
-        private const val MAX_TOOL_OUTPUT = 8_000
+        /** How much of the streamed answer the console's live line keeps, in characters. */
+private const val LIVE_LINE_CHARS = 40
+
+private const val MAX_TOOL_OUTPUT = 8_000
         private const val MAX_MEMORY_ENTRIES = 40
         private const val MAX_MEMORY_VALUE = 400
 

@@ -63,20 +63,29 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     // ---------------------------------------------------------------- gestures
 
-    suspend fun tap(x: Float, y: Float, durationMs: Long = 60L): Boolean =
-        gesture(Path().apply { moveTo(x, y) }, durationMs)
+    // Each of these draws itself before dispatching: the effect is the only sign the user
+    // gets that the agent is touching their screen rather than sitting there.
 
-    suspend fun longPress(x: Float, y: Float): Boolean =
-        gesture(Path().apply { moveTo(x, y) }, 700L)
+    suspend fun tap(x: Float, y: Float, durationMs: Long = 60L): Boolean {
+        TouchFx.tap(this, x, y)
+        return gesture(Path().apply { moveTo(x, y) }, durationMs)
+    }
 
-    suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300L): Boolean =
-        gesture(
+    suspend fun longPress(x: Float, y: Float): Boolean {
+        TouchFx.longPress(this, x, y)
+        return gesture(Path().apply { moveTo(x, y) }, 700L)
+    }
+
+    suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300L): Boolean {
+        TouchFx.swipe(this, x1, y1, x2, y2)
+        return gesture(
             Path().apply {
                 moveTo(x1, y1)
                 lineTo(x2, y2)
             },
             durationMs.coerceIn(60L, 5_000L),
         )
+    }
 
     /**
      * Dispatches the gesture and waits for the system to say it finished.
@@ -196,17 +205,23 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     /** Clicks the node, the nearest clickable ancestor, or its centre as a last resort. */
     suspend fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        val bounds = Rect().also { node.getBoundsInScreen(it) }
         var current: AccessibilityNodeInfo? = node
         while (current != null) {
             if (current.isClickable) {
                 if (runCatching { current.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)) {
+                    // An accessibility click never goes through dispatchGesture, but the user
+                    // still asked to see what the agent is touching, so the ring is drawn
+                    // from the node's own box instead.
+                    if (bounds.width() > 0 && bounds.height() > 0) {
+                        TouchFx.tap(this, bounds.centerX().toFloat(), bounds.centerY().toFloat())
+                    }
                     return true
                 }
                 break
             }
             current = current.parent
         }
-        val bounds = Rect().also { node.getBoundsInScreen(it) }
         if (bounds.width() <= 0 || bounds.height() <= 0) return false
         return tap(bounds.centerX().toFloat(), bounds.centerY().toFloat())
     }

@@ -2,18 +2,19 @@ package com.suixing.agent
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.ui.SuixingApp
@@ -35,10 +36,18 @@ class MainActivity : ComponentActivity() {
                 2 -> true
                 else -> systemDark
             }
-            // Forcing light or dark in settings must also flip the status bar icons.
-            SideEffect {
-                WindowCompat.getInsetsController(window, window.decorView)
-                    .isAppearanceLightStatusBars = !dark
+            // The bars have to follow the theme, and the theme is a setting the user can
+            // change while the app is running — deciding once in onCreate would freeze
+            // whichever value was stored at launch. Transparent scrims either way: the
+            // header paints the status bar area itself, so a coloured strip would show
+            // as a seam above it.
+            LaunchedEffect(dark) {
+                val style = if (dark) {
+                    SystemBarStyle.dark(Color.TRANSPARENT)
+                } else {
+                    SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                }
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
             }
             SuixingTheme(
                 darkTheme = dark,

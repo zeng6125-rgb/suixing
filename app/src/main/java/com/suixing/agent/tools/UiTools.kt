@@ -8,6 +8,7 @@ import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.capability.ShellResult
 import com.suixing.agent.service.SuixingAccessibilityService
+import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -165,34 +166,39 @@ class UiTools(
         return when (name) {
             "ui_dump" -> dump(service, args)
             "ui_screenshot" -> screenshot(service, args)
-            "ui_tap" -> gesture(
-                accessibilityAction = { it.tap(args.int("x", 0).toFloat(), args.int("y", 0).toFloat()) },
-                command = "input tap ${args.int("x", 0)} ${args.int("y", 0)}",
-                successText = "已点击 (${args.int("x", 0)}, ${args.int("y", 0)})",
-            )
+            "ui_tap" -> {
+                val x = args.int("x", 0).toFloat()
+                val y = args.int("y", 0).toFloat()
+                gesture(
+                    accessibilityAction = { it.tap(x, y) },
+                    command = "input tap ${x.toInt()} ${y.toInt()}",
+                    successText = "已点击 (${x.toInt()}, ${y.toInt()})",
+                    fx = { TouchFx.tap(context, x, y) },
+                )
+            }
 
-            "ui_long_press" -> gesture(
-                accessibilityAction = { it.longPress(args.int("x", 0).toFloat(), args.int("y", 0).toFloat()) },
-                command = "input swipe ${args.int("x", 0)} ${args.int("y", 0)} " +
-                    "${args.int("x", 0)} ${args.int("y", 0)} 800",
-                successText = "已长按 (${args.int("x", 0)}, ${args.int("y", 0)})",
-            )
+            "ui_long_press" -> {
+                val x = args.int("x", 0).toFloat()
+                val y = args.int("y", 0).toFloat()
+                gesture(
+                    accessibilityAction = { it.longPress(x, y) },
+                    command = "input swipe ${x.toInt()} ${y.toInt()} ${x.toInt()} ${y.toInt()} 800",
+                    successText = "已长按 (${x.toInt()}, ${y.toInt()})",
+                    fx = { TouchFx.longPress(context, x, y) },
+                )
+            }
 
             "ui_swipe" -> {
                 val duration = args.int("duration", 300).coerceIn(60, 5000)
+                val x1 = args.int("x1", 0).toFloat()
+                val y1 = args.int("y1", 0).toFloat()
+                val x2 = args.int("x2", 0).toFloat()
+                val y2 = args.int("y2", 0).toFloat()
                 gesture(
-                    accessibilityAction = {
-                        it.swipe(
-                            args.int("x1", 0).toFloat(),
-                            args.int("y1", 0).toFloat(),
-                            args.int("x2", 0).toFloat(),
-                            args.int("y2", 0).toFloat(),
-                            duration.toLong(),
-                        )
-                    },
-                    command = "input swipe ${args.int("x1", 0)} ${args.int("y1", 0)} " +
-                        "${args.int("x2", 0)} ${args.int("y2", 0)} $duration",
+                    accessibilityAction = { it.swipe(x1, y1, x2, y2, duration.toLong()) },
+                    command = "input swipe ${x1.toInt()} ${y1.toInt()} ${x2.toInt()} ${y2.toInt()} $duration",
                     successText = "已滑动",
+                    fx = { TouchFx.swipe(context, x1, y1, x2, y2) },
                 )
             }
 
@@ -246,6 +252,7 @@ class UiTools(
         accessibilityAction: suspend (SuixingAccessibilityService) -> Boolean,
         command: String,
         successText: String,
+        fx: () -> Unit,
     ): ToolResult {
         val service = accessibility()
         if (service != null && runCatching { accessibilityAction(service) }.getOrDefault(false)) {
@@ -260,6 +267,12 @@ class UiTools(
         }
         val result = shell(command) ?: return blocked()
         if (!result.ok) return ToolResult.failure("$successText 没成功：${result.render(300)}")
+        // On the accessibility route the service draws its own effect; nothing draws on this
+        // one, and a tap the user cannot see is exactly the complaint the effects exist to
+        // fix — the fallback is used when accessibility is off, so there is not even an
+        // accessibility indicator to go by. Drawn only once the shell has confirmed the
+        // touch landed, so the effect never claims a tap that did not happen.
+        fx()
         return ToolResult.success("$successText（经由 ${shellName()}）")
     }
 
@@ -377,6 +390,9 @@ class UiTools(
             ?: return ToolResult.failure("屏幕上没有找到「$text」，可以先 ui_dump 看界面元素。")
         val result = shell("input tap ${hit.centerX} ${hit.centerY}") ?: return blocked()
         if (!result.ok) return ToolResult.failure("点击没成功：${result.render(300)}")
+        // Same reason as in gesture(): this route is the one with no accessibility indicator,
+        // so the effect is the only sign the agent touched the screen.
+        TouchFx.tap(context, hit.centerX.toFloat(), hit.centerY.toFloat())
         return ToolResult.success("已点击「$text」（经由 ${shellName()}）")
     }
 

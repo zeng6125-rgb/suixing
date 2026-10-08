@@ -85,12 +85,12 @@ data class AppSettings(
      */
     val reasoningEffort: String = "",
     /**
-     * How much of the conversation to replay, counted in tokens the way a desktop
-     * agent counts it rather than in messages. 0 sends everything; anything else
-     * drops the oldest turns until the estimate fits. Whatever the model actually
-     * supports is its own business — this is only a ceiling the user sets.
+     * Per-model context window in tokens, keyed by model name. 0 (or absent) sends
+     * everything; anything else drops the oldest turns until the estimate fits.
+     * Whatever the model actually supports is its own business — this is only a
+     * ceiling the user sets, per model, because windows differ wildly between them.
      */
-    val contextWindow: Int = 0,
+    val modelContexts: Map<String, Int> = emptyMap(),
     /**
      * Tool-calling rounds allowed in one turn. 0 means no limit, which is the
      * default: a long task should not be cut off at an arbitrary number.
@@ -106,7 +106,7 @@ data class AppSettings(
      * 上下文接近窗口上限时自动把旧消息压成摘要。
      *
      * 默认开：超窗是硬失败（接口直接 400），而压缩最坏只是损失一些细节，两害相权
-     * 取其轻。只在用户设了 [contextWindow] 时才可能触发。
+     * 取其轻。只在当前模型设了窗口（[modelContexts]）时才可能触发。
      */
     val autoCompress: Boolean = true,
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
@@ -173,6 +173,8 @@ data class AppSettings(
     val alwaysDeniedTools: List<String> = emptyList(),
     /** 聊天：列表在底部时自动跟随新消息。 */
     val autoFollow: Boolean = true,
+    /** 悬浮窗控制台：开启后 agent 运行时显示悬浮球；关闭则永不显示。 */
+    val floatingConsole: Boolean = false,
     /** 0 小, 1 标准, 2 大, 3 特大 */
     val fontScale: Int = 1,
     /** 0 窄, 1 标准, 2 宽 —— 助手气泡最多占屏宽的比例，由聊天页读取 */
@@ -212,6 +214,9 @@ data class AppSettings(
 
     /** The active model with its provider prefix stripped, for display. */
     val shortModel: String get() = model.substringAfter('/')
+
+    /** The context ceiling for [model]; 0 when the user never set one for it. */
+    fun contextWindowFor(model: String): Int = modelContexts[model] ?: 0
 }
 
 const val DEFAULT_SYSTEM_PROMPT = """你是随行，运行在用户安卓手机上的智能体。

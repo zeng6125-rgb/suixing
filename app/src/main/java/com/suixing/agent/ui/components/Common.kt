@@ -3,6 +3,8 @@ package com.suixing.agent.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.Icon
@@ -27,6 +31,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -352,19 +358,124 @@ fun SuixingTopBar(
 val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 /**
- * The handle that opens the drawer, in the two shapes the app draws it in: a rounded
- * square inside [SuixingTopBar], and a circle in the chat screen's floating header.
+ * The bar for a page that is not a top-level destination: a back button instead of the
+ * drawer handle.
  *
- * Public because the chat header is not a [SuixingTopBar]: it has no bar to sit in.
+ * The drawer belongs to the chat screen alone. On a sub-page a hamburger offers a way
+ * *sideways* out of a screen the user is in the middle of, while the way back — the one
+ * they actually want — is not on screen at all.
+ */
+@Composable
+fun PageTopBar(
+    title: String,
+    onBack: () -> Unit,
+    subtitle: String? = null,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 2.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircleActionButton(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                onClick = onBack,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            actions()
+        }
+    }
+}
+
+/**
+ * The app's round action button: a filled circle that lifts when pressed.
+ *
+ * One helper for the header's two buttons, the composer's send/stop/steer and the
+ * jump-to-latest button, so the four of them cannot drift apart in size, colour or
+ * shadow — they were built separately once and did.
+ */
+@Composable
+fun CircleActionButton(
+    icon: ImageVector,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 40.dp,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    enabled: Boolean = true,
+    iconSize: Dp = 20.dp,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.size(size),
+        shape = CircleShape,
+        color = containerColor,
+        contentColor = contentColor,
+        shadowElevation = if (pressed) 4.dp else 2.dp,
+        interactionSource = interaction,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                modifier = Modifier.size(iconSize),
+            )
+        }
+    }
+}
+
+/**
+ * The handle that opens the drawer, in the two shapes the app draws it in: a rounded
+ * square inside [SuixingTopBar], and a circle in the chat screen's own header.
+ *
+ * Public because the chat header is not a [SuixingTopBar]: it is a solid bar of its own.
  */
 @Composable
 fun DrawerButton(size: Dp = 40.dp, shape: Shape = CircleShape) {
     val open = LocalOpenSidebar.current ?: return
+    if (shape == CircleShape) {
+        CircleActionButton(
+            icon = Icons.Rounded.Menu,
+            contentDescription = "打开侧边栏",
+            onClick = open,
+            size = size,
+        )
+        return
+    }
     Surface(
         onClick = open,
         modifier = Modifier.size(size),
         shape = shape,
-        color = MaterialTheme.colorScheme.surface,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(

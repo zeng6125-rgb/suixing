@@ -6,7 +6,6 @@ import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -61,7 +61,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.tools.humanSize
 import com.suixing.agent.tools.workspaceDir
-import com.suixing.agent.ui.components.SuixingTopBar
+import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.theme.MonoStyle
 import kotlinx.coroutines.Dispatchers
@@ -75,7 +75,7 @@ import java.util.Locale
 private class Entry(val file: File, val size: String, val modified: String)
 
 @Composable
-fun FilesScreen() {
+fun FilesScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val root = remember { workspaceDir(context) }
     var current by remember { mutableStateOf(root) }
@@ -113,10 +113,11 @@ fun FilesScreen() {
         listing = false
     }
 
-    Column(Modifier.fillMaxSize()) {
-        SuixingTopBar(
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        PageTopBar(
             title = "文件",
             subtitle = relativePath(root, current),
+            onBack = onBack,
             actions = {
                 IconButton(onClick = { reload++ }) {
                     Icon(Icons.Rounded.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))

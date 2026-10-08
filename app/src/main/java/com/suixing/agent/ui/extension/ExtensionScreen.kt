@@ -22,12 +22,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -56,7 +60,7 @@ import com.suixing.agent.mcp.McpServerState
 import com.suixing.agent.mcp.McpStatus
 import com.suixing.agent.skills.Skill
 import com.suixing.agent.ui.components.SuixingCard
-import com.suixing.agent.ui.components.SuixingTopBar
+import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
@@ -74,7 +78,7 @@ import kotlinx.coroutines.launch
  * is talking about, instead of dropping the user on MCP and making them swipe.
  */
 @Composable
-fun ExtensionScreen(initialTab: Int = 0) {
+fun ExtensionScreen(initialTab: Int = 0, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var tab by remember { mutableIntStateOf(initialTab) }
@@ -85,6 +89,7 @@ fun ExtensionScreen(initialTab: Int = 0) {
 
     var skillViewing by remember { mutableStateOf<Skill?>(null) }
     var skillDeleting by remember { mutableStateOf<Skill?>(null) }
+    var skillImportMenu by remember { mutableStateOf(false) }
     var skillRefresh by remember { mutableIntStateOf(0) }
 
     var memoryRefresh by remember { mutableIntStateOf(0) }
@@ -110,10 +115,31 @@ fun ExtensionScreen(initialTab: Int = 0) {
         }
     }
 
+    // A single SKILL.md shared straight out of a chat or a download has no folder to
+    // pick, so it gets its own launcher; it lands as a single-file skill.
+    val fileImporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val skill = runCatching { Core.skills.importFile(uri) }.getOrElse { error ->
+                snackbar.showSnackbar("导入失败：${error.message ?: error::class.java.simpleName}")
+                return@launch
+            }
+            if (skill == null) {
+                snackbar.showSnackbar("只能导入 .md 文件")
+                return@launch
+            }
+            skillRefresh++
+            snackbar.showSnackbar("已导入技能「${skill.name}」")
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize()) {
-            SuixingTopBar(
+        Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+            PageTopBar(
                 title = "扩展",
+                onBack = onBack,
                 subtitle = when (tab) {
                     0 -> "MCP 给模型加工具"
                     1 -> "技能给模型加知识"
@@ -135,32 +161,61 @@ fun ExtensionScreen(initialTab: Int = 0) {
                     ) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
                     }
-                    IconButton(
-                        onClick = {
-                            when (tab) {
-                                0 -> {
-                                    mcpEditing = null
-                                    mcpEditorOpen = true
-                                }
+                    Box {
+                        IconButton(
+                            onClick = {
+                                when (tab) {
+                                    0 -> {
+                                        mcpEditing = null
+                                        mcpEditorOpen = true
+                                    }
 
-                                1 -> importer.launch(null)
-                                else -> memoryNew++
-                            }
-                        },
-                    ) {
-                        Icon(
-                            imageVector = when (tab) {
-                                0 -> Icons.Rounded.Add
-                                1 -> Icons.Rounded.FileDownload
-                                else -> Icons.Rounded.Add
+                                    1 -> skillImportMenu = true
+                                    else -> memoryNew++
+                                }
                             },
-                            contentDescription = when (tab) {
-                                0 -> "添加服务器"
-                                1 -> "导入技能"
-                                else -> "新增记忆"
-                            },
-                            modifier = Modifier.size(20.dp),
-                        )
+                        ) {
+                            Icon(
+                                imageVector = when (tab) {
+                                    0 -> Icons.Rounded.Add
+                                    1 -> Icons.Rounded.FileDownload
+                                    else -> Icons.Rounded.Add
+                                },
+                                contentDescription = when (tab) {
+                                    0 -> "添加服务器"
+                                    1 -> "导入技能"
+                                    else -> "新增记忆"
+                                },
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        // A folder and a lone SKILL.md need different pickers, so the
+                        // import button offers the choice instead of guessing.
+                        DropdownMenu(
+                            expanded = skillImportMenu,
+                            onDismissRequest = { skillImportMenu = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("选文件夹（批量）") },
+                                leadingIcon = {
+                                    Icon(Icons.Rounded.FolderOpen, null, modifier = Modifier.size(20.dp))
+                                },
+                                onClick = {
+                                    skillImportMenu = false
+                                    importer.launch(null)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("选 .md 文件") },
+                                leadingIcon = {
+                                    Icon(Icons.Rounded.Description, null, modifier = Modifier.size(20.dp))
+                                },
+                                onClick = {
+                                    skillImportMenu = false
+                                    fileImporter.launch(arrayOf("text/markdown", "text/plain", "*/*"))
+                                },
+                            )
+                        }
                     }
                 },
             )
@@ -188,6 +243,13 @@ fun ExtensionScreen(initialTab: Int = 0) {
                     refresh = skillRefresh,
                     onView = { skillViewing = it },
                     onDelete = { skillDeleting = it },
+                    onToggle = { skill, enabled ->
+                        scope.launch {
+                            Core.skills.setEnabled(skill.id, enabled)
+                            skillRefresh++
+                            notify(if (enabled) "已启用 ${skill.name}" else "已停用 ${skill.name}")
+                        }
+                    },
                 )
 
                 else -> MemorySection(
