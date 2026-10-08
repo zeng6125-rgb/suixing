@@ -20,7 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -280,7 +281,7 @@ fun SuixingTopBar(
             // it works.
             val openSidebar = LocalOpenSidebar.current
             if (openSidebar != null) {
-                SidebarButton(openSidebar)
+                DrawerButton(size = 38.dp, shape = RoundedCornerShape(13.dp))
                 Spacer(Modifier.width(10.dp))
             }
             if (leading != null) {
@@ -322,7 +323,7 @@ fun SuixingTopBar(
                             )
                             if (interactive) {
                                 Icon(
-                                    imageVector = Icons.Filled.ArrowDropDown,
+                                    imageVector = Icons.Rounded.ArrowDropDown,
                                     contentDescription = "切换",
                                     tint = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier
@@ -350,13 +351,20 @@ fun SuixingTopBar(
  */
 val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
 
+/**
+ * The handle that opens the drawer, in the two shapes the app draws it in: a rounded
+ * square inside [SuixingTopBar], and a circle in the chat screen's floating header.
+ *
+ * Public because the chat header is not a [SuixingTopBar]: it has no bar to sit in.
+ */
 @Composable
-private fun SidebarButton(onClick: () -> Unit) {
+fun DrawerButton(size: Dp = 40.dp, shape: Shape = CircleShape) {
+    val open = LocalOpenSidebar.current ?: return
     Surface(
-        onClick = onClick,
-        modifier = Modifier.size(38.dp),
-        shape = RoundedCornerShape(13.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        onClick = open,
+        modifier = Modifier.size(size),
+        shape = shape,
+        color = MaterialTheme.colorScheme.surface,
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(

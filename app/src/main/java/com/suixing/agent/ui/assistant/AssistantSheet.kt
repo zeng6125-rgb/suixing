@@ -17,9 +17,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -90,7 +90,7 @@ fun AssistantSheet(
                         editing = Assistant(id = UUID.randomUUID().toString(), avatar = "🧭")
                     },
                 ) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("新建")
                 }
@@ -186,7 +186,7 @@ private fun AssistantCard(
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onEdit, modifier = Modifier.size(30.dp)) {
                     Icon(
-                        imageVector = Icons.Outlined.Edit,
+                        imageVector = Icons.Rounded.Edit,
                         contentDescription = "编辑",
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(15.dp),
@@ -205,7 +205,7 @@ private fun AssistantCard(
                 if (active) {
                     Spacer(Modifier.width(5.dp))
                     Icon(
-                        imageVector = Icons.Filled.CheckCircle,
+                        imageVector = Icons.Rounded.CheckCircle,
                         contentDescription = "当前",
                         tint = scheme.primary,
                         modifier = Modifier.size(14.dp),

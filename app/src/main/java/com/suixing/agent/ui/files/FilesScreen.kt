@@ -23,18 +23,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
-import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.ArrowUpward
-import androidx.compose.material.icons.outlined.AudioFile
-import androidx.compose.material.icons.outlined.Code
-import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.FolderZip
-import androidx.compose.material.icons.outlined.Image
-import androidx.compose.material.icons.outlined.Movie
-import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.AudioFile
+import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.FolderZip
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -119,11 +119,11 @@ fun FilesScreen() {
             subtitle = relativePath(root, current),
             actions = {
                 IconButton(onClick = { reload++ }) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
+                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
                 }
                 if (current != root) {
                     IconButton(onClick = { current = current.parentFile ?: root }) {
-                        Icon(Icons.Outlined.ArrowUpward, contentDescription = "上一级", modifier = Modifier.size(20.dp))
+                        Icon(Icons.Rounded.ArrowUpward, contentDescription = "上一级", modifier = Modifier.size(20.dp))
                     }
                 }
             },
@@ -247,7 +247,7 @@ private fun Breadcrumbs(root: File, current: File, onJump: (File) -> Unit) {
             }
             if (!last) {
                 Icon(
-                    Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                    Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.outline,
@@ -284,7 +284,7 @@ private fun EntryRow(entry: Entry, onClick: () -> Unit) {
         }
         if (entry.file.isDirectory) {
             Icon(
-                Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.outline,
             )
@@ -324,7 +324,7 @@ private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, on
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
         dismissButton = {
             TextButton(onClick = onCopy) {
-                Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("复制")
             }
@@ -334,17 +334,17 @@ private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, on
 
 /** Extension-driven icon and colour, so the list is scannable without reading names. */
 private fun iconFor(file: File): Pair<ImageVector, Color> {
-    if (file.isDirectory) return Icons.Outlined.Folder to Color(0xFFAD7BF9)
+    if (file.isDirectory) return Icons.Rounded.Folder to Color(0xFFAD7BF9)
     return when (file.extension.lowercase(Locale.ROOT)) {
-        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> Icons.Outlined.Image to Color(0xFF89C8AF)
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> Icons.Rounded.Image to Color(0xFF89C8AF)
         "kt", "kts", "java", "py", "js", "ts", "tsx", "jsx", "c", "cpp", "h", "rs", "go", "sh",
         "json", "yml", "yaml", "xml", "toml", "gradle", "html", "css", "sql",
-        -> Icons.Outlined.Code to Color(0xFF7FB3E8)
-        "md", "txt", "log", "csv", "ini", "conf", "properties" -> Icons.Outlined.Description to Color(0xFFB9B4AA)
-        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> Icons.Outlined.FolderZip to Color(0xFFF0C070)
-        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> Icons.Outlined.AudioFile to Color(0xFFD1A3E8)
-        "mp4", "mkv", "mov", "avi", "webm" -> Icons.Outlined.Movie to Color(0xFFE89A9A)
-        else -> Icons.AutoMirrored.Outlined.InsertDriveFile to Color(0xFF9A958C)
+        -> Icons.Rounded.Code to Color(0xFF7FB3E8)
+        "md", "txt", "log", "csv", "ini", "conf", "properties" -> Icons.Rounded.Description to Color(0xFFB9B4AA)
+        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> Icons.Rounded.FolderZip to Color(0xFFF0C070)
+        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> Icons.Rounded.AudioFile to Color(0xFFD1A3E8)
+        "mp4", "mkv", "mov", "avi", "webm" -> Icons.Rounded.Movie to Color(0xFFE89A9A)
+        else -> Icons.AutoMirrored.Rounded.InsertDriveFile to Color(0xFF9A958C)
     }
 }
 

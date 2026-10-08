@@ -18,7 +18,7 @@ object Transcript {
         val out = LinkedHashMap<String, String>()
         var current = ""
         messages.forEach { message ->
-            if (message.role == Roles.USER) current = message.id
+            if (message.role == Roles.USER && !message.steer) current = message.id
             out[message.id] = current
         }
         return out
@@ -78,7 +78,7 @@ object Transcript {
      * with the answer being replaced left out. Feed [active] through this first.
      */
     fun withoutLastAnswer(messages: List<StoredMessage>): List<StoredMessage> {
-        val lastTurn = messages.lastOrNull { it.role == Roles.USER }?.id ?: return messages
+        val lastTurn = messages.lastOrNull { it.role == Roles.USER && !it.steer }?.id ?: return messages
         val turnOf = turnOf(messages)
         return messages.filter { it.role == Roles.USER || turnOf[it.id] != lastTurn }
     }

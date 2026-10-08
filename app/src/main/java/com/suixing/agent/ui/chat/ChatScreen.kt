@@ -31,6 +31,8 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,6 +40,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -47,29 +51,31 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.outlined.Bolt
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.Image
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.PhotoCamera
-import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ChevronLeft
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -103,7 +109,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -112,13 +120,16 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
@@ -128,9 +139,9 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.ui.assistant.AssistantSheet
+import com.suixing.agent.ui.components.DrawerButton
 import com.suixing.agent.ui.components.MarkdownText
-import com.suixing.agent.ui.components.SuixingOrb
-import com.suixing.agent.ui.components.SuixingTopBar
+import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -246,26 +257,6 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            ChatHeader(
-                title = state.title,
-                subtitle = assistant?.label ?: "随行",
-                assistant = assistant,
-                settings = settings,
-                onOpenAssistants = { assistantsOpen = true },
-                onPickModel = { provider, model ->
-                    scope.launch {
-                        Core.settings.update {
-                            it.copy(
-                                baseUrl = provider.baseUrl,
-                                apiKey = provider.apiKey,
-                                model = model,
-                            )
-                        }
-                    }
-                },
-            )
-        },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             Composer(
@@ -279,6 +270,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     state.runningHere -> state.status
                     else -> "『${state.runningTitle}』正在运行"
                 },
+                stats = state.stats,
                 notice = state.notice,
                 attachment = attachment,
                 onClearAttachment = { attachment = null },
@@ -320,12 +312,35 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
             )
         },
     ) { padding ->
+        // Light mode fades a whisper of brand colour into the bottom of the canvas, the
+        // way the reference apps tint their own surface; dark stays flat because the same
+        // gradient over #0F1412 bands on OLED.
+        val canvas = if (LocalDarkTheme.current) {
+            SolidColor(MaterialTheme.colorScheme.surface)
+        } else {
+            Brush.verticalGradient(
+                listOf(
+                    MaterialTheme.colorScheme.surface,
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
+                ),
+            )
+        }
+        // The header floats over the transcript, so the list reserves the bar's height as
+        // padding instead of the scaffold reserving an opaque band for it.
+        val barHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 56.dp
         // The transcript and the jump button share one box: the button belongs to the
         // reading area, not to the composer, so it must not sit under the pill.
-        Box(Modifier.fillMaxSize().padding(padding)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(canvas)
+                .padding(padding),
+        ) {
             Column(Modifier.fillMaxSize()) {
                 state.error?.let { message ->
-                    ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
+                    Box(Modifier.padding(top = barHeight)) {
+                        ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
+                    }
                 }
                 if (visible.isEmpty() && !live) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -335,8 +350,15 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        // Content scrolls from under the floating bar, so the top padding
+                        // is the bar itself rather than a gutter.
+                        contentPadding = PaddingValues(
+                            start = 16.dp,
+                            end = 16.dp,
+                            top = if (state.error != null) 10.dp else barHeight,
+                            bottom = 16.dp,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
                         itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
                             if (row.showTimeLabel) TimeLabel(row.message.timestamp)
@@ -346,6 +368,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                                 showReasoning = settings.showReasoning,
                                 expandReasoning = settings.expandReasoning,
                                 expandTools = settings.expandTools,
+                                contextWindow = settings.contextWindow,
                                 onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
                                 onRegenerate = { viewModel.regenerate() },
                                 onEdit = { editing = it },
@@ -353,12 +376,29 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                         }
                         if (live) {
                             item(key = "streaming") {
+                                // The live reply is one round in progress, so its parts are
+                                // just what has arrived so far: thinking, then prose.
+                                val liveParts = buildList {
+                                    if (reasoning.isNotBlank()) {
+                                        add(
+                                            Part.Thinking(
+                                                text = reasoning,
+                                                tokens = state.stats?.thinkingTokens ?: 0,
+                                                elapsedMs = state.stats?.elapsedMs ?: 0,
+                                            ),
+                                        )
+                                    }
+                                    if (state.streaming.isNotBlank()) {
+                                        add(Part.Text(state.streaming))
+                                    }
+                                }
                                 AssistantRow(
-                                    text = state.streaming,
-                                    reasoning = reasoning,
+                                    parts = liveParts,
                                     streaming = true,
+                                    runningTool = state.runningTool,
                                     avatar = assistant?.face ?: "🪶",
                                     liveStats = state.stats,
+                                    contextWindow = settings.contextWindow,
                                     expandReasoning = settings.expandReasoning,
                                     expandTools = settings.expandTools,
                                 )
@@ -367,6 +407,21 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     }
                 }
             }
+            ChatTopBar(
+                settings = settings,
+                onPickModel = { provider, model ->
+                    scope.launch {
+                        Core.settings.update {
+                            it.copy(
+                                baseUrl = provider.baseUrl,
+                                apiKey = provider.apiKey,
+                                model = model,
+                            )
+                        }
+                    }
+                },
+                onNew = { viewModel.newConversation() },
+            )
             if (!atEnd) {
                 // Bottom-right corner of the reading area: thumb-reachable, and it only
                 // exists while the transcript is scrolled away from its end.
@@ -384,7 +439,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     ),
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.ArrowDownward,
+                        imageVector = Icons.Rounded.ArrowDownward,
                         contentDescription = "回到最新",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(11.dp).size(20.dp),
@@ -426,55 +481,59 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     }
 }
 
+/**
+ * The chat header: no bar and no background, just three controls floating over the
+ * transcript. The conversation's own name is not repeated here — it is on the drawer row
+ * that opened it, and a second copy up here only competed with the model chip for room.
+ */
 @Composable
-private fun ChatHeader(
-    title: String,
-    subtitle: String,
-    assistant: Assistant?,
+private fun ChatTopBar(
     settings: AppSettings,
-    onOpenAssistants: () -> Unit,
     onPickModel: (ProviderConfig, String) -> Unit,
+    onNew: () -> Unit,
 ) {
     var modelsOpen by remember { mutableStateOf(false) }
-    SuixingTopBar(
-        title = title,
-        subtitle = subtitle,
-        leading = {
-            // The face in the corner is the way into the assistant picker, which is
-            // why it is a button rather than decoration.
-            Surface(
-                onClick = onOpenAssistants,
-                modifier = Modifier.size(38.dp),
-                shape = RoundedCornerShape(13.dp),
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        DrawerButton()
+        Spacer(Modifier.width(8.dp))
+        Box {
+            ModelChip(
+                label = settings.shortModel.ifBlank { "选模型" },
+                onClick = { modelsOpen = true },
+            )
+            DropdownMenu(
+                expanded = modelsOpen,
+                onDismissRequest = { modelsOpen = false },
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(text = assistant?.face ?: "🪶", fontSize = 19.sp)
+                ModelMenu(settings = settings) { provider, model ->
+                    onPickModel(provider, model)
+                    modelsOpen = false
                 }
             }
-        },
-        // The model switcher sits on the subtitle line: putting it beside the title
-        // squeezed the conversation name down to four characters.
-        subtitleTrailing = {
-            Box {
-                ModelChip(
-                    label = settings.shortModel.ifBlank { "选模型" },
-                    onClick = { modelsOpen = true },
+        }
+        Spacer(Modifier.weight(1f))
+        Surface(
+            onClick = onNew,
+            modifier = Modifier.size(40.dp),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = "新对话",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
                 )
-                DropdownMenu(
-                    expanded = modelsOpen,
-                    onDismissRequest = { modelsOpen = false },
-                ) {
-                    ModelMenu(settings = settings) { provider, model ->
-                        onPickModel(provider, model)
-                        modelsOpen = false
-                    }
-                }
             }
-        },
-        // The conversation list and 「新会话」 moved into the drawer, where the whole
-        // history is visible at once instead of one dropdown tap deep.
-    )
+        }
+    }
 }
 
 /** The model name in the header; tapping it opens the switcher. */
@@ -483,25 +542,24 @@ private fun ModelChip(label: String, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
         Row(
-            modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            modifier = Modifier.padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 132.dp),
+                modifier = Modifier.widthIn(max = 150.dp),
             )
             Icon(
-                imageVector = Icons.Filled.KeyboardArrowDown,
+                imageVector = Icons.Rounded.KeyboardArrowDown,
                 contentDescription = "切换模型",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(15.dp),
+                modifier = Modifier.size(16.dp),
             )
         }
     }
@@ -537,7 +595,7 @@ private fun ModelMenu(settings: AppSettings, onPick: (ProviderConfig, String) ->
                 trailingIcon = {
                     if (active) {
                         Icon(
-                            imageVector = Icons.Filled.Check,
+                            imageVector = Icons.Rounded.Check,
                             contentDescription = "当前",
                             modifier = Modifier.size(18.dp),
                         )
@@ -556,9 +614,16 @@ private fun EmptyHero(onPick: (String) -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        SuixingOrb(size = 136.dp)
-        Spacer(Modifier.height(10.dp))
-        Text("随行", style = MaterialTheme.typography.headlineSmall)
+        // The app's own mark, tinted to the brand colour: the launcher asset is pure
+        // white for the home screen, and white on a light canvas would vanish.
+        Image(
+            painter = painterResource(R.drawable.ic_launcher_foreground),
+            contentDescription = null,
+            colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary),
+            modifier = Modifier.size(92.dp),
+        )
+        Spacer(Modifier.height(6.dp))
+        Text("我们开始吧", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(6.dp))
         Text(
             text = "说一句话，它就能读屏、点击、翻文件、跑命令。",
@@ -608,7 +673,7 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
             modifier = Modifier.padding(start = 14.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+            Icon(Icons.Rounded.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(10.dp))
             Text(
                 text = message,
@@ -618,20 +683,20 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
             IconButton(onClick = onDismiss) {
-                Icon(Icons.Outlined.Close, contentDescription = "关闭", modifier = Modifier.size(18.dp))
+                Icon(Icons.Rounded.Close, contentDescription = "关闭", modifier = Modifier.size(18.dp))
             }
         }
     }
 }
 
 /**
- * One bubble of the transcript: the message that owns it, the tool calls it made,
- * and whether it opens a new time bucket.
+ * One bubble of the transcript: the message that owns it, the parts of the reply in the
+ * order they arrived, and whether it opens a new time bucket.
  */
 private data class ChatRow(
     val message: StoredMessage,
     val showTimeLabel: Boolean,
-    val tools: List<StoredMessage> = emptyList(),
+    val parts: List<Part> = emptyList(),
     val branch: Branch? = null,
     /**
      * Every round the reply took, oldest first.
@@ -643,16 +708,35 @@ private data class ChatRow(
      */
     val rounds: List<StoredMessage> = listOf(message),
 ) {
-    /** The prose of every round, blank rounds dropped, as one body. */
-    val text: String
-        get() = rounds.map { it.text.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
-
-    /** The thinking of every round, so the header's numbers cover the whole reply. */
-    val reasoning: String
-        get() = rounds.mapNotNull { it.reasoning?.trim()?.takeIf(String::isNotEmpty) }
-            .joinToString("\n\n")
-
     val usage: Usage? get() = Usage.of(rounds)
+}
+
+/**
+ * One piece of a reply, in the order it arrived.
+ *
+ * A single run can think, call tools, think again, call more tools and finally answer.
+ * Each of those is its own part and keeps its own block: merging two rounds of thinking
+ * into one hides where the model changed its mind, and starting a second bubble for the
+ * next round is what used to make one answer arrive as three.
+ */
+private sealed interface Part {
+    /** One round of thinking, with that round's own numbers. */
+    data class Thinking(val text: String, val tokens: Int, val elapsedMs: Long) : Part
+
+    /** The tool calls made after the part before this one. */
+    data class Tools(val calls: List<StoredMessage>) : Part
+
+    /** The words the model wrote. */
+    data class Text(val text: String) : Part
+
+    /**
+     * A line the user typed mid-answer.
+     *
+     * It is a part of this turn rather than a turn of its own: that is what keeps the
+     * bubble whole while still drawing the line exactly where it landed, and it is why
+     * the transcript does not read as though the model volunteered something.
+     */
+    data class Steer(val message: StoredMessage) : Part
 }
 
 /**
@@ -733,7 +817,9 @@ private fun groupRows(
     val runs = Transcript.runsByTurn(messages, turnOf)
     val chosen = Transcript.chosenRuns(messages, activeRuns)
     val shown = Transcript.active(messages, activeRuns)
-    val lastQuestion = shown.lastOrNull { it.role == Roles.USER }?.id.orEmpty()
+    // A steer line is the user talking mid-answer, not a new question: only a real
+    // question can be re-answered or own the branch switcher.
+    val lastQuestion = shown.lastOrNull { it.role == Roles.USER && !it.steer }?.id.orEmpty()
 
     // The switcher hangs off the last reply a turn actually drew, so a text-less
     // turn of the model cannot swallow it.
@@ -773,22 +859,44 @@ private fun groupRows(
             message.role == Roles.TOOL -> {
                 val index = openIndex
                 if (index >= 0) {
-                    rows[index] = rows[index].copy(tools = rows[index].tools + message)
+                    val open = rows[index]
+                    // Consecutive calls share one block; a call that arrives after
+                    // thinking or prose starts a new one, so the sequence stays honest.
+                    val parts = if (open.parts.lastOrNull() is Part.Tools) {
+                        open.parts.dropLast(1) +
+                            Part.Tools((open.parts.last() as Part.Tools).calls + message)
+                    } else {
+                        open.parts + Part.Tools(listOf(message))
+                    }
+                    rows[index] = open.copy(parts = parts)
                 } else {
                     // A tool result with no bubble above it (a transcript that starts
                     // mid-turn) still gets drawn, just on its own.
-                    rows += ChatRow(message, needsTimeLabel(previous, message))
+                    rows += ChatRow(
+                        message = message,
+                        showTimeLabel = needsTimeLabel(previous, message),
+                        parts = listOf(Part.Tools(listOf(message))),
+                    )
                     previous = message
                 }
             }
 
             message.role == Roles.ASSISTANT && message.isVisible() -> {
                 val run = message.runId.orEmpty()
+                // Thinking first, then the words: that is the order they arrived in, and
+                // a round that only thought contributes only a thinking part.
+                val arrived = buildList {
+                    message.reasoning?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                        add(Part.Thinking(it, message.reasoningTokens, message.elapsedMs))
+                    }
+                    if (message.text.isNotBlank()) add(Part.Text(message.text))
+                }
                 val index = openIndex
                 if (index >= 0 && run.isNotEmpty() && run == openRun) {
                     val open = rows[index]
                     rows[index] = open.copy(
                         message = message,
+                        parts = open.parts + arrived,
                         rounds = open.rounds + message,
                         // The switcher only hangs off the reply's last round, which
                         // is this one.
@@ -798,6 +906,7 @@ private fun groupRows(
                     rows += ChatRow(
                         message = message,
                         showTimeLabel = needsTimeLabel(previous, message),
+                        parts = arrived,
                         branch = branchFor(message),
                     )
                     openIndex = rows.lastIndex
@@ -810,8 +919,29 @@ private fun groupRows(
             // to the bubble that is already open.
             message.role == Roles.ASSISTANT -> Unit
 
+            // 插话: drawn where it was typed, inside the turn it interrupted, and the
+            // bubble stays open so the model's next round appends after it.
+            message.role == Roles.USER && message.steer -> {
+                val index = openIndex
+                if (index >= 0) {
+                    val open = rows[index]
+                    rows[index] = open.copy(parts = open.parts + Part.Steer(message))
+                } else {
+                    // Typed before the model had written anything back yet.
+                    rows += ChatRow(
+                        message = message,
+                        showTimeLabel = needsTimeLabel(previous, message),
+                        parts = listOf(Part.Steer(message)),
+                    )
+                }
+                previous = message
+            }
+
             message.isVisible() -> {
-                rows += ChatRow(message, needsTimeLabel(previous, message))
+                rows += ChatRow(
+                    message = message,
+                    showTimeLabel = needsTimeLabel(previous, message),
+                )
                 previous = message
                 openIndex = -1
                 openRun = null
@@ -830,6 +960,7 @@ private fun MessageRow(
     showReasoning: Boolean,
     expandReasoning: Boolean,
     expandTools: Boolean,
+    contextWindow: Int,
     onBranch: (String, String) -> Unit,
     onRegenerate: () -> Unit,
     onEdit: (StoredMessage) -> Unit,
@@ -844,13 +975,14 @@ private fun MessageRow(
         }
 
         Roles.ASSISTANT -> AssistantRow(
-            text = row.text,
-            reasoning = if (showReasoning) row.reasoning else "",
+            // The setting hides thinking entirely; everything else keeps its place in
+            // the sequence either way.
+            parts = if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking },
             streaming = false,
-            tools = row.tools,
             avatar = avatar,
             branch = row.branch,
             usage = row.usage,
+            contextWindow = contextWindow,
             message = row.message,
             expandReasoning = expandReasoning,
             expandTools = expandTools,
@@ -859,12 +991,10 @@ private fun MessageRow(
             onEdit = onEdit,
         )
 
-        // A tool result with no bubble above it still renders as one, chips only.
+        // A tool result with no bubble above it still renders as one, card only.
         else -> AssistantRow(
-            text = "",
-            reasoning = "",
+            parts = listOf(Part.Tools(listOf(row.message))),
             streaming = false,
-            tools = listOf(row.message),
             avatar = avatar,
         )
     }
@@ -878,11 +1008,27 @@ private fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit) 
             .pointerInput(message.id) {
                 detectTapGestures(onLongPress = { onEdit(message) })
             },
-        shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
+        shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
     ) {
-        Column(Modifier.padding(horizontal = 15.dp, vertical = 11.dp)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            // 插话 was typed mid-answer, not as a new question; the badge is how the
+            // transcript stays honest about that after the run is over.
+            if (message.steer) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                    contentColor = MaterialTheme.colorScheme.primary,
+                ) {
+                    Text(
+                        text = "插话",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
+            }
             message.imageBase64?.let { ImageBlock(it) }
             if (message.text.isNotBlank()) {
                 Text(message.text, style = MaterialTheme.typography.bodyLarge)
@@ -907,10 +1053,10 @@ private fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> Un
         modifier = Modifier.padding(top = 2.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TinyAction(Icons.Outlined.ContentCopy, "复制") {
+        TinyAction(Icons.Rounded.ContentCopy, "复制") {
             clipboard.setText(AnnotatedString(message.text))
         }
-        TinyAction(Icons.Filled.Edit, "修改") { onEdit(message) }
+        TinyAction(Icons.Rounded.Edit, "修改") { onEdit(message) }
     }
 }
 
@@ -934,15 +1080,18 @@ private fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
 
 @Composable
 private fun AssistantRow(
-    text: String,
+    /** The reply's pieces in arrival order: thinking, tools, prose, thinking again… */
+    parts: List<Part>,
     streaming: Boolean,
-    reasoning: String = "",
-    tools: List<StoredMessage> = emptyList(),
+    /** The tool this reply is waiting on right now, so its card can say so live. */
+    runningTool: String? = null,
     avatar: String = "🪶",
     branch: Branch? = null,
     usage: Usage? = null,
     /** The engine's live speed, present only while this bubble is the one streaming. */
     liveStats: StreamStats? = null,
+    /** The model's window, for the context readout; 0 means it was never set. */
+    contextWindow: Int = 0,
     message: StoredMessage? = null,
     expandReasoning: Boolean = false,
     expandTools: Boolean = false,
@@ -950,72 +1099,82 @@ private fun AssistantRow(
     onRegenerate: () -> Unit = {},
     onEdit: (StoredMessage) -> Unit = {},
 ) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Surface(
-            modifier = Modifier.size(28.dp),
+            modifier = Modifier.size(24.dp),
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text(text = avatar, fontSize = 13.sp)
+                Text(text = avatar, fontSize = 11.sp)
             }
         }
-        // The action row hangs under the bubble, so the width cap belongs to the
-        // whole column rather than to the bubble on its own.
-        Column(Modifier.widthIn(max = 330.dp)) {
-            Surface(
-                shape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            ) {
-                Column(Modifier.padding(horizontal = 15.dp, vertical = 12.dp)) {
-                    if (reasoning.isNotBlank()) {
+        // The reply is not a card, it is the canvas: only the tool block keeps a surface,
+        // because tools are things that happened rather than the model speaking.
+        Column(Modifier.weight(1f)) {
+            parts.forEachIndexed { index, part ->
+                val last = index == parts.lastIndex
+                when (part) {
+                    is Part.Thinking -> {
                         ReasoningBlock(
-                            text = reasoning,
-                            streaming = streaming && text.isBlank(),
-                            reasoningTokens = usage?.reasoning ?: 0,
-                            elapsedMs = usage?.elapsedMs ?: 0,
+                            text = part.text,
+                            // A live block is the one still growing; a settled round's
+                            // thinking is complete even while the run continues.
+                            streaming = streaming && last,
+                            reasoningTokens = part.tokens,
+                            elapsedMs = part.elapsedMs,
                             // Thinking is the reason to run a thinking model at all, so a
                             // live block starts open; it settles into the setting's state
                             // once the reply is stored and drawn as its own message.
                             startExpanded = expandReasoning || streaming,
                         )
-                        if (text.isNotBlank() || streaming || tools.isNotEmpty()) {
-                            Spacer(Modifier.height(10.dp))
-                        }
+                        Spacer(Modifier.height(10.dp))
                     }
-                    when {
-                        text.isBlank() && streaming -> TypingDots()
-                        text.isBlank() -> Unit
-                        else -> {
-                            SelectionContainer {
-                                MarkdownText(text = text, style = MaterialTheme.typography.bodyLarge)
-                            }
-                            if (streaming) {
-                                Spacer(Modifier.height(4.dp))
-                                BlinkingCursor()
-                            }
-                        }
+
+                    is Part.Tools -> {
+                        ToolBundle(
+                            tools = part.calls,
+                            // Only the newest block can be the one waiting on a tool.
+                            runningTool = runningTool.takeIf { last },
+                            startExpanded = expandTools,
+                        )
+                        Spacer(Modifier.height(10.dp))
                     }
-                    // Every tool the turn ran shares one folding row, so a turn that fired
-                    // ten of them reads as one block rather than ten stacked bubbles.
-                    if (tools.isNotEmpty()) {
-                        if (text.isNotBlank() || reasoning.isNotBlank()) {
-                            Spacer(Modifier.height(10.dp))
-                            HorizontalDivider(
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
+
+                    is Part.Text -> {
+                        SelectionContainer {
+                            MarkdownText(
+                                text = part.text,
+                                style = MaterialTheme.typography.bodyLarge,
                             )
                         }
-                        ToolBundle(tools, startExpanded = expandTools)
+                        if (streaming && last) {
+                            Spacer(Modifier.height(4.dp))
+                            BlinkingCursor()
+                        }
+                        Spacer(Modifier.height(10.dp))
                     }
-                    val settled = usage?.takeIf { it.known }
-                    if (settled != null || liveStats != null) {
-                        Spacer(Modifier.height(9.dp))
-                        UsageLine(settled, liveStats)
+
+                    is Part.Steer -> {
+                        // Right-aligned, like any user line, but inside the reply: the
+                        // indentation is what says "I said this while it was working".
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            UserBubble(message = part.message, onEdit = onEdit)
+                        }
+                        Spacer(Modifier.height(10.dp))
                     }
                 }
             }
+            if (parts.isEmpty() && streaming) TypingDots()
+            val settled = usage?.takeIf { it.known }
+            if (settled != null || liveStats != null) {
+                UsageLine(settled, liveStats, contextWindow)
+            }
             if (message != null && !streaming) {
+                Spacer(Modifier.height(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ActionBar(
                         branch = branch,
@@ -1052,7 +1211,7 @@ private fun ActionBar(
             val atStart = branch.index <= 0
             val atEnd = branch.index >= branch.runs.lastIndex
             BranchArrow(
-                icon = Icons.Filled.ChevronLeft,
+                icon = Icons.Rounded.ChevronLeft,
                 label = "上一个回答",
                 enabled = !atStart,
                 onClick = { onBranch(branch.turnId, branch.runs[branch.index - 1]) },
@@ -1063,7 +1222,7 @@ private fun ActionBar(
                 color = scheme.onSurfaceVariant,
             )
             BranchArrow(
-                icon = Icons.Filled.ChevronRight,
+                icon = Icons.Rounded.ChevronRight,
                 label = "下一个回答",
                 enabled = !atEnd,
                 onClick = { onBranch(branch.turnId, branch.runs[branch.index + 1]) },
@@ -1071,7 +1230,7 @@ private fun ActionBar(
         }
         if (branch?.canRegenerate == true) {
             BranchArrow(
-                icon = Icons.Filled.Refresh,
+                icon = Icons.Rounded.Refresh,
                 label = "重新回答",
                 enabled = true,
                 onClick = onRegenerate,
@@ -1140,7 +1299,7 @@ private fun ReasoningBlock(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = Icons.Outlined.Psychology,
+                imageVector = Icons.Rounded.Psychology,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(14.dp),
@@ -1168,9 +1327,9 @@ private fun ReasoningBlock(
             }
             Icon(
                 imageVector = if (expanded) {
-                    Icons.Filled.KeyboardArrowUp
+                    Icons.Rounded.KeyboardArrowUp
                 } else {
-                    Icons.Filled.KeyboardArrowDown
+                    Icons.Rounded.KeyboardArrowDown
                 },
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1204,51 +1363,107 @@ private fun ReasoningBlock(
 }
 
 /**
- * Every tool call of one turn in one folding row: one line per tool, tapped open to
- * reveal its arguments and output.
+ * Every tool call of one turn behind one summary line: the row is the whole story until
+ * the user asks for more, because ten tool calls drawn flat filled the screen with
+ * arguments nobody had asked to read yet.
  *
- * Flat on purpose: the bubble is the only surface in a reply, so the tools read as
- * part of it rather than as a card stacked under the answer.
+ * Two levels on purpose. The summary opens the list of calls; a single call opens its own
+ * arguments and output. Arguments are the noisy part, so they stay behind the second tap
+ * even once the list is open.
  */
 @Composable
-private fun ToolBundle(tools: List<StoredMessage>, startExpanded: Boolean = false) {
-    // -1 keeps every tool collapsed; the setting opens the first one, and tapping a row
-    // moves the detail to that row instead.
-    var open by remember { mutableStateOf(if (startExpanded) 0 else -1) }
+private fun ToolBundle(
+    tools: List<StoredMessage>,
+    runningTool: String? = null,
+    startExpanded: Boolean = false,
+) {
+    var expanded by remember { mutableStateOf(startExpanded) }
+    var openTool by remember { mutableStateOf<String?>(null) }
     val failures = tools.count { it.toolOk == false }
-    Column(Modifier.fillMaxWidth().padding(top = 7.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Outlined.Bolt,
-                contentDescription = null,
-                tint = if (failures > 0) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.secondary
-                },
-                modifier = Modifier.size(15.dp),
-            )
-            Spacer(Modifier.width(7.dp))
-            Text(
-                text = if (tools.size == 1) "调用 1 个工具" else "调用 ${tools.size} 个工具",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-            )
-            if (failures > 0) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Bolt,
+                    contentDescription = null,
+                    tint = when {
+                        failures > 0 -> MaterialTheme.colorScheme.error
+                        runningTool != null -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.secondary
+                    },
+                    modifier = Modifier.size(15.dp),
+                )
+                Spacer(Modifier.width(7.dp))
                 Text(
-                    text = "$failures 个失败",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
+                    text = if (tools.size == 1) "调用 1 个工具" else "调用 ${tools.size} 个工具",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                when {
+                    // The name of the tool being waited on is the only useful thing this
+                    // row can say while it is waiting.
+                    runningTool != null -> {
+                        Text(
+                            text = runningTool,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 140.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+
+                    failures > 0 -> Text(
+                        text = "$failures 个失败",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+
+                    else -> Text(
+                        text = "完成",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) {
+                        Icons.Rounded.KeyboardArrowUp
+                    } else {
+                        Icons.Rounded.KeyboardArrowDown
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
                 )
             }
-        }
-        tools.forEachIndexed { index, tool ->
-            ToolRow(
-                message = tool,
-                expanded = open == index,
-                onToggle = { open = if (open == index) -1 else index },
-            )
+            if (expanded) {
+                tools.forEach { tool ->
+                    ToolRow(
+                        message = tool,
+                        expanded = openTool == tool.id,
+                        onToggle = {
+                            openTool = if (openTool == tool.id) null else tool.id
+                        },
+                    )
+                }
+            }
         }
     }
 }
@@ -1285,21 +1500,23 @@ private fun ToolRow(message: StoredMessage, expanded: Boolean, onToggle: () -> U
                 color = tone,
             )
             Icon(
-                imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(16.dp),
             )
         }
         val args = message.toolArgs?.takeIf { it.isNotBlank() && it != "{}" }
-        if (args != null) {
-            Spacer(Modifier.height(4.dp))
+        // Arguments are the noisy part of a tool call, so they wait behind this row's
+        // own tap even after the list itself is open.
+        if (expanded && args != null) {
+            Spacer(Modifier.height(6.dp))
             Text(
                 text = args,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = if (expanded) 14 else 1,
+                maxLines = 14,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -1322,9 +1539,14 @@ private fun ToolRow(message: StoredMessage, expanded: Boolean, onToggle: () -> U
     }
 }
 
-/** What the reply cost, in the provider's own numbers. */
+/**
+ * What the reply cost, in the provider's own numbers, plus how full the context is.
+ *
+ * [contextWindow] is the user's own setting for the model's window; 0 means they never
+ * told us, and then only the raw prompt size is shown rather than a made-up ratio.
+ */
 @Composable
-private fun UsageLine(usage: Usage?, live: StreamStats? = null) {
+private fun UsageLine(usage: Usage?, live: StreamStats? = null, contextWindow: Int = 0) {
     val parts = buildList {
         if (live != null) {
             // The provider only reports its counts with the last chunk, so a running
@@ -1346,12 +1568,63 @@ private fun UsageLine(usage: Usage?, live: StreamStats? = null) {
             if (usage.elapsedMs > 0) add(formatDuration(usage.elapsedMs))
         }
     }
-    if (parts.isEmpty()) return
-    Text(
-        text = parts.joinToString(" · "),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+    // The prompt size of the newest round is what is actually sitting in the window now.
+    // While a run streams, the engine's copy of the endpoint's last report is fresher than
+    // anything already stored, so it wins; a settled reply has no live stats and falls
+    // back to its own numbers.
+    val context = live?.lastPromptTokens?.takeIf { it > 0 } ?: usage?.prompt ?: 0
+    if (parts.isEmpty() && context <= 0) return
+    // The meta line is 12sp. Written as a fraction of labelMedium rather than a bare
+    // 12.sp so the user's font scale still applies to it: the theme scales every slot,
+    // and a hard size here would quietly opt this one line out.
+    val meta = MaterialTheme.typography.labelMedium.copy(
+        fontSize = MaterialTheme.typography.labelMedium.fontSize * (12f / 13f),
     )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (parts.isNotEmpty()) {
+            Text(
+                text = parts.joinToString(" · "),
+                style = meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (context > 0) {
+            if (parts.isNotEmpty()) Spacer(Modifier.width(6.dp))
+            ContextChip(tokens = context, window = contextWindow)
+        }
+    }
+}
+
+/** 上下文 Xk, or Xk / Yk once the window is known; it turns amber near the ceiling. */
+@Composable
+private fun ContextChip(tokens: Int, window: Int) {
+    val full = window > 0 && tokens * 100 / window >= 80
+    val tone = if (full) {
+        MaterialTheme.colorScheme.tertiary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Surface(
+        shape = CircleShape,
+        color = if (full) {
+            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.14f)
+        } else {
+            MaterialTheme.colorScheme.surfaceContainer
+        },
+    ) {
+        Text(
+            text = if (window > 0) {
+                "上下文 ${tokens / 1000}k / ${window / 1000}k"
+            } else {
+                "上下文 ${tokens / 1000}k"
+            },
+            style = MaterialTheme.typography.labelMedium.copy(
+                fontSize = MaterialTheme.typography.labelMedium.fontSize * (12f / 13f),
+            ),
+            color = tone,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+        )
+    }
 }
 
 @Composable
@@ -1417,6 +1690,8 @@ private fun Composer(
     onInput: (String) -> Unit,
     running: Boolean,
     status: String,
+    /** The live run's stats; the status line reads its compression note. */
+    stats: StreamStats?,
     /** 被拦下的动作或别的会话里跑挂的 run，说给用户听的那一句。 */
     notice: String?,
     attachment: Attachment?,
@@ -1439,11 +1714,14 @@ private fun Composer(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .padding(horizontal = 12.dp)
-            .padding(top = 6.dp, bottom = 10.dp),
+            .padding(horizontal = 16.dp)
+            .padding(top = 6.dp, bottom = 12.dp),
     ) {
         Column {
             if (running) {
+                // A compression note outranks the status text: it explains why the run is
+                // suddenly working from a shorter history, which "正在思考…" cannot.
+                val note = stats?.note.orEmpty()
                 Row(
                     modifier = Modifier.padding(start = 14.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1451,13 +1729,13 @@ private fun Composer(
                     CircularProgressIndicator(
                         modifier = Modifier.size(13.dp),
                         strokeWidth = 2.dp,
-                        color = scheme.primary,
+                        color = if (note.isNotEmpty()) scheme.tertiary else scheme.primary,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        text = status.ifBlank { "正在思考…" },
+                        text = note.ifEmpty { status.ifBlank { "正在思考…" } },
                         style = MaterialTheme.typography.labelMedium,
-                        color = scheme.onSurfaceVariant,
+                        color = if (note.isNotEmpty()) scheme.tertiary else scheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -1469,7 +1747,7 @@ private fun Composer(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
-                        imageVector = Icons.Outlined.Info,
+                        imageVector = Icons.Rounded.Info,
                         contentDescription = null,
                         tint = scheme.tertiary,
                         modifier = Modifier.size(14.dp),
@@ -1485,10 +1763,9 @@ private fun Composer(
                 }
             }
             if (running) {
-                // 插话: a line the model reads at its next turn, instead of waiting for
-                // the whole run to finish before it hears anything.
-                SteerRow(onSteer = onSteer)
-                Spacer(Modifier.height(8.dp))
+                // 插话 is typed into this same field and sent with enter; a second box
+                // below it made it ambiguous which one starts a run and which joins one.
+                Spacer(Modifier.height(2.dp))
             }
             attachment?.let {
                 AttachmentChip(attachment = it, onRemove = onClearAttachment)
@@ -1497,15 +1774,16 @@ private fun Composer(
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(28.dp),
-                color = scheme.surfaceContainerHigh,
-                shadowElevation = 8.dp,
-                border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.55f)),
+                // Light stays pure white so the pill does not read as a grey fill; in dark
+                // `surface` IS the canvas, so the pill steps one surface up to stay a
+                // visible object rather than a shadow with nothing inside it.
+                color = if (LocalDarkTheme.current) scheme.surfaceContainer else scheme.surface,
+                shadowElevation = 6.dp,
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                    // Centred, not bottom-aligned: the icons are 44dp while a single line of
-                    // bodyLarge plus its padding is taller than that, so bottom alignment
-                    // left the send button riding high against the text.
+                    // Centred, not bottom-aligned: the icons are 48dp while a single line
+                    // of bodyLarge plus its padding is 48dp too, so the two line up.
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box {
@@ -1514,7 +1792,7 @@ private fun Composer(
                             modifier = Modifier.size(44.dp),
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Add,
+                                imageVector = Icons.Rounded.Add,
                                 contentDescription = "添加图片或文件",
                                 tint = scheme.onSurfaceVariant,
                             )
@@ -1525,7 +1803,7 @@ private fun Composer(
                         ) {
                             DropdownMenuItem(
                                 text = { Text("图片") },
-                                leadingIcon = { Icon(Icons.Outlined.Image, contentDescription = null) },
+                                leadingIcon = { Icon(Icons.Rounded.Image, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
                                     onPickImage()
@@ -1533,7 +1811,7 @@ private fun Composer(
                             )
                             DropdownMenuItem(
                                 text = { Text("拍照") },
-                                leadingIcon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
+                                leadingIcon = { Icon(Icons.Rounded.PhotoCamera, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
                                     onTakePhoto()
@@ -1543,7 +1821,7 @@ private fun Composer(
                                 text = { Text("文件") },
                                 leadingIcon = {
                                     Icon(
-                                        Icons.AutoMirrored.Outlined.InsertDriveFile,
+                                        Icons.AutoMirrored.Rounded.InsertDriveFile,
                                         contentDescription = null,
                                     )
                                 },
@@ -1559,20 +1837,34 @@ private fun Composer(
                         onValueChange = onInput,
                         modifier = Modifier
                             .weight(1f)
-                            // 10dp + 24dp line + 10dp = the 44dp of the icon buttons beside
-                            // it, so one line of text sits dead centre in the pill.
-                            .padding(vertical = 10.dp)
+                            // 12dp + 24dp line + 12dp = the 48dp of the icon buttons
+                            // beside it, so one line of text sits dead centre.
+                            .padding(vertical = 12.dp)
                             .onFocusChanged { focus ->
                                 if (focus.isFocused) onFocused()
                             },
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
                         cursorBrush = SolidColor(scheme.primary),
                         maxLines = 5,
+                        // Enter sends — and while a run is live it sends the line to that
+                        // run instead of starting a second one.
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(
+                            onSend = {
+                                val text = input.trim()
+                                if (text.isEmpty()) return@KeyboardActions
+                                if (running) {
+                                    if (onSteer(text)) onInput("")
+                                } else {
+                                    onSend()
+                                }
+                            },
+                        ),
                         decorationBox = { inner ->
                             Box {
                                 if (input.isEmpty()) {
                                     Text(
-                                        text = "让随行做点什么…",
+                                        text = if (running) "插一句话…" else "让随行做点什么…",
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = scheme.onSurfaceVariant,
                                     )
@@ -1584,91 +1876,54 @@ private fun Composer(
                     IconButton(
                         onClick = onMic,
                         enabled = !running,
-                        modifier = Modifier.size(44.dp),
+                        modifier = Modifier.size(48.dp),
                     ) {
                         Icon(
-                            Icons.Filled.Mic,
+                            Icons.Rounded.Mic,
                             contentDescription = "语音输入",
                             tint = if (running) scheme.onSurfaceVariant else scheme.onSurfaceVariant,
                         )
                     }
-                    Spacer(Modifier.width(2.dp))
+                    // 插话发送: only while a run is live and there is something to say —
+                    // an always-present second button would be a dead control most of
+                    // the time, and the stop button beside it still owns the slot.
+                    if (running && input.isNotBlank()) {
+                        FilledIconButton(
+                            onClick = { if (onSteer(input.trim())) onInput("") },
+                            shape = CircleShape,
+                            modifier = Modifier.size(48.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = scheme.primaryContainer,
+                                contentColor = scheme.onPrimaryContainer,
+                            ),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ArrowUpward,
+                                contentDescription = "插话发送",
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
                     FilledIconButton(
                         onClick = { if (running) onStop() else onSend() },
                         enabled = running || input.isNotBlank() || attachment != null,
                         shape = CircleShape,
-                        modifier = Modifier.size(44.dp),
+                        modifier = Modifier.size(48.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = if (running) scheme.error else scheme.primary,
-                            contentColor = if (running) scheme.onError else scheme.onPrimary,
-                            disabledContainerColor = scheme.surfaceContainerHighest,
-                            disabledContentColor = scheme.onSurfaceVariant,
+                            containerColor = if (running) scheme.primary else scheme.surfaceVariant,
+                            contentColor = if (running) scheme.onPrimary else scheme.onSurfaceVariant,
+                            disabledContainerColor = scheme.surfaceVariant,
+                            disabledContentColor = scheme.onSurfaceVariant.copy(alpha = 0.5f),
                         ),
                     ) {
                         Icon(
-                            imageVector = if (running) Icons.Filled.Stop else Icons.Filled.ArrowUpward,
+                            imageVector = if (running) Icons.Rounded.Stop else Icons.Rounded.ArrowUpward,
                             contentDescription = if (running) "停止" else "发送",
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(22.dp),
                         )
                     }
                 }
-            }
-        }
-    }
-}
-
-/**
- * The interjection line, shown only while a run is live.
- *
- * It is a second, deliberately smaller field than the composer: the big one is for the
- * next question, and one field for both would leave it unclear whether sending starts a
- * new run or joins the one already going.
- */
-@Composable
-private fun SteerRow(onSteer: (String) -> Boolean) {
-    val scheme = MaterialTheme.colorScheme
-    var text by rememberSaveable { mutableStateOf("") }
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
-        color = scheme.surfaceContainer,
-        border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.5f)),
-    ) {
-        Row(
-            modifier = Modifier.padding(start = 14.dp, end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            BasicTextField(
-                value = text,
-                onValueChange = { text = it },
-                modifier = Modifier.weight(1f).padding(vertical = 9.dp),
-                textStyle = MaterialTheme.typography.bodyMedium.copy(color = scheme.onSurface),
-                cursorBrush = SolidColor(scheme.primary),
-                maxLines = 2,
-                decorationBox = { inner ->
-                    Box {
-                        if (text.isEmpty()) {
-                            Text(
-                                text = "插一句话，它下一步就能看到…",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = scheme.onSurfaceVariant,
-                            )
-                        }
-                        inner()
-                    }
-                },
-            )
-            IconButton(
-                onClick = { if (onSteer(text.trim())) text = "" },
-                enabled = text.isNotBlank(),
-                modifier = Modifier.size(36.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.ArrowUpward,
-                    contentDescription = "插话",
-                    tint = if (text.isNotBlank()) scheme.primary else scheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
             }
         }
     }
@@ -1709,7 +1964,7 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                     )
                 } else {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                        imageVector = Icons.AutoMirrored.Rounded.InsertDriveFile,
                         contentDescription = null,
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp),
@@ -1726,7 +1981,7 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                 )
                 IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
                     Icon(
-                        imageVector = Icons.Outlined.Close,
+                        imageVector = Icons.Rounded.Close,
                         contentDescription = "移除",
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(15.dp),

@@ -96,6 +96,19 @@ data class AppSettings(
      * default: a long task should not be cut off at an arbitrary number.
      */
     val maxToolRounds: Int = 0,
+    /**
+     * 插话落在哪里。0 排队：等这一轮模型说完，在下一轮请求前注入，模型把它当成
+     * 「用户在我干活时说的」；1 立即：掐断在途的流，让模型马上看到这句话——代价是
+     * 被打断的那一轮输出作废。默认排队，因为打断是有损的。
+     */
+    val steerMode: Int = 0,
+    /**
+     * 上下文接近窗口上限时自动把旧消息压成摘要。
+     *
+     * 默认开：超窗是硬失败（接口直接 400），而压缩最坏只是损失一些细节，两害相权
+     * 取其轻。只在用户设了 [contextWindow] 时才可能触发。
+     */
+    val autoCompress: Boolean = true,
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     /**

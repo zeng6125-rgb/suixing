@@ -44,6 +44,8 @@ data class ChatUiState(
     /** Why the last action was refused, or how a run in another conversation ended. */
     val notice: String? = null,
     val status: String = "",
+    /** The tool the run is inside right now; the tool card names it live. */
+    val runningTool: String? = null,
     /**
      * Speed of the run that is streaming, straight off the engine's `RunState`. Only the
      * live bubble reads it; once the reply is stored, its own usage numbers are the
@@ -77,6 +79,7 @@ private data class RunSession(
     val streaming: String = "",
     val reasoning: String = "",
     val status: String = "",
+    val runningTool: String? = null,
     val error: String? = null,
 )
 
@@ -385,7 +388,31 @@ class ChatViewModel : ViewModel() {
      * Slips a line to the model at its next turn instead of waiting for this run to end.
      * False means nothing was running, so the caller keeps the text.
      */
-    fun steer(text: String): Boolean = Core.engine.steer(text)
+    /**
+     * Queues a line for the model that is running, and writes it into the transcript at
+     * the point it lands.
+     *
+     * The bubble matters: without it the answer reads as though the model volunteered
+     * something nobody asked for. It is marked `steer` so the transcript keeps treating
+     * it as an interruption rather than as the question the turn is answering.
+     */
+    fun steer(text: String): Boolean {
+        val body = text.trim()
+        if (body.isEmpty() || !Core.engine.steer(body)) return false
+        val live = session ?: return true
+        val line = StoredMessage(
+            id = UUID.randomUUID().toString(),
+            role = Roles.USER,
+            text = body,
+            steer = true,
+        )
+        val next = live.copy(messages = live.messages + line)
+        setSession(next)
+        // Saved straight away: a steer that only lived in memory would vanish the moment
+        // the user switched conversations, which is exactly when they go looking for it.
+        viewModelScope.launch { saveSession(next) }
+        return true
+    }
 
     fun dismissError() {
         _state.update { it.copy(error = null) }
@@ -467,14 +494,18 @@ class ChatViewModel : ViewModel() {
                 reasoning = "",
             )
 
-            is AgentEvent.ToolStarted -> live.copy(status = "调用 ${event.name}")
+            is AgentEvent.ToolStarted -> live.copy(
+                status = "调用 ${event.name}",
+                runningTool = event.name,
+            )
 
             is AgentEvent.ToolMessage -> live.copy(
                 messages = live.messages + event.message.copy(runId = live.runId),
                 status = "",
+                runningTool = null,
             )
 
-            is AgentEvent.ToolFinished -> live
+            is AgentEvent.ToolFinished -> live.copy(runningTool = null)
 
             // The error rides with the run: it shows on the error card only while that
             // conversation is the one on screen, and travels with it otherwise.
@@ -513,6 +544,7 @@ class ChatViewModel : ViewModel() {
                     streaming = next.streaming,
                     reasoning = next.reasoning,
                     status = next.status,
+                    runningTool = next.runningTool,
                     error = next.error ?: snapshot.error,
                 )
             }
@@ -538,6 +570,7 @@ class ChatViewModel : ViewModel() {
                     reasoning = "",
                     stats = null,
                     status = status,
+                    runningTool = null,
                     notice = null,
                     error = failure ?: snapshot.error,
                 )

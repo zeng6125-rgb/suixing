@@ -18,11 +18,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.outlined.Badge
-import androidx.compose.material.icons.outlined.Build
-import androidx.compose.material.icons.outlined.Memory
-import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.rounded.Badge
+import androidx.compose.material.icons.rounded.Build
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -137,7 +137,7 @@ fun AssistantEditor(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun IdentitySection(draft: Assistant, onDraft: (Assistant) -> Unit) {
-    SectionCard(title = "身份", icon = Icons.Outlined.Badge, subtitle = "名字与头像") {
+    SectionCard(title = "身份", icon = Icons.Rounded.Badge, subtitle = "名字与头像") {
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -192,7 +192,7 @@ private fun IdentitySection(draft: Assistant, onDraft: (Assistant) -> Unit) {
 private fun PromptSection(draft: Assistant, onDraft: (Assistant) -> Unit) {
     SectionCard(
         title = "系统提示词",
-        icon = Icons.Outlined.Tune,
+        icon = Icons.Rounded.Tune,
         subtitle = "这个助手是谁、该怎么做事",
         trailing = {
             TextButton(
@@ -225,7 +225,7 @@ private fun ModelSection(
         else -> draft.model.substringAfter('/')
     }
 
-    SectionCard(title = "模型", icon = Icons.Outlined.Memory, subtitle = "可以让这个助手用另一个模型") {
+    SectionCard(title = "模型", icon = Icons.Rounded.Memory, subtitle = "可以让这个助手用另一个模型") {
         Surface(
             onClick = { open = true },
             modifier = Modifier.fillMaxWidth(),
@@ -245,7 +245,7 @@ private fun ModelSection(
                     modifier = Modifier.weight(1f),
                 )
                 Icon(
-                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
@@ -315,7 +315,7 @@ private fun ToolSection(
     val off = draft.disabledTools.toSet()
     SectionCard(
         title = "工具",
-        icon = Icons.Outlined.Build,
+        icon = Icons.Rounded.Build,
         subtitle = "关掉的工具这个助手不能调用",
         trailing = {
             TextButton(onClick = { onDraft(draft.copy(disabledTools = emptyList())) }) {

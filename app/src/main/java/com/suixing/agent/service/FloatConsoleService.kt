@@ -435,11 +435,26 @@ private fun RunState.detail(): String = when (this) {
     is RunState.Failed -> message
 }
 
-private fun StreamStats.line(): String = String.format(
-    Locale.US,
-    "输出 %d tok · 思考 %d · %.1f tok/s · %.1fs",
-    tokensOut,
-    thinkingTokens,
-    tokPerSec,
-    elapsedMs / 1000.0,
-)
+/**
+ * The second line: how fast, how long, how full the context is, or what went wrong.
+ *
+ * The context figure is the endpoint's own prompt-token count, which makes it the one
+ * number here that is not an estimate. The note rides along because the console is the
+ * only place a compression can be seen while it is still news.
+ */
+private fun StreamStats.line(): String = buildString {
+    append(
+        String.format(
+            Locale.US,
+            "输出 %d tok · 思考 %d · %.1f tok/s · %.1fs",
+            tokensOut,
+            thinkingTokens,
+            tokPerSec,
+            elapsedMs / 1000.0,
+        ),
+    )
+    if (lastPromptTokens > 0) {
+        append(String.format(Locale.US, " · 上下文 %.1fk", lastPromptTokens / 1000.0))
+    }
+    if (note.isNotEmpty()) append(" · ").append(note)
+}

@@ -33,11 +33,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ShieldMoon
-import androidx.compose.material.icons.outlined.DeleteOutline
-import androidx.compose.material.icons.outlined.FolderOpen
-import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.ShieldMoon
+import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -71,7 +72,9 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.suixing.agent.core.Core
+import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
+import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
@@ -110,8 +113,14 @@ fun SuixingApp() {
     }.collectAsState(initial = "" to "")
     val activeConversationId = shellIds.first
     val runningChatId = shellIds.second
+    // Same reason as the ids above: the picker needs one field, not the whole transcript.
+    val assistantId by remember(chat) {
+        chat.state.map { it.assistantId }.distinctUntilChanged()
+    }.collectAsState(initial = "")
 
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    var assistantsOpen by rememberSaveable { mutableStateOf(false) }
+    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
 
     // Top-level destinations replace each other: the drawer is a switch, not a stack.
     val open: (String) -> Unit = { target ->
@@ -179,6 +188,10 @@ fun SuixingApp() {
                     open("chat")
                 },
                 onDeleteConversation = { chat.deleteConversation(it) },
+                onOpenAssistants = {
+                    drawerOpen = false
+                    assistantsOpen = true
+                },
                 onNavigate = open,
             )
         }
@@ -187,6 +200,20 @@ fun SuixingApp() {
     // Rendered outside the navigation host so a prompt cannot be missed while the
     // user is on another screen — the agent is blocked until it is answered.
     pending?.let { request -> ApprovalDialog(request.toolName, request.args) }
+
+    // The assistant picker used to live in the chat header's avatar, which the floating
+    // header no longer has; the drawer is where the rest of the app's switches live.
+    if (assistantsOpen) {
+        AssistantSheet(
+            assistants = settings.assistants,
+            activeId = assistantId.ifBlank { settings.activeAssistantId },
+            settings = settings,
+            onUse = { chat.useAssistant(it) },
+            onSave = { chat.saveAssistant(it) },
+            onDelete = { chat.deleteAssistant(it) },
+            onDismiss = { assistantsOpen = false },
+        )
+    }
 }
 
 /**
@@ -203,6 +230,7 @@ private fun BoxScope.Drawer(
     onNew: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
     onDeleteConversation: (Conversation) -> Unit,
+    onOpenAssistants: () -> Unit,
     onNavigate: (String) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -262,7 +290,7 @@ private fun BoxScope.Drawer(
                     }
                     IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
                         Icon(
-                            imageVector = Icons.Filled.Add,
+                            imageVector = Icons.Rounded.Add,
                             contentDescription = "新对话",
                             tint = scheme.primary,
                         )
@@ -298,16 +326,23 @@ private fun BoxScope.Drawer(
                 )
                 Spacer(Modifier.height(6.dp))
                 DrawerAction(
+                    label = "助手",
+                    hint = "人格与工具白名单",
+                    icon = Icons.Rounded.SmartToy,
+                    selected = false,
+                    onClick = onOpenAssistants,
+                )
+                DrawerAction(
                     label = "文件",
                     hint = "浏览与编辑",
-                    icon = Icons.Outlined.FolderOpen,
+                    icon = Icons.Rounded.FolderOpen,
                     selected = route == "files",
                     onClick = { onNavigate("files") },
                 )
                 DrawerAction(
                     label = "设置",
                     hint = "模型 · 外观 · 权限",
-                    icon = Icons.Outlined.Settings,
+                    icon = Icons.Rounded.Settings,
                     selected = route == "settings",
                     onClick = { onNavigate("settings") },
                 )
@@ -357,7 +392,7 @@ private fun ConversationRow(
             )
             IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
                 Icon(
-                    imageVector = Icons.Outlined.DeleteOutline,
+                    imageVector = Icons.Rounded.DeleteOutline,
                     contentDescription = "删除会话",
                     tint = scheme.onSurfaceVariant,
                     modifier = Modifier.size(17.dp),
@@ -415,7 +450,7 @@ private fun DrawerAction(
 private fun ApprovalDialog(toolName: String, args: String) {
     AlertDialog(
         onDismissRequest = { Core.gate.resolve(false) },
-        icon = { Icon(Icons.Filled.ShieldMoon, contentDescription = null) },
+        icon = { Icon(Icons.Rounded.ShieldMoon, contentDescription = null) },
         title = { Text("需要你确认") },
         text = {
             Column {

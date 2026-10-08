@@ -17,9 +17,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.MenuBook
-import androidx.compose.material.icons.outlined.DeleteOutline
-import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.automirrored.rounded.MenuBook
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -93,7 +93,7 @@ fun SkillsSection(
 private fun SkillIntroCard(rootPath: String) {
     SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.Outlined.Info, size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            SoftIcon(Icons.Rounded.Info, size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text("什么是技能", style = MaterialTheme.typography.titleMedium)
         }
@@ -134,7 +134,7 @@ private fun SkillIntroCard(rootPath: String) {
 private fun SkillCard(skill: Skill, onView: () -> Unit, onDelete: () -> Unit) {
     SuixingCard(contentPadding = PaddingValues(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.AutoMirrored.Outlined.MenuBook, tint = MaterialTheme.colorScheme.tertiary)
+            SoftIcon(Icons.AutoMirrored.Rounded.MenuBook, tint = MaterialTheme.colorScheme.tertiary)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -153,7 +153,7 @@ private fun SkillCard(skill: Skill, onView: () -> Unit, onDelete: () -> Unit) {
             }
             IconButton(onClick = onDelete) {
                 Icon(
-                    Icons.Outlined.DeleteOutline,
+                    Icons.Rounded.DeleteOutline,
                     contentDescription = "删除",
                     modifier = Modifier.size(20.dp),
                 )

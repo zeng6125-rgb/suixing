@@ -208,6 +208,18 @@ data class StreamStats(
     val thinkingTokens: Int,
     val elapsedMs: Long,
     val tokPerSec: Float,
+    /**
+     * The prompt size the endpoint itself reported for the last round; 0 until it
+     * reports one. This is the only honest measure of 「上下文用了多少」 — counting
+     * the wire's characters would be a guess, and this number is handed to us.
+     */
+    val lastPromptTokens: Int = 0,
+    /**
+     * One line about the run that is not a statistic, e.g. that the context was just
+     * compressed. It rides here rather than in a new event because this flow is
+     * already the live channel both the chat screen and the floating console read.
+     */
+    val note: String = "",
 )
 
 /** What the engine is doing right now, for anything outside the chat screen. */
@@ -256,6 +268,28 @@ class AgentEngine(
 
     private val steering = Channel<String>(Channel.UNLIMITED)
 
+    /**
+     * Set when an immediate [steer] aborts the round on purpose, so the IOException it
+     * produces is read as 「这一轮作废」 rather than as a network failure.
+     */
+    private val steeringCut = AtomicBoolean(false)
+
+    /** The settings of the run in flight; [steer]'s default mode comes from here. */
+    @Volatile
+    private var runSettings: AppSettings? = null
+
+    /** Prompt tokens the endpoint reported for the last round; 0 = it never did. */
+    @Volatile
+    private var lastPromptTokens = 0
+
+    /** Wire size in characters when [lastPromptTokens] was recorded, to price the growth. */
+    @Volatile
+    private var lastPromptChars = 0
+
+    /** A one-line note about the run, shown by whoever renders [runState]. */
+    @Volatile
+    private var contextNote = ""
+
     private val outChars = AtomicInteger(0)
 
     private val thinkingChars = AtomicInteger(0)
@@ -299,19 +333,33 @@ class AgentEngine(
     }
 
     /**
-     * Queues a message to be handed to the model at its next turn.
+     * Says something to the run that is in flight.
      *
-     * Steering is not a second run: the text lands in the same conversation, before
-     * the next request goes out, so the model sees it as something the user said
-     * while it was working. When nothing is running there is nobody to tell, so the
-     * caller gets false and keeps the text.
+     * Queued steering (the default) lands on the next round boundary: the model
+     * finishes what it is saying and reads the line before being asked for the next
+     * step. Immediate steering cuts the stream instead, so the line is read now —
+     * worth it when the model is heading the wrong way, and lossy because whatever it
+     * was in the middle of is discarded.
      *
-     * @return whether the text was queued.
+     * The default is taken from the run's own settings rather than fixed at `false`,
+     * so [AppSettings.steerMode] decides without every caller having to look it up.
+     *
+     * @return whether the text was taken; false when nothing is running.
      */
-    fun steer(text: String): Boolean {
+    fun steer(text: String, immediate: Boolean = runSettings?.steerMode == STEER_IMMEDIATE): Boolean {
         if (!running.get()) return false
         val body = text.trim()
         if (body.isEmpty()) return false
+        if (immediate) {
+            // The same abort `cancel()` uses, without the cancelled flag: this ends the
+            // round, not the run. The flag tells the loop the resulting IOException is
+            // the cut it asked for, so the round is retried instead of failing the run.
+            val call = inFlight
+            if (call != null) {
+                steeringCut.set(true)
+                call.cancel()
+            }
+        }
         return steering.trySend(body).isSuccess
     }
 
@@ -327,10 +375,15 @@ class AgentEngine(
     ): List<StoredMessage> {
         val seq = runSeq.incrementAndGet()
         cancelled.set(false)
+        steeringCut.set(false)
         outChars.set(0)
         thinkingChars.set(0)
+        lastPromptTokens = 0
+        lastPromptChars = 0
+        contextNote = ""
         startedAt = System.nanoTime()
         running.set(true)
+        runSettings = settings
         // Published here rather than left to the ticker, so a caller sees Running the
         // moment the run starts even if no ticker was ever started.
         _runState.value = RunState.Running(stats())
@@ -349,16 +402,19 @@ class AgentEngine(
         )
         sanitize(trim(history, settings.contextWindow)).forEach { appendToWire(wire, it, settings) }
 
-        // 0 = the user did not set a ceiling, so the only stop is the model itself.
-        val maxRounds = if (settings.maxToolRounds <= 0) MAX_ROUNDS else settings.maxToolRounds.coerceIn(1, MAX_ROUNDS)
+        // A ceiling of 0 (or less) means the user set none: the loop then ends only when
+        // the model stops asking for tools, which is the only limit a long task should
+        // have. A positive value is a real ceiling, and the failure below says so.
+        val roundLimit = settings.maxToolRounds
         var round = 0
         try {
-            while (round < maxRounds) {
+            while (roundLimit <= 0 || round < roundLimit) {
                 round++
                 // Steering lands here, on the boundary between two model turns: the
                 // model has finished the previous turn and has not been asked for the
                 // next one, which is the only moment the wire can be edited safely.
                 drainSteering(wire)
+                compressContext(wire, settings)
                 if (cancelled.get()) {
                     settled = true
                     finishCancelled(onEvent)
@@ -366,6 +422,9 @@ class AgentEngine(
                 }
 
                 val turnStartedAt = System.currentTimeMillis()
+                // Cleared here rather than after the call: an abort from `steer` can only
+                // belong to the round it interrupted, so nothing else may inherit the flag.
+                steeringCut.set(false)
                 val turn = try {
                     llm.complete(
                         settings = settings,
@@ -389,12 +448,25 @@ class AgentEngine(
                         finishCancelled(onEvent)
                         return produced
                     }
+                    // An immediate steer aborts the stream the same way, but nothing is
+                    // wrong: this round is abandoned so the next one can carry the line.
+                    // Rethrowing here would kill the run the user just spoke to.
+                    if (steeringCut.get()) {
+                        steeringCut.set(false)
+                        continue
+                    }
                     throw error
                 } finally {
                     inFlight = null
                 }
                 val elapsed = System.currentTimeMillis() - turnStartedAt
                 val usage = turn.usage
+                // Kept for the context readout and for pricing the next round's growth:
+                // only the endpoint knows how big the prompt really was.
+                usage?.promptTokens?.takeIf { it > 0 }?.let { reported ->
+                    lastPromptTokens = reported
+                    lastPromptChars = wireChars(wire)
+                }
                 val thinking = turn.reasoning.takeIf { it.isNotBlank() }
                 // A truncated turn can end mid-tool-call, so say so instead of silently
                 // presenting half an answer as a finished one.
@@ -481,8 +553,9 @@ class AgentEngine(
                     onEvent(AgentEvent.ToolFinished(call.name, result.ok, output))
                 }
             }
-            onEvent(AgentEvent.Failed("已达到最大工具轮数（$maxRounds），任务未完成。"))
-            _runState.value = RunState.Failed("已达到最大工具轮数（$maxRounds），任务未完成。")
+            // Only reachable with a ceiling: unlimited rounds end by returning above.
+            onEvent(AgentEvent.Failed("已达到最大工具轮数（$roundLimit），任务未完成。"))
+            _runState.value = RunState.Failed("已达到最大工具轮数（$roundLimit），任务未完成。")
             settled = true
             return produced
         } catch (cancellation: CancellationException) {
@@ -499,6 +572,7 @@ class AgentEngine(
         } finally {
             running.set(false)
             inFlight = null
+            runSettings = null
             startedAt = 0L
             if (!settled) emit(seq, RunState.Idle)
         }
@@ -529,6 +603,111 @@ class AgentEngine(
         }
     }
 
+    /**
+     * Summarises the oldest part of the conversation once the prompt is close to the
+     * window the user set, so a long task does not end in a hard 400.
+     *
+     * The alternative — dropping the old messages — is what the trimmer already does
+     * for the initial replay, and it is worse in the middle of a task: the model
+     * forgets the decision it made ten steps ago and starts over. A summary keeps the
+     * conclusions, the paths and the decisions, which is what the model actually
+     * needs to carry on.
+     *
+     * The newest [KEEP_RECENT] messages are never touched: they are the work in
+     * progress, and summarising the tool result the model is reading right now would
+     * be self-defeating.
+     */
+    private suspend fun compressContext(
+        wire: MutableList<ChatMessage>,
+        settings: AppSettings,
+    ) {
+        val window = settings.contextWindow
+        if (window <= 0 || !settings.autoCompress) return
+        if (wire.size <= MIN_MESSAGES) return
+        if (estimatePromptTokens(wire) <= window * COMPRESS_AT) return
+
+        // The cut never splits an assistant's tool_calls from their results: a lone
+        // tool message is a hard 400 on every OpenAI-compatible endpoint.
+        var cut = wire.size - KEEP_RECENT
+        while (cut > 1 && wire[cut].role == ROLE_TOOL) cut--
+        if (cut <= 1) return
+
+        val older = wire.subList(1, cut).filter { it.role != ROLE_SYSTEM }
+        if (older.isEmpty()) return
+
+        val summary = try {
+            summarize(older, settings)
+        } catch (error: IOException) {
+            // A stop during the summary is still a stop: let the caller's check see it
+            // rather than reporting the abort as a failure of the whole run.
+            if (cancelled.get()) return
+            throw error
+        } finally {
+            inFlight = null
+        }
+        if (summary.isBlank()) return
+
+        val pinned = wire.subList(1, cut).filter { it.role == ROLE_SYSTEM }
+        val tail = wire.subList(cut, wire.size).toList()
+        val head = wire.first()
+        wire.clear()
+        wire += head
+        wire += ChatMessage.system("[上下文摘要] $summary")
+        wire += pinned
+        wire += tail
+
+        // The next round's estimate has to be priced off the summary, not off the
+        // messages it replaced, or the threshold would fire again immediately.
+        lastPromptTokens = 0
+        lastPromptChars = 0
+        contextNote = "已压缩上下文：${older.size} 条消息 → 摘要"
+        // Published at once rather than waiting for the next tick, so the note is on
+        // screen while the summary is still the news.
+        emitRunning()
+    }
+
+    /** One call to the same endpoint, asking only for prose: no tools, no streaming UI. */
+    private suspend fun summarize(older: List<ChatMessage>, settings: AppSettings): String {
+        val transcript = older.joinToString("\n") { renderForSummary(it) }
+        val turn = llm.complete(
+            settings = settings,
+            messages = listOf(
+                ChatMessage.system(COMPRESS_PROMPT),
+                ChatMessage.user(transcript),
+            ),
+            tools = emptyList(),
+            onCall = { inFlight = it },
+        )
+        return turn.text.trim()
+    }
+
+    private fun renderForSummary(message: ChatMessage): String = buildString {
+        append(message.role).append(": ")
+        append(message.text)
+        message.toolCalls.forEach { call ->
+            append("\n  [调用工具 ").append(call.name).append(' ').append(call.arguments).append(']')
+        }
+        if (message.imageBase64 != null) append("\n  （含一张截图，已省略）")
+    }
+
+    /**
+     * How big the next request will be, in the endpoint's own tokens where possible.
+     *
+     * The last reported prompt size is a fact; only what has been appended since is
+     * estimated, at four characters per token for the mixed Chinese-and-JSON traffic
+     * an agent produces. Before the first usage arrives there is nothing to anchor to,
+     * so the whole wire is estimated the pessimistic way.
+     */
+    private fun estimatePromptTokens(wire: List<ChatMessage>): Int {
+        val chars = wireChars(wire)
+        val reported = lastPromptTokens
+        if (reported <= 0) return chars / 3
+        return reported + (chars - lastPromptChars).coerceAtLeast(0) / 4
+    }
+
+    private fun wireChars(wire: List<ChatMessage>): Int =
+        wire.sumOf { it.text.length + it.imageBase64.orEmpty().length }
+
     private fun emitRunning() = emit(runSeq.get(), RunState.Running(stats()))
 
     private fun emit(seq: Int, state: RunState) {
@@ -545,6 +724,8 @@ class AgentEngine(
             thinkingTokens = estimateTokens(thinkingChars.get()),
             elapsedMs = elapsedMs,
             tokPerSec = if (elapsedMs <= 0L) 0f else tokens * 1000f / elapsedMs,
+            lastPromptTokens = lastPromptTokens,
+            note = contextNote,
         )
     }
 
@@ -684,13 +865,38 @@ class AgentEngine(
             }
 
     companion object {
-        private const val MAX_ROUNDS = 60
         private const val MAX_TOOL_OUTPUT = 8_000
         private const val MAX_MEMORY_ENTRIES = 40
         private const val MAX_MEMORY_VALUE = 400
 
         /** 120 ms is faster than the eye and slower than the stream. */
         private const val STATS_TICK_MS = 120L
+
+        /** 1 = 立即插话 in [AppSettings.steerMode]. */
+        private const val STEER_IMMEDIATE = 1
+
+        /**
+         * How many of the newest messages a compression always keeps verbatim.
+         *
+         * Six is a turn's worth of context — the user's line, the assistant's answer
+         * and a couple of tool results — which is what the model is actively working
+         * on when the compression fires.
+         */
+        private const val KEEP_RECENT = 6
+
+        /** Below this many messages there is nothing worth summarising. */
+        private const val MIN_MESSAGES = 8
+
+        /** Compress at 80% of the window: the next round has to fit in what is left. */
+        private const val COMPRESS_AT = 0.8
+
+        private const val ROLE_TOOL = "tool"
+        private const val ROLE_SYSTEM = "system"
+
+        private const val COMPRESS_PROMPT =
+            "把下面这段 agent 执行历史压缩成要点摘要。保留：已经得出的结论、涉及的文件路径与命令、" +
+                "已经做出的决定及其原因、尚未完成的事项。丢掉：寒暄、重复的尝试、被推翻的中间过程。" +
+                "直接输出摘要正文，不要加任何开场白或标题。"
 
         /**
          * Roughly a token per three characters of Chinese, which is where the error

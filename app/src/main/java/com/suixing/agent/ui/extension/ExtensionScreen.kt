@@ -20,13 +20,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.DeleteOutline
-import androidx.compose.material.icons.outlined.Dns
-import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.FileDownload
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -133,7 +133,7 @@ fun ExtensionScreen(initialTab: Int = 0) {
                             }
                         },
                     ) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
+                        Icon(Icons.Rounded.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
                     }
                     IconButton(
                         onClick = {
@@ -150,9 +150,9 @@ fun ExtensionScreen(initialTab: Int = 0) {
                     ) {
                         Icon(
                             imageVector = when (tab) {
-                                0 -> Icons.Outlined.Add
-                                1 -> Icons.Outlined.FileDownload
-                                else -> Icons.Outlined.Add
+                                0 -> Icons.Rounded.Add
+                                1 -> Icons.Rounded.FileDownload
+                                else -> Icons.Rounded.Add
                             },
                             contentDescription = when (tab) {
                                 0 -> "添加服务器"
@@ -326,7 +326,7 @@ private fun McpSection(
 private fun McpIntroCard() {
     SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.Outlined.Info, size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            SoftIcon(Icons.Rounded.Info, size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text("什么是 MCP", style = MaterialTheme.typography.titleMedium)
         }
@@ -367,7 +367,7 @@ private fun ServerCard(
     }
     SuixingCard(contentPadding = PaddingValues(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.Outlined.Dns, tint = tone.color(dark))
+            SoftIcon(Icons.Rounded.Dns, tint = tone.color(dark))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -422,10 +422,10 @@ private fun ServerCard(
                 }
             }
             IconButton(onClick = onEdit) {
-                Icon(Icons.Outlined.Edit, contentDescription = "编辑", modifier = Modifier.size(20.dp))
+                Icon(Icons.Rounded.Edit, contentDescription = "编辑", modifier = Modifier.size(20.dp))
             }
             IconButton(onClick = onDelete) {
-                Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除", modifier = Modifier.size(20.dp))
+                Icon(Icons.Rounded.DeleteOutline, contentDescription = "删除", modifier = Modifier.size(20.dp))
             }
         }
     }

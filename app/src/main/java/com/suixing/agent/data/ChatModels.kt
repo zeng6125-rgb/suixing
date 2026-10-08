@@ -35,6 +35,12 @@ data class StoredMessage(
     val elapsedMs: Long = 0,
     /** True once the user edited the text by hand, so the UI can say so. */
     val edited: Boolean = false,
+    /**
+     * True for a user message that was injected mid-run as a steer, not asked as a
+     * new question. It draws as a user bubble but must not open a new turn, or one
+     * engine pass would be split across two bubbles.
+     */
+    val steer: Boolean = false,
     val timestamp: Long = System.currentTimeMillis(),
 ) {
     val totalTokens: Int get() = promptTokens + completionTokens

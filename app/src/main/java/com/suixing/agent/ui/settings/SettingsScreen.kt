@@ -21,21 +21,20 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.EditNote
-import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.Extension
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.Palette
-import androidx.compose.material.icons.outlined.RecordVoiceOver
-import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.SmartToy
-import androidx.compose.material.icons.outlined.TravelExplore
-import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material.icons.outlined.VerifiedUser
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AdminPanelSettings
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SmartToy
+import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.TravelExplore
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -211,9 +210,9 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
             Spacer(Modifier.height(4.dp))
 
             SectionCard(
-                title = "模型",
-                icon = Icons.Outlined.SmartToy,
-                subtitle = "OpenAI 兼容接口",
+                title = "模型与生成",
+                icon = Icons.Rounded.SmartToy,
+                subtitle = "接口、模型与采样",
             ) {
                 if (form.providers.isNotEmpty()) {
                     Row(
@@ -258,7 +257,7 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                             label = { Text("新建") },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Outlined.Add,
+                                    imageVector = Icons.Rounded.Add,
                                     contentDescription = null,
                                     modifier = Modifier.size(16.dp),
                                 )
@@ -357,7 +356,7 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                         } else {
                             Icon(
-                                imageVector = Icons.Outlined.Refresh,
+                                imageVector = Icons.Rounded.Refresh,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
                             )
@@ -399,59 +398,6 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                     onValueChange = { form = form.copy(temperature = it.toDouble()) },
                 )
                 LabeledSlider(
-                    label = "最大工具轮数 ${form.maxToolRounds}",
-                    hint = "一次任务里最多连续调用多少次工具",
-                    value = form.maxToolRounds.toFloat(),
-                    range = 1f..40f,
-                    steps = 38,
-                    onValueChange = { form = form.copy(maxToolRounds = it.toInt()) },
-                )
-            }
-
-            SectionCard(
-                title = "生成参数",
-                icon = Icons.Outlined.Tune,
-                subtitle = "上下文、思考强度与采样",
-            ) {
-                SettingRow(
-                    title = "显示思考过程",
-                    subtitle = "把模型的思考流式画在回复上方。关掉只是不显示，思考强度照旧生效。",
-                    control = {
-                        Switch(
-                            checked = form.showReasoning,
-                            onCheckedChange = { form = form.copy(showReasoning = it) },
-                        )
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Text(text = "思考强度", style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    text = "对应接口的 reasoning_effort。只对支持档位的模型有效，不支持的会忽略这一项。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(9.dp))
-                SegmentedPill(
-                    options = REASONING_LEVELS.map { it.second },
-                    selectedIndex = REASONING_LEVELS
-                        .indexOfFirst { it.first == form.reasoningEffort }
-                        .coerceAtLeast(0),
-                    onSelect = { index ->
-                        form = form.copy(reasoningEffort = REASONING_LEVELS[index].first)
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                LabeledSlider(
-                    label = "上下文条数 " +
-                        if (form.contextWindow <= 0) "不限" else "${form.contextWindow}",
-                    hint = "每次请求只带最近多少条消息。不限时历史一长就变慢、也更贵。",
-                    value = form.contextWindow.toFloat(),
-                    range = 0f..80f,
-                    steps = 79,
-                    onValueChange = { form = form.copy(contextWindow = it.toInt()) },
-                )
-                LabeledSlider(
                     label = "Top P ${"%.2f".format(form.topP)}",
                     hint = "核采样。1.00 表示不过滤，一般不用动。",
                     value = form.topP,
@@ -472,69 +418,119 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     shape = MaterialTheme.shapes.small,
                 )
-            }
-
-            SectionCard(
-                title = "联网搜索",
-                icon = Icons.Outlined.TravelExplore,
-                subtitle = "web_search 走哪里查",
-            ) {
-                OutlinedTextField(
-                    value = form.searchEndpoint,
-                    onValueChange = { form = form.copy(searchEndpoint = it) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("搜索接口（可留空）") },
-                    placeholder = { Text("https://api.tavily.com/search") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    supportingText = {
-                        Text("留空时用内置的 DuckDuckGo 抓取，容易被限流；填 Tavily 兼容接口更稳。")
-                    },
+                LabeledSlider(
+                    label = "上下文条数 " +
+                        if (form.contextWindow <= 0) "不限" else "${form.contextWindow}",
+                    hint = "每次请求只带最近多少条消息。不限时历史一长就变慢、也更贵。",
+                    value = form.contextWindow.toFloat(),
+                    range = 0f..80f,
+                    steps = 79,
+                    onValueChange = { form = form.copy(contextWindow = it.toInt()) },
                 )
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = form.searchApiKey,
-                    onValueChange = { form = form.copy(searchApiKey = it) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("搜索接口 Key（可留空）") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    visualTransformation = PasswordVisualTransformation(),
+                LabeledSlider(
+                    label = "最大工具轮数 ${form.maxToolRounds}",
+                    hint = "一次任务里最多连续调用多少次工具；0 = 不限制。",
+                    value = form.maxToolRounds.toFloat(),
+                    range = 0f..40f,
+                    steps = 39,
+                    onValueChange = { form = form.copy(maxToolRounds = it.toInt()) },
                 )
-            }
-
-            SectionCard(
-                title = "语音",
-                icon = Icons.Outlined.RecordVoiceOver,
-                subtitle = "输入与朗读",
-            ) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 SettingRow(
-                    title = "朗读回复",
-                    subtitle = "用系统语音引擎读出来。引擎状态：${Core.speaker.languageLabel()}。" +
-                        "输入框左边的麦克风按钮负责语音输入。",
+                    title = "显示思考过程",
+                    subtitle = "把模型的思考流式画在回复上方。关掉只是不显示，思考强度照旧生效。",
                     control = {
                         Switch(
-                            checked = form.speakReplies,
-                            onCheckedChange = { form = form.copy(speakReplies = it) },
+                            checked = form.showReasoning,
+                            onCheckedChange = { form = form.copy(showReasoning = it) },
                         )
                     },
                 )
-                if (form.speakReplies) {
-                    Spacer(Modifier.height(4.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = { Core.speaker.speak("你好，我是随行。") }) {
-                            Text("试听")
-                        }
-                        OutlinedButton(onClick = { Core.speaker.stop() }) { Text("停止朗读") }
-                    }
-                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(10.dp))
+                Text(text = "思考强度", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "对应接口的 reasoning_effort。只对支持档位的模型有效，不支持的会忽略这一项。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(9.dp))
+                SegmentedPill(
+                    options = REASONING_LEVELS.map { it.second },
+                    selectedIndex = REASONING_LEVELS
+                        .indexOfFirst { it.first == form.reasoningEffort }
+                        .coerceAtLeast(0),
+                    onSelect = { index ->
+                        form = form.copy(reasoningEffort = REASONING_LEVELS[index].first)
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(10.dp))
+                Text(text = "系统提示词", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "模型的人设与工作方式，每次请求都会带上。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(9.dp))
+                OutlinedTextField(
+                    value = form.systemPrompt,
+                    onValueChange = { form = form.copy(systemPrompt = it) },
+                    minLines = 6,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(
+                    onClick = { form = form.copy(systemPrompt = AppSettings().systemPrompt) },
+                ) { Text("恢复默认") }
             }
 
             SectionCard(
-                title = "工具审批",
-                icon = Icons.Outlined.VerifiedUser,
-                subtitle = "模型每次动手前要不要问你",
+                title = "插话与运行",
+                icon = Icons.Rounded.Tune,
+                subtitle = "插话落点、压缩与工具审批",
             ) {
+                // 0 排队 / 1 立即，见 AppSettings.steerMode：打断在途的回复是有损的，
+                // 所以默认排队，只有用户主动选「立即」才掐断。
+                Text(text = "插话方式", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "你干活时插的话落在哪里。排队：等这一轮说完再送进去，模型把它当成" +
+                        "中途听到的话；立即：打断在途的回复，模型马上看到，代价是这一轮输出作废。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(9.dp))
+                SegmentedPill(
+                    options = listOf("排队", "立即"),
+                    selectedIndex = form.steerMode.coerceIn(0, 1),
+                    onSelect = { form = form.copy(steerMode = it) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "自动压缩上下文",
+                    subtitle = "上下文接近窗口上限时把旧消息压成摘要。超窗是接口直接报错，" +
+                        "压缩最坏只是丢些细节；只在上面设了上下文条数时才可能触发。",
+                    control = {
+                        Switch(
+                            checked = form.autoCompress,
+                            onCheckedChange = { form = form.copy(autoCompress = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(10.dp))
+                Text(text = "工具审批", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "模型每次动手前要不要问你。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(9.dp))
                 SegmentedPill(
                     options = ApprovalMode.entries.map { modeLabel(it) },
                     selectedIndex = ApprovalMode.entries.indexOf(form.approvalMode),
@@ -589,7 +585,7 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                             )
                             IconButton(onClick = { Core.gate.forgetAlways(name) }) {
                                 Icon(
-                                    Icons.Outlined.Close,
+                                    Icons.Rounded.Close,
                                     contentDescription = "忘记 $name",
                                     modifier = Modifier.size(18.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -636,7 +632,7 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                             )
                             IconButton(onClick = { Core.gate.forgetDenied(name) }) {
                                 Icon(
-                                    Icons.Outlined.Close,
+                                    Icons.Rounded.Close,
                                     contentDescription = "不再拒绝 $name",
                                     modifier = Modifier.size(18.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -649,7 +645,7 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
 
             SectionCard(
                 title = "外观",
-                icon = Icons.Outlined.Palette,
+                icon = Icons.Rounded.Palette,
                 subtitle = "主题、配色与排版",
             ) {
                 SegmentedPill(
@@ -688,22 +684,6 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(14.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Spacer(Modifier.height(12.dp))
-                Text(text = "气泡宽度", style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    text = "助手回复最多占屏幕的宽度比例。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(9.dp))
-                SegmentedPill(
-                    options = listOf("窄", "标准", "宽"),
-                    selectedIndex = form.bubbleWidth.coerceIn(0, 2),
-                    onSelect = { form = form.copy(bubbleWidth = it) },
-                )
-                Spacer(Modifier.height(14.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Spacer(Modifier.height(12.dp))
                 Text(text = "圆角", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(3.dp))
                 Text(
@@ -719,27 +699,21 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                 )
                 Spacer(Modifier.height(14.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                SettingRow(
-                    title = "显示时间",
-                    subtitle = "在每条消息下面显示发送时间。",
-                    control = {
-                        Switch(
-                            checked = form.showTimestamps,
-                            onCheckedChange = { form = form.copy(showTimestamps = it) },
-                        )
-                    },
+                Spacer(Modifier.height(12.dp))
+                Text(text = "气泡宽度", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "助手回复最多占屏幕的宽度比例。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                SettingRow(
-                    title = "工具调用默认展开",
-                    subtitle = "关掉时工具卡片折叠成一行，点开才看参数与结果。",
-                    control = {
-                        Switch(
-                            checked = form.expandTools,
-                            onCheckedChange = { form = form.copy(expandTools = it) },
-                        )
-                    },
+                Spacer(Modifier.height(9.dp))
+                SegmentedPill(
+                    options = listOf("窄", "标准", "宽"),
+                    selectedIndex = form.bubbleWidth.coerceIn(0, 2),
+                    onSelect = { form = form.copy(bubbleWidth = it) },
                 )
+                Spacer(Modifier.height(14.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 SettingRow(
                     title = "思考过程默认展开",
@@ -759,6 +733,28 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                         Switch(
                             checked = form.autoFollow,
                             onCheckedChange = { form = form.copy(autoFollow = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "显示时间",
+                    subtitle = "在每条消息下面显示发送时间。",
+                    control = {
+                        Switch(
+                            checked = form.showTimestamps,
+                            onCheckedChange = { form = form.copy(showTimestamps = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "工具调用默认展开",
+                    subtitle = "关掉时工具卡片折叠成一行，点开才看参数与结果。",
+                    control = {
+                        Switch(
+                            checked = form.expandTools,
+                            onCheckedChange = { form = form.copy(expandTools = it) },
                         )
                     },
                 )
@@ -783,9 +779,9 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
             }
 
             SectionCard(
-                title = "高级",
-                icon = Icons.Outlined.Tune,
-                subtitle = "风险操作",
+                title = "权限",
+                icon = Icons.Rounded.AdminPanelSettings,
+                subtitle = "root 与系统能力",
             ) {
                 SettingRow(
                     title = "允许 root 工具",
@@ -797,42 +793,6 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
                         )
                     },
                 )
-            }
-
-            SectionCard(
-                title = "系统提示词",
-                icon = Icons.Outlined.EditNote,
-                subtitle = "模型的人设与工作方式",
-            ) {
-                OutlinedTextField(
-                    value = form.systemPrompt,
-                    onValueChange = { form = form.copy(systemPrompt = it) },
-                    minLines = 6,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                TextButton(
-                    onClick = { form = form.copy(systemPrompt = AppSettings().systemPrompt) },
-                ) { Text("恢复默认") }
-            }
-
-            SectionCard(
-                title = "更多",
-                icon = Icons.Outlined.Extension,
-                subtitle = "MCP、记忆与权限",
-            ) {
-                SettingsLink(
-                    title = "MCP 服务器",
-                    subtitle = "给模型外挂工具",
-                    onClick = { onOpen("extension?tab=0") },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                SettingsLink(
-                    title = "记忆",
-                    subtitle = "模型自己写下的长期备忘",
-                    onClick = { onOpen("extension?tab=2") },
-                )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 SettingsLink(
                     title = "权限与能力",
@@ -842,8 +802,76 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
             }
 
             SectionCard(
+                title = "网络与语音",
+                icon = Icons.Rounded.TravelExplore,
+                subtitle = "搜索走哪里、回复读不读出来",
+            ) {
+                OutlinedTextField(
+                    value = form.searchEndpoint,
+                    onValueChange = { form = form.copy(searchEndpoint = it) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("搜索接口（可留空）") },
+                    placeholder = { Text("https://api.tavily.com/search") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    supportingText = {
+                        Text("留空时用内置的 DuckDuckGo 抓取，容易被限流；填 Tavily 兼容接口更稳。")
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = form.searchApiKey,
+                    onValueChange = { form = form.copy(searchApiKey = it) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("搜索接口 Key（可留空）") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "朗读回复",
+                    subtitle = "用系统语音引擎读出来。引擎状态：${Core.speaker.languageLabel()}。" +
+                        "输入框左边的麦克风按钮负责语音输入。",
+                    control = {
+                        Switch(
+                            checked = form.speakReplies,
+                            onCheckedChange = { form = form.copy(speakReplies = it) },
+                        )
+                    },
+                )
+                if (form.speakReplies) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = { Core.speaker.speak("你好，我是随行。") }) {
+                            Text("试听")
+                        }
+                        OutlinedButton(onClick = { Core.speaker.stop() }) { Text("停止朗读") }
+                    }
+                }
+            }
+
+            SectionCard(
+                title = "数据",
+                icon = Icons.Rounded.Storage,
+                subtitle = "MCP 与记忆",
+            ) {
+                SettingsLink(
+                    title = "记忆",
+                    subtitle = "模型自己写下的长期备忘",
+                    onClick = { onOpen("extension?tab=2") },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingsLink(
+                    title = "MCP 服务器",
+                    subtitle = "给模型外挂工具",
+                    onClick = { onOpen("extension?tab=0") },
+                )
+            }
+
+            SectionCard(
                 title = "关于",
-                icon = Icons.Outlined.Info,
+                icon = Icons.Rounded.Info,
                 subtitle = "随行 Suixing",
             ) {
                 Text(
@@ -861,7 +889,7 @@ fun SettingsScreen(onOpen: (String) -> Unit) {
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    imageVector = Icons.Outlined.VerifiedUser,
+                    imageVector = Icons.Rounded.VerifiedUser,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.height(15.dp),
@@ -903,7 +931,7 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
     ) {
         Row(verticalAlignment = Alignment.Top) {
             Icon(
-                imageVector = if (outcome.ok) Icons.Outlined.CheckCircle else Icons.Outlined.ErrorOutline,
+                imageVector = if (outcome.ok) Icons.Rounded.CheckCircle else Icons.Rounded.ErrorOutline,
                 contentDescription = null,
                 tint = tint,
                 modifier = Modifier.size(18.dp),
@@ -917,7 +945,7 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
             )
             IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
                 Icon(
-                    imageVector = Icons.Outlined.Close,
+                    imageVector = Icons.Rounded.Close,
                     contentDescription = "关闭",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(15.dp),
@@ -1078,7 +1106,7 @@ private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
             )
         }
         Icon(
-            imageVector = Icons.Filled.ChevronRight,
+            imageVector = Icons.Rounded.ChevronRight,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(18.dp),

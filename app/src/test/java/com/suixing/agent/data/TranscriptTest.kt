@@ -19,6 +19,8 @@ class TranscriptTest {
             runId = run,
         )
 
+    private fun steer(id: String) = StoredMessage(id = id, role = Roles.USER, text = "插 $id", steer = true)
+
     @Test
     fun `every message follows the question that opened its turn`() {
         val messages = listOf(question("q1"), answer("a1", "r1"), call("t1", "r1"), question("q2"))
@@ -109,5 +111,24 @@ class TranscriptTest {
         val messages = listOf(question("q1"), answer("a1", "r1"), answer("a2", "r2"))
         assertEquals(mapOf("q1" to "r2"), Transcript.chosenRuns(messages, emptyMap()))
         assertEquals(mapOf("q1" to "r1"), Transcript.chosenRuns(messages, mapOf("q1" to "r1")))
+    }
+
+    @Test
+    fun `a steer stays inside the turn it was injected into`() {
+        val messages = listOf(question("q1"), answer("a1", "r1"), steer("s1"), answer("a2", "r1"))
+        val turns = Transcript.turnOf(messages)
+        assertEquals("q1", turns["s1"])
+        assertEquals("q1", turns["a2"])
+        assertEquals(mapOf("q1" to listOf("r1")), Transcript.runsByTurn(messages))
+        assertEquals(messages, Transcript.active(messages, emptyMap()))
+    }
+
+    @Test
+    fun `withoutLastAnswer ignores a trailing steer and drops the real reply`() {
+        val messages = listOf(question("q1"), answer("a1", "r1"), steer("s1"))
+        assertEquals(
+            listOf("q1", "s1"),
+            Transcript.withoutLastAnswer(messages).map { it.id },
+        )
     }
 }
