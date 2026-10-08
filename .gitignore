@@ -13,3 +13,7 @@ captures/
 !app/sideload.keystore
 *.jks
 keystore.properties
+
+# Local staging for sideloading: APKs, release notes and build logs live here
+# so the project folder stays self-contained without polluting the repo.
+dist/
