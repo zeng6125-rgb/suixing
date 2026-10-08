@@ -48,6 +48,16 @@ data class AppSettings(
      */
     val imageInput: Boolean = false,
     /**
+     * Accept any TLS certificate, including self-signed ones.
+     *
+     * Needed for the common setup of a reverse proxy on the LAN (`https://192.168.x.x:port/v1`)
+     * whose certificate is not signed by a public CA. Android refuses those with
+     * `CertPathValidatorException: Trust anchor for certification path not found`.
+     * Turning this on disables certificate and hostname verification for model
+     * requests only, so it is a deliberate trade-off, never a default.
+     */
+    val allowInsecureTls: Boolean = false,
+    /**
      * Optional Tavily-compatible search endpoint. Empty means the built-in
      * DuckDuckGo fallback, which needs no key but is easier to rate-limit.
      */

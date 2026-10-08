@@ -43,6 +43,15 @@
 
 审批弹窗挂在导航栏之上，切到「能力」「文件」「设置」页也会照常弹出；被记住的「总是允许」可在「设置」页一键清除。
 
+## 模型接入
+
+接口只要兼容 OpenAI 的 `/chat/completions` 就能用（DeepSeek、通义、Kimi、OpenRouter、vLLM、Ollama、局域网自建反代都行）。
+
+- **不用手打模型名**：填好接口地址和 Key，点「获取模型列表」，灵枢会去请求 `{地址}/models` 并把返回的模型列出来供选；列表很长时对话框里带筛选框。
+- **地址写 `.../v1` 就行**，不用补 `/chat/completions`；补了也认。
+- **局域网自签名证书**：如果你的反代是 `https://192.168.x.x:端口/v1` 这类自签证书，安卓会以 `Trust anchor for certification path not found` 拒绝。打开「设置 → 模型 → 允许自签名证书」即可放行（只对模型请求生效，且只跳过证书校验，不影响别的）。更省事的办法是把地址写成 `http://`（应用已允许明文流量），或者在手机上把该证书装进系统信任库。
+- **报错说人话**：401 会说「API Key 不对」，404 会提醒地址要以 `/v1` 结尾，连不上会说「检查地址和网络」，证书问题会直接告诉你打开上面那个开关。
+
 ## 内置工具（38 个）
 
 - 系统（8）：`device_info` `list_apps` `open_app` `open_url` `clipboard_read` `clipboard_write` `memory_write` `memory_read`
@@ -113,7 +122,7 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 gradle :app:assembleDebug
 # 产物 app/build/outputs/apk/debug/app-debug.apk
 
-# 单元测试（MCP 协议层与 stdio 传输的真实往返、HTML 转纯文本，无需设备）
+# 单元测试（MCP 协议层与 stdio 传输的真实往返、HTML 转纯文本、接口报错翻译，无需设备）
 gradle :app:testDebugUnitTest
 ```
 
@@ -135,7 +144,7 @@ app/src/main/java/com/lingshu/agent/
 ├── mcp/                         MCP 客户端：协议、stdio/http 传输、连接管理
 ├── skills/SkillStore.kt         技能库：扫描 / 解析 frontmatter / 导入导出
 ├── voice/Speaker.kt             系统 TTS 封装（朗读回复、speak 工具）
-├── llm/LlmClient.kt             OpenAI 兼容流式客户端（SSE + tool_calls 组装）
+├── llm/LlmClient.kt             OpenAI 兼容流式客户端（SSE + tool_calls 组装、模型列表、报错翻译）
 ├── agent/AgentEngine.kt         主循环：模型 → 工具 → 模型，含审批闸门
 └── ui/
     ├── theme/                   配色（手调 M3 角色）、排版、圆角
@@ -146,7 +155,7 @@ app/src/main/java/com/lingshu/agent/
 ## 首次使用
 
 1. 安装 APK，打开「灵枢」
-2. 「设置」→ 填接口地址（如 `https://api.deepseek.com/v1`）、API Key、模型名 → 点「测试连接」→「保存」
+2. 「设置」→ 填接口地址（如 `https://api.deepseek.com/v1`）、API Key → 点「获取模型列表」挑一个 → 点「测试连接」→「保存」（局域网自签证书见上一节）
 3. 「能力」→ 打开无障碍服务（不开也能聊，但用不了 UI 自动化）
 4. 可选：装 Shizuku 并授权，获得 ADB 级能力
 5. 回「会话」，直接说人话，例如「打开微信，给文件传输助手发一条『你好』」

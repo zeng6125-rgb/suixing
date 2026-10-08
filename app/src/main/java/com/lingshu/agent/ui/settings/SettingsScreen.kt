@@ -1,28 +1,42 @@
 package com.lingshu.agent.ui.settings
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.EditNote
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.RecordVoiceOver
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.TravelExplore
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VerifiedUser
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -43,6 +57,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.lingshu.agent.core.Core
@@ -50,11 +66,19 @@ import com.lingshu.agent.data.AppSettings
 import com.lingshu.agent.data.ApprovalMode
 import com.lingshu.agent.llm.ChatMessage
 import com.lingshu.agent.llm.LlmClient
+import com.lingshu.agent.llm.describeError
+import com.lingshu.agent.ui.components.LingshuCard
 import com.lingshu.agent.ui.components.LingshuTopBar
 import com.lingshu.agent.ui.components.SectionCard
 import com.lingshu.agent.ui.components.SegmentedPill
 import com.lingshu.agent.ui.components.SettingRow
+import com.lingshu.agent.ui.theme.LocalDarkTheme
+import com.lingshu.agent.ui.theme.Tone
+import com.lingshu.agent.ui.theme.color
 import kotlinx.coroutines.launch
+
+/** Outcome of a connection test, shown in the fixed bar above the buttons. */
+private data class TestOutcome(val ok: Boolean, val message: String)
 
 @Composable
 fun SettingsScreen() {
@@ -64,6 +88,10 @@ fun SettingsScreen() {
     val snackbar = remember { SnackbarHostState() }
     val client = remember { LlmClient() }
     var testing by remember { mutableStateOf(false) }
+    var loadingModels by remember { mutableStateOf(false) }
+    var models by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pickerOpen by remember { mutableStateOf(false) }
+    var outcome by remember { mutableStateOf<TestOutcome?>(null) }
     val dirty = form != stored
 
     Scaffold(
@@ -77,50 +105,57 @@ fun SettingsScreen() {
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(color = MaterialTheme.colorScheme.background) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
                         .padding(top = 8.dp, bottom = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                Core.settings.save(form)
-                                snackbar.showSnackbar("已保存")
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (dirty) "保存改动" else "保存") }
-                    OutlinedButton(
-                        enabled = !testing,
-                        onClick = {
-                            scope.launch {
-                                testing = true
-                                Core.settings.save(form)
-                                val message = runCatching {
-                                    client.complete(
-                                        settings = form,
-                                        messages = listOf(ChatMessage.user("你好，请只回复两个字：可用")),
-                                        tools = emptyList(),
+                    outcome?.let { current ->
+                        OutcomeCard(current) { outcome = null }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    Core.settings.save(form)
+                                    snackbar.showSnackbar("已保存")
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) { Text(if (dirty) "保存改动" else "保存") }
+                        OutlinedButton(
+                            enabled = !testing,
+                            onClick = {
+                                scope.launch {
+                                    testing = true
+                                    outcome = null
+                                    Core.settings.save(form)
+                                    outcome = runCatching {
+                                        client.complete(
+                                            settings = form,
+                                            messages = listOf(ChatMessage.user("你好，请只回复两个字：可用")),
+                                            tools = emptyList(),
+                                        )
+                                    }.fold(
+                                        onSuccess = {
+                                            TestOutcome(true, "连接成功，模型回了：${it.text.trim().take(60)}")
+                                        },
+                                        onFailure = { TestOutcome(false, describeError(it)) },
                                     )
-                                }.fold(
-                                    onSuccess = { "连接成功：${it.text.trim().take(40)}" },
-                                    onFailure = { "连接失败：${it.message ?: it::class.java.simpleName}" },
+                                    testing = false
+                                }
+                            },
+                        ) {
+                            if (testing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.height(16.dp).padding(end = 8.dp),
+                                    strokeWidth = 2.dp,
                                 )
-                                testing = false
-                                snackbar.showSnackbar(message)
                             }
-                        },
-                    ) {
-                        if (testing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.height(16.dp).padding(end = 8.dp),
-                                strokeWidth = 2.dp,
-                            )
+                            Text(if (testing) "测试中" else "测试连接")
                         }
-                        Text(if (testing) "测试中" else "测试连接")
                     }
                 }
             }
@@ -150,6 +185,19 @@ fun SettingsScreen() {
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(Modifier.height(6.dp))
+                SettingRow(
+                    title = "允许自签名证书",
+                    subtitle = "接口是 https 且证书自签时打开。局域网上的反代（例如 " +
+                        "https://192.168.0.50:8914/v1）基本都要开，开了就不再校验证书与域名。",
+                    control = {
+                        Switch(
+                            checked = form.allowInsecureTls,
+                            onCheckedChange = { form = form.copy(allowInsecureTls = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = form.apiKey,
@@ -168,6 +216,44 @@ fun SettingsScreen() {
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        enabled = !loadingModels,
+                        onClick = {
+                            scope.launch {
+                                loadingModels = true
+                                outcome = null
+                                runCatching { client.listModels(form) }.fold(
+                                    onSuccess = {
+                                        models = it
+                                        pickerOpen = true
+                                    },
+                                    onFailure = { outcome = TestOutcome(false, describeError(it)) },
+                                )
+                                loadingModels = false
+                            }
+                        },
+                    ) {
+                        if (loadingModels) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                imageVector = Icons.Outlined.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (loadingModels) "获取中…" else "获取模型列表")
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "从接口的 /models 拉一份可用模型，省得手打；也可以直接填。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(6.dp))
                 SettingRow(
@@ -361,6 +447,129 @@ fun SettingsScreen() {
             Spacer(Modifier.height(8.dp))
         }
     }
+
+    if (pickerOpen && models.isNotEmpty()) {
+        ModelPickerDialog(
+            models = models,
+            current = form.model,
+            onPick = {
+                form = form.copy(model = it)
+                pickerOpen = false
+            },
+            onDismiss = { pickerOpen = false },
+        )
+    }
+}
+
+/** Result of a connection test or a model-list fetch, pinned above the buttons. */
+@Composable
+private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
+    val tint = if (outcome.ok) Tone.OK.color(LocalDarkTheme.current) else Tone.WARN.color(LocalDarkTheme.current)
+    LingshuCard(
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentPadding = PaddingValues(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Icon(
+                imageVector = if (outcome.ok) Icons.Outlined.CheckCircle else Icons.Outlined.ErrorOutline,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = outcome.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                Icon(
+                    imageVector = Icons.Outlined.Close,
+                    contentDescription = "关闭",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+        }
+    }
+}
+
+/** Picks one of the ids the endpoint reported, with a filter for long lists. */
+@Composable
+private fun ModelPickerDialog(
+    models: List<String>,
+    current: String,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val shown = remember(models, query) {
+        if (query.isBlank()) models else models.filter { it.contains(query.trim(), ignoreCase = true) }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择模型") },
+        text = {
+            Column {
+                if (models.size > 8) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        label = { Text("筛选") },
+                        singleLine = true,
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (shown.isEmpty()) {
+                    Text(
+                        text = "没有匹配的模型。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                        items(shown) { id ->
+                            val selected = id == current
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(MaterialTheme.shapes.small)
+                                    .background(
+                                        if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                    )
+                                    .clickable { onPick(id) }
+                                    .padding(horizontal = 12.dp, vertical = 11.dp),
+                            ) {
+                                Text(
+                                    text = id,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (selected) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(17.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }
 
 @Composable

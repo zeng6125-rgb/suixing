@@ -19,7 +19,19 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.security.SecureRandom
+import java.security.cert.CertPathValidatorException
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 /** One message in the wire format of an OpenAI-compatible chat API. */
 data class ChatMessage(
@@ -58,6 +70,37 @@ class LlmException(message: String) : Exception(message)
  */
 class LlmClient(private val http: OkHttpClient = defaultClient()) {
 
+    /** Built on first use: only endpoints that need it pay for the relaxed socket factory. */
+    private val relaxedHttp: OkHttpClient by lazy { insecureClient() }
+
+    /**
+     * Endpoints on the LAN usually carry a self-signed certificate, which Android
+     * rejects outright with `Trust anchor for certification path not found`.
+     * `allowInsecureTls` opts those endpoints into the relaxed client.
+     */
+    private fun clientFor(settings: AppSettings): OkHttpClient =
+        if (settings.allowInsecureTls) relaxedHttp else http
+
+    /**
+     * Ask the endpoint which models it serves (`GET {base}/models`).
+     *
+     * The key is optional here because some local proxies do not check it; when the
+     * server does reject the call the mapped message says so.
+     */
+    suspend fun listModels(settings: AppSettings): List<String> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(modelsEndpoint(settings.baseUrl))
+            .header("Accept", "application/json")
+            .apply { if (settings.apiKey.isNotBlank()) header("Authorization", "Bearer ${settings.apiKey}") }
+            .get()
+            .build()
+        clientFor(settings).newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw LlmException(friendlyHttp(response.code, body))
+            parseModels(body)
+        }
+    }
+
     suspend fun complete(
         settings: AppSettings,
         messages: List<ChatMessage>,
@@ -83,11 +126,10 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             .post(payload.toString().toRequestBody(JSON_MEDIA))
             .build()
 
-        http.newCall(request).execute().use { response ->
+        clientFor(settings).newCall(request).execute().use { response ->
             val body = response.body
             if (!response.isSuccessful || body == null) {
-                val detail = body?.string()?.take(600).orEmpty()
-                throw LlmException("请求失败 HTTP ${response.code}${if (detail.isBlank()) "" else "：$detail"}")
+                throw LlmException(friendlyHttp(response.code, body?.string().orEmpty()))
             }
             val text = StringBuilder()
             val calls = LinkedHashMap<Int, MutableToolCall>()
@@ -208,8 +250,18 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
 
     private fun endpoint(baseUrl: String): String {
         val trimmed = baseUrl.trim().trimEnd('/')
-        if (trimmed.isEmpty()) throw LlmException("请先在「设置」里填写 API 地址")
+        if (trimmed.isEmpty()) throw LlmException("请先在「设置」里填写接口地址")
         return if (trimmed.endsWith("/chat/completions")) trimmed else "$trimmed/chat/completions"
+    }
+
+    private fun modelsEndpoint(baseUrl: String): String {
+        val trimmed = baseUrl.trim().trimEnd('/')
+        if (trimmed.isEmpty()) throw LlmException("请先在「设置」里填写接口地址")
+        return when {
+            trimmed.endsWith("/models") -> trimmed
+            trimmed.endsWith("/chat/completions") -> trimmed.removeSuffix("/chat/completions") + "/models"
+            else -> "$trimmed/models"
+        }
     }
 
     companion object {
@@ -222,5 +274,126 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             .callTimeout(600, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
+
+        /**
+         * Same timeouts, but accepts any certificate and any hostname.
+         *
+         * Only reachable through `AppSettings.allowInsecureTls`, which the user turns on
+         * themselves for a self-signed endpoint on their own network.
+         */
+        fun insecureClient(): OkHttpClient {
+            val trustAll = object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+            val context = SSLContext.getInstance("TLS")
+            context.init(null, arrayOf<TrustManager>(trustAll), SecureRandom())
+            return defaultClient().newBuilder()
+                .sslSocketFactory(context.socketFactory, trustAll)
+                .hostnameVerifier { _, _ -> true }
+                .build()
+        }
+    }
+}
+
+/** Reads the model ids out of an OpenAI-style `GET /models` response. */
+internal fun parseModels(body: String): List<String> {
+    val trimmed = body.trim()
+    if (trimmed.isEmpty()) throw LlmException("服务器返回了空内容")
+    val root = runCatching { Json.parseToJsonElement(trimmed) }.getOrNull()
+        ?: throw LlmException("服务器返回的不是 JSON：${trimmed.take(160)}")
+    val array = when (root) {
+        is JsonArray -> root
+        is JsonObject -> root["data"] as? JsonArray
+            ?: root["models"] as? JsonArray
+            ?: root["result"] as? JsonArray
+            ?: throw LlmException("返回里没有 data / models 字段")
+        else -> throw LlmException("返回格式不认识：${trimmed.take(160)}")
+    }
+    val ids = array.mapNotNull { element ->
+        when (element) {
+            is JsonPrimitive -> element.takeIf { it !is JsonNull }?.content?.takeIf { it.isNotBlank() }
+            is JsonObject -> {
+                val field = element["id"] ?: element["name"] ?: element["model"]
+                (field as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content?.takeIf { it.isNotBlank() }
+            }
+            else -> null
+        }
+    }.distinct()
+    if (ids.isEmpty()) throw LlmException("服务器没有返回任何模型")
+    return ids
+}
+
+/** Pulls a human-readable reason out of an error body, whatever shape it has. */
+internal fun extractApiError(body: String): String {
+    val trimmed = body.trim()
+    if (trimmed.isEmpty()) return ""
+    val parsed = runCatching { Json.parseToJsonElement(trimmed) as? JsonObject }.getOrNull()
+    if (parsed != null) {
+        val message = when (val error = parsed["error"]) {
+            is JsonObject -> error["message"].asText()
+            is JsonPrimitive -> error.takeIf { it !is JsonNull }?.content
+            else -> null
+        } ?: parsed["message"].asText()
+            ?: parsed["detail"].asText()
+            ?: parsed["msg"].asText()
+        if (!message.isNullOrBlank()) return message.take(300)
+    }
+    return trimmed.take(200).replace(Regex("\\s+"), " ")
+}
+
+private fun JsonElement?.asText(): String? =
+    (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content?.takeIf { it.isNotBlank() }
+
+/** Turns an HTTP status into advice, not just a number. */
+internal fun friendlyHttp(code: Int, body: String): String {
+    val hint = when (code) {
+        400 -> "服务器说请求格式不对"
+        401 -> "API Key 不对或已失效"
+        403 -> "服务器拒绝了这个 Key（可能是地区或权限限制）"
+        404 -> "路径不对：接口地址要以 /v1 结尾，而不是完整的 /chat/completions"
+        408 -> "服务器等超时了"
+        413 -> "请求体太大（多半是截图太多）"
+        429 -> "请求太频繁或额度用完，稍后再试"
+        in 500..599 -> "服务器内部出错"
+        else -> "请求失败"
+    }
+    val detail = extractApiError(body)
+    return "$hint（HTTP $code）${if (detail.isBlank()) "" else "：$detail"}"
+}
+
+/**
+ * Maps the exceptions users actually hit onto something actionable.
+ *
+ * The certificate branch matters most: a reverse proxy on the LAN hands out a
+ * self-signed certificate and Android reports it as
+ * `CertPathValidatorException: Trust anchor for certification path not found`,
+ * which says nothing about what to do next.
+ */
+internal fun describeError(error: Throwable): String {
+    val chain = generateSequence(error) { it.cause }.take(8).toList()
+    val text = chain.joinToString(" | ") { "${it::class.java.simpleName}: ${it.message.orEmpty()}" }
+    val certProblem = chain.any {
+        it is CertPathValidatorException ||
+            it is CertificateException ||
+            it is SSLHandshakeException ||
+            it is SSLPeerUnverifiedException
+    }
+    return when {
+        certProblem && (text.contains("Trust anchor", true) || text.contains("certification path", true)) ->
+            "服务器证书不被信任（多半是自签名证书）。打开「模型」里的『允许自签名证书』再试，" +
+                "或把地址换成 http://，或在手机上安装这张证书。"
+        certProblem || text.contains("SSL", true) || text.contains("certificate", true) ->
+            "TLS 握手失败：服务器证书有问题。可试『允许自签名证书』，或改用 http://。"
+        chain.any { it is UnknownHostException } ->
+            "找不到这个域名：检查接口地址的拼写，以及手机有没有连上网。"
+        chain.any { it is SocketTimeoutException } ->
+            "连接超时：地址或端口可能不对，也可能手机和服务器不在同一个网络。"
+        chain.any { it is ConnectException } ->
+            "连不上服务器：确认端口是开着的，而且手机和服务器在同一个网络。"
+        chain.any { it is LlmException } ->
+            chain.first { it is LlmException }.message.orEmpty().ifBlank { "请求失败" }
+        else -> "${error::class.java.simpleName}：${error.message ?: "没有更多信息"}"
     }
 }
