@@ -50,6 +50,20 @@ import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
 
 /**
+ * The values the OpenAI-compatible `reasoning_effort` field accepts, wire value to
+ * 档位名. The settings slider and the chat's 思考 pill menu read the same list, so the
+ * two can never disagree about what a level is called.
+ */
+val REASONING_LEVELS: List<Pair<String, String>> = listOf(
+    "" to "默认",
+    "minimal" to "minimal",
+    "low" to "低",
+    "medium" to "中",
+    "high" to "高",
+    "xhigh" to "xhigh",
+)
+
+/**
  * The one panel shape used everywhere. A hairline border instead of a drop
  * shadow keeps stacked surfaces legible in both schemes.
  */
@@ -420,10 +434,9 @@ fun PageTopBar(
  * shadow — they were built separately once and did.
  */
 /**
- * A bar button with no container of its own: the bar is the container.
- *
- * The chat header's controls used to be filled circles sitting on the bar, which read as
- * three buttons floating over the transcript rather than one header.
+ * A lifted disc button: the chat header floats over the transcript with no bar of its
+ * own, so each of its buttons carries its own surface and a real shadow — a flat glyph
+ * over scrolling content has nothing to sit on.
  */
 @Composable
 fun FlatIconButton(
@@ -433,19 +446,21 @@ fun FlatIconButton(
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
-    Box(
-        modifier = modifier
-            .size(40.dp)
-            .clip(CircleShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+    Surface(
+        onClick = onClick,
+        modifier = modifier.size(40.dp),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = tint,
+        shadowElevation = 2.dp,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = tint,
-            modifier = Modifier.size(24.dp),
-        )
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                modifier = Modifier.size(22.dp),
+            )
+        }
     }
 }
 

@@ -43,6 +43,13 @@ data class ProviderConfig(
     val models: List<String> = emptyList(),
     /** The subset the user ticked. Only these appear in the model switcher. */
     val enabled: List<String> = emptyList(),
+    /** Per-endpoint sampling overrides; null inherits the global knob. */
+    val temperature: Double? = null,
+    val topP: Float? = null,
+    val maxTokens: Int? = null,
+    val reasoningEffort: String? = null,
+    /** When false the four overrides above are ignored and the globals apply. */
+    val ownSampling: Boolean = false,
 ) {
     val label: String get() = name.ifBlank { baseUrl.ifBlank { "未命名" } }
 
@@ -297,11 +304,15 @@ private fun AppSettings.withAssistants(): AppSettings {
 fun AppSettings.forAssistant(assistant: Assistant?): AppSettings {
     if (assistant == null) return this
     val provider = providers.firstOrNull { it.id == assistant.providerId }
+    val own = provider?.takeIf { it.ownSampling }
     return copy(
         systemPrompt = assistant.systemPrompt.ifBlank { systemPrompt },
         model = assistant.model.ifBlank { model },
         baseUrl = provider?.baseUrl?.ifBlank { null } ?: baseUrl,
         apiKey = provider?.apiKey?.ifBlank { null } ?: apiKey,
-        temperature = assistant.temperature ?: temperature,
+        temperature = assistant.temperature ?: own?.temperature ?: temperature,
+        topP = own?.topP ?: topP,
+        maxTokens = own?.maxTokens ?: maxTokens,
+        reasoningEffort = own?.reasoningEffort ?: reasoningEffort,
     )
 }

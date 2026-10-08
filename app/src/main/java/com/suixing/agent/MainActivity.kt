@@ -15,6 +15,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.ui.SuixingApp
@@ -26,6 +27,11 @@ class MainActivity : ComponentActivity() {
         // The app draws its own headers and a floating nav bar, so it owns the
         // whole window instead of leaving two system-coloured strips behind.
         enableEdgeToEdge()
+        // enableEdgeToEdge already asks for this, but saying it outright keeps the
+        // gesture-bar strip out of the layout in both themes even if a future
+        // enableEdgeToEdge call drops the flag.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.navigationBarColor = Color.TRANSPARENT
         super.onCreate(savedInstanceState)
         requestNotificationPermission()
         setContent {
@@ -48,6 +54,10 @@ class MainActivity : ComponentActivity() {
                     SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
                 }
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+                // Re-asserted per theme: the style above carries a transparent scrim,
+                // but a solid navigation bar colour is exactly the grey band under the
+                // gesture pill the user photographed.
+                window.navigationBarColor = Color.TRANSPARENT
             }
             SuixingTheme(
                 darkTheme = dark,

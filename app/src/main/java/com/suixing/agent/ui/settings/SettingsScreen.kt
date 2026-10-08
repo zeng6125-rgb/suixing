@@ -88,6 +88,7 @@ import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SuixingCard
@@ -99,20 +100,6 @@ import kotlinx.coroutines.launch
 
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
-
-/**
- * The values the OpenAI-compatible `reasoning_effort` field accepts, wire value to
- * 档位名，按滑杆的顺序排列。The empty string means "say nothing", which leaves the model
- * on its own default; `minimal` / `xhigh` are the two ends only some vendors know.
- */
-private val REASONING_LEVELS = listOf(
-    "" to "默认",
-    "minimal" to "minimal",
-    "low" to "低",
-    "medium" to "中",
-    "high" to "高",
-    "xhigh" to "xhigh",
-)
 
 /**
  * The context-window presets for the current model, tokens to 档位名。0 是「不限」，
@@ -464,6 +451,15 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                     apiKey = "",
                                     model = "",
                                 )
+                                // 点选即落盘：新建的提供方若只留在草稿里，离开页面就没了。
+                                scope.persist {
+                                    it.copy(
+                                        providers = form.providers,
+                                        baseUrl = form.baseUrl,
+                                        apiKey = form.apiKey,
+                                        model = form.model,
+                                    )
+                                }
                             },
                             label = { Text("新建") },
                             leadingIcon = {
@@ -486,6 +482,16 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                         apiKey = next.apiKey,
                                         model = next.enabled.firstOrNull() ?: form.model,
                                     )
+                                    // 同新建：删除也是结构操作，草稿里删了磁盘上还在会让
+                                    // 切换器继续列出已经不存在的提供方。
+                                    scope.persist {
+                                        it.copy(
+                                            providers = form.providers,
+                                            baseUrl = form.baseUrl,
+                                            apiKey = form.apiKey,
+                                            model = form.model,
+                                        )
+                                    }
                                 },
                             ) { Text("删除") }
                         }
@@ -598,6 +604,15 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                     onSuccess = { fetched ->
                                         val merged = (fetched + selected?.models.orEmpty()).distinct()
                                         form = form.mapProvider(selected?.id) { it.copy(models = merged) }
+                                        // 拉到的清单属于提供方结构，同样点选即落盘。
+                                        scope.persist {
+                                            it.copy(
+                                                providers = form.providers,
+                                                baseUrl = form.baseUrl,
+                                                apiKey = form.apiKey,
+                                                model = form.model,
+                                            )
+                                        }
                                         if (merged.isEmpty()) {
                                             outcome = TestOutcome(false, "接口没返回任何模型，直接手填吧。")
                                         } else {
@@ -650,11 +665,23 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
+                // 最大输出 belongs to the isolation group: with 独立采样 on it reads and
+                // writes the provider's nullable field, where an empty box is null.
+                val ownMax = selected?.takeIf { it.ownSampling }?.maxTokens
                 OutlinedTextField(
-                    value = if (form.maxTokens <= 0) "" else form.maxTokens.toString(),
+                    value = if (selected?.ownSampling == true) {
+                        if (ownMax == null || ownMax <= 0) "" else ownMax.toString()
+                    } else {
+                        if (form.maxTokens <= 0) "" else form.maxTokens.toString()
+                    },
                     onValueChange = { raw ->
                         val digits = raw.filter { it.isDigit() }.take(6)
-                        form = form.copy(maxTokens = digits.toIntOrNull() ?: 0)
+                        val parsed = digits.toIntOrNull() ?: 0
+                        form = if (selected?.ownSampling == true) {
+                            form.mapProvider(selected.id) { it.copy(maxTokens = parsed.takeIf { v -> v > 0 }) }
+                        } else {
+                            form.copy(maxTokens = parsed)
+                        }
                     },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("最大输出 tokens（留空 = 不限）") },
@@ -709,28 +736,59 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             // touched, and they were the rows pushing the daily switches off the screen.
             item {
                 AdvancedSection {
+                    // 独立采样: off = the four knobs below read and write the globals,
+                    // on = they read and write this provider's nullable overrides.
+                    SettingRow(
+                        title = "独立采样参数",
+                        subtitle = "开启后温度 / Top P / 思考强度 / 最大输出只作用于当前提供方。",
+                        control = {
+                            Switch(
+                                checked = selected?.ownSampling == true,
+                                onCheckedChange = { on ->
+                                    form = form.mapProvider(selected?.id) { it.copy(ownSampling = on) }
+                                    scope.persist { it.copy(providers = form.providers) }
+                                },
+                            )
+                        },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    val own = selected?.takeIf { it.ownSampling }
                     LabeledSlider(
-                        label = "温度 ${"%.1f".format(form.temperature)}",
+                        label = "温度 ${"%.1f".format(own?.temperature ?: form.temperature)}",
                         hint = "越高越随机，日常 0.3 – 0.8",
-                        value = form.temperature.toFloat(),
+                        value = (own?.temperature ?: form.temperature).toFloat(),
                         range = 0f..2f,
                         steps = 0,
-                        onValueChange = { form = form.copy(temperature = it.toDouble()) },
+                        onValueChange = { v ->
+                            form = if (own != null) {
+                                form.mapProvider(selected?.id) { it.copy(temperature = v.toDouble()) }
+                            } else {
+                                form.copy(temperature = v.toDouble())
+                            }
+                        },
                     )
                     Spacer(Modifier.height(12.dp))
                     LabeledSlider(
-                        label = "Top P ${"%.2f".format(form.topP)}",
+                        label = "Top P ${"%.2f".format(own?.topP ?: form.topP)}",
                         hint = "核采样。1.00 表示不过滤，一般不用动。",
-                        value = form.topP,
+                        value = own?.topP ?: form.topP,
                         range = 0.1f..1f,
                         steps = 17,
-                        onValueChange = { form = form.copy(topP = it) },
+                        onValueChange = { v ->
+                            form = if (own != null) {
+                                form.mapProvider(selected?.id) { it.copy(topP = v) }
+                            } else {
+                                form.copy(topP = v)
+                            }
+                        },
                     )
                     Spacer(Modifier.height(12.dp))
                     // 滑杆而不是 pill：六档在一行 pill 上每格只剩两个字的宽度，滑杆顺带
                     // 把线上值写进标题，不用另起一行解释 reasoning_effort 收到的是什么。
+                    // 同源显示：provider(own) > global，与 forAssistant 的解析顺序一致。
+                    val effortWire = own?.reasoningEffort ?: form.reasoningEffort
                     val effort = REASONING_LEVELS
-                        .indexOfFirst { it.first == form.reasoningEffort }
+                        .indexOfFirst { it.first == effortWire }
                         // 旧的/接口自造的值只显示成「默认」，不写回：拨动滑杆才落盘。
                         .coerceAtLeast(0)
                     val (wire, name) = REASONING_LEVELS[effort]
@@ -741,7 +799,12 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         range = 0f..REASONING_LEVELS.lastIndex.toFloat(),
                         steps = REASONING_LEVELS.size - 2,
                         onValueChange = { index ->
-                            form = form.copy(reasoningEffort = REASONING_LEVELS[index.toInt()].first)
+                            val level = REASONING_LEVELS[index.toInt()].first
+                            form = if (own != null) {
+                                form.mapProvider(selected?.id) { it.copy(reasoningEffort = level) }
+                            } else {
+                                form.copy(reasoningEffort = level)
+                            }
                         },
                     )
                 }
