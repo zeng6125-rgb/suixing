@@ -1,0 +1,239 @@
+package com.suixing.agent.tools
+
+import android.content.Context
+import com.suixing.agent.data.SCHEDULE_AT
+import com.suixing.agent.data.SCHEDULE_DAILY
+import com.suixing.agent.data.SCHEDULE_EVERY
+import com.suixing.agent.data.Schedule
+import com.suixing.agent.data.ScheduleStore
+import com.suixing.agent.data.nextTriggerAfter
+import com.suixing.agent.data.parseLocalMoment
+import com.suixing.agent.data.parseTime
+import com.suixing.agent.service.SchedulerService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.UUID
+
+/**
+ * Reminders: a time, and something for the agent to do when it arrives.
+ *
+ * This is the one part of the app that acts with nobody watching, so the tool that creates
+ * a reminder says out loud when it will next fire — a schedule the user cannot picture is a
+ * schedule they cannot trust.
+ */
+class ScheduleTools(
+    private val context: Context,
+    private val schedules: ScheduleStore,
+) : ToolGroup() {
+
+    private val zone: ZoneId get() = ZoneId.systemDefault()
+
+    override val specs: List<ToolSpec> = listOf(
+        ToolSpec(
+            "schedule_create",
+            "建一个定时提醒：到点后随行会在一个新会话里执行 prompt，并发一条通知。" +
+                "三个时机参数只能给一个：at（某个时刻）/ every_seconds（每隔多久）/ daily（每天几点）。",
+            Schema.objectOf(
+                properties = listOf(
+                    "title" to Schema.string("提醒的名字，也是通知标题和新会话标题"),
+                    "prompt" to Schema.string("到点要让随行做什么，例如「把今天的待办念一遍」"),
+                    "at" to Schema.string("一次性：本地时间 \"yyyy-MM-dd HH:mm\"，例如 2026-10-09 07:30"),
+                    "every_seconds" to Schema.integer("重复：间隔秒数，最小 60", minimum = 60),
+                    "daily" to Schema.string("每天：本地时间 \"HH:mm\"，例如 07:30"),
+                ),
+                required = listOf("title", "prompt"),
+            ),
+        ),
+        ToolSpec(
+            "schedule_list",
+            "列出所有定时提醒：id、名字、时机、下一次触发时间。",
+            Schema.objectOf(properties = emptyList()),
+        ),
+        ToolSpec(
+            "schedule_update",
+            "改一个已有提醒：可以只改名字、只改 prompt，或换一个时机参数（同样只能给一个）。",
+            Schema.objectOf(
+                properties = listOf(
+                    "id" to Schema.string("schedule_list 里的 id"),
+                    "title" to Schema.string("新名字，不改就留空"),
+                    "prompt" to Schema.string("新的执行内容，不改就留空"),
+                    "at" to Schema.string("改成一次性时刻 \"yyyy-MM-dd HH:mm\""),
+                    "every_seconds" to Schema.integer("改成固定间隔，最小 60", minimum = 60),
+                    "daily" to Schema.string("改成每天 \"HH:mm\""),
+                ),
+                required = listOf("id"),
+            ),
+        ),
+        ToolSpec(
+            "schedule_delete",
+            "删掉一个定时提醒，同时撤掉它的闹钟。",
+            Schema.objectOf(
+                properties = listOf("id" to Schema.string("schedule_list 里的 id")),
+                required = listOf("id"),
+            ),
+        ),
+    )
+
+    override suspend fun execute(name: String, args: JsonObject): ToolResult = when (name) {
+        "schedule_create" -> create(args)
+        "schedule_list" -> list()
+        "schedule_update" -> update(args)
+        "schedule_delete" -> delete(args)
+        else -> ToolResult.failure("未知工具：$name")
+    }
+
+    private suspend fun create(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        val title = args.str("title")?.trim().orEmpty()
+        if (title.isEmpty()) return@withContext ToolResult.failure("缺少参数 title")
+        val prompt = args.str("prompt")?.trim().orEmpty()
+        if (prompt.isEmpty()) return@withContext ToolResult.failure("缺少参数 prompt（到点要让随行做什么）")
+
+        val timing = readTiming(args) ?: return@withContext timingError(args)
+        val now = System.currentTimeMillis()
+        val schedule = Schedule(
+            id = UUID.randomUUID().toString().substring(0, 8),
+            title = title,
+            prompt = prompt,
+            kind = timing.kind,
+            atMillis = timing.atMillis,
+            everySeconds = timing.everySeconds,
+            timeOfDay = timing.timeOfDay,
+        ).let { it.copy(nextAt = it.nextTriggerAfter(now, zone) ?: 0L) }
+        if (schedule.nextAt == 0L) {
+            return@withContext ToolResult.failure("这个时间已经过去了：${args.str("at").orEmpty()}。请给一个将来的时刻。")
+        }
+        schedules.upsert(schedule)
+        SchedulerService.arm(context)
+        ToolResult.success(
+            "已建提醒 ${schedule.id}「${schedule.title}」，下一次 ${format(schedule.nextAt)}（${describe(schedule)}）。",
+        )
+    }
+
+    private suspend fun list(): ToolResult = withContext(Dispatchers.IO) {
+        val all = schedules.read()
+        if (all.isEmpty()) return@withContext ToolResult.success("还没有定时提醒。")
+        val text = all.joinToString("\n") { schedule ->
+            val next = schedule.nextAt.takeIf { it > 0L }?.let { format(it) } ?: "不会触发"
+            "- ${schedule.id}「${schedule.title}」${describe(schedule)} · 下一次 $next · 到点执行：${schedule.prompt}"
+        }
+        ToolResult.success("共 ${all.size} 个定时提醒：\n$text")
+    }
+
+    private suspend fun update(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        val id = args.str("id")?.trim().orEmpty()
+        if (id.isEmpty()) return@withContext ToolResult.failure("缺少参数 id")
+        val existing = schedules.find(id)
+            ?: return@withContext ToolResult.failure("没有这个提醒：$id。先用 schedule_list 看有哪些。")
+
+        val title = args.str("title")?.trim().orEmpty().ifBlank { existing.title }
+        val prompt = args.str("prompt")?.trim().orEmpty().ifBlank { existing.prompt }
+        // "no timing given" means keep the old one; a timing that was given but is wrong is an
+        // error, not a silent no-op — otherwise a typo'd time looks like a successful update.
+        val given = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }
+        val timing = readTiming(args)
+        if (given.isNotEmpty() && timing == null) return@withContext timingError(args)
+        val updated = if (timing == null) {
+            existing.copy(title = title, prompt = prompt)
+        } else {
+            existing.copy(
+                title = title,
+                prompt = prompt,
+                kind = timing.kind,
+                atMillis = timing.atMillis,
+                everySeconds = timing.everySeconds,
+                timeOfDay = timing.timeOfDay,
+            )
+        }
+        val now = System.currentTimeMillis()
+        val armed = updated.copy(nextAt = updated.nextTriggerAfter(now, zone) ?: 0L)
+        if (timing != null && armed.nextAt == 0L) {
+            return@withContext ToolResult.failure("这个时间已经过去了，提醒没有改动。")
+        }
+        schedules.upsert(armed)
+        SchedulerService.arm(context)
+        ToolResult.success("已更新 ${armed.id}「${armed.title}」，下一次 ${format(armed.nextAt)}。")
+    }
+
+    private suspend fun delete(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        val id = args.str("id")?.trim().orEmpty()
+        if (id.isEmpty()) return@withContext ToolResult.failure("缺少参数 id")
+        val existing = schedules.find(id)
+            ?: return@withContext ToolResult.failure("没有这个提醒：$id。先用 schedule_list 看有哪些。")
+        schedules.delete(id)
+        SchedulerService.arm(context)
+        ToolResult.success("已删除提醒「${existing.title}」（$id）。")
+    }
+
+    private class Timing(
+        val kind: String,
+        val atMillis: Long = 0L,
+        val everySeconds: Long = 0L,
+        val timeOfDay: String = "",
+    )
+
+    /** The one timing parameter that was given, or null when it was not exactly one. */
+    private fun readTiming(args: JsonObject): Timing? {
+        val given = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }
+        if (given.size != 1) return null
+        return when (given.first()) {
+            "at" -> {
+                val raw = args.str("at").orEmpty()
+                val millis = parseLocalMoment(raw, zone) ?: return null
+                Timing(SCHEDULE_AT, atMillis = millis)
+            }
+
+            "every_seconds" -> {
+                val seconds = args.int("every_seconds", 0)
+                if (seconds < 60) return null
+                Timing(SCHEDULE_EVERY, everySeconds = seconds.toLong())
+            }
+
+            else -> {
+                val raw = args.str("daily").orEmpty()
+                if (parseTime(raw, DAILY_TIME_FORMATS) == null) return null
+                Timing(SCHEDULE_DAILY, timeOfDay = raw.trim())
+            }
+        }
+    }
+
+    private fun timingError(args: JsonObject): ToolResult {
+        val given = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }
+        return when {
+            given.isEmpty() -> ToolResult.failure(
+                "缺少时机参数，三选一：at=\"yyyy-MM-dd HH:mm\"、every_seconds=秒数（≥60）、daily=\"HH:mm\"。",
+            )
+
+            given.size > 1 -> ToolResult.failure("时机参数只能给一个，现在给了 ${given.joinToString("、")}。")
+
+            else -> ToolResult.failure(
+                "${given.first()} 的值不对：「${args.str(given.first())}」。" +
+                    "at 要 \"yyyy-MM-dd HH:mm\"，every_seconds 要 ≥60 的秒数，daily 要 \"HH:mm\"。",
+            )
+        }
+    }
+
+    private fun describe(schedule: Schedule): String = when (schedule.kind) {
+        SCHEDULE_AT -> "一次性 ${format(schedule.atMillis)}"
+        SCHEDULE_EVERY -> "每 ${schedule.everySeconds} 秒"
+        SCHEDULE_DAILY -> "每天 ${schedule.timeOfDay}"
+        else -> schedule.kind
+    }
+
+    private fun format(millis: Long): String =
+        MOMENT_FORMAT.format(Instant.ofEpochMilli(millis).atZone(zone))
+
+    private companion object {
+        val TIMING_KEYS = listOf("at", "every_seconds", "daily")
+
+        val DAILY_TIME_FORMATS = listOf(
+            DateTimeFormatter.ofPattern("HH:mm:ss"),
+            DateTimeFormatter.ofPattern("HH:mm"),
+        )
+
+        val MOMENT_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+    }
+}

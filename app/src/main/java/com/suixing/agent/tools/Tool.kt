@@ -2,8 +2,11 @@ package com.suixing.agent.tools
 
 import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
+import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.SettingsRepository
+import com.suixing.agent.data.TodoStore
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.voice.Speaker
 import kotlinx.serialization.json.JsonArray
@@ -95,6 +98,19 @@ object Schema {
         put("properties", buildJsonObject { properties.forEach { (key, value) -> put(key, value) } })
         if (required.isNotEmpty()) put("required", JsonArray(required.map { JsonPrimitive(it) }))
     }
+
+    /**
+     * An array whose elements are all shaped like [item].
+     *
+     * A list of objects rather than one packed string: a tool that takes the whole board at
+     * once must not depend on the model getting newline escaping right, or a broken write
+     * silently loses half the tasks.
+     */
+    fun arrayOf(description: String, item: JsonObject): JsonObject = buildJsonObject {
+        put("type", "array")
+        put("description", description)
+        put("items", item)
+    }
 }
 
 fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
@@ -118,11 +134,17 @@ class ToolRegistry private constructor() {
         speaker: Speaker,
         settings: SettingsRepository,
         memory: MemoryStore,
+        jobs: JobStore,
+        todos: TodoStore,
+        schedules: ScheduleStore,
     ) : this() {
         add(SystemTools(context, memory))
         add(FileTools(context))
         add(ShellTools(capabilities))
         add(UiTools(context, capabilities))
+        add(JobTools(jobs))
+        add(TodoTools(todos))
+        add(ScheduleTools(context, schedules))
         add(SkillTools(skills))
         add(WebTools(context, settings))
         add(VoiceTools(speaker))

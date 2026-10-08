@@ -10,9 +10,14 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
+    <!-- Declared but never demanded: reminders work without it (the alarm is then inexact and
+         may arrive a minute late), and with it the scheduler uses exact alarms. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        tools:ignore="ExactAlarm" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -66,6 +71,18 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- An alarm delivers here, and the service goes foreground before it starts the
+             agent's own run: since Android 12 a background app may not start a foreground
+             service, and foreground → foreground is allowed. -->
+        <service
+            android:name=".service.SchedulerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="fires a user-scheduled reminder and starts the agent run it asks for" />
+        </service>
+
         <!-- The console is a window over other apps, which is what `specialUse` covers;
              Android 14+ refuses to start a typed service without the matching subtype. -->
         <service
@@ -76,6 +93,17 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="floating console that stops or steers an in-progress agent run" />
         </service>
+
+        <!-- Alarms are dropped by a reboot; this puts the board back on the clock. Exported
+             because the system is the sender, and BOOT_COMPLETED is a protected broadcast
+             that no other app can forge. -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

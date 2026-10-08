@@ -535,7 +535,7 @@ class AgentEngine(
                         role = Roles.ASSISTANT,
                         text = turn.text,
                         reasoning = thinking,
-                    ).withUsage(usage, elapsed)
+                    ).withUsage(usage, elapsed, settings.model)
                     produced += assistant
                     onEvent(AgentEvent.AssistantMessage(assistant))
                     onEvent(AgentEvent.Finished(turn.text))
@@ -549,7 +549,7 @@ class AgentEngine(
                     text = turn.text,
                     reasoning = thinking,
                     toolCalls = turn.toolCalls.map { StoredToolCall(it.id, it.name, it.arguments) },
-                ).withUsage(usage, elapsed)
+                ).withUsage(usage, elapsed, settings.model)
                 produced += assistant
                 onEvent(AgentEvent.AssistantMessage(assistant))
                 wire += ChatMessage.assistant(turn.text, turn.toolCalls)
@@ -922,6 +922,13 @@ class AgentEngine(
                 "工具返回失败时先分析原因，不要重复同样的调用。" +
                 "任务完成后，用简洁的中文向用户说明做了什么、结果如何。",
         )
+        // The board is the one piece of state that outlives the context window, so the prompt
+        // has to say so: a model that keeps its plan in its head loses it the first time the
+        // history is summarised.
+        append(
+            "\n多步任务先用 todo_write 列清单，每完成一步重写一遍完整清单（不是追加）：" +
+                "你的上下文会被压缩，任务板不会。",
+        )
     }
 
     /**
@@ -999,13 +1006,14 @@ private fun estimateTokens(message: StoredMessage): Int {
  * usage block leave the counts at zero, which the UI reads as "unknown" rather than
  * "free".
  */
-private fun StoredMessage.withUsage(usage: Usage?, elapsedMs: Long): StoredMessage {
-    if (usage == null) return copy(elapsedMs = elapsedMs)
+private fun StoredMessage.withUsage(usage: Usage?, elapsedMs: Long, model: String): StoredMessage {
+    if (usage == null) return copy(elapsedMs = elapsedMs, model = model)
     return copy(
         promptTokens = usage.promptTokens,
         completionTokens = usage.completionTokens,
         reasoningTokens = usage.reasoningTokens,
         cachedTokens = usage.cachedTokens,
         elapsedMs = elapsedMs,
+        model = model,
     )
 }

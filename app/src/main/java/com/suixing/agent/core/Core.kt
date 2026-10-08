@@ -5,10 +5,14 @@ import com.suixing.agent.agent.AgentEngine
 import com.suixing.agent.agent.ApprovalGate
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.data.ChatRepository
+import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.McpStore
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.SettingsRepository
+import com.suixing.agent.data.TodoStore
 import com.suixing.agent.mcp.McpManager
+import com.suixing.agent.service.SchedulerService
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.tools.ToolRegistry
 import com.suixing.agent.voice.Speaker
@@ -16,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * Process-wide service locator. The app is small enough that a hand-rolled
@@ -42,6 +47,19 @@ object Core {
         private set
     lateinit var speaker: Speaker
         private set
+
+    /** Background shell jobs; their logs live under `filesDir/jobs`. */
+    lateinit var jobs: JobStore
+        private set
+
+    /** The task board: `filesDir/todos.json`, shared with the UI. */
+    lateinit var todos: TodoStore
+        private set
+
+    /** Reminders: `filesDir/schedules.json`. */
+    lateinit var schedules: ScheduleStore
+        private set
+
     lateinit var tools: ToolRegistry
         private set
     lateinit var mcp: McpManager
@@ -77,11 +95,19 @@ object Core {
             capabilities = CapabilityHub(appContext, settings)
             skills = SkillStore(appContext)
             speaker = Speaker(appContext)
-            tools = ToolRegistry(appContext, capabilities, skills, speaker, settings, memory)
+            jobs = JobStore(File(appContext.filesDir, "jobs"), appScope)
+            todos = TodoStore(File(appContext.filesDir, "todos.json"))
+            schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))
+            tools = ToolRegistry(
+                appContext, capabilities, skills, speaker, settings, memory, jobs, todos, schedules,
+            )
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)
             engine = AgentEngine(scope = appScope)
             appScope.launch { memory.load() }
+            // Alarms are dropped when the app is updated or force-stopped, so aiming the next
+            // one on every launch is what keeps a reminder set weeks ago from going quiet.
+            SchedulerService.arm(appContext)
             initialized = true
         }
     }
