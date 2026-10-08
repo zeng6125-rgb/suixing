@@ -24,6 +24,11 @@ data class StoredMessage(
      */
     val runId: String? = null,
     /**
+     * The model that produced this message, for per-model usage rollups. Empty on
+     * transcripts written before the field existed and on user messages.
+     */
+    val model: String = "",
+    /**
      * What this message cost, as the endpoint reported it. Only assistant messages
      * carry it, and only when the endpoint sent a usage block at all.
      */
