@@ -227,7 +227,7 @@ class McpManager(
 
     companion object {
         const val MCP_PREFIX = "mcp__"
-        const val APP_VERSION = "0.5.0"
+        const val APP_VERSION = "0.5.1"
 
         /** Function names are limited to 64 characters by the OpenAI API. */
         private const val MAX_TOOL_NAME = 64

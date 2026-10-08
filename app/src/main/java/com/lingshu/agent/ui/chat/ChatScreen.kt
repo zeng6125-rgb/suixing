@@ -135,20 +135,9 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
         }
     }
 
-    // A tool-only assistant turn carries no text. Drawing its bubble anyway is what
-    // left the stray empty bubbles in the transcript, so those messages are dropped
-    // here and the time labels are computed over what actually renders.
-    val visible = remember(state.messages) {
-        val rows = mutableListOf<ChatRow>()
-        var previous: StoredMessage? = null
-        state.messages.forEach { message ->
-            if (message.isVisible()) {
-                rows += ChatRow(message, needsTimeLabel(previous, message))
-                previous = message
-            }
-        }
-        rows
-    }
+    // Tool-only assistant turns carry no text of their own, so their tool calls are
+    // folded into the bubble above them instead of standing alone in the transcript.
+    val visible = remember(state.messages) { groupRows(state.messages) }
     val live = state.streaming.isNotEmpty() || state.reasoning.isNotEmpty()
 
     val itemCount = visible.size + if (live) 1 else 0
@@ -224,7 +213,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 ) {
                     itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
                         if (row.showTimeLabel) TimeLabel(row.message.timestamp)
-                        MessageRow(row.message)
+                        MessageRow(row)
                     }
                     if (live) {
                         item(key = "streaming") {
@@ -472,39 +461,95 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
     }
 }
 
-/** One row of the transcript, plus whether it opens a new time bucket. */
-private data class ChatRow(val message: StoredMessage, val showTimeLabel: Boolean)
+/**
+ * One bubble of the transcript: the message that owns it, the tool calls it made,
+ * and whether it opens a new time bucket.
+ */
+private data class ChatRow(
+    val message: StoredMessage,
+    val showTimeLabel: Boolean,
+    val tools: List<StoredMessage> = emptyList(),
+)
 
 /**
  * Whether a stored message has anything to draw at all.
  *
  * A turn that only asked for tools stores an assistant message with empty text. It
  * still belongs in the wire history, but drawing its bubble is what produced the
- * stray empty bubbles that showed up between tool chips.
+ * stray empty bubbles between tool chips.
  */
 private fun StoredMessage.isVisible(): Boolean = when (role) {
     Roles.USER -> text.isNotBlank() || imageBase64 != null
-    Roles.ASSISTANT -> text.isNotBlank()
+    Roles.ASSISTANT -> text.isNotBlank() || !reasoning.isNullOrBlank()
     Roles.TOOL -> true
     else -> false
 }
 
+/**
+ * Folds the transcript into bubbles.
+ *
+ * Every tool result is claimed by the assistant bubble above it, so a reply and the
+ * tools it ran read as one block; a text-less assistant turn is skipped rather than
+ * drawn as an empty bubble.
+ */
+private fun groupRows(messages: List<StoredMessage>): List<ChatRow> {
+    val rows = mutableListOf<ChatRow>()
+    var previous: StoredMessage? = null
+    var bucket: MutableList<StoredMessage>? = null
+
+    messages.forEach { message ->
+        when {
+            message.role == Roles.TOOL -> {
+                val open = bucket
+                if (open != null) {
+                    open.add(message)
+                } else {
+                    // A tool result with no bubble above it (a transcript that starts
+                    // mid-turn) still gets drawn, just on its own.
+                    rows += ChatRow(message, needsTimeLabel(previous, message))
+                    previous = message
+                }
+            }
+
+            message.role == Roles.ASSISTANT && message.isVisible() -> {
+                val tools = mutableListOf<StoredMessage>()
+                rows += ChatRow(message, needsTimeLabel(previous, message), tools)
+                previous = message
+                bucket = tools
+            }
+
+            // A text-less assistant turn: nothing to draw, and its tools fall through
+            // to the bubble that is already open.
+            message.role == Roles.ASSISTANT -> Unit
+
+            message.isVisible() -> {
+                rows += ChatRow(message, needsTimeLabel(previous, message))
+                previous = message
+                bucket = null
+            }
+
+            else -> Unit
+        }
+    }
+    return rows
+}
+
 @Composable
-private fun MessageRow(message: StoredMessage) {
-    when (message.role) {
+private fun MessageRow(row: ChatRow) {
+    when (row.message.role) {
         Roles.USER -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            UserBubble(message)
+            UserBubble(row.message)
         }
 
         Roles.ASSISTANT -> AssistantRow(
-            text = message.text,
-            reasoning = message.reasoning.orEmpty(),
+            text = row.message.text,
+            reasoning = row.message.reasoning.orEmpty(),
             streaming = false,
+            tools = row.tools,
         )
 
-        Roles.TOOL -> ToolChip(message)
-
-        else -> Unit
+        // A tool result with no bubble above it still renders as one, chips only.
+        else -> AssistantRow(text = "", reasoning = "", streaming = false, tools = listOf(row.message))
     }
 }
 
@@ -526,7 +571,12 @@ private fun UserBubble(message: StoredMessage) {
 }
 
 @Composable
-private fun AssistantRow(text: String, streaming: Boolean, reasoning: String = "") {
+private fun AssistantRow(
+    text: String,
+    streaming: Boolean,
+    reasoning: String = "",
+    tools: List<StoredMessage> = emptyList(),
+) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         Surface(
             modifier = Modifier.size(28.dp),
@@ -545,7 +595,9 @@ private fun AssistantRow(text: String, streaming: Boolean, reasoning: String = "
                 if (reasoning.isNotBlank()) {
                     // The thinking is only "live" while no answer text has arrived yet.
                     ReasoningBlock(reasoning, streaming = streaming && text.isBlank())
-                    if (text.isNotBlank() || streaming) Spacer(Modifier.height(10.dp))
+                    if (text.isNotBlank() || streaming || tools.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                    }
                 }
                 when {
                     text.isBlank() && streaming -> TypingDots()
@@ -558,6 +610,17 @@ private fun AssistantRow(text: String, streaming: Boolean, reasoning: String = "
                             Spacer(Modifier.height(4.dp))
                             BlinkingCursor()
                         }
+                    }
+                }
+                // The tools this reply ran live inside the same bubble, so a turn
+                // reads as one block instead of a bubble followed by loose chips.
+                if (tools.isNotEmpty()) {
+                    if (text.isNotBlank() || reasoning.isNotBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                    }
+                    tools.forEachIndexed { index, tool ->
+                        if (index > 0) Spacer(Modifier.height(8.dp))
+                        ToolChip(tool)
                     }
                 }
             }
