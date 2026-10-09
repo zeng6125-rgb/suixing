@@ -446,12 +446,12 @@ fun FlatIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
-    iconSize: Dp = 22.dp,
+    iconSize: Dp = 26.dp,
 ) {
     Surface(
         onClick = onClick,
         modifier = modifier
-            .size(44.dp)
+            .size(48.dp)
             .shadow(
                 elevation = 8.dp,
                 shape = CircleShape,

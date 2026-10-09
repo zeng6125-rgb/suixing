@@ -12,6 +12,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -180,11 +181,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             if (!response.isSuccessful || body == null) {
                 throw LlmException(friendlyHttp(response.code, body?.string().orEmpty()))
             }
-            val text = StringBuilder()
-            val thinking = StringBuilder()
-            val calls = LinkedHashMap<Int, MutableToolCall>()
-            var finishReason: String? = null
-            var usage: Usage? = null
+            val stream = StreamTurn()
             val source = body.source()
             while (true) {
                 val line = source.readUtf8Line() ?: break
@@ -197,45 +194,87 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                     val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content ?: error.toString()
                     throw LlmException("接口返回错误：$message")
                 }
-                // The usage block rides on a chunk whose `choices` array is empty, so
-                // it has to be read before the choice lookup bails out.
-                chunk["usage"]?.let { element ->
-                    (element as? JsonObject)?.let { usage = parseUsage(it) }
-                }
-                val choice = chunk["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: continue
-                choice["finish_reason"]?.let { element ->
-                    if (element !is JsonNull) finishReason = element.jsonPrimitive.content
-                }
-                val delta = choice["delta"]?.jsonObject ?: continue
-                // Reasoning models stream their thinking in a side channel. DeepSeek
-                // and most Chinese gateways use `reasoning_content`; OpenRouter and
-                // the Anthropic-compatible shims use `reasoning`. Both may also
-                // arrive as a structured block, which has no plain-text form here.
-                (delta["reasoning_content"].asPlainText() ?: delta["reasoning"].asPlainText())
-                    ?.takeIf { it.isNotEmpty() }
-                    ?.let { piece ->
-                        thinking.append(piece)
-                        onReasoning(piece)
-                    }
-                delta["content"]?.let { element ->
-                    if (element !is JsonNull) {
-                        val piece = element.jsonPrimitive.content
-                        if (piece.isNotEmpty()) {
-                            text.append(piece)
-                            onDelta(piece)
-                        }
-                    }
-                }
-                delta["tool_calls"]?.jsonArray?.forEach { element ->
-                    val item = element.jsonObject
-                    val index = item["index"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                    val call = calls.getOrPut(index) { MutableToolCall() }
-                    item["id"]?.let { if (it !is JsonNull) call.id = it.jsonPrimitive.content }
-                    val function = item["function"]?.jsonObject ?: return@forEach
-                    function["name"]?.let { if (it !is JsonNull) call.name = it.jsonPrimitive.content }
-                    function["arguments"]?.let { if (it !is JsonNull) call.arguments.append(it.jsonPrimitive.content) }
-                }
+                stream.accept(chunk, onDelta, onReasoning)
             }
+            stream.toTurn()
+        }
+    }
+
+    private class MutableToolCall {
+        var id: String = ""
+        var name: String = ""
+        val arguments: StringBuilder = StringBuilder()
+    }
+
+    /**
+     * One streamed turn, assembled from the chunks of a `stream: true` response.
+     *
+     * Split out of the read loop because *where* a gateway puts the thinking is the part that
+     * kept going wrong. Reading only `delta.reasoning_content` — which is what this used to
+     * do — silently produced a thinking block with a timer and no text on every endpoint that
+     * instead uses `reasoning`, hoists it to the top level of the chunk, or answers with whole
+     * non-streaming-shaped `message` chunks. Here the shape handling is a function of a chunk,
+     * so it can be tested against fixtures instead of against a live provider.
+     */
+    internal class StreamTurn {
+        private val text = StringBuilder()
+        private val thinking = StringBuilder()
+        private val calls = LinkedHashMap<Int, MutableToolCall>()
+
+        var finishReason: String? = null
+            private set
+        var usage: Usage? = null
+            private set
+
+        fun accept(chunk: JsonObject, onDelta: (String) -> Unit, onReasoning: (String) -> Unit) {
+            // The usage block rides on a chunk whose `choices` array is empty, so it has to be
+            // read before the choice lookup bails out.
+            chunk["usage"]?.let { element ->
+                (element as? JsonObject)?.let { usage = parseUsage(it) }
+            }
+            val choice = chunk["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return
+            choice["finish_reason"]?.let { element ->
+                if (element !is JsonNull) finishReason = element.jsonPrimitive.content
+            }
+            // A gateway streams `delta` chunks, whole `message` chunks, or both; the delta wins
+            // when it carries the field, so a chunk that repeats itself is not counted twice.
+            val delta = choice["delta"]?.jsonObject
+            val message = choice["message"]?.jsonObject
+
+            reasoningOf(chunk, choice, delta, message)?.let { piece ->
+                thinking.append(piece)
+                onReasoning(piece)
+            }
+
+            // Blank pieces are kept here: a streamed "\n\n" is markdown paragraph spacing, and
+            // dropping it would run the answer together.
+            val content = if (delta != null && delta.containsKey("content")) {
+                delta["content"].textOf()
+            } else {
+                message?.get("content").textOf()
+            }
+            if (content != null) {
+                text.append(content)
+                onDelta(content)
+            }
+
+            val rawCalls = if (delta != null && delta.containsKey("tool_calls")) {
+                delta["tool_calls"]
+            } else {
+                message?.get("tool_calls")
+            }
+            rawCalls?.jsonArray?.forEach { element ->
+                val item = element.jsonObject
+                val index = item["index"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+                val call = calls.getOrPut(index) { MutableToolCall() }
+                item["id"]?.let { if (it !is JsonNull) call.id = it.jsonPrimitive.content }
+                val function = item["function"]?.jsonObject ?: return@forEach
+                function["name"]?.let { if (it !is JsonNull) call.name = it.jsonPrimitive.content }
+                function["arguments"]?.let { if (it !is JsonNull) call.arguments.append(it.jsonPrimitive.content) }
+            }
+        }
+
+        fun toTurn(): AssistantTurn {
             val requests = calls.toSortedMap().values
                 .filter { it.name.isNotBlank() }
                 .mapIndexed { index, call ->
@@ -245,14 +284,8 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         arguments = call.arguments.toString().ifBlank { "{}" },
                     )
                 }
-            AssistantTurn(text.toString(), requests, finishReason, thinking.toString(), usage)
+            return AssistantTurn(text.toString(), requests, finishReason, thinking.toString(), usage)
         }
-    }
-
-    private class MutableToolCall {
-        var id: String = ""
-        var name: String = ""
-        val arguments: StringBuilder = StringBuilder()
     }
 
     private fun encodeMessage(message: ChatMessage): JsonObject = buildJsonObject {
@@ -452,12 +485,52 @@ private fun JsonElement?.asText(): String? =
     (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content?.takeIf { it.isNotBlank() }
 
 /**
- * A streamed text fragment. Unlike [asText] this keeps blanks, and it returns null
- * for anything that is not a plain string, so an endpoint that sends its reasoning
- * as a structured block is skipped rather than crashing the parse.
+ * The text of a streamed field, whatever shape it arrived in.
+ *
+ * Plain strings pass through untouched — including blank ones, because a streamed "\n\n" is
+ * markdown paragraph spacing. Some gateways send a structured block instead
+ * (`[{"type":"thinking","thinking":"…"}]`, or `{"text":"…"}`), which used to be dropped
+ * because it is not a `JsonPrimitive`; those are flattened here.
  */
-private fun JsonElement?.asPlainText(): String? =
-    (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content
+private fun JsonElement?.textOf(): String? = when (this) {
+    null -> null
+    is JsonPrimitive -> contentOrNull
+    is JsonArray -> mapNotNull { it.textOf() }.joinToString("").ifEmpty { null }
+    is JsonObject -> (this["text"] ?: this["thinking"] ?: this["content"]).textOf()
+}
+
+/**
+ * The thinking text of one chunk, or null when the chunk carries none worth showing.
+ *
+ * Where this goes is not standardised: DeepSeek and most Chinese gateways put
+ * `reasoning_content` on the delta, OpenRouter and the Anthropic-compatible shims use
+ * `reasoning`, some reverse proxies hoist either to the top level of the chunk or onto the
+ * choice, and a few answer with whole non-streaming-shaped chunks that carry it under
+ * `message`.
+ *
+ * Blank pieces are dropped on purpose. An endpoint that streams only whitespace used to fill
+ * the UI's thinking block with newlines, which reads as "thinking, 0 tokens" next to a running
+ * timer — the empty block users reported. Real reasoning keeps its paragraph breaks because
+ * those arrive attached to text.
+ */
+private fun reasoningOf(
+    chunk: JsonObject,
+    choice: JsonObject,
+    delta: JsonObject?,
+    message: JsonObject?,
+): String? {
+    val candidates = listOf(
+        delta?.get("reasoning_content"),
+        delta?.get("reasoning"),
+        message?.get("reasoning_content"),
+        message?.get("reasoning"),
+        choice["reasoning_content"],
+        choice["reasoning"],
+        chunk["reasoning_content"],
+        chunk["reasoning"],
+    )
+    return candidates.firstNotNullOfOrNull { it.textOf()?.takeIf { text -> text.isNotBlank() } }
+}
 
 /** Turns an HTTP status into advice, not just a number. */
 internal fun friendlyHttp(code: Int, body: String): String {

@@ -346,6 +346,8 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 ),
             )
         }
+        // The top fade layer needs one solid colour: the canvas brush's own top stop.
+        val canvasColor = MaterialTheme.colorScheme.surface
         // The header is a real bar again: it owns the status bar strip and the transcript
         // starts below it, so nothing scrolls under a translucent band of controls.
         // The transcript and the jump button share one box: the button belongs to the
@@ -433,6 +435,20 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     }
                 }
             }
+            // Content scrolling behind the floating header fades out instead of being
+            // cut by it: the canvas colour at full alpha under the status strip, gone by
+            // the bottom of the header's own row. Under the discs, over the transcript.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .height(72.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(canvasColor, canvasColor.copy(alpha = 0f)),
+                        ),
+                    ),
+            )
             // The floating header: three discs over the transcript, no bar of its own.
             ChatTopBar(
                 title = state.title,
@@ -610,7 +626,7 @@ private fun ChatTopBar(
             // floating over the transcript, not glued to the notch.
             .padding(top = 4.dp)
             .height(56.dp)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -644,7 +660,7 @@ private fun ChatTopBar(
             icon = Icons.Rounded.PictureInPictureAlt,
             contentDescription = if (consoleOn) "关闭悬浮窗" else "开启悬浮窗",
             onClick = onToggleConsole,
-            iconSize = 20.dp,
+            iconSize = 26.dp,
             tint = if (consoleOn) {
                 MaterialTheme.colorScheme.primary
             } else {
@@ -681,7 +697,7 @@ private fun ModelChip(label: String, onClick: () -> Unit) {
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
         Row(
-            modifier = Modifier.padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+            modifier = Modifier.height(30.dp).padding(start = 14.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -1282,7 +1298,7 @@ private fun AssistantRow(
         // mode, where the two surfaces are 8% apart.
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(16.dp)) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp)) {
             // The avatar sits in the card's header rather than beside it: the reply is one
             // object, and an avatar floating outside the card made it two.
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1328,10 +1344,10 @@ private fun AssistantRow(
                     expandReasoning = expandReasoning,
                     onEdit = onEdit,
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
             }
             val lastText = parts.indexOfLast { it is Part.Text }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
             parts.forEachIndexed { index, part ->
                 val last = index == parts.lastIndex
                 when (part) {
@@ -1399,9 +1415,8 @@ private fun AssistantRow(
             }
             if (parts.isEmpty() && streaming) TypingDots()
             if (message != null && !streaming) {
-                // 4dp: the summary card already carries its own padding, and a full gap
-                // here read as a hole under the reply.
-                Spacer(Modifier.height(4.dp))
+                // No gap of its own: the last block's trailing spacer is the air above
+                // this row, and a second one here read as a hole under the reply.
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ActionBar(
                         branch = branch,
@@ -1505,6 +1520,10 @@ private fun ProcessCard(
     expanded: Boolean,
     onToggle: () -> Unit,
     trailing: (@Composable () -> Unit)? = null,
+    /** First line of the folded content, shown after the meta while the card is closed. */
+    preview: String? = null,
+    /** Drawn right after [preview]: the streaming cursor for a folded think. */
+    previewTail: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -1518,11 +1537,11 @@ private fun ProcessCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     // A minimum, not a fixed height: nothing in this row may wrap, and a
-                    // larger 字号 should grow the row rather than clip the title. 40dp
-                    // with 8dp of vertical padding keeps the card a strip, not a slab.
-                    .heightIn(min = 40.dp)
+                    // larger 字号 should grow the row rather than clip the title. 36dp
+                    // with 6dp of vertical padding keeps the card a strip, not a slab.
+                    .heightIn(min = 36.dp)
                     .clickable(onClick = onToggle)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -1551,6 +1570,18 @@ private fun ProcessCard(
                     // they read as one word — 「run_shell1 个失败」.
                     Spacer(Modifier.width(8.dp))
                     trailing()
+                }
+                if (preview != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = preview,
+                        style = metaStyle(),
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    previewTail?.invoke()
                 }
                 Icon(
                     imageVector = if (expanded) {
@@ -1631,11 +1662,20 @@ private fun ReasoningBlock(
         if (reasoningTokens > 0) add("$reasoningTokens tokens")
         if (elapsedMs > 0) add(formatDuration(elapsedMs))
     }
+    // The folded header says what the think starts with, so a closed block is still
+    // readable; a streaming block adds the cursor right after that line.
+    val firstLine = lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
     ProcessCard(
         icon = Icons.Rounded.Psychology,
         title = "思考过程",
         expanded = expanded,
         onToggle = { expanded = !expanded },
+        preview = firstLine.takeIf { it.isNotEmpty() },
+        previewTail = if (streaming && firstLine.isNotEmpty()) {
+            { BlinkingCursor() }
+        } else {
+            null
+        },
         trailing = {
             if (meta.isNotEmpty()) ProcessStatus(meta.joinToString(" · "))
             if (streaming) {
@@ -1644,6 +1684,35 @@ private fun ReasoningBlock(
             }
         },
     ) {
+        // A think with no text at all (the endpoint reported time but no chain) must not
+        // render as an empty slab: one line says what happened.
+        if (lines.none { it.isNotBlank() }) {
+            Text(
+                text = "（本段无思考文本）",
+                style = thinkingStyle(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@ProcessCard
+        }
+        // Short thinks wrap to their own height; only a long one needs the capped,
+        // lazy column — an always-280dp-tall box is what made a one-line think a slab.
+        if (lines.size <= 12) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                lines.forEachIndexed { index, line ->
+                    if (line.isBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                    } else {
+                        MarkdownText(
+                            text = line,
+                            style = thinkingStyle(),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (index == lines.lastIndex && streaming) BlinkingCursor()
+                }
+            }
+            return@ProcessCard
+        }
         LazyColumn(
             state = inner,
             modifier = Modifier
@@ -1700,11 +1769,20 @@ private fun ToolBundle(
     } else {
         "调用 ${tools.size} 个工具"
     }
+    // Folded, the header still says what the call is doing: the first argument line of
+    // the newest call (a shell command, a path), which is the row's own content anyway.
+    val preview = tools.lastOrNull()
+        ?.args
+        ?.lineSequence()
+        ?.firstOrNull { it.isNotBlank() }
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it != "{}" }
     ProcessCard(
         icon = Icons.Rounded.Bolt,
         title = title,
         expanded = expanded,
         onToggle = { expanded = !expanded },
+        preview = preview,
         trailing = {
             when {
                 // The name of the tool being waited on is the only useful thing the header
@@ -2045,49 +2123,42 @@ private fun TurnScrubber(
     onJumpTo: (Int) -> Unit,
 ) {
     if (turns <= 1) return
-    val shown = remember(turns) {
-        if (turns <= SCRUBBER_MAX) {
-            List(turns) { it }
-        } else {
-            List(SCRUBBER_MAX) { it * (turns - 1) / (SCRUBBER_MAX - 1) }
-        }
-    }
+    val scheme = MaterialTheme.colorScheme
+    // Exactly four slots, always: the whole transcript folds into four marks and each
+    // mark jumps to the first turn of its quarter. A dense column of one line per turn
+    // read as noise beside the transcript.
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         horizontalAlignment = Alignment.End,
     ) {
-        shown.forEach { turn ->
-            val active = turn == current - 1
+        List(SCRUBBER_SLOTS) { slot ->
+            val from = slot * turns / SCRUBBER_SLOTS
+            val to = (slot + 1) * turns / SCRUBBER_SLOTS - 1
+            val reached = current - 1 <= to
+            val active = current - 1 in from..to
             Box(
                 modifier = Modifier
-                    .height(16.dp)
+                    .height(18.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .clickable { onJumpTo(turn) },
+                    .clickable { onJumpTo(from) },
                 contentAlignment = Alignment.Center,
             ) {
                 Box(
                     Modifier
-                        // Reached turns are the long lines, the ones still ahead short:
-                        // the column doubles as a progress readout. The current turn is
-                        // the brand-coloured one among the long lines.
-                        .width(if (turn <= current - 1) 24.dp else 12.dp)
-                        .height(2.dp)
+                        // Reached quarters are the long brand lines, the ones ahead
+                        // short outline ones; the quarter being read is brand and bold.
+                        .width(if (active) 24.dp else if (reached) 20.dp else 12.dp)
+                        .height(if (active) 3.dp else 2.dp)
                         .clip(RoundedCornerShape(1.dp))
-                        .background(
-                            if (active) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                            },
-                        ),
+                        .background(if (reached) scheme.primary else scheme.outlineVariant),
                 )
             }
         }
     }
 }
 
-private const val SCRUBBER_MAX = 24
+private const val SCRUBBER_SLOTS = 4
 
 /**
  * Where the context went.
@@ -2368,30 +2439,6 @@ private fun Composer(
                     }
                 }
             }
-            // The pill row: model and 思考强度 side by side, both write-through.
-            Row(
-                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                var modelsOpen by remember { mutableStateOf(false) }
-                Box {
-                    ModelChip(
-                        label = settings.shortModel.ifBlank { "选模型" },
-                        onClick = { modelsOpen = true },
-                    )
-                    DropdownMenu(
-                        expanded = modelsOpen,
-                        onDismissRequest = { modelsOpen = false },
-                    ) {
-                        ModelMenu(settings = settings) { provider, model ->
-                            onPickModel(provider, model)
-                            modelsOpen = false
-                        }
-                    }
-                }
-                ReasoningChip(settings = settings)
-            }
             attachment?.let {
                 AttachmentChip(attachment = it, onRemove = onClearAttachment)
                 Spacer(Modifier.height(8.dp))
@@ -2416,12 +2463,39 @@ private fun Composer(
                 color = if (LocalDarkTheme.current) scheme.surfaceContainer else scheme.surface,
                 shadowElevation = 0.dp,
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                    // Centred, not bottom-aligned: the icons are 48dp while a single line
-                    // of bodyLarge plus its padding is 48dp too, so the two line up.
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+                Column {
+                    // Row 1: model and 思考强度 inside the capsule, above the input row —
+                    // one stadium instead of a pill row floating outside it.
+                    Row(
+                        modifier = Modifier
+                            .height(30.dp)
+                            .padding(start = 16.dp, top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        var modelsOpen by remember { mutableStateOf(false) }
+                        Box {
+                            ModelChip(
+                                label = settings.shortModel.ifBlank { "选模型" },
+                                onClick = { modelsOpen = true },
+                            )
+                            DropdownMenu(
+                                expanded = modelsOpen,
+                                onDismissRequest = { modelsOpen = false },
+                            ) {
+                                ModelMenu(settings = settings) { provider, model ->
+                                    onPickModel(provider, model)
+                                    modelsOpen = false
+                                }
+                            }
+                        }
+                        ReasoningChip(settings = settings)
+                    }
+                    // Row 2: attach, field, mic, send, with 6dp of air under it.
+                    Row(
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                     Box {
                         IconButton(
                             onClick = { menuOpen = true },
@@ -2560,6 +2634,7 @@ private fun Composer(
                         shadowElevation = 0.dp,
                         iconSize = 22.dp,
                     )
+                    }
                 }
             }
         }

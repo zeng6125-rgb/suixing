@@ -90,6 +90,7 @@ import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
+import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -260,6 +261,9 @@ private fun BoxScope.Drawer(
     // The board changes behind our back (the agent writes it mid-run), so the count is
     // re-read every time the drawer opens rather than cached for the process.
     var todoCount by remember { mutableStateOf(0) }
+    // Every delete entry in the drawer funnels through this one confirmation: a swipe
+    // of the thumb on a row must not be able to erase a conversation outright.
+    var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
     LaunchedEffect(open) {
         if (open) {
             todoCount = withContext(Dispatchers.IO) {
@@ -343,14 +347,22 @@ private fun BoxScope.Drawer(
                     ) {
                         Text(
                             text = buildString {
-                                append("${tally.turns} 轮 ${tally.steps} 步")
+                                // No turn/step counts here: the drawer row says what a
+                                // conversation IS (title, when, running), not how many
+                                // steps it took — the user read that as noise.
                                 if (tally.perSecond > 0) {
-                                    append(" · 均 ")
+                                    append("均 ")
                                     append(String.format(Locale.US, "%.1f", tally.perSecond))
                                     append(" tok/s")
                                 }
-                                if (tally.tokens > 0) append(" · ${tally.tokens / 1000}k tok")
-                                if (tally.cachePercent > 0) append(" · 缓存 ${tally.cachePercent}%")
+                                if (tally.tokens > 0) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append("${tally.tokens / 1000}k tok")
+                                }
+                                if (tally.cachePercent > 0) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append("缓存 ${tally.cachePercent}%")
+                                }
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = scheme.onSurfaceVariant,
@@ -390,7 +402,7 @@ private fun BoxScope.Drawer(
                             selected = conversation.id == activeId,
                             running = conversation.id == runningId,
                             onClick = { onOpenConversation(conversation) },
-                            onDelete = { onDeleteConversation(conversation) },
+                            onDelete = { pendingDelete = conversation },
                         )
                     }
                 }
@@ -433,6 +445,32 @@ private fun BoxScope.Drawer(
             }
         }
     }
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除会话") },
+            text = {
+                Text(
+                    text = target.title,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteConversation(target)
+                    pendingDelete = null
+                }) {
+                    Text("删除", color = scheme.primary)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -473,6 +511,15 @@ private fun ConversationRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
+            )
+            // When, not how much: the row's only facts are title, time and the run dot.
+            Text(
+                text = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                    .format(conversation.updatedAt),
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+                maxLines = 1,
+                modifier = Modifier.padding(start = 6.dp, end = 2.dp),
             )
             IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
                 Icon(
