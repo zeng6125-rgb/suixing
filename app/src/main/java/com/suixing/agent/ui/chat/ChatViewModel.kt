@@ -7,19 +7,24 @@ import com.suixing.agent.agent.RunState
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Assistant
+import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.Conversation
+import com.suixing.agent.data.LiveDraft
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.forAssistant
+import com.suixing.agent.data.choiceFor
 import com.suixing.agent.service.AgentForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
@@ -27,6 +32,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * What the user has typed but not sent, per conversation. A single global field is
@@ -39,6 +45,16 @@ data class Draft(
     val attachmentName: String? = null,
 )
 
+/**
+ * A line the user queued while a run was going, before the model has read it.
+ *
+ * It is not a message yet: nothing reaches the transcript until the engine reports the
+ * line was handed over ([AgentEvent.Steered]), and until then the user can still promote,
+ * edit or delete it. The queue is deliberately never written to disk — it is the state of
+ * a run that is still going, and a restarted process has no such run.
+ */
+data class PendingSteer(val id: String, val text: String)
+
 data class ChatUiState(
     val conversationId: String = "",
     val title: String = "新会话",
@@ -47,6 +63,13 @@ data class ChatUiState(
     val activeRuns: Map<String, String> = emptyMap(),
     /** The persona this conversation speaks as. */
     val assistantId: String = "",
+    /**
+     * This conversation's own model pick, or null while it follows the persona and then
+     * the app-wide default. The screen draws its tick from the same [AppSettings.choiceFor]
+     * chain the run sends with, so what the picker shows is what goes on the wire.
+     */
+    val providerId: String? = null,
+    val model: String? = null,
     val streaming: String = "",
     /** The thinking streamed ahead of [streaming], shown in its own block. */
     val reasoning: String = "",
@@ -76,6 +99,16 @@ data class ChatUiState(
     val error: String? = null,
     /** The unsent text of the conversation on screen; see [Draft]. */
     val draft: Draft = Draft(),
+    /** Lines queued for the run that is going, oldest first; see [PendingSteer]. */
+    val pendingSteers: List<PendingSteer> = emptyList(),
+    /**
+     * This conversation's compression record, oldest first.
+     *
+     * Carried with the conversation rather than looked up per run: the engine reuses a
+     * summary it has already paid for, and a list rebuilt from scratch would fold — and
+     * charge for — the same messages again on every turn.
+     */
+    val checkpoints: List<ContextCheckpoint> = emptyList(),
 ) {
     /** The transcript as drawn: one run per turn, newest first pick wins. */
     val visible: List<StoredMessage>
@@ -126,6 +159,11 @@ private data class RunSession(
     val chatId: String,
     val title: String,
     val assistantId: String,
+    /** The conversation's own model pick; carried so a save cannot drop it. */
+    val providerId: String? = null,
+    val model: String? = null,
+    /** The conversation's compression record; carried so a save cannot drop it. */
+    val checkpoints: List<ContextCheckpoint> = emptyList(),
     val runId: String,
     val messages: List<StoredMessage>,
     val activeRuns: Map<String, String>,
@@ -197,11 +235,39 @@ class ChatViewModel : ViewModel() {
      * state itself changes on every token, while these numbers change once a reply lands.
      */
     val sessionStats: Flow<SessionStats?> = combine(state, Core.settings.flow) { snapshot, settings ->
-        SessionStats.of(snapshot.messages, settings.contextWindowFor(settings.model))
+        // The window of the model this conversation would send with, not the app-wide
+        // default's: a chat that picked a smaller-window endpoint must not read its own
+        // usage against the wrong denominator.
+        val assistant = settings.assistant(snapshot.assistantId) ?: settings.activeAssistant()
+        val model = settings.choiceFor(snapshot.providerId, snapshot.model, assistant).model
+        SessionStats.of(snapshot.messages, settings.contextWindowFor(model))
     }.distinctUntilChanged()
 
     /** The per-conversation run-state watcher; replaced whenever the display switches. */
     private var stateWatcher: Job? = null
+
+    /**
+     * The conversation whose reply the speaker is reading out, or null once it was
+     * stopped. The speaker is a single app-wide queue, so the stop button has to know
+     * whether the voice it would cut belongs to the chat it is drawn in.
+     */
+    private var speakingChatId: String? = null
+
+    /**
+     * The last failure per conversation, for the runs that ended while another chat was on
+     * screen. The run's copy is gone by then and nothing else remembers why it stopped, so
+     * the reason is held here until that conversation is opened again.
+     */
+    private val lastErrors = mutableMapOf<String, String>()
+
+    /**
+     * Queued lines per conversation, oldest first.
+     *
+     * Kept here rather than only in the on-screen state so a queue survives a look at
+     * another chat: the run it belongs to keeps going while the user is away, and coming
+     * back must still show what is waiting — and still offer to retract it.
+     */
+    private val steers = mutableMapOf<String, List<PendingSteer>>()
 
     /**
      * One live copy per running conversation, keyed by chat id. A single slot is what
@@ -209,8 +275,11 @@ class ChatViewModel : ViewModel() {
      * earlier run's copy, and the earlier run's events then landed in the later one's
      * transcript. The engine keys its handles the same way; this map is the view
      * model's half of that contract.
+     *
+     * Concurrent on purpose: stream events reach [handleEvent] on the OkHttp reader
+     * thread while the main thread removes and reads the same entry.
      */
-    private val sessions = mutableMapOf<String, RunSession>()
+    private val sessions = ConcurrentHashMap<String, RunSession>()
 
     /** One coroutine per running conversation, so stopping one leaves the others alone. */
     private val jobs = mutableMapOf<String, Job>()
@@ -263,9 +332,16 @@ class ChatViewModel : ViewModel() {
                         // for the stream to wind down on its own. What already arrived
                         // is saved first: the run is over either way, and only this
                         // copy has it.
-                        is RunState.Cancelled -> sessions[chatId]?.let { live ->
-                            viewModelScope.launch { saveSession(live) }
-                            endSession(chatId, "已停止")
+                        is RunState.Cancelled -> {
+                            // Cancelled is terminal and the engine never follows it with
+                            // Idle, so the screen has to be released here — otherwise the
+                            // composer keeps its stop button and the conversation stays
+                            // locked until the user switches away and back.
+                            _state.update { it.copy(runningHere = false) }
+                            sessions[chatId]?.let { live ->
+                                viewModelScope.launch { saveSession(live) }
+                                endSession(chatId, "已停止")
+                            }
                         }
 
                         is RunState.Idle -> _state.update {
@@ -292,6 +368,9 @@ class ChatViewModel : ViewModel() {
             } else {
                 _state.value = existing.toUiState(settings.activeAssistant()?.id.orEmpty())
             }
+            // Same recovery on a cold start: the run that was streaming when the process
+            // died has no session any more, only its draft.
+            mergeLiveDraft(_state.value.conversationId)
         }
         // The draft follows the displayed conversation: switching restores that
         // conversation's own unsent text without any action at the switch site.
@@ -320,6 +399,9 @@ class ChatViewModel : ViewModel() {
 
     fun openConversation(conversation: Conversation) {
         val live = sessions[conversation.id]
+        // Read-and-clear: a failure that landed while another conversation was on screen
+        // is reported the moment its own chat comes back.
+        val failure = lastErrors.remove(conversation.id)
         _state.value = if (live != null) {
             // Coming back to the conversation a run owns: pick up what it has streamed
             // since, rather than the older snapshot on disk.
@@ -329,17 +411,72 @@ class ChatViewModel : ViewModel() {
                 messages = live.messages,
                 activeRuns = live.activeRuns,
                 assistantId = live.assistantId,
+                providerId = live.providerId,
+                model = live.model,
+                checkpoints = live.checkpoints,
                 streaming = live.streaming,
                 reasoning = live.reasoning,
                 status = live.status,
                 runningHere = true,
+                // The tool it is inside right now: without it the row that says what the
+                // run is doing went blank on every switch back.
+                runningTool = live.runningTool,
                 liveParts = live.parts,
                 liveRunId = live.runId,
+                error = failure,
+                // The queue belongs to the run, not to the screen: coming back to it must
+                // still show what is waiting.
+                pendingSteers = steers[conversation.id].orEmpty(),
             )
         } else {
             // A conversation that never picked a persona keeps the one already on screen,
             // which was seeded from the settings when this screen was created.
-            conversation.toUiState(_state.value.assistantId)
+            conversation.toUiState(_state.value.assistantId).let {
+                it.copy(
+                    error = failure,
+                    // A run that ended with lines still queued keeps them: they are the
+                    // user's words, and the rows say they never went out.
+                    pendingSteers = steers[conversation.id].orEmpty(),
+                )
+            }
+        }
+        // A run that was killed left its half-written answer in a draft file: it belongs to
+        // this conversation, so it is picked up the moment the conversation is.
+        viewModelScope.launch { mergeLiveDraft(conversation.id) }
+    }
+
+    /**
+     * Remembers the model this conversation picked — and only this conversation's copy of
+     * it. The choice belongs to the chat it was made in, so two conversations can run
+     * different endpoints side by side while the app-wide default stays the settings
+     * page's to own.
+     */
+    fun chooseModel(providerId: String, model: String) {
+        val chatId = _state.value.conversationId
+        if (chatId.isEmpty()) return
+        val shown = _state.value
+        _state.update { it.copy(providerId = providerId, model = model) }
+        // The run's own copy carries the pick as well, or the next save would write the
+        // conversation back without it and the run after that would fall back to the
+        // persona.
+        val live = sessions[chatId]
+        live?.let { putSession(it.copy(providerId = providerId, model = model)) }
+        viewModelScope.launch {
+            // The one save path, so the pick rides along with everything else: it keeps
+            // createdAt, derives the title and falls back to what is already on disk.
+            val title = save(
+                chatId = chatId,
+                title = live?.title ?: shown.title,
+                messages = live?.messages ?: shown.messages,
+                assistantId = live?.assistantId ?: shown.assistantId,
+                activeRuns = live?.activeRuns ?: shown.activeRuns,
+                providerId = providerId,
+                model = model,
+            ) ?: return@launch
+            if (title != shown.title) {
+                _state.update { it.copy(title = title) }
+                sessions[chatId]?.let { current -> putSession(current.copy(title = title)) }
+            }
         }
     }
 
@@ -347,6 +484,8 @@ class ChatViewModel : ViewModel() {
         // The run owns its conversation until it ends: deleting it would only have the
         // next save write it straight back.
         if (sessions.containsKey(conversation.id)) return
+        // Nothing left to hand a queued line to.
+        steers.remove(conversation.id)
         viewModelScope.launch {
             Core.chats.delete(conversation.id)
             if (conversation.id != _state.value.conversationId) return@launch
@@ -367,28 +506,50 @@ class ChatViewModel : ViewModel() {
 
     // ---------------------------------------------------------------- assistants
 
-    /** Makes [assistant] the face of this conversation and the app-wide default. */
+    /**
+     * Makes [assistant] the face of this conversation — this one only. The app-wide
+     * default is a separate decision ([setDefaultAssistant]): a persona tried out in one
+     * chat must not silently become what every other chat starts as.
+     */
     fun useAssistant(assistant: Assistant) {
         editDisplayed { it.copy(assistantId = assistant.id) }
+        viewModelScope.launch { persistDisplayed() }
+    }
+
+    /** Makes [assistant] what new conversations start as, leaving this one as it is. */
+    fun setDefaultAssistant(assistant: Assistant) {
         viewModelScope.launch {
             Core.settings.update { it.copy(activeAssistantId = assistant.id) }
-            persistDisplayed()
         }
     }
 
     fun saveAssistant(assistant: Assistant) {
         viewModelScope.launch {
+            // Whether this was a new persona or an edit decides what else may move: saving
+            // a brand-new one is an explicit "use this", editing one is not.
+            var created = false
             Core.settings.update { settings ->
                 val exists = settings.assistants.any { it.id == assistant.id }
+                created = !exists
                 val list = if (exists) {
                     settings.assistants.map { if (it.id == assistant.id) assistant else it }
                 } else {
                     settings.assistants + assistant
                 }
-                settings.copy(assistants = list, activeAssistantId = assistant.id)
+                settings.copy(
+                    assistants = list,
+                    // A brand-new persona becomes the default — that is what saving it
+                    // means the first time. Editing an existing one must not move the
+                    // default out from under every other conversation.
+                    activeAssistantId = if (exists) settings.activeAssistantId else assistant.id,
+                )
             }
-            editDisplayed { it.copy(assistantId = assistant.id) }
-            persistDisplayed()
+            // An edit is not a switch: renaming a persona must not quietly change what the
+            // conversation on screen is speaking as. Switching is [useAssistant].
+            if (created) {
+                editDisplayed { it.copy(assistantId = assistant.id) }
+                persistDisplayed()
+            }
         }
     }
 
@@ -483,9 +644,21 @@ class ChatViewModel : ViewModel() {
         val body = text.trim()
         if (body.isEmpty()) return
         editDisplayed { snapshot ->
+            val index = snapshot.messages.indexOfFirst { it.id == id }
             snapshot.copy(
                 messages = snapshot.messages.map { message ->
                     if (message.id == id) message.copy(text = body, edited = true) else message
+                },
+                // A summary that covers the edited message no longer describes what the model
+                // will read, and a stale one would quietly hand it the text from before the
+                // fix — exactly the fact the user came back to correct. Only the records that
+                // end before the edit are still accurate.
+                checkpoints = if (index < 0) {
+                    snapshot.checkpoints
+                } else {
+                    snapshot.checkpoints.filterNot { checkpoint ->
+                        snapshot.messages.indexOfFirst { it.id == checkpoint.toMessageId } >= index
+                    }
                 },
             )
         }
@@ -522,48 +695,77 @@ class ChatViewModel : ViewModel() {
     }
 
     fun stop() {
-        Core.speaker.stop()
+        // Only this conversation's reading: the speaker is one app-wide queue, so an
+        // unconditional stop here used to cut short a reply another chat was reading out.
+        val chatId = _state.value.conversationId
+        if (speakingChatId == chatId) {
+            Core.speaker.stop()
+            speakingChatId = null
+        }
         // This conversation's run, by id: the engine keeps one handle per chat, and
         // stopping whatever happens to be newest would cut a run this screen does
         // not even show. Its approval prompt, if any, is answered "refused" for this
         // run only — another conversation's prompt stays on screen.
-        val chatId = _state.value.conversationId
         gate.cancelPending(chatId)
         Core.engine.cancel(chatId)
         jobs.remove(chatId)?.cancel()
     }
 
     /**
-     * Slips a line to the model at its next turn instead of waiting for this run to end.
-     * False means nothing was running, so the caller keeps the text.
-     */
-    /**
-     * Queues a line for the model that is running, and writes it into the transcript at
-     * the point it lands.
+     * Queues a line for the run that is going instead of waiting for it to end.
      *
-     * The bubble matters: without it the answer reads as though the model volunteered
-     * something nobody asked for. It is marked `steer` so the transcript keeps treating
-     * it as an interruption rather than as the question the turn is answering.
+     * The line is not written into the transcript here: it waits above the composer, and
+     * becomes a message only when the engine says it was handed over — which is what lets
+     * the user promote, edit or delete it in the meantime. False means nothing was
+     * running, so the caller keeps the text.
      */
     fun steer(text: String): Boolean {
         val body = text.trim()
         val chatId = _state.value.conversationId
-        if (body.isEmpty() || !Core.engine.steer(chatId, body)) return false
-        val live = sessions[chatId] ?: return true
-        val line = StoredMessage(
-            id = UUID.randomUUID().toString(),
-            role = Roles.USER,
-            text = body,
-            steer = true,
-        )
-        val next = live.copy(messages = live.messages + line)
-        putSession(next)
-        // Saved straight away: a steer that only lived in memory would vanish the moment
-        // the user switched conversations, which is exactly when they go looking for it.
-        viewModelScope.launch { saveSession(next) }
+        if (body.isEmpty()) return false
+        val id = UUID.randomUUID().toString().take(8)
+        // 排队 or 立即 comes from the run's own settings — the engine reads steerMode off
+        // the live run — so this stays a plain call whose boolean the composer can await.
+        if (!Core.engine.steer(chatId, id, body)) return false
+        steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, body)
+        publishSteers(chatId)
         clearDraft(chatId)
         return true
     }
+
+    /** Sends a queued line now, cutting the round in flight so the model sees it at once. */
+    fun promoteSteer(id: String) {
+        val chatId = _state.value.conversationId
+        val queued = steers[chatId].orEmpty().firstOrNull { it.id == id } ?: return
+        if (Core.engine.promote(chatId, id)) return
+        // No round left to interrupt: the line goes out as an ordinary message instead of
+        // being silently dropped — but only because the user asked for it now.
+        retractSteer(id)
+        send(queued.text)
+    }
+
+    /** Drops a queued line before the model ever reads it. */
+    fun retractSteer(id: String) {
+        val chatId = _state.value.conversationId
+        Core.engine.retract(chatId, id)
+        steers[chatId] = steers[chatId].orEmpty().filterNot { it.id == id }
+        publishSteers(chatId)
+    }
+
+    /** Mirrors one conversation's queue onto the screen, when that is the one on screen. */
+    private fun publishSteers(chatId: String) {
+        if (_state.value.conversationId != chatId) return
+        _state.update { it.copy(pendingSteers = steers[chatId].orEmpty()) }
+    }
+
+    /**
+     * Asks the run on screen to fold the conversation at its next turn boundary.
+     *
+     * Only a flag: the engine consumes it between rounds, so nothing in flight is cut and
+     * the answer being written right now still lands. False means no run is going, which is
+     * also when compressing would have nothing to do.
+     */
+    fun requestCompress(): Boolean = Core.engine.requestCompress(_state.value.conversationId)
 
     fun dismissError() {
         _state.update { it.copy(error = null) }
@@ -572,11 +774,18 @@ class ChatViewModel : ViewModel() {
     private fun start(runId: String, history: List<StoredMessage>) {
         val shown = _state.value
         val chatId = shown.conversationId
+        // Lines left queued by the run that just ended, taken before this one starts: the
+        // queue outlives a run, and a line queued from here on is already on its way to the
+        // new run, so handing that one over again would deliver it twice.
+        val carried = steers[chatId].orEmpty()
         putSession(
             RunSession(
                 chatId = chatId,
                 title = shown.title,
                 assistantId = shown.assistantId,
+                providerId = shown.providerId,
+                model = shown.model,
+                checkpoints = shown.checkpoints,
                 runId = runId,
                 messages = shown.messages,
                 activeRuns = shown.activeRuns,
@@ -585,6 +794,28 @@ class ChatViewModel : ViewModel() {
         )
         jobs[chatId] = viewModelScope.launch {
             AgentForegroundService.start(Core.appContext, "随行正在执行任务")
+            // The draft writer rides inside the run's own coroutine, so it stops the moment
+            // the run does — no separate job to cancel, and no writes after the answer has
+            // landed in the transcript. It is cancelled by hand in the finally as well: a
+            // `while (true)` loop left to itself would tick once a second for the life of
+            // the view model, and the cancel lands before the draft is cleared, so no write
+            // can slip in after it.
+            val writer = launch { writeLiveDraft(chatId) }
+            // Lines still queued from the run that ended: the queue outlives a run, so the new
+            // one has to be told about them. Waiting for Running is what makes this work — the
+            // engine refuses a steer for a conversation it is not running yet, and startRun
+            // below does not return until the run is over.
+            if (carried.isNotEmpty()) {
+                launch {
+                    Core.engine.stateOf(chatId).first { it is RunState.Running }
+                    // The queue is the truth: a line retracted while the run was starting is
+                    // gone from the table, and gone from the UI, so it must not go out here.
+                    carried.filter { queued -> steers[chatId]?.any { it.id == queued.id } == true }
+                        .forEach { queued ->
+                            Core.engine.steer(chatId, queued.id, queued.text, immediate = false)
+                        }
+                }
+            }
             // Decided in the catches, applied once in the finally: there is exactly one
             // place that saves and one that closes the run, whichever way it ended.
             var status = ""
@@ -594,7 +825,16 @@ class ChatViewModel : ViewModel() {
                 val settings = Core.settings.current()
                 val assistant = settings.assistant(shown.assistantId) ?: settings.activeAssistant()
                 // The persona bends the live settings; anything it left blank stays as-is.
-                val effective = settings.forAssistant(assistant)
+                val persona = settings.forAssistant(assistant)
+                // The wire comes from the one chain the picker also reads: this
+                // conversation's own pick, then the persona's pins, then the app-wide
+                // default. Everything else keeps the persona's overrides.
+                val choice = settings.choiceFor(shown.providerId, shown.model, assistant)
+                val effective = persona.copy(
+                    baseUrl = choice.baseUrl,
+                    apiKey = choice.apiKey,
+                    model = choice.model,
+                )
                 val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
                 val produced = engine.startRun(
                     chatId = chatId,
@@ -610,12 +850,23 @@ class ChatViewModel : ViewModel() {
                     // closure is what keeps two parallel runs out of each other's
                     // transcript.
                     onEvent = { event -> handleEvent(chatId, event) },
+                    // The compressions this conversation has already paid for, and the one
+                    // this run is about to make: without both, every turn would fold — and
+                    // charge for — the same span again.
+                    checkpoints = shown.checkpoints,
+                    onCheckpoint = { checkpoint -> recordCheckpoint(chatId, checkpoint) },
                 )
                 // Only the run's own last reply is read out, not the whole history.
                 if (effective.speakReplies) {
                     produced.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }
                         ?.text
-                        ?.let { Core.speaker.speak(it) }
+                        ?.let {
+                            // Remembered before speaking, because the speaker queues the
+                            // line and returns at once: the id has to be set by the time
+                            // any other screen can reach the stop button.
+                            speakingChatId = chatId
+                            Core.speaker.speak(it)
+                        }
                 }
             } catch (cancellation: CancellationException) {
                 // RunState.Cancelled usually released the screen first; this is the belt
@@ -627,10 +878,17 @@ class ChatViewModel : ViewModel() {
             } finally {
                 AgentForegroundService.stop(Core.appContext)
                 withContext(NonCancellable) {
+                    // First of all: the writer must not run again, or a tick landing after
+                    // the clear below would resurrect a draft for an answer already saved.
+                    writer.cancel()
                     // A cancelled coroutine refuses to suspend, so the final save has to
                     // run in a NonCancellable block or a stopped run loses its messages.
                     sessions[chatId]?.let { saveSession(it) }
                     endSession(chatId, status, failure)
+                    // The answer is in the transcript now, whatever way the run ended: a
+                    // draft left behind would come back on the next launch as a second
+                    // bubble saying the same thing.
+                    Core.chats.clearLive(chatId)
                 }
             }
         }
@@ -690,8 +948,27 @@ class ChatViewModel : ViewModel() {
             is AgentEvent.Failed -> live.copy(error = event.message)
 
             is AgentEvent.Finished -> live
+
+            // The model has the line now: it leaves the queue and becomes a message in the
+            // same breath, so a queued line is never both. Marked `steer` so the transcript
+            // keeps reading it as an interruption rather than as the question being answered.
+            is AgentEvent.Steered -> {
+                steers[chatId] = steers[chatId].orEmpty().filterNot { it.id == event.id }
+                publishSteers(chatId)
+                live.copy(
+                    messages = live.messages + StoredMessage(
+                        id = event.id,
+                        role = Roles.USER,
+                        text = event.text,
+                        steer = true,
+                    ),
+                )
+            }
         }
         putSession(next)
+        // Saved straight away: a handed-over line that only lived in memory would vanish the
+        // moment the user switches conversations, which is when they go looking for it.
+        if (event is AgentEvent.Steered) viewModelScope.launch { saveSession(next) }
     }
 
     /**
@@ -802,8 +1079,13 @@ class ChatViewModel : ViewModel() {
      */
     private fun endSession(chatId: String, status: String, error: String? = null) {
         val live = sessions.remove(chatId)
+        val failure = error ?: live?.error
+        // A run that failed while another conversation was on screen has no state to land
+        // in — its own copy is gone a line above — so the reason waits here until that
+        // conversation is opened again. Otherwise the user comes back to half an answer
+        // and no explanation.
+        if (failure != null && _state.value.conversationId != chatId) lastErrors[chatId] = failure
         _state.update { snapshot ->
-            val failure = error ?: live?.error
             if (live != null && snapshot.conversationId == chatId) {
                 snapshot.copy(
                     streaming = "",
@@ -836,8 +1118,132 @@ class ChatViewModel : ViewModel() {
                 assistantId = shown.assistantId,
                 messages = shown.messages,
                 activeRuns = shown.activeRuns,
+                // Carried too: an edit can drop a compression record, and a session still
+                // holding the old list would write it back at the end of the run.
+                checkpoints = shown.checkpoints,
             ),
         )
+    }
+
+    /**
+     * Keeps the conversation's draft file in step with the answer being streamed.
+     *
+     * Once a second, and only when the text actually changed: one write is an encode plus a
+     * file write plus a rename, and tokens can arrive every few milliseconds. A second is the
+     * interval where a kill costs the user the last tick instead of the whole answer, while a
+     * stalled stream costs nothing at all.
+     */
+    private suspend fun writeLiveDraft(chatId: String) {
+        var written = ""
+        while (true) {
+            delay(LIVE_DRAFT_INTERVAL_MS)
+            val live = sessions[chatId] ?: continue
+            // Only the answer: the reasoning chain is not what the user comes back for, and
+            // writing it would double the file for text the transcript redraws anyway.
+            val text = live.streaming
+            if (text.isBlank() || text == written) continue
+            written = text
+            Core.chats.saveLive(
+                LiveDraft(
+                    chatId = chatId,
+                    runId = live.runId,
+                    at = System.currentTimeMillis(),
+                    text = text,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Turns the draft a killed run left behind back into a message.
+     *
+     * Only when the run it belongs to is not already in the transcript: a draft that outlived
+     * a clean finish would otherwise return as a second bubble saying the same thing. The
+     * order is append, save, then clear — clearing first would lose the text for good if the
+     * save never happened.
+     */
+    private suspend fun mergeLiveDraft(chatId: String) {
+        val draft = Core.chats.readLive(chatId) ?: return
+        val live = sessions[chatId]
+        val shown = _state.value.takeIf { it.conversationId == chatId }
+        val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }
+        val messages = live?.messages ?: shown?.messages ?: stored?.messages.orEmpty()
+        // "This text is already in the transcript", not "this run has messages": a run that
+        // used a tool has already stored messages under the same runId, and judging by the
+        // run alone would throw the half-written final answer away — the one thing this
+        // draft exists to save. The first 64 characters are the fingerprint; a cleanly
+        // finished answer starts with them, because the draft was its prefix.
+        val probe = draft.text.trim().take(LIVE_DRAFT_PROBE_CHARS)
+        val delivered = probe.isNotEmpty() && messages.any { message ->
+            message.runId == draft.runId &&
+                message.role == Roles.ASSISTANT &&
+                message.text.trim().startsWith(probe)
+        }
+        // An empty draft has no answer in it to save; clearing it is all that is left.
+        if (delivered || probe.isEmpty()) {
+            Core.chats.clearLive(chatId)
+            return
+        }
+        // The answer is real but unfinished, and nothing else can say so: StoredMessage has
+        // no field for it, and a bubble that looks complete would read as the model having
+        // stopped mid-sentence for no reason.
+        val line = StoredMessage(
+            id = UUID.randomUUID().toString(),
+            role = Roles.ASSISTANT,
+            text = draft.text.trimEnd() + "\n\n（中断）",
+            runId = draft.runId,
+        )
+        val next = messages + line
+        if (shown != null) _state.update { it.copy(messages = next) }
+        live?.let { putSession(it.copy(messages = next)) }
+        save(
+            chatId = chatId,
+            title = live?.title ?: shown?.title ?: stored?.title.orEmpty(),
+            messages = next,
+            assistantId = live?.assistantId ?: shown?.assistantId ?: stored?.assistantId.orEmpty(),
+            activeRuns = live?.activeRuns ?: shown?.activeRuns ?: stored?.activeRuns.orEmpty(),
+            providerId = live?.providerId ?: shown?.providerId ?: stored?.providerId,
+            model = live?.model ?: shown?.model ?: stored?.model,
+            checkpoints = live?.checkpoints ?: shown?.checkpoints ?: stored?.checkpoints.orEmpty(),
+        )
+        Core.chats.clearLive(chatId)
+    }
+
+    /**
+     * Records one compression the engine just made.
+     *
+     * The record is what lets a later run reuse a summary instead of paying to produce it
+     * again, so it is saved the moment it arrives. Newest last and capped: an unbounded
+     * history of every compression a long conversation ever made would only grow the file.
+     */
+    private fun recordCheckpoint(chatId: String, checkpoint: ContextCheckpoint) {
+        val live = sessions[chatId]
+        val shown = _state.value.takeIf { it.conversationId == chatId }
+        val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }
+        val current = live?.checkpoints ?: shown?.checkpoints ?: stored?.checkpoints.orEmpty()
+        val next = (current + checkpoint).distinctBy { it.id }.takeLast(MAX_CHECKPOINTS)
+        // Mirrored onto every live copy first, so the next save carries it whether the run
+        // is still going or has just landed.
+        if (shown != null) _state.update { it.copy(checkpoints = next) }
+        live?.let { putSession(it.copy(checkpoints = next)) }
+        viewModelScope.launch {
+            // Read-modify-write of the checkpoints field alone: the run's own copy of the
+            // messages is still growing, and saving it here would write a half-finished
+            // snapshot back over the transcript. A conversation that is gone has nothing to
+            // write to at all — save() upserts, so it would come back as an empty ghost.
+            val base = Core.chats.conversations.value.firstOrNull { it.id == chatId }
+                ?: return@launch
+            save(
+                chatId = chatId,
+                title = base.title,
+                messages = base.messages,
+                assistantId = base.assistantId,
+                activeRuns = base.activeRuns,
+                providerId = base.providerId,
+                model = base.model,
+                checkpoints = next,
+            )
+        }
     }
 
     /** Saves the conversation on screen. */
@@ -849,6 +1255,9 @@ class ChatViewModel : ViewModel() {
             messages = shown.messages,
             assistantId = shown.assistantId,
             activeRuns = shown.activeRuns,
+            providerId = shown.providerId,
+            model = shown.model,
+            checkpoints = shown.checkpoints,
         ) ?: return
         if (title != shown.title) _state.update { it.copy(title = title) }
     }
@@ -860,6 +1269,9 @@ class ChatViewModel : ViewModel() {
             messages = live.messages,
             assistantId = live.assistantId,
             activeRuns = live.activeRuns,
+            providerId = live.providerId,
+            model = live.model,
+            checkpoints = live.checkpoints,
         ) ?: return
         val current = sessions[live.chatId]
         if (current != null && title != current.title) {
@@ -874,6 +1286,9 @@ class ChatViewModel : ViewModel() {
         messages: List<StoredMessage>,
         assistantId: String,
         activeRuns: Map<String, String>,
+        providerId: String?,
+        model: String?,
+        checkpoints: List<ContextCheckpoint>? = null,
     ): String? {
         if (chatId.isEmpty()) return null
         val previous = Core.chats.conversations.value.firstOrNull { it.id == chatId }
@@ -895,6 +1310,16 @@ class ChatViewModel : ViewModel() {
                 messages = messages,
                 assistantId = assistantId,
                 activeRuns = activeRuns,
+                // The conversation's own model pick survives every save: dropping it here
+                // would silently hand the next run back to the persona. Saves that carry
+                // no pick (a message landing, a derived title, the end of a run) fall back
+                // to what is already on disk instead of clearing it.
+                providerId = providerId ?: previous?.providerId,
+                model = model ?: previous?.model,
+                // Same trap as the model pick: a save that carries no checkpoints must
+                // inherit the ones on disk, or every message landing would wipe the record
+                // of what was compressed — and the next run would compress and pay again.
+                checkpoints = checkpoints ?: previous?.checkpoints ?: emptyList(),
             ),
         )
         return derived
@@ -919,4 +1344,28 @@ private fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = C
     messages = messages,
     activeRuns = activeRuns,
     assistantId = assistantId.ifBlank { fallbackAssistantId },
+    providerId = providerId,
+    model = model,
+    checkpoints = checkpoints,
 )
+
+/** How many compressions of one conversation are kept; older ones are dropped. */
+private const val MAX_CHECKPOINTS = 10
+
+/**
+ * How often the answer being streamed is written to the conversation's draft file.
+ *
+ * A second, not every delta: each write is an encode plus a file write, and a long answer
+ * arrives in thousands of deltas. It is the interval where a kill costs the last tick of the
+ * answer rather than all of it.
+ */
+private const val LIVE_DRAFT_INTERVAL_MS = 1000L
+
+/**
+ * How much of a draft is compared against the transcript to decide it was already saved.
+ *
+ * A prefix, not the whole text: the saved answer is the draft plus whatever arrived after the
+ * last write, so equality would call every cleanly finished run "not delivered" and duplicate
+ * the bubble. 64 characters are far more than any two answers share by accident.
+ */
+private const val LIVE_DRAFT_PROBE_CHARS = 64

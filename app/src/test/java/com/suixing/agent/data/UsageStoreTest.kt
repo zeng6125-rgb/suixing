@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -208,5 +209,90 @@ class UsageStoreTest {
         val lateUtc = Instant.parse("2026-03-01T23:30:00Z").toEpochMilli()
         assertEquals("2026-03-01", dayKey(lateUtc, ZoneId.of("UTC")))
         assertEquals("2026-03-02", dayKey(lateUtc, ZoneId.of("Asia/Shanghai")))
+    }
+
+    @Test
+    fun `deleting a chat gives its tokens back`() {
+        val kept = convo("b", listOf(msg("m2", prompt = 40, model = "gpt")))
+        val both = accumulate(
+            UsageSnapshot(),
+            listOf(convo("a", listOf(msg("m1", prompt = 100, model = "deepseek-chat"))), kept),
+            utc,
+        )
+        assertEquals(140L, both.totals.prompt)
+
+        // The user deleted chat "a": its day, its model and the total must all drop it,
+        // or the header ends up reporting chats that no longer exist.
+        val afterDelete = accumulate(both, listOf(kept), utc)
+        assertEquals(40L, afterDelete.totals.prompt)
+        assertEquals(40L, afterDelete.days.getValue("2026-03-01").prompt)
+        assertEquals(listOf("gpt"), byModelOf(afterDelete).map { it.model })
+    }
+
+    @Test
+    fun `rebuilding from an empty cache matches an incremental scan`() {
+        // Deleting usage.json is a supported repair path, so a cold rebuild has to land
+        // on exactly the same numbers as the incremental one.
+        val firstDayOnly = listOf(convo("c1", listOf(msg("m1", prompt = 100, ts = day1))))
+        val both = listOf(
+            convo("c1", listOf(msg("m1", prompt = 100, ts = day1), msg("m2", prompt = 50, ts = day2))),
+        )
+        val incremental = accumulate(accumulate(UsageSnapshot(), firstDayOnly, utc), both, utc)
+        val fromScratch = accumulate(UsageSnapshot(), both, utc)
+        assertEquals(fromScratch, incremental)
+        assertEquals(150L, fromScratch.totals.prompt)
+    }
+
+    @Test
+    fun `an old flat cache decodes and rebuilds to the same numbers`() {
+        // What every installed 0.8.10 upgrades from: one flat aggregate plus timestamp
+        // watermarks and no per-chat detail. It has to decode (unknown keys ignored) and
+        // then rebuild from the chats, because the chats are the only source of truth.
+        val legacy = Json { ignoreUnknownKeys = true }.decodeFromString(
+            UsageSnapshot.serializer(),
+            """{"days":{"2026-03-01":{"prompt":100,"completion":40}},""" +
+                """"models":{"deepseek-chat":{"prompt":100,"completion":40}},""" +
+                """"lastScanned":{"c1":1772000000000}}""",
+        )
+        assertEquals(UsageSnapshot(), legacy)
+        val rebuilt = accumulate(
+            legacy,
+            listOf(convo("c1", listOf(msg("m1", prompt = 100, completion = 40, model = "deepseek-chat")))),
+            utc,
+        )
+        assertEquals(140L, rebuilt.totals.total)
+        assertEquals(140L, byModelOf(rebuilt).single().tokens.total)
+    }
+
+    @Test
+    fun `a turn that gets priced after the scan is counted on the next scan`() {
+        // The newest assistant message is saved while its usage is still missing. The
+        // watermark must not step over it, or that turn's tokens are lost for good.
+        val midFlight = listOf(convo("c1", listOf(msg("m1", prompt = 100), msg("m2"))))
+        val first = accumulate(UsageSnapshot(), midFlight, utc)
+        assertEquals(100L, first.totals.prompt)
+
+        val priced = listOf(convo("c1", listOf(msg("m1", prompt = 100), msg("m2", prompt = 25))))
+        val second = accumulate(first, priced, utc)
+        assertEquals(125L, second.totals.prompt)
+    }
+
+    @Test
+    fun `a message appended after the clock jumps backwards is still counted`() {
+        // The watermark is a message count, so a clock that jumps back (NTP correction,
+        // the user changing the date) can no longer hide the new turn behind it.
+        val first = accumulate(
+            UsageSnapshot(),
+            listOf(convo("c1", listOf(msg("m1", prompt = 100, ts = day2)))),
+            utc,
+        )
+        val second = accumulate(
+            first,
+            listOf(convo("c1", listOf(msg("m1", prompt = 100, ts = day2), msg("m2", prompt = 50, ts = day1)))),
+            utc,
+        )
+        assertEquals(150L, second.totals.prompt)
+        // ...and the new turn is filed under the day its own timestamp says.
+        assertEquals(50L, second.days.getValue("2026-03-01").prompt)
     }
 }

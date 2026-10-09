@@ -5,6 +5,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -26,34 +28,59 @@ data class MemoryEntry(val value: String = "", val updatedAt: Long = 0L)
  */
 class MemoryStore(private val context: Context) {
 
+    companion object {
+        /**
+         * Cap on a single note. The whole file is rewritten on every change and the
+         * notes are injected into the prompt, so one runaway note slows down both.
+         */
+        const val MAX_VALUE_LENGTH = 4000
+    }
+
     private val file: File get() = File(context.filesDir, "memory.json")
+
+    /**
+     * Serialises the read-modify-write in [put] / [remove] / [clear]: the tool layer and
+     * the notes UI both write, and without it the later writer starts from a stale read
+     * and silently drops the other's key.
+     */
+    private val lock = Mutex()
 
     private val _entries = MutableStateFlow<Map<String, MemoryEntry>>(emptyMap())
     val entries: StateFlow<Map<String, MemoryEntry>> = _entries.asStateFlow()
 
     /** Reads the file into [entries]; the UI calls this once on start. */
-    suspend fun load() = withContext(Dispatchers.IO) { _entries.value = read() }
+    suspend fun load() = withContext(Dispatchers.IO) { lock.withLock { _entries.value = read() } }
 
     suspend fun put(key: String, value: String): Boolean = withContext(Dispatchers.IO) {
-        val next = read().toMutableMap()
-        next[key] = MemoryEntry(value, System.currentTimeMillis())
-        val ok = write(next)
-        if (ok) _entries.value = next
-        ok
+        // Refused, never truncated: a note the model cannot read back in full is worse
+        // than a note it has to shorten. Callers can compare against [MAX_VALUE_LENGTH]
+        // to say which limit was hit.
+        if (value.length > MAX_VALUE_LENGTH) return@withContext false
+        lock.withLock {
+            val next = read().toMutableMap()
+            next[key] = MemoryEntry(value, System.currentTimeMillis())
+            val ok = write(next)
+            if (ok) _entries.value = next
+            ok
+        }
     }
 
     suspend fun remove(key: String): Boolean = withContext(Dispatchers.IO) {
-        val next = read().toMutableMap()
-        next.remove(key)
-        val ok = write(next)
-        if (ok) _entries.value = next
-        ok
+        lock.withLock {
+            val next = read().toMutableMap()
+            next.remove(key)
+            val ok = write(next)
+            if (ok) _entries.value = next
+            ok
+        }
     }
 
     suspend fun clear(): Boolean = withContext(Dispatchers.IO) {
-        val ok = write(emptyMap())
-        if (ok) _entries.value = emptyMap()
-        ok
+        lock.withLock {
+            val ok = write(emptyMap())
+            if (ok) _entries.value = emptyMap()
+            ok
+        }
     }
 
     private fun read(): Map<String, MemoryEntry> {
@@ -61,7 +88,13 @@ class MemoryStore(private val context: Context) {
         val text = runCatching { file.readText() }.getOrNull().orEmpty()
         if (text.isBlank()) return emptyMap()
         val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
-            ?: return emptyMap()
+        if (root == null) {
+            // Unreadable notes used to read as "no notes at all", and the next put then
+            // rewrote the file with only its own key, so everything older was gone for
+            // good. Keep the bytes under a name that can still be recovered by hand.
+            quarantine()
+            return emptyMap()
+        }
         return root.entries.mapNotNull { (key, element) ->
             when (element) {
                 is JsonObject -> {
@@ -91,7 +124,28 @@ class MemoryStore(private val context: Context) {
         }
         return runCatching {
             file.parentFile?.mkdirs()
-            file.writeText(json.toString())
+            // Write-then-rename, so a kill mid-save cannot leave a half-written file
+            // that [read] would quarantine — the old notes survive instead.
+            val temp = File(file.parentFile, "${file.name}.tmp")
+            val text = json.toString()
+            temp.writeText(text)
+            if (!temp.renameTo(file)) {
+                // renameTo reports failure by returning false, so fall back to a direct
+                // write; its exception has to stay visible rather than lose the note.
+                try {
+                    file.writeText(text)
+                } finally {
+                    temp.delete()
+                }
+            }
         }.isSuccess
+    }
+
+    /**
+     * Keeps an unreadable file next to its own name (the same call McpStore makes for
+     * mcp.corrupt.json) instead of letting the next write bury it.
+     */
+    private fun quarantine() {
+        runCatching { file.renameTo(File(file.parentFile, "memory.corrupt.json")) }
     }
 }

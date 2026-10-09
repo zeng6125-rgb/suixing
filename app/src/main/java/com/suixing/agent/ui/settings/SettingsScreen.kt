@@ -255,7 +255,7 @@ private fun SettingsRoot(
             item {
                 SettingsEntry(
                     title = "数据",
-                    summary = "MCP、记忆与关于",
+                    summary = "MCP、记忆、悬浮窗与关于",
                     icon = Icons.Rounded.Storage,
                     onClick = { onOpenPage(SettingsPage.DATA) },
                 )
@@ -365,6 +365,51 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     val dirty = seeded && form != stored
     // The endpoint the model fields edit; tapping a chip also makes it the active one.
     val selected = form.providers.firstOrNull { it.id == selectedId } ?: form.providers.firstOrNull()
+    // A switch overwrites baseUrl/apiKey/model with the target provider's values (model only
+    // when that provider has an enabled one — see switchProvider), so "edited by hand" means
+    // the draft no longer matches what a switch would write. Comparing against disk instead
+    // would be too broad: the switch itself already makes the draft differ from disk.
+    val switchModel = selected?.enabled?.firstOrNull()
+    val endpointEdited = selected != null &&
+        (form.baseUrl != selected.baseUrl ||
+            form.apiKey != selected.apiKey ||
+            (switchModel != null && form.model != switchModel))
+    var pendingSwitch by remember { mutableStateOf<String?>(null) }
+    val switchProvider: (ProviderConfig) -> Unit = { provider ->
+        selectedId = provider.id
+        form = form.copy(
+            baseUrl = provider.baseUrl,
+            apiKey = provider.apiKey,
+            model = provider.enabled.firstOrNull() ?: form.model,
+        )
+    }
+    var pendingDelete by remember { mutableStateOf<String?>(null) }
+    val deleteProvider: (ProviderConfig) -> Unit = { provider ->
+        val rest = form.providers.filterNot { it.id == provider.id }
+        val next = rest.first()
+        selectedId = next.id
+        form = form.copy(
+            providers = rest,
+            baseUrl = next.baseUrl,
+            apiKey = next.apiKey,
+            model = next.enabled.firstOrNull() ?: form.model,
+        )
+        // 同新建：删除也是结构操作，草稿里删了磁盘上还在会让切换器继续列出已经不存在的提供方。
+        // 但全局 active 只在下一个提供方真的填过地址时才跟着换：落到一个还没填的空壳上，
+        // 会把正在跑的会话指到空地址，下一轮就带着空 model 出去（同「新建」那条）。
+        scope.persist {
+            if (next.baseUrl.isNotBlank()) {
+                it.copy(
+                    providers = form.providers,
+                    baseUrl = form.baseUrl,
+                    apiKey = form.apiKey,
+                    model = form.model,
+                )
+            } else {
+                it.copy(providers = form.providers)
+            }
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -503,10 +548,19 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item {
+                // The raw id, not the alias: what is typed here is what goes on the wire, so
+                // a display name typed or pasted in would be sent as the model and 404. The
+                // alias stays read-only, under the field and on the picker's chips.
+                val alias = selected?.aliases?.get(form.model)
                 OutlinedTextField(
-                    value = selected?.displayModel(form.model) ?: form.model,
+                    value = form.model,
                     onValueChange = { form = form.copy(model = it) },
                     label = { Text("当前模型") },
+                    supportingText = if (alias != null) {
+                        { Text("别名：$alias") }
+                    } else {
+                        null
+                    },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth(),
@@ -516,12 +570,15 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // 模型列表里那枚 chip 要先进对话框、再展开输入框才能改一个数；当前模型
                 // 的窗口是天天要调的，所以在页面上直接给一档预设。
                 val model = form.model
+                // The page names the model by its alias everywhere else, so the hint does too;
+                // the raw id is still what the window is filed under in modelContexts.
+                val modelLabel = selected?.displayModel(model) ?: model
                 val window = form.contextWindowFor(model)
                 var customOpen by remember { mutableStateOf(false) }
                 val presetIndex = CONTEXT_PRESETS.indexOfFirst { it.first == window }
                 LabeledBlock(
                     label = "上下文窗口",
-                    hint = "只影响当前模型（$model）：超过这个长度就丢掉最早的对话，不限则整段发过去。",
+                    hint = "只影响当前模型（$modelLabel）：超过这个长度就丢掉最早的对话，不限则整段发过去。",
                 ) {
                     SegmentedPill(
                         options = CONTEXT_PRESETS.map { it.second } + "自定义",
@@ -594,12 +651,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                 FilterChip(
                                     selected = provider.id == selected?.id,
                                     onClick = {
-                                        selectedId = provider.id
-                                        form = form.copy(
-                                            baseUrl = provider.baseUrl,
-                                            apiKey = provider.apiKey,
-                                            model = provider.enabled.firstOrNull() ?: form.model,
-                                        )
+                                        if (endpointEdited) {
+                                            pendingSwitch = provider.id
+                                        } else {
+                                            switchProvider(provider)
+                                        }
                                     },
                                     label = {
                                         Text(
@@ -611,12 +667,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                     },
                                     modifier = Modifier.combinedClickable(
                                         onClick = {
-                                            selectedId = provider.id
-                                            form = form.copy(
-                                                baseUrl = provider.baseUrl,
-                                                apiKey = provider.apiKey,
-                                                model = provider.enabled.firstOrNull() ?: form.model,
-                                            )
+                                            if (endpointEdited) {
+                                                pendingSwitch = provider.id
+                                            } else {
+                                                switchProvider(provider)
+                                            }
                                         },
                                         onLongClick = { menuOpen = true },
                                     ),
@@ -637,24 +692,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                         enabled = form.providers.size > 1,
                                         onClick = {
                                             menuOpen = false
-                                            val rest = form.providers.filterNot { it.id == provider.id }
-                                            val next = rest.first()
-                                            selectedId = next.id
-                                            form = form.copy(
-                                                providers = rest,
-                                                baseUrl = next.baseUrl,
-                                                apiKey = next.apiKey,
-                                                model = next.enabled.firstOrNull() ?: form.model,
-                                            )
-                                            // 同新建：删除也是结构操作，草稿里删了磁盘上还在会让
-                                            // 切换器继续列出已经不存在的提供方。
-                                            scope.persist {
-                                                it.copy(
-                                                    providers = form.providers,
-                                                    baseUrl = form.baseUrl,
-                                                    apiKey = form.apiKey,
-                                                    model = form.model,
-                                                )
+                                            if (endpointEdited) {
+                                                pendingDelete = provider.id
+                                            } else {
+                                                deleteProvider(provider)
                                             }
                                         },
                                     )
@@ -685,14 +726,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                     model = "",
                                 )
                                 // 点选即落盘：新建的提供方若只留在草稿里，离开页面就没了。
-                                scope.persist {
-                                    it.copy(
-                                        providers = form.providers,
-                                        baseUrl = form.baseUrl,
-                                        apiKey = form.apiKey,
-                                        model = form.model,
-                                    )
-                                }
+                                // 只落 providers：草稿里那三个空值属于还没填完的新提供方，
+                                // 一起写下去会把全局 active 的接口地址/Key/模型清空，正在跑的
+                                // 会话下一轮就会带着空 model 出去。
+                                scope.persist { it.copy(providers = form.providers) }
                             },
                             label = { Text("新建") },
                             leadingIcon = {
@@ -974,6 +1011,40 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 pickerOpen = false
             },
             onDismiss = { pickerOpen = false },
+        )
+    }
+
+    pendingSwitch?.let { id ->
+        AlertDialog(
+            onDismissRequest = { pendingSwitch = null },
+            title = { Text("切换提供方？") },
+            text = { Text("当前提供方的接口地址、API Key 或模型还没保存，切过去会丢掉这些改动。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingSwitch = null
+                        form.providers.firstOrNull { it.id == id }?.let(switchProvider)
+                    },
+                ) { Text("继续") }
+            },
+            dismissButton = { TextButton(onClick = { pendingSwitch = null }) { Text("取消") } },
+        )
+    }
+
+    pendingDelete?.let { id ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除提供方？") },
+            text = { Text("当前提供方还有未保存的改动，删除会连同这些改动一起丢掉，并切到下一个提供方。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDelete = null
+                        form.providers.firstOrNull { it.id == id }?.let(deleteProvider)
+                    },
+                ) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
         )
     }
 }
@@ -1306,6 +1377,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 paletteMode = defaults.paletteMode,
                                 fontScale = defaults.fontScale,
                                 bubbleWidth = defaults.bubbleWidth,
+                                reasoningHeight = defaults.reasoningHeight,
                                 cornerScale = defaults.cornerScale,
                                 showTimestamps = defaults.showTimestamps,
                                 expandTools = defaults.expandTools,
@@ -1431,11 +1503,11 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
             }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             item {
-                // Read-only on purpose: the switch is on the chat header, next to the run
-                // it starts, so a second one here would be a second source of truth.
+                // Read-only on purpose: the switch is the drawer's bottom row, next to the
+                // run it starts, so a second one here would be a second source of truth.
                 SettingRow(
                     title = "悬浮窗控制台",
-                    subtitle = "开关在聊天页顶栏的悬浮窗钮上；这里只说明权限",
+                    subtitle = "开关在左侧抽屉底部的「悬浮窗控制台」那一行；这里只说明权限",
                 )
             }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }

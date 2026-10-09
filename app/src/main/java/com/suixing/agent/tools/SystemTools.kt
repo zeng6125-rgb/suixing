@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -175,6 +176,9 @@ class SystemTools(
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
+        // The screen is about to belong to another app. There is no touch point to draw a ring
+        // around, so the edge flash is the whole signal that the agent did this.
+        TouchFx.handoff(context)
         ToolResult.success("已打开 ${intent.component?.packageName ?: target}")
     }.getOrElse { ToolResult.failure("打开应用失败：${it.message ?: it.javaClass.simpleName}") }
 
@@ -184,6 +188,8 @@ class SystemTools(
         val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
+        // A URL usually lands in a browser, which is the same handoff as launching an app.
+        TouchFx.handoff(context)
         ToolResult.success("已打开 $url")
     }.getOrElse { ToolResult.failure("打开网址失败：${it.message ?: it.javaClass.simpleName}") }
 
@@ -218,6 +224,14 @@ class SystemTools(
         val key = args.str("key")?.trim().orEmpty()
         val value = args.str("value").orEmpty()
         if (key.isEmpty()) return ToolResult.failure("缺少参数 key")
+        // Checked here instead of leaving it to the store: `put` can only answer false, and the
+        // generic "write failed, check storage" would send the model looking in the wrong place
+        // for a note that is merely too long.
+        if (value.length > MemoryStore.MAX_VALUE_LENGTH) {
+            return ToolResult.failure(
+                "内容过长（${value.length}/${MemoryStore.MAX_VALUE_LENGTH} 字），请精简后再记",
+            )
+        }
         val ok = memory.put(key, value)
         return if (ok) {
             ToolResult.success("已记住「$key」")

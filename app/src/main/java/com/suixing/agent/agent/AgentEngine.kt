@@ -3,6 +3,7 @@ package com.suixing.agent.agent
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
+import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.Roles
@@ -22,7 +23,6 @@ import com.suixing.agent.tools.ToolResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -61,7 +62,33 @@ sealed interface AgentEvent {
     data class Failed(val message: String) : AgentEvent
 
     data class Finished(val text: String) : AgentEvent
+
+    /**
+     * One line the user slipped in has just been written into the prompt, in this order.
+     *
+     * The UI needs this to know a queued line was actually read: until it lands the line is still
+     * retractable and belongs nowhere in the transcript, and after it the bubble is history.
+     */
+    data class Steered(val id: String, val text: String) : AgentEvent
 }
+
+/**
+ * One line the user slipped in, waiting for the model's next turn.
+ *
+ * File level rather than a member of the run handle: the parser refuses a class declaration nested
+ * inside an `inner class` (`'Class' is prohibited here`), and both this and [WireSpan] are only
+ * names for the run's own bookkeeping.
+ */
+private data class Steer(val id: String, val text: String)
+
+/**
+ * Which stored message a stretch of the wire came from: [from] is where it starts and [to] is one
+ * past its last entry.
+ *
+ * The wire carries no ids of its own, and a checkpoint has to be able to name the messages it
+ * folded away — a compression that cannot say what it covered can never be resumed from.
+ */
+private data class WireSpan(val id: String, val from: Int, val to: Int)
 
 /**
  * Holds a tool call until the user answers. In ASK mode the agent coroutine
@@ -322,24 +349,69 @@ class AgentEngine(
      * The default is taken from that run's own settings rather than fixed at `false`, so
      * [AppSettings.steerMode] decides without every caller having to look it up.
      *
+     * [id] is the caller's handle on the line: it is what [retract] and [promote] address, and it
+     * comes back on [AgentEvent.Steered] when the model actually reads it.
+     *
      * @return whether the text was taken; false when that conversation is not running.
      */
     fun steer(
         chatId: String,
+        id: String,
         text: String,
         immediate: Boolean = runs.value[chatId]?.steerMode == STEER_IMMEDIATE,
-    ): Boolean = runs.value[chatId]?.steer(text, immediate) ?: false
+    ): Boolean = runs.value[chatId]?.steer(id, text, immediate) ?: false
+
+    /**
+     * Takes a line back before the model has read it.
+     *
+     * This is the whole reason the queue is keyed by id: a line the user thought better of must
+     * be removable while it is still waiting, and once it has landed in the prompt there is no
+     * taking it back — so the answer says which of the two happened.
+     *
+     * @return true when the line was still waiting and is now gone; false once it has been read
+     *   (or when that conversation is not running, or the id was never this run's).
+     */
+    fun retract(chatId: String, id: String): Boolean = runs.value[chatId]?.retract(id) ?: false
+
+    /**
+     * Pushes one waiting line to the front, so the model reads it now instead of at the end of
+     * the round in flight.
+     *
+     * Only that line moves: the others stay queued and land on their own boundary. A queue that
+     * empties the moment someone else is in a hurry is not a queue.
+     *
+     * @return true when the line was still waiting and is now at the front; false once it has
+     *   been read, or when that conversation is not running.
+     */
+    fun promote(chatId: String, id: String): Boolean = runs.value[chatId]?.promote(id) ?: false
+
+    /**
+     * Asks one conversation's run to fold its oldest context into a summary.
+     *
+     * The compression itself happens at the next round boundary, the same place every other one
+     * happens, so tapping a menu item never cuts the answer being written.
+     *
+     * @return false when that conversation is not running, so the UI can say so rather than
+     *   pretending something was compressed.
+     */
+    fun requestCompress(chatId: String): Boolean = runs.value[chatId]?.requestCompress() ?: false
 
     /**
      * Runs one conversation and returns the messages it produced.
      *
-     * The caller's coroutine is the run's coroutine: N conversations running at once is N
-     * callers, which is why nothing here launches into a scope of its own. Cancelling that
-     * coroutine ends the run (see [cancel] for the polite version).
+     * The run happens on the caller's coroutine, but on a job of its own underneath it (see
+     * [RunHandle.execute]): N conversations running at once is N callers, which is why nothing
+     * here launches into a scope of its own. Cancelling the caller's coroutine still ends the
+     * run, and so does [cancel] — without taking the caller down with it.
      *
      * A conversation that is already running is refused rather than queued: two runs writing
      * one transcript would interleave two answers into one and leave the user unable to tell
      * which is which. Callers should ask [isRunning] first.
+     *
+     * [checkpoints] are the compressions this conversation has already been through, oldest first:
+     * the newest one that still lines up with [history] is reused instead of being paid for again.
+     * [onCheckpoint] is handed every new compression, to be stored on the conversation — the
+     * summary has to outlive this run or the next one starts from the full history and re-does it.
      */
     suspend fun startRun(
         chatId: String,
@@ -352,6 +424,8 @@ class AgentEngine(
         memory: MemoryStore,
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
+        checkpoints: List<ContextCheckpoint> = emptyList(),
+        onCheckpoint: (ContextCheckpoint) -> Unit = {},
     ): List<StoredMessage> {
         // Check and register in one critical section: two coroutines starting the same
         // conversation (a double tap, or an isRunning check preempted before start) would
@@ -374,7 +448,18 @@ class AgentEngine(
             return emptyList()
         }
         try {
-            return handle.execute(history, settings, registry, capabilities, skills, memory, gate, onEvent)
+            return handle.execute(
+                history = history,
+                checkpoints = checkpoints,
+                settings = settings,
+                registry = registry,
+                capabilities = capabilities,
+                skills = skills,
+                memory = memory,
+                gate = gate,
+                onEvent = onEvent,
+                onCheckpoint = onCheckpoint,
+            )
         } finally {
             // Gone from [runs] before the state settles: a finished run is not a run, and the
             // console must stop offering to stop it. By identity, so a stale finally cannot
@@ -431,9 +516,22 @@ class AgentEngine(
         var liveLine: String = ""
             private set
 
-        /** The coroutine driving this run, for anything that needs to look at it. */
+        /**
+         * The coroutine driving this run: the run's own job, a child of the caller's, so that
+         * stopping the run does not stop whoever asked for it.
+         */
         @Volatile
         internal var job: Job? = null
+
+        /**
+         * The job that asked for this run — the caller's, not the run's own ([job]).
+         *
+         * Kept only so a cancellation can tell 「用户停了这一次 run」 from 「调用者的作用域没了」:
+         * the first ends the run with what it produced, the second has to travel on as a
+         * cancellation or structured concurrency breaks.
+         */
+        @Volatile
+        private var caller: Job? = null
 
         /** [steer]'s default mode for this run, read from the settings it started with. */
         internal val steerMode: Int = settings.steerMode
@@ -444,7 +542,43 @@ class AgentEngine(
         @Volatile
         private var inFlight: Call? = null
 
-        private val steering = Channel<String>(Channel.UNLIMITED)
+        /**
+         * The gate this run asks for approval through, kept so [cancel] can take this run's own
+         * prompt down with it. Null until [execute] starts — which is also the only stretch in
+         * which there can be no prompt of this run's on screen to take down.
+         */
+        @Volatile
+        private var gate: ApprovalGate? = null
+
+        /**
+         * Lines the user slipped in that the model has not read yet, in the order they were said.
+         *
+         * A map keyed by id rather than a plain queue because the user can still change their
+         * mind: a line is retractable right up to the moment it lands in the wire, and that is
+         * only possible if the waiting ones can be addressed.
+         */
+        private val steering = LinkedHashMap<String, Steer>()
+
+        /**
+         * Lines the user pushed to the front with 「立即插话」, kept apart from [steering] because
+         * being pushed says something about *when* the line lands: the next boundary carries these
+         * and leaves the rest queued, so one line's urgency does not drag every other waiting line
+         * along with it.
+         */
+        private val urgent = LinkedHashMap<String, Steer>()
+
+        /** Guards both queues: the UI thread writes them, the run's own coroutine drains them. */
+        private val steeringLock = Any()
+
+        /**
+         * Set when the user asked for a compression from the 「+」 menu.
+         *
+         * A request, not an action: folding the oldest context away is done at a round boundary
+         * like every other compression, because cutting the answer in flight is what the stop
+         * button is for.
+         */
+        @Volatile
+        private var compressNow = false
 
         /**
          * Set when an immediate [steer] aborts the round on purpose, so the IOException it
@@ -485,36 +619,108 @@ class AgentEngine(
      */
     fun cancel(): Boolean {
         if (!isLive()) return false
+        // The flag first, then the call, then the coroutine: the decision is visible before
+        // either abort lands, so the loop reads the stop as a stop and not as a network failure
+        // or as an immediate steer.
         cancelled.set(true)
+        // This run's approval prompt, if one is on screen, is answered "refused" for this run only.
+        // A cancelled coroutine never resumes the await that is holding it, so without this the
+        // card would sit there for a run that is already dead — and stopping from the floating
+        // console has no chat screen to do it. Other conversations' prompts stay up.
+        gate?.cancelPending(chatId)
         inFlight?.cancel()
+        // Cancelling the job is what reaches a tool that is already running. The wire is not the
+        // only thing a run can be blocked on: a shell command only notices a stop if its coroutine
+        // is cancelled (that is what Shell's polling checks), and the floating console has no
+        // coroutine of its own to cancel — so without this, stopping from the console waited for
+        // the tool to finish while stopping from the chat screen did not, the same button meaning
+        // two different things.
+        //
+        // Idempotent by construction: the run publishes its own end from whichever branch returns
+        // first (see finishCancelled), so a second cancel — or the chat screen's own job.cancel()
+        // right after this one — only repeats an already-made decision.
+        job?.cancel()
         return true
     }
 
     /**
-     * Says something to this run.
+     * Queues a line for this run.
      *
-     * Queued steering (the default) lands on the next round boundary: the model finishes what
-     * it is saying and reads the line before being asked for the next step. Immediate steering
-     * cuts the stream instead, so the line is read now — worth it when the model is heading the
-     * wrong way, and lossy because whatever it was in the middle of is discarded.
-     *
-     * @return whether the text was taken; false when this run is no longer live.
+     * @return whether the text was taken; false when this run is no longer live or the line is
+     *   blank. A line the user says twice keeps both, because each one has its own [id].
      */
-    fun steer(text: String, immediate: Boolean): Boolean {
+    fun steer(id: String, text: String, immediate: Boolean): Boolean {
         if (!isLive()) return false
         val body = text.trim()
         if (body.isEmpty()) return false
-        if (immediate) {
-            // The same abort `cancel()` uses, without the cancelled flag: this ends the
-            // round, not the run. The flag tells the loop the resulting IOException is
-            // the cut it asked for, so the round is retried instead of failing the run.
-            val call = inFlight
-            if (call != null) {
-                steeringCut.set(true)
-                call.cancel()
-            }
+        val line = Steer(id, body)
+        synchronized(steeringLock) {
+            if (immediate) urgent[id] = line else steering[id] = line
         }
-        return steering.trySend(body).isSuccess
+        // Queued first, cut second: the line has to be waiting before the round that will carry it
+        // is thrown away, or the next drain could run in between and find nothing.
+        if (immediate) cutRound()
+        return true
+    }
+
+    /**
+     * Takes a waiting line back, from either queue.
+     *
+     * @return true when it was still waiting; false once the model has read it, or when no line
+     *   with that id was ever waiting here.
+     */
+    fun retract(id: String): Boolean = synchronized(steeringLock) {
+        urgent.remove(id) != null || steering.remove(id) != null
+    }
+
+    /**
+     * Moves one waiting line to the front, and abandons the round in flight so it is read now.
+     *
+     * Idempotent in the sense that matters: a line already at the front answers true without
+     * cutting a second round. Pressing 「立即插话」 twice must not cost the user two abandoned
+     * answers, which is what a promote that always cut would do.
+     *
+     * @return true when that line is now at the front — including when it already was;
+     *   false when it has been read, or is not waiting here at all.
+     */
+    fun promote(id: String): Boolean {
+        if (!isLive()) return false
+        // Non-local returns on purpose: `synchronized` is inline, so both of these leave the
+        // function with the monitor released.
+        synchronized(steeringLock) {
+            if (urgent.containsKey(id)) return true
+            val line = steering.remove(id) ?: return false
+            urgent[id] = line
+        }
+        cutRound()
+        return true
+    }
+
+    /**
+     * Asks for a compression at the next round boundary.
+     *
+     * @return true when the request was taken; false when this run is no longer live.
+     */
+    fun requestCompress(): Boolean {
+        if (!isLive()) return false
+        compressNow = true
+        return true
+    }
+
+    /**
+     * Abandons the round that is streaming, so the next one carries a line the user wants read
+     * now.
+     *
+     * The same abort [cancel] uses, without the cancelled flag: this ends the round, not the run.
+     * [steeringCut] is what tells the loop the resulting IOException is the cut it asked for
+     * rather than a network failure, so the round is retried instead of failing the run.
+     */
+    private fun cutRound() {
+        val call = inFlight
+        if (call != null) {
+            steeringCut.set(true)
+            call.cancel()
+        }
     }
 
     /** Whether this handle is still the registered run for its conversation. */
@@ -531,17 +737,23 @@ class AgentEngine(
 
     /** Repaints the speed readout while this run streams. */
     internal fun tick() {
-        if (isLive()) publish(RunState.Running(stats()))
+        // Only a run that is still streaming is repainted. The handle stays registered for a few
+        // more instructions after it has published how it ended, and a tick landing in that window
+        // would put Running back on top of Cancelled — a state nothing would ever clear again, so
+        // the conversation would sit there locked with a stop button that has nothing to stop.
+        if (isLive() && _state.value is RunState.Running) publish(RunState.Running(stats()))
     }
 
     /**
-     * The loop itself, run once on the caller's coroutine.
+     * Runs one conversation on a job of its own and returns what it produced.
      *
-     * Everything it counts or flags is per-handle and starts empty, because the handle was
-     * made for this run and is dropped with it.
+     * The split matters: [job] is the run's, not the caller's, so [cancel] can stop a run that is
+     * blocked inside a tool without cancelling the coroutine that asked for it. The loop itself is
+     * [runLoop], which is where every end of the run is published.
      */
     internal suspend fun execute(
         history: List<StoredMessage>,
+        checkpoints: List<ContextCheckpoint>,
         settings: AppSettings,
         registry: ToolRegistry,
         capabilities: CapabilityHub,
@@ -549,40 +761,142 @@ class AgentEngine(
         memory: MemoryStore,
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
+        onCheckpoint: (ContextCheckpoint) -> Unit,
     ): List<StoredMessage> {
-        job = currentCoroutineContext()[Job]
+        // The run gets a job of its own, a child of the caller's rather than the caller's own.
+        // Stopping the run has to reach whatever it is blocked on — a shell command only notices
+        // through its coroutine being cancelled — but it must not cancel the caller: the chat
+        // screen's launch still has to run its finally and save the transcript, and whoever asked
+        // for a run must not die with it.
+        val parent = currentCoroutineContext()[Job]
+        val runJob = Job(parent)
+        job = runJob
+        caller = parent
+        // Kept so [cancel] can reach this run's approval prompt; the gate itself is shared, and
+        // every call into it carries this run's chatId, so one run's stop cannot answer another's.
+        this.gate = gate
+        try {
+            return withContext(runJob) {
+                runLoop(
+                    history = history,
+                    checkpoints = checkpoints,
+                    settings = settings,
+                    registry = registry,
+                    capabilities = capabilities,
+                    skills = skills,
+                    memory = memory,
+                    gate = gate,
+                    onEvent = onEvent,
+                    onCheckpoint = onCheckpoint,
+                )
+            }
+        } catch (cancellation: CancellationException) {
+            // Reachable when the stop lands between registering the run and the loop's first
+            // instruction: the loop never ran, so nothing has published how this run ended yet,
+            // and the screen would keep waiting for an answer that is never coming.
+            if (cancelled.get() && parent?.isCancelled != true) {
+                finishCancelled(onEvent, StringBuilder())
+                return emptyList()
+            }
+            throw cancellation
+        } finally {
+            // A child that never completes keeps its parent in "completing" forever, which would
+            // hang an await() on the caller. Completing it is what lets the caller finish.
+            runJob.complete()
+        }
+    }
+
+    /**
+     * The run itself, on the run's own job ([job]).
+     *
+     * Everything it counts or flags is per-handle and starts empty, because the handle was
+     * made for this run and is dropped with it.
+     */
+    private suspend fun runLoop(
+        history: List<StoredMessage>,
+        checkpoints: List<ContextCheckpoint>,
+        settings: AppSettings,
+        registry: ToolRegistry,
+        capabilities: CapabilityHub,
+        skills: SkillStore,
+        memory: MemoryStore,
+        gate: ApprovalGate,
+        onEvent: (AgentEvent) -> Unit,
+        onCheckpoint: (ContextCheckpoint) -> Unit,
+    ): List<StoredMessage> {
         // Published here rather than left to the ticker, so a caller sees Running the
         // moment the run starts even if no ticker was ever started.
         publish(RunState.Running(stats()))
 
         val produced = mutableListOf<StoredMessage>()
         val wire = mutableListOf<ChatMessage>()
+        // Which stored message each stretch of the wire came from. The wire has no ids of its own,
+        // and a compression has to be able to name the messages it folded away — a checkpoint that
+        // cannot say what it covered could never be resumed from by the next run.
+        val spans = mutableListOf<WireSpan>()
         // Built once and measured once: the system prompt carries the skills catalogue and
         // the memory entries, so it is both the largest fixed part of the prompt and the one
         // the user can do least about.
         val systemText = systemPrompt(settings, registry, skills.catalog(skills.list()), memory.entries.value)
         breakSystem = systemText.length / 4
         wire += ChatMessage.system(systemText)
-        sanitize(trim(history, settings.contextWindowFor(settings.model))).forEach { appendToWire(wire, it, settings) }
+
+        // A checkpoint stands in for everything up to its last message. Replaying the whole history
+        // and summarising it again would pay for the same summary on every following turn, and the
+        // prefix would never match the previous request — which is exactly what the endpoint's
+        // prompt cache keys on.
+        val window = settings.contextWindowFor(settings.model)
+        val checkpoint = checkpoints.lastOrNull()
+        val resumeAt = checkpoint?.let { saved -> history.indexOfFirst { it.id == saved.toMessageId } }
+        val replayed = if (checkpoint != null && resumeAt != null && resumeAt >= 0) {
+            wire += ChatMessage.system("[上下文摘要] ${checkpoint.summary}")
+            sanitize(trim(history.drop(resumeAt + 1), window))
+        } else {
+            // No checkpoint, or one whose message is no longer in the transcript: the transcript is
+            // what decides the prompt, so a checkpoint that no longer lines up is ignored rather
+            // than half-applied.
+            sanitize(trim(history, window))
+        }
+        // The messages themselves are never removed from the conversation — the usage watermark
+        // counts them — which is why the span is found by id and the replay is a slice, not a rewrite.
+        replayed.forEach { message ->
+            val from = wire.size
+            appendToWire(wire, message, settings)
+            spans += WireSpan(message.id, from, wire.size)
+        }
 
         // A ceiling of 0 (or less) means the user set none: the loop then ends only when
         // the model stops asking for tools, which is the only limit a long task should
         // have. A positive value is a real ceiling, and the failure below says so.
         val roundLimit = settings.maxToolRounds
         var round = 0
+        // Hoisted out of the round on purpose: a stop can land anywhere, including in the outer
+        // catch, and what already arrived is then the run's only output. A round-local
+        // StringBuilder died with its round, which is how a stopped run showed the user a
+        // paragraph that afterwards existed nowhere — not on screen, not on disk.
+        var streamed = StringBuilder()
         try {
             while (roundLimit <= 0 || round < roundLimit) {
                 round++
+                // Emptied at the top of the round rather than next to the call: by the time the
+                // loop comes back here the previous round's text is already an assistant message,
+                // and a stop anywhere in this round — even one thrown out of the compression
+                // below — must not hand the same paragraph to [finishCancelled] a second time.
+                streamed = StringBuilder()
                 // Steering lands here, on the boundary between two model turns: the
                 // model has finished the previous turn and has not been asked for the
                 // next one, which is the only moment the wire can be edited safely.
-                drainSteering(wire)
-                compressContext(wire, settings)
+                drainSteering(wire, onEvent)
+                // A manual 「压缩」 is spent here, on the boundary: the user asked for the oldest
+                // context to be folded away, not for the answer in flight to be cut short.
+                val asked = compressNow
+                compressNow = false
+                compressContext(wire, spans, settings, onCheckpoint, asked)
                 // Cleared with the round: whatever the last one ended with is over, and a
                 // line that outlives its step reads as a stall.
                 liveLine = ""
                 if (cancelled.get()) {
-                    finishCancelled(onEvent)
+                    finishCancelled(onEvent, streamed)
                     return produced
                 }
 
@@ -600,7 +914,6 @@ class AgentEngine(
                 steeringCut.set(false)
                 // The console shows the tail of what is being written; the finished text only
                 // exists once the turn ends, which is far too late for a "still working" line.
-                val streamed = StringBuilder()
                 val turn = try {
                     llm.complete(
                         settings = settings,
@@ -623,7 +936,7 @@ class AgentEngine(
                     // Cancelling a call surfaces as an IOException on the reading
                     // thread. It is a stop, not a failure, so it is reported as one.
                     if (cancelled.get()) {
-                            finishCancelled(onEvent)
+                            finishCancelled(onEvent, streamed)
                         return produced
                     }
                     // An immediate steer aborts the stream the same way, but nothing is
@@ -636,6 +949,14 @@ class AgentEngine(
                     throw error
                 } finally {
                     inFlight = null
+                }
+                // The stop can land in the gap between clearing `inFlight` above and the next
+                // round's `onCall`: in that window there is no call to cancel yet — the payload is
+                // still being serialised — so nothing reads the flag, and this round would stream
+                // to the end and report the whole run as Done.
+                if (cancelled.get()) {
+                    finishCancelled(onEvent, streamed)
+                    return produced
                 }
                 val elapsed = System.currentTimeMillis() - turnStartedAt
                 val usage = turn.usage
@@ -660,6 +981,18 @@ class AgentEngine(
                     ).withUsage(usage, elapsed, settings.model)
                     produced += assistant
                     onEvent(AgentEvent.AssistantMessage(assistant))
+                    // The answer goes into the wire either way: the finish path below never asks
+                    // the model anything again, and the steering path needs it *in front of* the
+                    // line the user just said — a steer that read as if it had come before the
+                    // answer it interrupted would be answered as the earlier turn.
+                    val answerAt = wire.size
+                    wire += ChatMessage.assistant(turn.text)
+                    spans += WireSpan(assistant.id, answerAt, wire.size)
+                    // A line the user slipped in while this round was streaming: this round is not
+                    // the last one, so the run takes one more pass to read it. Finishing here
+                    // instead would leave a steer bubble on screen that the model never saw, with
+                    // nothing telling the user it went nowhere.
+                    if (drainSteering(wire, onEvent) > 0) continue
                     onEvent(AgentEvent.Finished(turn.text))
                     publish(RunState.Done(stats()))
                     return produced
@@ -673,13 +1006,19 @@ class AgentEngine(
                 ).withUsage(usage, elapsed, settings.model)
                 produced += assistant
                 onEvent(AgentEvent.AssistantMessage(assistant))
+                val assistantAt = wire.size
                 wire += ChatMessage.assistant(turn.text, turn.toolCalls)
+                spans += WireSpan(assistant.id, assistantAt, wire.size)
+                // This round's text is a message now, so a stop from here on (before a tool call,
+                // or while one is running) must not hand the same paragraph to [finishCancelled]
+                // again: it would land in the transcript as a second, identical bubble.
+                streamed = StringBuilder()
 
                 for (call in turn.toolCalls) {
                     // Checked before every call, not after the batch: a stop means the
                     // tools the model asked for in the same breath do not run either.
                     if (cancelled.get()) {
-                            finishCancelled(onEvent)
+                            finishCancelled(onEvent, streamed)
                         return produced
                     }
                     val argsPreview = call.arguments.take(600)
@@ -719,7 +1058,9 @@ class AgentEngine(
                     )
                     produced += stored
                     onEvent(AgentEvent.ToolMessage(stored))
+                    val toolAt = wire.size
                     wire += ChatMessage.tool(call.id, output)
+                    spans += WireSpan(stored.id, toolAt, wire.size)
                     result.imageBase64?.let { base64 ->
                         if (settings.imageInput) {
                             wire += ChatMessage.user("（这是上一步 $call.name 返回的截图）", base64)
@@ -742,9 +1083,20 @@ class AgentEngine(
             publish(RunState.Failed("已达到最大工具轮数（$roundLimit），任务未完成。"))
             return produced
         } catch (cancellation: CancellationException) {
-            // The caller cancelled the coroutine rather than the run; the stream still
-            // has to be taken down, and the state still has to say what happened.
             inFlight?.cancel()
+            // Two different things land here. A stop the user asked for cancels this run's own
+            // job while the caller is still alive, and that caller has every right to the messages
+            // the run produced — throwing would hand it a cancellation it never asked for, and
+            // would kill the finally of whoever merely asked for a run. A cancellation that came
+            // from the caller's own scope is the other thing entirely and still travels as one.
+            if (cancelled.get() && caller?.isCancelled != true) {
+                finishCancelled(onEvent, streamed)
+                return produced
+            }
+            // The caller's scope is gone: the stream still has to be taken down, the paragraph
+            // that already arrived still has to be kept, and the state still has to say what
+            // happened — by hand, because this branch rethrows.
+            emitPartial(onEvent, streamed)
             publish(RunState.Cancelled(stats()))
             throw cancellation
         } catch (error: Throwable) {
@@ -754,7 +1106,7 @@ class AgentEngine(
             // screen for a button the user just pressed, and the caller would be handed a
             // throwable it turns into one too.
             if (cancelled.get()) {
-                finishCancelled(onEvent)
+                finishCancelled(onEvent, streamed)
                 return produced
             }
             publish(RunState.Failed(error.message ?: error::class.java.simpleName))
@@ -772,10 +1124,37 @@ class AgentEngine(
      * It does not throw: the transcript produced so far is still real, the user can
      * see it, and discarding it because the run was stopped halfway would lose the
      * work that was actually done.
+     *
+     * [partial] is what the round had already streamed when the stop landed. It goes out as a
+     * real assistant message so the paragraph the user watched arrive is still there afterwards —
+     * on screen and on disk. It is deliberately left out of the run's `produced` list: the only
+     * reader of that list is the read-aloud path, and reading a stopped half-sentence out loud is
+     * not what the stop button means.
      */
-    private fun finishCancelled(onEvent: (AgentEvent) -> Unit) {
+    private fun finishCancelled(onEvent: (AgentEvent) -> Unit, partial: CharSequence) {
+        emitPartial(onEvent, partial)
         onEvent(AgentEvent.Finished(""))
         publish(RunState.Cancelled(stats()))
+    }
+
+    /**
+     * Hands the text that had already streamed to the transcript as a real assistant message.
+     *
+     * Empty means the round's text is already a message of its own (the tool-call branch clears
+     * the round's buffer the moment it emits one), so nothing is sent — otherwise the user would
+     * see the same paragraph twice.
+     */
+    private fun emitPartial(onEvent: (AgentEvent) -> Unit, partial: CharSequence) {
+        if (partial.isBlank()) return
+        onEvent(
+            AgentEvent.AssistantMessage(
+                StoredMessage(
+                    id = UUID.randomUUID().toString(),
+                    role = Roles.ASSISTANT,
+                    text = partial.toString(),
+                ),
+            ),
+        )
     }
 
     /**
@@ -783,12 +1162,31 @@ class AgentEngine(
      *
      * The text goes in as a user message in the same run — not a new one — because
      * that is exactly what it is: something said in the middle of a task.
+     *
+     * Each line is announced as it lands ([AgentEvent.Steered]) and in the same order it was
+     * written to the wire, so the transcript the user reads is the one the model was given.
+     *
+     * Returns how many lines landed, so the caller can tell "nothing was said" from "the
+     * user just spoke, this round is not the last one".
      */
-    private fun drainSteering(wire: MutableList<ChatMessage>) {
-        while (true) {
-            val text = steering.tryReceive().getOrNull() ?: return
-            wire += ChatMessage.user("（用户在任务进行中说：$text）")
+    private fun drainSteering(wire: MutableList<ChatMessage>, onEvent: (AgentEvent) -> Unit): Int {
+        // Pushed-to-the-front lines go first, and go alone: the rest were queued, and queued means
+        // the boundary after this one. Draining everything here is what would turn one person's
+        // urgency into every waiting line landing at once.
+        val batch = synchronized(steeringLock) {
+            if (urgent.isEmpty()) {
+                steering.values.toList().also { steering.clear() }
+            } else {
+                urgent.values.toList().also { urgent.clear() }
+            }
         }
+        batch.forEach { line ->
+            wire += ChatMessage.user("（用户在任务进行中说：${line.text}）")
+            // Announced after the wire, never before: a caller told about a line and then shown a
+            // prompt without it would have written a bubble the model never saw.
+            onEvent(AgentEvent.Steered(line.id, line.text))
+        }
+        return batch.size
     }
 
     /**
@@ -804,15 +1202,34 @@ class AgentEngine(
      * The newest [KEEP_RECENT] messages are never touched: they are the work in
      * progress, and summarising the tool result the model is reading right now would
      * be self-defeating.
+     *
+     * The span it folded away is reported through [onCheckpoint] so it can be stored on the
+     * conversation: a summary that lives only in this run's wire is paid for again on every
+     * following turn. [asked] is a request from the menu, which skips the threshold and the
+     * automatic switch but not the round boundary — a menu tap must never cut the answer in flight.
+     *
+     * The wire this leaves behind has to be exactly the wire a later run rebuilds from the
+     * checkpoint — see [appendToWire] for the rule that keeps the two in step. A prefix that differs
+     * by one message is a prompt cache miss for everything after it, and the model would be reading
+     * a transcript the user never saw.
      */
     private suspend fun compressContext(
         wire: MutableList<ChatMessage>,
+        spans: MutableList<WireSpan>,
         settings: AppSettings,
+        onCheckpoint: (ContextCheckpoint) -> Unit,
+        asked: Boolean,
     ) {
         val window = settings.contextWindowFor(settings.model)
-        if (window <= 0 || !settings.autoCompress) return
+        // A request from the menu needs neither a ceiling nor the automatic switch: the user asked
+        // for the oldest context to be folded away, and the threshold is only what decides when
+        // that happens on its own.
+        if (!asked && (window <= 0 || !settings.autoCompress)) return
         if (wire.size <= MIN_MESSAGES) return
-        if (estimatePromptTokens(wire) <= window * COMPRESS_AT) return
+        // Priced before anything is replaced: what the checkpoint reports is how big the wire was
+        // when this compression was decided on, not what it shrank to afterwards.
+        val before = estimatePromptTokens(wire)
+        if (!asked && before <= window * COMPRESS_AT) return
 
         // The cut never splits an assistant's tool_calls from their results: a lone
         // tool message is a hard 400 on every OpenAI-compatible endpoint.
@@ -824,7 +1241,10 @@ class AgentEngine(
         if (older.isEmpty()) return
 
         val summary = try {
-            summarize(older, settings)
+            // The whole span, system notes included: the summary this one replaces has to be folded
+            // into it. Otherwise the rebuild that resumes from the checkpoint — which can only carry
+            // one summary — would drop the older one and its context with it.
+            summarize(wire.subList(1, cut), settings)
         } catch (error: IOException) {
             // A stop during the summary is still a stop: let the caller's check see it
             // rather than reporting the abort as a failure of the whole run.
@@ -835,20 +1255,62 @@ class AgentEngine(
         }
         if (summary.isBlank()) return
 
-        val pinned = wire.subList(1, cut).filter { it.role == ROLE_SYSTEM }
+        // The span this summary stands for, named by the messages it covered. Only a span that
+        // begins and ends on whole messages can be resumed from by a later run, so a message the
+        // cut would split is left out of the record — it stays in the tail and gets replayed, which
+        // is the safe direction to be wrong in.
+        val covered = spans.filter { it.from >= 1 && it.to <= cut }
+
+        // The span's own system messages are not re-inserted: the summary above has already absorbed
+        // them, and leaving them out is what makes this wire byte-for-byte the one a later run
+        // rebuilds from the checkpoint — a prefix that differs by even one message is a prompt cache
+        // miss for everything after it.
         val tail = wire.subList(cut, wire.size).toList()
         val head = wire.first()
         wire.clear()
         wire += head
         wire += ChatMessage.system("[上下文摘要] $summary")
-        wire += pinned
         wire += tail
+
+        // The spans move with the wire: what was folded away is gone, and what is left now starts
+        // after the summary. Without this the next compression would name the wrong messages.
+        val shift = 2 - cut
+        val kept = spans.filter { it.from >= cut }.map { it.copy(from = it.from + shift, to = it.to + shift) }
+        spans.clear()
+        spans += kept
+
+        // Counted in transcript messages, not in wire entries: the card that shows this number also
+        // shows how many messages the span covers, and the two have to be the same fact. A wire
+        // entry that came from nowhere — the screenshot note, a steer line — would make them differ.
+        val folded = if (covered.isEmpty()) older.size else covered.size
+
+        // Handed up rather than kept here: the summary has to outlive this run, or the next one
+        // starts from the full history and pays to summarise the same messages all over again.
+        val first = covered.firstOrNull()
+        val last = covered.lastOrNull()
+        if (first != null && last != null) {
+            onCheckpoint(
+                ContextCheckpoint(
+                    id = UUID.randomUUID().toString(),
+                    at = System.currentTimeMillis(),
+                    fromMessageId = first.id,
+                    toMessageId = last.id,
+                    summary = summary,
+                    messages = folded,
+                    promptTokens = before,
+                ),
+            )
+        }
 
         // The next round's estimate has to be priced off the summary, not off the
         // messages it replaced, or the threshold would fire again immediately.
         lastPromptTokens = 0
         lastPromptChars = 0
-        contextNote = "已压缩上下文：${older.size} 条消息 → 摘要"
+        contextNote = if (asked) {
+            "已压缩上下文（手动）：$folded 条消息 → 摘要"
+        } else {
+            "已压缩上下文：$folded 条消息 → 摘要"
+        }
         // Published at once rather than waiting for the next tick, so the note is on
         // screen while the summary is still the news.
         tick()
@@ -962,6 +1424,15 @@ class AgentEngine(
         }
     }
 
+    /**
+     * Writes one stored message onto the wire.
+     *
+     * This is the *rebuild* path, and it has to produce exactly what the live path produced for the
+     * same message: a rebuilt prompt that differs by so much as a wrapper sentence is not the request
+     * the model answered, and the prompt cache keys on that prefix. **Any text the live path wraps
+     * around a message — the steer marker, the screenshot notes — must be mirrored here**, and any
+     * new one added live must be added here in the same commit.
+     */
     private fun appendToWire(
         wire: MutableList<ChatMessage>,
         message: StoredMessage,
@@ -976,7 +1447,14 @@ class AgentEngine(
             ""
         }
         when (message.role) {
-            Roles.USER -> wire += ChatMessage.user(message.text + note, image)
+            // A steer reads as an interruption live, so it reads as one here too — the wrapper is
+            // what tells the model this was said mid-task rather than asked as a new question.
+            Roles.USER ->
+                if (message.steer) {
+                    wire += ChatMessage.user("（用户在任务进行中说：${message.text}）")
+                } else {
+                    wire += ChatMessage.user(message.text + note, image)
+                }
             Roles.SYSTEM -> wire += ChatMessage.system(message.text)
             Roles.ASSISTANT -> wire += ChatMessage.assistant(
                 message.text,
@@ -987,7 +1465,17 @@ class AgentEngine(
                     message.toolCallId ?: message.toolName.orEmpty(),
                     message.toolOutput.orEmpty(),
                 )
-                if (image != null) wire += ChatMessage.user("（上一步工具的截图）", image)
+                // The same two sentences the live path writes, chosen by the same condition: with
+                // image input on the picture itself goes out, and with it off the model is told a
+                // picture existed and that it cannot see it.
+                val tool = message.toolName.orEmpty()
+                if (image != null) {
+                    wire += ChatMessage.user("（这是上一步 $tool 返回的截图）", image)
+                } else if (message.imageBase64 != null) {
+                    wire += ChatMessage.user(
+                        "（上一步 $tool 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
+                    )
+                }
             }
         }
     }

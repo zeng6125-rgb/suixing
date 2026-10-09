@@ -13,13 +13,17 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.suixing.agent.MainActivity
 import com.suixing.agent.R
+import com.suixing.agent.agent.AgentEvent
 import com.suixing.agent.agent.RunState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.Schedule
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.nextTriggerAfter
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 /**
@@ -51,9 +55,14 @@ class SchedulerService : Service() {
             // its own fresh conversation: nothing else on the engine can make it busy.
             startForeground(REMINDER_ID, buildNotification(id))
             Core.appScope.launch {
-                fire(id)
-                // The reminder stays in the shade as an ordinary, dismissible notification;
-                // only the foreground flag goes away.
+                // A run that fails throws: the engine publishes Failed and rethrows, and this
+                // scope has no exception handler, so an unguarded call would kill the process
+                // before the reminder was put back on the board — one bad reminder would then
+                // silence every later one until the app was opened again.
+                runCatching { fire(id) }
+                // Deliberately outside the guard above: these two have to run even after a
+                // failure, or a foreground notification would be left with nobody to take it
+                // down and the reminder would keep its foreground flag forever.
                 stopForeground(STOP_FOREGROUND_DETACH)
                 stopSelf(startId)
             }
@@ -79,24 +88,68 @@ class SchedulerService : Service() {
         Core.chats.save(conversation.copy(messages = listOf(question)))
 
         AgentForegroundService.start(this, "定时任务：${schedule.title}")
-        val produced = Core.engine.startRun(
-            chatId = conversation.id,
-            title = schedule.title,
-            history = listOf(question),
-            settings = Core.settings.current(),
-            registry = Core.tools,
-            capabilities = Core.capabilities,
-            skills = Core.skills,
-            memory = Core.memory,
-            gate = Core.gate,
-            onEvent = {},
-        )
-        Core.chats.save(conversation.copy(messages = listOf(question) + produced))
-
-        // A one-shot reminder that has fired is done; a repeating one is due again from now.
-        val next = schedule.nextTriggerAfter(System.currentTimeMillis())
-        if (next == null) Core.schedules.delete(schedule.id) else Core.schedules.upsert(schedule.copy(nextAt = next))
-        arm(this)
+        // A reminder has no chat screen to collect the run's events, and a run stopped from the
+        // console never returns a transcript: the messages the engine emits on its way out are
+        // the only copy of the answer there is.
+        val emitted = mutableListOf<StoredMessage>()
+        try {
+            val produced = Core.engine.startRun(
+                chatId = conversation.id,
+                title = schedule.title,
+                history = listOf(question),
+                settings = Core.settings.current(),
+                registry = Core.tools,
+                capabilities = Core.capabilities,
+                skills = Core.skills,
+                memory = Core.memory,
+                gate = Core.gate,
+                onEvent = { event ->
+                    when (event) {
+                        is AgentEvent.AssistantMessage -> emitted += event.message
+                        is AgentEvent.ToolMessage -> emitted += event.message
+                        else -> Unit
+                    }
+                },
+            )
+            // Invariant: `emitted` is `produced` in the same order, plus the messages the engine
+            // emits while ending a stopped run — each `produced +=` in AgentEngine is followed
+            // immediately by its event. A new `produced +=` without an event would break that,
+            // so a short `emitted` falls back to `produced` instead of saving a transcript with
+            // the wrong messages in it.
+            val transcript = if (emitted.size >= produced.size) {
+                produced + emitted.drop(produced.size)
+            } else {
+                produced
+            }
+            // NonCancellable because a run stopped from the floating console cancels this
+            // coroutine, and a cancelled coroutine refuses to suspend: without it the save
+            // would be skipped and the reminder's conversation would keep only the question —
+            // the answer the user waited for would be gone with nothing to show it existed.
+            withContext(NonCancellable) {
+                Core.chats.save(conversation.copy(messages = listOf(question) + transcript))
+            }
+        } catch (cancellation: CancellationException) {
+            // The engine rethrows when the coroutine itself was cancelled — a stop that landed
+            // while a tool was running — so `produced` was never assigned and what it emitted
+            // on the way out is all there is. Saved under NonCancellable for the same reason as
+            // above, then rethrown: swallowing the cancellation here would turn a stop into a
+            // normal ending and change what the caller's finally is allowed to assume.
+            withContext(NonCancellable) {
+                Core.chats.save(conversation.copy(messages = listOf(question) + emitted))
+            }
+            throw cancellation
+        } finally {
+            // A reminder that fired is done whether or not its run worked: rescheduling in a
+            // finally is what keeps one failure from taking the whole board down with it. A
+            // one-shot is deleted, a repeating one is due again from now.
+            val next = schedule.nextTriggerAfter(System.currentTimeMillis())
+            if (next == null) Core.schedules.delete(schedule.id) else Core.schedules.upsert(schedule.copy(nextAt = next))
+            arm(this)
+            // The agent's foreground service is not tied to this one, so it has to be taken
+            // down here as well — otherwise its ongoing notification would outlive the run.
+            // It declines while another conversation is still running.
+            AgentForegroundService.stop(this)
+        }
     }
 
     private fun buildNotification(id: String): Notification {

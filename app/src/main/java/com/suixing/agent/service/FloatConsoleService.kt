@@ -41,6 +41,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.R
+import com.suixing.agent.agent.AgentEngine
 import com.suixing.agent.agent.RunState
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
@@ -49,7 +50,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.abs
@@ -131,6 +131,8 @@ class FloatConsoleService : Service() {
     private lateinit var liveText: TextView
     private lateinit var statsText: TextView
     private lateinit var steerInput: EditText
+    private lateinit var stopArea: LinearLayout
+    private lateinit var feedbackText: TextView
 
     private var attached = false
     private var dotPulse: ValueAnimator? = null
@@ -217,8 +219,10 @@ class FloatConsoleService : Service() {
 
     private fun attach() {
         if (attached) return
-        runCatching { windowManager.addView(root, params) }
-        attached = true
+        // The flag follows what the window manager actually did. A window the system refused
+        // (the permission was revoked between the check and now) must not be remembered as
+        // attached, or the console would stay invisible for the rest of the run.
+        attached = runCatching { windowManager.addView(root, params) }.isSuccess
     }
 
     private fun detach() {
@@ -352,14 +356,26 @@ class FloatConsoleService : Service() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(actionButton("回到对话") { openChat() })
-                addView(
-                    View(context).apply {
-                        layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-                    },
-                )
-                addView(actionButton("停止", accent = true) { stopRun() })
             },
         )
+        // Filled in by [renderStopArea] once the run set is known: one run keeps the plain stop
+        // button, several get a titled row each, because a single button could only guess which
+        // conversation the user meant.
+        stopArea = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        addView(stopArea)
+        // The panel's other lines are rewritten from the run's state on every change, so the
+        // confirmation of a stop needs a line of its own to still be there when the run it
+        // named has already left the list.
+        feedbackText = TextView(context).apply {
+            setTextColor(palette.muted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, dp(6), 0, 0)
+            visibility = View.GONE
+        }
+        addView(feedbackText)
     }
 
     private fun collapseButton(): TextView = TextView(this).apply {
@@ -465,8 +481,12 @@ class FloatConsoleService : Service() {
             // start/stop, so a newer run takes the panel over and an ended one hands it
             // back to the previous run or hides the panel when none is left.
             Core.engine.runsFlow
-                .map { runs -> runs.values.maxByOrNull { it.startedAt } }
-                .collectLatest { handle ->
+                .collectLatest { runs ->
+                    // The panel follows whichever run started last; the map re-emits on every
+                    // start/stop, so a newer run takes the panel over and an ended one hands it
+                    // back to the previous run or hides the panel when none is left. The stop
+                    // area, unlike the panel, shows every run in flight.
+                    val handle = runs.values.maxByOrNull { it.startedAt }
                     val state = handle?.state?.value ?: RunState.Idle
                     stateText.text = state.title()
                     statsText.text = state.detail()
@@ -474,6 +494,12 @@ class FloatConsoleService : Service() {
                     // while a run is in flight, so this stays current without a second stream.
                     liveText.text = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
                     setStatusDot(state is RunState.Running)
+                    renderStopArea(runs.values.sortedByDescending { it.startedAt })
+                    // Re-decided here as well, because a run can also start with the app already
+                    // in the background (a reminder): this is the only place that sees one
+                    // appear, and without it the ball would wait for the next trip out of the
+                    // app to show up — or never show for a run that both starts and ends there.
+                    attachIfRunning()
                 }
         }
     }
@@ -498,16 +524,86 @@ class FloatConsoleService : Service() {
         }
     }
 
-    private fun stopRun() {
-        val stopped = Core.engine.newestRun()?.let { Core.engine.cancel(it.chatId) } ?: false
-        statsText.text = if (stopped) "已请求停止" else "当前没有进行中的任务"
+    /**
+     * Rebuilt whenever a run starts or ends.
+     *
+     * One run needs no label: there is nothing to disambiguate, so the button is the same one
+     * the console has always had. Two or more get a row each, titled, because a single button
+     * could only ever stop whichever run happened to be newest — not the one the user was
+     * looking at.
+     */
+    private fun renderStopArea(handles: List<AgentEngine.RunHandle>) {
+        stopArea.removeAllViews()
+        stopArea.visibility = if (handles.isEmpty()) View.GONE else View.VISIBLE
+        if (handles.isEmpty()) return
+        if (handles.size == 1) {
+            stopArea.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        View(context).apply {
+                            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+                        },
+                    )
+                    addView(actionButton("停止", accent = true) { stopRun(handles.first()) })
+                },
+            )
+            return
+        }
+        for (handle in handles) {
+            stopArea.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = titleOf(handle)
+                            setTextColor(palette.ink)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            maxLines = 1
+                            ellipsize = TextUtils.TruncateAt.END
+                            layoutParams = LinearLayout.LayoutParams(
+                                0,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                                1f,
+                            )
+                        },
+                    )
+                    addView(actionButton("停止", accent = true) { stopRun(handle) })
+                },
+            )
+        }
+    }
+
+    private fun stopRun(handle: AgentEngine.RunHandle) {
+        val stopped = Core.engine.cancel(handle.chatId)
+        // Named, so a stop aimed at one of several runs says which one it hit — and on its own
+        // line, because the run it names is about to leave the list and take its row with it.
+        feedbackText.text = if (stopped) "已请求停止：${titleOf(handle)}" else "这个任务已经结束了"
+        feedbackText.visibility = View.VISIBLE
+    }
+
+    /**
+     * The conversation's own title, so a rename is reflected; the title the run started with, for
+     * a conversation the list has not caught up with; then a short id, which is at least
+     * something the user can match against the chat list.
+     */
+    private fun titleOf(handle: AgentEngine.RunHandle): String {
+        val current = Core.chats.conversations.value.firstOrNull { it.id == handle.chatId }?.title
+        return current?.takeIf { it.isNotBlank() }
+            ?: handle.title.takeIf { it.isNotBlank() }
+            ?: "会话 ${handle.chatId.take(6)}"
     }
 
     private fun sendSteering() {
         val text = steerInput.text.toString().trim()
         if (text.isEmpty()) return
         val handle = Core.engine.newestRun()
-        val queued = handle != null && Core.engine.steer(handle.chatId, text)
+        // The line needs an id of its own: the engine's queue is keyed by it, and the console has
+        // no way to retract or promote what it says, so nothing else ever reads this one.
+        val queued = handle != null &&
+            Core.engine.steer(handle.chatId, java.util.UUID.randomUUID().toString(), text)
         if (queued) {
             steerInput.setText("")
             statsText.text = "已插话，模型下一轮就能看到"
@@ -591,9 +687,13 @@ class FloatConsoleService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        // 1202, not 0: SchedulerService's reminder notification builds the same
+        // `Intent(this, MainActivity)` under request code 0, and PendingIntent identity ignores
+        // an intent's flags — sharing the code would let whichever notification was built last
+        // overwrite the other's intent (the reminder's NEW_TASK|CLEAR_TOP included).
         val open = PendingIntent.getActivity(
             this,
-            0,
+            1202,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE,
         )

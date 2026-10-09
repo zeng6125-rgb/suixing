@@ -57,6 +57,7 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
 
     fun start(command: String, label: String): JobInfo {
         dir.mkdirs()
+        pruneLogs()
         val id = UUID.randomUUID().toString().substring(0, 8)
         val log = File(dir, "$id.log")
         // stderr is merged into stdout on purpose: a job's failure is usually explained by
@@ -134,7 +135,38 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
 
     private fun lastLineOf(file: File): String =
         readJobLog(file, tail = 1, since = 0).lineSequence().lastOrNull().orEmpty().take(160)
+
+    /**
+     * Keeps `filesDir/jobs` bounded. One log per job, and a job nobody remembers starting
+     * would otherwise leave its output on disk forever — nothing else ever deletes these.
+     * The newest [KEEP_LOGS] files survive, and so does anything younger than
+     * [LOG_MAX_AGE_MS]; everything else goes.
+     */
+    private fun pruneLogs() {
+        val cutoff = System.currentTimeMillis() - LOG_MAX_AGE_MS
+        // A job that is still in [jobs] is never pruned: its process holds the file open, so
+        // deleting it leaves a job that keeps running while its output has silently become
+        // unreadable — `job_output` would answer with an empty log and no hint of the loss.
+        val live = synchronized(lock) { jobs.values.mapTo(mutableSetOf<String>()) { it.info.logPath } }
+        dir.listFiles { file -> file.extension == "log" }
+            ?.filterNot { it.absolutePath in live }
+            ?.sortedByDescending { it.lastModified() }
+            ?.filterIndexed { index, file -> index >= KEEP_LOGS || file.lastModified() < cutoff }
+            ?.forEach { it.delete() }
+    }
+
+    private companion object {
+        const val KEEP_LOGS = 20
+        const val LOG_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
+    }
 }
+
+/**
+ * One `job_output` read is capped at this many bytes. A job that dumps a megabyte in one
+ * go would otherwise be pulled into memory whole, and the turn reading it cannot use that
+ * much anyway.
+ */
+private const val MAX_READ_BYTES = 256 * 1024
 
 /**
  * Reads a job's log: everything after byte [since] when that is positive, otherwise its
@@ -143,18 +175,30 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
  * Offsets are byte offsets because that is what the file itself offers, and a log keeps
  * growing while it is read: the caller passes the length it has already seen to get only
  * what is new, which is how a long job is followed without re-reading it every time.
+ *
+ * At most [MAX_READ_BYTES] is read per call, and the window always ends at the end of the
+ * file — so the length the caller is told to pass next time still lines up with what it
+ * has actually seen, even when one read could not cover the whole burst.
  */
 internal fun readJobLog(file: File, tail: Int, since: Long): String {
     if (!file.exists()) return ""
-    if (since > 0L) {
-        val length = file.length()
-        if (since >= length) return ""
-        return RandomAccessFile(file, "r").use { raf ->
-            raf.seek(since)
-            val bytes = ByteArray((length - since).toInt())
-            raf.readFully(bytes)
-            String(bytes, Charsets.UTF_8)
-        }
+    val length = file.length()
+    if (since > 0L && since >= length) return ""
+    val from = maxOf(since, length - MAX_READ_BYTES)
+    val text = RandomAccessFile(file, "r").use { raf ->
+        raf.seek(from)
+        val bytes = ByteArray((length - from).toInt())
+        raf.readFully(bytes)
+        String(bytes, Charsets.UTF_8)
     }
-    return file.readLines().takeLast(tail.coerceAtLeast(1)).joinToString("\n")
+    if (since > 0L) return text
+    // Tail mode: the last [tail] lines of the window. Reading the file line by line into a
+    // list (readLines) made `job_list` pull every job's whole log into memory to show one.
+    //
+    // `lines()` keeps the empty string a trailing newline produces, where `readLines()` dropped
+    // it: a log that ends in a newline — which is every running job's — would tail as one real
+    // line plus a blank one, and `lastLineOf` would then answer "". Drop exactly the final
+    // terminator first, which is what readLines did.
+    return text.removeSuffix("\n").removeSuffix("\r").lines()
+        .takeLast(tail.coerceAtLeast(1)).joinToString("\n")
 }

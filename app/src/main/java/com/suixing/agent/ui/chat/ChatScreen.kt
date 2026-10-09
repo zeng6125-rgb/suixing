@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,6 +15,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +26,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -78,9 +81,11 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Create
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Image
@@ -121,12 +126,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -135,14 +144,19 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.onSizeChanged
@@ -171,10 +185,15 @@ import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
+import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Transcript
+import com.suixing.agent.data.forAssistant
+import com.suixing.agent.data.groupModels
+import com.suixing.agent.data.modelOffers
+import com.suixing.agent.data.choiceFor
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.DrawerButton
@@ -188,8 +207,10 @@ import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -303,8 +324,67 @@ fun ChatScreen(
     // the reply arrived and merged the two into one.
     val live = state.liveParts.isNotEmpty()
     val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
+    // The chain a run takes, resolved once for the whole screen. The context readouts
+    // below divide by the window of the model that actually sends, which is not the
+    // app-wide default's window once a conversation or a persona picks its own.
+    val contextWindow = settings.contextWindowFor(
+        settings.choiceFor(state.providerId, state.model, assistant).model,
+    )
+    // What the ring left of the mic draws: the newest round's own count, or the live run's
+    // estimate while it streams — the same pair the summary card reads, so the two agree.
+    // The cache count is the newest round's too: context is cumulative, so an older round's
+    // cache figure says nothing about the window as it stands now.
+    val newestUsage = visible.lastOrNull { it.usage != null }?.usage
+    val contextUsed = state.stats?.lastPromptTokens?.takeIf { it > 0 }
+        ?: newestUsage?.prompt
+        ?: 0
+    // The newest round's hit rate, in the drawer's own convention: cached over prompt, a
+    // whole percentage, and nothing when the endpoint reported no prompt to divide by.
+    val cachePercent = newestUsage?.takeIf { it.prompt > 0 }?.let { it.cached * 100 / it.prompt } ?: 0
+    // Which compression records belong under which row. A record names the first and last
+    // message it folded away, so it is drawn under the row that holds that last message —
+    // the place in the transcript where the model stopped seeing the conversation verbatim.
+    val checkpointsByRow = remember(state.checkpoints, visible) {
+        val byId = visible.associateBy { it.message.id }
+        val indexOf = visible.withIndex().associate { (index, row) -> row.message.id to index }
+        state.checkpoints.mapNotNull { checkpoint ->
+            val owner = byId[checkpoint.toMessageId]
+                ?: visible.firstOrNull { row ->
+                    row.rounds.any { it.id == checkpoint.toMessageId }
+                }
+            // Nothing to hang it on: a branch switch or a trimmed conversation. Dropping it
+            // beats drawing it somewhere it does not belong.
+            val id = owner?.message?.id ?: return@mapNotNull null
+            val at = indexOf[id] ?: return@mapNotNull null
+            at to checkpoint
+        }.groupBy({ it.first }, { it.second })
+            .mapKeys { (index, _) -> visible[index].message.id }
+    }
+    // The run caption's text, and whether it carries a clock: the compression note is a
+    // fact about the context rather than progress, so it never shows a duration.
+    val statsNote = state.stats?.note.orEmpty()
+    val liveStatusText = statsNote.ifEmpty { state.status.ifBlank { "正在思考…" } }
+    // When the live run began, remembered per run so a switch away and back does not
+    // restart the caption's clock. Written in an effect, never during composition.
+    val runStartedAt = remember { mutableStateMapOf<String, Long>() }
+    val runKey = state.liveRunId.ifEmpty { state.conversationId }
+    LaunchedEffect(state.runningHere, runKey) {
+        if (!state.runningHere) return@LaunchedEffect
+        runStartedAt.getOrPut(runKey) { System.currentTimeMillis() }
+    }
+    // Which thinking blocks are open, per conversation. One table for the screen, because
+    // the live block and the stored block it becomes are two different composables — a
+    // remember inside the block was born fresh on that hand-over, which is why a think
+    // never folded when it settled — and because the live row's key was shared by every
+    // conversation, so two chats were reading the same switch.
+    val reasoningExpanded = remember { mutableStateMapOf<String, Boolean>() }
+    val reasoningExpansion = remember(state.conversationId) {
+        ReasoningExpansion(state.conversationId, reasoningExpanded)
+    }
 
-    val itemCount = visible.size + if (live) 1 else 0
+    // The live card and, under it, its progress caption: both are items of the list, so
+    // the count everything else scrolls by includes them.
+    val itemCount = visible.size + if (live) 2 else 0
 
     // The user's own messages are the landmarks of a conversation, so the status line can
     // say "turn 2 of 5" and jump between them without the engine knowing anything about it.
@@ -334,7 +414,20 @@ fun ChatScreen(
             }
     }
     // A new conversation starts at its newest message, whoever was reading what before.
-    LaunchedEffect(state.conversationId) { following = true }
+    // The list keeps one scroll state for the whole screen, so a switch would otherwise
+    // land at the previous chat's offset. Not gated by autoFollow: that setting decides
+    // what *new* messages do, while this is simply where a conversation opens.
+    LaunchedEffect(state.conversationId) {
+        following = true
+        if (itemCount <= 0) return@LaunchedEffect
+        programmatic = true
+        try {
+            listState.scrollToItem(itemCount - 1)
+            listState.scrollBy(FOLLOW_SCROLL_PX)
+        } finally {
+            programmatic = false
+        }
+    }
     // Every event that can change the height of the last item is a trigger: the streamed
     // text, a tool row appearing or finishing, and the status line — not just the count.
     LaunchedEffect(
@@ -357,7 +450,34 @@ fun ChatScreen(
         }
     }
 
+    // The keyboard is not a scroll: the scaffold's imePadding squeezes this screen's
+    // viewport from the bottom, so a list pinned to its end keeps its offset and leaves
+    // its last card below the fold while the composer rises above the keys. Re-pin to
+    // the end — and only when the list was already at its end, because tapping the
+    // field must never move a transcript the user is reading.
+    val imeHeight = WindowInsets.ime.getBottom(LocalDensity.current)
+    LaunchedEffect(imeHeight) {
+        if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
+        // One frame first: the inset is already the new one while the list is still
+        // laid out at the old height, and scrolling against that lands on the old end.
+        withFrameNanos { }
+        programmatic = true
+        try {
+            listState.scrollToItem(itemCount - 1)
+            listState.scrollBy(FOLLOW_SCROLL_PX)
+        } finally {
+            programmatic = false
+        }
+    }
+
     val atEnd by remember { derivedStateOf { listState.atEnd() } }
+
+    // 外观 → 气泡宽度. Measured against the screen, which is what the setting promises
+    // in its own words: 标准 (0.94) stays wider than the transcript's own 16dp margins,
+    // so the default leaves every card exactly as wide as it has always been, and only
+    // 窄 pulls the reply in.
+    val bubbleMaxWidth = with(LocalConfiguration.current) { screenWidthDp.dp } *
+        settings.bubbleWidthFraction
 
     fun jumpToLatest() {
         scope.launch {
@@ -447,7 +567,10 @@ fun ChatScreen(
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
                         itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
-                            if (row.showTimeLabel) TimeLabel(row.message.timestamp)
+                            // 外观 → 显示时间: off means no labels at all, not fewer of them.
+                            if (settings.showTimestamps && row.showTimeLabel) {
+                                TimeLabel(row.message.timestamp)
+                            }
                             MessageRow(
                                 row = row,
                                 assistantName = assistant?.label ?: "随行",
@@ -456,14 +579,34 @@ fun ChatScreen(
                                 expandReasoning = settings.expandReasoning,
                                 expandTools = settings.expandTools,
                                 reasoningMaxHeight = settings.reasoningHeight.dp,
-                                contextWindow = settings.contextWindowFor(settings.model),
+                                bubbleMaxWidth = bubbleMaxWidth,
+                                contextWindow = contextWindow,
+                                reasoningExpansion = reasoningExpansion,
                                 onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
                                 onRegenerate = { viewModel.regenerate() },
                                 onEdit = { editing = it },
                             )
+                            // The compression record sits under the last message it folded
+                            // away: that is the point in the transcript where the model
+                            // stopped seeing the conversation verbatim.
+                            checkpointsByRow[row.message.id].orEmpty().forEach { checkpoint ->
+                                val originals = checkpointSpan(state.messages, checkpoint)
+                                // A checkpoint whose span is not in this transcript (a
+                                // branch switch, a trimmed conversation) is not drawn: half
+                                // a record would read as data loss.
+                                if (originals != null) {
+                                    CheckpointCard(
+                                        checkpoint = checkpoint,
+                                        originals = originals,
+                                    )
+                                }
+                            }
                         }
                         if (live) {
-                            item(key = "streaming") {
+                            // Keyed by conversation: the live row keeps its slot for as long
+                            // as it is on screen, and a switch used to hand the next chat
+                            // whatever the previous one had left in that slot.
+                            item(key = "streaming:${state.conversationId}") {
                                 AssistantRow(
                                     parts = state.liveParts.mapNotNull { part ->
                                         when (part) {
@@ -472,6 +615,11 @@ fun ChatScreen(
                                                     text = part.text,
                                                     tokens = part.tokens,
                                                     elapsedMs = part.elapsedMs,
+                                                    // The run this block belongs to: the
+                                                    // saved message carries the same id, so
+                                                    // the block keeps its identity when the
+                                                    // live row is replaced by the stored one.
+                                                    runId = state.liveRunId,
                                                 )
                                             } else {
                                                 null
@@ -491,10 +639,23 @@ fun ChatScreen(
                                     face = assistant?.face ?: "",
                                     runningTool = state.runningTool,
                                     liveStats = state.stats,
-                                    contextWindow = settings.contextWindowFor(settings.model),
+                                    contextWindow = contextWindow,
                                     expandReasoning = settings.expandReasoning,
                                     expandTools = settings.expandTools,
                                     reasoningMaxHeight = settings.reasoningHeight.dp,
+                                    bubbleMaxWidth = bubbleMaxWidth,
+                                    reasoningExpansion = reasoningExpansion,
+                                )
+                            }
+                            // The run's progress, under the card it belongs to. The
+                            // composer keeps its own line only until this card exists, so
+                            // exactly one of the two is ever on screen.
+                            item(key = "live-status:${state.conversationId}") {
+                                RunStatusLine(
+                                    text = liveStatusText,
+                                    startedAt = runStartedAt[runKey] ?: 0L,
+                                    timed = statsNote.isEmpty(),
+                                    modifier = Modifier.padding(start = 4.dp, top = 6.dp),
                                 )
                             }
                         }
@@ -569,19 +730,25 @@ fun ChatScreen(
                     // The status line names the run on screen; a run in another
                     // conversation is none of this composer's business.
                     status = if (state.runningHere) state.status else "",
+                    // The caption under the live card owns the progress line as soon as
+                    // that card exists; before it does, the composer is the only place a
+                    // run can announce itself.
+                    showStatus = !live,
                     stats = state.stats,
                     settings = settings,
-                    onPickModel = { provider, model ->
-                        scope.launch {
-                            Core.settings.update {
-                                it.copy(
-                                    baseUrl = provider.baseUrl,
-                                    apiKey = provider.apiKey,
-                                    model = model,
-                                )
-                            }
-                        }
-                    },
+                    assistantId = state.assistantId,
+                    contextWindow = contextWindow,
+                    contextUsed = contextUsed,
+                    cachePercent = cachePercent,
+                    conversationProviderId = state.providerId,
+                    conversationModel = state.model,
+                    // The pick belongs to the conversation, not to the settings: it is
+                    // written onto this chat alone, so choosing an endpoint here cannot
+                    // change what any other conversation — or the app-wide default — runs.
+                    onPickModel = { provider, model -> viewModel.chooseModel(provider.id, model) },
+                    pendingSteers = state.pendingSteers,
+                    onPromoteSteer = { viewModel.promoteSteer(it) },
+                    onRetractSteer = { viewModel.retractSteer(it) },
                     attachment = attachment,
                     onClearAttachment = {
                         viewModel.cacheAttachment(state.conversationId, null)
@@ -601,10 +768,24 @@ fun ChatScreen(
                     },
                     onStop = { viewModel.stop() },
                     onSteer = { viewModel.steer(it) },
+                    onRequestCompress = { viewModel.requestCompress() },
                     onFocused = {
-                        // Tapping the field with the keyboard still down should reveal the
-                        // newest message rather than leaving the user mid-transcript.
-                        if (itemCount > 0) scope.launch { listState.animateScrollToItem(itemCount - 1) }
+                        // Only a transcript that was already at its end follows the
+                        // keyboard. Scrolling to the last item would put its *top* at the
+                        // top of the viewport — the bottom padding is what makes that
+                        // reachable — which is the drift the field tap used to cause, and
+                        // a reader parked mid-conversation must not be dragged anywhere.
+                        if (following && itemCount > 0) {
+                            scope.launch {
+                                programmatic = true
+                                try {
+                                    listState.scrollToItem(itemCount - 1)
+                                    listState.scrollBy(FOLLOW_SCROLL_PX)
+                                } finally {
+                                    programmatic = false
+                                }
+                            }
+                        }
                     },
                     onMic = {
                         // In-app recognition needs the mic ourselves, unlike the old
@@ -638,6 +819,7 @@ fun ChatScreen(
             activeId = state.assistantId.ifBlank { settings.activeAssistantId },
             settings = settings,
             onUse = { viewModel.useAssistant(it) },
+            onSetDefault = { viewModel.setDefaultAssistant(it) },
             onSave = { viewModel.saveAssistant(it) },
             onDelete = { viewModel.deleteAssistant(it) },
             onDismiss = { assistantsOpen = false },
@@ -744,17 +926,33 @@ private fun titleBarStyle(): TextStyle {
 
 /** A flat text dropdown: label plus a caret, no container of its own. */
 @Composable
-private fun UnifiedSelector(settings: AppSettings, onClick: () -> Unit) {
-    val assistant = settings.assistant(settings.activeAssistantId) ?: settings.activeAssistant()
-    val provider = settings.providers.firstOrNull { it.id == assistant?.providerId }
+private fun UnifiedSelector(
+    settings: AppSettings,
+    /** The conversation's persona and its own pick, so the caption names what a run sends. */
+    assistantId: String?,
+    conversationProviderId: String?,
+    conversationModel: String?,
+    onClick: () -> Unit,
+) {
+    val assistant = assistantId?.let { settings.assistant(it) } ?: settings.activeAssistant()
+    val choice = settings.choiceFor(conversationProviderId, conversationModel, assistant)
+    val provider = settings.providers.firstOrNull { it.id == choice.providerId }
+        ?: settings.providers.firstOrNull {
+            it.baseUrl.trimEnd('/') == choice.baseUrl.trimEnd('/')
+        }
     val own = provider?.takeIf { it.ownSampling }
     val wire = own?.reasoningEffort ?: settings.reasoningEffort
     val level = REASONING_LEVELS.firstOrNull { it.first == wire }?.second ?: "默认"
-    val model = provider?.displayModel(settings.model)
-        ?.takeIf { it != settings.model }
-        ?: settings.shortModel.ifBlank { "选模型" }
+    val model = provider?.displayModel(choice.model)
+        ?.takeIf { it != choice.model }
+        ?: choice.model.substringAfter('/').ifBlank { "选模型" }
     Row(
         modifier = Modifier
+            // The caption is capped, not the row it lives in: on a 360dp-wide screen the
+            // add button, the context ring, the mic, the send button and their gaps leave
+            // this much, and a wider caption would push the send button off the row. The
+            // model name ellipsizes inside this width, and so does the level badge.
+            .widthIn(max = 104.dp)
             .clip(MaterialTheme.shapes.small)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -781,6 +979,7 @@ private fun UnifiedSelector(settings: AppSettings, onClick: () -> Unit) {
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
@@ -953,8 +1152,20 @@ private data class ToolLine(
 }
 
 private sealed interface Part {
-    /** One round of thinking, with that round's own numbers. */
-    data class Thinking(val text: String, val tokens: Int, val elapsedMs: Long) : Part
+    /**
+     * One round of thinking, with that round's own numbers.
+     *
+     * [runId] is the run that produced it, and it is what makes a think the same block
+     * before and after it is stored: the live row and the saved message are two different
+     * composables, and only the run id is common to both. Blank for a message stored
+     * before runs were keyed.
+     */
+    data class Thinking(
+        val text: String,
+        val tokens: Int,
+        val elapsedMs: Long,
+        val runId: String = "",
+    ) : Part
 
     /** The tool calls made after the part before this one. */
     data class Tools(val calls: List<ToolLine>) : Part
@@ -1120,7 +1331,7 @@ private fun groupRows(
                 // a round that only thought contributes only a thinking part.
                 val arrived = buildList {
                     message.reasoning?.trim()?.takeIf { it.isNotEmpty() }?.let {
-                        add(Part.Thinking(it, message.reasoningTokens, message.elapsedMs))
+                        add(Part.Thinking(it, message.reasoningTokens, message.elapsedMs, run))
                     }
                     if (message.text.isNotBlank()) add(Part.Text(message.text))
                 }
@@ -1195,7 +1406,10 @@ private fun MessageRow(
     expandReasoning: Boolean,
     expandTools: Boolean,
     reasoningMaxHeight: Dp,
+    bubbleMaxWidth: Dp,
     contextWindow: Int,
+    /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
+    reasoningExpansion: ReasoningExpansion,
     onBranch: (String, String) -> Unit,
     onRegenerate: () -> Unit,
     onEdit: (StoredMessage) -> Unit,
@@ -1223,6 +1437,8 @@ private fun MessageRow(
             expandReasoning = expandReasoning,
             expandTools = expandTools,
             reasoningMaxHeight = reasoningMaxHeight,
+            bubbleMaxWidth = bubbleMaxWidth,
+            reasoningExpansion = reasoningExpansion,
             onBranch = onBranch,
             onRegenerate = onRegenerate,
             onEdit = onEdit,
@@ -1233,6 +1449,8 @@ private fun MessageRow(
             parts = listOf(Part.Tools(listOf(ToolLine.of(row.message)))),
             streaming = false,
             face = assistantFace,
+            bubbleMaxWidth = bubbleMaxWidth,
+            reasoningExpansion = reasoningExpansion,
         )
     }
 }
@@ -1343,12 +1561,20 @@ private fun AssistantRow(
     expandReasoning: Boolean = false,
     expandTools: Boolean = false,
     reasoningMaxHeight: Dp = 180.dp,
+    /** 外观 → 气泡宽度: the card's cap. [Dp.Infinity] leaves it at the row's own width. */
+    bubbleMaxWidth: Dp = Dp.Infinity,
+    /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
+    reasoningExpansion: ReasoningExpansion,
     onBranch: (String, String) -> Unit = { _, _ -> },
     onRegenerate: () -> Unit = {},
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
+        // constraint, or the inner fill would win and the card could never narrow.
+        modifier = Modifier
+            .widthIn(max = bubbleMaxWidth)
+            .fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
@@ -1403,6 +1629,10 @@ private fun AssistantRow(
                     contextWindow = contextWindow,
                     expandReasoning = expandReasoning,
                     reasoningMaxHeight = reasoningMaxHeight,
+                    // The stored blocks answer to their message, so the table keeps their
+                    // state apart from the live run's and from every other message's.
+                    messageId = message?.id.orEmpty(),
+                    reasoningExpansion = reasoningExpansion,
                     onEdit = onEdit,
                 )
                 // 头像行→10→首块、末块→10→正文/气泡底: the card's own air below is
@@ -1410,77 +1640,86 @@ private fun AssistantRow(
                 Spacer(Modifier.height(10.dp))
             }
             val lastText = parts.indexOfLast { it is Part.Text }
+            // key(index): without it every part's remembered state was allocated by
+            // position, so a new round appearing at the front moved one block's switch onto
+            // its neighbour.
             parts.forEachIndexed { index, part ->
-                val last = index == parts.lastIndex
-                when (part) {
-                    is Part.Thinking -> {
-                        // A settled reply keeps its thinking inside the summary card
-                        // alone: a second copy beside the answer is what made one
-                        // answer read as a stack of blocks. Live it still streams here.
-                        if (!streaming) return@forEachIndexed
-                        ReasoningBlock(
-                            text = part.text,
-                            // A live block is the one still growing; a settled round's
-                            // thinking is complete even while the run continues.
-                            streaming = streaming && last,
-                            reasoningTokens = part.tokens,
-                            elapsedMs = part.elapsedMs,
-                            // Thinking is the reason to run a thinking model at all, so a
-                            // live block starts open; it settles into the setting's state
-                            // once the reply is stored and drawn as its own message.
-                            startExpanded = expandReasoning || streaming,
-                            maxHeight = reasoningMaxHeight,
-                        )
-                        if (!last) Spacer(Modifier.height(10.dp))
-                    }
+                key(index) {
+                    val last = index == parts.lastIndex
+                    when (part) {
+                        is Part.Thinking -> {
+                            // A settled reply keeps its thinking inside the summary card
+                            // alone: a second copy beside the answer is what made one
+                            // answer read as a stack of blocks. Live it still streams here.
+                            if (!streaming) return@forEachIndexed
+                            ReasoningBlock(
+                                text = part.text,
+                                // A live block is the one still growing; a settled round's
+                                // thinking is complete even while the run continues.
+                                streaming = streaming && last,
+                                // A live block keeps its slot for the whole run, and the
+                                // stored copy of the same run answers to the same key.
+                                blockId = thinkSlot(parts, index, "live"),
+                                expansion = reasoningExpansion,
+                                reasoningTokens = part.tokens,
+                                elapsedMs = part.elapsedMs,
+                                // Thinking is the reason to run a thinking model at all, so
+                                // a live block starts open; it settles into the setting's
+                                // state once the reply is stored and drawn as its message.
+                                startExpanded = expandReasoning || streaming,
+                                maxHeight = reasoningMaxHeight,
+                            )
+                            if (!last) Spacer(Modifier.height(10.dp))
+                        }
 
-                    is Part.Tools -> {
-                        // Same rule as thinking: settled tool rows live in the summary
-                        // card's expanded list, not flat beside the answer.
-                        if (!streaming) return@forEachIndexed
-                        // Consecutive tool rounds merge into one block: one card per
-                        // run of calls, not a card inside a card per round.
-                        val run = mutableListOf(part.calls)
-                        var cursor = index + 1
-                        while (cursor < parts.size && parts[cursor] is Part.Tools) {
-                            run.add((parts[cursor] as Part.Tools).calls)
-                            cursor++
+                        is Part.Tools -> {
+                            // Same rule as thinking: settled tool rows live in the summary
+                            // card's expanded list, not flat beside the answer.
+                            if (!streaming) return@forEachIndexed
+                            // Consecutive tool rounds merge into one block: one card per
+                            // run of calls, not a card inside a card per round.
+                            val run = mutableListOf(part.calls)
+                            var cursor = index + 1
+                            while (cursor < parts.size && parts[cursor] is Part.Tools) {
+                                run.add((parts[cursor] as Part.Tools).calls)
+                                cursor++
+                            }
+                            ToolBundle(
+                                tools = run.flatten(),
+                                // Only the newest block can be the one waiting on a tool.
+                                runningTool = runningTool.takeIf { cursor > parts.lastIndex },
+                                startExpanded = expandTools,
+                            )
+                            if (!last) Spacer(Modifier.height(10.dp))
                         }
-                        ToolBundle(
-                            tools = run.flatten(),
-                            // Only the newest block can be the one waiting on a tool.
-                            runningTool = runningTool.takeIf { cursor > parts.lastIndex },
-                            startExpanded = expandTools,
-                        )
-                        if (!last) Spacer(Modifier.height(10.dp))
-                    }
 
-                    is Part.Text -> {
-                        // Only the last stretch of prose is drawn once the run is over: the
-                        // model's "let me check" before a tool is not part of its answer.
-                        // While it streams every stretch shows, because that is what it is
-                        // doing right now.
-                        if (!streaming && index != lastText) return@forEachIndexed
-                        SelectionContainer {
-                            MarkdownText(text = part.text)
+                        is Part.Text -> {
+                            // Only the last stretch of prose is drawn once the run is over:
+                            // the model's "let me check" before a tool is not part of its
+                            // answer. While it streams every stretch shows, because that is
+                            // what it is doing right now.
+                            if (!streaming && index != lastText) return@forEachIndexed
+                            SelectionContainer {
+                                MarkdownText(text = part.text)
+                            }
+                            if (streaming && last) {
+                                Spacer(Modifier.height(4.dp))
+                                BlinkingCursor()
+                            }
+                            if (!last) Spacer(Modifier.height(10.dp))
                         }
-                        if (streaming && last) {
-                            Spacer(Modifier.height(4.dp))
-                            BlinkingCursor()
-                        }
-                        if (!last) Spacer(Modifier.height(10.dp))
-                    }
 
-                    is Part.Steer -> {
-                        // Right-aligned, like any user line, but inside the reply: the
-                        // indentation is what says "I said this while it was working".
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            UserBubble(message = part.message, onEdit = onEdit)
+                        is Part.Steer -> {
+                            // Right-aligned, like any user line, but inside the reply: the
+                            // indentation is what says "I said this while it was working".
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                            ) {
+                                UserBubble(message = part.message, onEdit = onEdit)
+                            }
+                            if (!last) Spacer(Modifier.height(10.dp))
                         }
-                        if (!last) Spacer(Modifier.height(10.dp))
                     }
                 }
             }
@@ -1734,17 +1973,57 @@ private fun ProcessSpinner(tone: Color) {
 }
 
 /**
+ * Which thinking blocks the user has opened or closed, for the conversation on screen.
+ *
+ * A block's state cannot live inside the block: the live think and the stored one it turns
+ * into are two different call sites, so a `remember` there started from scratch the moment
+ * the reply was saved (and with 思考过程默认展开 on, that meant a think never folded). The
+ * conversation is part of every key, so two chats never share a block's switch.
+ */
+@Stable
+private class ReasoningExpansion(
+    private val conversationId: String,
+    private val entries: MutableMap<String, Boolean>,
+) {
+    /** Null while this block has no opinion of its own. */
+    fun stored(blockId: String): Boolean? = entries["$conversationId:$blockId"]
+
+    fun set(blockId: String, expanded: Boolean) {
+        entries["$conversationId:$blockId"] = expanded
+    }
+}
+
+/**
+ * Which slot a thinking block occupies in the screen's table of open blocks.
+ *
+ * The key is the run that produced the think plus how many thinks that run had already
+ * produced — not the composable's position, and not the message id, because neither of
+ * those is shared by the live block and the stored message that replaces it. The run id is:
+ * the engine stamps it on the message it saves, so the same think answers to the same key
+ * on both sides of the hand-over. [fallback] covers a message stored before runs were keyed.
+ */
+private fun thinkSlot(parts: List<Part>, index: Int, fallback: String): String {
+    val part = parts.getOrNull(index) as? Part.Thinking ?: return index.toString()
+    val before = parts.take(index).count { it is Part.Thinking && it.runId == part.runId }
+    return "${part.runId.ifEmpty { fallback }}:$before"
+}
+
+/**
  * The model's thinking, folded into the reply's own card.
  *
  * It is drawn in its own [LazyColumn] so a 10k-character chain of thought only ever
- * composes the handful of lines on screen — laying the whole string out as one [Text]
- * is what makes a long think stutter. Whether it is open survives scrolling away,
- * because it is remembered per message.
+ * composes the handful of lines on screen — laying the whole string out as one [Text] is
+ * what makes a long think stutter. Whether it is open is not remembered here: it is a row
+ * of the screen's [ReasoningExpansion] table, so the choice outlives this composable and
+ * survives the hand-over from the live row to the stored message.
  */
 @Composable
 private fun ReasoningBlock(
     text: String,
     streaming: Boolean,
+    /** This block's slot in the screen's table: see [thinkSlot]. */
+    blockId: String,
+    expansion: ReasoningExpansion,
     reasoningTokens: Int = 0,
     elapsedMs: Long = 0,
     startExpanded: Boolean = false,
@@ -1757,18 +2036,14 @@ private fun ReasoningBlock(
     /** How tall the chain's inner scroll may grow; the appearance page owns it. */
     maxHeight: Dp = 180.dp,
 ) {
-    // The setting only decides where a block starts; once the user taps the header the
-    // choice sticks to that message for as long as it stays in the list.
-    var expanded by rememberSaveable { mutableStateOf(startExpanded) }
-    // A streaming think opens on its own and closes when it settles, but a header the
-    // user tapped is theirs: the auto-close must not fight a manual choice.
-    var userToggled by remember { mutableStateOf(false) }
+    // The table decides, and it outlives this composable: a think opens while it streams,
+    // folds when it settles, and a header the user tapped is theirs from then on — the
+    // automatic fold never overwrites a manual choice, and a manual fold is never undone.
+    val expanded = expansion.stored(blockId) ?: (streaming || startExpanded)
     var wasStreaming by remember { mutableStateOf(streaming) }
     LaunchedEffect(streaming) {
-        if (streaming) {
-            expanded = true
-        } else if (wasStreaming && !userToggled) {
-            expanded = false
+        if (wasStreaming && !streaming && expansion.stored(blockId) == null) {
+            expansion.set(blockId, false)
         }
         wasStreaming = streaming
     }
@@ -1836,8 +2111,9 @@ private fun ReasoningBlock(
         }
     }
     val toggle = {
-        expanded = !expanded
-        userToggled = true
+        // Written to the table, not to a local: the choice has to survive the hand-over
+        // from the live block to the stored one.
+        expansion.set(blockId, !expanded)
     }
     val status: @Composable () -> Unit = {
         if (meta.isNotEmpty()) ProcessStatus(meta.joinToString(" · "))
@@ -2199,6 +2475,9 @@ private fun TurnSummary(
     contextWindow: Int,
     expandReasoning: Boolean = false,
     reasoningMaxHeight: Dp = 180.dp,
+    /** The message these blocks belong to; part of every block's key in the table. */
+    messageId: String = "",
+    reasoningExpansion: ReasoningExpansion,
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
@@ -2258,44 +2537,52 @@ private fun TurnSummary(
         // including the mid-run transitions, steer bubbles — the same sequence the
         // live bubble drew. The usage detail closes the list.
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            parts.forEach { part ->
-                when (part) {
-                    is Part.Thinking -> ReasoningBlock(
-                        text = part.text,
-                        streaming = false,
-                        reasoningTokens = part.tokens,
-                        elapsedMs = part.elapsedMs,
-                        startExpanded = expandReasoning,
-                        nested = true,
-                        maxHeight = reasoningMaxHeight,
-                    )
+            parts.forEachIndexed { index, part ->
+                key(index) {
+                    when (part) {
+                        is Part.Thinking -> ReasoningBlock(
+                            text = part.text,
+                            streaming = false,
+                            // One message can hold several thinks (think → tool → think);
+                            // the slot is the run plus the think's place inside it.
+                            blockId = thinkSlot(parts, index, messageId.ifEmpty { "summary" }),
+                            expansion = reasoningExpansion,
+                            reasoningTokens = part.tokens,
+                            elapsedMs = part.elapsedMs,
+                            startExpanded = expandReasoning,
+                            nested = true,
+                            maxHeight = reasoningMaxHeight,
+                        )
 
-                    is Part.Tools -> {
-                        var openTool by remember { mutableStateOf<String?>(null) }
-                        part.calls.forEachIndexed { index, call ->
-                            // Name + status on the row, arguments and output behind its
-                            // own tap — the same two-level row the live bundle draws.
-                            val key = call.message?.id ?: "summary-$index"
-                            ToolRow(
-                                line = call,
-                                expanded = openTool == key,
-                                onToggle = { openTool = if (openTool == key) null else key },
-                            )
+                        is Part.Tools -> {
+                            var openTool by remember { mutableStateOf<String?>(null) }
+                            part.calls.forEachIndexed { index, call ->
+                                // Name + status on the row, arguments and output behind its
+                                // own tap — the same two-level row the live bundle draws.
+                                val callKey = call.message?.id ?: "summary-$index"
+                                ToolRow(
+                                    line = call,
+                                    expanded = openTool == callKey,
+                                    onToggle = {
+                                        openTool = if (openTool == callKey) null else callKey
+                                    },
+                                )
+                            }
                         }
-                    }
 
-                    // Prose keeps the card's own left edge: it is read as the answer's
-                    // body, not as a row of the grid, and 2dp of vertical air plus the
-                    // column's 8dp keeps it off its neighbours.
-                    is Part.Text -> Column(Modifier.padding(vertical = 2.dp)) {
-                        SelectionContainer { MarkdownText(text = part.text) }
-                    }
+                        // Prose keeps the card's own left edge: it is read as the answer's
+                        // body, not as a row of the grid, and 2dp of vertical air plus the
+                        // column's 8dp keeps it off its neighbours.
+                        is Part.Text -> Column(Modifier.padding(vertical = 2.dp)) {
+                            SelectionContainer { MarkdownText(text = part.text) }
+                        }
 
-                    is Part.Steer -> Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                    ) {
-                        UserBubble(message = part.message, onEdit = onEdit)
+                        is Part.Steer -> Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            UserBubble(message = part.message, onEdit = onEdit)
+                        }
                     }
                 }
             }
@@ -2593,12 +2880,52 @@ private fun BlinkingCursor() {
     )
 }
 
+/**
+ * The live run's progress line: the engine's own sentence, plus how long the run has been
+ * going. The clock lives in here — one tick a second re-composes this caption and nothing
+ * else, and the elapsed time is read off the wall clock on each tick, so a line that is
+ * re-created (a switch away and back) still shows the true time rather than restarting.
+ */
+@Composable
+private fun RunStatusLine(
+    text: String,
+    /** When the run began, or 0 while the effect that records it has yet to run. */
+    startedAt: Long,
+    /** False for the compression note: that is a fact, not a progress bar. */
+    timed: Boolean,
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    var tick by remember { mutableStateOf(0) }
+    LaunchedEffect(startedAt) {
+        if (startedAt <= 0) return@LaunchedEffect
+        while (true) {
+            delay(1000)
+            tick++
+        }
+    }
+    val caption = remember(tick, startedAt, text, timed) {
+        if (!timed || startedAt <= 0) text
+        else "$text，用时 ${formatRunElapsed(System.currentTimeMillis() - startedAt)}"
+    }
+    Text(
+        text = caption,
+        style = statusLineStyle(),
+        color = color,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
+}
+
 @Composable
 private fun TimeLabel(timestamp: Long) {
     Text(
         text = formatTime(timestamp),
         modifier = Modifier.fillMaxWidth(),
-        style = MaterialTheme.typography.labelSmall,
+        // labelSmall's 16sp line box is what leaves the label floating a few dp above
+        // the bubble it belongs to; 12sp tightens that air without touching the glyphs.
+        style = MaterialTheme.typography.labelSmall.copy(lineHeight = 12.sp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center,
     )
@@ -2610,9 +2937,21 @@ private fun Composer(
     onInput: (String) -> Unit,
     running: Boolean,
     status: String,
+    /** False once the live card exists: the transcript draws the caption instead. */
+    showStatus: Boolean,
     /** The live run's stats; the status line reads its compression note. */
     stats: StreamStats?,
     settings: AppSettings,
+    /** The persona this conversation runs with, not the app-wide active one. */
+    assistantId: String,
+    /** The window the context ring divides by; 0 hides the ring (no denominator). */
+    contextWindow: Int,
+    /** Tokens the newest round filled of that window, and how many of them were cached. */
+    contextUsed: Int,
+    cachePercent: Int,
+    /** This conversation's own model pick, or null while it follows persona/defaults. */
+    conversationProviderId: String?,
+    conversationModel: String?,
     onPickModel: (ProviderConfig, String) -> Unit,
     attachment: Attachment?,
     onClearAttachment: () -> Unit,
@@ -2623,6 +2962,14 @@ private fun Composer(
     onStop: () -> Unit,
     /** Queues a line for the running model; false means it was dropped. */
     onSteer: (String) -> Boolean,
+    /** Asks the live run to fold the conversation at its next turn boundary. */
+    onRequestCompress: () -> Boolean,
+    /** Lines queued for the run that is going, oldest first. */
+    pendingSteers: List<PendingSteer>,
+    /** Sends a queued line now, cutting the round in flight. */
+    onPromoteSteer: (String) -> Unit,
+    /** Drops a queued line before the model reads it; 「修改」 uses it too. */
+    onRetractSteer: (String) -> Unit,
     onFocused: () -> Unit,
     onMic: () -> Unit,
     /** The empty provider list's way out: straight into the model settings page. */
@@ -2638,6 +2985,11 @@ private fun Composer(
     val density = LocalDensity.current
     var menuOpen by remember { mutableStateOf(false) }
     var sheetOpen by remember { mutableStateOf(false) }
+    // Where the model button's centre sits, in window pixels: the 生成设置 sheet is centred
+    // on it rather than on the composer or the screen, which is what "right above the model
+    // button" means. Read from the layout, because the row's paddings and the label's own
+    // width decide it.
+    var modelButtonCenter by remember { mutableStateOf(0f) }
     val ctx = LocalContext.current
     // No recognizer on the device means the mic entry would be a dead control, and
     // the user has no patience for those: the row simply drops it.
@@ -2663,6 +3015,10 @@ private fun Composer(
                 if (sheetOpen) {
                     GenerationSheet(
                         settings = settings,
+                        assistantId = assistantId,
+                        conversationProviderId = conversationProviderId,
+                        conversationModel = conversationModel,
+                        modelButtonCenterPx = modelButtonCenter,
                         onPickModel = onPickModel,
                         onOpenSettings = onOpenSettings,
                         onDismiss = { sheetOpen = false },
@@ -2700,7 +3056,7 @@ private fun Composer(
                 note.isNotEmpty() -> note
                 else -> status.ifBlank { "正在思考…" }
             }
-            if (running) {
+            if (running && showStatus) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2730,6 +3086,37 @@ private fun Composer(
             attachment?.let {
                 AttachmentChip(attachment = it, onRemove = onClearAttachment)
                 Spacer(Modifier.height(8.dp))
+            }
+            // Queued lines sit directly above the field they came from: the user's own
+            // words on their way to the model, not messages yet — so they are plain rows,
+            // no bubble and no background, and each one can still be acted on.
+            if (pendingSteers.isNotEmpty()) {
+                pendingSteers.take(STEER_ROWS_SHOWN).forEach { queued ->
+                    SteerQueueRow(
+                        steer = queued,
+                        // The run is over, so nothing will ever read this line unless the
+                        // user sends it again — the row says so.
+                        undelivered = !running,
+                        onPromote = { onPromoteSteer(queued.id) },
+                        onEdit = {
+                            // Appended, not substituted: the field may hold something the
+                            // user is in the middle of typing, and taking a queued line back
+                            // must not throw that away without a word.
+                            onInput(if (input.isBlank()) queued.text else "${input.trimEnd()} ${queued.text}")
+                            onRetractSteer(queued.id)
+                        },
+                        onDelete = { onRetractSteer(queued.id) },
+                    )
+                }
+                if (pendingSteers.size > STEER_ROWS_SHOWN) {
+                    Text(
+                        text = "还有 ${pendingSteers.size - STEER_ROWS_SHOWN} 条排队中",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
             }
             // Opaque surface with one real soft shadow: the drawn concentric rings read
             // as a halo, and 86% alpha let the transcript bleed through the pill.
@@ -2788,7 +3175,13 @@ private fun Composer(
                             Box {
                                 if (input.isEmpty()) {
                                     Text(
-                                        text = if (running) "插一句话…" else "让随行做点什么…",
+                                        text = when {
+                                            pendingSteers.isNotEmpty() ->
+                                                "还有 ${pendingSteers.size} 条排队中…"
+
+                                            running -> "插一句话…"
+                                            else -> "让随行做点什么…"
+                                        },
                                         style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
                                         color = scheme.onSurfaceVariant,
                                     )
@@ -2798,11 +3191,13 @@ private fun Composer(
                         },
                     )
                     // Row 2: attach, the two flat selectors, mic, action — the controls
-                    // live under the text now, one 44dp line.
+                    // live under the text now. 48dp of content, not 44: the buttons carry
+                    // a 48dp minimum touch target, and a shorter row squeezed them into
+                    // ellipses with the circle clipped to a 40x36 box.
                     Row(
                         modifier = Modifier
-                            .height(44.dp)
-                            .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+                            .padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
+                            .height(48.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
@@ -2851,13 +3246,60 @@ private fun Composer(
                                     onPickFile()
                                 },
                             )
+                            // Only while a run is going: the engine consumes the request at
+                            // a turn boundary, and with no run there is no boundary — a
+                            // greyed-out entry would only invite a tap that cannot work.
+                            if (running) {
+                                DropdownMenuItem(
+                                    text = { Text("压缩上下文") },
+                                    leadingIcon = {
+                                        Icon(Icons.Rounded.Compress, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        menuOpen = false
+                                        val asked = onRequestCompress()
+                                        Toast.makeText(
+                                            ctx,
+                                            if (asked) {
+                                                "已请求压缩，本轮结束后生效"
+                                            } else {
+                                                "没有正在进行的任务，无需压缩"
+                                            },
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    },
+                                )
+                            }
                         }
                     }
                     // One selector for both decisions: the model and the reasoning
                     // level live together in the 生成设置 sheet, so the row keeps a
                     // single caption instead of two competing ones.
-                    UnifiedSelector(settings = settings, onClick = { sheetOpen = true })
+                    // Measured, not assumed: the sheet is centred on this button, and where
+                    // the button sits depends on the label's width and the row's paddings.
+                    Box(
+                        Modifier.onGloballyPositioned {
+                            modelButtonCenter = it.boundsInWindow().center.x
+                        },
+                    ) {
+                        UnifiedSelector(
+                            settings = settings,
+                            assistantId = assistantId,
+                            conversationProviderId = conversationProviderId,
+                            conversationModel = conversationModel,
+                            onClick = { sheetOpen = true },
+                        )
+                    }
                     Spacer(Modifier.weight(1f))
+                    // Left of the mic, where the user asked for it: the mic is the control
+                    // reached for mid-thought, and this is the gauge that says whether the
+                    // next question still fits in the window.
+                    ContextRing(
+                        used = contextUsed,
+                        window = contextWindow,
+                        cachePercent = cachePercent,
+                        live = stats,
+                    )
                     // The mic only earns its slot when a recognizer actually exists on
                     // the device: a dead control is worse than no control.
                     if (speechAvailable) {
@@ -2936,43 +3378,90 @@ private fun statusLineStyle(): TextStyle = MaterialTheme.typography.labelMedium
  * thinks are one decision, so they share one surface — model name and level badge on
  * top, the six-step slider in the middle, the provider's enabled models as radio rows
  * below. Every change writes through at once; there is no confirm button to forget.
+ *
+ * It hangs off the composer's zero-height anchor box (see `ComposerStack`, the `Box` at the
+ * top of the stack): the sheet opens upward from there and its bottom edge lands 8dp above
+ * that box, so it never covers the field it belongs to. Horizontally it is centred on the
+ * model button — [modelButtonCenterPx] is that button's centre, measured in the composer —
+ * and nudged back inside the screen when the button sits too close to an edge for a sheet
+ * this wide. Centring on the button is the whole point: anchored to the composer's end it
+ * used to open off to the right, which read as "the sheet is somewhere else".
  */
 @Composable
 private fun GenerationSheet(
     settings: AppSettings,
+    /** The persona the conversation runs with: the sheet must name the endpoint a run
+     *  will actually reach, and the app-wide active persona is a different one. */
+    assistantId: String?,
+    /** This conversation's own pick, or null while it follows the persona and defaults. */
+    conversationProviderId: String?,
+    conversationModel: String?,
+    /** The model button's centre, in window pixels; 0 until the composer has measured it. */
+    modelButtonCenterPx: Float,
     onPickModel: (ProviderConfig, String) -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val scheme = MaterialTheme.colorScheme
-    val assistant = settings.assistant(settings.activeAssistantId) ?: settings.activeAssistant()
-    // The persona's own provider first; a persona saved before providers existed has a
-    // blank id, so the base url the app is talking to is the next best witness, and a
-    // provider with anything enabled is the one after that. Null only when there is
-    // genuinely nothing configured.
-    val provider = settings.providers.firstOrNull { it.id == assistant?.providerId }
+    val assistant = assistantId?.let { settings.assistant(it) } ?: settings.activeAssistant()
+    // One chain for the whole screen — this conversation's pick, then the persona's pins,
+    // then the app-wide default — so the header, the tick and the request all agree.
+    val choice = settings.choiceFor(conversationProviderId, conversationModel, assistant)
+    // The endpoint the choice lands on; a conversation that never picked falls through to
+    // the base url the app is talking to, and a provider with anything enabled is the last
+    // witness. Null only when there is genuinely nothing configured.
+    val provider = settings.providers.firstOrNull { it.id == choice.providerId }
         ?: settings.providers.firstOrNull {
-            it.baseUrl.trimEnd('/') == settings.baseUrl.trimEnd('/')
+            it.baseUrl.trimEnd('/') == choice.baseUrl.trimEnd('/')
         }
         ?: settings.providers.firstOrNull { it.enabled.isNotEmpty() }
     val own = provider?.takeIf { it.ownSampling }
     val wire = own?.reasoningEffort ?: settings.reasoningEffort
     val levelIndex = REASONING_LEVELS.indexOfFirst { it.first == wire }.coerceAtLeast(0)
-    // The model in use is always a row, even when the provider list lost it: picking
-    // what you already run must never be impossible.
-    val models = (provider?.enabled.orEmpty() + settings.model).distinct()
+    // Every endpoint with ticked models can offer one: this picker is the only place to
+    // switch endpoints without a detour through settings, so it lists them all instead
+    // of only the endpoint the assistant happens to point at. Inside one endpoint the
+    // ids split by upstream vendor (an aggregating proxy prefixes them).
+    val offers = remember(settings.providers, choice.model, choice.providerId) {
+        modelOffers(settings.providers, choice.model, provider)
+    }
+    val density = LocalDensity.current
+    // The anchor's own left edge and the sheet's own width, both measured: the first is
+    // where the popup's alignment starts counting from, the second is what decides how far
+    // a centred sheet would hang off an edge.
+    var anchorLeft by remember { mutableStateOf(0f) }
+    var sheetWidth by remember { mutableStateOf(0) }
+    val screenPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
+    val edge = with(density) { 8.dp.toPx() }
+    val nudge = if (sheetWidth <= 0 || anchorLeft == 0f) {
+        0f
+    } else {
+        val width = sheetWidth.toFloat()
+        val left = (modelButtonCenterPx - width / 2f)
+            .coerceIn(edge, (screenPx - edge - width).coerceAtLeast(edge))
+        left - anchorLeft
+    }
+    // Zero-height, full-width probe inside the composer's anchor box: it reads that box's
+    // left edge, which is the origin the popup's own alignment is measured from.
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { anchorLeft = it.boundsInWindow().left },
+    )
     Popup(
         // Anchored to the composer's own top edge, not a sheet from the screen's
-        // bottom: the picker is a control of the row that opened it.
-        alignment = Alignment.BottomEnd,
-        offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
+        // bottom: the picker is a control of the row that opened it. Start-aligned plus
+        // [nudge] is how the sheet ends up centred on the model button.
+        alignment = Alignment.BottomStart,
+        offset = with(density) { IntOffset(nudge.roundToInt(), -8.dp.roundToPx()) },
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
         Column(
             modifier = Modifier
-                .width(300.dp)
+                .widthIn(max = 300.dp)
+                .onSizeChanged { sheetWidth = it.width }
                 .shadow(
                     elevation = 8.dp,
                     shape = RoundedCornerShape(20.dp),
@@ -2990,7 +3479,9 @@ private fun GenerationSheet(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = provider?.displayModel(settings.model) ?: settings.shortModel,
+                    text = provider?.displayModel(choice.model)
+                        ?.takeIf { it != choice.model }
+                        ?: choice.model.substringAfter('/').ifBlank { "选模型" },
                     style = MaterialTheme.typography.titleMedium.copy(fontSize = 16.sp),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -3034,36 +3525,12 @@ private fun GenerationSheet(
                 color = scheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))
-            models.forEach { id ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(MaterialTheme.shapes.small)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = ripple(),
-                        ) {
-                            if (provider != null) onPickModel(provider, id)
-                        }
-                        .padding(vertical = 8.dp, horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioButton(
-                        selected = id == settings.model,
-                        onClick = null,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = provider?.displayModel(id) ?: id,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            if (provider == null || provider.enabled.isEmpty()) {
+            // No endpoint has anything ticked: the picker has nothing to offer, so the
+            // way out is the settings page. Asking the offers list would hide that way
+            // out as soon as the active model is the only thing left in it.
+            if (settings.providers.none { it.enabled.isNotEmpty() }) {
                 Text(
-                    text = "这个提供方还没启用模型。",
+                    text = "还没有启用任何模型。",
                     style = MaterialTheme.typography.bodySmall,
                     color = scheme.onSurfaceVariant,
                 )
@@ -3071,39 +3538,160 @@ private fun GenerationSheet(
                 Button(onClick = onOpenSettings, shape = RoundedCornerShape(12.dp)) {
                     Text("去设置里拉取")
                 }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    offers.forEach { (owner, ids) ->
+                        if (offers.size > 1) {
+                            Text(
+                                text = owner.shortLabel,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                ),
+                                color = scheme.primary,
+                                modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                            )
+                        }
+                        val groups = groupModels(ids)
+                        groups.forEach { (group, groupIds) ->
+                            if (groups.size > 1) {
+                                Text(
+                                    text = group,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                                )
+                            }
+                            groupIds.forEach { id ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(MaterialTheme.shapes.small)
+                                        .clickable(
+                                            interactionSource = remember { MutableInteractionSource() },
+                                            indication = ripple(),
+                                        ) { onPickModel(owner, id) }
+                                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    RadioButton(
+                                        // Ticked on the resolved choice, never on the raw
+                                        // settings: a conversation that picked its own model
+                                        // shows that one, and one that never picked shows
+                                        // whatever the persona and the default resolve to.
+                                        selected = owner.id == choice.providerId &&
+                                            id == choice.model,
+                                        onClick = null,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = owner.displayModel(id),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 /**
+ * What the dictation card is doing.
+ *
+ * The card used to be a single `listening` flag, which is why a recognizer that refused the
+ * app closed the card without a word: there was no state in which a failure could be shown.
+ */
+private sealed interface VoicePhase {
+    /** Between startListening and onReadyForSpeech: the recognizer is warming up. */
+    object Preparing : VoicePhase
+
+    object Listening : VoicePhase
+
+    /** Speech ended; the recognizer is turning it into text, and the mic is closed. */
+    object Thinking : VoicePhase
+
+    /** It failed. [message] says why in plain words, [code] keeps the raw code for retry. */
+    data class Failed(val message: String, val code: Int) : VoicePhase
+}
+
+/**
+ * The recognizer's error codes in words a user can act on.
+ *
+ * Every one of these used to be swallowed — the card simply vanished — so a device whose
+ * recognizer will not serve third-party apps looked exactly like a dead microphone.
+ */
+private fun voiceErrorMessage(error: Int): String = when (error) {
+    SpeechRecognizer.ERROR_CLIENT -> "识别服务拒绝了这个应用（ERROR_CLIENT）"
+    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别服务正忙，请稍后再试（ERROR_RECOGNIZER_BUSY）"
+    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+        "没有录音权限（ERROR_INSUFFICIENT_PERMISSIONS）"
+
+    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
+        "网络不可用（ERROR_NETWORK）"
+
+    SpeechRecognizer.ERROR_SERVER -> "识别服务出错（ERROR_SERVER）"
+    SpeechRecognizer.ERROR_AUDIO -> "录音出错（ERROR_AUDIO）"
+    SpeechRecognizer.ERROR_NO_MATCH -> "没听清（ERROR_NO_MATCH）"
+    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听到说话（ERROR_SPEECH_TIMEOUT）"
+    else -> "识别失败（错误码 $error）"
+}
+
+/**
  * In-app dictation: a floating card over a scrim, with the recognizer's partial
- * results live in the middle. The system recognizer's own app gave no partials and no
- * way to cancel mid-sentence, which is what the old hand-off cost.
+ * results live in the middle.
  *
  * [SpeechRecognizer] owns the microphone itself; this only draws the card and reads
- * what it reports. Recognition ending — a result or an error — closes the card.
+ * what it reports. A result closes the card. A failure keeps it open with the reason —
+ * and, because some devices (MIUI's AsrService answers ERROR_CLIENT) only let their own
+ * speech screen bind the recognizer, offers the system's input as the way out.
  */
 @Composable
 private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     val context = LocalContext.current
     var partial by remember { mutableStateOf("") }
-    var listening by remember { mutableStateOf(true) }
-    val recognizer = remember {
+    var phase by remember { mutableStateOf<VoicePhase>(VoicePhase.Preparing) }
+    // Retrying means a new recognizer: the failed one is spent, and reusing it would replay
+    // the same refusal.
+    var attempt by remember { mutableStateOf(0) }
+    // One automatic hand-off per visit, or a device that refuses us would throw the system
+    // speech screen at the user again on every retry.
+    var fellBack by remember { mutableStateOf(false) }
+    val recognizer = remember(attempt) {
         SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) = Unit
+                override fun onReadyForSpeech(params: Bundle?) {
+                    phase = VoicePhase.Listening
+                }
+
                 override fun onBeginningOfSpeech() = Unit
                 override fun onRmsChanged(rmsdB: Float) = Unit
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
-                override fun onEndOfSpeech() { listening = false }
+
+                override fun onEndOfSpeech() {
+                    phase = VoicePhase.Thinking
+                }
+
                 override fun onError(error: Int) {
-                    listening = false
-                    onDismiss()
+                    // "Nobody spoke" is not a failure to report: the card closes the way it
+                    // always did. Everything else stays on screen with its reason.
+                    if (error == SpeechRecognizer.ERROR_NO_MATCH ||
+                        error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                    ) {
+                        onDismiss()
+                    } else {
+                        phase = VoicePhase.Failed(voiceErrorMessage(error), error)
+                    }
                 }
 
                 override fun onResults(results: Bundle?) {
-                    listening = false
                     val best = results
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()
@@ -3142,6 +3730,55 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
             recognizer.destroy()
         }
     }
+    // The way out when the in-app recognizer will not have us: the system's own speech
+    // screen, which on this device is the one that can reach the installed recognizer.
+    val systemInput = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val text = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+        if (result.resultCode == Activity.RESULT_OK && !text.isNullOrEmpty()) {
+            onResult(text)
+        } else {
+            // Backing out of the system screen is the user's own decision and says nothing;
+            // an OK with no words is the recognizer having heard nothing, which used to look
+            // exactly like a cancel.
+            if (result.resultCode == Activity.RESULT_OK) {
+                Toast.makeText(context, "没有识别到内容", Toast.LENGTH_SHORT).show()
+            }
+            onDismiss()
+        }
+    }
+    val useSystemInput: () -> Unit = {
+        // Our own recognizer would keep the microphone while the system screen wants it.
+        recognizer.cancel()
+        try {
+            systemInput.launch(
+                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(
+                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                    )
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
+                },
+            )
+        } catch (missing: ActivityNotFoundException) {
+            phase = VoicePhase.Failed("这台设备没有可用的系统语音输入", 0)
+        }
+    }
+    val failure = phase as? VoicePhase.Failed
+    LaunchedEffect(failure?.code) {
+        // A recognizer that refuses this app is the MIUI case; hand the job to the system's
+        // own input once, without making the user ask for it.
+        if (failure?.code == SpeechRecognizer.ERROR_CLIENT && !fellBack) {
+            fellBack = true
+            useSystemInput()
+        }
+    }
+    val listening = phase is VoicePhase.Listening
     val scheme = MaterialTheme.colorScheme
     // Two rings breathing out of the disc while the mic is open: the only motion on
     // the card, and it stops the moment recognition ends.
@@ -3217,7 +3854,13 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             Text(
-                text = partial.ifEmpty { if (listening) "请说话…" else "…" },
+                text = when {
+                    failure != null -> failure.message
+                    partial.isNotEmpty() -> partial
+                    phase is VoicePhase.Listening -> "请说话…"
+                    phase is VoicePhase.Thinking -> "正在识别…"
+                    else -> "正在准备麦克风…"
+                },
                 style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp),
                 color = if (partial.isEmpty()) scheme.onSurfaceVariant else scheme.onSurface,
                 textAlign = TextAlign.Center,
@@ -3226,13 +3869,29 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onDismiss) { Text("取消") }
-                Button(
-                    onClick = { recognizer.stopListening() },
-                    shape = RoundedCornerShape(12.dp),
-                ) {
-                    Text("完成")
+                if (failure != null) {
+                    // The two ways out of a recognizer that will not work: the system's own
+                    // speech screen, or one more try with a fresh recognizer.
+                    TextButton(onClick = useSystemInput) { Text("改用系统语音输入") }
+                    Button(
+                        onClick = {
+                            partial = ""
+                            phase = VoicePhase.Preparing
+                            attempt++
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text("重试")
+                    }
+                } else {
+                    Button(
+                        onClick = { recognizer.stopListening() },
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text("完成")
+                    }
                 }
             }
         }
@@ -3247,6 +3906,344 @@ data class Attachment(
 )
 
 private enum class AttachKind { IMAGE, FILE }
+
+/**
+ * The context window as a ring, left of the mic.
+ *
+ * A gauge rather than a number: 22dp of arc is all the room this row has, and the figures are
+ * one tap away. The arc turns red at 80% of the window — where the engine starts folding the
+ * conversation and where the next question may no longer fit — so the colour carries the
+ * warning and the card carries the detail. Nothing is drawn when the window is unknown
+ * (0 = unlimited): a fraction needs a denominator, and a ring over an unknown one would be
+ * decoration pretending to be data.
+ *
+ * The touch target is 32dp, not the 48dp the primary controls use: this row also carries the
+ * model caption, the mic and the send button, and at 48dp the caption would be too narrow to
+ * read on a 360dp-wide screen.
+ */
+@Composable
+private fun ContextRing(used: Int, window: Int, cachePercent: Int, live: StreamStats?) {
+    if (window <= 0) return
+    val scheme = MaterialTheme.colorScheme
+    val fraction = (used.toFloat() / window).coerceIn(0f, 1f)
+    val tone = if (fraction >= 0.8f) scheme.error else scheme.primary
+    val track = scheme.surfaceVariant
+    var open by remember { mutableStateOf(false) }
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = { open = true },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(22.dp)) {
+            val stroke = 2.5.dp.toPx()
+            val ringSize = Size(size.width - stroke, size.height - stroke)
+            val topLeft = Offset(stroke / 2f, stroke / 2f)
+            drawArc(
+                color = track,
+                startAngle = 0f,
+                sweepAngle = 360f,
+                useCenter = false,
+                topLeft = topLeft,
+                size = ringSize,
+                style = Stroke(width = stroke),
+            )
+            if (fraction > 0f) {
+                drawArc(
+                    color = tone,
+                    // From twelve o'clock, clockwise: how a gauge is read.
+                    startAngle = -90f,
+                    sweepAngle = 360f * fraction,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = ringSize,
+                    style = Stroke(width = stroke, cap = StrokeCap.Round),
+                )
+            }
+        }
+        // The card's anchor: a zero-height box at the ring's top edge, so the popup opens
+        // upward from the ring instead of covering the row it belongs to.
+        Box(Modifier.align(Alignment.TopCenter)) {
+            if (open) {
+                Popup(
+                    alignment = Alignment.BottomCenter,
+                    offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
+                    onDismissRequest = { open = false },
+                    properties = PopupProperties(focusable = true),
+                ) {
+                    ContextRingCard(
+                        used = used,
+                        window = window,
+                        cachePercent = cachePercent,
+                        live = live,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** The ring's detail: the numbers a 22dp arc cannot show. */
+@Composable
+private fun ContextRingCard(used: Int, window: Int, cachePercent: Int, live: StreamStats?) {
+    val scheme = MaterialTheme.colorScheme
+    val percent = used * 100 / window
+    Column(
+        modifier = Modifier
+            .widthIn(max = 240.dp)
+            .shadow(
+                elevation = 8.dp,
+                shape = RoundedCornerShape(16.dp),
+                ambientColor = Color.Black.copy(alpha = 0.25f),
+                spotColor = Color.Black.copy(alpha = 0.25f),
+            )
+            .clip(RoundedCornerShape(16.dp))
+            .background(scheme.surface)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (used <= 0) {
+            Text(
+                text = "暂无数据",
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.onSurfaceVariant,
+            )
+        } else {
+            RingDetail("上下文", "${shortTokens(used)} / ${shortTokens(window)}（$percent%）")
+            if (cachePercent > 0) RingDetail("缓存命中", "$cachePercent%")
+            live?.let {
+                RingDetail(
+                    "本轮",
+                    "入 ${shortTokens(it.lastPromptTokens)} · 出 ${shortTokens(it.tokensOut)}",
+                )
+            }
+        }
+    }
+}
+
+/** One label/value line of the ring's card. */
+@Composable
+private fun RingDetail(label: String, value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 12.3k / 950 — the short form the context readouts use. */
+private fun shortTokens(tokens: Int): String =
+    if (tokens < 1000) "$tokens" else String.format(Locale.US, "%.1fk", tokens / 1000.0)
+
+/**
+ * The messages a compression record covers, or null when this transcript no longer holds
+ * both ends of the span — a branch switch, or a conversation trimmed by hand.
+ */
+private fun checkpointSpan(
+    messages: List<StoredMessage>,
+    checkpoint: ContextCheckpoint,
+): List<StoredMessage>? {
+    val from = messages.indexOfFirst { it.id == checkpoint.fromMessageId }
+    val to = messages.indexOfFirst { it.id == checkpoint.toMessageId }
+    if (from < 0 || to < from) return null
+    return messages.subList(from, to + 1)
+}
+
+/**
+ * One compression the engine made, drawn where it happened.
+ *
+ * A separator, not a bubble: it is not something either side said, it is a note about the
+ * transcript itself. Folded it is a single line; opened it shows the summary the model
+ * produced — bounded, because a summary can be long — and, on request, the messages it
+ * replaced. Those originals are still on disk, which is the whole point of keeping a record:
+ * the conversation is never actually lost, only folded.
+ */
+@Composable
+private fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<StoredMessage>) {
+    val scheme = MaterialTheme.colorScheme
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    var showOriginal by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.small)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = ripple(),
+                    onClick = { expanded = !expanded },
+                )
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Compress,
+                contentDescription = null,
+                tint = scheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "已压缩上下文 · ${formatTime(checkpoint.at)} · " +
+                    "${checkpoint.messages} 条消息 → 摘要",
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                contentDescription = null,
+                tint = scheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, top = 6.dp, bottom = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 200.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Text(
+                        text = checkpoint.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurface,
+                    )
+                }
+                Text(
+                    text = "压缩前约 ${shortTokens(checkpoint.promptTokens)} tokens · " +
+                        "${checkpoint.messages} 条消息 · ${formatTime(checkpoint.at)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = { showOriginal = !showOriginal },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = if (showOriginal) "收起原文" else "查看原文",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                if (showOriginal) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "被压缩的原文（${originals.size} 条）",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.SemiBold,
+                            ),
+                            color = scheme.onSurfaceVariant,
+                        )
+                        originals.forEach { original ->
+                            Column {
+                                Text(
+                                    text = "${if (original.role == Roles.USER) "我" else "随行"} · " +
+                                        formatTime(original.timestamp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    text = original.text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = scheme.onSurface,
+                                    maxLines = 6,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One queued line, above the composer.
+ *
+ * Not a bubble and not a card: it is a line waiting its turn, so it is drawn as one row of
+ * text with the three things the user can still do to it. Only the newest three are drawn
+ * (see [STEER_ROWS_SHOWN]) — a queue long enough to push the field off screen would be
+ * worse than the count that replaces it.
+ */
+@Composable
+private fun SteerQueueRow(
+    steer: PendingSteer,
+    /** The run is over: this line will never be read unless the user sends it again. */
+    undelivered: Boolean,
+    onPromote: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = if (undelivered) "${steer.text}（未送达）" else steer.text,
+            style = MaterialTheme.typography.labelMedium,
+            color = scheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        // An undelivered line has no round left to interrupt: the action starts a new turn
+        // instead, and the label has to say so.
+        QueueAction(if (undelivered) "发送" else "立即插话", onPromote)
+        QueueAction("修改", onEdit)
+        QueueAction("删除", onDelete)
+    }
+}
+
+/** A text-only action of a queued row: no container, because the row is not a card. */
+@Composable
+private fun QueueAction(label: String, onClick: () -> Unit) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick,
+            )
+            .padding(horizontal = 6.dp, vertical = 6.dp),
+    )
+}
 
 /** The chip above the pill: a thumbnail, the name, and a way out of it. */
 @Composable
@@ -3312,6 +4309,9 @@ private fun LazyListState.atEnd(slack: Int = 24): Boolean {
 
 /** Far more than any transcript: the list clamps this to its own end. */
 private const val FOLLOW_SCROLL_PX = 200_000f
+
+/** How many queued lines are drawn before the rest collapse into one count. */
+private const val STEER_ROWS_SHOWN = 3
 
 private const val ATTACHMENT_MAX_WIDTH = 1280
 
@@ -3526,3 +4526,13 @@ private fun formatTime(timestamp: Long): String {
 
 private fun formatDuration(millis: Long): String =
     if (millis < 1000) "${millis}ms" else String.format(Locale.getDefault(), "%.1fs", millis / 1000.0)
+
+/** 12 秒 / 1 分 03 秒 — how the run caption counts, never more than two units. */
+private fun formatRunElapsed(millis: Long): String {
+    val seconds = millis / 1000
+    return if (seconds < 60) {
+        "$seconds 秒"
+    } else {
+        "${seconds / 60} 分 ${(seconds % 60).toString().padStart(2, '0')} 秒"
+    }
+}

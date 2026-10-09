@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.core.Core
+import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.ui.components.SuixingCard
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -154,7 +155,17 @@ fun MemorySection(
                 editing = null
                 scope.launch {
                     val ok = Core.memory.put(saved.key, saved.value)
-                    onNotify(if (ok) "已保存「${saved.key}」" else "保存失败")
+                    // A note the store refused for length alone is not a mystery failure:
+                    // saying how far over the cap it is tells the user what to cut.
+                    val overLength = saved.value.length > MemoryStore.MAX_VALUE_LENGTH
+                    onNotify(
+                        when {
+                            ok -> "已保存「${saved.key}」"
+                            overLength ->
+                                "内容过长（${saved.value.length}/${MemoryStore.MAX_VALUE_LENGTH} 字），请精简后再记"
+                            else -> "保存失败"
+                        },
+                    )
                 }
             },
         )

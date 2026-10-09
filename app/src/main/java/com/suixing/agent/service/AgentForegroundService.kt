@@ -3,6 +3,7 @@ package com.suixing.agent.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -23,6 +24,10 @@ class AgentForegroundService : Service() {
     companion object {
         private const val CHANNEL_ID = "Suixing_agent"
         private const val NOTIFICATION_ID = 1201
+        private const val GRANT_REQUEST = 1203
+
+        /** Shown instead of the usual line when the console could not start for lack of the grant. */
+        private const val CONSOLE_BLOCKED_TEXT = "悬浮窗权限未开启，悬浮球无法显示：点此开启"
 
         fun start(context: Context, text: String = "正在执行任务") {
             val intent = Intent(context, AgentForegroundService::class.java).putExtra(EXTRA_TEXT, text)
@@ -36,6 +41,11 @@ class AgentForegroundService : Service() {
         }
 
         fun stop(context: Context) {
+            // Two conversations can run at once and each one stops the service when it ends, so
+            // the stop is declined while any run is still live: otherwise the first run to
+            // finish would take the notification, the process's foreground protection and the
+            // console down while the other was still working.
+            if (Core.engine.runsFlow.value.isNotEmpty()) return
             runCatching { context.stopService(Intent(context, AgentForegroundService::class.java)) }
         }
 
@@ -58,7 +68,17 @@ class AgentForegroundService : Service() {
         // that is merely about to is not.
         // The console appears only when the user switched it on; a run is silent otherwise.
         scope.launch {
-            if (Core.settings.current().floatingConsole) FloatConsoleService.start(this@AgentForegroundService)
+            if (!Core.settings.current().floatingConsole) return@launch
+            // The console declines to start without the overlay grant, and a run that quietly
+            // shows no ball is indistinguishable from a broken switch: say why in the
+            // notification the run already has, with the one tap that fixes it. Any other
+            // reason a start failed leaves the notification alone.
+            if (FloatConsoleService.start(this@AgentForegroundService) ||
+                FloatConsoleService.canDrawOverlays(this@AgentForegroundService)
+            ) {
+                return@launch
+            }
+            startForeground(NOTIFICATION_ID, buildNotification(CONSOLE_BLOCKED_TEXT, overlayGrantIntent()))
         }
         return START_NOT_STICKY
     }
@@ -90,13 +110,22 @@ class AgentForegroundService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(text: String): Notification =
+    private fun buildNotification(text: String, open: PendingIntent? = null): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_spark)
             .setContentTitle("随行")
             .setContentText(text)
+            .apply { open?.let { setContentIntent(it) } }
             .setOngoing(true)
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
+
+    /** The system's overlay-grant page: the one tap that turns the switch back into a ball. */
+    private fun overlayGrantIntent(): PendingIntent = PendingIntent.getActivity(
+        this,
+        GRANT_REQUEST,
+        FloatConsoleService.overlayPermissionIntent(this).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
 }

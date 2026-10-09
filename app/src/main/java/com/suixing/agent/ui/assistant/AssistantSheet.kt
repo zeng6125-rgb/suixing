@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -28,11 +29,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,15 +57,24 @@ import java.util.UUID
 @Composable
 fun AssistantSheet(
     assistants: List<Assistant>,
+    /** The persona the conversation on screen speaks as — not the app-wide default. */
     activeId: String,
     settings: AppSettings,
     onUse: (Assistant) -> Unit,
+    onSetDefault: (Assistant) -> Unit,
     onSave: (Assistant) -> Unit,
     onDelete: (Assistant) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var editing by remember { mutableStateOf<Assistant?>(null) }
+    // Kept as an id rather than the object so a rotation no longer closes the editor: an
+    // existing persona is looked up in settings again, and the one id that cannot be found
+    // is the freshly created draft, which is rebuilt from its id and the same defaults.
+    // The in-progress edits still live in the editor's own draft.
+    var editingId by rememberSaveable { mutableStateOf<String?>(null) }
+    val editing = editingId?.let { id ->
+        assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -86,9 +97,7 @@ fun AssistantSheet(
                     )
                 }
                 FilledTonalButton(
-                    onClick = {
-                        editing = Assistant(id = UUID.randomUUID().toString(), avatar = "🧭")
-                    },
+                    onClick = { editingId = UUID.randomUUID().toString() },
                 ) {
                     Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
@@ -108,13 +117,15 @@ fun AssistantSheet(
                             AssistantCard(
                                 assistant = assistant,
                                 active = assistant.id == activeId,
+                                isDefault = assistant.id == settings.activeAssistantId,
                                 modelLabel = modelLabel(settings, assistant),
                                 modifier = Modifier.weight(1f),
                                 onClick = {
                                     onUse(assistant)
                                     onDismiss()
                                 },
-                                onEdit = { editing = assistant },
+                                onEdit = { editingId = assistant.id },
+                                onSetDefault = { onSetDefault(assistant) },
                             )
                         }
                         // An odd count leaves the last row half empty; a spacer keeps
@@ -133,17 +144,17 @@ fun AssistantSheet(
             toolNames = Core.tools.names(),
             onSave = {
                 onSave(it)
-                editing = null
+                editingId = null
             },
             onDelete = if (assistants.size > 1) {
                 {
                     onDelete(target)
-                    editing = null
+                    editingId = null
                 }
             } else {
                 null
             },
-            onDismiss = { editing = null },
+            onDismiss = { editingId = null },
         )
     }
 }
@@ -152,10 +163,12 @@ fun AssistantSheet(
 private fun AssistantCard(
     assistant: Assistant,
     active: Boolean,
+    isDefault: Boolean,
     modelLabel: String,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onEdit: () -> Unit,
+    onSetDefault: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
@@ -184,7 +197,34 @@ private fun AssistantCard(
                     Text(assistant.face, fontSize = 20.sp)
                 }
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = onEdit, modifier = Modifier.size(30.dp)) {
+                // One slot for "this is the app-wide default" and "make it one": the star is
+                // the action, and once taken it greys out rather than disappearing, so cards
+                // keep the same geometry in both states. The state itself is spelled out on
+                // the model line, where there is room for words.
+                IconButton(
+                    onClick = onSetDefault,
+                    enabled = !isDefault,
+                    modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Star,
+                        contentDescription = if (isDefault) "默认" else "设为默认",
+                        // Spelled out because an explicit tint outlives the disabled colour
+                        // IconButton would otherwise apply on its own.
+                        tint = if (isDefault) {
+                            scheme.onSurfaceVariant.copy(alpha = 0.38f)
+                        } else {
+                            scheme.primary
+                        },
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+                // The 30dp disc stays the visual; the 48dp minimum sits outside it so the
+                // card's spacing does not change and the ripple stays on the disc.
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Edit,
                         contentDescription = "编辑",
@@ -213,13 +253,26 @@ private fun AssistantCard(
                 }
             }
             Spacer(Modifier.height(2.dp))
-            Text(
-                text = modelLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = scheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = modelLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                // The app-wide default is a weaker fact than "this chat speaks as it", so it
+                // is a word in secondary ink on the quiet line, not a second badge.
+                if (isDefault) {
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = "默认",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                }
+            }
             if (assistant.description.isNotBlank()) {
                 Spacer(Modifier.height(5.dp))
                 Text(

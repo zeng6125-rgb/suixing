@@ -100,26 +100,46 @@ internal fun parseLocalMoment(text: String, zone: ZoneId): Long? {
 class ScheduleStore(private val file: File) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true }
 
-    fun read(): List<Schedule> {
-        if (!file.exists()) return emptyList()
-        return runCatching { json.decodeFromString<List<Schedule>>(file.readText()) }.getOrDefault(emptyList())
+    /**
+     * The scheduler service and any conversation can touch the board at the same moment, and
+     * every write is the whole list: without the lock the later read-modify-write silently
+     * drops the other one's reminder. A plain monitor rather than a coroutine mutex keeps
+     * `read`/`write` non-suspending for their existing callers.
+     */
+    private val lock = Any()
+
+    fun read(): List<Schedule> = synchronized(lock) {
+        if (!file.exists()) {
+            emptyList()
+        } else {
+            runCatching { json.decodeFromString<List<Schedule>>(file.readText()) }.getOrDefault(emptyList())
+        }
     }
 
-    fun write(items: List<Schedule>): List<Schedule> {
+    fun write(items: List<Schedule>): List<Schedule> = synchronized(lock) {
         file.parentFile?.mkdirs()
-        file.writeText(json.encodeToString(items))
-        return items
+        // Temp file then rename, as in ChatRepository: a kill mid-write would otherwise leave
+        // a truncated board, and a truncated board reads back as "no reminders at all".
+        val text = json.encodeToString(items)
+        val temp = File(file.parentFile, "${file.name}.tmp")
+        temp.writeText(text)
+        if (!temp.renameTo(file)) {
+            file.writeText(text)
+            temp.delete()
+        }
+        items
     }
 
     fun find(id: String): Schedule? = read().firstOrNull { it.id == id }
 
     /** Adds or replaces [schedule] by id, and returns the whole board. */
-    fun upsert(schedule: Schedule): List<Schedule> {
-        val current = read().filterNot { it.id == schedule.id }
-        return write(current + schedule)
+    fun upsert(schedule: Schedule): List<Schedule> = synchronized(lock) {
+        write(read().filterNot { it.id == schedule.id } + schedule)
     }
 
-    fun delete(id: String): List<Schedule> = write(read().filterNot { it.id == id })
+    fun delete(id: String): List<Schedule> = synchronized(lock) {
+        write(read().filterNot { it.id == id })
+    }
 
     /**
      * The soonest moment anything on the board is due, or 0 when nothing is.

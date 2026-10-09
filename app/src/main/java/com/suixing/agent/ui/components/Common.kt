@@ -25,11 +25,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowDropDown
-import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -43,10 +44,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.R
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
@@ -321,38 +326,47 @@ fun SuixingTopBar(
                     val interactive = onSubtitleClick != null
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (subtitle != null) {
-                            Text(
-                                text = subtitle,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (interactive) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                            // One button for the label and its caret. They used to be two
+                            // clickables, so TalkBack announced the switch twice and the caret
+                            // on its own was a 16dp target. The caret is decoration now and the
+                            // pair carries a standard 48dp target — the bar grows by it when a
+                            // screen turns the subtitle into a control.
+                            Row(
                                 modifier = Modifier
                                     .weight(1f, fill = false)
                                     .then(
                                         if (interactive) {
                                             Modifier
-                                                .clip(CircleShape)
+                                                .heightIn(min = 48.dp)
+                                                .clip(RoundedCornerShape(12.dp))
                                                 .clickable(onClick = onSubtitleClick!!)
+                                                .padding(horizontal = 6.dp)
                                         } else {
                                             Modifier
                                         },
                                     ),
-                            )
-                            if (interactive) {
-                                Icon(
-                                    imageVector = Icons.Rounded.ArrowDropDown,
-                                    contentDescription = "切换",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .size(16.dp)
-                                        .clip(CircleShape)
-                                        .clickable(onClick = onSubtitleClick!!),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = subtitle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (interactive) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
+                                if (interactive) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.ArrowDropDown,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
                             }
                         }
                         if (subtitleTrailing != null) {
@@ -524,23 +538,81 @@ fun CircleActionButton(
     iconSize: Dp = 20.dp,
     /** 0.dp for a button that must not cast one — the send button is flat by design. */
     shadowElevation: Dp = 2.dp,
+) = CircleActionButton(
+    painter = rememberVectorPainter(icon),
+    contentDescription = contentDescription,
+    onClick = onClick,
+    modifier = modifier,
+    size = size,
+    containerColor = containerColor,
+    contentColor = contentColor,
+    enabled = enabled,
+    iconSize = iconSize,
+    shadowElevation = shadowElevation,
+)
+
+/**
+ * The same disc for a glyph that lives in a drawable rather than in code — the drawer
+ * handle, which the chat header draws from the same resource. Private on purpose: the
+ * public API stays the [ImageVector] one every call site already uses.
+ */
+@Composable
+private fun CircleActionButton(
+    painter: Painter,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 40.dp,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    enabled: Boolean = true,
+    iconSize: Dp = 20.dp,
+    shadowElevation: Dp = 2.dp,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    Surface(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = modifier.size(size),
-        shape = CircleShape,
-        color = containerColor,
-        contentColor = contentColor,
-        shadowElevation = if (pressed) shadowElevation + 2.dp else shadowElevation,
-        interactionSource = interaction,
+    // Two boxes on purpose. M3's clickable Surface folds its 48dp minimum touch size into
+    // the same box that carries the shape, so a 40dp disc asked for inside a 36dp row came
+    // back as a 48x36 ellipse with the ripple bound to that box. Here the outer box is the
+    // touch target and the inner one is only the drawing: the disc is always [size] round
+    // and a parent that cannot spare 48dp costs touch area — never the shape. The click sits
+    // on the outer box so the whole 48dp is reachable: on a child box the hit area would
+    // shrink back to the disc, which is what the old Surface did wrong in the other
+    // direction.
+    Box(
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .clickable(
+                interactionSource = interaction,
+                indication = ripple(
+                    color = contentColor,
+                    // Unbounded and disc-sized: a bounded ripple inside a 48dp box grows
+                    // into the corners and reads as a circle wider than the button, the
+                    // artefact this rewrite exists to remove.
+                    bounded = false,
+                    radius = size / 2,
+                ),
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
     ) {
-        Box(contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .shadow(
+                    elevation = if (pressed) shadowElevation + 2.dp else shadowElevation,
+                    shape = CircleShape,
+                )
+                .clip(CircleShape)
+                .background(containerColor),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
-                imageVector = icon,
+                painter = painter,
                 contentDescription = contentDescription,
+                tint = contentColor,
                 modifier = Modifier.size(iconSize),
             )
         }
@@ -556,28 +628,52 @@ fun CircleActionButton(
 @Composable
 fun DrawerButton(size: Dp = 40.dp, shape: Shape = CircleShape) {
     val open = LocalOpenSidebar.current ?: return
+    // One glyph, drawn once: the chat header's handle is this same drawable through
+    // FlatPainterButton, so the two headers cannot drift into two hamburgers.
+    val handle = painterResource(R.drawable.ic_menu_soft)
     if (shape == CircleShape) {
         CircleActionButton(
-            icon = Icons.Rounded.Menu,
+            painter = handle,
             contentDescription = "打开侧边栏",
             onClick = open,
             size = size,
+            iconSize = 22.dp,
         )
         return
     }
-    Surface(
-        onClick = open,
-        modifier = Modifier.size(size),
-        shape = shape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    // The square handle gets the same treatment as the round one: the 48dp box is the
+    // clickable itself and the tile is a child of it, so the whole box answers the thumb
+    // while the tile keeps its [size]. A Surface(onClick) inside a sized box only reserves
+    // 48dp of layout space — its own hit area stays at [size].
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .minimumInteractiveComponentSize()
+            .clickable(
+                interactionSource = interaction,
+                indication = ripple(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    bounded = false,
+                    radius = size / 2,
+                ),
+                role = Role.Button,
+                onClick = open,
+            ),
+        contentAlignment = Alignment.Center,
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(
-                imageVector = Icons.Rounded.Menu,
-                contentDescription = "打开侧边栏",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
-            )
+        Surface(
+            modifier = Modifier.size(size),
+            shape = shape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    painter = handle,
+                    contentDescription = "打开侧边栏",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.suixing.agent.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -35,7 +36,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
@@ -53,6 +53,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -68,6 +69,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -80,6 +83,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
@@ -165,6 +169,11 @@ fun SuixingApp() {
     val push: (String) -> Unit = { target -> navController.navigate(target) }
 
     CompositionLocalProvider(LocalOpenSidebar provides { drawerOpen = true }) {
+        // The drawer is the shell's own panel rather than a ModalNavigationDrawer, so
+        // nothing else consumes BACK: without this, BACK with the drawer open finished
+        // the activity and dropped the user on the home screen. The assistant sheet is a
+        // window of its own, so it keeps handling BACK while it is up.
+        BackHandler(enabled = drawerOpen) { drawerOpen = false }
         Box(Modifier.fillMaxSize()) {
             Scaffold(
                 modifier = Modifier.imePadding(),
@@ -258,7 +267,16 @@ fun SuixingApp() {
     // Rendered outside the navigation host so a prompt cannot be missed while the
     // user is on another screen — the agent is blocked until it is answered.
     pending.entries.firstOrNull()?.let { (chatId, request) ->
-        ApprovalDialog(chatId, request.toolName, request.args)
+        ApprovalDialog(
+            chatId = chatId,
+            toolName = request.toolName,
+            args = request.args,
+            // The card floats above whichever screen the user is on, so it has to name the
+            // conversation it belongs to: with several runs in flight the prompt on screen
+            // may well be another chat's, and only this line says whose it is.
+            sourceTitle = conversations.firstOrNull { it.id == chatId }?.title,
+            otherWaiting = pending.size - 1,
+        )
     }
 
     // The assistant picker used to live in the chat header's avatar, which the floating
@@ -266,9 +284,12 @@ fun SuixingApp() {
     if (assistantsOpen) {
         AssistantSheet(
             assistants = settings.assistants,
+            // The conversation's own persona, not the app-wide default: a chat that never
+            // picked one falls back to the default, which is what "没指定就默认" means.
             activeId = assistantId.ifBlank { settings.activeAssistantId },
             settings = settings,
             onUse = { chat.useAssistant(it) },
+            onSetDefault = { chat.setDefaultAssistant(it) },
             onSave = { chat.saveAssistant(it) },
             onDelete = { chat.deleteAssistant(it) },
             onDismiss = { assistantsOpen = false },
@@ -302,8 +323,14 @@ private fun BoxScope.Drawer(
     // Every delete entry in the drawer funnels through this one confirmation: a swipe
     // of the thumb on a row must not be able to erase a conversation outright.
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
+    val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(open) {
         if (open) {
+            // Five 56dp rows plus the head do not fit above the keyboard on a short
+            // screen, and the list column can only shrink to zero — the bottom rows,
+            // 设置 included, would sit off-screen with nothing able to scroll them.
+            // Dropping the keyboard gives the panel the height it was laid out for.
+            keyboard?.hide()
             todoCount = withContext(Dispatchers.IO) {
                 Core.todos.read().count { it.status != TODO_COMPLETED }
             }
@@ -364,10 +391,14 @@ private fun BoxScope.Drawer(
                         )
                     }
                     IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
+                        // The same glyph the chat header's compose button draws, at the same
+                        // 22dp: the drawer and the bar are two doors to one action, and they
+                        // read as two until the drawing is shared.
                         Icon(
-                            imageVector = Icons.Rounded.Add,
+                            painter = painterResource(R.drawable.ic_compose),
                             contentDescription = "新对话",
                             tint = scheme.primary,
+                            modifier = Modifier.size(22.dp),
                         )
                     }
                 }
@@ -426,7 +457,12 @@ private fun BoxScope.Drawer(
                     label = "悬浮窗控制台",
                     icon = Icons.Rounded.PictureInPictureAlt,
                     selected = false,
-                    onClick = { if (!consoleOn) onToggleConsole() },
+                    // The whole row toggles, both ways: this row is the app's only
+                    // console switch (the settings page is text only), so a row that
+                    // could only turn it on left the user tapping a dead row while the
+                    // ball was up. The Switch keeps its own handler; a child consumes
+                    // the tap, so the two never fire together.
+                    onClick = onToggleConsole,
                     trailing = {
                         Switch(checked = consoleOn, onCheckedChange = { onToggleConsole() })
                     },
@@ -507,11 +543,25 @@ private fun ConversationRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+            // A run owns its conversation and the view model refuses to delete it, so an
+            // enabled button here was a tap that silently did nothing. The icon is dimmed
+            // to Material's disabled alpha by hand because the explicit tint below would
+            // otherwise keep it looking live.
+            // The icon keeps its 17dp and the ripple its 36dp disc; the 48dp minimum sits
+            // outside them, so only the touch area grows.
+            IconButton(
+                onClick = onDelete,
+                enabled = !running,
+                modifier = Modifier.minimumInteractiveComponentSize().size(36.dp),
+            ) {
                 Icon(
                     imageVector = Icons.Rounded.DeleteOutline,
                     contentDescription = "删除会话",
-                    tint = scheme.onSurfaceVariant,
+                    tint = if (running) {
+                        scheme.onSurfaceVariant.copy(alpha = 0.38f)
+                    } else {
+                        scheme.onSurfaceVariant
+                    },
                     modifier = Modifier.size(17.dp),
                 )
             }
@@ -573,11 +623,42 @@ private fun DrawerAction(
 }
 
 @Composable
-private fun ApprovalDialog(chatId: String, toolName: String, args: String) {
+private fun ApprovalDialog(
+    chatId: String,
+    toolName: String,
+    args: String,
+    /** Title of the conversation whose run is asking; null once it is gone from the list. */
+    sourceTitle: String?,
+    /** How many other conversations are blocked on their own prompt right now. */
+    otherWaiting: Int,
+) {
+    // A deleted or untitled conversation still has to be named: a blank line would leave
+    // the user unable to tell the card apart from the chat they are looking at.
+    val from = sourceTitle?.takeIf { it.isNotBlank() } ?: "另一个会话"
     AlertDialog(
         onDismissRequest = { Core.gate.resolve(chatId, false) },
         icon = { Icon(Icons.Rounded.ShieldMoon, contentDescription = null) },
-        title = { Text("需要你确认") },
+        title = {
+            Column {
+                Text("需要你确认")
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = "来自会话：$from",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // Only worth a line when it is true: one blocked chat is the normal case.
+                if (otherWaiting > 0) {
+                    Text(
+                        text = "还有 $otherWaiting 个会话在等待",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
         text = {
             Column {
                 Text("随行想调用工具：$toolName")

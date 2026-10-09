@@ -33,7 +33,9 @@ import androidx.compose.ui.unit.dp
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.DayUsage
 import com.suixing.agent.data.ModelUsage
+import com.suixing.agent.data.Roles
 import com.suixing.agent.data.TokenTally
+import com.suixing.agent.data.Transcript
 import com.suixing.agent.ui.components.PageTopBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -60,8 +62,22 @@ fun UsageScreen(onBack: () -> Unit) {
         totals = snapshot.totals
         val chats = Core.chats.conversations.value
         conversations = chats.size
-        longestTurn = chats.flatMap { it.messages }
-            .maxOfOrNull { it.completionTokens.toLong() } ?: 0L
+        // One run — one engine pass — is what one bubble on the chat screen reports, and it
+        // is the unit this card is named after. Context is cumulative, so only the run's
+        // newest round knows the real prompt size: the prompt is not summed, the output is
+        // (the same reading as ChatScreen's Usage.of). Rounds written before branching carry
+        // no run id, and each of those is its own group — matching the chat bubble's merge
+        // guard (ChatScreen.kt:1148, `run.isNotEmpty()`). Folding them into one BASE_RUN
+        // group instead would add every old reply in a chat up as though it were one run.
+        longestTurn = chats.maxOfOrNull { chat ->
+            chat.messages
+                .filter { it.role == Roles.ASSISTANT }
+                .groupBy { message -> Transcript.runOf(message).ifEmpty { message.id } }
+                .values
+                .maxOfOrNull { rounds ->
+                    rounds.last().promptTokens.toLong() + rounds.sumOf { it.completionTokens.toLong() }
+                } ?: 0L
+        } ?: 0L
     }
     val scheme = MaterialTheme.colorScheme
     Scaffold(

@@ -37,6 +37,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +53,7 @@ import com.suixing.agent.data.ASSISTANT_AVATARS
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.DEFAULT_SYSTEM_PROMPT
+import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SettingRow
@@ -82,24 +84,31 @@ fun AssistantEditor(
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
                 topBar = {
-                    SuixingTopBar(
-                        title = if (isNew) "新建助手" else "编辑助手",
-                        subtitle = draft.label,
-                        leading = {
-                            Surface(
-                                modifier = Modifier.size(38.dp),
-                                shape = MaterialTheme.shapes.medium,
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text(draft.face, fontSize = 19.sp)
+                    // The shell's drawer handle rides on SuixingTopBar and the composition
+                    // local follows the composition into this dialog's window — but the
+                    // drawer itself is painted behind the dialog, so the handle was a dead
+                    // tap. A dialog is a place with no sidebar: a null local says exactly
+                    // that.
+                    CompositionLocalProvider(LocalOpenSidebar provides null) {
+                        SuixingTopBar(
+                            title = if (isNew) "新建助手" else "编辑助手",
+                            subtitle = draft.label,
+                            leading = {
+                                Surface(
+                                    modifier = Modifier.size(38.dp),
+                                    shape = MaterialTheme.shapes.medium,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(draft.face, fontSize = 19.sp)
+                                    }
                                 }
-                            }
-                        },
-                        actions = {
-                            TextButton(onClick = { onSave(draft) }) { Text("保存") }
-                        },
-                    )
+                            },
+                            actions = {
+                                TextButton(onClick = { onSave(draft) }) { Text("保存") }
+                            },
+                        )
+                    }
                 },
             ) { padding ->
                 Column(

@@ -62,6 +62,31 @@ data class StoredToolCall(
     val arguments: String = "{}",
 )
 
+/**
+ * One span of a conversation that the engine has summarised away, recorded at the moment it
+ * was compressed.
+ *
+ * The summary has to outlive the run that produced it: a wire rebuilt from the full history
+ * would compress — and pay for — the same messages on every following turn, and the user
+ * would have no way to see what was folded away or that the original text is still on disk.
+ */
+@Serializable
+data class ContextCheckpoint(
+    val id: String,
+    /** When the compression happened, in milliseconds. */
+    val at: Long,
+    /** First message of the compressed span, inclusive. */
+    val fromMessageId: String,
+    /** Last message of the compressed span, inclusive. */
+    val toMessageId: String,
+    /** The summary the model produced, verbatim. */
+    val summary: String,
+    /** How many messages the span covered. */
+    val messages: Int,
+    /** Prompt tokens of the wire as it was before compressing, for the usage line. */
+    val promptTokens: Int,
+)
+
 @Serializable
 data class Conversation(
     val id: String,
@@ -77,6 +102,19 @@ data class Conversation(
      * freshly answered question should show.
      */
     val activeRuns: Map<String, String> = emptyMap(),
+    /**
+     * This conversation's own model choice; null means it never picked one and falls back
+     * to the assistant's pin and then to the global default. Stored per conversation on
+     * purpose: picking another model in one chat must not move the model of any other.
+     */
+    val providerId: String? = null,
+    val model: String? = null,
+    /**
+     * Every compression this conversation has been through, oldest first. The messages
+     * themselves are never deleted — this is the record of which spans were folded into
+     * which summary, so a later run can reuse a summary instead of paying to make it again.
+     */
+    val checkpoints: List<ContextCheckpoint> = emptyList(),
 )
 
 object Roles {

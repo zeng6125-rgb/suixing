@@ -1,7 +1,11 @@
 package com.suixing.agent.ui.capability
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -77,7 +81,6 @@ fun CapabilityScreen(onBack: () -> Unit) {
     var notice by remember { mutableStateOf<String?>(null) }
     var explainerOpen by remember { mutableStateOf(false) }
     val supportsAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-    val allFiles = supportsAllFiles && Environment.isExternalStorageManager()
 
     // Overlay permission lives in the system settings app, not in our process, so it has
     // to be re-read when the user comes back rather than remembered in state.
@@ -86,6 +89,17 @@ fun CapabilityScreen(onBack: () -> Unit) {
     val overlayLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { overlayGranted = FloatConsoleService.canDrawOverlays(context) }
+
+    // Same story for "all files access": the grant is decided in the system settings app, so
+    // it is re-read on the way back. Both reads stay guarded by the API check — the call only
+    // exists from Android 11, and below that the card has to keep saying 不支持, not 未授予.
+    var allFilesGranted by remember {
+        mutableStateOf(supportsAllFiles && Environment.isExternalStorageManager())
+    }
+    val allFiles = supportsAllFiles && allFilesGranted
+    val allFilesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { allFilesGranted = supportsAllFiles && Environment.isExternalStorageManager() }
 
     LaunchedEffect(Unit) { Core.capabilities.refresh() }
 
@@ -199,14 +213,14 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 summary = "agent 跑起来时，屏幕上有个能停止、能插话的悬浮球",
                 granted = overlayGranted,
                 lines = if (overlayGranted) {
-                    // Read-only here: the switch itself lives in the chat header, and two
-                    // places to flip it would disagree the moment one of them lagged.
+                    // Read-only here: the switch itself lives in the drawer's bottom row, and
+                    // two places to flip it would disagree the moment one of them lagged.
                     listOf(
                         "已授权：系统权限已就绪",
                         if (settings.floatingConsole) {
-                            "顶栏开关：已打开，agent 运行时悬浮球会出现"
+                            "抽屉开关：已打开，agent 运行时悬浮球会出现"
                         } else {
-                            "顶栏开关：已关闭，去聊天页顶栏的悬浮窗钮打开"
+                            "抽屉开关：已关闭，去左侧抽屉底部的「悬浮窗控制台」那一行打开"
                         },
                     )
                 } else {
@@ -243,10 +257,16 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(
                         onClick = {
-                            if (Core.capabilities.openAllFilesSettings()) {
-                                notice = null
+                            // Started through the launcher, not through the hub: the launcher
+                            // is what reports that the user came back. The global list is the
+                            // fallback for ROMs that only ship that one.
+                            val opened = allFilesSettingsIntents(context).any { intent ->
+                                runCatching { allFilesLauncher.launch(intent) }.isSuccess
+                            }
+                            notice = if (opened) {
+                                null
                             } else {
-                                notice = "本机无法打开「所有文件访问权限」设置，请改用 Shizuku 或 root 获取全盘访问。"
+                                "本机无法打开「所有文件访问权限」设置，请改用 Shizuku 或 root 获取全盘访问。"
                             }
                         },
                     ) { Text("打开设置") }
@@ -472,4 +492,21 @@ private fun formatAgo(timestamp: Long): String {
         delta < 86_400_000L -> "${delta / 3_600_000L} 小时前"
         else -> "${delta / 86_400_000L} 天前"
     }
+}
+
+/**
+ * The "all files access" pages, in the order they should be tried: the per-app entry is the
+ * precise target, the global list is what some ROMs ship instead.
+ *
+ * Second copy of the same two intents as capability/CapabilityHub.kt:128-141. That one starts
+ * the page itself, which tells us nothing about the user coming back; the launcher here needs
+ * the Intent in hand, so the list is built locally. Keep the two in step.
+ */
+private fun allFilesSettingsIntents(context: Context): List<Intent> {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
+    return listOf(
+        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+            .setData(Uri.parse("package:${context.packageName}")),
+        Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+    )
 }

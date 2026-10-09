@@ -74,6 +74,34 @@ fun modelGroupOf(modelId: String): String =
 fun groupModels(ids: List<String>): List<Pair<String, List<String>>> =
     ids.groupBy(::modelGroupOf).toList()
 
+/**
+ * What the composer's model picker offers: every endpoint with ticked models, in the
+ * order the user set them up, each with its own list. The model in use is always
+ * present — a provider list that lost it must still be able to re-pick it.
+ */
+fun modelOffers(
+    providers: List<ProviderConfig>,
+    model: String,
+    active: ProviderConfig?,
+): List<Pair<ProviderConfig, List<String>>> {
+    val list = providers
+        .filter { it.enabled.isNotEmpty() }
+        .map { it to it.enabled }
+        .toMutableList()
+    if (model.isNotBlank() && list.none { (_, ids) -> model in ids }) {
+        // A stale reference (an endpoint that is no longer in the list) must not invent a
+        // group of its own: the first endpoint is the one that can actually be switched to.
+        val owner = active?.takeIf { a -> providers.any { it.id == a.id } } ?: providers.firstOrNull()
+        val at = list.indexOfFirst { (p, _) -> p.id == owner?.id }
+        if (at >= 0) {
+            list[at] = list[at].first to (list[at].second + model).distinct()
+        } else if (owner != null) {
+            list += owner to listOf(model)
+        }
+    }
+    return list
+}
+
 @Serializable
 data class AppSettings(
     val baseUrl: String = "https://api.deepseek.com/v1",
@@ -251,14 +279,7 @@ class SettingsRepository(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val key = stringPreferencesKey("settings_json")
 
-    val flow: Flow<AppSettings> = context.settingsDataStore.data.map { prefs ->
-        val raw = prefs[key]
-        if (raw.isNullOrBlank()) {
-            AppSettings()
-        } else {
-            runCatching { json.decodeFromString<AppSettings>(raw) }.getOrElse { AppSettings() }
-        }
-    }.map { it.migrated() }
+    val flow: Flow<AppSettings> = context.settingsDataStore.data.map { prefs -> decode(prefs[key]) }
 
     suspend fun current(): AppSettings = flow.first()
 
@@ -269,7 +290,26 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun update(block: (AppSettings) -> AppSettings) {
-        save(block(current()))
+        // The read has to happen inside edit{}: DataStore runs these blocks one at a
+        // time, so two concurrent updates (a slider drag and a run writing its own
+        // field) can no longer both start from the same snapshot and have the later
+        // one drop the earlier one's change.
+        context.settingsDataStore.edit { prefs ->
+            prefs[key] = json.encodeToString(AppSettings.serializer(), block(decode(prefs[key])))
+        }
+    }
+
+    /**
+     * One decoder for [flow] and [update] both: what counts as a valid settings file,
+     * and how it migrates, must not depend on which path happened to read it.
+     */
+    private fun decode(raw: String?): AppSettings {
+        val parsed = if (raw.isNullOrBlank()) {
+            AppSettings()
+        } else {
+            runCatching { json.decodeFromString<AppSettings>(raw) }.getOrElse { AppSettings() }
+        }
+        return parsed.migrated()
     }
 }
 
@@ -325,4 +365,39 @@ fun AppSettings.forAssistant(assistant: Assistant?): AppSettings {
         maxTokens = own?.maxTokens ?: maxTokens,
         reasoningEffort = own?.reasoningEffort ?: reasoningEffort,
     )
+}
+
+/** Where one turn goes: the endpoint and the model id, already resolved. */
+data class LlmChoice(
+    val providerId: String?,
+    val baseUrl: String,
+    val apiKey: String,
+    val model: String,
+)
+
+/**
+ * The three places a model can be chosen, in the order that wins: the conversation's own
+ * pick first, then the assistant's pin, and only then the global default. A conversation
+ * that never picked anything therefore starts on the default, and a pick made in one
+ * conversation cannot move another — which is what the picker shows, too.
+ */
+fun AppSettings.choiceFor(
+    conversationProviderId: String?,
+    conversationModel: String?,
+    assistant: Assistant?,
+): LlmChoice {
+    val own = conversationProviderId?.let { id -> providers.firstOrNull { it.id == id } }
+    if (own != null && !conversationModel.isNullOrBlank()) {
+        return LlmChoice(own.id, own.baseUrl, own.apiKey, conversationModel)
+    }
+    val pinned = assistant?.providerId?.takeIf { it.isNotBlank() }
+        ?.let { id -> providers.firstOrNull { it.id == id } }
+    val pinnedModel = assistant?.model?.takeIf { it.isNotBlank() }
+    if (pinned != null) {
+        return LlmChoice(pinned.id, pinned.baseUrl, pinned.apiKey, pinnedModel ?: model)
+    }
+    if (pinnedModel != null) {
+        return LlmChoice(activeProvider()?.id, baseUrl, apiKey, pinnedModel)
+    }
+    return LlmChoice(activeProvider()?.id, baseUrl, apiKey, model)
 }

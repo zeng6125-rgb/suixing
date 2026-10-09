@@ -71,6 +71,19 @@ object TouchFx {
         fx.addTrail(x1, y1, x2, y2)
     }
 
+    /**
+     * The screen is being handed to another app — `open_app`, `am start`, `monkey -p`.
+     *
+     * The edge flash on its own, with no ring: unlike [tap] and [swipe] there is no touch
+     * point to draw, and a ring would have to invent a spot on a screen the agent never
+     * touched. What is left is the part of the signal that is still true — something the
+     * agent did just changed what the user is looking at. Shares [FX_EDGE_THROTTLE_MS]
+     * with the gestures, so a launch straight after a tap does not flash twice.
+     */
+    fun handoff(context: Context) = post(context) { fx ->
+        flashEdge(fx)
+    }
+
     /** Gestures come off the tool dispatcher, but windows and drawing are main-thread only. */
     private fun post(context: Context, block: (FxView) -> Unit) {
         val app = context.applicationContext

@@ -28,9 +28,20 @@ data class TodoItem(
 class TodoStore(private val file: File) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true }
 
-    fun read(): List<TodoItem> {
-        if (!file.exists()) return emptyList()
-        return runCatching { json.decodeFromString<List<TodoItem>>(file.readText()) }.getOrDefault(emptyList())
+    /**
+     * The board is app-wide, so two conversations can write it at the same moment — and every
+     * write is the *whole* list. Without the lock the later read-modify-write drops the other
+     * one's edit. A plain monitor rather than a coroutine mutex keeps `read`/`write`
+     * non-suspending for the callers that already have them.
+     */
+    private val lock = Any()
+
+    fun read(): List<TodoItem> = synchronized(lock) {
+        if (!file.exists()) {
+            emptyList()
+        } else {
+            runCatching { json.decodeFromString<List<TodoItem>>(file.readText()) }.getOrDefault(emptyList())
+        }
     }
 
     /**
@@ -40,12 +51,21 @@ class TodoStore(private val file: File) {
      * refers to entries by id when it reports progress, and a stable, guessable id is what
      * makes "t2 完成了" mean the same thing on both sides of the conversation.
      */
-    fun write(items: List<TodoItem>): List<TodoItem> {
+    fun write(items: List<TodoItem>): List<TodoItem> = synchronized(lock) {
         val stored = items.mapIndexed { index, item ->
             item.copy(id = item.id.ifBlank { "t${index + 1}" })
         }
         file.parentFile?.mkdirs()
-        file.writeText(json.encodeToString(stored))
-        return stored
+        // Temp file then rename, as in ChatRepository and ScheduleStore: a kill mid-write
+        // would otherwise leave a truncated board, and a truncated board reads back as
+        // "no tasks at all" rather than as a board that lost its last edit.
+        val text = json.encodeToString(stored)
+        val temp = File(file.parentFile, "${file.name}.tmp")
+        temp.writeText(text)
+        if (!temp.renameTo(file)) {
+            file.writeText(text)
+            temp.delete()
+        }
+        stored
     }
 }
