@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -48,6 +50,7 @@ import androidx.compose.material.icons.rounded.TravelExplore
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ripple
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -457,6 +460,21 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item {
+                // The provider's own name, editable in place: the chip row's long-press
+                // rename stays, but the name is read every day and typed once a month.
+                OutlinedTextField(
+                    value = selected?.name.orEmpty(),
+                    onValueChange = { value ->
+                        form = form.mapProvider(selected?.id) { it.copy(name = value) }
+                        scope.persist { it.copy(providers = form.providers) }
+                    },
+                    label = { Text("提供方名称") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            item {
                 SettingRow(
                     title = "允许自签名证书",
                     subtitle = "接口是 https 且证书自签时打开。局域网上的反代（例如 " +
@@ -486,7 +504,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             }
             item {
                 OutlinedTextField(
-                    value = form.model,
+                    value = selected?.displayModel(form.model) ?: form.model,
                     onValueChange = { form = form.copy(model = it) },
                     label = { Text("当前模型") },
                     singleLine = true,
@@ -914,6 +932,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             models = selected.models,
             enabled = selected.enabled,
             contexts = form.modelContexts,
+            provider = selected,
             onContext = { model, window ->
                 // Written through immediately: the window belongs to the model, and the
                 // dialog's confirm button is about which models are enabled. The draft is
@@ -926,6 +945,26 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     },
                 )
                 scope.persist { it.copy(modelContexts = form.modelContexts) }
+            },
+            onAlias = { model, name ->
+                form = form.mapProvider(selected.id) { cfg ->
+                    cfg.copy(
+                        aliases = if (name.isEmpty()) cfg.aliases - model else cfg.aliases + (model to name),
+                    )
+                }
+                scope.persist { it.copy(providers = form.providers) }
+            },
+            onAdd = { modelId ->
+                form = form.mapProvider(selected.id) { cfg ->
+                    cfg.copy(models = (cfg.models + modelId).distinct(), enabled = (cfg.enabled + modelId).distinct())
+                }
+                scope.persist { it.copy(providers = form.providers) }
+            },
+            onRemove = { modelId ->
+                form = form.mapProvider(selected.id) { cfg ->
+                    cfg.copy(models = cfg.models - modelId, enabled = cfg.enabled - modelId)
+                }
+                scope.persist { it.copy(providers = form.providers) }
             },
             onConfirm = { picked ->
                 form = form.mapProvider(selected.id) { it.copy(enabled = picked) }
@@ -1597,12 +1636,22 @@ private fun ModelPickerDialog(
     enabled: List<String>,
     /** Per-model context windows, keyed by model name; 0 or missing means 不限. */
     contexts: Map<String, Int>,
+    /** The provider the list belongs to: names and aliases are per provider. */
+    provider: ProviderConfig,
     onContext: (String, Int) -> Unit,
+    /** Rename one model for this provider; a blank name drops the alias. */
+    onAlias: (String, String) -> Unit,
+    /** Add a model id the endpoint did not list. */
+    onAdd: (String) -> Unit,
+    /** Drop a model from the provider's list (aliases stay, harmless). */
+    onRemove: (String) -> Unit,
     onConfirm: (List<String>) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     var picked by remember(models) { mutableStateOf(enabled.toSet()) }
+    var aliasing by remember { mutableStateOf<String?>(null) }
+    var adding by remember { mutableStateOf(false) }
     val groups = remember(models, query) {
         val shown = if (query.isBlank()) {
             models
@@ -1616,6 +1665,15 @@ private fun ModelPickerDialog(
         title = { Text("选择模型") },
         text = {
             Column {
+                // Endpoints that hide a model behind a flag still serve it: typing the
+                // id is the way in, and the row appears as soon as it is added.
+                TextButton(
+                    onClick = { adding = true },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text("自定义模型", style = MaterialTheme.typography.labelSmall)
+                }
+                Spacer(Modifier.height(4.dp))
                 if (models.size > 8) {
                     OutlinedTextField(
                         value = query,
@@ -1649,12 +1707,15 @@ private fun ModelPickerDialog(
                             items(ids, key = { "model-$it" }) { id ->
                                 ModelCheckRow(
                                     id = id,
+                                    label = provider.displayModel(id),
                                     checked = id in picked,
                                     contextWindow = contexts[id] ?: 0,
                                     onToggle = {
                                         picked = if (id in picked) picked - id else picked + id
                                     },
                                     onContext = { onContext(id, it) },
+                                    onAlias = { aliasing = id },
+                                    onRemove = { onRemove(id) },
                                 )
                             }
                         }
@@ -1669,6 +1730,26 @@ private fun ModelPickerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+
+    aliasing?.let { id ->
+        AliasDialog(
+            initial = provider.aliases[id].orEmpty(),
+            onDismiss = { aliasing = null },
+            onConfirm = { name ->
+                onAlias(id, name)
+                aliasing = null
+            },
+        )
+    }
+    if (adding) {
+        AddModelDialog(
+            onDismiss = { adding = false },
+            onConfirm = { modelId ->
+                onAdd(modelId)
+                adding = false
+            },
+        )
+    }
 }
 
 /** One upstream vendor's slice of the list, with a select-all shortcut. */
@@ -1712,12 +1793,17 @@ private fun GroupHeader(
 @Composable
 private fun ModelCheckRow(
     id: String,
+    /** What the row says: the alias when the user gave one, the raw id otherwise. */
+    label: String,
     checked: Boolean,
     contextWindow: Int,
     onToggle: () -> Unit,
     onContext: (Int) -> Unit,
+    onAlias: () -> Unit,
+    onRemove: () -> Unit,
 ) {
     var editing by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
     var draft by remember(editing) {
         mutableStateOf(if (contextWindow > 0) contextWindow.toString() else "")
     }
@@ -1726,18 +1812,36 @@ private fun ModelCheckRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(MaterialTheme.shapes.small)
-                .clickable(onClick = onToggle)
+                .combinedClickable(
+                    onClick = onToggle,
+                    onLongClick = { menuOpen = true },
+                )
                 .padding(end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Checkbox(checked = checked, onCheckedChange = { onToggle() })
             Text(
-                text = id,
+                text = label,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            // The alias is a rename of one model for this provider alone; a blank name
+            // in the dialog drops the alias and the row falls back to the raw id.
+            Icon(
+                imageVector = Icons.Rounded.Edit,
+                contentDescription = "改别名",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(16.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = ripple(),
+                        onClick = onAlias,
+                    ),
+            )
+            Spacer(Modifier.width(8.dp))
             // The chip is the way in, so tapping the name still only picks the model.
             Surface(
                 onClick = { editing = !editing },
@@ -1780,7 +1884,65 @@ private fun ModelCheckRow(
                 modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, bottom = 6.dp),
             )
         }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("移出清单") },
+                onClick = {
+                    menuOpen = false
+                    onRemove()
+                },
+            )
+        }
     }
+}
+
+/** One-line rename of a single model for one provider; blank drops the alias. */
+@Composable
+private fun AliasDialog(initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var value by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("模型别名") },
+        text = {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text("显示名（留空 = 用回原 id）") },
+                singleLine = true,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(value.trim()) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+/** Type a model id the endpoint never listed; it joins the list at once. */
+@Composable
+private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var value by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义模型") },
+        text = {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text("模型 id") },
+                singleLine = true,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = value.isNotBlank(),
+                onClick = { onConfirm(value.trim()) },
+            ) { Text("添加") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 /** A row that leaves this page: the chevron is what says so before it is tapped. */

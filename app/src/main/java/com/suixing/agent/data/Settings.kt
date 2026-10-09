@@ -50,7 +50,10 @@ data class ProviderConfig(
     val reasoningEffort: String? = null,
     /** When false the four overrides above are ignored and the globals apply. */
     val ownSampling: Boolean = false,
+    /** Display names for model ids; the wire id sent to the API never changes. */
+    val aliases: Map<String, String> = emptyMap(),
 ) {
+    fun displayModel(id: String): String = aliases[id]?.takeIf { it.isNotBlank() } ?: id
     val label: String get() = name.ifBlank { baseUrl.ifBlank { "未命名" } }
 
     /** Host-only label, short enough for a chip: `192.168.0.50:8914`. */

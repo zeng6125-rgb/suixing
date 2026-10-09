@@ -23,6 +23,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -63,7 +65,7 @@ import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -127,6 +129,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.material3.ripple
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -263,8 +267,12 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
 
     // The user's own messages are the landmarks of a conversation, so the status line can
     // say "turn 2 of 5" and jump between them without the engine knowing anything about it.
+    // Steered lines ride inside the turn they steer, so counting them would draw one
+    // landmark per interjection — a question plus two steers is still one turn.
     val turnIndices = remember(visible) {
-        visible.indices.filter { visible[it].message.role == Roles.USER }
+        visible.indices.filter {
+            visible[it].message.role == Roles.USER && !visible[it].message.steer
+        }
     }
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
     val currentTurn = turnIndices.indexOfLast { it <= firstVisible }.coerceAtLeast(0) + 1
@@ -359,9 +367,6 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 .padding(padding),
         ) {
             Column(Modifier.fillMaxSize()) {
-                state.error?.let { message ->
-                    ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
-                }
                 if (visible.isEmpty() && !live) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         EmptyHero(onPick = { input = it })
@@ -374,8 +379,11 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                             start = 16.dp,
                             end = 16.dp,
                             // The floating header owns the status bar strip, so the
-                            // first bubble starts below its discs.
-                            top = 84.dp,
+                            // first bubble starts below its discs with 16dp of air:
+                            // status bar + 4dp lift + 56dp row + 16dp gap.
+                            top = with(LocalDensity.current) {
+                                WindowInsets.statusBars.getTop(this).toDp()
+                            } + 76.dp,
                             // The composer floats over the list, so the list leaves room
                             // for it; otherwise the last line of a reply sits under the
                             // pill. Fixed, not ime-grown: the keyboard lifts the whole
@@ -424,6 +432,11 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                                         }
                                     },
                                     streaming = true,
+                                    // The live bubble is the persona's reply too: without
+                                    // these two it fell back to the brand name and feather
+                                    // while every stored bubble showed the persona.
+                                    name = assistant?.label ?: "随行",
+                                    face = assistant?.face ?: "",
                                     runningTool = state.runningTool,
                                     liveStats = state.stats,
                                     contextWindow = settings.contextWindowFor(settings.model),
@@ -436,19 +449,33 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 }
             }
             // Content scrolling behind the floating header fades out instead of being
-            // cut by it: the canvas colour at full alpha under the status strip, gone by
-            // the bottom of the header's own row. Under the discs, over the transcript.
+            // cut by it. It starts at y=0 — behind the status strip too, or the first
+            // line still hard-cuts under the clock — and runs statusBar + 4 + 56 + 16.
+            val statusBarInset = with(LocalDensity.current) {
+                WindowInsets.statusBars.getTop(this).toDp()
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .statusBarsPadding()
-                    .height(72.dp)
+                    .height(statusBarInset + 76.dp)
                     .background(
                         Brush.verticalGradient(
                             listOf(canvasColor, canvasColor.copy(alpha = 0f)),
                         ),
                     ),
             )
+            // The error banner rides below the header's control row and above the fade
+            // layer: in the column it sat under the status strip, and the fade ate its
+            // text. status bar + 4dp lift + 56dp row + 8dp of air.
+            state.error?.let { message ->
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = statusBarInset + 68.dp),
+                ) {
+                    ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
+                }
+            }
             // The floating header: three discs over the transcript, no bar of its own.
             ChatTopBar(
                 title = state.title,
@@ -682,37 +709,34 @@ private fun titleBarStyle(): TextStyle {
     return title.copy(fontSize = title.fontSize * (16f / 17f))
 }
 
-/** The model name in the header; tapping it opens the switcher. */
+/** A flat text dropdown: label plus a caret, no container of its own. */
 @Composable
-private fun ModelChip(label: String, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        modifier = Modifier.shadow(
-            elevation = 8.dp,
-            shape = CircleShape,
-            ambientColor = Color.Black.copy(alpha = 0.25f),
-            spotColor = Color.Black.copy(alpha = 0.25f),
-        ),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+private fun FlatSelector(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick,
+            )
+            .padding(vertical = 8.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.height(30.dp).padding(start = 14.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = label,
-                style = metaStyle(),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Icon(
-                imageVector = Icons.Rounded.KeyboardArrowDown,
-                contentDescription = "切换模型",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp),
-            )
-        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Icon(
+            imageVector = Icons.Rounded.KeyboardArrowDown,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
     }
 }
 
@@ -742,7 +766,7 @@ private fun ModelMenu(settings: AppSettings, onPick: (ProviderConfig, String) ->
             val active = modelId == settings.model &&
                 owner.baseUrl.trimEnd('/') == settings.baseUrl.trimEnd('/')
             DropdownMenuItem(
-                text = { Text(modelId, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                text = { Text(owner.displayModel(modelId), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 trailingIcon = {
                     if (active) {
                         Icon(
@@ -1253,7 +1277,11 @@ private fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
         modifier = Modifier
             .size(28.dp)
             .clip(CircleShape)
-            .clickable(onClick = onClick),
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -1375,10 +1403,18 @@ private fun AssistantRow(
                         // Same rule as thinking: settled tool rows live in the summary
                         // card's expanded list, not flat beside the answer.
                         if (!streaming) return@forEachIndexed
+                        // Consecutive tool rounds merge into one block: one card per
+                        // run of calls, not a card inside a card per round.
+                        val run = mutableListOf(part.calls)
+                        var cursor = index + 1
+                        while (cursor < parts.size && parts[cursor] is Part.Tools) {
+                            run.add((parts[cursor] as Part.Tools).calls)
+                            cursor++
+                        }
                         ToolBundle(
-                            tools = part.calls,
+                            tools = run.flatten(),
                             // Only the newest block can be the one waiting on a tool.
-                            runningTool = runningTool.takeIf { last },
+                            runningTool = runningTool.takeIf { cursor > parts.lastIndex },
                             startExpanded = expandTools,
                         )
                         Spacer(Modifier.height(8.dp))
@@ -1537,11 +1573,23 @@ private fun ProcessCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     // A minimum, not a fixed height: nothing in this row may wrap, and a
-                    // larger 字号 should grow the row rather than clip the title. 36dp
-                    // with 6dp of vertical padding keeps the card a strip, not a slab.
-                    .heightIn(min = 36.dp)
-                    .clickable(onClick = onToggle)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                    // larger 字号 should grow the row rather than clip the title. 32dp
+                    // with 4dp of vertical padding keeps the folded card a one-line strip.
+                    .heightIn(min = 32.dp)
+                    .clip(
+                        RoundedCornerShape(
+                            topStart = 16.dp,
+                            topEnd = 16.dp,
+                            bottomStart = if (expanded) 0.dp else 16.dp,
+                            bottomEnd = if (expanded) 0.dp else 16.dp,
+                        ),
+                    )
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = ripple(),
+                        onClick = onToggle,
+                    )
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -1595,6 +1643,8 @@ private fun ProcessCard(
                 )
             }
             if (expanded) {
+                // Header and content are one card; the hairline is their only seam.
+                HorizontalDivider(color = scheme.outlineVariant)
                 Column(Modifier.padding(12.dp), content = content)
             }
         }
@@ -1653,11 +1703,19 @@ private fun ReasoningBlock(
     // The setting only decides where a block starts; once the user taps the header the
     // choice sticks to that message for as long as it stays in the list.
     var expanded by rememberSaveable { mutableStateOf(startExpanded) }
-    val lines = remember(text) { text.split('\n') }
-    val inner = rememberLazyListState()
-    LaunchedEffect(lines.size, expanded) {
-        if (expanded && streaming && lines.isNotEmpty()) inner.scrollToItem(lines.lastIndex)
+    // A streaming think opens on its own and closes when it settles, but a header the
+    // user tapped is theirs: the auto-close must not fight a manual choice.
+    var userToggled by remember { mutableStateOf(false) }
+    var wasStreaming by remember { mutableStateOf(streaming) }
+    LaunchedEffect(streaming) {
+        if (streaming) {
+            expanded = true
+        } else if (wasStreaming && !userToggled) {
+            expanded = false
+        }
+        wasStreaming = streaming
     }
+    val lines = remember(text) { text.split('\n') }
     val meta = buildList {
         if (reasoningTokens > 0) add("$reasoningTokens tokens")
         if (elapsedMs > 0) add(formatDuration(elapsedMs))
@@ -1669,7 +1727,10 @@ private fun ReasoningBlock(
         icon = Icons.Rounded.Psychology,
         title = "思考过程",
         expanded = expanded,
-        onToggle = { expanded = !expanded },
+        onToggle = {
+            expanded = !expanded
+            userToggled = true
+        },
         preview = firstLine.takeIf { it.isNotEmpty() },
         previewTail = if (streaming && firstLine.isNotEmpty()) {
             { BlinkingCursor() }
@@ -1694,33 +1755,15 @@ private fun ReasoningBlock(
             )
             return@ProcessCard
         }
-        // Short thinks wrap to their own height; only a long one needs the capped,
-        // lazy column — an always-280dp-tall box is what made a one-line think a slab.
-        if (lines.size <= 12) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                lines.forEachIndexed { index, line ->
-                    if (line.isBlank()) {
-                        Spacer(Modifier.height(4.dp))
-                    } else {
-                        MarkdownText(
-                            text = line,
-                            style = thinkingStyle(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (index == lines.lastIndex && streaming) BlinkingCursor()
-                }
-            }
-            return@ProcessCard
-        }
-        LazyColumn(
-            state = inner,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 280.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            itemsIndexed(lines) { index, line ->
+        // Expanded means the whole chain at its own height, no inner scroll: the outer
+        // chat list is the one that scrolls, and a capped inner box is what made two
+        // open blocks on one screen disagree about how tall a think is. A monster chain
+        // caps at 60 lines with an explicit 「展开全部」 instead of burying the transcript.
+        val cap = 60
+        var uncapped by remember { mutableStateOf(false) }
+        val shown = if (uncapped || lines.size <= cap) lines else lines.subList(0, cap)
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            shown.forEachIndexed { index, line ->
                 if (line.isBlank()) {
                     Spacer(Modifier.height(4.dp))
                 } else {
@@ -1732,7 +1775,12 @@ private fun ReasoningBlock(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (index == lines.lastIndex && streaming) BlinkingCursor()
+                if (index == shown.lastIndex && streaming) BlinkingCursor()
+            }
+            if (!uncapped && lines.size > cap) {
+                TextButton(onClick = { uncapped = true }) {
+                    Text("展开全部 ${lines.size} 行")
+                }
             }
         }
     }
@@ -1778,7 +1826,7 @@ private fun ToolBundle(
         ?.trim()
         ?.takeIf { it.isNotEmpty() && it != "{}" }
     ProcessCard(
-        icon = Icons.Rounded.Bolt,
+        icon = Icons.Rounded.Build,
         title = title,
         expanded = expanded,
         onToggle = { expanded = !expanded },
@@ -1825,35 +1873,38 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
         Modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
-            .clickable(onClick = onToggle)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onToggle,
+            )
             .padding(vertical = 6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (line.done) {
-                Box(
-                    Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(tone),
+                Icon(
+                    imageVector = Icons.Rounded.Build,
+                    contentDescription = null,
+                    tint = tone,
+                    modifier = Modifier.size(16.dp),
                 )
             } else {
                 // A call in flight is a spinner, not a dot: the row has to say "still
                 // working" while the model waits on it.
                 CircularProgressIndicator(
-                    modifier = Modifier.size(9.dp),
+                    modifier = Modifier.size(12.dp),
                     strokeWidth = 1.5.dp,
                     color = tone,
                 )
             }
-            Spacer(Modifier.width(9.dp))
+            Spacer(Modifier.width(8.dp))
             Text(
                 text = line.name,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f, fill = false),
             )
-            // Without this the status butts against the name: 「run_shell1 个失败」.
             Spacer(Modifier.width(8.dp))
             Text(
                 text = when {
@@ -1867,6 +1918,22 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
                 maxLines = 1,
                 softWrap = false,
             )
+            // What the call is doing, on the row itself: a folded tool row that only
+            // says 「完成」 is exactly what the user called 「执行什么内容也没有」.
+            val firstArg = line.args.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+                ?.takeIf { it.isNotEmpty() && it != "{}" }
+            if (firstArg != null) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = firstArg,
+                    style = metaStyle(),
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
             Icon(
                 imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
                 contentDescription = null,
@@ -1875,21 +1942,6 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
             )
         }
         val args = line.args.takeIf { it.isNotBlank() && it != "{}" }
-        // While the call runs its arguments are the only clue to what it is doing, so they
-        // are shown without a tap — capped at two lines, because a shell command can be a
-        // screenful. Arguments are the noisy part of a settled call, so there they wait
-        // behind this row's own tap even after the list itself is open.
-        if (args != null && !line.done) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = args,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
         if (expanded && args != null) {
             Spacer(Modifier.height(6.dp))
             Text(
@@ -2124,30 +2176,40 @@ private fun TurnScrubber(
 ) {
     if (turns <= 1) return
     val scheme = MaterialTheme.colorScheme
-    // Exactly four slots, always: the whole transcript folds into four marks and each
-    // mark jumps to the first turn of its quarter. A dense column of one line per turn
-    // read as noise beside the transcript.
+    // One slot per turn, so a tap lands exactly where the eye aims. Past five turns the
+    // column samples five evenly spaced turns instead of growing past the screen; each
+    // slot still jumps to its own turn, not to a quarter's head.
+    val slots = remember(turns) {
+        if (turns <= SCRUBBER_SLOTS) {
+            List(turns) { it }
+        } else {
+            List(SCRUBBER_SLOTS) { i ->
+                kotlin.math.round(i.toDouble() * (turns - 1) / (SCRUBBER_SLOTS - 1)).toInt()
+            }.distinct()
+        }
+    }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(6.dp),
         horizontalAlignment = Alignment.End,
     ) {
-        List(SCRUBBER_SLOTS) { slot ->
-            val from = slot * turns / SCRUBBER_SLOTS
-            val to = (slot + 1) * turns / SCRUBBER_SLOTS - 1
-            val reached = current - 1 <= to
-            val active = current - 1 in from..to
+        slots.forEach { turn ->
+            val reached = turn < current - 1
+            val active = turn == current - 1
             Box(
                 modifier = Modifier
                     .height(18.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .clickable { onJumpTo(from) },
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = ripple(),
+                    ) { onJumpTo(turn) },
                 contentAlignment = Alignment.Center,
             ) {
                 Box(
                     Modifier
-                        // Reached quarters are the long brand lines, the ones ahead
-                        // short outline ones; the quarter being read is brand and bold.
+                        // Reached turns are the long brand lines, the ones ahead short
+                        // outline ones; the turn being read is brand and bold.
                         .width(if (active) 24.dp else if (reached) 20.dp else 12.dp)
                         .height(if (active) 3.dp else 2.dp)
                         .clip(RoundedCornerShape(1.dp))
@@ -2158,7 +2220,7 @@ private fun TurnScrubber(
     }
 }
 
-private const val SCRUBBER_SLOTS = 4
+private const val SCRUBBER_SLOTS = 5
 
 /**
  * Where the context went.
@@ -2405,7 +2467,7 @@ private fun Composer(
                             start = 4.dp,
                             end = 4.dp,
                             top = if (showJump) 0.dp else 16.dp,
-                            bottom = 4.dp,
+                            bottom = 8.dp,
                         ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -2450,56 +2512,80 @@ private fun Composer(
                     .fillMaxWidth()
                     .shadow(
                         elevation = 8.dp,
-                        shape = RoundedCornerShape(28.dp),
+                        shape = RoundedCornerShape(24.dp),
                         ambientColor = Color.Black.copy(alpha = 0.25f),
                         spotColor = Color.Black.copy(alpha = 0.25f),
                     ),
             ) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(24.dp),
                 // Light uses the canvas colour; dark steps one surface up, because there
                 // `surface` IS the canvas and the pill would vanish into it.
                 color = if (LocalDarkTheme.current) scheme.surfaceContainer else scheme.surface,
                 shadowElevation = 0.dp,
             ) {
                 Column {
-                    // Row 1: model and 思考强度 inside the capsule, above the input row —
-                    // one stadium instead of a pill row floating outside it.
+                    // Row 1: the field itself, transparent on the capsule — no border,
+                    // no container, just text with room to breathe above the controls.
+                    BasicTextField(
+                        value = input,
+                        onValueChange = onInput,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 4.dp)
+                            .onFocusChanged { focus ->
+                                if (focus.isFocused) onFocused()
+                            },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            fontSize = 16.sp,
+                            color = scheme.onSurface,
+                        ),
+                        cursorBrush = SolidColor(scheme.primary),
+                        maxLines = 5,
+                        // Enter sends — and while a run is live it sends the line to that
+                        // run instead of starting a second one.
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(
+                            onSend = {
+                                val text = input.trim()
+                                if (text.isEmpty()) return@KeyboardActions
+                                if (running) {
+                                    if (onSteer(text)) onInput("")
+                                } else {
+                                    onSend()
+                                }
+                            },
+                        ),
+                        decorationBox = { inner ->
+                            Box {
+                                if (input.isEmpty()) {
+                                    Text(
+                                        text = if (running) "插一句话…" else "让随行做点什么…",
+                                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
+                                        color = scheme.onSurfaceVariant,
+                                    )
+                                }
+                                inner()
+                            }
+                        },
+                    )
+                    // Row 2: attach, the two flat selectors, mic, action — the controls
+                    // live under the text now, one 44dp line.
                     Row(
                         modifier = Modifier
-                            .height(30.dp)
-                            .padding(start = 16.dp, top = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        var modelsOpen by remember { mutableStateOf(false) }
-                        Box {
-                            ModelChip(
-                                label = settings.shortModel.ifBlank { "选模型" },
-                                onClick = { modelsOpen = true },
-                            )
-                            DropdownMenu(
-                                expanded = modelsOpen,
-                                onDismissRequest = { modelsOpen = false },
-                            ) {
-                                ModelMenu(settings = settings) { provider, model ->
-                                    onPickModel(provider, model)
-                                    modelsOpen = false
-                                }
-                            }
-                        }
-                        ReasoningChip(settings = settings)
-                    }
-                    // Row 2: attach, field, mic, send, with 6dp of air under it.
-                    Row(
-                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp),
+                            .height(44.dp)
+                            .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                     Box {
                         IconButton(
                             onClick = { menuOpen = true },
-                            modifier = Modifier.size(44.dp),
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(scheme.surfaceContainerHigh),
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Add,
@@ -2542,51 +2628,34 @@ private fun Composer(
                             )
                         }
                     }
-                    BasicTextField(
-                        value = input,
-                        onValueChange = onInput,
-                        modifier = Modifier
-                            .weight(1f)
-                            // 12dp + 24dp line + 12dp = the 48dp of the icon buttons
-                            // beside it, so one line of text sits dead centre.
-                            .padding(vertical = 12.dp)
-                            .onFocusChanged { focus ->
-                                if (focus.isFocused) onFocused()
-                            },
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
-                        cursorBrush = SolidColor(scheme.primary),
-                        maxLines = 5,
-                        // Enter sends — and while a run is live it sends the line to that
-                        // run instead of starting a second one.
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(
-                            onSend = {
-                                val text = input.trim()
-                                if (text.isEmpty()) return@KeyboardActions
-                                if (running) {
-                                    if (onSteer(text)) onInput("")
-                                } else {
-                                    onSend()
-                                }
-                            },
-                        ),
-                        decorationBox = { inner ->
-                            Box {
-                                if (input.isEmpty()) {
-                                    Text(
-                                        text = if (running) "插一句话…" else "让随行做点什么…",
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = scheme.onSurfaceVariant,
-                                    )
-                                }
-                                inner()
+                    Spacer(Modifier.width(4.dp))
+                    var modelsOpen by remember { mutableStateOf(false) }
+                    Box {
+                        FlatSelector(
+                            // The alias wins over the raw id; without one the short id
+                            // stays, exactly as the composer has always read.
+                            label = settings.activeProvider()?.displayModel(settings.model)
+                                ?.takeIf { it != settings.model }
+                                ?: settings.shortModel.ifBlank { "选模型" },
+                            onClick = { modelsOpen = true },
+                        )
+                        DropdownMenu(
+                            expanded = modelsOpen,
+                            onDismissRequest = { modelsOpen = false },
+                        ) {
+                            ModelMenu(settings = settings) { provider, model ->
+                                onPickModel(provider, model)
+                                modelsOpen = false
                             }
-                        },
-                    )
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    ReasoningChip(settings = settings)
+                    Spacer(Modifier.weight(1f))
                     IconButton(
                         onClick = onMic,
                         enabled = !running,
-                        modifier = Modifier.size(48.dp),
+                        modifier = Modifier.size(40.dp),
                     ) {
                         Icon(
                             Icons.Rounded.Mic,
@@ -2594,6 +2663,7 @@ private fun Composer(
                             tint = if (running) scheme.onSurfaceVariant else scheme.onSurfaceVariant,
                         )
                     }
+                    Spacer(Modifier.width(4.dp))
                     // 插话发送: only while a run is live and there is something to say —
                     // an always-present second button would be a dead control most of
                     // the time, and the stop button beside it still owns the slot.
@@ -2616,7 +2686,7 @@ private fun Composer(
                         contentDescription = if (running) "停止" else "发送",
                         onClick = { if (running) onStop() else onSend() },
                         enabled = sendable,
-                        size = 48.dp,
+                        size = 44.dp,
                         // Three states, three colours: a live run offers stop, a field with
                         // something in it turns brand-coloured so the button reads as ready,
                         // and an empty field stays a quiet grey circle.
@@ -2662,7 +2732,7 @@ private fun ReasoningChip(settings: AppSettings) {
     val wire = own?.reasoningEffort ?: settings.reasoningEffort
     val name = REASONING_LEVELS.firstOrNull { it.first == wire }?.second ?: "默认"
     Box {
-        ModelChip(label = "思考·$name", onClick = { open = true })
+        FlatSelector(label = "思考 · $name", onClick = { open = true })
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             REASONING_LEVELS.forEach { (level, label) ->
                 DropdownMenuItem(
