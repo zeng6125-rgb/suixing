@@ -44,6 +44,14 @@ private val FX_HANDOFF = Regex("""\b(?:am\s+start(?:-activity)?|monkey)\b""")
 private val FX_HANDOFF_KEY = Regex(FX_INPUT + """keyevent\s+(?:3|187|KEYCODE_HOME|KEYCODE_APP_SWITCH)\b""")
 
 /**
+ * `input text` types into whatever has focus, and `input keyevent` presses a key. Neither has
+ * coordinates, so neither draws anything — but both change what is on screen, so both light the
+ * breathing edge. `keyevent` is matched with any argument, options included (`--longpress 3`).
+ */
+private val FX_TEXT = Regex(FX_INPUT + """text\s+\S""")
+private val FX_KEYEVENT = Regex(FX_INPUT + """keyevent\s+\S""")
+
+/**
  * The one argument that goes into a command which may run as root. A package name has a fixed
  * shape, so anything else — spaces, `;`, `$` — is refused instead of escaped.
  */
@@ -167,8 +175,12 @@ class ShellTools(
             }
         }
         // No ring for a handoff: the agent is not touching the screen, it is handing it over.
-        if (FX_HANDOFF.containsMatchIn(command) || FX_HANDOFF_KEY.containsMatchIn(command)) {
-            TouchFx.handoff(context)
+        val handoff = FX_HANDOFF.containsMatchIn(command) || FX_HANDOFF_KEY.containsMatchIn(command)
+        if (handoff) TouchFx.handoff(context)
+        // Typing and key presses are driving too, but there is nothing to draw at: the light is
+        // the whole signal. The handoff branch above has already lit it for the keys that flash.
+        if (!handoff && (FX_TEXT.containsMatchIn(command) || FX_KEYEVENT.containsMatchIn(command))) {
+            TouchFx.noteDriving(context)
         }
     }
 

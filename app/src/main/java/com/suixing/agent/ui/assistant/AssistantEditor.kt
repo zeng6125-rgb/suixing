@@ -17,12 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Badge
-import androidx.compose.material.icons.rounded.Build
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.Memory
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -44,11 +38,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.suixing.agent.R
 import com.suixing.agent.data.ASSISTANT_AVATARS
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
@@ -146,7 +143,7 @@ fun AssistantEditor(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun IdentitySection(draft: Assistant, onDraft: (Assistant) -> Unit) {
-    SectionCard(title = "身份", icon = Icons.Rounded.Badge, subtitle = "名字与头像") {
+    SectionCard(title = "身份", icon = ImageVector.vectorResource(R.drawable.ic_id_card), subtitle = "名字与头像") {
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -201,7 +198,7 @@ private fun IdentitySection(draft: Assistant, onDraft: (Assistant) -> Unit) {
 private fun PromptSection(draft: Assistant, onDraft: (Assistant) -> Unit) {
     SectionCard(
         title = "系统提示词",
-        icon = Icons.Rounded.Tune,
+        icon = ImageVector.vectorResource(R.drawable.ic_sliders_horizontal),
         subtitle = "这个助手是谁、该怎么做事",
         trailing = {
             TextButton(
@@ -234,7 +231,7 @@ private fun ModelSection(
         else -> draft.model.substringAfter('/')
     }
 
-    SectionCard(title = "模型", icon = Icons.Rounded.Memory, subtitle = "可以让这个助手用另一个模型") {
+    SectionCard(title = "模型", icon = ImageVector.vectorResource(R.drawable.ic_cpu), subtitle = "可以让这个助手用另一个模型") {
         Surface(
             onClick = { open = true },
             modifier = Modifier.fillMaxWidth(),
@@ -254,7 +251,7 @@ private fun ModelSection(
                     modifier = Modifier.weight(1f),
                 )
                 Icon(
-                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
@@ -324,7 +321,7 @@ private fun ToolSection(
     val off = draft.disabledTools.toSet()
     SectionCard(
         title = "工具",
-        icon = Icons.Rounded.Build,
+        icon = ImageVector.vectorResource(R.drawable.ic_wrench),
         subtitle = "关掉的工具这个助手不能调用",
         trailing = {
             TextButton(onClick = { onDraft(draft.copy(disabledTools = emptyList())) }) {

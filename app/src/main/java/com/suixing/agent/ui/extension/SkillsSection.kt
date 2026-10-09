@@ -16,10 +16,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.MenuBook
-import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,8 +33,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.skills.Skill
 import com.suixing.agent.ui.components.SuixingCard
@@ -100,7 +99,7 @@ fun SkillsSection(
 private fun SkillIntroCard(rootPath: String) {
     SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.Rounded.Info, size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            SoftIcon(ImageVector.vectorResource(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text("什么是技能", style = MaterialTheme.typography.titleMedium)
         }
@@ -146,7 +145,7 @@ private fun SkillCard(
 ) {
     SuixingCard(contentPadding = PaddingValues(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.AutoMirrored.Rounded.MenuBook, tint = MaterialTheme.colorScheme.tertiary)
+            SoftIcon(ImageVector.vectorResource(R.drawable.ic_book_open), tint = MaterialTheme.colorScheme.tertiary)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -169,7 +168,7 @@ private fun SkillCard(
             Switch(checked = skill.enabled, onCheckedChange = onToggle)
             IconButton(onClick = onDelete) {
                 Icon(
-                    Icons.Rounded.DeleteOutline,
+                    ImageVector.vectorResource(R.drawable.ic_trash),
                     contentDescription = "删除",
                     modifier = Modifier.size(20.dp),
                 )

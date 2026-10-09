@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lucide music — ISC License. Geometry copied verbatim from
+     https://lucide.dev/icons/music (24 grid, 2 stroke, round caps, round joins);
+     rect/circle primitives were expanded into equivalent path commands because a
+     VectorDrawable has no <rect>. The tint on the Icon side is what colours it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FF000000">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M9 18V5l12-2v13"
+        android:strokeWidth="2"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M3,18 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0 Z"
+        android:strokeWidth="2"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M15,16 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0 Z"
+        android:strokeWidth="2"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

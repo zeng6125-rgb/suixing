@@ -4,9 +4,10 @@
      what colours it.
 
      Drawn on a 22 viewport because every call site renders it at 22dp, so one unit is
-     one dp: each bar is a 13-unit line plus a 1-unit cap at either end — 15dp wide —
-     and 2dp thick, the three centres 5dp apart for a 3dp gap, 12dp tall in all and
-     centred in the box. -->
+     one dp: each bar is a 13-unit line plus a 1.25-unit cap at either end — 15.5dp
+     wide — and 2.5dp thick, the three centres 5.5dp apart for a 3dp gap, 13.5dp tall
+     in all and centred in the box. The weight is 2.5dp because the user compared the
+     button against his reference and called the old 2dp bars thin. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="22dp"
     android:height="22dp"
@@ -15,20 +16,20 @@
     android:tint="#FF000000">
     <path
         android:fillColor="#FF000000"
-        android:pathData="M4.5,6 L17.5,6"
-        android:strokeWidth="2"
+        android:pathData="M4.5,5.5 L17.5,5.5"
+        android:strokeWidth="2.5"
         android:strokeColor="#FF000000"
         android:strokeLineCap="round" />
     <path
         android:fillColor="#FF000000"
         android:pathData="M4.5,11 L17.5,11"
-        android:strokeWidth="2"
+        android:strokeWidth="2.5"
         android:strokeColor="#FF000000"
         android:strokeLineCap="round" />
     <path
         android:fillColor="#FF000000"
-        android:pathData="M4.5,16 L17.5,16"
-        android:strokeWidth="2"
+        android:pathData="M4.5,16.5 L17.5,16.5"
+        android:strokeWidth="2.5"
         android:strokeColor="#FF000000"
         android:strokeLineCap="round" />
 </vector>

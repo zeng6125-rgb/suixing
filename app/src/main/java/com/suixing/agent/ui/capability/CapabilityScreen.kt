@@ -24,17 +24,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.HelpOutline
-import androidx.compose.material.icons.rounded.AdminPanelSettings
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.FolderSpecial
-import androidx.compose.material.icons.rounded.PictureInPictureAlt
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.ShieldMoon
-import androidx.compose.material.icons.rounded.Terminal
-import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -58,8 +47,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.R
 import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
@@ -126,7 +117,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
-                            Icons.Rounded.ErrorOutline,
+                            ImageVector.vectorResource(R.drawable.ic_circle_alert),
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                         )
@@ -138,7 +129,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
 
             CapabilityCard(
                 title = "无障碍服务",
-                icon = Icons.Rounded.TouchApp,
+                icon = ImageVector.vectorResource(R.drawable.ic_pointer),
                 summary = "读屏、点击、滑动、输入文字、截图",
                 granted = state.accessibility,
                 lines = listOf(
@@ -156,7 +147,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
 
             CapabilityCard(
                 title = "Shizuku（ADB 级权限）",
-                icon = Icons.Rounded.Terminal,
+                icon = ImageVector.vectorResource(R.drawable.ic_terminal),
                 summary = "am / pm / input / dumpsys，读写 /sdcard 与 Android/data",
                 granted = state.shellReady,
                 lines = buildList {
@@ -182,7 +173,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
 
             CapabilityCard(
                 title = "Root",
-                icon = Icons.Rounded.AdminPanelSettings,
+                icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
                 summary = "最高权限，可直接读写系统文件",
                 granted = state.rootReady,
                 lines = listOfNotNull(
@@ -209,7 +200,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
 
             CapabilityCard(
                 title = "悬浮窗控制台",
-                icon = Icons.Rounded.PictureInPictureAlt,
+                icon = ImageVector.vectorResource(R.drawable.ic_picture_in_picture_2),
                 summary = "agent 跑起来时，屏幕上有个能停止、能插话的悬浮球",
                 granted = overlayGranted,
                 lines = if (overlayGranted) {
@@ -237,7 +228,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
 
             SuixingCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    SoftIcon(Icons.Rounded.FolderSpecial, tint = MaterialTheme.colorScheme.tertiary)
+                    SoftIcon(ImageVector.vectorResource(R.drawable.ic_folder_cog), tint = MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text("所有文件访问权限", style = MaterialTheme.typography.titleMedium)
@@ -272,7 +263,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     ) { Text("打开设置") }
                     TextButton(onClick = { Core.capabilities.refresh() }) {
                         Icon(
-                            Icons.Rounded.Refresh,
+                            ImageVector.vectorResource(R.drawable.ic_rotate_cw),
                             contentDescription = null,
                             modifier = Modifier.size(17.dp),
                         )
@@ -284,7 +275,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
 
             SectionCard(
                 title = "这三档权限分别能做什么",
-                icon = Icons.AutoMirrored.Rounded.HelpOutline,
+                icon = ImageVector.vectorResource(R.drawable.ic_circle_question_mark),
                 subtitle = if (explainerOpen) "点标题收起" else "点标题展开",
                 trailing = {
                     TextButton(onClick = { explainerOpen = !explainerOpen }) {
@@ -354,7 +345,7 @@ private fun CapabilityHero(state: CapabilityState) {
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
-                                Icons.Rounded.ShieldMoon,
+                                ImageVector.vectorResource(R.drawable.ic_shield_alert),
                                 contentDescription = null,
                                 tint = scheme.onPrimary,
                                 modifier = Modifier.size(22.dp),
@@ -454,7 +445,7 @@ private fun CapabilityCard(
             StatusPill(
                 text = if (granted) "已就绪" else "未就绪",
                 tone = if (granted) Tone.OK else Tone.WARN,
-                icon = if (granted) Icons.Rounded.CheckCircle else null,
+                icon = if (granted) ImageVector.vectorResource(R.drawable.ic_circle_check) else null,
             )
         }
         Spacer(Modifier.height(12.dp))

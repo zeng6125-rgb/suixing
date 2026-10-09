@@ -31,24 +31,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AdminPanelSettings
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.KeyboardArrowUp
-import androidx.compose.material.icons.rounded.Palette
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Insights
-import androidx.compose.material.icons.rounded.SmartToy
-import androidx.compose.material.icons.rounded.Storage
-import androidx.compose.material.icons.rounded.TravelExplore
-import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ripple
 import androidx.compose.material3.AssistChip
@@ -85,10 +67,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
@@ -125,12 +109,6 @@ private val CONTEXT_PRESETS = listOf(
     256_000 to "256k",
     1_000_000 to "1M",
 )
-
-/** Rewrites one saved endpoint in place; a null or unknown id is a no-op. */
-private fun AppSettings.mapProvider(id: String?, block: (ProviderConfig) -> ProviderConfig): AppSettings {
-    if (id == null || providers.none { it.id == id }) return this
-    return copy(providers = providers.map { if (it.id == id) block(it) else it })
-}
 
 /**
  * The pages the root list opens. 权限 is deliberately missing: it is not a page of this
@@ -205,7 +183,7 @@ private fun SettingsRoot(
                 SettingsEntry(
                     title = "模型与生成",
                     summary = "接口、模型与采样",
-                    icon = Icons.Rounded.SmartToy,
+                    icon = ImageVector.vectorResource(R.drawable.ic_bot),
                     onClick = { onOpenPage(SettingsPage.MODEL) },
                 )
             }
@@ -213,7 +191,7 @@ private fun SettingsRoot(
                 SettingsEntry(
                     title = "插话与运行",
                     summary = "插话落点、压缩与工具审批",
-                    icon = Icons.Rounded.Tune,
+                    icon = ImageVector.vectorResource(R.drawable.ic_sliders_horizontal),
                     onClick = { onOpenPage(SettingsPage.STEER) },
                 )
             }
@@ -221,7 +199,7 @@ private fun SettingsRoot(
                 SettingsEntry(
                     title = "外观",
                     summary = "主题、配色与排版",
-                    icon = Icons.Rounded.Palette,
+                    icon = ImageVector.vectorResource(R.drawable.ic_palette),
                     onClick = { onOpenPage(SettingsPage.APPEARANCE) },
                 )
             }
@@ -232,7 +210,7 @@ private fun SettingsRoot(
                 SettingsEntry(
                     title = "权限",
                     summary = "root 与系统能力",
-                    icon = Icons.Rounded.AdminPanelSettings,
+                    icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
                     onClick = { onOpen("capability") },
                 )
             }
@@ -240,7 +218,7 @@ private fun SettingsRoot(
                 SettingsEntry(
                     title = "网络与语音",
                     summary = "搜索走哪里、回复读不读出来",
-                    icon = Icons.Rounded.TravelExplore,
+                    icon = ImageVector.vectorResource(R.drawable.ic_compass),
                     onClick = { onOpenPage(SettingsPage.NETWORK) },
                 )
             }
@@ -248,7 +226,7 @@ private fun SettingsRoot(
                 SettingsEntry(
                     title = "用量",
                     summary = "tokens · 30 日柱状 · 按模型",
-                    icon = Icons.Rounded.Insights,
+                    icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
                     onClick = { onOpenPage(SettingsPage.USAGE) },
                 )
             }
@@ -256,7 +234,7 @@ private fun SettingsRoot(
                 SettingsEntry(
                     title = "数据",
                     summary = "MCP、记忆、悬浮窗与关于",
-                    icon = Icons.Rounded.Storage,
+                    icon = ImageVector.vectorResource(R.drawable.ic_database),
                     onClick = { onOpenPage(SettingsPage.DATA) },
                 )
             }
@@ -311,7 +289,7 @@ private fun SettingsEntry(
             )
         }
         Icon(
-            imageVector = Icons.Rounded.ChevronRight,
+            imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_right),
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp),
@@ -327,6 +305,22 @@ private fun SettingsEntry(
  */
 private fun CoroutineScope.persist(block: (AppSettings) -> AppSettings) {
     launch { Core.settings.update(block) }
+}
+
+/**
+ * Writes one provider's change straight through, addressed by id *inside* the update block:
+ * the draft may hold edits that are not saved yet, and handing it the whole provider list
+ * would write those down with it — and could carry a stale list over a concurrent writer's
+ * change. [com.suixing.agent.data.SettingsRepository.update] runs the block inside the
+ * DataStore edit, so the read-modify-write is one transaction.
+ */
+private fun CoroutineScope.persistProvider(id: String?, block: (ProviderConfig) -> ProviderConfig) {
+    if (id.isNullOrEmpty()) return
+    launch {
+        Core.settings.update { current ->
+            current.copy(providers = current.providers.map { if (it.id == id) block(it) else it })
+        }
+    }
 }
 
 /**
@@ -357,23 +351,31 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     var loadingModels by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
     var outcome by remember { mutableStateOf<TestOutcome?>(null) }
-    var selectedId by remember(stored) {
-        mutableStateOf(stored.activeProvider()?.id ?: stored.providers.firstOrNull()?.id.orEmpty())
+    // The chip being edited. Keyed on the provider ids, never on `stored` itself: the name
+    // field writes through on every keystroke, and a selection re-derived from `stored` on
+    // each of those writes would snap back to the active provider mid-word — the rest of the
+    // name would then be written to whichever provider it snapped to.
+    var selectedId by remember { mutableStateOf("") }
+    LaunchedEffect(stored.providers.map { it.id }) {
+        // Re-point only when the chip the user is on has gone away (migration, a deletion
+        // elsewhere): the draft is what this page shows, so it stays where the user put it.
+        if (stored.providers.none { it.id == selectedId }) {
+            selectedId = stored.activeProvider()?.id ?: stored.providers.firstOrNull()?.id.orEmpty()
+        }
     }
-    // Only real edits count: the draft is compared against the migrated stored settings,
-    // and before the first emission there is nothing to be dirty about.
-    val dirty = seeded && form != stored
     // The endpoint the model fields edit; tapping a chip also makes it the active one.
     val selected = form.providers.firstOrNull { it.id == selectedId } ?: form.providers.firstOrNull()
-    // A switch overwrites baseUrl/apiKey/model with the target provider's values (model only
-    // when that provider has an enabled one — see switchProvider), so "edited by hand" means
-    // the draft no longer matches what a switch would write. Comparing against disk instead
-    // would be too broad: the switch itself already makes the draft differ from disk.
-    val switchModel = selected?.enabled?.firstOrNull()
-    val endpointEdited = selected != null &&
-        (form.baseUrl != selected.baseUrl ||
-            form.apiKey != selected.apiKey ||
-            (switchModel != null && form.model != switchModel))
+    // A chip tap rewrites the endpoint triple (address, key, model) in the draft without
+    // writing to disk, so whether the draft holds a hand edit to it is a rule of its own —
+    // see ModelDraft.kt, where it is unit tested.
+    val endpointEdited = endpointHandEdited(form, stored, selected)
+    // Only real edits count: the draft is compared against the migrated stored settings, and
+    // before the first emission there is nothing to be dirty about. The endpoint triple is
+    // left out on purpose — tapping a chip rewrites it in the draft without writing to disk,
+    // so counting it would call a plain switch "unsaved"; a hand edit there is exactly what
+    // `endpointEdited` reports. Saving writes the draft (a blank address keeps the live
+    // endpoint — see forSaving), so this clears by itself.
+    val dirty = seeded && (endpointEdited || form.differsOutsideEndpoint(stored))
     var pendingSwitch by remember { mutableStateOf<String?>(null) }
     val switchProvider: (ProviderConfig) -> Unit = { provider ->
         selectedId = provider.id
@@ -441,7 +443,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         Button(
                             onClick = {
                                 scope.launch {
-                                    Core.settings.save(form)
+                                    Core.settings.save(form.forSaving(stored))
                                     snackbar.showSnackbar("已保存")
                                 }
                             },
@@ -453,7 +455,9 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                 scope.launch {
                                     testing = true
                                     outcome = null
-                                    Core.settings.save(form)
+                                    // 同保存：空地址不写进全局 active（新建后停在空 provider 上
+                                    // 点测试，不该把正在用的接口清掉）。
+                                    Core.settings.save(form.forSaving(stored))
                                     outcome = runCatching {
                                         client.complete(
                                             settings = form,
@@ -511,7 +515,9 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     value = selected?.name.orEmpty(),
                     onValueChange = { value ->
                         form = form.mapProvider(selected?.id) { it.copy(name = value) }
-                        scope.persist { it.copy(providers = form.providers) }
+                        // 按 id 只写这一个提供方：整份 providers 覆盖会把页面上其它还没保存的
+                        // 草稿一起写下去，也会拿旧快照盖掉别人刚写的值。
+                        scope.persistProvider(selected?.id) { it.copy(name = value) }
                     },
                     label = { Text("提供方名称") },
                     singleLine = true,
@@ -734,7 +740,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             label = { Text("新建") },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Add,
+                                    imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
                                     contentDescription = null,
                                     modifier = Modifier.size(16.dp),
                                 )
@@ -781,7 +787,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                         } else {
                             Icon(
-                                imageVector = Icons.Rounded.Refresh,
+                                imageVector = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
                             )
@@ -1166,7 +1172,7 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                         )
                         IconButton(onClick = { Core.gate.forgetAlways(name) }) {
                             Icon(
-                                Icons.Rounded.Close,
+                                ImageVector.vectorResource(R.drawable.ic_x),
                                 contentDescription = "忘记 $name",
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1212,7 +1218,7 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                         )
                         IconButton(onClick = { Core.gate.forgetDenied(name) }) {
                             Icon(
-                                Icons.Rounded.Close,
+                                ImageVector.vectorResource(R.drawable.ic_x),
                                 contentDescription = "不再拒绝 $name",
                                 modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1535,7 +1541,7 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Rounded.VerifiedUser,
+                        imageVector = ImageVector.vectorResource(R.drawable.ic_badge_check),
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.height(15.dp),
@@ -1547,6 +1553,14 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+            item {
+                // Lucide 是 ISC 许可：它要求保留版权与许可声明，这一页是 App 唯一的出处说明。
+                Text(
+                    text = "图标：Lucide（ISC License）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -1577,7 +1591,7 @@ private fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Tune,
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_sliders_horizontal),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
@@ -1591,9 +1605,9 @@ private fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
                 )
                 Icon(
                     imageVector = if (expanded) {
-                        Icons.Rounded.KeyboardArrowUp
+                        ImageVector.vectorResource(R.drawable.ic_chevron_up)
                     } else {
-                        Icons.Rounded.KeyboardArrowDown
+                        ImageVector.vectorResource(R.drawable.ic_chevron_down)
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1695,7 +1709,7 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
     ) {
         Row(verticalAlignment = Alignment.Top) {
             Icon(
-                imageVector = if (outcome.ok) Icons.Rounded.CheckCircle else Icons.Rounded.ErrorOutline,
+                imageVector = if (outcome.ok) ImageVector.vectorResource(R.drawable.ic_circle_check) else ImageVector.vectorResource(R.drawable.ic_circle_alert),
                 contentDescription = null,
                 tint = tint,
                 modifier = Modifier.size(18.dp),
@@ -1709,7 +1723,7 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
             )
             IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
                 Icon(
-                    imageVector = Icons.Rounded.Close,
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_x),
                     contentDescription = "关闭",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(15.dp),
@@ -1923,7 +1937,7 @@ private fun ModelCheckRow(
             // The alias is a rename of one model for this provider alone; a blank name
             // in the dialog drops the alias and the row falls back to the raw id.
             Icon(
-                imageVector = Icons.Rounded.Edit,
+                imageVector = ImageVector.vectorResource(R.drawable.ic_square_pen),
                 contentDescription = "改别名",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
@@ -2058,7 +2072,7 @@ private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
             )
         }
         Icon(
-            imageVector = Icons.Rounded.ChevronRight,
+            imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_right),
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(18.dp),

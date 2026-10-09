@@ -22,9 +22,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -308,7 +305,9 @@ fun SuixingTopBar(
             // it works.
             val openSidebar = LocalOpenSidebar.current
             if (openSidebar != null) {
-                DrawerButton(size = 38.dp, shape = RoundedCornerShape(13.dp))
+                // The round handle, not the rounded square: the user held the square
+                // against a circular reference and read the button as unchanged.
+                DrawerButton(size = 38.dp)
                 Spacer(Modifier.width(10.dp))
             }
             if (leading != null) {
@@ -361,7 +360,7 @@ fun SuixingTopBar(
                                 )
                                 if (interactive) {
                                     Icon(
-                                        imageVector = Icons.Rounded.ArrowDropDown,
+                                        painter = painterResource(R.drawable.ic_chevron_down),
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.size(16.dp),
@@ -414,10 +413,16 @@ fun PageTopBar(
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // No disc behind the glyph on purpose: this bar is a filled surface of its
+            // own, and a button with a second surface colour on top of it read as a
+            // sticker. The chat header is the other way round — it floats over the
+            // transcript with no fill, so there every button carries its own disc.
             CircleActionButton(
-                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                painter = painterResource(R.drawable.ic_arrow_left),
                 contentDescription = "返回",
                 onClick = onBack,
+                containerColor = Color.Transparent,
+                shadowElevation = 0.dp,
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
@@ -488,9 +493,30 @@ fun FlatIconButton(
 }
 
 /**
+ * The disc the sidebar handle wears: the pale-green circle with dark bars the user
+ * pinned as the reference for that button. That pale green is not one token across the
+ * two schemes — dark's `primary` is the tint itself (#8FD6B6), light keeps it in
+ * `primaryContainer` (#C9EBD8) — so it is picked per scheme instead of pinned to one
+ * colour, which would be wrong in the other theme.
+ */
+@Composable
+private fun handleDisc(): Color = with(MaterialTheme.colorScheme) {
+    if (LocalDarkTheme.current) primary else primaryContainer
+}
+
+/** The other half of [handleDisc]: the ink that reads on that disc. */
+@Composable
+private fun handleInk(): Color = with(MaterialTheme.colorScheme) {
+    if (LocalDarkTheme.current) onPrimary else onPrimaryContainer
+}
+
+/**
  * The same disc as [FlatIconButton] for glyphs that are vectors of our own rather
  * than material's: the drawer handle and the compose pencil are drawn in
  * res/drawable so their stroke weight is ours to set.
+ *
+ * The disc is the handle's pale green and the default ink is the dark one that reads
+ * on it: both this and the drawer's handle draw the one button the user pointed at.
  */
 @Composable
 fun FlatPainterButton(
@@ -498,7 +524,7 @@ fun FlatPainterButton(
     contentDescription: String?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    tint: Color = handleInk(),
     iconSize: Dp = 22.dp,
 ) {
     Surface(
@@ -512,7 +538,7 @@ fun FlatPainterButton(
                 spotColor = Color.Black.copy(alpha = 0.12f),
             ),
         shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        color = handleDisc(),
         contentColor = tint,
     ) {
         Box(contentAlignment = Alignment.Center) {
@@ -536,7 +562,11 @@ fun CircleActionButton(
     contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
     enabled: Boolean = true,
     iconSize: Dp = 20.dp,
-    /** 0.dp for a button that must not cast one — the send button is flat by design. */
+    /**
+     * 0.dp for a button that must not cast one — the send button is flat by design, and
+     * so is the back button on a filled bar. Such a button stays flat when pressed too:
+     * see the press rule in the painter overload below.
+     */
     shadowElevation: Dp = 2.dp,
 ) = CircleActionButton(
     painter = rememberVectorPainter(icon),
@@ -602,7 +632,11 @@ private fun CircleActionButton(
             modifier = Modifier
                 .size(size)
                 .shadow(
-                    elevation = if (pressed) shadowElevation + 2.dp else shadowElevation,
+                    // The press lifts a disc off the surface it sits on. A button that
+                    // asked for no shadow has no disc to lift — the back button on a
+                    // filled bar is only a glyph — so it stays flat on press instead of
+                    // growing a smudge; every filled button keeps the lift.
+                    elevation = if (pressed && shadowElevation > 0.dp) shadowElevation + 2.dp else shadowElevation,
                     shape = CircleShape,
                 )
                 .clip(CircleShape)
@@ -620,8 +654,9 @@ private fun CircleActionButton(
 }
 
 /**
- * The handle that opens the drawer, in the two shapes the app draws it in: a rounded
- * square inside [SuixingTopBar], and a circle in the chat screen's own header.
+ * The handle that opens the drawer. Both headers draw it as a circle now — the shape
+ * the user's reference shows — so [SuixingTopBar] takes the default too; the rounded
+ * square is still accepted for a caller that wants it, and none does today.
  *
  * Public because the chat header is not a [SuixingTopBar]: it is a solid bar of its own.
  */
@@ -637,6 +672,8 @@ fun DrawerButton(size: Dp = 40.dp, shape: Shape = CircleShape) {
             contentDescription = "打开侧边栏",
             onClick = open,
             size = size,
+            containerColor = handleDisc(),
+            contentColor = handleInk(),
             iconSize = 22.dp,
         )
         return

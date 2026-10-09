@@ -13,6 +13,13 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
 
+/**
+ * `<chatId>.live.json` — a draft beside its conversation, never inside it. Top-level because
+ * every listing of `filesDir/chats` has to skip it: it ends in `.json`, exactly like a
+ * transcript does.
+ */
+internal const val LIVE_SUFFIX = ".live.json"
+
 /** Conversations are stored one JSON file per conversation under filesDir/chats. */
 class ChatRepository(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -66,6 +73,9 @@ class ChatRepository(private val context: Context) {
             // A deleted chat's draft is garbage nobody will ever read: the conversation it
             // belongs to is gone from the list, so nothing will look for it again.
             liveFile(id).delete()
+            // A marker pointing at a chat that no longer exists would only send the next
+            // launch down the fallback path anyway, so it is cleared rather than left lying.
+            if (readLastOpenedMarker() == id) lastOpenedFile.delete()
         }
         _conversations.value = _conversations.value.filterNot { it.id == id }
     }
@@ -102,7 +112,49 @@ class ChatRepository(private val context: Context) {
         withContext(Dispatchers.IO) { lock.withLock { liveFile(chatId).delete() } }
     }
 
+    /**
+     * Remembers which conversation was on screen, so the next launch opens that one instead of
+     * whichever chat was written most recently — a chat the user only read has no reason to be
+     * first, and re-saving it just to move it up the list would rewrite megabytes on every
+     * switch.
+     *
+     * The marker is a bare id in a file with no extension, never JSON: [load] picks files out
+     * of this directory by extension, and a dotless name has no extension to match, so this
+     * can never be read back as a conversation.
+     */
+    suspend fun saveLastOpened(chatId: String) = withContext(Dispatchers.IO) {
+        val id = chatId.trim()
+        lock.withLock {
+            if (id.isEmpty()) {
+                lastOpenedFile.delete()
+            } else {
+                writeAtomically(lastOpenedFile, id)
+            }
+        }
+    }
+
+    /** The conversation that was on screen last, or null when there is none to restore. */
+    suspend fun readLastOpened(): String? = withContext(Dispatchers.IO) {
+        val id = readLastOpenedMarker()
+        // Missing, empty and unreadable all mean the same thing: nothing to restore. The
+        // marker holds no history worth rescuing, so it goes rather than being re-reported
+        // at every launch.
+        if (id == null) lastOpenedFile.delete()
+        id
+    }
+
+    private fun readLastOpenedMarker(): String? =
+        runCatching { lastOpenedFile.takeIf { it.exists() }?.readText()?.trim() }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+
     private fun liveFile(chatId: String): File = File(dir, "$chatId$LIVE_SUFFIX")
+
+    /**
+     * `filesDir/chats/last-opened` — which conversation was on screen when the app went away.
+     * No extension on purpose; see [saveLastOpened].
+     */
+    private val lastOpenedFile: File get() = File(dir, "last-opened")
 
     private fun write(conversation: Conversation) {
         val target = File(dir, "${conversation.id}.json")
@@ -137,11 +189,6 @@ class ChatRepository(private val context: Context) {
      */
     private fun quarantine(file: File) {
         runCatching { file.renameTo(File(dir, "${file.name}.corrupt")) }
-    }
-
-    private companion object {
-        /** `<chatId>.live.json` — a draft beside its conversation, never inside it. */
-        const val LIVE_SUFFIX = ".live.json"
     }
 }
 

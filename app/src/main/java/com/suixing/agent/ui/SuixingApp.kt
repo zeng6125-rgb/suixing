@@ -4,12 +4,17 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -33,16 +38,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.PictureInPictureAlt
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.ShieldMoon
-import androidx.compose.material.icons.rounded.SmartToy
-import androidx.compose.material.icons.rounded.TaskAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -66,15 +62,23 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -433,20 +437,20 @@ private fun BoxScope.Drawer(
                 Spacer(Modifier.height(6.dp))
                 DrawerAction(
                     label = "助手",
-                    icon = Icons.Rounded.SmartToy,
+                    icon = painterResource(R.drawable.ic_bot),
                     selected = false,
                     onClick = onOpenAssistants,
                 )
                 DrawerAction(
                     label = "任务",
-                    icon = Icons.Rounded.TaskAlt,
+                    icon = painterResource(R.drawable.ic_list_checks),
                     selected = route == "tasks",
                     onClick = { onNavigate("tasks") },
                     badge = if (todoCount > 0) "$todoCount" else null,
                 )
                 DrawerAction(
                     label = "文件",
-                    icon = Icons.Rounded.FolderOpen,
+                    icon = painterResource(R.drawable.ic_folder_open),
                     selected = route == "files",
                     onClick = { onNavigate("files") },
                 )
@@ -455,7 +459,7 @@ private fun BoxScope.Drawer(
                 // page comes first and the switch flips when the grant lands.
                 DrawerAction(
                     label = "悬浮窗控制台",
-                    icon = Icons.Rounded.PictureInPictureAlt,
+                    icon = painterResource(R.drawable.ic_picture_in_picture_2),
                     selected = false,
                     // The whole row toggles, both ways: this row is the app's only
                     // console switch (the settings page is text only), so a row that
@@ -469,7 +473,7 @@ private fun BoxScope.Drawer(
                 )
                 DrawerAction(
                     label = "设置",
-                    icon = Icons.Rounded.Settings,
+                    icon = painterResource(R.drawable.ic_settings),
                     selected = route == "settings",
                     onClick = { onNavigate("settings") },
                 )
@@ -527,13 +531,11 @@ private fun ConversationRow(
         ) {
             if (running) {
                 // 运行中的会话可能在用户看不见的那一屏里跑，抽屉里得有个标记，
-                // 否则「谁在占着那个 run」只能靠猜。
-                Box(
-                    Modifier
-                        .size(7.dp)
-                        .background(scheme.primary, CircleShape),
-                )
-                Spacer(Modifier.width(9.dp))
+                // 否则「谁在占着那个 run」只能靠猜。标记本身在转：静止的点看不出
+                // 「它正在动」，而这一行要回答的正是「现在有没有人在跑」。
+                // 14dp 的环比原来的 7dp 点宽，间距收窄到 2dp，标题的左缘不动。
+                RunningSpinner(Modifier.size(14.dp))
+                Spacer(Modifier.width(2.dp))
             }
             Text(
                 text = conversation.title,
@@ -547,7 +549,7 @@ private fun ConversationRow(
             // enabled button here was a tap that silently did nothing. The icon is dimmed
             // to Material's disabled alpha by hand because the explicit tint below would
             // otherwise keep it looking live.
-            // The icon keeps its 17dp and the ripple its 36dp disc; the 48dp minimum sits
+            // The icon keeps its 18dp and the ripple its 36dp disc; the 48dp minimum sits
             // outside them, so only the touch area grows.
             IconButton(
                 onClick = onDelete,
@@ -555,24 +557,62 @@ private fun ConversationRow(
                 modifier = Modifier.minimumInteractiveComponentSize().size(36.dp),
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.DeleteOutline,
+                    painter = painterResource(R.drawable.ic_trash),
                     contentDescription = "删除会话",
                     tint = if (running) {
                         scheme.onSurfaceVariant.copy(alpha = 0.38f)
                     } else {
                         scheme.onSurfaceVariant
                     },
-                    modifier = Modifier.size(17.dp),
+                    modifier = Modifier.size(18.dp),
                 )
             }
         }
     }
 }
 
+/**
+ * 会话行左侧的运行标记：一段 270° 的弧在转，而不是一个静止的点。
+ *
+ * 自绘而不是用 Material 的 Autorenew/Sync：那两个图标画的是「刷新」语义，会被读成
+ * 一个可以点的动作，而这里只是状态。只有运行中的行才建这段动画——整抽屉一起转比
+ * 没有标记更糟。
+ */
+@Composable
+private fun RunningSpinner(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "running")
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+        ),
+        label = "angle",
+    )
+    val arc = MaterialTheme.colorScheme.primary
+    Canvas(
+        modifier = modifier.semantics { contentDescription = "正在运行" },
+    ) {
+        val stroke = 1.6.dp.toPx()
+        val diameter = size.minDimension
+        // 内缩半个线宽，圆头端点才不会在 14dp 的盒子里被切掉。
+        drawArc(
+            color = arc,
+            startAngle = angle,
+            sweepAngle = 270f,
+            useCenter = false,
+            topLeft = Offset(stroke / 2f, stroke / 2f),
+            size = Size(diameter - stroke, diameter - stroke),
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+    }
+}
+
 @Composable
 private fun DrawerAction(
     label: String,
-    icon: ImageVector,
+    /** A Lucide vector from res/drawable: the drawer rows all draw from one icon set. */
+    icon: Painter,
     selected: Boolean,
     onClick: () -> Unit,
     badge: String? = null,
@@ -596,7 +636,7 @@ private fun DrawerAction(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = icon,
+                painter = icon,
                 contentDescription = null,
                 tint = if (selected) scheme.primary else scheme.onSurfaceVariant,
                 modifier = Modifier.size(24.dp),
@@ -637,7 +677,7 @@ private fun ApprovalDialog(
     val from = sourceTitle?.takeIf { it.isNotBlank() } ?: "另一个会话"
     AlertDialog(
         onDismissRequest = { Core.gate.resolve(chatId, false) },
-        icon = { Icon(Icons.Rounded.ShieldMoon, contentDescription = null) },
+        icon = { Icon(ImageVector.vectorResource(R.drawable.ic_shield_alert), contentDescription = null) },
         title = {
             Column {
                 Text("需要你确认")

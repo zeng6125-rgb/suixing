@@ -22,19 +22,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.AudioFile
-import androidx.compose.material.icons.rounded.Code
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.FolderZip
-import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.Movie
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -57,8 +44,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.R
 import com.suixing.agent.tools.humanSize
 import com.suixing.agent.tools.workspaceDir
 import com.suixing.agent.ui.components.PageTopBar
@@ -120,11 +109,11 @@ fun FilesScreen(onBack: () -> Unit) {
             onBack = onBack,
             actions = {
                 IconButton(onClick = { reload++ }) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
+                    Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), contentDescription = "刷新", modifier = Modifier.size(20.dp))
                 }
                 if (current != root) {
                     IconButton(onClick = { current = current.parentFile ?: root }) {
-                        Icon(Icons.Rounded.ArrowUpward, contentDescription = "上一级", modifier = Modifier.size(20.dp))
+                        Icon(ImageVector.vectorResource(R.drawable.ic_arrow_up), contentDescription = "上一级", modifier = Modifier.size(20.dp))
                     }
                 }
             },
@@ -248,7 +237,7 @@ private fun Breadcrumbs(root: File, current: File, onJump: (File) -> Unit) {
             }
             if (!last) {
                 Icon(
-                    Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                    ImageVector.vectorResource(R.drawable.ic_chevron_right),
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.outline,
@@ -285,7 +274,7 @@ private fun EntryRow(entry: Entry, onClick: () -> Unit) {
         }
         if (entry.file.isDirectory) {
             Icon(
-                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                ImageVector.vectorResource(R.drawable.ic_chevron_right),
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.outline,
             )
@@ -325,7 +314,7 @@ private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, on
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
         dismissButton = {
             TextButton(onClick = onCopy) {
-                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(ImageVector.vectorResource(R.drawable.ic_copy), contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("复制")
             }
@@ -334,18 +323,19 @@ private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, on
 }
 
 /** Extension-driven icon and colour, so the list is scannable without reading names. */
+@Composable
 private fun iconFor(file: File): Pair<ImageVector, Color> {
-    if (file.isDirectory) return Icons.Rounded.Folder to Color(0xFFAD7BF9)
+    if (file.isDirectory) return ImageVector.vectorResource(R.drawable.ic_folder) to Color(0xFFAD7BF9)
     return when (file.extension.lowercase(Locale.ROOT)) {
-        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> Icons.Rounded.Image to Color(0xFF89C8AF)
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> ImageVector.vectorResource(R.drawable.ic_image) to Color(0xFF89C8AF)
         "kt", "kts", "java", "py", "js", "ts", "tsx", "jsx", "c", "cpp", "h", "rs", "go", "sh",
         "json", "yml", "yaml", "xml", "toml", "gradle", "html", "css", "sql",
-        -> Icons.Rounded.Code to Color(0xFF7FB3E8)
-        "md", "txt", "log", "csv", "ini", "conf", "properties" -> Icons.Rounded.Description to Color(0xFFB9B4AA)
-        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> Icons.Rounded.FolderZip to Color(0xFFF0C070)
-        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> Icons.Rounded.AudioFile to Color(0xFFD1A3E8)
-        "mp4", "mkv", "mov", "avi", "webm" -> Icons.Rounded.Movie to Color(0xFFE89A9A)
-        else -> Icons.AutoMirrored.Rounded.InsertDriveFile to Color(0xFF9A958C)
+        -> ImageVector.vectorResource(R.drawable.ic_file_code) to Color(0xFF7FB3E8)
+        "md", "txt", "log", "csv", "ini", "conf", "properties" -> ImageVector.vectorResource(R.drawable.ic_file_text) to Color(0xFFB9B4AA)
+        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> ImageVector.vectorResource(R.drawable.ic_file_archive) to Color(0xFFF0C070)
+        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> ImageVector.vectorResource(R.drawable.ic_music) to Color(0xFFD1A3E8)
+        "mp4", "mkv", "mov", "avi", "webm" -> ImageVector.vectorResource(R.drawable.ic_film) to Color(0xFFE89A9A)
+        else -> ImageVector.vectorResource(R.drawable.ic_file) to Color(0xFF9A958C)
     }
 }
 

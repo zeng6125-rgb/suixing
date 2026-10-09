@@ -58,6 +58,14 @@ data class PendingSteer(val id: String, val text: String)
 data class ChatUiState(
     val conversationId: String = "",
     val title: String = "新会话",
+    /**
+     * True until the conversation to show is known.
+     *
+     * The screen draws a bare skeleton while this holds, because an empty state on the way
+     * to the real conversation reads as "it opened a new chat first and then jumped" — which
+     * is exactly what the user saw on every cold start.
+     */
+    val loading: Boolean = true,
     val messages: List<StoredMessage> = emptyList(),
     /** Which run of each turn is on screen; see [Transcript]. */
     val activeRuns: Map<String, String> = emptyMap(),
@@ -261,6 +269,12 @@ class ChatViewModel : ViewModel() {
     private val lastErrors = mutableMapOf<String, String>()
 
     /**
+     * The conversation this process last showed, remembered so a new screen instance can adopt
+     * it before its first frame instead of waiting for the marker file to be read.
+     */
+    private var lastOpenedId: String? = null
+
+    /**
      * Queued lines per conversation, oldest first.
      *
      * Kept here rather than only in the on-screen state so a queue survives a look at
@@ -311,6 +325,18 @@ class ChatViewModel : ViewModel() {
     }
 
     init {
+        // Adopted before the first frame when this process already knows which conversation
+        // the user was in — that is the case where nothing needs reading, so nothing may
+        // flash. With no memory of it the coroutine below decides, and until then the screen
+        // shows the skeleton rather than a conversation the user is not in. The persona is
+        // left blank on purpose: an empty id means "follow the app-wide default", which is
+        // exactly what a fresh state wants, and resolving it needs a suspend call this
+        // constructor cannot make.
+        lastOpenedId?.let { id ->
+            Core.chats.conversations.value.firstOrNull { it.id == id }?.let { cached ->
+                _state.value = cached.toUiState("").copy(loading = false)
+            }
+        }
         // The engine keys its runs by conversation, so this screen subscribes to the
         // state of whichever conversation is on display: a run elsewhere neither
         // locks this screen nor narrates itself into its status line.
@@ -355,19 +381,37 @@ class ChatViewModel : ViewModel() {
             }
         }
         viewModelScope.launch {
-            Core.chats.load()
             val settings = Core.settings.current()
-            val existing = Core.chats.conversations.value.firstOrNull()
+            val assistantId = settings.activeAssistant()?.id.orEmpty()
+            // Only the cold path reads the files: when the conversations are already in
+            // memory the state above is the real one, and loading them again would only
+            // make the screen wait for something it already has.
+            if (Core.chats.conversations.value.isEmpty()) Core.chats.load()
+            val conversations = Core.chats.conversations.value
+            // The conversation the user was last in — and only if it is still there: the
+            // marker can outlive its conversation (deleted from another entry point), and
+            // opening a chat that no longer exists would leave the screen on nothing. The
+            // in-memory id is preferred because it is what this process last showed; the
+            // file is the cold-start answer.
+            val reopened = (lastOpenedId ?: Core.chats.readLastOpened())?.let { id ->
+                conversations.firstOrNull { it.id == id }
+            }
+            val existing = reopened ?: conversations.firstOrNull()
             if (existing == null) {
                 val created = Core.chats.create()
                 _state.value = ChatUiState(
                     conversationId = created.id,
                     title = created.title,
-                    assistantId = settings.activeAssistant()?.id.orEmpty(),
+                    assistantId = assistantId,
+                    loading = false,
                 )
             } else {
-                _state.value = existing.toUiState(settings.activeAssistant()?.id.orEmpty())
+                _state.value = existing.toUiState(assistantId).copy(loading = false)
             }
+            // Recorded here as well as on a switch: a session that only ever read one
+            // conversation never wrote the marker, and the next launch would fall back to
+            // "most recently written" — which is not where the user was.
+            rememberOpened(_state.value.conversationId)
             // Same recovery on a cold start: the run that was streaming when the process
             // died has no session any more, only its draft.
             mergeLiveDraft(_state.value.conversationId)
@@ -393,8 +437,26 @@ class ChatViewModel : ViewModel() {
                 conversationId = created.id,
                 title = created.title,
                 assistantId = settings.activeAssistant()?.id.orEmpty(),
+                loading = false,
             )
+            // A brand-new conversation is where the user is now: without this the next
+            // launch would reopen whatever was written last, not what they left open.
+            rememberOpened(created.id)
         }
+    }
+
+    /**
+     * Remembers the conversation the user is in, for the next launch.
+     *
+     * A file of its own rather than a timestamp on the conversation: a transcript can be
+     * megabytes, and rewriting one just to say "this is where I was" would be absurd — which
+     * is why "touch the conversation so it sorts first" was rejected. Fire and forget: the
+     * switch must not wait for a disk write.
+     */
+    private fun rememberOpened(chatId: String) {
+        if (chatId.isEmpty()) return
+        lastOpenedId = chatId
+        viewModelScope.launch { Core.chats.saveLastOpened(chatId) }
     }
 
     fun openConversation(conversation: Conversation) {
@@ -418,6 +480,8 @@ class ChatViewModel : ViewModel() {
                 reasoning = live.reasoning,
                 status = live.status,
                 runningHere = true,
+                // A conversation the screen already has is not "still opening".
+                loading = false,
                 // The tool it is inside right now: without it the row that says what the
                 // run is doing went blank on every switch back.
                 runningTool = live.runningTool,
@@ -443,6 +507,8 @@ class ChatViewModel : ViewModel() {
         // A run that was killed left its half-written answer in a draft file: it belongs to
         // this conversation, so it is picked up the moment the conversation is.
         viewModelScope.launch { mergeLiveDraft(conversation.id) }
+        // Where the user is, for the next launch.
+        rememberOpened(conversation.id)
     }
 
     /**
@@ -497,10 +563,14 @@ class ChatViewModel : ViewModel() {
                     conversationId = created.id,
                     title = created.title,
                     assistantId = settings.activeAssistant()?.id.orEmpty(),
+                    loading = false,
                 )
             } else {
                 next.toUiState(settings.activeAssistant()?.id.orEmpty())
             }
+            // The deleted conversation may have been the marker's; the one now on screen is
+            // where the user is.
+            rememberOpened(_state.value.conversationId)
         }
     }
 
@@ -1347,6 +1417,9 @@ private fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = C
     providerId = providerId,
     model = model,
     checkpoints = checkpoints,
+    // A conversation read from disk is not "still opening": this state is what the skeleton
+    // is replaced by, so it must not leave the flag set.
+    loading = false,
 )
 
 /** How many compressions of one conversation are kept; older ones are dropped. */

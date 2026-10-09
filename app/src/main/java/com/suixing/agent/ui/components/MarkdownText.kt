@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.components
 
 import kotlinx.coroutines.delay
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -9,9 +10,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.material3.Icon
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
@@ -52,6 +50,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.suixing.agent.R
 
 // ---------------------------------------------------------------------------
 // Block model + parser. Pure Kotlin: no Android or Compose types are involved,
@@ -779,7 +779,7 @@ private fun CodeBlock(block: MdBlock.Code) {
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                        imageVector = if (copied) ImageVector.vectorResource(R.drawable.ic_check) else ImageVector.vectorResource(R.drawable.ic_copy),
                         contentDescription = if (copied) "已复制" else "复制代码",
                         tint = if (copied) {
                             MaterialTheme.colorScheme.primary

@@ -404,7 +404,10 @@ class UiTools(
             val append = args.bool("append", false)
             val ok = runCatching { if (append) service.appendText(text) else service.setText(text) }
                 .getOrDefault(false)
-            if (ok) return ToolResult.success("已输入 ${text.length} 字")
+            if (ok) {
+                TouchFx.noteDriving(context)
+                return ToolResult.success("已输入 ${text.length} 字")
+            }
             if (!privileged()) {
                 return ToolResult.failure("没有找到可输入的输入框，请先点击输入框再输入。")
             }
@@ -419,6 +422,9 @@ class UiTools(
         val escaped = text.replace("\\", "").replace("'", "").replace(" ", "%s")
         val result = shell("input text '$escaped'") ?: return blocked()
         if (!result.ok) return ToolResult.failure("输入没成功：${result.render(300)}")
+        // Typing changes what is on screen, so it counts as driving the phone — it just has no
+        // point to draw a ring at, which is why the light is the only sign of it.
+        TouchFx.noteDriving(context)
         return ToolResult.success("已通过 ${shellName()} 输入 ${text.length} 个字符")
     }
 
@@ -435,6 +441,7 @@ class UiTools(
         }
         val ok = runCatching { service.typeIntoField(label, text) }.getOrDefault(false)
         return if (ok) {
+            TouchFx.noteDriving(context)
             ToolResult.success("已在「$label」输入 ${text.length} 字")
         } else {
             ToolResult.failure("没有找到「$label」，可以先 ui_dump 看界面元素。")
@@ -454,7 +461,10 @@ class UiTools(
                 else -> service.notifications()
             }
         }.getOrDefault(false)
-        if (viaAccessibility) return ToolResult.success("已发送按键 $name")
+        if (viaAccessibility) {
+            TouchFx.noteDriving(context)
+            return ToolResult.success("已发送按键 $name")
+        }
 
         if (!privileged()) {
             return if (service == null) blocked() else ToolResult.failure("按键没被系统接受")
@@ -467,6 +477,9 @@ class UiTools(
         }
         val result = shell(command) ?: return blocked()
         if (!result.ok) return ToolResult.failure("按键没成功：${result.render(300)}")
+        // A key press changes the screen, so it is driving; the flash stays the shell's business,
+        // where the two keys that hand the phone to another app are the ones worth flashing for.
+        TouchFx.noteDriving(context)
         return ToolResult.success("已发送按键 $name（经由 ${shellName()}）")
     }
 

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lucide circle-question-mark — ISC License. Geometry copied verbatim from
+     https://lucide.dev/icons/circle-question-mark (24 grid, 2 stroke, round caps, round joins);
+     rect/circle primitives were expanded into equivalent path commands because a
+     VectorDrawable has no <rect>. The tint on the Icon side is what colours it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FF000000">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M2,12 a10,10 0 1 0 20,0 a10,10 0 1 0 -20,0 Z"
+        android:strokeWidth="2"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"
+        android:strokeWidth="2"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M12 17h.01"
+        android:strokeWidth="2"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

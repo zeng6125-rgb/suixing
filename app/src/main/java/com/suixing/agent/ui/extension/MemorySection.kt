@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,8 +29,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.ui.components.SuixingCard
@@ -120,7 +121,7 @@ fun MemorySection(
                             modifier = Modifier.size(30.dp),
                         ) {
                             Icon(
-                                Icons.Rounded.Close,
+                                ImageVector.vectorResource(R.drawable.ic_x),
                                 contentDescription = "删除 ${row.key}",
                                 modifier = Modifier.size(16.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,

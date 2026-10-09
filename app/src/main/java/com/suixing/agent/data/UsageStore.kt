@@ -134,7 +134,9 @@ class UsageStore(private val context: Context) {
     fun byModel(): List<ModelUsage> = byModelOf(snapshot)
 
     private fun loadConversations(): List<Conversation> =
-        chatsDir.listFiles { file -> file.extension == "json" }
+        // A live draft ends in `.json` too; reading it as a conversation would hand
+        // accumulate() an id that no transcript has.
+        chatsDir.listFiles { file -> file.extension == "json" && !file.name.endsWith(LIVE_SUFFIX) }
             ?.mapNotNull { file -> runCatching { json.decodeFromString<Conversation>(file.readText()) }.getOrNull() }
             ?: emptyList()
 

@@ -19,16 +19,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Dns
-import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.FileDownload
-import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -52,8 +42,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.McpServerConfig
 import com.suixing.agent.mcp.MCP_MAX_RECONNECT_ATTEMPTS
@@ -160,7 +153,7 @@ fun ExtensionScreen(initialTab: Int = 0, onBack: () -> Unit) {
                             }
                         },
                     ) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "刷新", modifier = Modifier.size(20.dp))
+                        Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), contentDescription = "刷新", modifier = Modifier.size(20.dp))
                     }
                     Box {
                         IconButton(
@@ -178,9 +171,9 @@ fun ExtensionScreen(initialTab: Int = 0, onBack: () -> Unit) {
                         ) {
                             Icon(
                                 imageVector = when (tab) {
-                                    0 -> Icons.Rounded.Add
-                                    1 -> Icons.Rounded.FileDownload
-                                    else -> Icons.Rounded.Add
+                                    0 -> ImageVector.vectorResource(R.drawable.ic_plus)
+                                    1 -> ImageVector.vectorResource(R.drawable.ic_download)
+                                    else -> ImageVector.vectorResource(R.drawable.ic_plus)
                                 },
                                 contentDescription = when (tab) {
                                     0 -> "添加服务器"
@@ -199,7 +192,7 @@ fun ExtensionScreen(initialTab: Int = 0, onBack: () -> Unit) {
                             DropdownMenuItem(
                                 text = { Text("选文件夹（批量）") },
                                 leadingIcon = {
-                                    Icon(Icons.Rounded.FolderOpen, null, modifier = Modifier.size(20.dp))
+                                    Icon(ImageVector.vectorResource(R.drawable.ic_folder_open), null, modifier = Modifier.size(20.dp))
                                 },
                                 onClick = {
                                     skillImportMenu = false
@@ -209,7 +202,7 @@ fun ExtensionScreen(initialTab: Int = 0, onBack: () -> Unit) {
                             DropdownMenuItem(
                                 text = { Text("选 .md 文件") },
                                 leadingIcon = {
-                                    Icon(Icons.Rounded.Description, null, modifier = Modifier.size(20.dp))
+                                    Icon(ImageVector.vectorResource(R.drawable.ic_file_text), null, modifier = Modifier.size(20.dp))
                                 },
                                 onClick = {
                                     skillImportMenu = false
@@ -397,7 +390,7 @@ private fun McpSection(
 private fun McpIntroCard() {
     SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.Rounded.Info, size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            SoftIcon(ImageVector.vectorResource(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text("什么是 MCP", style = MaterialTheme.typography.titleMedium)
         }
@@ -440,7 +433,7 @@ private fun ServerCard(
     }
     SuixingCard(contentPadding = PaddingValues(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(Icons.Rounded.Dns, tint = tone.color(dark))
+            SoftIcon(ImageVector.vectorResource(R.drawable.ic_server), tint = tone.color(dark))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -507,10 +500,10 @@ private fun ServerCard(
                 }
             }
             IconButton(onClick = onEdit) {
-                Icon(Icons.Rounded.Edit, contentDescription = "编辑", modifier = Modifier.size(20.dp))
+                Icon(ImageVector.vectorResource(R.drawable.ic_square_pen), contentDescription = "编辑", modifier = Modifier.size(20.dp))
             }
             IconButton(onClick = onDelete) {
-                Icon(Icons.Rounded.DeleteOutline, contentDescription = "删除", modifier = Modifier.size(20.dp))
+                Icon(ImageVector.vectorResource(R.drawable.ic_trash), contentDescription = "删除", modifier = Modifier.size(20.dp))
             }
         }
     }

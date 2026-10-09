@@ -16,11 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -39,9 +34,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
@@ -99,7 +97,7 @@ fun AssistantSheet(
                 FilledTonalButton(
                     onClick = { editingId = UUID.randomUUID().toString() },
                 ) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(ImageVector.vectorResource(R.drawable.ic_plus), contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("新建")
                 }
@@ -207,7 +205,7 @@ private fun AssistantCard(
                     modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Star,
+                        imageVector = ImageVector.vectorResource(R.drawable.ic_star),
                         contentDescription = if (isDefault) "默认" else "设为默认",
                         // Spelled out because an explicit tint outlives the disabled colour
                         // IconButton would otherwise apply on its own.
@@ -226,7 +224,7 @@ private fun AssistantCard(
                     modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Edit,
+                        imageVector = ImageVector.vectorResource(R.drawable.ic_square_pen),
                         contentDescription = "编辑",
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(15.dp),
@@ -245,7 +243,7 @@ private fun AssistantCard(
                 if (active) {
                     Spacer(Modifier.width(5.dp))
                     Icon(
-                        imageVector = Icons.Rounded.CheckCircle,
+                        imageVector = ImageVector.vectorResource(R.drawable.ic_circle_check),
                         contentDescription = "当前",
                         tint = scheme.primary,
                         modifier = Modifier.size(14.dp),
