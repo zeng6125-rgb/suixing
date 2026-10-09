@@ -1,5 +1,7 @@
 package com.suixing.agent.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -36,6 +38,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.ShieldMoon
 import androidx.compose.material.icons.rounded.SmartToy
@@ -47,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,14 +61,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -77,11 +84,11 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.TODO_COMPLETED
+import com.suixing.agent.service.FloatConsoleService
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
-import com.suixing.agent.ui.chat.SessionStats
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
@@ -89,9 +96,8 @@ import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
-import java.text.SimpleDateFormat
-import java.util.Locale
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
@@ -115,25 +121,36 @@ fun SuixingApp() {
     // very conversations the screen is showing.
     val chat: ChatViewModel = viewModel()
     val conversations by chat.conversations.collectAsState()
-    // The two ids alone, not the whole chat state: the shell must not recompose once per
-    // streamed token just to keep one row highlighted and one dot lit.
-    val shellIds by remember(chat) {
-        chat.state.map { it.conversationId to it.runningChatId }.distinctUntilChanged()
-    }.collectAsState(initial = "" to "")
-    val activeConversationId = shellIds.first
-    val runningChatId = shellIds.second
+    // The one id alone, not the whole chat state: the shell must not recompose once per
+    // streamed token just to keep one row highlighted.
+    val activeConversationId by remember(chat) {
+        chat.state.map { it.conversationId }.distinctUntilChanged()
+    }.collectAsState(initial = "")
+    // Which conversations have a run in flight, straight off the engine's own map: the
+    // drawer's dots follow it without the view model narrating anyone else's run.
+    val runningIds by remember {
+        Core.engine.runsFlow.map { it.keys }.distinctUntilChanged()
+    }.collectAsState(initial = emptySet<String>())
     // Same reason as the ids above: the picker needs one field, not the whole transcript.
     val assistantId by remember(chat) {
         chat.state.map { it.assistantId }.distinctUntilChanged()
     }.collectAsState(initial = "")
 
-    // The conversation's own tally, for the drawer's status line. Its own flow, so the
-    // shell does not recompose once per streamed token.
-    val sessionStats by chat.sessionStats.collectAsState(initial = null)
-
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
     var assistantsOpen by rememberSaveable { mutableStateOf(false) }
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // Returning from the system's overlay page is the only moment the grant can have
+    // changed, so the switch is decided here rather than on the way out.
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        if (FloatConsoleService.canDrawOverlays(context)) {
+            scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
+            FloatConsoleService.start(context)
+        }
+    }
 
     // Top-level destinations replace each other: the drawer is a switch, not a stack.
     val open: (String) -> Unit = { target ->
@@ -199,7 +216,7 @@ fun SuixingApp() {
                 route = route,
                 conversations = conversations,
                 activeId = activeConversationId,
-                runningId = runningChatId,
+                runningId = runningIds,
                 onClose = { drawerOpen = false },
                 onNew = {
                     chat.newConversation()
@@ -215,7 +232,25 @@ fun SuixingApp() {
                     assistantsOpen = true
                 },
                 onNavigate = open,
-                stats = sessionStats,
+                consoleOn = settings.floatingConsole,
+                onToggleConsole = {
+                    if (settings.floatingConsole) {
+                        // Written first, then stopped: the switch is what the run checks,
+                        // and a console left running after the switch went off would
+                        // linger until the run ended on its own.
+                        scope.launch { Core.settings.update { it.copy(floatingConsole = false) } }
+                        FloatConsoleService.stop(context)
+                    } else if (FloatConsoleService.canDrawOverlays(context)) {
+                        scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
+                        FloatConsoleService.start(context)
+                    } else {
+                        // Not persisted on the way out: without the grant the switch
+                        // would read ON while no ball could ever appear.
+                        overlayPermissionLauncher.launch(
+                            FloatConsoleService.overlayPermissionIntent(context),
+                        )
+                    }
+                },
             )
         }
     }
@@ -248,13 +283,14 @@ private fun BoxScope.Drawer(
     route: String,
     conversations: List<Conversation>,
     activeId: String,
-    runningId: String,
+    runningId: Set<String>,
     onClose: () -> Unit,
     onNew: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
     onDeleteConversation: (Conversation) -> Unit,
     onOpenAssistants: () -> Unit,
-    stats: SessionStats?,
+    consoleOn: Boolean,
+    onToggleConsole: () -> Unit,
     onNavigate: (String) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -335,57 +371,6 @@ private fun BoxScope.Drawer(
                 }
 
                 Spacer(Modifier.height(14.dp))
-                // What this conversation has cost so far, from its own stored usage rows.
-                // Hidden until there is something to say.
-                stats?.let { tally ->
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = buildString {
-                                // No turn/step counts here: the drawer row says what a
-                                // conversation IS (title, when, running), not how many
-                                // steps it took — the user read that as noise.
-                                if (tally.perSecond > 0) {
-                                    append("均 ")
-                                    append(String.format(Locale.US, "%.1f", tally.perSecond))
-                                    append(" tok/s")
-                                }
-                                if (tally.tokens > 0) {
-                                    if (isNotEmpty()) append(" · ")
-                                    append("${tally.tokens / 1000}k tok")
-                                }
-                                if (tally.cachePercent > 0) {
-                                    if (isNotEmpty()) append(" · ")
-                                    append("缓存 ${tally.cachePercent}%")
-                                }
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = scheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        Spacer(Modifier.weight(1f))
-                        if (tally.contextTokens > 0) {
-                            Text(
-                                text = if (tally.contextWindow > 0) {
-                                    "上下文 ${tally.contextTokens * 100 / tally.contextWindow}%"
-                                } else {
-                                    "上下文 ${tally.contextTokens / 1000}k"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = scheme.onSurfaceVariant,
-                                maxLines = 1,
-                                softWrap = false,
-                            )
-                        }
-                    }
-                }
                 HorizontalDivider(
                     modifier = Modifier.padding(horizontal = 16.dp),
                     color = scheme.outlineVariant,
@@ -400,7 +385,7 @@ private fun BoxScope.Drawer(
                         ConversationRow(
                             conversation = conversation,
                             selected = conversation.id == activeId,
-                            running = conversation.id == runningId,
+                            running = conversation.id in runningId,
                             onClick = { onOpenConversation(conversation) },
                             onDelete = { pendingDelete = conversation },
                         )
@@ -415,14 +400,12 @@ private fun BoxScope.Drawer(
                 Spacer(Modifier.height(6.dp))
                 DrawerAction(
                     label = "助手",
-                    hint = "人格与工具白名单",
                     icon = Icons.Rounded.SmartToy,
                     selected = false,
                     onClick = onOpenAssistants,
                 )
                 DrawerAction(
                     label = "任务",
-                    hint = "待办 · 进行中 · 已完成",
                     icon = Icons.Rounded.TaskAlt,
                     selected = route == "tasks",
                     onClick = { onNavigate("tasks") },
@@ -430,14 +413,24 @@ private fun BoxScope.Drawer(
                 )
                 DrawerAction(
                     label = "文件",
-                    hint = "浏览与编辑",
                     icon = Icons.Rounded.FolderOpen,
                     selected = route == "files",
                     onClick = { onNavigate("files") },
                 )
+                // The console's switch moved out of the chat header into here: on
+                // without the overlay grant would read ON with no ball, so the grant
+                // page comes first and the switch flips when the grant lands.
+                DrawerAction(
+                    label = "悬浮窗控制台",
+                    icon = Icons.Rounded.PictureInPictureAlt,
+                    selected = false,
+                    onClick = { if (!consoleOn) onToggleConsole() },
+                    trailing = {
+                        Switch(checked = consoleOn, onCheckedChange = { onToggleConsole() })
+                    },
+                )
                 DrawerAction(
                     label = "设置",
-                    hint = "模型 · 外观 · 权限",
                     icon = Icons.Rounded.Settings,
                     selected = route == "settings",
                     onClick = { onNavigate("settings") },
@@ -506,22 +499,13 @@ private fun ConversationRow(
             }
             Text(
                 text = conversation.title,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
                 color = if (selected) scheme.primary else scheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            // When, not how much: the row's only facts are title, time and the run dot.
-            Text(
-                text = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
-                    .format(conversation.updatedAt),
-                style = MaterialTheme.typography.labelSmall,
-                color = scheme.onSurfaceVariant,
-                maxLines = 1,
-                modifier = Modifier.padding(start = 6.dp, end = 2.dp),
-            )
-            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
                 Icon(
                     imageVector = Icons.Rounded.DeleteOutline,
                     contentDescription = "删除会话",
@@ -536,11 +520,12 @@ private fun ConversationRow(
 @Composable
 private fun DrawerAction(
     label: String,
-    hint: String,
     icon: ImageVector,
     selected: Boolean,
     onClick: () -> Unit,
     badge: String? = null,
+    /** A control on the row's end instead of the chevron-less plain row. */
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
@@ -552,28 +537,27 @@ private fun DrawerAction(
         color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
                 tint = if (selected) scheme.primary else scheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(24.dp),
             )
             Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (selected) scheme.primary else scheme.onSurface,
-                )
-                Text(
-                    text = hint,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = scheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
+                color = if (selected) scheme.primary else scheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
             if (badge != null) {
                 Text(
                     text = badge,
@@ -581,6 +565,7 @@ private fun DrawerAction(
                     color = scheme.primary,
                 )
             }
+            trailing?.invoke()
         }
     }
 }

@@ -147,6 +147,49 @@ class MarkdownTest {
     }
 
     @Test
+    fun `a fence written on the same line as its content stays prose`() {
+        // The opening test is matchEntire-strict: ```echo x is not a fence, so the
+        // line cannot open a box that a later stray fence then closes empty.
+        val blocks = parseMarkdown("```echo x\nmore prose")
+        assertEquals(true, blocks.none { it is MdBlock.Code })
+        assertEquals("```echo x\nmore prose", (blocks.single() as MdBlock.Paragraph).text)
+    }
+
+    @Test
+    fun `an inline fence at a line end never opens a code block`() {
+        val blocks = parseMarkdown("run it ``` then explain\nsecond line")
+        assertEquals(true, blocks.none { it is MdBlock.Code })
+    }
+
+    @Test
+    fun `two stray fence lines produce no empty code box`() {
+        // The invariant the user's blank grey slab broke: no MdBlock.Code with a
+        // blank body, ever. The pair still opens one block around "after", and the
+        // blank-body guard is what keeps a fence-only pair from painting a slab.
+        val blocks = parseMarkdown("before\n```\nafter\n```")
+        assertEquals(
+            listOf<MdBlock>(MdBlock.Paragraph("before"), MdBlock.Code("", "after")),
+            blocks,
+        )
+        assertEquals(true, blocks.filterIsInstance<MdBlock.Code>().none { it.code.isBlank() })
+        assertEquals(true, parseMarkdown("```\n```").none { it is MdBlock.Code })
+    }
+
+    @Test
+    fun `an unterminated stream fence still keeps its body`() {
+        val blocks = parseMarkdown("```\npartial thought")
+        assertEquals(listOf<MdBlock>(MdBlock.Code("", "partial thought")), blocks)
+    }
+
+    @Test
+    fun `a normal code block still parses unchanged`() {
+        assertEquals(
+            listOf<MdBlock>(MdBlock.Code("sh", "echo hi")),
+            parseMarkdown("```sh\necho hi\n```"),
+        )
+    }
+
+    @Test
     fun `blockquote lines merge and drop their marker`() {
         assertEquals(
             listOf<MdBlock>(MdBlock.Quote("first\nsecond")),

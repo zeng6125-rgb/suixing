@@ -76,6 +76,14 @@ sealed interface MdBlock {
 // Every pattern is compiled once, here. Building a Regex per line leaks native
 // ICU buffers and has aborted the process before, so never move these inward.
 private val MD_FENCE = Regex("`{3,}\\s*([^`\\s]*)")
+
+/**
+ * A closing fence is a line of nothing but backticks. The opening test is just as
+ * strict, so a fence the model wrote on the same line as its content (```echo x)
+ * cannot pair with a stray closing fence somewhere below and swallow the reply
+ * into an empty code box.
+ */
+private val MD_FENCE_CLOSE = Regex("^`{3,}\\s*$")
 private val MD_HEADING = Regex("(#{1,6})\\s+(.*)")
 private val MD_RULE = Regex("\\s*([-*_])(\\s*\\1){2,}\\s*")
 private val MD_BULLET = Regex("(\\s*)[-*+]\\s+(.*)")
@@ -113,13 +121,20 @@ fun parseMarkdown(source: String): List<MdBlock> {
             fence != null -> {
                 val body = mutableListOf<String>()
                 index++
-                while (index < lines.size && !lines[index].trim().startsWith(FENCE)) {
+                while (index < lines.size && !MD_FENCE_CLOSE.matches(lines[index].trim())) {
                     body += lines[index]
                     index++
                 }
                 // A missing closing fence means the answer is still streaming in.
                 if (index < lines.size) index++
-                blocks += MdBlock.Code(fence.groupValues[1], body.joinToString("\n"))
+                // An empty body never becomes a box: a stray fence line (or a pair of
+                // them) used to paint a grey slab with a copy button and nothing in it.
+                // A fence written on the same line as its content never reaches this
+                // branch at all — the opening test is matchEntire-strict — so it stays
+                // prose and nothing leaks into a code block.
+                if (body.joinToString("\n").isNotBlank()) {
+                    blocks += MdBlock.Code(fence.groupValues[1], body.joinToString("\n"))
+                }
             }
             heading != null -> {
                 blocks += MdBlock.Heading(heading.groupValues[1].length, heading.groupValues[2].trim())

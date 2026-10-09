@@ -49,6 +49,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.abs
@@ -228,7 +229,7 @@ class FloatConsoleService : Service() {
 
     private fun attachIfRunning() {
         val foreground = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-        if (!foreground && Core.engine.runState.value is RunState.Running) attach() else detach()
+        if (!foreground && Core.engine.runsFlow.value.isNotEmpty()) attach() else detach()
     }
 
     /**
@@ -460,14 +461,20 @@ class FloatConsoleService : Service() {
      */
     private fun observeRun() {
         scope.launch {
-            Core.engine.runState.collectLatest { state ->
-                stateText.text = state.title()
-                statsText.text = state.detail()
-                // The live line is re-read on every state, and the engine ticks its state
-                // while a run is in flight, so this stays current without a second stream.
-                liveText.text = if (state is RunState.Running) Core.engine.liveLine else ""
-                setStatusDot(state is RunState.Running)
-            }
+            // The console follows whichever run started last; the map re-emits on every
+            // start/stop, so a newer run takes the panel over and an ended one hands it
+            // back to the previous run or hides the panel when none is left.
+            Core.engine.runsFlow
+                .map { runs -> runs.values.maxByOrNull { it.startedAt } }
+                .collectLatest { handle ->
+                    val state = handle?.state?.value ?: RunState.Idle
+                    stateText.text = state.title()
+                    statsText.text = state.detail()
+                    // The live line is re-read on every state, and the engine ticks its state
+                    // while a run is in flight, so this stays current without a second stream.
+                    liveText.text = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
+                    setStatusDot(state is RunState.Running)
+                }
         }
     }
 
@@ -492,14 +499,15 @@ class FloatConsoleService : Service() {
     }
 
     private fun stopRun() {
-        val stopped = Core.engine.cancel()
+        val stopped = Core.engine.newestRun()?.let { Core.engine.cancel(it.chatId) } ?: false
         statsText.text = if (stopped) "已请求停止" else "当前没有进行中的任务"
     }
 
     private fun sendSteering() {
         val text = steerInput.text.toString().trim()
         if (text.isEmpty()) return
-        val queued = Core.engine.steer(text)
+        val handle = Core.engine.newestRun()
+        val queued = handle != null && Core.engine.steer(handle.chatId, text)
         if (queued) {
             steerInput.setText("")
             statsText.text = "已插话，模型下一轮就能看到"

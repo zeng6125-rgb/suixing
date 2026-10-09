@@ -21,7 +21,9 @@ import com.suixing.agent.tools.ToolRegistry
 import com.suixing.agent.tools.ToolResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -248,139 +250,238 @@ sealed interface RunState {
 }
 
 /**
- * The agent loop: send the conversation to the model, execute whatever tools it
- * asks for, feed the results back, and repeat until it stops calling tools.
+ * The agent loop: send the conversation to the model, execute whatever tools it asks
+ * for, feed the results back, and repeat until it stops calling tools.
  *
- * It also owns the three things a caller needs to steer a run from outside: the
- * live [runState], [cancel] and [steer]. A caller that only wants the transcript
- * still gets it the old way, through `onEvent` — the two channels are independent,
- * so nothing that listens to events had to change.
+ * Runs are keyed by conversation. Every chat gets its own [RunHandle], so two chats can
+ * work at the same time without touching each other's wire, stream or stop button. What is
+ * shared is only what has no per-run meaning: the HTTP client, the tool registry, the gate.
  */
 class AgentEngine(
     private val llm: LlmClient = LlmClient(),
     private val scope: CoroutineScope? = null,
 ) {
 
-    private val _runState = MutableStateFlow<RunState>(RunState.Idle)
+    private val runs = MutableStateFlow<Map<String, RunHandle>>(emptyMap())
 
-    /** Live run state; survives whichever screen happens to be on top. */
-    val runState: StateFlow<RunState> = _runState.asStateFlow()
-
-    /** 0 = no run has ever started, which is what makes a stale run's writes harmless. */
-    private val runSeq = AtomicInteger(0)
-
-    private val running = AtomicBoolean(false)
-
-    private val cancelled = AtomicBoolean(false)
-
-    /** The call currently on the wire; cancelling it is what stops the stream. */
-    @Volatile
-    private var inFlight: Call? = null
-
-    private val steering = Channel<String>(Channel.UNLIMITED)
+    /** The runs in flight right now, keyed by conversation id. */
+    val runsFlow: StateFlow<Map<String, RunHandle>> = runs.asStateFlow()
 
     /**
-     * Set when an immediate [steer] aborts the round on purpose, so the IOException it
-     * produces is read as 「这一轮作废」 rather than as a network failure.
-     */
-    private val steeringCut = AtomicBoolean(false)
-
-    /** The settings of the run in flight; [steer]'s default mode comes from here. */
-    @Volatile
-    private var runSettings: AppSettings? = null
-
-    /** Prompt tokens the endpoint reported for the last round; 0 = it never did. */
-    @Volatile
-    private var lastPromptTokens = 0
-
-    /** Wire size in characters when [lastPromptTokens] was recorded, to price the growth. */
-    @Volatile
-    private var lastPromptChars = 0
-
-    /** The three parts of the prompt, in estimated tokens, for the UI's breakdown bar. */
-    @Volatile
-    private var breakSystem = 0
-
-    @Volatile
-    private var breakTools = 0
-
-    @Volatile
-    private var breakHistory = 0
-
-    /** A one-line note about the run, shown by whoever renders [runState]. */
-    @Volatile
-    private var contextNote = ""
-
-    /**
-     * What the run is doing at this instant, for the floating console: which tool is
-     * running, that the model is thinking, or the tail of the text it is writing.
+     * Per-conversation state that outlives its run.
      *
-     * It is deliberately not part of [runState]: that flows at its own pace, and this
-     * changes on every tool and every delta. The console re-reads it whenever a state
-     * arrives, which is often enough for a line that is meant to look alive.
+     * Kept apart from [runs] because the UI needs the *terminal* state: the usage line
+     * freezes on `Done`, and a flow that vanished along with the run would take the numbers
+     * with it.
      */
-    @Volatile
-    var liveLine: String = ""
-        private set
-
-    private val outChars = AtomicInteger(0)
-
-    private val thinkingChars = AtomicInteger(0)
-
-    /** When the current run began, in [System.nanoTime] terms; 0 = not running. */
-    @Volatile
-    private var startedAt = 0L
+    private val states = mutableMapOf<String, MutableStateFlow<RunState>>()
 
     /**
-     * Ticks the speed readout while a run is live.
+     * The state of one conversation, whether or not it is running right now.
      *
-     * It runs on a timer rather than on every delta because the UI would otherwise
-     * be recomposed once per token; 120 ms is faster than the eye and slower than
-     * the stream.
+     * The same flow is returned for the same id for the life of the process, so a screen can
+     * collect it once and keep it across runs.
+     */
+    fun stateOf(chatId: String): StateFlow<RunState> = synchronized(states) {
+        states.getOrPut(chatId) { MutableStateFlow(RunState.Idle) }
+    }
+
+    fun isRunning(chatId: String): Boolean = runs.value.containsKey(chatId)
+
+    /** The run that started most recently: the one the floating console drives. */
+    fun newestRun(): RunHandle? = runs.value.values.maxByOrNull { it.startedAt }
+
+    /**
+     * Stops one conversation's run.
+     *
+     * Cancelling the OkHttp call is the part that matters: without it the loop would keep
+     * reading tokens off the wire until the model decided to stop, and 「点停即停」 would be a
+     * lie. The flag carries the decision past the call, so a tool that is already running is
+     * not waited on either — the loop checks it at the top of every round and before every
+     * tool call. Other conversations are untouched.
+     *
+     * @return whether that conversation had a run to interrupt.
+     */
+    fun cancel(chatId: String): Boolean = runs.value[chatId]?.cancel() ?: false
+
+    /**
+     * Says something to one conversation's run.
+     *
+     * Queued steering (the default) lands on the next round boundary: the model finishes what
+     * it is saying and reads the line before being asked for the next step. Immediate steering
+     * cuts the stream instead, so the line is read now — worth it when the model is heading the
+     * wrong way, and lossy because whatever it was in the middle of is discarded.
+     *
+     * The default is taken from that run's own settings rather than fixed at `false`, so
+     * [AppSettings.steerMode] decides without every caller having to look it up.
+     *
+     * @return whether the text was taken; false when that conversation is not running.
+     */
+    fun steer(
+        chatId: String,
+        text: String,
+        immediate: Boolean = runs.value[chatId]?.steerMode == STEER_IMMEDIATE,
+    ): Boolean = runs.value[chatId]?.steer(text, immediate) ?: false
+
+    /**
+     * Runs one conversation and returns the messages it produced.
+     *
+     * The caller's coroutine is the run's coroutine: N conversations running at once is N
+     * callers, which is why nothing here launches into a scope of its own. Cancelling that
+     * coroutine ends the run (see [cancel] for the polite version).
+     *
+     * A conversation that is already running is refused rather than queued: two runs writing
+     * one transcript would interleave two answers into one and leave the user unable to tell
+     * which is which. Callers should ask [isRunning] first.
+     */
+    suspend fun startRun(
+        chatId: String,
+        title: String,
+        history: List<StoredMessage>,
+        settings: AppSettings,
+        registry: ToolRegistry,
+        capabilities: CapabilityHub,
+        skills: SkillStore,
+        memory: MemoryStore,
+        gate: ApprovalGate,
+        onEvent: (AgentEvent) -> Unit,
+    ): List<StoredMessage> {
+        val existing = runs.value[chatId]
+        if (existing != null) {
+            onEvent(AgentEvent.Failed("这个会话已经有任务在跑了，先停下或等它结束。"))
+            existing.publish(RunState.Failed("这个会话已经有任务在跑了。"))
+            return emptyList()
+        }
+        val handle = RunHandle(chatId, title, settings)
+        runs.value = runs.value + (chatId to handle)
+        try {
+            return handle.execute(history, settings, registry, capabilities, skills, memory, gate, onEvent)
+        } finally {
+            // Gone from [runs] before the state settles: a finished run is not a run, and the
+            // console must stop offering to stop it.
+            runs.value = runs.value - chatId
+        }
+    }
+
+    /**
+     * Ticks every live run's speed readout.
+     *
+     * It runs on a timer rather than on every delta because the UI would otherwise be
+     * recomposed once per token; 120 ms is faster than the eye and slower than the stream.
      */
     init {
         scope?.launch {
             while (isActive) {
-                if (running.get()) emitRunning()
+                runs.value.values.forEach { it.tick() }
                 delay(STATS_TICK_MS)
             }
         }
     }
 
     /**
-     * Stops the run that is streaming right now.
+     * One conversation's run: everything that used to be engine-wide lives here, which is what
+     * lets two conversations run at the same time.
      *
-     * Cancelling the OkHttp call is the part that matters: without it the loop would
-     * keep reading tokens off the wire until the model decided to stop, and 「点停即停」
-     * would be a lie. The flag is what carries the decision past the call, so a tool
-     * that is already executing is not waited on either — the loop checks it at the
-     * top of every round and before every tool call.
+     * An inner class on purpose — the loop needs the engine's prompt building, tool registry and
+     * HTTP client, and those really are shared.
+     */
+    inner class RunHandle(
+        val chatId: String,
+        val title: String,
+        settings: AppSettings,
+    ) {
+        private val _state = MutableStateFlow<RunState>(RunState.Idle)
+
+        /** This conversation's state, from the moment it starts to long after it ends. */
+        val state: StateFlow<RunState> = _state.asStateFlow()
+
+        /** When this run began, in [System.nanoTime] terms. What orders concurrent runs. */
+        @Volatile
+        var startedAt: Long = System.nanoTime()
+            private set
+
+        /**
+         * What this run is doing at this instant, for the floating console: which tool is
+         * running, that the model is thinking, or the tail of the text it is writing.
+         *
+         * Deliberately not part of [state]: that flows at its own pace, and this changes on
+         * every tool and every delta.
+         */
+        @Volatile
+        var liveLine: String = ""
+            private set
+
+        /** The coroutine driving this run, for anything that needs to look at it. */
+        @Volatile
+        internal var job: Job? = null
+
+        /** [steer]'s default mode for this run, read from the settings it started with. */
+        internal val steerMode: Int = settings.steerMode
+
+        private val cancelled = AtomicBoolean(false)
+
+        /** The call currently on the wire; cancelling it is what stops this run's stream. */
+        @Volatile
+        private var inFlight: Call? = null
+
+        private val steering = Channel<String>(Channel.UNLIMITED)
+
+        /**
+         * Set when an immediate [steer] aborts the round on purpose, so the IOException it
+         * produces is read as 「这一轮作废」 rather than as a network failure.
+         */
+        private val steeringCut = AtomicBoolean(false)
+
+        /** Prompt tokens the endpoint reported for the last round; 0 = it never did. */
+        @Volatile
+        private var lastPromptTokens = 0
+
+        /** Wire size in characters when [lastPromptTokens] was recorded, to price the growth. */
+        @Volatile
+        private var lastPromptChars = 0
+
+        /** The three parts of the prompt, in estimated tokens, for the UI's breakdown bar. */
+        @Volatile
+        private var breakSystem = 0
+
+        @Volatile
+        private var breakTools = 0
+
+        @Volatile
+        private var breakHistory = 0
+
+        /** A one-line note about the run, shown by whoever renders [state]. */
+        @Volatile
+        private var contextNote = ""
+
+        private val outChars = AtomicInteger(0)
+
+        private val thinkingChars = AtomicInteger(0)
+
+    /**
+     * Stops this run. See [AgentEngine.cancel] for why the call itself has to be cancelled.
      *
-     * @return whether there was a run to interrupt.
+     * @return whether there was anything to interrupt.
      */
     fun cancel(): Boolean {
-        if (!running.get()) return false
+        if (!isLive()) return false
         cancelled.set(true)
         inFlight?.cancel()
         return true
     }
 
     /**
-     * Says something to the run that is in flight.
+     * Says something to this run.
      *
-     * Queued steering (the default) lands on the next round boundary: the model
-     * finishes what it is saying and reads the line before being asked for the next
-     * step. Immediate steering cuts the stream instead, so the line is read now —
-     * worth it when the model is heading the wrong way, and lossy because whatever it
-     * was in the middle of is discarded.
+     * Queued steering (the default) lands on the next round boundary: the model finishes what
+     * it is saying and reads the line before being asked for the next step. Immediate steering
+     * cuts the stream instead, so the line is read now — worth it when the model is heading the
+     * wrong way, and lossy because whatever it was in the middle of is discarded.
      *
-     * The default is taken from the run's own settings rather than fixed at `false`,
-     * so [AppSettings.steerMode] decides without every caller having to look it up.
-     *
-     * @return whether the text was taken; false when nothing is running.
+     * @return whether the text was taken; false when this run is no longer live.
      */
-    fun steer(text: String, immediate: Boolean = runSettings?.steerMode == STEER_IMMEDIATE): Boolean {
-        if (!running.get()) return false
+    fun steer(text: String, immediate: Boolean): Boolean {
+        if (!isLive()) return false
         val body = text.trim()
         if (body.isEmpty()) return false
         if (immediate) {
@@ -396,7 +497,26 @@ class AgentEngine(
         return steering.trySend(body).isSuccess
     }
 
-    suspend fun run(
+    /** Whether this handle is still the registered run for its conversation. */
+    private fun isLive(): Boolean = runs.value[chatId] === this
+
+    /** Publishes [state] to this run's own flow. */
+    internal fun publish(state: RunState) {
+        _state.value = state
+    }
+
+    /** Repaints the speed readout while this run streams. */
+    internal fun tick() {
+        if (isLive()) publish(RunState.Running(stats()))
+    }
+
+    /**
+     * The loop itself, run once on the caller's coroutine.
+     *
+     * Everything it counts or flags is per-handle and starts empty, because the handle was
+     * made for this run and is dropped with it.
+     */
+    internal suspend fun execute(
         history: List<StoredMessage>,
         settings: AppSettings,
         registry: ToolRegistry,
@@ -406,33 +526,13 @@ class AgentEngine(
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
     ): List<StoredMessage> {
-        val seq = runSeq.incrementAndGet()
-        cancelled.set(false)
-        steeringCut.set(false)
-        outChars.set(0)
-        thinkingChars.set(0)
-        lastPromptTokens = 0
-        lastPromptChars = 0
-        breakSystem = 0
-        breakTools = 0
-        breakHistory = 0
-        contextNote = ""
-        startedAt = System.nanoTime()
-        running.set(true)
-        runSettings = settings
+        job = currentCoroutineContext()[Job]
         // Published here rather than left to the ticker, so a caller sees Running the
         // moment the run starts even if no ticker was ever started.
-        _runState.value = RunState.Running(stats())
-        // A queue left over from a previous run would otherwise be injected into this
-        // one as if the user had just said it.
-        while (steering.tryReceive().isSuccess) Unit
+        publish(RunState.Running(stats()))
 
         val produced = mutableListOf<StoredMessage>()
         val wire = mutableListOf<ChatMessage>()
-        // Whether a terminal state has been published for this run. The `finally` must
-        // not paint Idle over Cancelled or Failed — the UI would lose the one fact it
-        // needs to leave the running state.
-        var settled = false
         // Built once and measured once: the system prompt carries the skills catalogue and
         // the memory entries, so it is both the largest fixed part of the prompt and the one
         // the user can do least about.
@@ -458,7 +558,6 @@ class AgentEngine(
                 // line that outlives its step reads as a stall.
                 liveLine = ""
                 if (cancelled.get()) {
-                    settled = true
                     finishCancelled(onEvent)
                     return produced
                 }
@@ -500,8 +599,7 @@ class AgentEngine(
                     // Cancelling a call surfaces as an IOException on the reading
                     // thread. It is a stop, not a failure, so it is reported as one.
                     if (cancelled.get()) {
-                        settled = true
-                        finishCancelled(onEvent)
+                            finishCancelled(onEvent)
                         return produced
                     }
                     // An immediate steer aborts the stream the same way, but nothing is
@@ -539,8 +637,7 @@ class AgentEngine(
                     produced += assistant
                     onEvent(AgentEvent.AssistantMessage(assistant))
                     onEvent(AgentEvent.Finished(turn.text))
-                    _runState.value = RunState.Done(stats())
-                    settled = true
+                    publish(RunState.Done(stats()))
                     return produced
                 }
                 val assistant = StoredMessage(
@@ -558,8 +655,7 @@ class AgentEngine(
                     // Checked before every call, not after the batch: a stop means the
                     // tools the model asked for in the same breath do not run either.
                     if (cancelled.get()) {
-                        settled = true
-                        finishCancelled(onEvent)
+                            finishCancelled(onEvent)
                         return produced
                     }
                     val argsPreview = call.arguments.take(600)
@@ -619,26 +715,21 @@ class AgentEngine(
             }
             // Only reachable with a ceiling: unlimited rounds end by returning above.
             onEvent(AgentEvent.Failed("已达到最大工具轮数（$roundLimit），任务未完成。"))
-            _runState.value = RunState.Failed("已达到最大工具轮数（$roundLimit），任务未完成。")
-            settled = true
+            publish(RunState.Failed("已达到最大工具轮数（$roundLimit），任务未完成。"))
             return produced
         } catch (cancellation: CancellationException) {
             // The caller cancelled the coroutine rather than the run; the stream still
             // has to be taken down, and the state still has to say what happened.
             inFlight?.cancel()
-            _runState.value = RunState.Cancelled(stats())
-            settled = true
+            publish(RunState.Cancelled(stats()))
             throw cancellation
         } catch (error: Throwable) {
-            _runState.value = RunState.Failed(error.message ?: error::class.java.simpleName)
-            settled = true
+            publish(RunState.Failed(error.message ?: error::class.java.simpleName))
             throw error
         } finally {
-            running.set(false)
             inFlight = null
-            runSettings = null
-            startedAt = 0L
-            if (!settled) emit(seq, RunState.Idle)
+            // Nothing is published here. The run has already said how it ended, and that
+            // answer is what the conversation's state flow keeps for whoever still reads it.
         }
     }
 
@@ -651,7 +742,7 @@ class AgentEngine(
      */
     private fun finishCancelled(onEvent: (AgentEvent) -> Unit) {
         onEvent(AgentEvent.Finished(""))
-        _runState.value = RunState.Cancelled(stats())
+        publish(RunState.Cancelled(stats()))
     }
 
     /**
@@ -727,7 +818,7 @@ class AgentEngine(
         contextNote = "已压缩上下文：${older.size} 条消息 → 摘要"
         // Published at once rather than waiting for the next tick, so the note is on
         // screen while the summary is still the news.
-        emitRunning()
+        tick()
     }
 
     /** One call to the same endpoint, asking only for prose: no tools, no streaming UI. */
@@ -780,16 +871,8 @@ class AgentEngine(
         message.text.length + message.imageBase64.orEmpty().length +
             message.toolCalls.sumOf { it.name.length + it.arguments.length }
 
-    private fun emitRunning() = emit(runSeq.get(), RunState.Running(stats()))
-
-    private fun emit(seq: Int, state: RunState) {
-        // A run that has already been replaced must not paint over its successor's state.
-        if (seq == runSeq.get()) _runState.value = state
-    }
-
     private fun stats(): StreamStats {
-        val started = startedAt
-        val elapsedMs = if (started == 0L) 0L else (System.nanoTime() - started) / 1_000_000L
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
         val tokens = estimateTokens(outChars.get())
         return StreamStats(
             tokensOut = tokens,
@@ -945,6 +1028,7 @@ class AgentEngine(
             .joinToString("\n") { (key, entry) ->
                 "- $key: ${entry.value.take(MAX_MEMORY_VALUE)}"
             }
+    }
 
     companion object {
         /** How much of the streamed answer the console's live line keeps, in characters. */

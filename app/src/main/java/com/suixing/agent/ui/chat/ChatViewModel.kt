@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,14 +39,12 @@ data class ChatUiState(
     val streaming: String = "",
     /** The thinking streamed ahead of [streaming], shown in its own block. */
     val reasoning: String = "",
-    /** A run is in flight somewhere in the app — not necessarily in this conversation. */
-    val running: Boolean = false,
-    /** Which conversation owns that run; empty when nothing is running. */
-    val runningChatId: String = "",
-    /** Its title, so a refusal can name the conversation holding the one run slot. */
-    val runningTitle: String = "",
-    /** Why the last action was refused, or how a run in another conversation ended. */
-    val notice: String? = null,
+    /**
+     * Whether the conversation on screen has a run in flight, straight off the
+     * engine's per-chat state. Runs in other conversations are none of this
+     * screen's business: nothing here locks, refuses or narrates them.
+     */
+    val runningHere: Boolean = false,
     val status: String = "",
     /** The tool the run is inside right now; the tool card names it live. */
     val runningTool: String? = null,
@@ -69,9 +68,6 @@ data class ChatUiState(
     val visible: List<StoredMessage>
         get() = Transcript.active(messages, activeRuns)
             .filterNot { liveRunId.isNotEmpty() && it.runId == liveRunId }
-
-    /** The live run is writing into the conversation on screen, not some other one. */
-    val runningHere: Boolean get() = running && runningChatId == conversationId
 }
 
 /**
@@ -188,25 +184,48 @@ class ChatViewModel : ViewModel() {
 
     private var job: Job? = null
 
+    /** The per-conversation run-state watcher; replaced whenever the display switches. */
+    private var stateWatcher: Job? = null
+
     /** The run in flight and the conversation it belongs to; null when nothing runs. */
     private var session: RunSession? = null
 
     init {
-        // The engine is shared with the floating console, so its run state is the one
-        // truth about whether a run is live — including one this screen never started.
+        // The engine keys its runs by conversation, so this screen subscribes to the
+        // state of whichever conversation is on display: a run elsewhere neither
+        // locks this screen nor narrates itself into its status line.
         viewModelScope.launch {
-            Core.engine.runState.collect { run ->
-                when (run) {
-                    is RunState.Running -> _state.update { it.copy(stats = run.stats) }
-                    // Back to typing the moment the run is stopped, without waiting for
-                    // the stream to wind down on its own. What already arrived is saved
-                    // first: the run is over either way, and only this copy has it.
-                    is RunState.Cancelled -> session?.let { live ->
-                        viewModelScope.launch { saveSession(live) }
-                        endSession("已停止")
-                    }
+            state.map { it.conversationId }.distinctUntilChanged().collect { chatId ->
+                // One watcher per displayed conversation: switching cancels the old
+                // subscription before the new one starts, so two chats never feed one
+                // status line.
+                stateWatcher?.cancel()
+                if (chatId.isEmpty()) return@collect
+                stateWatcher = viewModelScope.launch {
+                    Core.engine.stateOf(chatId).collect { run ->
+                    when (run) {
+                        is RunState.Running -> _state.update {
+                            it.copy(runningHere = true, stats = run.stats)
+                        }
 
-                    else -> Unit
+                        // Back to typing the moment the run is stopped, without waiting
+                        // for the stream to wind down on its own. What already arrived
+                        // is saved first: the run is over either way, and only this
+                        // copy has it.
+                        is RunState.Cancelled -> session?.let { live ->
+                            if (live.chatId == chatId) {
+                                viewModelScope.launch { saveSession(live) }
+                                endSession("已停止")
+                            }
+                        }
+
+                        is RunState.Idle -> _state.update {
+                            it.copy(runningHere = false, stats = null)
+                        }
+
+                        else -> _state.update { it.copy(runningHere = false) }
+                    }
+                }
                 }
             }
         }
@@ -231,12 +250,10 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             val settings = Core.settings.current()
             val created = Core.chats.create()
-            _state.value = projected(
-                ChatUiState(
-                    conversationId = created.id,
-                    title = created.title,
-                    assistantId = settings.activeAssistant()?.id.orEmpty(),
-                ),
+            _state.value = ChatUiState(
+                conversationId = created.id,
+                title = created.title,
+                assistantId = settings.activeAssistant()?.id.orEmpty(),
             )
         }
     }
@@ -255,24 +272,19 @@ class ChatViewModel : ViewModel() {
                 streaming = live.streaming,
                 reasoning = live.reasoning,
                 status = live.status,
-                running = true,
-                runningChatId = live.chatId,
-                runningTitle = live.title,
+                runningHere = true,
             )
         } else {
             // A conversation that never picked a persona keeps the one already on screen,
             // which was seeded from the settings when this screen was created.
-            projected(conversation.toUiState(_state.value.assistantId))
+            conversation.toUiState(_state.value.assistantId)
         }
     }
 
     fun deleteConversation(conversation: Conversation) {
         // The run owns its conversation until it ends: deleting it would only have the
         // next save write it straight back.
-        if (session?.chatId == conversation.id) {
-            _state.update { it.copy(notice = runningNotice()) }
-            return
-        }
+        if (session?.chatId == conversation.id) return
         viewModelScope.launch {
             Core.chats.delete(conversation.id)
             if (conversation.id != _state.value.conversationId) return@launch
@@ -280,25 +292,16 @@ class ChatViewModel : ViewModel() {
             val next = Core.chats.conversations.value.firstOrNull()
             _state.value = if (next == null) {
                 val created = Core.chats.create()
-                projected(
-                    ChatUiState(
-                        conversationId = created.id,
-                        title = created.title,
-                        assistantId = settings.activeAssistant()?.id.orEmpty(),
-                    ),
+                ChatUiState(
+                    conversationId = created.id,
+                    title = created.title,
+                    assistantId = settings.activeAssistant()?.id.orEmpty(),
                 )
             } else {
-                projected(next.toUiState(settings.activeAssistant()?.id.orEmpty()))
+                next.toUiState(settings.activeAssistant()?.id.orEmpty())
             }
         }
     }
-
-    /** Adds the "who is running" half of the picture to a freshly built conversation. */
-    private fun projected(state: ChatUiState): ChatUiState = state.copy(
-        running = session != null,
-        runningChatId = session?.chatId.orEmpty(),
-        runningTitle = session?.title.orEmpty(),
-    )
 
     // ---------------------------------------------------------------- assistants
 
@@ -356,12 +359,10 @@ class ChatViewModel : ViewModel() {
         val body = text.trim()
         if (body.isEmpty() && imageBase64 == null) return false
         if (_state.value.conversationId.isEmpty()) return false
-        // One engine, one run: while one is in flight nothing else may start, whichever
-        // conversation is on screen. The refusal names the conversation holding the slot.
-        if (session != null) {
-            _state.update { it.copy(notice = runningNotice()) }
-            return false
-        }
+        // No global lock: the engine refuses a second run in the same conversation
+        // (two runs would interleave into one transcript), and every other
+        // conversation is free to start its own run right now.
+        if (Core.engine.isRunning(_state.value.conversationId)) return false
 
         val user = StoredMessage(
             id = UUID.randomUUID().toString(),
@@ -378,7 +379,6 @@ class ChatViewModel : ViewModel() {
                 reasoning = "",
                 status = "正在思考…",
                 error = null,
-                notice = null,
             )
         }
         start(fresh, _state.value.messages)
@@ -387,10 +387,7 @@ class ChatViewModel : ViewModel() {
 
     /** Answers the last question again, keeping the old reply as a branch. */
     fun regenerate() {
-        if (session != null) {
-            _state.update { it.copy(notice = runningNotice()) }
-            return
-        }
+        if (Core.engine.isRunning(_state.value.conversationId)) return
         val snapshot = _state.value
         val active = Transcript.active(snapshot.messages, snapshot.activeRuns)
         val question = active.lastOrNull { it.role == Roles.USER } ?: return
@@ -438,10 +435,7 @@ class ChatViewModel : ViewModel() {
      * exists, so keeping them would hang them off the wrong prompt.
      */
     fun editAndResend(id: String, text: String) {
-        if (session != null) {
-            _state.update { it.copy(notice = runningNotice()) }
-            return
-        }
+        if (Core.engine.isRunning(_state.value.conversationId)) return
         val body = text.trim()
         if (body.isEmpty()) return
         val snapshot = _state.value
@@ -467,10 +461,10 @@ class ChatViewModel : ViewModel() {
     fun stop() {
         gate.cancelPending()
         Core.speaker.stop()
-        // Ask the engine first: it cancels the OkHttp call that is on the wire, which
-        // is what makes the stop take effect now rather than at the next token. The
-        // job cancel below is only the belt to that pair of braces.
-        Core.engine.cancel()
+        // This conversation's run, by id: the engine keeps one handle per chat, and
+        // stopping whatever happens to be newest would cut a run this screen does
+        // not even show.
+        Core.engine.cancel(_state.value.conversationId)
         job?.cancel()
         job = null
     }
@@ -489,7 +483,8 @@ class ChatViewModel : ViewModel() {
      */
     fun steer(text: String): Boolean {
         val body = text.trim()
-        if (body.isEmpty() || !Core.engine.steer(body)) return false
+        val chatId = _state.value.conversationId
+        if (body.isEmpty() || !Core.engine.steer(chatId, body)) return false
         val live = session ?: return true
         val line = StoredMessage(
             id = UUID.randomUUID().toString(),
@@ -535,7 +530,9 @@ class ChatViewModel : ViewModel() {
                 // The persona bends the live settings; anything it left blank stays as-is.
                 val effective = settings.forAssistant(assistant)
                 val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
-                val produced = engine.run(
+                val produced = engine.startRun(
+                    chatId = shown.conversationId,
+                    title = shown.title,
                     history = history,
                     settings = effective,
                     registry = registry,
@@ -686,30 +683,20 @@ class ChatViewModel : ViewModel() {
     /**
      * Installs [next] as the run's copy of its conversation and, when that conversation is
      * the one on screen, copies the live parts of it onto the screen. A run in some other
-     * conversation changes nothing here except the "who is running" line.
+     * conversation changes nothing here at all.
      */
     private fun setSession(next: RunSession?) {
         session = next
         _state.update { snapshot ->
             when {
                 next == null -> snapshot.copy(
-                    running = false,
-                    runningChatId = "",
-                    runningTitle = "",
                     liveParts = emptyList(),
                     liveRunId = "",
                 )
 
-                snapshot.conversationId != next.chatId -> snapshot.copy(
-                    running = true,
-                    runningChatId = next.chatId,
-                    runningTitle = next.title,
-                )
+                snapshot.conversationId != next.chatId -> snapshot
 
                 else -> snapshot.copy(
-                    running = true,
-                    runningChatId = next.chatId,
-                    runningTitle = next.title,
                     title = next.title,
                     messages = next.messages,
                     activeRuns = next.activeRuns,
@@ -735,11 +722,8 @@ class ChatViewModel : ViewModel() {
         session = null
         _state.update { snapshot ->
             val failure = error ?: live?.error
-            when {
-                live != null && snapshot.conversationId == live.chatId -> snapshot.copy(
-                    running = false,
-                    runningChatId = "",
-                    runningTitle = "",
+            if (live != null && snapshot.conversationId == live.chatId) {
+                snapshot.copy(
                     streaming = "",
                     reasoning = "",
                     stats = null,
@@ -747,26 +731,10 @@ class ChatViewModel : ViewModel() {
                     runningTool = null,
                     liveParts = emptyList(),
                     liveRunId = "",
-                    notice = null,
                     error = failure ?: snapshot.error,
                 )
-
-                // A run in another conversation died: there is no error card to put it
-                // on, so say it in the notice line rather than let it vanish.
-                live != null && failure != null -> snapshot.copy(
-                    running = false,
-                    runningChatId = "",
-                    runningTitle = "",
-                    stats = null,
-                    notice = "『${live.title}』运行失败：$failure",
-                )
-
-                else -> snapshot.copy(
-                    running = false,
-                    runningChatId = "",
-                    runningTitle = "",
-                    stats = null,
-                )
+            } else {
+                snapshot
             }
         }
     }
@@ -789,12 +757,6 @@ class ChatViewModel : ViewModel() {
                 activeRuns = shown.activeRuns,
             ),
         )
-    }
-
-    /** Names the conversation holding the single run slot, so the refusal is actionable. */
-    private fun runningNotice(): String {
-        val live = session ?: return "正在运行，先停止或切回"
-        return "『${live.title}』正在运行，先停止或切回"
     }
 
     /** Saves the conversation on screen. */

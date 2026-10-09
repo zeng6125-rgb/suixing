@@ -50,6 +50,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -81,7 +82,6 @@ import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PhotoCamera
-import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
@@ -98,6 +98,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -128,6 +132,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material3.ripple
 import androidx.compose.ui.text.font.FontWeight
@@ -137,6 +143,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -148,7 +155,6 @@ import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Transcript
-import com.suixing.agent.service.FloatConsoleService
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.DrawerButton
@@ -184,6 +190,11 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     val scope = rememberCoroutineScope()
     var input by rememberSaveable { mutableStateOf("") }
     var editing by remember { mutableStateOf<StoredMessage?>(null) }
+    // The composer stack's own measured height (navigation bar inset included: the
+    // modifier sits inside the measured node), so the list's bottom padding is what
+    // the stack actually occupies instead of a guess that leaves a band in both the
+    // keyboard-up and keyboard-down states.
+    var composerH by remember { mutableStateOf(0.dp) }
 
     val voiceLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -228,17 +239,6 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
         ActivityResultContracts.GetContent(),
     ) { uri -> attach(uri, AttachKind.FILE) }
 
-    // Returning from the system's overlay page is the only moment the grant can have
-    // changed, so the switch is decided here rather than on the way out.
-    val overlayPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) {
-        if (FloatConsoleService.canDrawOverlays(context)) {
-            scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
-            FloatConsoleService.start(context)
-        }
-    }
-
     // Tool-only assistant turns carry no text of their own, so their tool calls are
     // folded into the bubble above them instead of standing alone in the transcript.
     // Only the branch the user picked is drawn; the other answers stay on disk.
@@ -250,10 +250,10 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
     val visible = remember(
         state.messages,
         state.activeRuns,
-        state.running,
+        state.runningHere,
         state.liveRunId,
     ) {
-        groupRows(state.messages, state.activeRuns, state.running)
+        groupRows(state.messages, state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
     val reasoning = if (settings.showReasoning) state.reasoning else ""
@@ -368,7 +368,20 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
         ) {
             Column(Modifier.fillMaxSize()) {
                 if (visible.isEmpty() && !live) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    // Outside the list on purpose: an empty conversation recentres in
+                    // whatever space the keyboard leaves, instead of the list's top
+                    // padding shoving the hero off the top of the screen.
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .padding(
+                                top = with(LocalDensity.current) {
+                                    WindowInsets.statusBars.getTop(this).toDp()
+                                } + 60.dp,
+                                bottom = composerH + 16.dp,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
                         EmptyHero(onPick = { input = it })
                     }
                 } else {
@@ -384,14 +397,11 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                             top = with(LocalDensity.current) {
                                 WindowInsets.statusBars.getTop(this).toDp()
                             } + 76.dp,
-                            // The composer floats over the list, so the list leaves room
-                            // for it; otherwise the last line of a reply sits under the
-                            // pill. Fixed, not ime-grown: the keyboard lifts the whole
-                            // composer stack, and growing the padding with the IME cut
-                            // the list off above the keyboard and left a blank band in
-                            // its rounded corners. Content now scrolls behind the
-                            // capsule and the lifted stack.
-                            bottom = 168.dp,
+                            // The composer floats over the list, so the list leaves
+                            // exactly the room the stack occupies plus 16dp of air —
+                            // measured, not guessed, so neither the keyboard-up nor the
+                            // keyboard-down state leaves a blank band.
+                            bottom = composerH + 16.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
@@ -450,17 +460,23 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
             }
             // Content scrolling behind the floating header fades out instead of being
             // cut by it. It starts at y=0 — behind the status strip too, or the first
-            // line still hard-cuts under the clock — and runs statusBar + 4 + 56 + 16.
+            // line still hard-cuts under the clock — and runs statusBar + 96dp, the
+            // taller band the ChatGPT header wears. Three stops (full, half, gone)
+            // soften the edge the way a two-stop ramp cannot.
             val statusBarInset = with(LocalDensity.current) {
                 WindowInsets.statusBars.getTop(this).toDp()
             }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(statusBarInset + 76.dp)
+                    .height(statusBarInset + 96.dp)
                     .background(
                         Brush.verticalGradient(
-                            listOf(canvasColor, canvasColor.copy(alpha = 0f)),
+                            colorStops = arrayOf(
+                                0f to canvasColor,
+                                0.55f to canvasColor.copy(alpha = 0.55f),
+                                1f to canvasColor.copy(alpha = 0f),
+                            ),
                         ),
                     ),
             )
@@ -476,31 +492,9 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
                 }
             }
-            // The floating header: three discs over the transcript, no bar of its own.
+            // The floating header: two discs and the title capsule, no bar of its own.
             ChatTopBar(
                 title = state.title,
-                consoleOn = settings.floatingConsole,
-                onToggleConsole = {
-                    if (settings.floatingConsole) {
-                        // Written first, then stopped: the switch is what the run checks,
-                        // and a console left running after the switch went off would
-                        // linger until the run ended on its own.
-                        scope.launch { Core.settings.update { it.copy(floatingConsole = false) } }
-                        FloatConsoleService.stop(context)
-                    } else if (FloatConsoleService.canDrawOverlays(context)) {
-                        scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
-                        // Idempotent: starting a console that is already up only refreshes
-                        // its notification, and it is what makes the ball appear for the
-                        // run that is already going rather than only the next one.
-                        FloatConsoleService.start(context)
-                    } else {
-                        // Not persisted on the way out: without the grant the switch would
-                        // read ON while no ball could ever appear.
-                        overlayPermissionLauncher.launch(
-                            FloatConsoleService.overlayPermissionIntent(context),
-                        )
-                    }
-                },
                 onNew = { viewModel.newConversation() },
             )
             // The jump-to-latest button lives inside the composer stack (first row of
@@ -528,16 +522,11 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                 Composer(
                     input = input,
                     onInput = { input = it },
-                    running = state.running,
-                    // 运行在别的会话里时，状态行得点名是哪一个：否则「正在思考…」会让人以为
-                    // 是眼前这条对话在跑。
-                    status = when {
-                        !state.running -> ""
-                        state.runningHere -> state.status
-                        else -> "『${state.runningTitle}』正在运行"
-                    },
+                    running = state.runningHere,
+                    // The status line names the run on screen; a run in another
+                    // conversation is none of this composer's business.
+                    status = if (state.runningHere) state.status else "",
                     stats = state.stats,
-                    notice = state.notice,
                     settings = settings,
                     onPickModel = { provider, model ->
                         scope.launch {
@@ -589,6 +578,7 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
                     },
                     jumpToLatest = { jumpToLatest() },
                     showJump = !atEnd,
+                    onHeightChanged = { composerH = it },
                 )
             }
         }
@@ -627,8 +617,10 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
 }
 
 /**
- * The chat header: a solid bar that owns the status bar strip. Four slots, nothing else —
- * drawer handle, the conversation's name, the floating-console switch, new conversation.
+ * The chat header: a solid bar that owns the status bar strip. Three slots, nothing
+ * else — drawer handle, the conversation's name, new conversation. The floating
+ * console moved to the drawer: a fourth disc here only ever read as clutter over the
+ * transcript.
  *
  * The model switcher used to live here too and was moved down to the composer: a pill
  * between two round buttons left the conversation's name about four characters wide.
@@ -636,8 +628,6 @@ fun ChatScreen(viewModel: ChatViewModel = viewModel()) {
 @Composable
 private fun ChatTopBar(
     title: String,
-    consoleOn: Boolean,
-    onToggleConsole: () -> Unit,
     onNew: () -> Unit,
 ) {
     // Read outside the click lambda: the composition local is a composable read, and the
@@ -653,7 +643,7 @@ private fun ChatTopBar(
             // floating over the transcript, not glued to the notch.
             .padding(top = 4.dp)
             .height(56.dp)
-            .padding(horizontal = 20.dp),
+            .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -661,11 +651,13 @@ private fun ChatTopBar(
             icon = Icons.Rounded.Menu,
             contentDescription = "打开侧边栏",
             onClick = { openDrawer?.invoke() },
+            iconSize = 24.dp,
+            tint = MaterialTheme.colorScheme.onSurface,
         )
         Surface(
             modifier = Modifier
                 .weight(1f)
-                .padding(start = 4.dp)
+                .height(48.dp)
                 .shadow(
                     elevation = 8.dp,
                     shape = CircleShape,
@@ -675,29 +667,22 @@ private fun ChatTopBar(
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surface,
         ) {
-            Text(
-                text = title,
-                style = titleBarStyle(),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-            )
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                Text(
+                    text = title,
+                    style = titleBarStyle(),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                )
+            }
         }
-        FlatIconButton(
-            icon = Icons.Rounded.PictureInPictureAlt,
-            contentDescription = if (consoleOn) "关闭悬浮窗" else "开启悬浮窗",
-            onClick = onToggleConsole,
-            iconSize = 26.dp,
-            tint = if (consoleOn) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
         FlatIconButton(
             icon = Icons.Rounded.Add,
             contentDescription = "新对话",
             onClick = onNew,
+            iconSize = 24.dp,
+            tint = MaterialTheme.colorScheme.onSurface,
         )
     }
 }
@@ -741,47 +726,9 @@ private fun FlatSelector(label: String, onClick: () -> Unit) {
 }
 
 /**
- * Every model the user ticked, grouped by the provider it came from, so switching
- * between a LAN proxy's upstream vendors takes two taps.
+ * Every model the user ticked used to live in a dropdown here; the 生成设置 sheet
+ * owns the list now, so this menu is gone with its last caller.
  */
-@Composable
-private fun ModelMenu(settings: AppSettings, onPick: (ProviderConfig, String) -> Unit) {
-    val groups = settings.enabledModels().groupBy { it.first.id }.values
-    if (groups.isEmpty()) {
-        DropdownMenuItem(
-            text = { Text("还没启用模型，去「设置」里拉取") },
-            onClick = {},
-        )
-        return
-    }
-    groups.forEach { pairs ->
-        val provider = pairs.first().first
-        Text(
-            text = provider.label,
-            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        pairs.forEach { (owner, modelId) ->
-            val active = modelId == settings.model &&
-                owner.baseUrl.trimEnd('/') == settings.baseUrl.trimEnd('/')
-            DropdownMenuItem(
-                text = { Text(owner.displayModel(modelId), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                trailingIcon = {
-                    if (active) {
-                        Icon(
-                            imageVector = Icons.Rounded.Check,
-                            contentDescription = "当前",
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                },
-                onClick = { onPick(owner, modelId) },
-            )
-        }
-    }
-}
-
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EmptyHero(onPick: (String) -> Unit) {
@@ -801,24 +748,35 @@ private fun EmptyHero(onPick: (String) -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(24.dp))
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+        // A short screen with the keyboard up must not let the suggestions push the
+        // hero off: the chip column scrolls inside 40% of the display height.
+        val chipMax = with(LocalConfiguration.current) { screenHeightDp.dp } * 0.4f
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = chipMax)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            SUGGESTIONS.forEach { suggestion ->
-                Surface(
-                    onClick = { onPick(suggestion) },
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                ) {
-                    Text(
-                        text = suggestion,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SUGGESTIONS.forEach { suggestion ->
+                    Surface(
+                        onClick = { onPick(suggestion) },
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    ) {
+                        Text(
+                            text = suggestion,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -1326,7 +1284,7 @@ private fun AssistantRow(
         // mode, where the two surfaces are 8% apart.
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp)) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp)) {
             // The avatar sits in the card's header rather than beside it: the reply is one
             // object, and an avatar floating outside the card made it two.
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1362,6 +1320,8 @@ private fun AssistantRow(
             // The summary opens the bubble and waits for the run to settle: while it
             // streams the numbers are still moving, and a card that changes shape under the
             // reader's eyes is worse than no card at all.
+            // 头像行→10→首块（无汇总卡的流式态也走这一条）。
+            Spacer(Modifier.height(10.dp))
             val settled = usage?.takeIf { it.known }
             if (!streaming && (settled != null || parts.isNotEmpty())) {
                 TurnSummary(
@@ -1372,10 +1332,11 @@ private fun AssistantRow(
                     expandReasoning = expandReasoning,
                     onEdit = onEdit,
                 )
-                Spacer(Modifier.height(8.dp))
+                // 头像行→10→首块、末块→10→正文/气泡底: the card's own air below is
+                // this spacer, so a bubble without a card does not stack two of them.
+                Spacer(Modifier.height(10.dp))
             }
             val lastText = parts.indexOfLast { it is Part.Text }
-            Spacer(Modifier.height(8.dp))
             parts.forEachIndexed { index, part ->
                 val last = index == parts.lastIndex
                 when (part) {
@@ -1396,7 +1357,7 @@ private fun AssistantRow(
                             // once the reply is stored and drawn as its own message.
                             startExpanded = expandReasoning || streaming,
                         )
-                        Spacer(Modifier.height(8.dp))
+                        if (!last) Spacer(Modifier.height(10.dp))
                     }
 
                     is Part.Tools -> {
@@ -1417,7 +1378,7 @@ private fun AssistantRow(
                             runningTool = runningTool.takeIf { cursor > parts.lastIndex },
                             startExpanded = expandTools,
                         )
-                        Spacer(Modifier.height(8.dp))
+                        if (!last) Spacer(Modifier.height(10.dp))
                     }
 
                     is Part.Text -> {
@@ -1433,7 +1394,7 @@ private fun AssistantRow(
                             Spacer(Modifier.height(4.dp))
                             BlinkingCursor()
                         }
-                        Spacer(Modifier.height(8.dp))
+                        if (!last) Spacer(Modifier.height(10.dp))
                     }
 
                     is Part.Steer -> {
@@ -1445,14 +1406,15 @@ private fun AssistantRow(
                         ) {
                             UserBubble(message = part.message, onEdit = onEdit)
                         }
-                        Spacer(Modifier.height(8.dp))
+                        if (!last) Spacer(Modifier.height(10.dp))
                     }
                 }
             }
             if (parts.isEmpty() && streaming) TypingDots()
             if (message != null && !streaming) {
-                // No gap of its own: the last block's trailing spacer is the air above
-                // this row, and a second one here read as a hole under the reply.
+                // The last block carries no trailing spacer of its own, so the air
+                // above this row is its own 10dp.
+                Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ActionBar(
                         branch = branch,
@@ -1572,10 +1534,10 @@ private fun ProcessCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // A minimum, not a fixed height: nothing in this row may wrap, and a
-                    // larger 字号 should grow the row rather than clip the title. 32dp
-                    // with 4dp of vertical padding keeps the folded card a one-line strip.
-                    .heightIn(min = 32.dp)
+                    // Exactly 36dp folded: the fourth time the user has nailed this
+                    // card's height down, so it is a fixed height, not a minimum —
+                    // nothing in the row wraps (every text is maxLines 1).
+                    .height(36.dp)
                     .clip(
                         RoundedCornerShape(
                             topStart = 16.dp,
@@ -1589,15 +1551,23 @@ private fun ProcessCard(
                         indication = ripple(),
                         onClick = onToggle,
                     )
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                    .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
+                // One slot for all three card families: the icon sits centred in a
+                // 24dp box at 16dp, so Psychology, Build and Insights line up exactly
+                // instead of each header carrying its own size and tint.
+                Box(
+                    modifier = Modifier.size(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = scheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = title,
@@ -1755,15 +1725,28 @@ private fun ReasoningBlock(
             )
             return@ProcessCard
         }
-        // Expanded means the whole chain at its own height, no inner scroll: the outer
-        // chat list is the one that scrolls, and a capped inner box is what made two
-        // open blocks on one screen disagree about how tall a think is. A monster chain
-        // caps at 60 lines with an explicit 「展开全部」 instead of burying the transcript.
-        val cap = 60
+        // Bounded inner scroll: a chain of thought can run to screens of text, and a
+        // bubble that grows with it buries the answer — the user's verdict on the
+        // natural-height version. 320dp of lazy list that follows its tail while the
+        // think streams; the outer chat list still carries the page.
+        val cap = 200
         var uncapped by remember { mutableStateOf(false) }
         val shown = if (uncapped || lines.size <= cap) lines else lines.subList(0, cap)
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            shown.forEachIndexed { index, line ->
+        val inner = rememberLazyListState()
+        LaunchedEffect(shown.size, expanded) {
+            if (expanded && streaming && shown.isNotEmpty()) {
+                inner.animateScrollToItem(shown.lastIndex)
+            }
+        }
+        LazyColumn(
+            state = inner,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 320.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            items(shown.size) { index ->
+                val line = shown[index]
                 if (line.isBlank()) {
                     Spacer(Modifier.height(4.dp))
                 } else {
@@ -1778,8 +1761,10 @@ private fun ReasoningBlock(
                 if (index == shown.lastIndex && streaming) BlinkingCursor()
             }
             if (!uncapped && lines.size > cap) {
-                TextButton(onClick = { uncapped = true }) {
-                    Text("展开全部 ${lines.size} 行")
+                item {
+                    TextButton(onClick = { uncapped = true }) {
+                        Text("展开全部 ${lines.size} 行")
+                    }
                 }
             }
         }
@@ -1850,14 +1835,23 @@ private fun ToolBundle(
             }
         },
     ) {
-        tools.forEachIndexed { index, tool ->
-            // Stored calls key on their message id; a live one has no id yet.
-            val key = tool.message?.id ?: "live-$index"
-            ToolRow(
-                line = tool,
-                expanded = openTool == key,
-                onToggle = { openTool = if (openTool == key) null else key },
-            )
+        // Same family as the thinking block: bounded at 320dp with its own lazy list,
+        // so a run of twenty calls does not stretch the bubble past the screen.
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 320.dp),
+        ) {
+            items(tools.size) { index ->
+                val tool = tools[index]
+                // Stored calls key on their message id; a live one has no id yet.
+                val key = tool.message?.id ?: "live-$index"
+                ToolRow(
+                    line = tool,
+                    expanded = openTool == key,
+                    onToggle = { openTool = if (openTool == key) null else key },
+                )
+            }
         }
     }
 }
@@ -2392,8 +2386,6 @@ private fun Composer(
     status: String,
     /** The live run's stats; the status line reads its compression note. */
     stats: StreamStats?,
-    /** 被拦下的动作或别的会话里跑挂的 run，说给用户听的那一句。 */
-    notice: String?,
     settings: AppSettings,
     onPickModel: (ProviderConfig, String) -> Unit,
     attachment: Attachment?,
@@ -2411,9 +2403,13 @@ private fun Composer(
     jumpToLatest: () -> Unit,
     /** Shown while the transcript is scrolled away from its end. */
     showJump: Boolean,
+    /** The stack's measured height, so the list can pad by what it truly occupies. */
+    onHeightChanged: (Dp) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val density = LocalDensity.current
     var menuOpen by remember { mutableStateOf(false) }
+    var sheetOpen by remember { mutableStateOf(false) }
     // Nothing here paints a background: the transcript scrolls right down to the gesture
     // bar behind the pill, so the composer reads as something floating over the
     // conversation rather than an opaque strip that cuts it off.
@@ -2422,7 +2418,10 @@ private fun Composer(
             .fillMaxWidth()
             .navigationBarsPadding()
             .padding(horizontal = 16.dp)
-            .padding(top = 6.dp, bottom = 12.dp),
+            .padding(top = 6.dp, bottom = 12.dp)
+            // Measured after the navigation-bar inset is applied, so the number the
+            // list pads by is the stack's true footprint on screen.
+            .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) },
     ) {
         Column {
             // The jump-to-latest button rides the stack's own top: 12dp above whatever
@@ -2456,7 +2455,7 @@ private fun Composer(
                 note.isNotEmpty() -> note
                 else -> status.ifBlank { "正在思考…" }
             }
-            if (running || notice != null) {
+            if (running) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2476,24 +2475,6 @@ private fun Composer(
                             text = statusText,
                             style = statusLineStyle(),
                             color = if (note.isNotEmpty()) scheme.tertiary else scheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                    }
-                    notice?.let { text ->
-                        Spacer(Modifier.width(8.dp))
-                        Icon(
-                            imageVector = Icons.Rounded.Info,
-                            contentDescription = null,
-                            tint = scheme.tertiary,
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = text,
-                            style = statusLineStyle(),
-                            color = scheme.tertiary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false),
@@ -2578,12 +2559,13 @@ private fun Composer(
                             .height(44.dp)
                             .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                     Box {
                         IconButton(
                             onClick = { menuOpen = true },
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(40.dp)
                                 .clip(CircleShape)
                                 .background(scheme.surfaceContainerHigh),
                         ) {
@@ -2591,6 +2573,7 @@ private fun Composer(
                                 imageVector = Icons.Rounded.Add,
                                 contentDescription = "添加图片或文件",
                                 tint = scheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp),
                             )
                         }
                         DropdownMenu(
@@ -2628,29 +2611,18 @@ private fun Composer(
                             )
                         }
                     }
-                    Spacer(Modifier.width(4.dp))
-                    var modelsOpen by remember { mutableStateOf(false) }
-                    Box {
-                        FlatSelector(
-                            // The alias wins over the raw id; without one the short id
-                            // stays, exactly as the composer has always read.
-                            label = settings.activeProvider()?.displayModel(settings.model)
-                                ?.takeIf { it != settings.model }
-                                ?: settings.shortModel.ifBlank { "选模型" },
-                            onClick = { modelsOpen = true },
-                        )
-                        DropdownMenu(
-                            expanded = modelsOpen,
-                            onDismissRequest = { modelsOpen = false },
-                        ) {
-                            ModelMenu(settings = settings) { provider, model ->
-                                onPickModel(provider, model)
-                                modelsOpen = false
-                            }
-                        }
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    ReasoningChip(settings = settings)
+                    // Both flat labels are the one door into the 生成设置 sheet: model
+                    // list and reasoning level live together there, so the row stays
+                    // two short captions instead of two menus.
+                    FlatSelector(
+                        // The alias wins over the raw id; without one the short id
+                        // stays, exactly as the composer has always read.
+                        label = settings.activeProvider()?.displayModel(settings.model)
+                            ?.takeIf { it != settings.model }
+                            ?: settings.shortModel.ifBlank { "选模型" },
+                        onClick = { sheetOpen = true },
+                    )
+                    ReasoningChip(settings = settings, onOpenSheet = { sheetOpen = true })
                     Spacer(Modifier.weight(1f))
                     IconButton(
                         onClick = onMic,
@@ -2661,9 +2633,9 @@ private fun Composer(
                             Icons.Rounded.Mic,
                             contentDescription = "语音输入",
                             tint = if (running) scheme.onSurfaceVariant else scheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
                         )
                     }
-                    Spacer(Modifier.width(4.dp))
                     // 插话发送: only while a run is live and there is something to say —
                     // an always-present second button would be a dead control most of
                     // the time, and the stop button beside it still owns the slot.
@@ -2672,12 +2644,11 @@ private fun Composer(
                             icon = Icons.Rounded.ArrowUpward,
                             contentDescription = "插话发送",
                             onClick = { if (onSteer(input.trim())) onInput("") },
-                            size = 48.dp,
+                            size = 40.dp,
                             containerColor = scheme.primaryContainer,
                             contentColor = scheme.onPrimaryContainer,
-                            iconSize = 22.dp,
+                            iconSize = 20.dp,
                         )
-                        Spacer(Modifier.width(6.dp))
                     }
                     val hasSomething = input.isNotBlank() || attachment != null
                     val sendable = running || hasSomething
@@ -2686,7 +2657,7 @@ private fun Composer(
                         contentDescription = if (running) "停止" else "发送",
                         onClick = { if (running) onStop() else onSend() },
                         enabled = sendable,
-                        size = 44.dp,
+                        size = 40.dp,
                         // Three states, three colours: a live run offers stop, a field with
                         // something in it turns brand-coloured so the button reads as ready,
                         // and an empty field stays a quiet grey circle.
@@ -2702,7 +2673,7 @@ private fun Composer(
                         },
                         // Flat: the pill's own lift is the only depth in this corner.
                         shadowElevation = 0.dp,
-                        iconSize = 22.dp,
+                        iconSize = 20.dp,
                     )
                     }
                 }
@@ -2710,6 +2681,13 @@ private fun Composer(
         }
     }
             }
+    if (sheetOpen) {
+        GenerationSheet(
+            settings = settings,
+            onPickModel = onPickModel,
+            onDismiss = { sheetOpen = false },
+        )
+    }
 }
 
 /** The composer's status line: plain 13sp text with no container of its own. */
@@ -2723,45 +2701,121 @@ private fun statusLineStyle(): TextStyle = MaterialTheme.typography.labelMedium
  * precedence [AppSettings.forAssistant] resolves with.
  */
 @Composable
-private fun ReasoningChip(settings: AppSettings) {
-    val scope = rememberCoroutineScope()
-    var open by remember { mutableStateOf(false) }
+private fun ReasoningChip(settings: AppSettings, onOpenSheet: () -> Unit) {
     val assistant = settings.assistant(settings.activeAssistantId) ?: settings.activeAssistant()
     val provider = settings.providers.firstOrNull { it.id == assistant?.providerId }
     val own = provider?.takeIf { it.ownSampling }
     val wire = own?.reasoningEffort ?: settings.reasoningEffort
     val name = REASONING_LEVELS.firstOrNull { it.first == wire }?.second ?: "默认"
-    Box {
-        FlatSelector(label = "思考 · $name", onClick = { open = true })
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            REASONING_LEVELS.forEach { (level, label) ->
-                DropdownMenuItem(
-                    text = { Text(label) },
-                    trailingIcon = {
-                        if (level == wire) {
-                            Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = "当前",
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                    },
-                    onClick = {
-                        open = false
-                        scope.launch {
-                            Core.settings.update { stored ->
-                                if (own != null) {
-                                    stored.copy(
-                                        providers = stored.providers.map {
-                                            if (it.id == own.id) it.copy(reasoningEffort = level) else it
-                                        },
-                                    )
-                                } else {
-                                    stored.copy(reasoningEffort = level)
-                                }
+    FlatSelector(label = "思考 · $name", onClick = onOpenSheet)
+}
+
+/**
+ * The one sheet both composer captions open: which model answers and how hard it
+ * thinks are one decision, so they share one surface — model name and level badge on
+ * top, the six-step slider in the middle, the provider's enabled models as radio rows
+ * below. Every change writes through at once; there is no confirm button to forget.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GenerationSheet(
+    settings: AppSettings,
+    onPickModel: (ProviderConfig, String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val scheme = MaterialTheme.colorScheme
+    val assistant = settings.assistant(settings.activeAssistantId) ?: settings.activeAssistant()
+    val provider = settings.providers.firstOrNull { it.id == assistant?.providerId }
+    val own = provider?.takeIf { it.ownSampling }
+    val wire = own?.reasoningEffort ?: settings.reasoningEffort
+    val levelIndex = REASONING_LEVELS.indexOfFirst { it.first == wire }.coerceAtLeast(0)
+    val models = provider?.enabled.orEmpty()
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = provider?.displayModel(settings.model) ?: settings.shortModel,
+                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 16.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(Modifier.width(8.dp))
+                Surface(shape = CircleShape, color = scheme.primaryContainer) {
+                    Text(
+                        text = REASONING_LEVELS[levelIndex].second,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Slider(
+                value = levelIndex.toFloat(),
+                onValueChange = { index ->
+                    val level = REASONING_LEVELS[index.toInt()].first
+                    scope.launch {
+                        Core.settings.update { stored ->
+                            if (own != null) {
+                                stored.copy(
+                                    providers = stored.providers.map {
+                                        if (it.id == own.id) it.copy(reasoningEffort = level) else it
+                                    },
+                                )
+                            } else {
+                                stored.copy(reasoningEffort = level)
                             }
                         }
-                    },
+                    }
+                },
+                valueRange = 0f..REASONING_LEVELS.lastIndex.toFloat(),
+                steps = REASONING_LEVELS.size - 2,
+            )
+            Text(
+                text = "思考强度 · ${REASONING_LEVELS[levelIndex].second}",
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+            models.forEach { id ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = ripple(),
+                        ) {
+                            if (provider != null) onPickModel(provider, id)
+                        }
+                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(
+                        selected = id == settings.model,
+                        onClick = null,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = provider?.displayModel(id) ?: id,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            if (models.isEmpty()) {
+                Text(
+                    text = "这个提供方还没启用模型，去「设置」里拉取。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = scheme.onSurfaceVariant,
                 )
             }
         }

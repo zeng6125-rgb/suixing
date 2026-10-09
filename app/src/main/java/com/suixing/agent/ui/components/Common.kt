@@ -451,9 +451,9 @@ fun FlatIconButton(
     Surface(
         onClick = onClick,
         modifier = modifier
-            .size(48.dp)
+            .size(44.dp)
             .shadow(
-                elevation = 8.dp,
+                elevation = 2.dp,
                 shape = CircleShape,
                 ambientColor = Color.Black.copy(alpha = 0.25f),
                 spotColor = Color.Black.copy(alpha = 0.25f),

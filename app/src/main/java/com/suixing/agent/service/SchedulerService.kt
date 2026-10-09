@@ -47,14 +47,11 @@ class SchedulerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val id = intent?.getStringExtra(EXTRA_ID).orEmpty()
         if (intent?.action == ACTION_FIRE && id.isNotEmpty()) {
-            // The engine is shared with the chat screen and the floating console and runs one
-            // task at a time. If the user is already talking to it, a second run would
-            // interleave two conversations into one wire, so the reminder is recorded and
-            // left for the user instead — said out loud in the notification, not swallowed.
-            val busy = Core.engine.runState.value is RunState.Running
-            startForeground(REMINDER_ID, buildNotification(id, busy))
+            // Runs are keyed by conversation now, so a reminder always gets its own run in
+            // its own fresh conversation: nothing else on the engine can make it busy.
+            startForeground(REMINDER_ID, buildNotification(id))
             Core.appScope.launch {
-                fire(id, busy)
+                fire(id)
                 // The reminder stays in the shade as an ordinary, dismissible notification;
                 // only the foreground flag goes away.
                 stopForeground(STOP_FOREGROUND_DETACH)
@@ -69,7 +66,7 @@ class SchedulerService : Service() {
         return START_NOT_STICKY
     }
 
-    private suspend fun fire(id: String, busy: Boolean) {
+    private suspend fun fire(id: String) {
         val schedule = Core.schedules.find(id) ?: return
         val question = StoredMessage(
             id = UUID.randomUUID().toString(),
@@ -81,20 +78,20 @@ class SchedulerService : Service() {
         val conversation = Core.chats.create(schedule.title)
         Core.chats.save(conversation.copy(messages = listOf(question)))
 
-        if (!busy) {
-            AgentForegroundService.start(this, "定时任务：${schedule.title}")
-            val produced = Core.engine.run(
-                history = listOf(question),
-                settings = Core.settings.current(),
-                registry = Core.tools,
-                capabilities = Core.capabilities,
-                skills = Core.skills,
-                memory = Core.memory,
-                gate = Core.gate,
-                onEvent = {},
-            )
-            Core.chats.save(conversation.copy(messages = listOf(question) + produced))
-        }
+        AgentForegroundService.start(this, "定时任务：${schedule.title}")
+        val produced = Core.engine.startRun(
+            chatId = conversation.id,
+            title = schedule.title,
+            history = listOf(question),
+            settings = Core.settings.current(),
+            registry = Core.tools,
+            capabilities = Core.capabilities,
+            skills = Core.skills,
+            memory = Core.memory,
+            gate = Core.gate,
+            onEvent = {},
+        )
+        Core.chats.save(conversation.copy(messages = listOf(question) + produced))
 
         // A one-shot reminder that has fired is done; a repeating one is due again from now.
         val next = schedule.nextTriggerAfter(System.currentTimeMillis())
@@ -102,7 +99,7 @@ class SchedulerService : Service() {
         arm(this)
     }
 
-    private fun buildNotification(id: String, busy: Boolean): Notification {
+    private fun buildNotification(id: String): Notification {
         val schedule: Schedule? = Core.schedules.find(id)
         val open = PendingIntent.getActivity(
             this,
@@ -112,11 +109,7 @@ class SchedulerService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val text = if (busy) {
-            "随行正在执行别的任务，这条提醒没有自动执行，已存进会话"
-        } else {
-            "随行正在执行这条提醒"
-        }
+        val text = "随行正在执行这条提醒"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_spark)
             .setContentTitle(schedule?.title ?: "定时提醒")
