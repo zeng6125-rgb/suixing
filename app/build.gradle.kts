@@ -13,8 +13,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.8.8"
+        versionCode = 20
+        versionName = "0.8.9"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -99,4 +99,8 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    // MockK stands in for the Android-bound collaborators (CapabilityHub hooks Shizuku in
+    // its init, SkillStore/MemoryStore want a Context) without ever running their
+    // constructors, which is what makes engine-level tests possible on the JVM.
+    testImplementation("io.mockk:mockk:1.13.13")
 }

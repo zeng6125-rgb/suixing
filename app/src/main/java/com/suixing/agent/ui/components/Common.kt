@@ -453,10 +453,10 @@ fun FlatIconButton(
         modifier = modifier
             .size(44.dp)
             .shadow(
-                elevation = 2.dp,
+                elevation = 6.dp,
                 shape = CircleShape,
-                ambientColor = Color.Black.copy(alpha = 0.25f),
-                spotColor = Color.Black.copy(alpha = 0.25f),
+                ambientColor = Color.Black.copy(alpha = 0.12f),
+                spotColor = Color.Black.copy(alpha = 0.12f),
             ),
         shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,

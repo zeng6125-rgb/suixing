@@ -257,7 +257,9 @@ fun SuixingApp() {
 
     // Rendered outside the navigation host so a prompt cannot be missed while the
     // user is on another screen — the agent is blocked until it is answered.
-    pending?.let { request -> ApprovalDialog(request.toolName, request.args) }
+    pending.entries.firstOrNull()?.let { (chatId, request) ->
+        ApprovalDialog(chatId, request.toolName, request.args)
+    }
 
     // The assistant picker used to live in the chat header's avatar, which the floating
     // header no longer has; the drawer is where the rest of the app's switches live.
@@ -571,9 +573,9 @@ private fun DrawerAction(
 }
 
 @Composable
-private fun ApprovalDialog(toolName: String, args: String) {
+private fun ApprovalDialog(chatId: String, toolName: String, args: String) {
     AlertDialog(
-        onDismissRequest = { Core.gate.resolve(false) },
+        onDismissRequest = { Core.gate.resolve(chatId, false) },
         icon = { Icon(Icons.Rounded.ShieldMoon, contentDescription = null) },
         title = { Text("需要你确认") },
         text = {
@@ -601,11 +603,11 @@ private fun ApprovalDialog(toolName: String, args: String) {
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { Core.gate.resolve(true) }) { Text("允许一次") } },
+        confirmButton = { TextButton(onClick = { Core.gate.resolve(chatId, true) }) { Text("允许一次") } },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { Core.gate.resolve(true, always = true) }) { Text("总是允许") }
-                TextButton(onClick = { Core.gate.resolve(false) }) { Text("拒绝") }
+                TextButton(onClick = { Core.gate.resolve(chatId, true, always = true) }) { Text("总是允许") }
+                TextButton(onClick = { Core.gate.resolve(chatId, false) }) { Text("拒绝") }
             }
         },
     )

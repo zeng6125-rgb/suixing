@@ -84,7 +84,7 @@ object Core {
     /**
      * Shared for the same reason as [gate]: the floating console drives the run that
      * the chat screen started, so both need the same instance to call `cancel()` and
-     * `steer()` on. One engine, one run at a time.
+     * `steer()` on. One engine, one run per conversation, many conversations at once.
      */
     lateinit var engine: AgentEngine
         private set

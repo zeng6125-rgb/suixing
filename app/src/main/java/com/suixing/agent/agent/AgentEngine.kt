@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -37,6 +38,7 @@ import okhttp3.Call
 import java.io.IOException
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
@@ -77,14 +79,15 @@ class ApprovalGate(
 
     private data class Decision(val approved: Boolean, val always: Boolean)
 
-    private val _pending = MutableStateFlow<Request?>(null)
-    val pending: StateFlow<Request?> = _pending.asStateFlow()
+    private val _pending = MutableStateFlow<Map<String, Request>>(emptyMap())
+    val pending: StateFlow<Map<String, Request>> = _pending.asStateFlow()
 
-    private var waiter: CompletableDeferred<Decision>? = null
+    /** One waiter per run: two conversations asking at once must not overwrite each other. */
+    private val waiters = ConcurrentHashMap<String, CompletableDeferred<Decision>>()
 
-    private val alwaysAllowed = mutableSetOf<String>()
+    private val alwaysAllowed = ConcurrentHashMap.newKeySet<String>()
 
-    private val alwaysDenied = mutableSetOf<String>()
+    private val alwaysDenied = ConcurrentHashMap.newKeySet<String>()
 
     private val _alwaysAllowed = MutableStateFlow<Set<String>>(emptySet())
 
@@ -110,7 +113,7 @@ class ApprovalGate(
         }
     }
 
-    suspend fun request(toolName: String, args: String, mode: ApprovalMode): Boolean {
+    suspend fun request(chatId: String, toolName: String, args: String, mode: ApprovalMode): Boolean {
         when (mode) {
             ApprovalMode.AUTO -> return true
             ApprovalMode.DENY -> return false
@@ -118,31 +121,32 @@ class ApprovalGate(
         }
         if (alwaysDenied.contains(toolName)) return false
         if (alwaysAllowed.contains(toolName)) return true
+        val id = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Decision>()
-        waiter = deferred
-        _pending.value = Request(UUID.randomUUID().toString(), toolName, args)
+        waiters[chatId] = deferred
+        _pending.update { it + (chatId to Request(id, toolName, args)) }
         val decision = deferred.await()
-        _pending.value = null
-        waiter = null
+        waiters.remove(chatId)
+        _pending.update { it - chatId }
         if (decision.always) {
             if (decision.approved) rememberAlways(toolName) else rememberDenied(toolName)
         }
         return decision.approved
     }
 
-    fun resolve(approved: Boolean, always: Boolean = false) {
-        waiter?.complete(Decision(approved, always))
+    fun resolve(chatId: String, approved: Boolean, always: Boolean = false) {
+        waiters[chatId]?.complete(Decision(approved, always))
     }
 
     /**
-     * Used when the user stops the run while a prompt is on screen. The state is
+     * Used when the user stops one run while its prompt is on screen. The state is
      * cleared here rather than in [request] because a cancelled coroutine never
-     * resumes, which would otherwise leave the dialog on screen forever.
+     * resumes, which would otherwise leave the dialog on screen forever. Other runs'
+     * prompts stay up: stopping A must not answer B's question for the user.
      */
-    fun cancelPending() {
-        waiter?.complete(Decision(false, false))
-        waiter = null
-        _pending.value = null
+    fun cancelPending(chatId: String) {
+        waiters.remove(chatId)?.complete(Decision(false, false))
+        _pending.update { it - chatId }
     }
 
     /** Forgets every remembered tool. */
@@ -282,7 +286,10 @@ class AgentEngine(
      * The same flow is returned for the same id for the life of the process, so a screen can
      * collect it once and keep it across runs.
      */
-    fun stateOf(chatId: String): StateFlow<RunState> = synchronized(states) {
+    fun stateOf(chatId: String): StateFlow<RunState> = stateFlowOf(chatId)
+
+    /** The writable side of [stateOf], for the runs that publish into it. */
+    private fun stateFlowOf(chatId: String): MutableStateFlow<RunState> = synchronized(states) {
         states.getOrPut(chatId) { MutableStateFlow(RunState.Idle) }
     }
 
@@ -346,20 +353,33 @@ class AgentEngine(
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
     ): List<StoredMessage> {
-        val existing = runs.value[chatId]
-        if (existing != null) {
+        // Check and register in one critical section: two coroutines starting the same
+        // conversation (a double tap, or an isRunning check preempted before start) would
+        // otherwise both pass the guard and write one transcript from two loops.
+        val handle = synchronized(runs) {
+            val existing = runs.value[chatId]
+            if (existing != null) {
+                null
+            } else {
+                val created = RunHandle(chatId, title, settings)
+                runs.update { it + (chatId to created) }
+                created
+            }
+        }
+        if (handle == null) {
+            // The refusal goes to the caller that asked twice, not to the run in flight:
+            // publishing Failed onto the live handle would flip a healthy run to Failed
+            // on the chat screen just because someone double-tapped send.
             onEvent(AgentEvent.Failed("这个会话已经有任务在跑了，先停下或等它结束。"))
-            existing.publish(RunState.Failed("这个会话已经有任务在跑了。"))
             return emptyList()
         }
-        val handle = RunHandle(chatId, title, settings)
-        runs.value = runs.value + (chatId to handle)
         try {
             return handle.execute(history, settings, registry, capabilities, skills, memory, gate, onEvent)
         } finally {
             // Gone from [runs] before the state settles: a finished run is not a run, and the
-            // console must stop offering to stop it.
-            runs.value = runs.value - chatId
+            // console must stop offering to stop it. By identity, so a stale finally cannot
+            // unregister a newer run that took the same key.
+            runs.update { if (it[chatId] === handle) it - chatId else it }
         }
     }
 
@@ -500,9 +520,13 @@ class AgentEngine(
     /** Whether this handle is still the registered run for its conversation. */
     private fun isLive(): Boolean = runs.value[chatId] === this
 
-    /** Publishes [state] to this run's own flow. */
+    /** Publishes [state] to this run's own flow and to the conversation's durable one. */
     internal fun publish(state: RunState) {
         _state.value = state
+        // The per-conversation flow is what the chat screen collects; without this mirror
+        // stateOf(chatId) would sit at Idle forever and every per-chat branch in the UI
+        // would be dead code.
+        stateFlowOf(chatId).value = state
     }
 
     /** Repaints the speed readout while this run streams. */
@@ -670,7 +694,7 @@ class AgentEngine(
                         } else {
                             liveLine = "🔧 ${call.name}…"
                             onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
-                            if (!gate.request(call.name, argsPreview, settings.approvalMode)) {
+                            if (!gate.request(chatId, call.name, argsPreview, settings.approvalMode)) {
                                 ToolResult.failure("用户拒绝了这次调用。")
                             } else {
                                 val startedAt = System.currentTimeMillis()
@@ -724,6 +748,15 @@ class AgentEngine(
             publish(RunState.Cancelled(stats()))
             throw cancellation
         } catch (error: Throwable) {
+            // Cutting the wire makes OkHttp throw IOException("Canceled"), so a run the user
+            // stopped lands here rather than in the CancellationException branch above. It is
+            // the stop working, not a failure: publishing Failed would put an error card on
+            // screen for a button the user just pressed, and the caller would be handed a
+            // throwable it turns into one too.
+            if (cancelled.get()) {
+                finishCancelled(onEvent)
+                return produced
+            }
             publish(RunState.Failed(error.message ?: error::class.java.simpleName))
             throw error
         } finally {

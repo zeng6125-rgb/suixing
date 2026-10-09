@@ -1,18 +1,35 @@
 package com.suixing.agent.tools
 
+import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.capability.ShellResult
+import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+
+/**
+ * `input tap X Y` and friends, when the agent drives another app through the shell
+ * instead of through [UiTools]. Those taps land on the screen with no other sign that
+ * the agent did them, so the same rings the UI tools draw are drawn here too.
+ *
+ * File-scope and built once: these run on every shell command, and a fresh Regex per
+ * call is what took the app down once before.
+ */
+private val FX_TAP = Regex("""\binput\s+tap\s+(\d+)\s+(\d+)""")
+private val FX_LONG_PRESS = Regex("""\binput\s+(?:longpress|draganddrop)\s+(\d+)\s+(\d+)""")
+private val FX_SWIPE = Regex("""\binput\s+swipe\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)""")
 
 /**
  * Shell access. The same command can run as the app, as the shell user through
  * Shizuku, or as root; [run_shell] picks the strongest tier the user has granted
  * unless a tier is named explicitly.
  */
-class ShellTools(private val capabilities: CapabilityHub) : ToolGroup() {
+class ShellTools(
+    private val context: Context,
+    private val capabilities: CapabilityHub,
+) : ToolGroup() {
 
     override val tier: String = TIER_SHELL
 
@@ -64,6 +81,7 @@ class ShellTools(private val capabilities: CapabilityHub) : ToolGroup() {
         val command = args.str("command")?.trim().orEmpty()
         if (command.isEmpty()) return@withContext ToolResult.failure("缺少参数 command")
         val mode = args.str("mode")?.trim()?.lowercase() ?: "auto"
+        drawInputFx(command)
         val state = capabilities.state.value
         if (mode == "root" && !state.rootProbed) capabilities.probeRoot()
         val chosen = when (mode) {
@@ -94,8 +112,29 @@ class ShellTools(private val capabilities: CapabilityHub) : ToolGroup() {
         }
     }
 
-    private suspend fun appAction(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        val pkg = args.str("package")?.trim().orEmpty()
+    /**
+     * Rings for the gesture a shell command is about to perform, if it performs one.
+     *
+     * Drawn before the command runs rather than after: the ring is supposed to land with
+     * the tap, and the command itself blocks until the gesture is over.
+     */
+    private fun drawInputFx(command: String) {
+        FX_TAP.find(command)?.let {
+            TouchFx.tap(context, it.groupValues[1].toFloat(), it.groupValues[2].toFloat())
+        }
+        FX_LONG_PRESS.find(command)?.let {
+            TouchFx.longPress(context, it.groupValues[1].toFloat(), it.groupValues[2].toFloat())
+        }
+        FX_SWIPE.find(command)?.let {
+            TouchFx.swipe(
+                context,
+                it.groupValues[1].toFloat(), it.groupValues[2].toFloat(),
+                it.groupValues[3].toFloat(), it.groupValues[4].toFloat(),
+            )
+        }
+    }
+
+    private suspend fun appAction(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {        val pkg = args.str("package")?.trim().orEmpty()
         val action = args.str("action")?.trim()?.lowercase().orEmpty()
         if (pkg.isEmpty()) return@withContext ToolResult.failure("缺少参数 package")
         val command = when (action) {

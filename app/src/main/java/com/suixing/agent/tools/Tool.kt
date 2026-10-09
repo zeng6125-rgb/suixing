@@ -140,7 +140,7 @@ class ToolRegistry private constructor() {
     ) : this() {
         add(SystemTools(context, memory))
         add(FileTools(context))
-        add(ShellTools(capabilities))
+        add(ShellTools(context, capabilities))
         add(UiTools(context, capabilities))
         add(JobTools(jobs))
         add(TodoTools(todos))
