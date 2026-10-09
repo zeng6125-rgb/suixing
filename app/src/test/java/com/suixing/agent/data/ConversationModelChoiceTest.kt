@@ -30,6 +30,7 @@ class ConversationModelChoiceTest {
         val conversation = json.decodeFromString(Conversation.serializer(), legacy)
         assertNull(conversation.providerId)
         assertNull(conversation.model)
+        assertNull(conversation.reasoningEffort)
         // The rest of the file still loads: the new fields cost us no history.
         assertEquals("旧会话", conversation.title)
         assertEquals(listOf("你好"), conversation.messages.map { it.text })
@@ -55,6 +56,19 @@ class ConversationModelChoiceTest {
         val loaded = json.decodeFromString(Conversation.serializer(), text)
         assertNull(loaded.providerId)
         assertNull(loaded.model)
+        assertNull(loaded.reasoningEffort)
+    }
+
+    @Test
+    fun `a chosen reasoning level reaches the file and comes back`() {
+        val saved = Conversation(id = "c1", title = "会话", reasoningEffort = "high")
+        val text = json.encodeToString(Conversation.serializer(), saved)
+        // Per-conversation like the model: a level that only lived in the view model would
+        // look right until the app restarts, and then silently fall back to the global default.
+        assertTrue(text, text.contains("\"reasoningEffort\":\"high\""))
+
+        val loaded = json.decodeFromString(Conversation.serializer(), text)
+        assertEquals("high", loaded.reasoningEffort)
     }
 
     @Test

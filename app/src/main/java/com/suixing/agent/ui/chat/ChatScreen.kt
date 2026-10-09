@@ -57,7 +57,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -179,12 +178,12 @@ import com.suixing.agent.ui.components.DrawerButton
 import com.suixing.agent.ui.components.FeatherIcon
 import com.suixing.agent.ui.components.FlatIconButton
 import com.suixing.agent.ui.components.FlatPainterButton
+import com.suixing.agent.ui.components.LocalKeyboardInset
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
-import com.suixing.agent.ui.settings.ContextWindowEditor
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -248,9 +247,6 @@ fun ChatScreen(
     }
 
     var assistantsOpen by remember { mutableStateOf(false) }
-    // The context ring's own window editor: it edits the window of the model this conversation
-    // actually runs, which is not the id the settings page edits.
-    var editWindow by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     fun attach(uri: Uri?, kind: AttachKind) {
@@ -321,9 +317,15 @@ fun ChatScreen(
     val contextUsed = state.stats?.lastPromptTokens?.takeIf { it > 0 }
         ?: newestUsage?.prompt
         ?: 0
-    // The newest round's hit rate, in the drawer's own convention: cached over prompt, a
-    // whole percentage, and nothing when the endpoint reported no prompt to divide by.
-    val cachePercent = newestUsage?.takeIf { it.prompt > 0 }?.let { it.cached * 100 / it.prompt } ?: 0
+    // The newest round's hit rate, in the drawer's own convention: cached over prompt, to two
+    // decimals, and nothing when the endpoint reported no prompt to divide by. A whole
+    // percentage hid the difference between 96.4% and 96.9%, which is exactly the range a
+    // long conversation sits in.
+    val cachePercent = newestUsage?.takeIf { it.prompt > 0 }?.let { it.cached * 100.0 / it.prompt } ?: 0.0
+    // What the conversation has spent in total, summed once in the view model rather than
+    // walked here: a long transcript is thousands of messages, and the ring's card is
+    // redrawn far more often than the number changes.
+    val sessionTokens = viewModel.sessionStats.collectAsState(initial = null).value?.tokens ?: 0
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.
@@ -399,10 +401,19 @@ fun ChatScreen(
     // following its own output — which is exactly what it used to do.
     var programmatic by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress to listState.atEnd(slack = 48) }
-            .collect { (scrolling, atEnd) ->
-                if (scrolling && !programmatic && !atEnd) following = false
-                else if (atEnd) following = true
+        // The hand wins the moment it moves. `canScrollBackward` is false while the list sits
+        // at its end and true the instant a drag lifts it off, so following is dropped on the
+        // first pixel of an upward swipe — a distance threshold (the old 48px) meant a slow
+        // stream kept the list pinned while the user dragged, and they had to fight it.
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollBackward }
+            .collect { (scrolling, canScrollBack) ->
+                if (scrolling && !programmatic && canScrollBack) {
+                    following = false
+                } else if (!scrolling && listState.atEnd(slack = 8)) {
+                    // Released at the end again — or the user tapped 跳最新, which sets
+                    // following itself: either way the run may follow its output again.
+                    following = true
+                }
             }
     }
     // A new conversation starts at its newest message, whoever was reading what before.
@@ -431,6 +442,12 @@ fun ChatScreen(
         settings.autoFollow,
     ) {
         if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
+        // A drag in flight pauses the pin: content updates land between the frames of a
+        // gesture, and pinning on one of them yanks the list back to the end under the user's
+        // finger — which is what made "scroll up a little" not enough. The release effect
+        // above has already dropped `following` by then; this is the belt to that pair of
+        // braces for the frame or two before it runs.
+        if (listState.isScrollInProgress && !programmatic) return@LaunchedEffect
         programmatic = true
         try {
             listState.scrollToItem(itemCount - 1)
@@ -442,13 +459,19 @@ fun ChatScreen(
         }
     }
 
-    // The keyboard is not a scroll: the scaffold's imePadding squeezes this screen's
-    // viewport from the bottom, so a list pinned to its end keeps its offset and leaves
-    // its last card below the fold while the composer rises above the keys. Re-pin to
-    // the end — and only when the list was already at its end, because tapping the
-    // field must never move a transcript the user is reading.
-    val imeHeight = WindowInsets.ime.getBottom(LocalDensity.current)
-    LaunchedEffect(imeHeight) {
+    // The keyboard is not a scroll: it squeezes this screen's viewport from the bottom, so a
+    // list pinned to its end keeps its offset and leaves its last card below the fold while
+    // the composer rises above the keys. Re-pin to the end — and only when the list was
+    // already at its end, because tapping the field must never move a transcript the user is
+    // reading.
+    //
+    // The inset is read from the animated value the app publishes, not from the raw window
+    // inset: the keyboard is raised over 180ms, and pinning on the first frame of that
+    // animation pins to an end that is still moving — by the time the padding has finished
+    // growing, the real end is a keyboard-height lower. Following the animated value keeps
+    // the scroll with it, frame by frame.
+    val keyboardInset = LocalKeyboardInset.current
+    LaunchedEffect(keyboardInset) {
         if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
         // One frame first: the inset is already the new one while the list is still
         // laid out at the old height, and scrolling against that lands on the old end.
@@ -555,11 +578,12 @@ fun ChatScreen(
                             top = with(LocalDensity.current) {
                                 WindowInsets.statusBars.getTop(this).toDp()
                             } + 76.dp,
-                            // The composer floats over the list, so the list leaves
-                            // exactly the room the stack occupies plus 16dp of air —
-                            // measured, not guessed, so neither the keyboard-up nor the
-                            // keyboard-down state leaves a blank band.
-                            bottom = composerH + 40.dp,
+                            // The composer floats over the list, so the list leaves exactly
+                            // the room the stack occupies plus the air below it — measured,
+                            // not guessed, so neither the keyboard-up nor the keyboard-down
+                            // state leaves a blank band. 48dp of air: the last card was
+                            // reading as if it were glued to the input field.
+                            bottom = composerH + 48.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
@@ -678,7 +702,13 @@ fun ChatScreen(
                                     text = liveStatusText,
                                     startedAt = runStartedAt[runKey] ?: 0L,
                                     timed = statsNote.isEmpty(),
-                                    modifier = Modifier.padding(start = 4.dp),
+                                    // 4dp above and below, on top of the list's own 16dp: the
+                                    // caption read as cramped against the cards on both sides.
+                                    modifier = Modifier.padding(
+                                        start = 4.dp,
+                                        top = 4.dp,
+                                        bottom = 4.dp,
+                                    ),
                                 )
                             }
                         }
@@ -759,8 +789,11 @@ fun ChatScreen(
                     contextWindow = contextWindow,
                     contextUsed = contextUsed,
                     cachePercent = cachePercent,
+                    sessionTokens = sessionTokens,
                     conversationProviderId = state.providerId,
                     conversationModel = state.model,
+                    conversationReasoningEffort = state.reasoningEffort,
+                    onChooseReasoning = { viewModel.chooseReasoning(it) },
                     // The pick belongs to the conversation, not to the settings: it is
                     // written onto this chat alone, so choosing an endpoint here cannot
                     // change what any other conversation — or the app-wide default — runs.
@@ -818,7 +851,6 @@ fun ChatScreen(
                         }
                     },
                     onOpenSettings = onOpenSettings,
-                    onOpenContextWindow = { editWindow = true },
                     jumpToLatest = { jumpToLatest() },
                     showJump = !atEnd,
                     onHeightChanged = { composerH = it },
@@ -844,18 +876,6 @@ fun ChatScreen(
             onSave = { viewModel.saveAssistant(it) },
             onDelete = { viewModel.deleteAssistant(it) },
             onDismiss = { assistantsOpen = false },
-        )
-    }
-
-    if (editWindow) {
-        // Same string that [contextWindow] was resolved with, or the dialog would write a
-        // window for one model id while the ring reads another — which is exactly the bug
-        // this entry point exists to fix: the settings page edits the app-wide default's
-        // window, and the ring divides by the window of the model the run actually sends.
-        ContextWindowEditor(
-            model = settings.choiceFor(state.providerId, state.model, assistant).model,
-            current = contextWindow,
-            onDismiss = { editWindow = false },
         )
     }
 
@@ -955,6 +975,22 @@ private fun titleBarStyle(): TextStyle {
     return title.copy(fontSize = title.fontSize * (15f / 17f))
 }
 
+/**
+ * The thinking level a run in this conversation would actually send.
+ *
+ * One chain, read by both the caption and the sheet so they cannot disagree with the wire:
+ * the conversation's own pick first, then the endpoint's own declaration (only meaningful
+ * while that endpoint owns its sampling), then the app-wide default. The view model's
+ * `chooseReasoning` writes to the first link and nothing else.
+ */
+private fun reasoningWire(
+    settings: AppSettings,
+    provider: ProviderConfig?,
+    conversationLevel: String?,
+): String = conversationLevel
+    ?: provider?.takeIf { it.ownSampling }?.reasoningEffort
+    ?: settings.reasoningEffort
+
 /** A flat text dropdown: label plus a caret, no container of its own. */
 @Composable
 private fun UnifiedSelector(
@@ -963,6 +999,8 @@ private fun UnifiedSelector(
     assistantId: String?,
     conversationProviderId: String?,
     conversationModel: String?,
+    /** The conversation's own thinking level, if it ever picked one. */
+    conversationReasoningEffort: String?,
     onClick: () -> Unit,
 ) {
     val assistant = assistantId?.let { settings.assistant(it) } ?: settings.activeAssistant()
@@ -971,8 +1009,7 @@ private fun UnifiedSelector(
         ?: settings.providers.firstOrNull {
             it.baseUrl.trimEnd('/') == choice.baseUrl.trimEnd('/')
         }
-    val own = provider?.takeIf { it.ownSampling }
-    val wire = own?.reasoningEffort ?: settings.reasoningEffort
+    val wire = reasoningWire(settings, provider, conversationReasoningEffort)
     val level = REASONING_LEVELS.firstOrNull { it.first == wire }?.second ?: "默认"
     val model = provider?.displayModel(choice.model)
         ?.takeIf { it != choice.model }
@@ -1512,14 +1549,18 @@ private fun MessageRow(
     }
 }
 
+/**
+ * The user's own line, right-aligned.
+ *
+ * [onEdit] is still what 修改 goes through, but it is reached from the actions row under the
+ * bubble — never from a long press: that gesture belongs to text selection, which is what a
+ * user reaches for when they want to copy what they wrote.
+ */
 @Composable
 private fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit) {
     Surface(
         modifier = Modifier
-            .widthIn(max = 300.dp)
-            .pointerInput(message.id) {
-                detectTapGestures(onLongPress = { onEdit(message) })
-            },
+            .widthIn(max = 300.dp),
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -1544,9 +1585,13 @@ private fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit) 
             message.imageBase64?.let { ImageBlock(it) }
             if (message.text.isNotBlank()) {
                 // The user's own words are plain text, never parsed as Markdown — someone typing
-// "1. do this" means the list item, not a heading. The style is still the assistant
-// body's, so the two bubbles agree on size and leading.
-            Text(message.text, style = markdownBody())
+                // "1. do this" means the list item, not a heading. The style is still the
+                // assistant body's, so the two bubbles agree on size and leading.
+                // Selectable: long-press is how a phone copies text, and the bubble used to
+                // spend that gesture on the edit dialog instead.
+                SelectionContainer {
+                    Text(message.text, style = markdownBody())
+                }
             }
             if (message.edited) {
                 Spacer(Modifier.height(4.dp))
@@ -1593,6 +1638,106 @@ private fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
             contentDescription = label,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(15.dp),
+        )
+    }
+}
+
+/**
+ * The reply's own numbers, in the card's bottom row: how long it took and what it cost.
+ *
+ * They belong to the round, not to the summary of its shape — the collapsed header counts
+ * thoughts and tools, while these are the frozen record of one answer, and the bottom row is
+ * where the eye already goes for 「这条怎么样」. Everything is read off the stored message, so a
+ * reopened conversation shows the same figures it showed when the answer arrived, and a field
+ * the endpoint never reported is left out rather than filled with a zero.
+ *
+ * Tapping the pair opens the detail card, which opens upward: the row sits at the bottom of an
+ * answer, and a card opening downward would cover the composer.
+ */
+@Composable
+private fun TurnMetrics(
+    elapsedMs: Long,
+    promptTokens: Int,
+    completionTokens: Int,
+    cachedTokens: Int,
+) {
+    val total = promptTokens + completionTokens
+    if (elapsedMs <= 0 && total <= 0) return
+    val scheme = MaterialTheme.colorScheme
+    var open by remember { mutableStateOf(false) }
+    val elapsed = remember(elapsedMs) {
+        String.format(Locale.getDefault(), "%.1f秒", elapsedMs / 1000.0)
+    }
+    Box {
+        Row(
+            modifier = Modifier
+                .height(40.dp)
+                .clip(MaterialTheme.shapes.small)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = ripple(),
+                    onClick = { open = true },
+                )
+                .padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (elapsedMs > 0) {
+                MetricReadout(ImageVector.vectorResource(R.drawable.ic_clock), elapsed)
+            }
+            if (total > 0) {
+                MetricReadout(
+                    ImageVector.vectorResource(R.drawable.ic_database),
+                    "用量 ${shortTokens(total)} tok",
+                )
+            }
+        }
+        Box(Modifier.align(Alignment.TopStart)) {
+            MenuCard(
+                visible = open,
+                onDismiss = { open = false },
+                alignment = Alignment.BottomStart,
+                offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
+            ) {
+                if (elapsedMs > 0) RingDetail("用时", elapsed)
+                if (promptTokens > 0) RingDetail("入", "${shortTokens(promptTokens)} tok")
+                if (completionTokens > 0) RingDetail("出", "${shortTokens(completionTokens)} tok")
+                if (total > 0) RingDetail("合计", "${shortTokens(total)} tok")
+                if (promptTokens > 0 && cachedTokens > 0) {
+                    RingDetail(
+                        "缓存命中",
+                        remember(promptTokens, cachedTokens) {
+                            String.format(
+                                Locale.getDefault(),
+                                "%.2f%%",
+                                cachedTokens * 100.0 / promptTokens,
+                            )
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** One icon + value pair of [TurnMetrics]; decorative icon, the value carries the meaning. */
+@Composable
+private fun MetricReadout(icon: ImageVector, text: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
         )
     }
 }
@@ -1684,6 +1829,11 @@ private fun AssistantRow(
                     usage = usage,
                     live = null,
                     contextWindow = contextWindow,
+                    // The run's note, when there was one: it lives on the stats for as long as
+                    // the run does, which is exactly the window in which this card is drawn
+                    // for a live turn. A settled turn from an earlier launch has no note to
+                    // show — the compression record is the separator card's job.
+                    note = liveStats?.note.orEmpty(),
                     reasoningMaxHeight = reasoningMaxHeight,
                     // The stored blocks answer to their message, so the table keeps their
                     // state apart from the live run's and from every other message's.
@@ -1758,11 +1908,15 @@ private fun AssistantRow(
                             // the model's "let me check" before a tool is not part of its
                             // answer. While it streams every stretch shows, because that is
                             // what it is doing right now.
-                            // No SelectionContainer here: text that grows a line at a time is
-                            // not selectable in practice, and wrapping a container that
-                            // re-measures its content on every frame is what made the live
-                            // bubble flash the previous layout. The settled block keeps it.
-                            MarkdownText(text = part.text)
+                            // Selectable once it has settled, and only then: text that grows a
+                            // line at a time is not selectable in practice, and wrapping a
+                            // container that re-measures its content on every frame is what
+                            // made the live bubble flash the previous layout.
+                            if (streaming) {
+                                MarkdownText(text = part.text)
+                            } else {
+                                SelectionContainer { MarkdownText(text = part.text) }
+                            }
                             if (streaming && last) {
                                 Spacer(Modifier.height(4.dp))
                                 BlinkingCursor()
@@ -1794,6 +1948,14 @@ private fun AssistantRow(
                         branch = branch,
                         onBranch = onBranch,
                         onRegenerate = onRegenerate,
+                    )
+                    // The round's own clock and cost sit right of 「重新回答」: the same row the
+                    // branch arrows live in, which is where this card's controls already are.
+                    TurnMetrics(
+                        elapsedMs = message.elapsedMs,
+                        promptTokens = message.promptTokens,
+                        completionTokens = message.completionTokens,
+                        cachedTokens = message.cachedTokens,
                     )
                     Spacer(Modifier.weight(1f))
                     MessageActions(message = message, onEdit = onEdit)
@@ -2177,7 +2339,12 @@ private fun ReasoningBlock(
         expansion.set(blockId, !expanded)
     }
     val status: @Composable () -> Unit = {
-        if (meta.isNotEmpty()) ProcessStatus(meta.joinToString(" · "))
+        // Item by item with a real gap: joining them into one " · " string is what made
+        // "256 tokens · 25.1s" read as a single glued-together word at 13sp.
+        meta.forEachIndexed { index, item ->
+            if (index > 0) Spacer(Modifier.width(7.dp))
+            ProcessStatus(item)
+        }
         if (streaming) {
             Spacer(Modifier.width(8.dp))
             ProcessSpinner(MaterialTheme.colorScheme.primary)
@@ -2189,15 +2356,23 @@ private fun ReasoningBlock(
         Column(
             Modifier
                 .fillMaxWidth()
-                .clip(MaterialTheme.shapes.small)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = ripple(),
-                    onClick = toggle,
-                )
                 .padding(vertical = 4.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // The tap target is the header row alone, clipped to a rounded rectangle before the
+            // ripple is attached. On the Column it used to cover the whole block — chain
+            // included — so the ripple spilled over the text and a tap anywhere in the chain
+            // folded it.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = ripple(),
+                        onClick = toggle,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = ImageVector.vectorResource(R.drawable.ic_brain),
@@ -2535,6 +2710,13 @@ private fun TurnSummary(
     live: StreamStats?,
     contextWindow: Int,
     reasoningMaxHeight: Dp = 180.dp,
+    /**
+     * The run's own note — the compression line, when there was one. It belongs in this
+     * header rather than only in the status line: the status line is gone the moment the run
+     * ends, and "the context was folded here" is a fact about this turn. It rides inside the
+     * card, so it folds away with the rest of it.
+     */
+    note: String = "",
     /** The message these blocks belong to; part of every block's key in the table. */
     messageId: String = "",
     reasoningExpansion: ReasoningExpansion,
@@ -2573,6 +2755,9 @@ private fun TurnSummary(
     val header = buildList {
         add(if (headline.isEmpty()) "本轮用量" else "本轮：${headline.joinToString(" · ")}")
         addAll(tail)
+        // After the numbers, before nothing else: the compression line is a fact about this
+        // turn, so it rides in the same title and folds away with the card.
+        if (note.isNotBlank()) add(note)
     }.joinToString(" · ")
     ProcessCard(
         icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
@@ -2597,7 +2782,17 @@ private fun TurnSummary(
         // including the mid-run transitions, steer bubbles — the same sequence the
         // live bubble drew. The usage detail closes the list.
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // The answer itself is already drawn by the bubble below this card (the settled
+            // path keeps the last stretch of prose). Leaving a second copy in here is what
+            // made one reply read as a stack of the same text; the mid-run transitions — the
+            // model's "let me check" before a tool — stay, because the bubble does not show
+            // those and the card is their only record.
+            val lastText = parts.indexOfLast { it is Part.Text }
             parts.forEachIndexed { index, part ->
+                // Guarded before key(index), never inside it: a non-local return out of a key
+                // group leaves the group unclosed and Compose aborts with "Start/end
+                // imbalance" — the crash this file has already paid for once.
+                if (part is Part.Text && index == lastText) return@forEachIndexed
                 key(index) {
                     when (part) {
                         is Part.Thinking -> ReasoningBlock(
@@ -3022,11 +3217,17 @@ private fun Composer(
     contextWindow: Int,
     /** Tokens the newest round filled of that window, and how many of them were cached. */
     contextUsed: Int,
-    cachePercent: Int,
+    cachePercent: Double,
+    /** Everything this conversation has ever spent, for the ring's detail card. */
+    sessionTokens: Int,
     /** This conversation's own model pick, or null while it follows persona/defaults. */
     conversationProviderId: String?,
     conversationModel: String?,
+    /** This conversation's own thinking level, or null while it follows the defaults. */
+    conversationReasoningEffort: String?,
     onPickModel: (ProviderConfig, String) -> Unit,
+    /** Writes a thinking level onto this conversation alone. */
+    onChooseReasoning: (String) -> Unit,
     attachment: Attachment?,
     onClearAttachment: () -> Unit,
     onPickImage: () -> Unit,
@@ -3048,8 +3249,6 @@ private fun Composer(
     onMic: () -> Unit,
     /** The empty provider list's way out: straight into the model settings page. */
     onOpenSettings: () -> Unit,
-    /** The ring's 「设置窗口」: edits this conversation's model window, not the default's. */
-    onOpenContextWindow: () -> Unit,
     /** Scrolls the transcript to its newest line; the stack's own corner button. */
     jumpToLatest: () -> Unit,
     /** Shown while the transcript is scrolled away from its end. */
@@ -3096,6 +3295,8 @@ private fun Composer(
                     assistantId = assistantId,
                     conversationProviderId = conversationProviderId,
                     conversationModel = conversationModel,
+                    conversationReasoningEffort = conversationReasoningEffort,
+                    onChooseReasoning = onChooseReasoning,
                     modelButtonCenterPx = modelButtonCenter,
                     visible = sheetOpen,
                     onPickModel = onPickModel,
@@ -3347,6 +3548,7 @@ private fun Composer(
                                 assistantId = assistantId,
                                 conversationProviderId = conversationProviderId,
                                 conversationModel = conversationModel,
+                                conversationReasoningEffort = conversationReasoningEffort,
                                 onClick = { sheetOpen = true },
                             )
                         }
@@ -3358,8 +3560,8 @@ private fun Composer(
                         used = contextUsed,
                         window = contextWindow,
                         cachePercent = cachePercent,
+                        sessionTokens = sessionTokens,
                         live = stats,
-                        onEditWindow = onOpenContextWindow,
                     )
                     // The mic only earns its slot when a recognizer actually exists on
                     // the device: a dead control is worse than no control.
@@ -3620,6 +3822,10 @@ private fun GenerationSheet(
     /** This conversation's own pick, or null while it follows the persona and defaults. */
     conversationProviderId: String?,
     conversationModel: String?,
+    /** The conversation's own thinking level, if it ever picked one. */
+    conversationReasoningEffort: String?,
+    /** Writes a level onto this conversation alone; see the view model's chooseReasoning. */
+    onChooseReasoning: (String) -> Unit,
     /** The model button's centre, in window pixels; 0 until the composer has measured it. */
     modelButtonCenterPx: Float,
     /** Whether the card is open. It animates in and out on this, so it stays composed. */
@@ -3628,7 +3834,6 @@ private fun GenerationSheet(
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
     val scheme = MaterialTheme.colorScheme
     val assistant = assistantId?.let { settings.assistant(it) } ?: settings.activeAssistant()
     // One chain for the whole screen — this conversation's pick, then the persona's pins,
@@ -3642,8 +3847,7 @@ private fun GenerationSheet(
             it.baseUrl.trimEnd('/') == choice.baseUrl.trimEnd('/')
         }
         ?: settings.providers.firstOrNull { it.enabled.isNotEmpty() }
-    val own = provider?.takeIf { it.ownSampling }
-    val wire = own?.reasoningEffort ?: settings.reasoningEffort
+    val wire = reasoningWire(settings, provider, conversationReasoningEffort)
     val levelIndex = REASONING_LEVELS.indexOfFirst { it.first == wire }.coerceAtLeast(0)
     // Every endpoint with ticked models can offer one: this picker is the only place to
     // switch endpoints without a detour through settings, so it lists them all instead
@@ -3742,20 +3946,9 @@ private fun GenerationSheet(
             }
             Spacer(Modifier.height(4.dp))
             LevelSlider(levelIndex = levelIndex, levels = REASONING_LEVELS.size) { index ->
-                val level = REASONING_LEVELS[index].first
-                scope.launch {
-                    Core.settings.update { stored ->
-                        if (own != null) {
-                            stored.copy(
-                                providers = stored.providers.map {
-                                    if (it.id == own.id) it.copy(reasoningEffort = level) else it
-                                },
-                            )
-                        } else {
-                            stored.copy(reasoningEffort = level)
-                        }
-                    }
-                }
+                // The level belongs to this conversation, like the model pick beside it:
+                // writing it to the app-wide default here is what re-timed every other chat.
+                onChooseReasoning(REASONING_LEVELS[index].first)
             }
         } else {
             // Page two: every endpoint's models, the one that answers this conversation first
@@ -4207,9 +4400,10 @@ private enum class AttachKind { IMAGE, FILE }
 private fun ContextRing(
     used: Int,
     window: Int,
-    cachePercent: Int,
+    cachePercent: Double,
+    /** Everything this conversation has ever spent, prompt + completion. */
+    sessionTokens: Int,
     live: StreamStats?,
-    onEditWindow: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
@@ -4268,13 +4462,8 @@ private fun ContextRing(
                         used = used,
                         window = window,
                         cachePercent = cachePercent,
+                        sessionTokens = sessionTokens,
                         live = live,
-                        // Closes the card first: the dialog is a modal of its own, and a
-                        // popup left open behind it would still be there on the way back.
-                        onEditWindow = {
-                            open = false
-                            onEditWindow()
-                        },
                     )
                 }
             }
@@ -4287,9 +4476,9 @@ private fun ContextRing(
 private fun ContextRingCard(
     used: Int,
     window: Int,
-    cachePercent: Int,
+    cachePercent: Double,
+    sessionTokens: Int,
     live: StreamStats?,
-    onEditWindow: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
@@ -4320,29 +4509,32 @@ private fun ContextRingCard(
                 if (known) {
                     "${shortTokens(used)} / ${shortTokens(window)}（$percent%）"
                 } else {
-                    // No invented denominator: say what is used, and say what is missing.
-                    "${shortTokens(used)} · 窗口未设置"
+                    // No invented denominator, and no editor either: where the window is
+                    // filled in is the settings page, which also fills it from the endpoint's
+                    // own context_window when the user has not said otherwise. The ring only
+                    // reports.
+                    "${shortTokens(used)} · 窗口未设置 · 到设置里填"
                 },
             )
-            if (cachePercent > 0) RingDetail("缓存命中", "$cachePercent%")
+            if (cachePercent > 0) {
+                // Two decimals, and formatted once per value rather than on every recomposition:
+                // the drawer's own convention, at the precision a long conversation needs.
+                val hit = remember(cachePercent) {
+                    String.format(Locale.getDefault(), "%.2f%%", cachePercent)
+                }
+                RingDetail("缓存命中", hit)
+            }
             live?.let {
                 RingDetail(
                     "本轮",
                     "入 ${shortTokens(it.lastPromptTokens)} · 出 ${shortTokens(it.tokensOut)}",
                 )
             }
-            if (!known) {
-                // The one place the missing window is visible is also the one place that can
-                // fix it — and it has to fix the window of *this* model: the settings page
-                // edits the app-wide default's, which is a different id whenever the
-                // conversation or its persona picked its own.
-                TextButton(
-                    onClick = onEditWindow,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    modifier = Modifier.height(28.dp),
-                ) {
-                    Text("设置窗口", style = MaterialTheme.typography.labelMedium)
-                }
+            if (sessionTokens > 0) {
+                // The whole conversation, not just the context on screen: the two answer
+                // different questions, and a long chat's cost is the one the ring cannot
+                // draw as an arc.
+                RingDetail("会话总量", "${shortTokens(sessionTokens)} tok")
             }
         }
     }

@@ -133,6 +133,25 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         }
     }
 
+    /**
+     * The same `GET {base}/models`, keeping the context window each entry advertises next to
+     * its id. Kept apart from [listModels] on purpose: the id list is used in several places
+     * and its shape must not move, while the window is a bonus a caller may or may not want.
+     */
+    suspend fun listModelDetails(settings: AppSettings): List<ProviderModel> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(modelsEndpoint(settings.baseUrl))
+            .header("Accept", "application/json")
+            .apply { if (settings.apiKey.isNotBlank()) header("Authorization", "Bearer ${settings.apiKey}") }
+            .get()
+            .build()
+        clientFor(settings).newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw LlmException(friendlyHttp(response.code, body))
+            parseModelDetails(body)
+        }
+    }
+
     suspend fun complete(
         settings: AppSettings,
         messages: List<ChatMessage>,
@@ -461,6 +480,63 @@ internal fun parseModels(body: String): List<String> {    val trimmed = body.tri
     }.distinct()
     if (ids.isEmpty()) throw LlmException("服务器没有返回任何模型")
     return ids
+}
+
+/** One entry of `GET /models`: its id, plus the context window the endpoint advertises. */
+data class ProviderModel(val id: String, val contextLength: Int? = null)
+
+/**
+ * The same response as [parseModels], read for the context window as well.
+ *
+ * The field is not standardised. `context_window` is what the gateway this app was tested
+ * against sends (verified against a real response); the rest are the names other
+ * OpenAI-compatible servers use for the same number, tried in order. Nothing is guessed from
+ * the shape of the value: an entry that advertises no usable window simply carries null, and
+ * the caller decides what to do about that.
+ */
+internal fun parseModelDetails(body: String): List<ProviderModel> {
+    val trimmed = body.trim()
+    if (trimmed.isEmpty()) throw LlmException("服务器返回了空内容")
+    val root = runCatching { Json.parseToJsonElement(trimmed) }.getOrNull()
+        ?: throw LlmException("服务器返回的不是 JSON：${trimmed.take(160)}")
+    val array = when (root) {
+        is JsonArray -> root
+        is JsonObject -> root["data"] as? JsonArray
+            ?: root["models"] as? JsonArray
+            ?: root["result"] as? JsonArray
+            ?: throw LlmException("返回里没有 data / models 字段")
+        else -> throw LlmException("返回格式不认识：${trimmed.take(160)}")
+    }
+    val models = array.mapNotNull { element ->
+        when (element) {
+            is JsonPrimitive -> element.takeIf { it !is JsonNull }?.content
+                ?.takeIf { it.isNotBlank() }
+                ?.let { ProviderModel(it) }
+            is JsonObject -> {
+                val field = element["id"] ?: element["name"] ?: element["model"]
+                val id = (field as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content?.takeIf { it.isNotBlank() }
+                id?.let { ProviderModel(it, contextLengthOf(element)) }
+            }
+            else -> null
+        }
+    }.distinctBy { it.id }
+    if (models.isEmpty()) throw LlmException("服务器没有返回任何模型")
+    return models
+}
+
+/** The context window an entry advertises, or null when it advertises none. */
+private fun contextLengthOf(element: JsonObject): Int? {
+    val candidates = listOf(
+        element["context_window"],
+        element["context_length"],
+        (element["top_provider"] as? JsonObject)?.get("context_length"),
+        element["max_context_length"],
+        element["max_model_len"],
+        element["max_input_tokens"],
+    )
+    return candidates.firstNotNullOfOrNull { value ->
+        (value as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content?.toIntOrNull()?.takeIf { it > 0 }
+    }
 }
 
 /** Pulls a human-readable reason out of an error body, whatever shape it has. */

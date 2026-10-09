@@ -17,6 +17,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.math.PI
 import kotlin.math.cos
 
@@ -80,6 +85,19 @@ private const val FX_JOB_DRIVING_ID = "job"
 private const val FX_JOB_WINDOW_MS = 20_000L
 
 /**
+ * Effects are invisible when they fail: a window the system refused to add looks exactly like a
+ * run that never asked for one, and which of the two it was decides where to look next. Nothing
+ * else in the app can tell them apart, so every entry writes a line here. It is a diagnostic, not
+ * a log to grow forever — past the cap the oldest part is dropped.
+ */
+private const val FX_TRACE_FILE = "fx-trace.log"
+private const val FX_TRACE_MAX_BYTES = 48 * 1024
+private const val FX_TRACE_KEEP_BYTES = 24 * 1024
+
+/** Built once, like the gesture patterns: what the user typed is not a diagnostic anyway. */
+private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
+
+/**
  * Shows the user what the agent is doing to their screen.
  *
  * The request was one sentence — 「要有点击特效和边缘闪动，这样我才知道在操控手机」 — and that
@@ -132,7 +150,16 @@ object TouchFx {
     /** The run set as the previous tick saw it, so a tick can tell which run just ended. */
     private var previousIds: Set<String> = emptySet()
 
+    /**
+     * One thread for the trace file, so the lines stay in the order the effects happened and no
+     * caller — including the accessibility service, on the main thread — ever waits on the disk.
+     */
+    private val traceWorker = Executors.newSingleThreadExecutor()
+    private var traceFile: File? = null
+    private var lastOverlayNote: String? = null
+
     fun tap(context: Context, x: Float, y: Float) {
+        trace(context, "entry=tap x=$x y=$y")
         noteDriving(context)
         post(context) { fx ->
             flashEdge(fx)
@@ -141,6 +168,7 @@ object TouchFx {
     }
 
     fun longPress(context: Context, x: Float, y: Float) {
+        trace(context, "entry=longPress x=$x y=$y")
         noteDriving(context)
         post(context) { fx ->
             flashEdge(fx)
@@ -149,6 +177,7 @@ object TouchFx {
     }
 
     fun swipe(context: Context, x1: Float, y1: Float, x2: Float, y2: Float) {
+        trace(context, "entry=swipe x1=$x1 y1=$y1 x2=$x2 y2=$y2")
         noteDriving(context)
         post(context) { fx ->
             flashEdge(fx)
@@ -170,6 +199,7 @@ object TouchFx {
      * with the gestures, so a launch straight after a tap does not flash twice.
      */
     fun handoff(context: Context) {
+        trace(context, "entry=handoff")
         noteDriving(context)
         post(context) { fx ->
             flashEdge(fx)
@@ -198,6 +228,7 @@ object TouchFx {
         appContext = context.applicationContext
         val running = Core.engine.runsFlow.value.keys
         lastDrivingAt = SystemClock.uptimeMillis()
+        trace(context, "entry=noteDriving runs=${running.size} ids=${running.joinToString(",")}")
         if (running.isEmpty()) {
             jobDrivingUntil = lastDrivingAt + FX_JOB_WINDOW_MS
             drivingIds = drivingIds + FX_JOB_DRIVING_ID
@@ -280,6 +311,68 @@ object TouchFx {
         }
     }
 
+    /**
+     * One line for a call that is not an effect: a shell command that was inspected for gestures,
+     * or a UI tool that decided to drive the screen. Written whether or not anything matched —
+     * "nothing matched" and "it matched but nothing was drawn" have to be told apart from the file
+     * alone, and the command itself is what makes that possible.
+     *
+     * Typed text is masked: a trace that records what the user typed would be a keylogger.
+     */
+    fun traceCall(context: Context, tool: String, detail: String, matched: List<String>) {
+        val masked = detail.replace(FX_TRACE_TEXT, "input text ***").replace('\n', '⏎')
+        trace(
+            context,
+            "entry=call tool=$tool matched=${matched.joinToString("+").ifEmpty { "无" }} detail=$masked",
+        )
+    }
+
+    /**
+     * Appends one line to `filesDir/fx-trace.log`.
+     *
+     * The caller is read off the stack rather than passed in: a diagnostic that every call site has
+     * to remember to identify itself in is one that rots the first time a call site is added. The
+     * write happens on [traceWorker] and every failure is swallowed — a trace must never be the
+     * reason an effect does not happen.
+     */
+    private fun trace(context: Context, line: String) {
+        val app = context.applicationContext
+        val overlay = view?.let { "up" } ?: lastOverlayNote ?: "none"
+        val entry = "${stamp()} $line source=${caller()} overlay=$overlay " +
+            "breathing=${if (view?.isBreathing == true) "on" else "off"} " +
+            "runs=${Core.engine.runsFlow.value.size}"
+        traceWorker.execute {
+            runCatching {
+                val file = traceFile ?: File(app.filesDir, FX_TRACE_FILE).also { traceFile = it }
+                if (file.length() > FX_TRACE_MAX_BYTES) {
+                    val tail = file.readText().takeLast(FX_TRACE_KEEP_BYTES)
+                    file.writeText("— 已截断，仅保留最近一段 —\n$tail")
+                }
+                file.appendText("$entry\n")
+            }
+        }
+    }
+
+    private fun stamp(): String = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+
+    /** The first frame outside this file: which tool asked for the effect, and where. */
+    private fun caller(): String {
+        val frame = Thread.currentThread().stackTrace.firstOrNull {
+            !it.className.startsWith("com.suixing.agent.service.TouchFx") &&
+                !it.className.startsWith("java.lang.Thread") &&
+                !it.className.startsWith("java.util.concurrent")
+        } ?: return "?"
+        val file = frame.fileName ?: "?"
+        return "${frame.className.substringAfterLast('.')}.${frame.methodName}($file:${frame.lineNumber})"
+    }
+
+    /** Logs a change of overlay state, and only a change: a tick failing every second writes once. */
+    private fun noteOverlay(context: Context, note: String) {
+        if (lastOverlayNote == note) return
+        lastOverlayNote = note
+        trace(context, "overlay=$note")
+    }
+
     private fun flashEdge(fx: FxView) {
         val now = SystemClock.uptimeMillis()
         if (now - lastEdgeFlashAt < FX_EDGE_THROTTLE_MS) return
@@ -289,8 +382,15 @@ object TouchFx {
 
     private fun overlay(context: Context): FxView? {
         view?.let { return it }
-        if (!Settings.canDrawOverlays(context)) return null
-        val windowManager = context.getSystemService(WindowManager::class.java) ?: return null
+        if (!Settings.canDrawOverlays(context)) {
+            noteOverlay(context, "denied（没有悬浮窗权限）")
+            return null
+        }
+        val windowManager = context.getSystemService(WindowManager::class.java)
+        if (windowManager == null) {
+            noteOverlay(context, "failed（拿不到 WindowManager）")
+            return null
+        }
         val fx = FxView(context) { detach() }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -303,7 +403,15 @@ object TouchFx {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         )
-        if (!runCatching { windowManager.addView(fx, params) }.isSuccess) return null
+        // Swallowed before, which made a refused window indistinguishable from one never asked
+        // for; the reason is the single most useful line this file can hold.
+        val added = runCatching { windowManager.addView(fx, params) }
+        val error = added.exceptionOrNull()
+        if (error != null) {
+            noteOverlay(context, "failed（addView: ${error.javaClass.simpleName}: ${error.message}）")
+            return null
+        }
+        noteOverlay(context, "created")
         manager = windowManager
         view = fx
         return fx

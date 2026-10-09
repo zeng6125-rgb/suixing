@@ -82,6 +82,20 @@ internal fun Map<String, Int>.withContextWindow(model: String, tokens: Int): Map
     if (tokens <= 0 || model.isBlank()) this - model else this + (model to tokens)
 
 /**
+ * Fills in the windows the endpoint advertised for its models, leaving every window the user
+ * set untouched: a key that is already here is never overwritten, so 自定义 wins over 上游 and
+ * re-fetching the list cannot undo a choice. Blank ids and non-positive counts are ignored —
+ * an endpoint that advertises nothing contributes nothing, and nothing is invented in its place.
+ *
+ * A window set here is indistinguishable from one set by hand, which is the point: 「设过」 is
+ * the key existing at all, and that is what makes 自定义 win on every later fetch.
+ */
+internal fun Map<String, Int>.withUpstreamDefaults(upstream: Map<String, Int>): Map<String, Int> {
+    val missing = upstream.filter { (model, tokens) -> model.isNotBlank() && tokens > 0 && model !in this }
+    return this + missing
+}
+
+/**
  * A starting point for [model]'s window, or null when the name says nothing recognisable.
  *
  * These are the ceilings the vendors publish for the families that are identifiable by name.

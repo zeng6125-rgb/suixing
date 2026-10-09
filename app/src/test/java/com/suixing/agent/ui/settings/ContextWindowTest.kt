@@ -44,4 +44,45 @@ class ContextWindowTest {
         assertEquals(128_000, suggestedContextWindow("gpt-4o"))
         assertNull("an unrecognisable name gets no suggestion at all", suggestedContextWindow("whatever-unknown"))
     }
+
+    @Test
+    fun `upstream windows fill the gaps and never overwrite a window the user set`() {
+        val mine = mapOf("mine/model" to 4_096)
+
+        assertEquals(
+            "a window the user set is never overwritten, however often the list is re-fetched",
+            mapOf("mine/model" to 4_096, "new/model" to 180_000),
+            mine.withUpstreamDefaults(mapOf("mine/model" to 999_999, "new/model" to 180_000)),
+        )
+        assertEquals(
+            "an advertised key is written only when it is missing",
+            mapOf("mine/model" to 4_096, "new/model" to 180_000),
+            mine.withUpstreamDefaults(mapOf("new/model" to 180_000)),
+        )
+        assertEquals(
+            "a blank id or a non-positive count is ignored, not invented",
+            mine,
+            mine.withUpstreamDefaults(mapOf("" to 5_000, "zero" to 0, "negative" to -1)),
+        )
+        assertEquals("an empty advertisement changes nothing", mine, mine.withUpstreamDefaults(emptyMap()))
+        assertTrue(
+            "and nothing comes out of nothing",
+            emptyMap<String, Int>().withUpstreamDefaults(emptyMap()).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `a second fetch leaves a window the user raised alone`() {
+        val upstream = mapOf("Qwen3.8-Flash" to 180_000)
+
+        val filled = emptyMap<String, Int>().withUpstreamDefaults(upstream)
+        assertEquals("the first fetch fills the window in", 180_000, filled["Qwen3.8-Flash"])
+
+        val raised = filled.withContextWindow("Qwen3.8-Flash", 400_000)
+        assertEquals(
+            "and re-fetching the list cannot undo the user's own number",
+            400_000,
+            raised.withUpstreamDefaults(upstream)["Qwen3.8-Flash"],
+        )
+    }
 }

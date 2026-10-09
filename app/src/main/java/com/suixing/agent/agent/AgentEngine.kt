@@ -594,6 +594,15 @@ class AgentEngine(
         @Volatile
         private var lastPromptChars = 0
 
+        /**
+         * How many screenshots the wire carried when [lastPromptTokens] was recorded.
+         *
+         * Tracked apart from the character count because an image is priced per image: the base64
+         * of one picture would swamp any character-based delta.
+         */
+        @Volatile
+        private var lastPromptImages = 0
+
         /** The three parts of the prompt, in estimated tokens, for the UI's breakdown bar. */
         @Volatile
         private var breakSystem = 0
@@ -965,6 +974,7 @@ class AgentEngine(
                 usage?.promptTokens?.takeIf { it > 0 }?.let { reported ->
                     lastPromptTokens = reported
                     lastPromptChars = wireChars(wire)
+                    lastPromptImages = wire.count { it.imageBase64 != null }
                 }
                 val thinking = turn.reasoning.takeIf { it.isNotBlank() }
                 // A truncated turn can end mid-tool-call, so say so instead of silently
@@ -1229,6 +1239,10 @@ class AgentEngine(
         // Priced before anything is replaced: what the checkpoint reports is how big the wire was
         // when this compression was decided on, not what it shrank to afterwards.
         val before = estimatePromptTokens(wire)
+        // The last figure the endpoint itself reported, kept for the note below: when a compression
+        // looks wrong, the first question is whether the estimate or the conversation was at fault,
+        // and the two numbers side by side answer it without a debugger.
+        val realBefore = lastPromptTokens
         if (!asked && before <= window * COMPRESS_AT) return
 
         // The cut never splits an assistant's tool_calls from their results: a lone
@@ -1303,13 +1317,24 @@ class AgentEngine(
         }
 
         // The next round's estimate has to be priced off the summary, not off the
-        // messages it replaced, or the threshold would fire again immediately.
+        // messages it replaced, or the threshold would fire again immediately. With no anchor the
+        // next estimate is a plain character count, which is why screenshots are priced per image
+        // there rather than by their base64 length.
         lastPromptTokens = 0
         lastPromptChars = 0
-        contextNote = if (asked) {
-            "已压缩上下文（手动）：$folded 条消息 → 摘要"
+        lastPromptImages = 0
+        // The estimate and the last real figure travel together: 「设了更大的窗口还是压缩了」 is a
+        // question about which of the two was wrong, and the note is the only place the user can see
+        // either of them.
+        val evidence = if (realBefore > 0) {
+            "（估算 ${before / 1000}k / 上轮实际 ${realBefore / 1000}k）"
         } else {
-            "已压缩上下文：$folded 条消息 → 摘要"
+            "（估算 ${before / 1000}k）"
+        }
+        contextNote = if (asked) {
+            "已压缩上下文（手动）：$folded 条消息 → 摘要$evidence"
+        } else {
+            "已压缩上下文：$folded 条消息 → 摘要$evidence"
         }
         // Published at once rather than waiting for the next tick, so the note is on
         // screen while the summary is still the news.
@@ -1343,28 +1368,43 @@ class AgentEngine(
     /**
      * How big the next request will be, in the endpoint's own tokens where possible.
      *
-     * The last reported prompt size is a fact; only what has been appended since is
-     * estimated, at four characters per token for the mixed Chinese-and-JSON traffic
-     * an agent produces. Before the first usage arrives there is nothing to anchor to,
-     * so the whole wire is estimated the pessimistic way.
+     * The last reported prompt size is a fact; only what has been appended since is estimated, at
+     * four characters per token. That ratio is right for ASCII and JSON and an *under*estimate for
+     * Chinese (a Chinese character is nearer one token than a quarter of one), and an underestimate
+     * only ever makes a compression late — never early, which is the failure that matters here.
+     *
+     * Screenshots are priced per image at [IMAGE_TOKENS], never by their base64 length. This is the
+     * whole reason the estimate is trustworthy: a screenshot is a few hundred thousand base64
+     * characters and about a thousand tokens, so pricing it as text let a single picture outweigh a
+     * 1000k window — a 574k conversation would then compress itself with nothing actually wrong.
+     *
+     * Before the first usage arrives there is nothing to anchor to, so the whole wire is estimated
+     * the pessimistic way.
      */
     private fun estimatePromptTokens(wire: List<ChatMessage>): Int {
         val chars = wireChars(wire)
+        val images = wire.count { it.imageBase64 != null }
         val reported = lastPromptTokens
-        if (reported <= 0) return chars / 3
-        return reported + (chars - lastPromptChars).coerceAtLeast(0) / 4
+        if (reported <= 0) return chars / 3 + images * IMAGE_TOKENS
+        val textDelta = (chars - lastPromptChars).coerceAtLeast(0) / 4
+        val imagesDelta = (images - lastPromptImages).coerceAtLeast(0) * IMAGE_TOKENS
+        return reported + textDelta + imagesDelta
     }
 
     private fun wireChars(wire: List<ChatMessage>): Int = wire.sumOf { messageChars(it) }
 
     /**
-     * What one message costs in characters: its text, its images, and the arguments of any
-     * tool call it asks for. All three travel to the endpoint, and leaving the arguments out
-     * would undercount the part of a history that is made almost entirely of tool calls.
+     * What one message costs in characters: its text and the arguments of any tool call it asks
+     * for. Both travel to the endpoint, and leaving the arguments out would undercount the part
+     * of a history that is made almost entirely of tool calls.
+     *
+     * A screenshot is deliberately *not* counted here, even though its base64 also travels: it is
+     * priced per image by [estimatePromptTokens] instead. Counting it as characters made one
+     * screenshot — hundreds of thousands of base64 characters, roughly a thousand real tokens —
+     * look like a quarter of a million tokens of context.
      */
     private fun messageChars(message: ChatMessage): Int =
-        message.text.length + message.imageBase64.orEmpty().length +
-            message.toolCalls.sumOf { it.name.length + it.arguments.length }
+        message.text.length + message.toolCalls.sumOf { it.name.length + it.arguments.length }
 
     private fun stats(): StreamStats {
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
@@ -1598,12 +1638,32 @@ private const val MAX_TOOL_OUTPUT = 8_000
 }
 
 /**
- * The same estimate for a stored message, used by the context trimmer: a screenshot
- * costs its base64 length, everything else its text.
+ * What one screenshot costs the prompt, in tokens.
+ *
+ * An endpoint charges for an image by its resolution, not by the size of the base64 that carries
+ * it: a phone screenshot is a few hundred thousand characters and lands somewhere around a thousand
+ * tokens on every vision endpoint in use. A flat thousand is deliberately not a formula — being a
+ * few hundred out is nothing next to pricing the picture as text, which was out by two orders of
+ * magnitude and made a 574k conversation compress itself against a 1000k window.
+ *
+ * File level rather than in the engine's companion: the trimmer's estimate below is a top-level
+ * function and has to price images the same way.
+ */
+private const val IMAGE_TOKENS = 1000
+
+/**
+ * The same estimate for a stored message, used by the context trimmer: its text, plus a flat
+ * [IMAGE_TOKENS] for a screenshot.
+ *
+ * The screenshot used to be priced by its base64 length, which is the same mistake the wire
+ * estimate made: a few hundred thousand characters charged as text against a window of tokens. It
+ * did not merely compress early — it made the trimmer believe a handful of messages filled the
+ * whole budget and drop the rest of the conversation from the replay, silently.
  */
 private fun estimateTokens(message: StoredMessage): Int {
     val text = message.text.length + message.toolOutput.orEmpty().length + message.toolArgs.orEmpty().length
-    return (text + (message.imageBase64?.length ?: 0)) / 3
+    val image = if (message.imageBase64 != null) IMAGE_TOKENS else 0
+    return text / 3 + image
 }
 
 /**

@@ -110,6 +110,13 @@ data class Conversation(
     val providerId: String? = null,
     val model: String? = null,
     /**
+     * This conversation's own thinking level (the wire's `reasoning_effort`); null means it
+     * never picked one and falls back to the persona's provider, then the app-wide default.
+     * Per conversation for the same reason the model is: a level chosen while debugging one
+     * chat must not silently re-time every other chat.
+     */
+    val reasoningEffort: String? = null,
+    /**
      * Every compression this conversation has been through, oldest first. The messages
      * themselves are never deleted — this is the record of which spans were folded into
      * which summary, so a later run can reuse a summary instead of paying to make it again.

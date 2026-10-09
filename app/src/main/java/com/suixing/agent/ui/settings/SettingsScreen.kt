@@ -610,9 +610,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 val presetIndex = CONTEXT_PRESETS.indexOfFirst { it.first == window }
                 LabeledBlock(
                     label = "上下文窗口",
-                    hint = "只影响当前模型（$modelLabel）：这个模型一次能读多少 token，超过就丢掉" +
-                        "最早的对话；填了它，聊天页输入框左边的圆环才会按占用比例显示。" +
-                        "不限＝整段发过去，圆环不显示比例。",
+                    hint = "默认取自上游模型信息（拉取模型列表时写入）；可自定义；留空＝不限。" +
+                        "只影响当前模型（$modelLabel），填了它，聊天页输入框左边的圆环才会按占用比例显示。",
                 ) {
                     SegmentedPill(
                         options = CONTEXT_PRESETS.map { it.second } + "自定义",
@@ -639,6 +638,15 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
+                    Spacer(Modifier.height(6.dp))
+                    // 上游声明的值只代表「网关愿意承认的长度」：用户那个网关声明 180k 却
+                    // 实际接受 574k。这里不写死数字——手改过之后它就不再是「上游声明」，
+                    // 而且非预设值上面那行已经把真实值说出来了。
+                    Text(
+                        text = "上游声明的值可能小于网关实际支持的长度，可以改大；填小了会提前触发压缩。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 if (customOpen) {
                     // The raw id goes in, not the alias: the suggestion is matched against the
@@ -777,14 +785,23 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             scope.launch {
                                 loadingModels = true
                                 outcome = null
-                                runCatching { client.listModels(form) }.fold(
-                                    onSuccess = { fetched ->
+                                runCatching { client.listModelDetails(form) }.fold(
+                                    onSuccess = { details ->
+                                        val fetched = details.map { it.id }
                                         val merged = (fetched + selected?.models.orEmpty()).distinct()
-                                        form = form.mapProvider(selected?.id) { it.copy(models = merged) }
+                                        // 上游声明的窗口只在用户没设过时填入（withUpstreamDefaults：
+                                        // 键已存在就一个字都不动），并和清单在同一事务里落盘。
+                                        val windows = details.mapNotNull { model ->
+                                            model.contextLength?.let { model.id to it }
+                                        }.toMap()
+                                        form = form.copy(
+                                            modelContexts = form.modelContexts.withUpstreamDefaults(windows),
+                                        ).mapProvider(selected?.id) { it.copy(models = merged) }
                                         // 拉到的清单属于提供方结构，同样点选即落盘。
                                         scope.persist {
                                             it.copy(
                                                 providers = form.providers,
+                                                modelContexts = form.modelContexts,
                                                 baseUrl = form.baseUrl,
                                                 apiKey = form.apiKey,
                                                 model = form.model,

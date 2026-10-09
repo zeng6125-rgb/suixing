@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.chat
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.suixing.agent.agent.AgentEvent
@@ -13,8 +14,8 @@ import com.suixing.agent.data.LiveDraft
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Transcript
-import com.suixing.agent.data.forAssistant
 import com.suixing.agent.data.choiceFor
+import com.suixing.agent.data.forAssistant
 import com.suixing.agent.service.AgentForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -78,6 +79,12 @@ data class ChatUiState(
      */
     val providerId: String? = null,
     val model: String? = null,
+    /**
+     * This conversation's own thinking level, or null while it follows the persona's
+     * provider and then the app-wide default. Kept beside the model pick because the two
+     * are chosen in the same sheet and belong to the same chat.
+     */
+    val reasoningEffort: String? = null,
     val streaming: String = "",
     /** The thinking streamed ahead of [streaming], shown in its own block. */
     val reasoning: String = "",
@@ -170,6 +177,8 @@ private data class RunSession(
     /** The conversation's own model pick; carried so a save cannot drop it. */
     val providerId: String? = null,
     val model: String? = null,
+    /** The conversation's own thinking level; carried so a save cannot drop it. */
+    val reasoningEffort: String? = null,
     /** The conversation's compression record; carried so a save cannot drop it. */
     val checkpoints: List<ContextCheckpoint> = emptyList(),
     val runId: String,
@@ -273,6 +282,16 @@ class ChatViewModel : ViewModel() {
      * it before its first frame instead of waiting for the marker file to be read.
      */
     private var lastOpenedId: String? = null
+
+    /**
+     * Text waiting to be published, per conversation; see [handleEvent] and [DELTA_PUBLISH_MS].
+     *
+     * Two buffers, not one: the answer and the reasoning land in different parts of the live
+     * bubble, and a single buffer would put half a thought into the answer.
+     */
+    private val textBuffers = mutableMapOf<String, StringBuilder>()
+    private val reasoningBuffers = mutableMapOf<String, StringBuilder>()
+    private val lastPublishAt = mutableMapOf<String, Long>()
 
     /**
      * Queued lines per conversation, oldest first.
@@ -460,6 +479,10 @@ class ChatViewModel : ViewModel() {
     }
 
     fun openConversation(conversation: Conversation) {
+        // Anything the conversation on screen was still holding is published before the
+        // display moves: a buffered tail would otherwise land in the conversation being
+        // opened, or be lost with the one being left.
+        flushDeltas(_state.value.conversationId)
         val live = sessions[conversation.id]
         // Read-and-clear: a failure that landed while another conversation was on screen
         // is reported the moment its own chat comes back.
@@ -475,6 +498,7 @@ class ChatViewModel : ViewModel() {
                 assistantId = live.assistantId,
                 providerId = live.providerId,
                 model = live.model,
+                reasoningEffort = live.reasoningEffort,
                 checkpoints = live.checkpoints,
                 streaming = live.streaming,
                 reasoning = live.reasoning,
@@ -546,7 +570,37 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Remembers the thinking level this conversation picked — and only this conversation's
+     * copy of it. Same rule as [chooseModel]: the level decides how long every answer in
+     * this chat takes and what it costs, so it belongs to the chat it was chosen in rather
+     * than to the app-wide default every other chat also reads.
+     */
+    fun chooseReasoning(level: String) {
+        val chatId = _state.value.conversationId
+        if (chatId.isEmpty()) return
+        val shown = _state.value
+        _state.update { it.copy(reasoningEffort = level) }
+        val live = sessions[chatId]
+        live?.let { putSession(it.copy(reasoningEffort = level)) }
+        viewModelScope.launch {
+            save(
+                chatId = chatId,
+                title = live?.title ?: shown.title,
+                messages = live?.messages ?: shown.messages,
+                assistantId = live?.assistantId ?: shown.assistantId,
+                activeRuns = live?.activeRuns ?: shown.activeRuns,
+                providerId = live?.providerId ?: shown.providerId,
+                model = live?.model ?: shown.model,
+                reasoningEffort = level,
+            )
+        }
+    }
+
     fun deleteConversation(conversation: Conversation) {
+        // Published before the conversation goes: a buffered tail is part of an answer that
+        // may still be streaming into a chat that is about to disappear from the list.
+        flushDeltas(conversation.id)
         // The run owns its conversation until it ends: deleting it would only have the
         // next save write it straight back.
         if (sessions.containsKey(conversation.id)) return
@@ -855,6 +909,7 @@ class ChatViewModel : ViewModel() {
                 assistantId = shown.assistantId,
                 providerId = shown.providerId,
                 model = shown.model,
+                reasoningEffort = shown.reasoningEffort,
                 checkpoints = shown.checkpoints,
                 runId = runId,
                 messages = shown.messages,
@@ -904,6 +959,10 @@ class ChatViewModel : ViewModel() {
                     baseUrl = choice.baseUrl,
                     apiKey = choice.apiKey,
                     model = choice.model,
+                    // The level follows the same chain as the model: this chat's own pick
+                    // wins, then whatever the persona's provider declared, then the
+                    // app-wide default the persona already carries.
+                    reasoningEffort = shown.reasoningEffort ?: persona.reasoningEffort,
                 )
                 val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
                 val produced = engine.startRun(
@@ -953,6 +1012,9 @@ class ChatViewModel : ViewModel() {
                     writer.cancel()
                     // A cancelled coroutine refuses to suspend, so the final save has to
                     // run in a NonCancellable block or a stopped run loses its messages.
+                    // Whatever the endpoint sent since the last publish belongs to the answer
+                    // too: without this flush a stopped run would save all but its tail.
+                    flushDeltas(chatId)
                     sessions[chatId]?.let { saveSession(it) }
                     endSession(chatId, status, failure)
                     // The answer is in the transcript now, whatever way the run ended: a
@@ -966,56 +1028,63 @@ class ChatViewModel : ViewModel() {
 
     private fun handleEvent(chatId: String, event: AgentEvent) {
         val live = sessions[chatId] ?: return
+        // The model can send hundreds of deltas a second, and every one of them used to
+        // republish the state — which re-parses the whole Markdown body, because the render
+        // cache is keyed by the text itself and a text that changes every frame is a miss
+        // every frame. That is what made the ghosting worse the faster the endpoint wrote.
+        // Deltas are buffered and published at most every DELTA_PUBLISH_MS; every other event
+        // flushes first, so nothing is ever applied out of order and no tail is lost.
+        val textDelta = event is AgentEvent.TextDelta
+        val reasoningDelta = event is AgentEvent.ReasoningDelta
+        if (textDelta) textBuffers.getOrPut(chatId) { StringBuilder() }.append(event.text)
+        if (reasoningDelta) reasoningBuffers.getOrPut(chatId) { StringBuilder() }.append(event.text)
+        if (textDelta || reasoningDelta) {
+            val now = SystemClock.uptimeMillis()
+            if (now - (lastPublishAt[chatId] ?: 0L) < DELTA_PUBLISH_MS) return
+            lastPublishAt[chatId] = now
+        }
+        // Whatever has arrived so far, applied in one go. For a non-delta event this is the
+        // flush; for a delta it is the publish that got through the interval above.
+        val pendingText = textBuffers.remove(chatId)?.toString().orEmpty()
+        val pendingReasoning = reasoningBuffers.remove(chatId)?.toString().orEmpty()
+        val base = applyPending(live, pendingText, pendingReasoning)
         val next = when (event) {
-            is AgentEvent.TextDelta -> live.copy(
-                streaming = live.streaming + event.text,
-                parts = live.parts.sealThinking(live.thinkingStartedAt).appendText(event.text),
-                status = "",
-            )
+            // Already folded into `base` above.
+            is AgentEvent.TextDelta -> base
 
-            is AgentEvent.ReasoningDelta -> {
-                // A delta after a tool or after prose opens a new block: its clock
-                // starts now, not at the run's start.
-                val opening = live.parts.lastOrNull() !is LivePart.Thinking
-                live.copy(
-                    reasoning = live.reasoning + event.text,
-                    parts = live.parts.appendThinking(event.text),
-                    status = "",
-                    thinkingStartedAt = if (opening) System.currentTimeMillis() else live.thinkingStartedAt,
-                )
-            }
+            is AgentEvent.ReasoningDelta -> base
 
             // The round is stored, but it is not drawn from the transcript: the live
             // bubble keeps drawing it until the run lands, so the reply stays one bubble
             // from the first token to the last.
-            is AgentEvent.AssistantMessage -> live.copy(
-                messages = live.messages + event.message.copy(runId = live.runId),
-                parts = live.parts.sealThinking(live.thinkingStartedAt),
+            is AgentEvent.AssistantMessage -> base.copy(
+                messages = base.messages + event.message.copy(runId = base.runId),
+                parts = base.parts.sealThinking(base.thinkingStartedAt),
             )
 
-            is AgentEvent.ToolStarted -> live.copy(
+            is AgentEvent.ToolStarted -> base.copy(
                 status = "调用 ${event.name}",
                 runningTool = event.name,
-                parts = live.parts.sealThinking(live.thinkingStartedAt).startTool(event.name, event.args),
+                parts = base.parts.sealThinking(base.thinkingStartedAt).startTool(event.name, event.args),
             )
 
-            is AgentEvent.ToolMessage -> live.copy(
-                messages = live.messages + event.message.copy(runId = live.runId),
+            is AgentEvent.ToolMessage -> base.copy(
+                messages = base.messages + event.message.copy(runId = base.runId),
                 status = "",
                 runningTool = null,
                 // The result hangs off the call it belongs to, not only off the
                 // transcript: the row needs its output and its screenshot.
-                parts = live.parts.attachToolMessage(event.message),
+                parts = base.parts.attachToolMessage(event.message),
             )
 
-            is AgentEvent.ToolFinished -> live.copy(
+            is AgentEvent.ToolFinished -> base.copy(
                 runningTool = null,
-                parts = live.parts.finishTool(event.name, event.ok),
+                parts = base.parts.finishTool(event.name, event.ok),
             )
 
             // The error rides with the run: it shows on the error card only while that
             // conversation is the one on screen, and travels with it otherwise.
-            is AgentEvent.Failed -> live.copy(error = event.message)
+            is AgentEvent.Failed -> base.copy(error = event.message)
 
             is AgentEvent.Finished -> live
 
@@ -1039,6 +1108,51 @@ class ChatViewModel : ViewModel() {
         // Saved straight away: a handed-over line that only lived in memory would vanish the
         // moment the user switches conversations, which is when they go looking for it.
         if (event is AgentEvent.Steered) viewModelScope.launch { saveSession(next) }
+    }
+
+    /**
+     * Folds the buffered deltas into a session: the answer first, then the reasoning.
+     *
+     * Both fields are separate buffers on purpose — they feed different parts of the bubble,
+     * and merging them would put half a thought into the answer. Applied in one go, so one
+     * publish covers everything that arrived since the last one.
+     */
+    private fun applyPending(live: RunSession, text: String, reasoning: String): RunSession {
+        var next = live
+        if (text.isNotEmpty()) {
+            next = next.copy(
+                streaming = next.streaming + text,
+                parts = next.parts.sealThinking(next.thinkingStartedAt).appendText(text),
+                status = "",
+            )
+        }
+        if (reasoning.isNotEmpty()) {
+            // A delta after a tool or after prose opens a new block: its clock starts now,
+            // not at the run's start.
+            val opening = next.parts.lastOrNull() !is LivePart.Thinking
+            next = next.copy(
+                reasoning = next.reasoning + reasoning,
+                parts = next.parts.appendThinking(reasoning),
+                status = "",
+                thinkingStartedAt = if (opening) System.currentTimeMillis() else next.thinkingStartedAt,
+            )
+        }
+        return next
+    }
+
+    /**
+     * Publishes whatever is still buffered for [chatId].
+     *
+     * Called before anything that reads the session as a whole — saving it, switching away
+     * from it — because the buffered text is part of the answer and dropping it here is how a
+     * stopped or failed run would lose its last words.
+     */
+    private fun flushDeltas(chatId: String) {
+        val live = sessions[chatId] ?: return
+        val text = textBuffers.remove(chatId)?.toString().orEmpty()
+        val reasoning = reasoningBuffers.remove(chatId)?.toString().orEmpty()
+        if (text.isEmpty() && reasoning.isEmpty()) return
+        putSession(applyPending(live, text, reasoning))
     }
 
     /**
@@ -1274,6 +1388,7 @@ class ChatViewModel : ViewModel() {
             activeRuns = live?.activeRuns ?: shown?.activeRuns ?: stored?.activeRuns.orEmpty(),
             providerId = live?.providerId ?: shown?.providerId ?: stored?.providerId,
             model = live?.model ?: shown?.model ?: stored?.model,
+            reasoningEffort = live?.reasoningEffort ?: shown?.reasoningEffort ?: stored?.reasoningEffort,
             checkpoints = live?.checkpoints ?: shown?.checkpoints ?: stored?.checkpoints.orEmpty(),
         )
         Core.chats.clearLive(chatId)
@@ -1311,6 +1426,7 @@ class ChatViewModel : ViewModel() {
                 activeRuns = base.activeRuns,
                 providerId = base.providerId,
                 model = base.model,
+                reasoningEffort = base.reasoningEffort,
                 checkpoints = next,
             )
         }
@@ -1358,6 +1474,7 @@ class ChatViewModel : ViewModel() {
         activeRuns: Map<String, String>,
         providerId: String?,
         model: String?,
+        reasoningEffort: String? = null,
         checkpoints: List<ContextCheckpoint>? = null,
     ): String? {
         if (chatId.isEmpty()) return null
@@ -1386,6 +1503,10 @@ class ChatViewModel : ViewModel() {
                 // to what is already on disk instead of clearing it.
                 providerId = providerId ?: previous?.providerId,
                 model = model ?: previous?.model,
+                // Same trap again: the thinking level is picked in the same sheet as the
+                // model, so a save that carries none must inherit the one on disk rather
+                // than resetting the chat to the app-wide default.
+                reasoningEffort = reasoningEffort ?: previous?.reasoningEffort,
                 // Same trap as the model pick: a save that carries no checkpoints must
                 // inherit the ones on disk, or every message landing would wipe the record
                 // of what was compressed — and the next run would compress and pay again.
@@ -1416,6 +1537,7 @@ private fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = C
     assistantId = assistantId.ifBlank { fallbackAssistantId },
     providerId = providerId,
     model = model,
+    reasoningEffort = reasoningEffort,
     checkpoints = checkpoints,
     // A conversation read from disk is not "still opening": this state is what the skeleton
     // is replaced by, so it must not leave the flag set.
@@ -1433,6 +1555,16 @@ private const val MAX_CHECKPOINTS = 10
  * answer rather than all of it.
  */
 private const val LIVE_DRAFT_INTERVAL_MS = 1000L
+
+/**
+ * How often buffered deltas are published to the screen.
+ *
+ * Fifty milliseconds is under the frame time a reader can notice and far under the rate a
+ * fast endpoint sends at: the state stops changing hundreds of times a second, and with it
+ * the Markdown re-parse that every one of those changes forced (the render cache is keyed by
+ * the text, so a text that changes every frame is a miss every frame).
+ */
+private const val DELTA_PUBLISH_MS = 50L
 
 /**
  * How much of a draft is compared against the transcript to decide it was already saved.

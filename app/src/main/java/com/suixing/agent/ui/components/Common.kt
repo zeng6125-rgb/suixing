@@ -387,6 +387,18 @@ fun SuixingTopBar(
 val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 /**
+ * How much of the bottom of the window the keyboard currently covers, as the shell
+ * animates it — not the raw inset.
+ *
+ * The shell pads itself by this value over 180ms, so a screen that pins a list to its
+ * end has to key its re-pin on *this* rather than on `WindowInsets.ime`: the raw inset
+ * changes in one frame while the viewport is still shrinking, and pinning against a
+ * viewport that is still moving lands short of the end. Zero when no keyboard is up,
+ * which is also what a screen without an input field ever sees.
+ */
+val LocalKeyboardInset = staticCompositionLocalOf { 0.dp }
+
+/**
  * The bar for a page that is not a top-level destination: a back button instead of the
  * drawer handle.
  *

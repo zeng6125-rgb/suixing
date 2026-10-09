@@ -117,7 +117,7 @@ class ShellTools(
         val command = args.str("command")?.trim().orEmpty()
         if (command.isEmpty()) return@withContext ToolResult.failure("缺少参数 command")
         val mode = args.str("mode")?.trim()?.lowercase() ?: "auto"
-        drawInputFx(command)
+        drawInputFx(command, tool = "run_shell")
         val state = capabilities.state.value
         if (mode == "root" && !state.rootProbed) capabilities.probeRoot()
         val chosen = when (mode) {
@@ -154,19 +154,27 @@ class ShellTools(
      * Drawn before the command runs rather than after: a ring is supposed to land with the
      * tap, and the command itself blocks until the gesture is over. A key event has no
      * coordinates and draws nothing.
+     *
+     * Every command is traced with what it matched, so a user report of "nothing appeared" can be
+     * answered from the file: no match at all, or a match that drew nothing.
      */
-    private fun drawInputFx(command: String) {
+    private fun drawInputFx(command: String, tool: String) {
+        val matched = mutableListOf<String>()
         FX_TAP.find(command)?.let {
+            matched += "tap"
             TouchFx.tap(context, it.groupValues[1].toFloat(), it.groupValues[2].toFloat())
         }
         FX_LONG_PRESS.find(command)?.let {
+            matched += "longpress"
             TouchFx.longPress(context, it.groupValues[1].toFloat(), it.groupValues[2].toFloat())
         }
         val hold = FX_SWIPE_HOLD.find(command)
         if (hold != null) {
+            matched += "swipe-hold"
             TouchFx.longPress(context, hold.groupValues[1].toFloat(), hold.groupValues[2].toFloat())
         } else {
             FX_SWIPE.find(command)?.let {
+                matched += "swipe"
                 TouchFx.swipe(
                     context,
                     it.groupValues[1].toFloat(), it.groupValues[2].toFloat(),
@@ -176,12 +184,17 @@ class ShellTools(
         }
         // No ring for a handoff: the agent is not touching the screen, it is handing it over.
         val handoff = FX_HANDOFF.containsMatchIn(command) || FX_HANDOFF_KEY.containsMatchIn(command)
-        if (handoff) TouchFx.handoff(context)
+        if (handoff) {
+            matched += "handoff"
+            TouchFx.handoff(context)
+        }
         // Typing and key presses are driving too, but there is nothing to draw at: the light is
         // the whole signal. The handoff branch above has already lit it for the keys that flash.
         if (!handoff && (FX_TEXT.containsMatchIn(command) || FX_KEYEVENT.containsMatchIn(command))) {
+            matched += "text-or-key"
             TouchFx.noteDriving(context)
         }
+        TouchFx.traceCall(context, tool = tool, detail = command, matched = matched)
     }
 
     private suspend fun appAction(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {        val pkg = args.str("package")?.trim().orEmpty()
@@ -214,7 +227,7 @@ class ShellTools(
         }
         // `action=start` runs `monkey`, which launches an app: the same handoff `open_app` draws.
         // After the privilege check, so nothing flashes for a command that never runs.
-        drawInputFx(command)
+        drawInputFx(command, tool = "app_action")
         val result = if (state.rootReady) Shell.root(command) else Shell.shizuku(command)
         val label = if (state.rootReady) "root" else "shizuku(shell)"
         val prefix = "[$label] exit=${result.exitCode}\n"
