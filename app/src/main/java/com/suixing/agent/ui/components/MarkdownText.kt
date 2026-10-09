@@ -532,8 +532,83 @@ fun MarkdownText(
     color: Color = Color.Unspecified,
     onUrlClick: ((String) -> Unit)? = null,
 ) {
-    val blocks = remember(text) { parseMarkdown(text) }
+    val blocks = rememberGrowingMarkdown(text)
     MarkdownBlocks(blocks, modifier, style, color, onUrlClick)
+}
+
+/**
+ * [parseMarkdown], but only for the part of [text] that is new.
+ *
+ * A streamed answer grows by a few characters at a time, and the render cache is keyed by the
+ * whole string, so every publish re-parsed the whole document: for a long answer at a dozen
+ * publishes a second that is a dozen full parses of a growing text, and the frames that lose
+ * that race are the ghosting the user reported.
+ *
+ * The trick is that a finished block never changes. Everything before the last blank line is
+ * therefore stable once parsed, so this keeps that prefix and its blocks, and a publish that
+ * only extends the current block parses just the tail. The prefix is recomputed only when a new
+ * blank line lands — a few times per answer, not a dozen times a second.
+ */
+@Composable
+private fun rememberGrowingMarkdown(text: String): List<MdBlock> {
+    // A plain holder rather than state: the blocks are returned from this call, so nothing has
+    // to recompose when the cache moves on, and writing state during composition is exactly
+    // the kind of thing that recomposes forever.
+    val cache = remember { MarkdownCache() }
+    return cache.blocksFor(text)
+}
+
+/**
+ * The last parse, kept so the next one can start where this one stopped.
+ *
+ * [prefix] is the settled part of the text (everything before its last blank line) and
+ * [prefixBlocks] is that part's parse: the two together are what makes appending a freshly
+ * parsed tail correct — reusing the *whole* previous block list would append the tail to a list
+ * that already contained the old one.
+ */
+private class MarkdownCache {
+    private var text = ""
+    private var prefix = ""
+    private var prefixBlocks: List<MdBlock> = emptyList()
+    private var blocks: List<MdBlock> = emptyList()
+
+    fun blocksFor(next: String): List<MdBlock> {
+        if (next == text) return blocks
+        val settled = settledPrefix(next)
+        if (settled.isNotEmpty() && settled == prefix) {
+            blocks = prefixBlocks + parseMarkdown(next.removePrefix(settled))
+        } else {
+            prefixBlocks = if (settled.isEmpty()) emptyList() else parseMarkdown(settled)
+            blocks = if (settled.isEmpty()) {
+                parseMarkdown(next)
+            } else {
+                prefixBlocks + parseMarkdown(next.removePrefix(settled))
+            }
+            prefix = settled
+        }
+        text = next
+        return blocks
+    }
+
+    /**
+     * The part of [text] that can never change again, ending just past a blank line.
+     *
+     * A blank line normally ends a block, which is what makes the split safe — except inside a
+     * fenced code block, where it does not: cutting a fence in half would render one code block
+     * as two, one of them unterminated. So the last blank line with an even number of fences
+     * before it is the one taken, and a text whose only blank lines are inside fences simply has
+     * no settled part (it is re-parsed whole, which is what it did before any of this).
+     */
+    private fun settledPrefix(text: String): String {
+        var searchFrom = text.length
+        while (true) {
+            val at = text.lastIndexOf("\n\n", searchFrom - 1)
+            if (at <= 0) return ""
+            val candidate = text.substring(0, at + 2)
+            if (candidate.count { it == '`' } % 2 == 0) return candidate
+            searchFrom = at
+        }
+    }
 }
 
 /**

@@ -4,9 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -32,7 +30,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -71,7 +69,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.vectorResource
@@ -100,7 +97,6 @@ import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
-import com.suixing.agent.ui.components.LocalKeyboardInset
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
@@ -176,26 +172,15 @@ fun SuixingApp() {
     // A row inside the settings page pushes, so back returns to the list it came from.
     val push: (String) -> Unit = { target -> navController.navigate(target) }
 
-    // The keyboard is a layout change, not a scroll: imePadding() shortened the whole
-    // viewport in a single frame and the composer was shoved up with it. Animating the
-    // bottom inset instead keeps that motion continuous in both directions — 180ms with
-    // the same FastOutSlowIn curve the nav transitions use; a spring would overshoot and
-    // read as a wobble. The inset is read raw and the padding is ours, so no other
-    // modifier in the tree re-applies it.
-    val density = LocalDensity.current
-    val imeBottom = WindowInsets.ime.getBottom(density)
-    val keyboardInset by animateDpAsState(
-        targetValue = with(density) { imeBottom.toDp() },
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-        label = "keyboardInset",
-    )
-
+    // The keyboard is a layout change, not a scroll, and the platform already animates the
+    // IME inset frame by frame — so `imePadding()` moves the composer exactly as smoothly as
+    // the keyboard itself, in both directions. Animating that inset ourselves was a mistake
+    // twice over: it fought the platform's own animation (the composer lagged and then caught
+    // up, which read as a wobble) and it counted the whole IME height on top of the
+    // navigation-bar inset the composer already carries, leaving a band of empty space above
+    // the keyboard. `imePadding()` subtracts what the other insets have already consumed.
     CompositionLocalProvider(
         LocalOpenSidebar provides { drawerOpen = true },
-        // A screen that pins a list to its end follows the animated value rather than the
-        // raw inset: the raw one changes in a frame while the viewport is still shrinking,
-        // and pinning against a moving viewport lands short of the end.
-        LocalKeyboardInset provides keyboardInset,
     ) {
         // The drawer is the shell's own panel rather than a ModalNavigationDrawer, so
         // nothing else consumes BACK: without this, BACK with the drawer open finished
@@ -204,7 +189,7 @@ fun SuixingApp() {
         BackHandler(enabled = drawerOpen) { drawerOpen = false }
         Box(Modifier.fillMaxSize()) {
             Scaffold(
-                modifier = Modifier.padding(bottom = keyboardInset),
+                modifier = Modifier.imePadding(),
                 containerColor = MaterialTheme.colorScheme.background,
                 // Screens own their top inset (their headers paint behind the status
                 // bar) and the composer owns the bottom one, so the scaffold reserves
@@ -345,10 +330,6 @@ private fun BoxScope.Drawer(
     onNavigate: (String) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    // The drawer is a composable of its own, so it reads the shell's animated keyboard
-    // inset from the composition local instead of a parameter: the panel then moves with
-    // the same animation the shell pads itself by when the keyboard is up.
-    val keyboardInset = LocalKeyboardInset.current
     // The board changes behind our back (the agent writes it mid-run), so the count is
     // re-read every time the drawer opens rather than cached for the process.
     var todoCount by remember { mutableStateOf(0) }
@@ -404,9 +385,9 @@ private fun BoxScope.Drawer(
                     .fillMaxHeight()
                     .statusBarsPadding()
                     .navigationBarsPadding()
-                    // The keyboard can be up when the drawer is opened mid-sentence; the
-                    // panel moves with the same animation the shell pads itself by.
-                    .padding(bottom = keyboardInset)
+                    // The keyboard can be up when the drawer is opened mid-sentence: the
+                    // panel keeps clear of it the same way the shell does.
+                    .imePadding()
                     .padding(vertical = 18.dp),
             ) {
                 Row(

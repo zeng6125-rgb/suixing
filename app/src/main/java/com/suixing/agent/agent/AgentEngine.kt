@@ -918,6 +918,9 @@ class AgentEngine(
                 } / 4
                 breakHistory = wire.filter { it.role != ROLE_SYSTEM }.sumOf { messageChars(it) } / 4
                 val turnStartedAt = System.currentTimeMillis()
+                // When the first piece of anything arrived: the wait a user actually feels,
+                // and one the endpoint's own usage block never reports.
+                var firstChunkAt = 0L
                 // Cleared here rather than after the call: an abort from `steer` can only
                 // belong to the round it interrupted, so nothing else may inherit the flag.
                 steeringCut.set(false)
@@ -929,12 +932,14 @@ class AgentEngine(
                         messages = wire,
                         tools = toolSpecs,
                         onDelta = { piece ->
+                            if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
                             outChars.addAndGet(piece.length)
                             streamed.append(piece)
                             liveLine = streamed.takeLast(LIVE_LINE_CHARS).toString()
                             onEvent(AgentEvent.TextDelta(piece))
                         },
                         onReasoning = { piece ->
+                            if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
                             thinkingChars.addAndGet(piece.length)
                             liveLine = "思考中…"
                             onEvent(AgentEvent.ReasoningDelta(piece))
@@ -968,6 +973,7 @@ class AgentEngine(
                     return produced
                 }
                 val elapsed = System.currentTimeMillis() - turnStartedAt
+                val firstTokenMs = if (firstChunkAt > 0L) firstChunkAt - turnStartedAt else 0L
                 val usage = turn.usage
                 // Kept for the context readout and for pricing the next round's growth:
                 // only the endpoint knows how big the prompt really was.
@@ -988,7 +994,7 @@ class AgentEngine(
                         role = Roles.ASSISTANT,
                         text = turn.text,
                         reasoning = thinking,
-                    ).withUsage(usage, elapsed, settings.model)
+                    ).withUsage(usage, elapsed, settings.model, firstTokenMs)
                     produced += assistant
                     onEvent(AgentEvent.AssistantMessage(assistant))
                     // The answer goes into the wire either way: the finish path below never asks
@@ -1013,7 +1019,7 @@ class AgentEngine(
                     text = turn.text,
                     reasoning = thinking,
                     toolCalls = turn.toolCalls.map { StoredToolCall(it.id, it.name, it.arguments) },
-                ).withUsage(usage, elapsed, settings.model)
+                ).withUsage(usage, elapsed, settings.model, firstTokenMs)
                 produced += assistant
                 onEvent(AgentEvent.AssistantMessage(assistant))
                 val assistantAt = wire.size
@@ -1670,9 +1676,20 @@ private fun estimateTokens(message: StoredMessage): Int {
  * Stamps what the round cost onto the message it produced. Endpoints that send no
  * usage block leave the counts at zero, which the UI reads as "unknown" rather than
  * "free".
+ *
+ * [firstTokenMs] is the wait before anything came back — the number a slow endpoint is
+ * judged by, and the one the usage block never carries: it is measured here, between the
+ * request going out and the first delta arriving.
  */
-private fun StoredMessage.withUsage(usage: Usage?, elapsedMs: Long, model: String): StoredMessage {
-    if (usage == null) return copy(elapsedMs = elapsedMs, model = model)
+private fun StoredMessage.withUsage(
+    usage: Usage?,
+    elapsedMs: Long,
+    model: String,
+    firstTokenMs: Long = 0L,
+): StoredMessage {
+    if (usage == null) {
+        return copy(elapsedMs = elapsedMs, model = model, firstTokenMs = firstTokenMs)
+    }
     return copy(
         promptTokens = usage.promptTokens,
         completionTokens = usage.completionTokens,
@@ -1680,5 +1697,6 @@ private fun StoredMessage.withUsage(usage: Usage?, elapsedMs: Long, model: Strin
         cachedTokens = usage.cachedTokens,
         elapsedMs = elapsedMs,
         model = model,
+        firstTokenMs = firstTokenMs,
     )
 }

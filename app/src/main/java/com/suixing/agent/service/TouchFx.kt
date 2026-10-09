@@ -42,22 +42,29 @@ private const val FX_EDGE_THROTTLE_MS = 800L
 private const val FX_COLOR_BRAND = 0xFF1F6B4C.toInt()
 private const val FX_RING_STROKE_PX = 6f
 private const val FX_TRAIL_STROKE_PX = 4f
-private const val FX_EDGE_STROKE_PX = 10f
+private const val FX_EDGE_STROKE_PX = 14f
 
 /**
  * The breathing edge: the same stroke, turned up until it is seen at a glance without becoming
  * a band that fights the screen for attention, and taken through a slow wave.
+ *
+ * The user's verdict on the first attempt was 「不太明显」, and the numbers are the whole of
+ * that judgement: a 10px stroke at 0.16~0.40 alpha on a dark wallpaper is a rumour. Wider
+ * stroke, higher floor, and a ceiling that is still short of solid.
  */
 private const val FX_BREATH_PERIOD_MS = 2400L
-private const val FX_BREATH_MIN_ALPHA = 0.16f
-private const val FX_BREATH_MAX_ALPHA = 0.40f
+private const val FX_BREATH_MIN_ALPHA = 0.22f
+private const val FX_BREATH_MAX_ALPHA = 0.55f
 
 /**
  * The screen's own shape: a radius the size of a modern panel's corners, and a few px in from
- * the edge so a 10px stroke is neither half-eaten by those corners nor clipped by the window.
+ * the edge so the stroke is neither half-eaten by those corners nor clipped by the window.
+ *
+ * 52px read as 「不符合手机边缘」 on a 1080p panel whose corners are nearer 100px, and 8px of
+ * inset left a visible gap between the light and the edge it is supposed to trace.
  */
-private const val FX_EDGE_RADIUS_PX = 52f
-private const val FX_EDGE_INSET_PX = 8f
+private const val FX_EDGE_RADIUS_PX = 96f
+private const val FX_EDGE_INSET_PX = 3f
 
 /**
  * The light is a state the user reads at a glance, not an animation to admire: 25fps while it

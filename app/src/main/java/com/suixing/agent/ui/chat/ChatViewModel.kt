@@ -16,7 +16,9 @@ import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
+import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.service.AgentForegroundService
+import com.suixing.agent.ui.settings.withUpstreamDefaults
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -241,6 +243,10 @@ class ChatViewModel : ViewModel() {
     // able to stop and steer the very run this screen started.
     private val engine = Core.engine
     private val gate = Core.gate
+    /** Only used to ask an endpoint what windows its models advertise; see [prefetchWindows]. */
+    private val llm = LlmClient()
+    /** Endpoints already asked in this process, so opening the sheet twice costs one call. */
+    private val windowsAsked = mutableSetOf<String>()
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -594,6 +600,49 @@ class ChatViewModel : ViewModel() {
                 model = live?.model ?: shown.model,
                 reasoningEffort = level,
             )
+        }
+    }
+
+    /**
+     * Fills in the context windows the endpoint advertises for its models.
+     *
+     * Called when the model sheet opens — the moment the user is looking at models — rather
+     * than at app start, so no request goes out for someone who never opens the picker, and
+     * at most one per endpoint per process.
+     *
+     * Values the user set by hand are never touched: [withUpstreamDefaults] only fills gaps,
+     * which is what keeps 「I raised this window myself」 from being undone by a refresh. A
+     * value already raised stays raised.
+     */
+    fun prefetchWindows() {
+        viewModelScope.launch {
+            val settings = Core.settings.current()
+            val shown = _state.value
+            val assistant = settings.assistant(shown.assistantId) ?: settings.activeAssistant()
+            val choice = settings.choiceFor(shown.providerId, shown.model, assistant)
+            if (choice.baseUrl.isBlank()) return@launch
+            val key = choice.baseUrl.trimEnd('/') + "|" + choice.apiKey
+            if (!windowsAsked.add(key)) return@launch
+            val endpoint = settings.copy(
+                baseUrl = choice.baseUrl,
+                apiKey = choice.apiKey,
+                model = choice.model,
+            )
+            runCatching { llm.listModelDetails(endpoint) }
+                .onSuccess { details ->
+                    val windows = details
+                        .mapNotNull { model -> model.contextLength?.let { model.id to it } }
+                        .toMap()
+                    if (windows.isEmpty()) return@onSuccess
+                    Core.settings.update { stored ->
+                        stored.copy(
+                            modelContexts = stored.modelContexts.withUpstreamDefaults(windows),
+                        )
+                    }
+                }
+                // A failed probe is not worth a word on screen: the window simply stays as
+                // it was, and the settings page can be asked to fetch again.
+                .onFailure { windowsAsked.remove(key) }
         }
     }
 
@@ -1559,12 +1608,19 @@ private const val LIVE_DRAFT_INTERVAL_MS = 1000L
 /**
  * How often buffered deltas are published to the screen.
  *
- * Fifty milliseconds is under the frame time a reader can notice and far under the rate a
- * fast endpoint sends at: the state stops changing hundreds of times a second, and with it
- * the Markdown re-parse that every one of those changes forced (the render cache is keyed by
- * the text, so a text that changes every frame is a miss every frame).
+ * Under the frame time a reader can notice, and far under the rate a fast endpoint sends at:
+ * the state stops changing hundreds of times a second, and with it the Markdown re-parse that
+ * every one of those changes forced (the render cache is keyed by the text, so a text that
+ * changes every frame is a miss every frame).
+ *
+ * Eighty rather than fifty is an inference, not a measurement: the user still saw ghosting
+ * after the fifty-millisecond version, and the cost that scales with a fast endpoint is the
+ * re-parse, so halving the publish rate halves it. Twelve and a half a second is still
+ * smoother than reading speed. The measurement-backed fix — reusing the previous parse for
+ * the unchanged prefix instead of re-parsing the whole document — needs `MarkdownText` to
+ * report where each block starts, which it does not do yet.
  */
-private const val DELTA_PUBLISH_MS = 50L
+private const val DELTA_PUBLISH_MS = 80L
 
 /**
  * How much of a draft is compared against the transcript to decide it was already saved.

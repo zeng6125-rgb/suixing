@@ -38,6 +38,13 @@ data class StoredMessage(
     val cachedTokens: Int = 0,
     /** How long the model took, wall clock, for the line under the bubble. */
     val elapsedMs: Long = 0,
+    /**
+     * How long the endpoint took to produce its *first* piece of anything — thinking or
+     * text. Measured in the engine, because no usage block carries it and it is the wait a
+     * user actually feels; 0 for a round that never streamed, or a message stored before
+     * this was recorded.
+     */
+    val firstTokenMs: Long = 0,
     /** True once the user edited the text by hand, so the UI can say so. */
     val edited: Boolean = false,
     /**

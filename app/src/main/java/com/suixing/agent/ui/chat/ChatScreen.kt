@@ -10,6 +10,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -130,6 +131,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
@@ -178,7 +180,7 @@ import com.suixing.agent.ui.components.DrawerButton
 import com.suixing.agent.ui.components.FeatherIcon
 import com.suixing.agent.ui.components.FlatIconButton
 import com.suixing.agent.ui.components.FlatPainterButton
-import com.suixing.agent.ui.components.LocalKeyboardInset
+import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.REASONING_LEVELS
@@ -326,6 +328,17 @@ fun ChatScreen(
     // walked here: a long transcript is thousands of messages, and the ring's card is
     // redrawn far more often than the number changes.
     val sessionTokens = viewModel.sessionStats.collectAsState(initial = null).value?.tokens ?: 0
+    val sessionTurns = viewModel.sessionStats.collectAsState(initial = null).value?.turns ?: 0
+    // What each run actually took, summed over its own messages. A message's own `elapsedMs`
+    // is one round's call — the model thinking, then calling a tool, then thinking again are
+    // several messages in one run — while the status line the user watched counted the whole
+    // run. Showing the round's number under the card is what made the two disagree.
+    val runElapsed = remember(state.messages) {
+        state.messages.asSequence()
+            .filter { !it.runId.isNullOrEmpty() && it.elapsedMs > 0 }
+            .groupBy { it.runId }
+            .mapValues { (_, rows) -> rows.sumOf { it.elapsedMs } }
+    }
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.
@@ -465,12 +478,12 @@ fun ChatScreen(
     // already at its end, because tapping the field must never move a transcript the user is
     // reading.
     //
-    // The inset is read from the animated value the app publishes, not from the raw window
-    // inset: the keyboard is raised over 180ms, and pinning on the first frame of that
-    // animation pins to an end that is still moving — by the time the padding has finished
-    // growing, the real end is a keyboard-height lower. Following the animated value keeps
-    // the scroll with it, frame by frame.
-    val keyboardInset = LocalKeyboardInset.current
+    // The inset is read raw, not from a value the app animates itself: the platform already
+    // animates the IME inset frame by frame, so this effect re-runs on every frame of the
+    // keyboard's own animation and the card follows it up. Animating the inset a second time
+    // in the shell (and pinning to that) made the lift lag the keyboard and then catch up,
+    // which is exactly the stiffness this is meant to remove.
+    val keyboardInset = WindowInsets.ime.getBottom(LocalDensity.current)
     LaunchedEffect(keyboardInset) {
         if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
         // One frame first: the inset is already the new one while the list is still
@@ -568,7 +581,31 @@ fun ChatScreen(
                 } else {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // A long press is the user reaching into the content — almost
+                            // always to select text — and the follow scroll below would pull
+                            // the end back under their finger: the position moved, and the
+                            // selection went with it. A drag already wins that argument; this
+                            // gives a press the same right. The events are only observed, at
+                            // the initial pass, so selection and scrolling still receive them
+                            // untouched — nothing here consumes anything.
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val down = awaitPointerEvent(PointerEventPass.Initial)
+                                        if (down.changes.none { it.pressed }) continue
+                                        val pressedAt = SystemClock.uptimeMillis()
+                                        while (true) {
+                                            val next = awaitPointerEvent(PointerEventPass.Initial)
+                                            if (next.changes.none { it.pressed }) break
+                                        }
+                                        if (SystemClock.uptimeMillis() - pressedAt >= HOLD_TO_SELECT_MS) {
+                                            following = false
+                                        }
+                                    }
+                                }
+                            },
                         contentPadding = PaddingValues(
                             start = 16.dp,
                             end = 16.dp,
@@ -609,6 +646,7 @@ fun ChatScreen(
                                     reasoningMaxHeight = settings.reasoningHeight.dp,
                                     bubbleMaxWidth = bubbleMaxWidth,
                                     contextWindow = contextWindow,
+                                    runElapsedMs = runElapsed[row.message.runId] ?: 0L,
                                     reasoningExpansion = reasoningExpansion,
                                     onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
                                     onRegenerate = { viewModel.regenerate() },
@@ -679,14 +717,14 @@ fun ChatScreen(
                                         bubbleMaxWidth = bubbleMaxWidth,
                                         reasoningExpansion = reasoningExpansion,
                                     )
-                                    // 3dp under the card: the run's progress belongs to the
-                                    // bubble it describes, not to the next row of the list.
+                                    // 8dp under the card: the run's progress belongs to the
+                                    // bubble it describes, and 3dp read as cramped against it.
                                     if (state.runningHere) {
                                         RunStatusLine(
                                             text = liveStatusText,
                                             startedAt = runStartedAt[runKey] ?: 0L,
                                             timed = statsNote.isEmpty(),
-                                            modifier = Modifier.padding(start = 4.dp, top = 3.dp),
+                                            modifier = Modifier.padding(start = 4.dp, top = 8.dp),
                                         )
                                     }
                                 }
@@ -702,12 +740,12 @@ fun ChatScreen(
                                     text = liveStatusText,
                                     startedAt = runStartedAt[runKey] ?: 0L,
                                     timed = statsNote.isEmpty(),
-                                    // 4dp above and below, on top of the list's own 16dp: the
+                                    // 8dp above and below, on top of the list's own 16dp: the
                                     // caption read as cramped against the cards on both sides.
                                     modifier = Modifier.padding(
                                         start = 4.dp,
-                                        top = 4.dp,
-                                        bottom = 4.dp,
+                                        top = 8.dp,
+                                        bottom = 8.dp,
                                     ),
                                 )
                             }
@@ -790,6 +828,7 @@ fun ChatScreen(
                     contextUsed = contextUsed,
                     cachePercent = cachePercent,
                     sessionTokens = sessionTokens,
+                    sessionTurns = sessionTurns,
                     conversationProviderId = state.providerId,
                     conversationModel = state.model,
                     conversationReasoningEffort = state.reasoningEffort,
@@ -798,6 +837,7 @@ fun ChatScreen(
                     // written onto this chat alone, so choosing an endpoint here cannot
                     // change what any other conversation — or the app-wide default — runs.
                     onPickModel = { provider, model -> viewModel.chooseModel(provider.id, model) },
+                    onPrefetchWindows = { viewModel.prefetchWindows() },
                     pendingSteers = state.pendingSteers,
                     onPromoteSteer = { viewModel.promoteSteer(it) },
                     onRetractSteer = { viewModel.retractSteer(it) },
@@ -1502,6 +1542,8 @@ private fun MessageRow(
     reasoningMaxHeight: Dp,
     bubbleMaxWidth: Dp,
     contextWindow: Int,
+    /** What this row's whole run took; 0 falls back to the message's own round. */
+    runElapsedMs: Long = 0L,
     /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
     reasoningExpansion: ReasoningExpansion,
     onBranch: (String, String) -> Unit,
@@ -1527,6 +1569,7 @@ private fun MessageRow(
             branch = row.branch,
             usage = row.usage,
             contextWindow = contextWindow,
+            runElapsedMs = runElapsedMs,
             message = row.message,
             expandReasoning = expandReasoning,
             expandTools = expandTools,
@@ -1643,20 +1686,23 @@ private fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
 }
 
 /**
- * The reply's own numbers, in the card's bottom row: how long it took and what it cost.
+ * The reply's own numbers, in the card's bottom row: two buttons, one for the clock and one
+ * for the cost.
  *
- * They belong to the round, not to the summary of its shape — the collapsed header counts
- * thoughts and tools, while these are the frozen record of one answer, and the bottom row is
- * where the eye already goes for 「这条怎么样」. Everything is read off the stored message, so a
- * reopened conversation shows the same figures it showed when the answer arrived, and a field
- * the endpoint never reported is left out rather than filled with a zero.
+ * They are two questions — 「它花了多久」 and 「它用了多少」 — so they are two controls rather
+ * than one card with everything in it; each opens its own detail. The numbers come off the
+ * stored message, so a reopened conversation shows the same figures it showed when the answer
+ * arrived, and a field the endpoint never reported is left out rather than filled with a zero.
  *
- * Tapping the pair opens the detail card, which opens upward: the row sits at the bottom of an
- * answer, and a card opening downward would cover the composer.
+ * Both cards open upward: the row sits at the bottom of an answer, and a card opening downward
+ * would cover the composer.
  */
 @Composable
 private fun TurnMetrics(
+    /** What the whole run took, not one round's call. */
     elapsedMs: Long,
+    /** How long the endpoint took to say anything at all; 0 when it never streamed. */
+    firstTokenMs: Long,
     promptTokens: Int,
     completionTokens: Int,
     cachedTokens: Int,
@@ -1664,72 +1710,126 @@ private fun TurnMetrics(
     val total = promptTokens + completionTokens
     if (elapsedMs <= 0 && total <= 0) return
     val scheme = MaterialTheme.colorScheme
-    var open by remember { mutableStateOf(false) }
+    var open by remember { mutableStateOf<MetricCard?>(null) }
+    // What the card last showed: the popup stays composed through its exit animation, and an
+    // empty card sliding away is worse than the one the user just closed.
+    var shown by remember { mutableStateOf(MetricCard.TIME) }
+    if (open != null) shown = open!!
     val elapsed = remember(elapsedMs) {
         String.format(Locale.getDefault(), "%.1f秒", elapsedMs / 1000.0)
     }
     Box {
         Row(
-            modifier = Modifier
-                .height(40.dp)
-                .clip(MaterialTheme.shapes.small)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = ripple(),
-                    onClick = { open = true },
-                )
-                .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (elapsedMs > 0) {
-                MetricReadout(ImageVector.vectorResource(R.drawable.ic_clock), elapsed)
+                MetricButton(
+                    icon = ImageVector.vectorResource(R.drawable.ic_clock),
+                    text = elapsed,
+                    label = "用时详情",
+                    onClick = { open = MetricCard.TIME },
+                )
             }
             if (total > 0) {
-                MetricReadout(
-                    ImageVector.vectorResource(R.drawable.ic_database),
-                    "用量 ${shortTokens(total)} tok",
+                MetricButton(
+                    icon = ImageVector.vectorResource(R.drawable.ic_database),
+                    text = "用量 ${shortTokens(total)} tok",
+                    label = "用量详情",
+                    onClick = { open = MetricCard.USAGE },
                 )
             }
         }
         Box(Modifier.align(Alignment.TopStart)) {
             MenuCard(
-                visible = open,
-                onDismiss = { open = false },
+                visible = open != null,
+                onDismiss = { open = null },
                 alignment = Alignment.BottomStart,
                 offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
             ) {
-                if (elapsedMs > 0) RingDetail("用时", elapsed)
-                if (promptTokens > 0) RingDetail("入", "${shortTokens(promptTokens)} tok")
-                if (completionTokens > 0) RingDetail("出", "${shortTokens(completionTokens)} tok")
-                if (total > 0) RingDetail("合计", "${shortTokens(total)} tok")
-                if (promptTokens > 0 && cachedTokens > 0) {
-                    RingDetail(
-                        "缓存命中",
-                        remember(promptTokens, cachedTokens) {
-                            String.format(
-                                Locale.getDefault(),
-                                "%.2f%%",
-                                cachedTokens * 100.0 / promptTokens,
+                when (shown) {
+                    MetricCard.TIME -> {
+                        if (elapsedMs > 0) RingDetail("总用时", elapsed)
+                        if (firstTokenMs > 0) {
+                            RingDetail(
+                                "首 token",
+                                remember(firstTokenMs) {
+                                    String.format(
+                                        Locale.getDefault(),
+                                        "%.1f秒",
+                                        firstTokenMs / 1000.0,
+                                    )
+                                },
                             )
-                        },
-                    )
+                        }
+                        if (completionTokens > 0 && elapsedMs > 0) {
+                            RingDetail(
+                                "速度",
+                                remember(completionTokens, elapsedMs) {
+                                    String.format(
+                                        Locale.getDefault(),
+                                        "%.1f tok/s",
+                                        completionTokens * 1000.0 / elapsedMs,
+                                    )
+                                },
+                            )
+                        }
+                    }
+
+                    MetricCard.USAGE -> {
+                        if (total > 0) RingDetail("本轮用量", "${shortTokens(total)} tok")
+                        if (promptTokens > 0) {
+                            RingDetail("入", "${shortTokens(promptTokens)} tok")
+                            RingDetail("缓存 token", "${shortTokens(cachedTokens)} tok")
+                            RingDetail(
+                                "未缓存",
+                                "${shortTokens((promptTokens - cachedTokens).coerceAtLeast(0))} tok",
+                            )
+                            if (cachedTokens > 0) {
+                                RingDetail(
+                                    "缓存命中率",
+                                    remember(promptTokens, cachedTokens) {
+                                        String.format(
+                                            Locale.getDefault(),
+                                            "%.2f%%",
+                                            cachedTokens * 100.0 / promptTokens,
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                        if (completionTokens > 0) {
+                            RingDetail("输出", "${shortTokens(completionTokens)} tok")
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/** One icon + value pair of [TurnMetrics]; decorative icon, the value carries the meaning. */
+/** Which of the two detail cards [TurnMetrics] is showing. */
+private enum class MetricCard { TIME, USAGE }
+
+/** One icon + value pair of [TurnMetrics], tappable: it opens that number's detail card. */
 @Composable
-private fun MetricReadout(icon: ImageVector, text: String) {
+private fun MetricButton(icon: ImageVector, text: String, label: String, onClick: () -> Unit) {
     Row(
+        modifier = Modifier
+            .height(40.dp)
+            .clip(MaterialTheme.shapes.small)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick,
+            )
+            .padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Icon(
             imageVector = icon,
-            contentDescription = null,
+            contentDescription = label,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(14.dp),
         )
@@ -1759,6 +1859,8 @@ private fun AssistantRow(
     liveStats: StreamStats? = null,
     /** The model's window, for the context readout; 0 means it was never set. */
     contextWindow: Int = 0,
+    /** What the whole run took; 0 falls back to the message's own round. */
+    runElapsedMs: Long = 0L,
     message: StoredMessage? = null,
     expandReasoning: Boolean = false,
     expandTools: Boolean = false,
@@ -1952,7 +2054,10 @@ private fun AssistantRow(
                     // The round's own clock and cost sit right of 「重新回答」: the same row the
                     // branch arrows live in, which is where this card's controls already are.
                     TurnMetrics(
-                        elapsedMs = message.elapsedMs,
+                        // The run's own clock when we have it: one round's call is not what
+                        // the status line counted while the answer was arriving.
+                        elapsedMs = if (runElapsedMs > 0) runElapsedMs else message.elapsedMs,
+                        firstTokenMs = message.firstTokenMs,
                         promptTokens = message.promptTokens,
                         completionTokens = message.completionTokens,
                         cachedTokens = message.cachedTokens,
@@ -2339,6 +2444,10 @@ private fun ReasoningBlock(
         expansion.set(blockId, !expanded)
     }
     val status: @Composable () -> Unit = {
+        // A real gap after the title as well as between the items: with none, 「思考过程256
+        // tokens」 read as one word — the same complaint the " · " join earned, one word to
+        // the left.
+        if (meta.isNotEmpty()) Spacer(Modifier.width(8.dp))
         // Item by item with a real gap: joining them into one " · " string is what made
         // "256 tokens · 25.1s" read as a single glued-together word at 13sp.
         meta.forEachIndexed { index, item ->
@@ -3220,12 +3329,16 @@ private fun Composer(
     cachePercent: Double,
     /** Everything this conversation has ever spent, for the ring's detail card. */
     sessionTokens: Int,
+    /** How many questions that tally was built from. */
+    sessionTurns: Int,
     /** This conversation's own model pick, or null while it follows persona/defaults. */
     conversationProviderId: String?,
     conversationModel: String?,
     /** This conversation's own thinking level, or null while it follows the defaults. */
     conversationReasoningEffort: String?,
     onPickModel: (ProviderConfig, String) -> Unit,
+    /** Asks the endpoint once what context windows its models advertise; see prefetchWindows. */
+    onPrefetchWindows: () -> Unit,
     /** Writes a thinking level onto this conversation alone. */
     onChooseReasoning: (String) -> Unit,
     attachment: Attachment?,
@@ -3549,7 +3662,13 @@ private fun Composer(
                                 conversationProviderId = conversationProviderId,
                                 conversationModel = conversationModel,
                                 conversationReasoningEffort = conversationReasoningEffort,
-                                onClick = { sheetOpen = true },
+                                onClick = {
+                                    sheetOpen = true
+                                    // The sheet is the one place models are looked at, so
+                                    // this is where the endpoint's own window numbers are
+                                    // worth asking for — once per endpoint per process.
+                                    onPrefetchWindows()
+                                },
                             )
                         }
                     }
@@ -3561,6 +3680,7 @@ private fun Composer(
                         window = contextWindow,
                         cachePercent = cachePercent,
                         sessionTokens = sessionTokens,
+                        sessionTurns = sessionTurns,
                         live = stats,
                     )
                     // The mic only earns its slot when a recognizer actually exists on
@@ -4403,6 +4523,8 @@ private fun ContextRing(
     cachePercent: Double,
     /** Everything this conversation has ever spent, prompt + completion. */
     sessionTokens: Int,
+    /** How many questions that tally was built from, so 「累计」 cannot read as 「本轮」. */
+    sessionTurns: Int,
     live: StreamStats?,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -4463,6 +4585,7 @@ private fun ContextRing(
                         window = window,
                         cachePercent = cachePercent,
                         sessionTokens = sessionTokens,
+                        sessionTurns = sessionTurns,
                         live = live,
                     )
                 }
@@ -4478,6 +4601,7 @@ private fun ContextRingCard(
     window: Int,
     cachePercent: Double,
     sessionTokens: Int,
+    sessionTurns: Int,
     live: StreamStats?,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -4531,10 +4655,12 @@ private fun ContextRingCard(
                 )
             }
             if (sessionTokens > 0) {
-                // The whole conversation, not just the context on screen: the two answer
-                // different questions, and a long chat's cost is the one the ring cannot
-                // draw as an arc.
-                RingDetail("会话总量", "${shortTokens(sessionTokens)} tok")
+                // The whole conversation's spend, not the context on screen: every round
+                // re-sends the context, so this is the number a bill would be built from —
+                // and it is the same tally the usage page shows. Labelled 「累计」 rather
+                // than 「总量」 because it counts each round's re-send, which is why it can
+                // dwarf the 「上下文」 line right above it.
+                RingDetail("会话累计", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
             }
         }
     }
@@ -4560,9 +4686,18 @@ private fun RingDetail(label: String, value: String) {
     }
 }
 
-/** 12.3k / 950 — the short form the context readouts use. */
-private fun shortTokens(tokens: Int): String =
-    if (tokens < 1000) "$tokens" else String.format(Locale.US, "%.1fk", tokens / 1000.0)
+/**
+ * 12.3k / 950 / 1.2M — the short form the context readouts use.
+ *
+ * Past a million the k form stops being readable (a long conversation's own tally runs to
+ * hundreds of millions of tokens, and 「143798.2k」 says nothing); M is the unit a person
+ * actually reads.
+ */
+private fun shortTokens(tokens: Int): String = when {
+    tokens < 1000 -> "$tokens"
+    tokens < 1_000_000 -> String.format(Locale.US, "%.1fk", tokens / 1000.0)
+    else -> String.format(Locale.US, "%.1fM", tokens / 1_000_000.0)
+}
 
 /**
  * The messages a compression record covers, or null when this transcript no longer holds
@@ -4857,6 +4992,15 @@ private fun LazyListState.atEnd(slack: Int = 24): Boolean {
 
 /** Far more than any transcript: the list clamps this to its own end. */
 private const val FOLLOW_SCROLL_PX = 200_000f
+
+/**
+ * How long a press has to last before it counts as the user reaching into the content.
+ *
+ * The platform's own long-press threshold is 500ms and text selection starts there; a shorter
+ * window here would drop the follow scroll on an ordinary tap, which is not an interaction with
+ * the position at all.
+ */
+private const val HOLD_TO_SELECT_MS = 450L
 
 /** How many queued lines are drawn before the rest collapse into one count. */
 private const val STEER_ROWS_SHOWN = 3
