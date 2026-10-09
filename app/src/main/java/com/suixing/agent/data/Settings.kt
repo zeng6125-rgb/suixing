@@ -197,6 +197,13 @@ data class AppSettings(
     val expandTools: Boolean = false,
     /** 思考过程默认展开 */
     val expandReasoning: Boolean = false,
+    /**
+     * 展开的思考块内滚高度上限（dp）：180 矮 / 240 中 / 320 高。
+     *
+     * A chain of thought is context, not the answer: at 320dp it pushed the reply off the
+     * screen, so it opens at 180 and the user decides in 外观 how much room it may take.
+     */
+    val reasoningHeight: Int = 180,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 

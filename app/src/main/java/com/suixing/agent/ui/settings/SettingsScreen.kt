@@ -1237,6 +1237,27 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
+                LabeledBlock(label = "思考块高度", hint = "展开的思考过程最多长这么高，超出部分在块内滚动。") {
+                    SegmentedPill(
+                        options = listOf("180 矮", "240 中", "320 高"),
+                        selectedIndex = when (stored.reasoningHeight) {
+                            240 -> 1
+                            320 -> 2
+                            else -> 0
+                        },
+                        onSelect = { index ->
+                            val height = when (index) {
+                                1 -> 240
+                                2 -> 320
+                                else -> 180
+                            }
+                            scope.persist { it.copy(reasoningHeight = height) }
+                        },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
                 SettingRow(
                     title = "自动跟随新消息",
                     subtitle = "在底部时新回复自动滚到底；上滑看历史就暂停跟随。",

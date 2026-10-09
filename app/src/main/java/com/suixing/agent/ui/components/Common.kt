@@ -41,6 +41,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -465,6 +466,44 @@ fun FlatIconButton(
         Box(contentAlignment = Alignment.Center) {
             Icon(
                 imageVector = icon,
+                contentDescription = contentDescription,
+                modifier = Modifier.size(iconSize),
+            )
+        }
+    }
+}
+
+/**
+ * The same disc as [FlatIconButton] for glyphs that are vectors of our own rather
+ * than material's: the drawer handle and the compose pencil are drawn in
+ * res/drawable so their stroke weight is ours to set.
+ */
+@Composable
+fun FlatPainterButton(
+    painter: Painter,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    iconSize: Dp = 22.dp,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier
+            .size(44.dp)
+            .shadow(
+                elevation = 6.dp,
+                shape = CircleShape,
+                ambientColor = Color.Black.copy(alpha = 0.12f),
+                spotColor = Color.Black.copy(alpha = 0.12f),
+            ),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = tint,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painter,
                 contentDescription = contentDescription,
                 modifier = Modifier.size(iconSize),
             )

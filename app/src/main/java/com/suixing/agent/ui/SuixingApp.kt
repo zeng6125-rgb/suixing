@@ -185,7 +185,7 @@ fun SuixingApp() {
                     popEnterTransition = { fadeIn(tween(220)) },
                     popExitTransition = { fadeOut(tween(120)) },
                 ) {
-                    composable("chat") { ChatScreen(viewModel = chat) }
+                    composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
                     composable("files") { FilesScreen(onBack = { navController.popBackStack() }) }
                     composable("tasks") { TasksScreen(onBack = { navController.popBackStack() }) }
                     composable("settings") {
