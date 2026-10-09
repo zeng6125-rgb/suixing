@@ -1,8 +1,10 @@
 package com.suixing.agent.service
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.os.Handler
@@ -11,6 +13,9 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.View
 import android.view.WindowManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
+import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
 import kotlin.math.PI
 import kotlin.math.cos
@@ -34,10 +39,20 @@ private const val FX_RING_STROKE_PX = 6f
 private const val FX_TRAIL_STROKE_PX = 4f
 private const val FX_EDGE_STROKE_PX = 10f
 
-/** The breathing edge: the same stroke, turned down to a glow and taken through a slow wave. */
+/**
+ * The breathing edge: the same stroke, turned up until it is seen at a glance without becoming
+ * a band that fights the screen for attention, and taken through a slow wave.
+ */
 private const val FX_BREATH_PERIOD_MS = 2400L
-private const val FX_BREATH_MIN_ALPHA = 0.10f
-private const val FX_BREATH_MAX_ALPHA = 0.26f
+private const val FX_BREATH_MIN_ALPHA = 0.16f
+private const val FX_BREATH_MAX_ALPHA = 0.40f
+
+/**
+ * The screen's own shape: a radius the size of a modern panel's corners, and a few px in from
+ * the edge so a 10px stroke is neither half-eaten by those corners nor clipped by the window.
+ */
+private const val FX_EDGE_RADIUS_PX = 52f
+private const val FX_EDGE_INSET_PX = 8f
 
 /**
  * The light is a state the user reads at a glance, not an animation to admire: 25fps while it
@@ -45,6 +60,16 @@ private const val FX_BREATH_MAX_ALPHA = 0.26f
  */
 private const val FX_BREATH_FRAME_MS = 40L
 private const val FX_BREATH_TICK_MS = 1000L
+
+/**
+ * How long the light survives the last driving action.
+ *
+ * A run hands over to the next one across a boundary the ticker only notices on its next tick,
+ * and the agent often thinks for a few seconds between actions — without this the light blinks
+ * out in exactly the moments the user is watching it, which is what they reported. Five seconds
+ * covers a tick plus the pause before the next action.
+ */
+private const val FX_DRIVING_GRACE_MS = 5_000L
 
 /**
  * A background job can operate the phone with no chat run in flight, and then there is no run
@@ -92,6 +117,10 @@ object TouchFx {
     @Volatile
     private var drivingIds: Set<String> = emptySet()
 
+    /** When the last driving action happened, for the grace window. Volatile as above. */
+    @Volatile
+    private var lastDrivingAt = 0L
+
     /**
      * When a driving action happened with no run in flight — see [FX_JOB_DRIVING_ID].
      *
@@ -99,6 +128,9 @@ object TouchFx {
      */
     @Volatile
     private var jobDrivingUntil = 0L
+
+    /** The run set as the previous tick saw it, so a tick can tell which run just ended. */
+    private var previousIds: Set<String> = emptySet()
 
     fun tap(context: Context, x: Float, y: Float) {
         noteDriving(context)
@@ -156,16 +188,22 @@ object TouchFx {
      *
      * With no run in flight — a background job operating the phone — there is nothing to watch
      * for an ending, so the light follows the actions themselves and then a fixed window.
+     *
+     * Ids are added, never replaced: a run that drove keeps the light for as long as it lives,
+     * even if the next action is taken while a different set of runs happens to be in flight.
+     * Ids that have ended are dropped by the ticker, so a later run in the same conversation
+     * starts from nothing rather than inheriting the light from the one before it.
      */
     fun noteDriving(context: Context) {
         appContext = context.applicationContext
         val running = Core.engine.runsFlow.value.keys
+        lastDrivingAt = SystemClock.uptimeMillis()
         if (running.isEmpty()) {
-            drivingIds = setOf(FX_JOB_DRIVING_ID)
-            jobDrivingUntil = SystemClock.uptimeMillis() + FX_JOB_WINDOW_MS
+            jobDrivingUntil = lastDrivingAt + FX_JOB_WINDOW_MS
+            drivingIds = drivingIds + FX_JOB_DRIVING_ID
         } else {
-            drivingIds = running.toSet()
             jobDrivingUntil = 0L
+            drivingIds = (drivingIds - FX_JOB_DRIVING_ID) + running
         }
         // Also (re)starts the ticker: the first tick is immediate, so the light comes on with the
         // action instead of up to a second after it.
@@ -184,8 +222,22 @@ object TouchFx {
         override fun run() {
             val app = appContext
             val now = SystemClock.uptimeMillis()
+            val running = Core.engine.runsFlow.value.keys
+            val departed = previousIds - running
+            previousIds = running.toSet()
+            // A run that was operating the phone has just ended, and no other driving run is left:
+            // that is the moment the user asked to be handed their phone back, so it happens on
+            // this tick rather than after the light's grace period. A run that merely shared the
+            // screen with the one that drove does not earn the trip on its own.
+            val drivingLeft = departed.any { it in drivingIds }
+            if (drivingLeft && running.none { it in drivingIds }) returnToApp()
+            // An id that ended stops counting as driving. The grace window below — not a stale id —
+            // is what carries the light across the boundary, so a run that only chats afterwards
+            // does not inherit it. Racing an action can only drop an id, which the grace covers.
+            drivingIds = drivingIds - departed
             val lit = app != null &&
-                (Core.engine.runsFlow.value.keys.any { it in drivingIds } ||
+                (running.any { it in drivingIds } ||
+                    now - lastDrivingAt < FX_DRIVING_GRACE_MS ||
                     (FX_JOB_DRIVING_ID in drivingIds && now < jobDrivingUntil))
             if (lit && app != null) {
                 overlay(app)?.setBreathing(true)
@@ -197,6 +249,25 @@ object TouchFx {
                 view?.setBreathing(false)
                 main.removeCallbacks(this)
             }
+        }
+    }
+
+    /**
+     * Brings Suixing back to the front once the agent is done operating the phone.
+     *
+     * Only a run that drove the screen earns this: a run that answered in words must not pull the
+     * user out of whatever they were reading. Nothing happens when the app is already in front —
+     * the ticker runs on the main thread, so the lifecycle answer is the live one — and a start
+     * the system refuses is ignored, since being returned to the app is a courtesy, not a result.
+     * Starting an activity from the background is allowed here because the overlay permission the
+     * effects already need (SYSTEM_ALERT_WINDOW) is Android 10's documented exemption for it.
+     */
+    private fun returnToApp() {
+        val app = appContext ?: return
+        val foreground = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        if (foreground) return
+        runCatching {
+            app.startActivity(Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
     }
 
@@ -269,6 +340,7 @@ private class FxView(context: Context, private val onIdle: () -> Unit) : View(co
     private val rings = mutableListOf<Ring>()
     private val trails = mutableListOf<Trail>()
     private val edgeRect = RectF()
+    private val edgePath = Path()
     private var edgeStart = 0L
     private var idleReported = false
 
@@ -389,9 +461,7 @@ private class FxView(context: Context, private val onIdle: () -> Unit) : View(co
         paint.strokeWidth = FX_EDGE_STROKE_PX
         paint.color = FX_COLOR_BRAND
         paint.alpha = (0.6f * (1f - progress) * 255).toInt()
-        val inset = FX_EDGE_STROKE_PX / 2f
-        edgeRect.set(inset, inset, width - inset, height - inset)
-        canvas.drawRect(edgeRect, paint)
+        canvas.drawPath(edgeShape(), paint)
     }
 
     /**
@@ -409,8 +479,19 @@ private class FxView(context: Context, private val onIdle: () -> Unit) : View(co
         paint.strokeWidth = FX_EDGE_STROKE_PX
         paint.color = FX_COLOR_BRAND
         paint.alpha = (alpha * 255).toInt()
-        val inset = FX_EDGE_STROKE_PX / 2f
+        canvas.drawPath(edgeShape(), paint)
+    }
+
+    /**
+     * The outline both edge effects are drawn on: the screen's own shape rather than a rectangle
+     * around it. A phone's corners are round, so square corners read as a box laid on the screen
+     * instead of a light coming off its edges — which is exactly what the user reported seeing.
+     */
+    private fun edgeShape(): Path {
+        val inset = FX_EDGE_INSET_PX
         edgeRect.set(inset, inset, width - inset, height - inset)
-        canvas.drawRect(edgeRect, paint)
+        edgePath.reset()
+        edgePath.addRoundRect(edgeRect, FX_EDGE_RADIUS_PX, FX_EDGE_RADIUS_PX, Path.Direction.CW)
+        return edgePath
     }
 }

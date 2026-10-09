@@ -17,12 +17,23 @@ internal fun AppSettings.mapProvider(id: String?, block: (ProviderConfig) -> Pro
 }
 
 /**
- * True when the two settings differ anywhere except the endpoint triple. Those three fields
- * are what a chip tap rewrites in the draft without writing to disk, so they must not be read
- * as an edit on their own; a hand edit to them is what [endpointHandEdited] reports.
+ * True when the two settings differ anywhere that the save button is responsible for. Two
+ * fields are left out on purpose:
+ *
+ * - the endpoint triple, which a chip tap rewrites in the draft without writing to disk (a
+ *   hand edit there is what [endpointHandEdited] reports);
+ * - provider names, which are written through a beat after typing stops (see the name field).
+ *   Counting them would light up 「有未保存的改动」 on every keystroke, and that subtitle
+ *   appearing and disappearing is what made the page's title look like it was shaking.
  */
-internal fun AppSettings.differsOutsideEndpoint(other: AppSettings): Boolean =
-    copy(baseUrl = other.baseUrl, apiKey = other.apiKey, model = other.model) != other
+internal fun AppSettings.differsOutsideEndpoint(other: AppSettings): Boolean {
+    val mine = copy(baseUrl = other.baseUrl, apiKey = other.apiKey, model = other.model).withoutNames()
+    return mine != other.withoutNames()
+}
+
+/** The same settings with every provider name blanked, so names can be compared out. */
+private fun AppSettings.withoutNames(): AppSettings =
+    copy(providers = providers.map { it.copy(name = "") })
 
 /**
  * True when the draft holds a hand edit to the endpoint triple (address, key, model).
@@ -57,3 +68,38 @@ internal fun AppSettings.forSaving(current: AppSettings): AppSettings =
     } else {
         this
     }
+
+/**
+ * [model]'s window in the settings map — the one place the key is decided, shared by every
+ * writer (this page's presets, the model picker's chip, the chat's ring dialog).
+ *
+ * The key is the raw model id, which is exactly what [AppSettings.contextWindowFor] reads and
+ * what the engine, the view model and the ring all pass in. A window filed under an alias or a
+ * display name would be stored and then never read: the ring would keep saying 窗口未设置.
+ * A count of zero or less removes the entry, which is what 不限 means.
+ */
+internal fun Map<String, Int>.withContextWindow(model: String, tokens: Int): Map<String, Int> =
+    if (tokens <= 0 || model.isBlank()) this - model else this + (model to tokens)
+
+/**
+ * A starting point for [model]'s window, or null when the name says nothing recognisable.
+ *
+ * These are the ceilings the vendors publish for the families that are identifiable by name.
+ * It is only ever shown as a suggestion the user taps to accept — never written on its own —
+ * and it errs low on purpose: too small reddens the ring a little early, too large lets a
+ * request overflow the real window and fail at the endpoint.
+ */
+internal fun suggestedContextWindow(model: String): Int? {
+    val id = model.lowercase()
+    if (id.isBlank()) return null
+    return when {
+        "claude" in id -> 200_000
+        "gemini" in id -> 1_000_000
+        "deepseek" in id -> 64_000
+        "gpt-4" in id || "gpt-5" in id || "o1" in id || "o3" in id || "o4" in id -> 128_000
+        "qwen" in id -> 32_000
+        "glm" in id || "kimi" in id || "moonshot" in id || "llama" in id -> 128_000
+        "mistral" in id -> 32_000
+        else -> null
+    }
+}

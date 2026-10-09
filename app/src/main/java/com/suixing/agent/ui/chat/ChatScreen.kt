@@ -184,6 +184,7 @@ import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
+import com.suixing.agent.ui.settings.ContextWindowEditor
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -247,6 +248,9 @@ fun ChatScreen(
     }
 
     var assistantsOpen by remember { mutableStateOf(false) }
+    // The context ring's own window editor: it edits the window of the model this conversation
+    // actually runs, which is not the id the settings page edits.
+    var editWindow by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     fun attach(uri: Uri?, kind: AttachKind) {
@@ -814,6 +818,7 @@ fun ChatScreen(
                         }
                     },
                     onOpenSettings = onOpenSettings,
+                    onOpenContextWindow = { editWindow = true },
                     jumpToLatest = { jumpToLatest() },
                     showJump = !atEnd,
                     onHeightChanged = { composerH = it },
@@ -839,6 +844,18 @@ fun ChatScreen(
             onSave = { viewModel.saveAssistant(it) },
             onDelete = { viewModel.deleteAssistant(it) },
             onDismiss = { assistantsOpen = false },
+        )
+    }
+
+    if (editWindow) {
+        // Same string that [contextWindow] was resolved with, or the dialog would write a
+        // window for one model id while the ring reads another — which is exactly the bug
+        // this entry point exists to fix: the settings page edits the app-wide default's
+        // window, and the ring divides by the window of the model the run actually sends.
+        ContextWindowEditor(
+            model = settings.choiceFor(state.providerId, state.model, assistant).model,
+            current = contextWindow,
+            onDismiss = { editWindow = false },
         )
     }
 
@@ -984,17 +1001,23 @@ private fun UnifiedSelector(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            // Wide enough for a real model id (Qwen3.8-Flash) and narrow enough that the
-            // name, the badge, the ring, the mic and the send button still fit one row.
-            modifier = Modifier.widthIn(max = 160.dp),
+            // Weighted, so it is measured last and gets whatever the badge and the caret leave
+            // — they are fixed short things and must never be the ones to give way. `fill =
+            // false` keeps a short name from stretching its own tap target across the row.
+            // Wide enough for a real model id (Qwen3.8-Flash), narrow enough that the badge,
+            // the ring, the mic and the send button still fit one row.
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .widthIn(max = 160.dp),
         )
         Surface(shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.primaryContainer) {
             Text(
                 text = level,
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
+                // Never ellipsized: the level is a fixed short word, and a "xh…" badge is
+                // both unreadable and pointless — the name beside it is what gets cut.
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
@@ -3025,6 +3048,8 @@ private fun Composer(
     onMic: () -> Unit,
     /** The empty provider list's way out: straight into the model settings page. */
     onOpenSettings: () -> Unit,
+    /** The ring's 「设置窗口」: edits this conversation's model window, not the default's. */
+    onOpenContextWindow: () -> Unit,
     /** Scrolls the transcript to its newest line; the stack's own corner button. */
     jumpToLatest: () -> Unit,
     /** Shown while the transcript is scrolled away from its end. */
@@ -3334,7 +3359,7 @@ private fun Composer(
                         window = contextWindow,
                         cachePercent = cachePercent,
                         live = stats,
-                        onOpenSettings = onOpenSettings,
+                        onEditWindow = onOpenContextWindow,
                     )
                     // The mic only earns its slot when a recognizer actually exists on
                     // the device: a dead control is worse than no control.
@@ -3361,7 +3386,7 @@ private fun Composer(
                     val sendable = running || hasSomething
                     CircleActionButton(
                         icon = if (running && !steers) {
-                            ImageVector.vectorResource(R.drawable.ic_square)
+                            ImageVector.vectorResource(R.drawable.ic_stop_filled)
                         } else {
                             ImageVector.vectorResource(R.drawable.ic_arrow_up)
                         },
@@ -4184,7 +4209,7 @@ private fun ContextRing(
     window: Int,
     cachePercent: Int,
     live: StreamStats?,
-    onOpenSettings: () -> Unit,
+    onEditWindow: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
@@ -4244,11 +4269,11 @@ private fun ContextRing(
                         window = window,
                         cachePercent = cachePercent,
                         live = live,
-                        // Closes the card first: settings is a different screen, and a
+                        // Closes the card first: the dialog is a modal of its own, and a
                         // popup left open behind it would still be there on the way back.
-                        onOpenSettings = {
+                        onEditWindow = {
                             open = false
-                            onOpenSettings()
+                            onEditWindow()
                         },
                     )
                 }
@@ -4264,7 +4289,7 @@ private fun ContextRingCard(
     window: Int,
     cachePercent: Int,
     live: StreamStats?,
-    onOpenSettings: () -> Unit,
+    onEditWindow: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
@@ -4307,14 +4332,16 @@ private fun ContextRingCard(
                 )
             }
             if (!known) {
-                // The one place the missing window is visible is also the one place that
-                // can fix it: the model's window lives on the settings page.
+                // The one place the missing window is visible is also the one place that can
+                // fix it — and it has to fix the window of *this* model: the settings page
+                // edits the app-wide default's, which is a different id whenever the
+                // conversation or its persona picked its own.
                 TextButton(
-                    onClick = onOpenSettings,
+                    onClick = onEditWindow,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     modifier = Modifier.height(28.dp),
                 ) {
-                    Text("去设置", style = MaterialTheme.typography.labelMedium)
+                    Text("设置窗口", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }

@@ -55,6 +55,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -91,6 +92,7 @@ import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
 import com.suixing.agent.ui.usage.UsageScreen
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
@@ -109,6 +111,9 @@ private val CONTEXT_PRESETS = listOf(
     256_000 to "256k",
     1_000_000 to "1M",
 )
+
+/** How long the provider-name field waits after the last keystroke before writing through. */
+private const val NAME_WRITE_DEBOUNCE_MS = 400L
 
 /**
  * The pages the root list opens. 权限 is deliberately missing: it is not a page of this
@@ -376,6 +381,27 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     // `endpointEdited` reports. Saving writes the draft (a blank address keeps the live
     // endpoint — see forSaving), so this clears by itself.
     val dirty = seeded && (endpointEdited || form.differsOutsideEndpoint(stored))
+    // The name is a write-through field — nothing to save — but one DataStore transaction per
+    // keystroke made every observer of the settings flow recompose, which is what turned the
+    // subtitle above into a flicker and the title into a shake. So the draft takes the
+    // keystroke and the write happens once the typing stops. The scope is the app's, not the
+    // screen's: a rememberCoroutineScope would be cancelled on the way out and drop the name.
+    var pendingName by remember { mutableStateOf<Pair<String, String>?>(null) }
+    LaunchedEffect(pendingName) {
+        val pending = pendingName ?: return@LaunchedEffect
+        delay(NAME_WRITE_DEBOUNCE_MS)
+        Core.appScope.persistProvider(pending.first) { it.copy(name = pending.second) }
+        if (pendingName == pending) pendingName = null
+    }
+    // Leaving the page cancels the effect above, so a name still waiting out its debounce is
+    // written here instead — the user typed it, it must not evaporate with the screen.
+    DisposableEffect(Unit) {
+        onDispose {
+            pendingName?.let { pending ->
+                Core.appScope.persistProvider(pending.first) { it.copy(name = pending.second) }
+            }
+        }
+    }
     var pendingSwitch by remember { mutableStateOf<String?>(null) }
     val switchProvider: (ProviderConfig) -> Unit = { provider ->
         selectedId = provider.id
@@ -515,9 +541,9 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     value = selected?.name.orEmpty(),
                     onValueChange = { value ->
                         form = form.mapProvider(selected?.id) { it.copy(name = value) }
-                        // 按 id 只写这一个提供方：整份 providers 覆盖会把页面上其它还没保存的
-                        // 草稿一起写下去，也会拿旧快照盖掉别人刚写的值。
-                        scope.persistProvider(selected?.id) { it.copy(name = value) }
+                        // 只改草稿：每敲一键写一次盘，会让所有观察 settings 的地方跟着重组，
+                        // 顶栏那句「有未保存的改动」一闪一灭，看起来就是标题在抖。停手后再落盘。
+                        pendingName = selected?.id?.takeIf { it.isNotEmpty() }?.let { it to value }
                     },
                     label = { Text("提供方名称") },
                     singleLine = true,
@@ -584,7 +610,9 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 val presetIndex = CONTEXT_PRESETS.indexOfFirst { it.first == window }
                 LabeledBlock(
                     label = "上下文窗口",
-                    hint = "只影响当前模型（$modelLabel）：超过这个长度就丢掉最早的对话，不限则整段发过去。",
+                    hint = "只影响当前模型（$modelLabel）：这个模型一次能读多少 token，超过就丢掉" +
+                        "最早的对话；填了它，聊天页输入框左边的圆环才会按占用比例显示。" +
+                        "不限＝整段发过去，圆环不显示比例。",
                 ) {
                     SegmentedPill(
                         options = CONTEXT_PRESETS.map { it.second } + "自定义",
@@ -599,13 +627,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             // Draft first, disk second: the window belongs to the model and
                             // lands immediately, but routing it through the draft keeps
                             // whatever else is unsaved on this page intact.
-                            form = form.copy(
-                                modelContexts = if (tokens <= 0) {
-                                    form.modelContexts - model
-                                } else {
-                                    form.modelContexts + (model to tokens)
-                                },
-                            )
+                            form = form.copy(modelContexts = form.modelContexts.withContextWindow(model, tokens))
                             scope.persist { it.copy(modelContexts = form.modelContexts) }
                         },
                     )
@@ -619,18 +641,15 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     }
                 }
                 if (customOpen) {
-                    ContextCustomDialog(
+                    // The raw id goes in, not the alias: the suggestion is matched against the
+                    // model's own name, and the id is what the window is filed under.
+                    ContextWindowDialog(
+                        model = model,
                         current = window,
                         onDismiss = { customOpen = false },
                         onConfirm = { tokens ->
                             customOpen = false
-                            form = form.copy(
-                                modelContexts = if (tokens <= 0) {
-                                    form.modelContexts - model
-                                } else {
-                                    form.modelContexts + (model to tokens)
-                                },
-                            )
+                            form = form.copy(modelContexts = form.modelContexts.withContextWindow(model, tokens))
                             scope.persist { it.copy(modelContexts = form.modelContexts) }
                         },
                     )
@@ -980,13 +999,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // Written through immediately: the window belongs to the model, and the
                 // dialog's confirm button is about which models are enabled. The draft is
                 // updated first so the page's other unsaved edits survive the write.
-                form = form.copy(
-                    modelContexts = if (window <= 0) {
-                        form.modelContexts - model
-                    } else {
-                        form.modelContexts + (model to window)
-                    },
-                )
+                form = form.copy(modelContexts = form.modelContexts.withContextWindow(model, window))
                 scope.persist { it.copy(modelContexts = form.modelContexts) }
             },
             onAlias = { model, name ->
@@ -1650,34 +1663,6 @@ private fun RenameDialog(
 }
 
 /** The token count behind the context window's 自定义 segment. */
-@Composable
-private fun ContextCustomDialog(
-    current: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (Int) -> Unit,
-) {
-    var text by remember { mutableStateOf(if (current > 0) current.toString() else "") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("自定义上下文窗口") },
-        text = {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { value -> text = value.filter { it.isDigit() }.take(9) },
-                label = { Text("tokens") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(text.toIntOrNull() ?: 0) }) { Text("确定") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
-}
-
 @Composable
 private fun LabeledBlock(
     label: String,

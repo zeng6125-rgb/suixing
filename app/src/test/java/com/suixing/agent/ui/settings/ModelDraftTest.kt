@@ -141,4 +141,21 @@ class ModelDraftTest {
         assertTrue("a hand edit to the triple lights it too", dirty(disk.switchedTo(b).copy(apiKey = "typed")))
         assertFalse("and saving makes it quiet again", dirty(disk))
     }
+
+    @Test
+    fun `typing a provider name is not an edit, while its switches still are`() {
+        val a = provider("a")
+        val disk = stored(a)
+
+        // Names are written through a beat after typing stops. Counting them lit 「有未保存的改动」
+        // on every keystroke, and that subtitle appearing and disappearing is what shook the title.
+        assertFalse(
+            "a typed name must not flip the dirty flag",
+            disk.copy(providers = listOf(a.copy(name = "改了一半的名字"))).differsOutsideEndpoint(disk),
+        )
+        assertTrue(
+            "a switch outside the name still counts",
+            disk.copy(allowInsecureTls = !disk.allowInsecureTls).differsOutsideEndpoint(disk),
+        )
+    }
 }

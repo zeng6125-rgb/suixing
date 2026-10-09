@@ -493,30 +493,26 @@ fun FlatIconButton(
 }
 
 /**
- * The disc the sidebar handle wears: the pale-green circle with dark bars the user
- * pinned as the reference for that button. That pale green is not one token across the
- * two schemes — dark's `primary` is the tint itself (#8FD6B6), light keeps it in
- * `primaryContainer` (#C9EBD8) — so it is picked per scheme instead of pinned to one
- * colour, which would be wrong in the other theme.
+ * The disc the sidebar handle wears. The reference the user gave was about the *glyph* —
+ * three thick bars — never the disc, so the disc keeps the neutral `surfaceContainerHigh`
+ * it had before: the button reads as one of the header's other actions rather than the
+ * single coloured control in the row. Paired with [handleInk] so the chat header and the
+ * drawer handle flip together instead of drifting apart.
  */
 @Composable
-private fun handleDisc(): Color = with(MaterialTheme.colorScheme) {
-    if (LocalDarkTheme.current) primary else primaryContainer
-}
+private fun handleDisc(): Color = MaterialTheme.colorScheme.surfaceContainerHigh
 
 /** The other half of [handleDisc]: the ink that reads on that disc. */
 @Composable
-private fun handleInk(): Color = with(MaterialTheme.colorScheme) {
-    if (LocalDarkTheme.current) onPrimary else onPrimaryContainer
-}
+private fun handleInk(): Color = MaterialTheme.colorScheme.onSurface
 
 /**
  * The same disc as [FlatIconButton] for glyphs that are vectors of our own rather
  * than material's: the drawer handle and the compose pencil are drawn in
  * res/drawable so their stroke weight is ours to set.
  *
- * The disc is the handle's pale green and the default ink is the dark one that reads
- * on it: both this and the drawer's handle draw the one button the user pointed at.
+ * The disc and the ink come from [handleDisc]/[handleInk], the same pair the drawer's
+ * handle uses: both draw the one button the user pointed at, so neither drifts alone.
  */
 @Composable
 fun FlatPainterButton(

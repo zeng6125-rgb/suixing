@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A solid stop square, drawn here rather than taken from an icon set: the stroked Lucide
+     square (ic_square.xml) reads as a hollow outline at 22dp, and a stop control is a filled
+     shape everywhere the user has ever seen one. Not a Lucide asset, so no licence header.
+     16 of the 24 units, rounded by 4 — the same visual weight as the arrow beside it, and
+     the Icon tint is what colours it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FF000000">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M8,4 h8 a4,4 0 0 1 4,4 v8 a4,4 0 0 1 -4,4 h-8 a4,4 0 0 1 -4,-4 v-8 a4,4 0 0 1 4,-4 Z" />
+</vector>
