@@ -20,3 +20,6 @@ dist/
 
 # Kotlin compiler session/error logs at repo root
 .kotlin/
+
+# meow-memory local memory DB (hidden dir, unrecoverable if deleted)
+.dsh-meow/

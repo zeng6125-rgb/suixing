@@ -1,7 +1,7 @@
 # 工作会话记忆 — 2026-10-09 | suixing-agent v0.8.x 迭代
 
 > 范围：①「随行 Suixing」Android agent App 从 0.8.0 迭代到 0.8.9（十次出包，全部 adb 直推真机）；②多会话并行引擎重构 + 只读审计修 6 个并发洞 + 1 个真缺陷；③UI 返修 18 轮（顶栏/对话框/过程卡/图标/弹窗）；④测试基建（MockK + ParallelRunTest 5 例）；⑤v0.8 团队契约与三名 teammate 协作。
-> 状态：**HEAD `0fa08bb`（0.8.9，已推真机 versionCode 20）；工作区有未提交改动（崩溃修复 + 思考块高度设置 + 第 28 批在飞）；未 push**。
+> 状态：**HEAD `1672491`（0.8.10，已推真机 versionCode 21）；工作区干净；未 push**。
 
 ---
 
@@ -16,6 +16,7 @@
 | 测试框架事实 | 项目测试用 **org.junit**（`kotlin.test` 不在类路径）；依赖只有 `kotlinx-coroutines-core`（**无 coroutines-test**）；本轮新增 **MockK** 用于替身 Android 绑定类 |
 | 团队契约 | `D:\dsh\fixbug\lingshu\docs\v0.8-contract.md`（§0：teammate 禁打包/禁 git 写、写域划分、验证命令、增量编译自救、子代理写序） |
 | 出包纪律 | 用户明令：**只出 release，不构建 debug**；打包必须用户放行 |
+| meow-memory 语言 | `promptLang: 'zh'`（写在插件自带 patch `…\profiles\web\node_modules\meow-memory\cordis.patch.yml`；该文件在 node_modules 内，插件升级可能被覆盖，重加即可） |
 
 ## 2. 问题与根因
 
@@ -53,8 +54,9 @@
 - **思考块高度**：320dp→240dp（`ChatScreen.kt:1791-1796`），再引入数据键 `Settings.kt` `val reasoningHeight: Int = 180`（默认 180，外观页三档可调，UI 接线在第 28 批）。
 - **input 特效**：`ShellTools.kt` 加 `context` 参数 + file-scope `FX_TAP/FX_LONG_PRESS/FX_SWIPE` 正则 + `drawInputFx()`；`Tool.kt` 调用点改 `ShellTools(context, capabilities)`。
 - **测试**：新增 `app/src/test/java/com/suixing/agent/agent/ParallelRunTest.kt` 5 例（两审批共存、停一不误伤、双击只跑一次、stateOf 实时镜像+保终态、取消=掐线 IOException 必落 Cancelled）。
-- 验证：`:app:testDebugUnitTest --rerun-tasks` → **BUILD SUCCESSFUL 47s，179 tests / 0 failures**（XML 重生成 19:51:13，非缓存）；`:app:assembleRelease` → 3m18s SUCCESS。
-- 出包链（本轮十次）：bump versionCode/versionName → 写 `dist/notes/release-notes-<ver>.md` → commit → assembleRelease → 归档 `dist/suixing-<ver>.apk` → apksigner 验签 → mdns 重发现端口 → `adb -s <ip:port> install -r` → `dumpsys package` 核对 versionCode/lastUpdateTime。
+- **第 28 批 UI（0.8.10，ui-shell-2 做、lead 读码验真）**：对话框控件行三枚同 40dp 占位、icon 22dp、`+` 与麦克风纯 icon 无圆底（`ChatScreen.kt:2810-2812`）、麦克入口按 `SpeechRecognizer.isRecognitionAvailable` 门控（`:2644`，无识别器即不显示）；UnifiedSelector 去 Bolt（全仓零命中）；`GenerationSheet`→`Popup` 300dp/20dp 圆角锚 composer 栈顶（`:2965`）、provider 四级回退解析、清单永远含当前模型（`:2964 (enabled + settings.model).distinct()`）、空态「去设置里拉取」经 `onOpenSettings`→`SuixingApp open("settings")`；顶栏换自绘 `res/drawable/ic_menu_soft.xml` + `ic_compose.xml`（painterResource 22dp，`ChatScreen:699-733`）；列表 bottom `composerH + 40.dp`（`:422/:445`）；思考块高度走 `settings.reasoningHeight`（`:458/:497` → ReasoningBlock `:1759/:1811`），外观页三档 `SettingsScreen.kt:1240-1256`。
+- 验证：`:app:testDebugUnitTest --rerun-tasks` → **BUILD SUCCESSFUL 47s，179 tests / 0 failures**（XML 重生成 19:51:13，非缓存）；`:app:assembleRelease` → 3m18s / 3m SUCCESS。
+- 出包链（本轮十一次）：bump versionCode/versionName → 写 `dist/notes/release-notes-<ver>.md` → commit → assembleRelease → 归档 `dist/suixing-<ver>.apk` → apksigner 验签 → mdns 重发现端口 → `adb -s <ip:port> install -r` → `dumpsys package` 核对 versionCode/lastUpdateTime。
 
 ## 4. 踩过的坑
 
@@ -71,10 +73,10 @@
 
 ## 5. 当前状态与待办
 
-- 已提交：`0fa08bb` 随行 0.8.9（多会话并行引擎六修 + 会话隔离/草稿 + 工具输出与截图 + input 特效）；本轮完整版本链：0.8.0 `4ca87b3`(vc11) → 0.8.1 `84be7b1`(12) → 0.8.2 `bc21f64`(13) → 0.8.3 `5e0d33f`+`2af9b14`(14) → 0.8.4 `a63c3d6`(15) → 0.8.5 `66c7c49`(16) → 0.8.6 `2fcfe50`(17) → 0.8.7 `7a9df99`(18) → 0.8.8 `18260d4`(19) → 0.8.9 `0fa08bb`(20)。
-- **未提交（工作区）**：`ChatScreen.kt`（崩溃修复 + 思考 240dp）、`Settings.kt`（`reasoningHeight=180`）、以及 ui-shell-2 第 28 批在改的 `SuixingApp.kt`/`Common.kt`/`SettingsScreen.kt` + 新文件 `res/drawable/ic_compose.xml`、`ic_menu_soft.xml`。
-- 真机现状：`versionCode=20 / 0.8.9`，`lastUpdateTime=2026-10-09 20:38:21`（含崩溃修复，不含 21:00 后新增的 `reasoningHeight`）。
-- 待办（第 28 批，ui-shell-2 在飞）：28-2 对话框三钮统一 40dp（+/麦克风去圆底、发送实心圆三态）；28-3 模型选择器去闪电；28-4 生成设置改弹窗 + provider 三级兜底解析 + 永远列出当前模型；28-5 顶栏 ChatGPT 风格自绘 icon（文件已建）；28-6 列表 bottom padding = composerH+40dp；28-7 思考块高度接 `reasoningHeight` + 外观页三档。回执后 lead 读码验真 → bump → 出包 → adb 推。
+- 已提交：`1672491` 随行 0.8.10（工具详情闪退修复 + 对话框三钮统一 + 模型弹窗 provider 四级回退 + 顶栏自绘 icon + 思考块高度可配默认 180dp）；本轮完整版本链：0.8.0 `4ca87b3`(vc11) → 0.8.1 `84be7b1`(12) → 0.8.2 `bc21f64`(13) → 0.8.3 `5e0d33f`+`2af9b14`(14) → 0.8.4 `a63c3d6`(15) → 0.8.5 `66c7c49`(16) → 0.8.6 `2fcfe50`(17) → 0.8.7 `7a9df99`(18) → 0.8.8 `18260d4`(19) → 0.8.9 `0fa08bb`(20) → 0.8.10 `1672491`(21)。
+- 工作区：**干净**（0.8.10 已全部提交）；`dist/` 被 gitignore，APK 与 release notes 留本地。
+- 真机现状：`versionCode=21 / 0.8.10`，`lastUpdateTime=2026-10-09 21:53:06`（adb 直推 Success）。
+- 待办：等用户 0.8.10 真机反馈；已知未验证项——语音悬浮卡在真机是否有识别器（无则入口自动隐藏）、任务板/用量页细节、`proot+Alpine`（跑 Pi/Node 生态）为可选项待用户勾；下一个会话继续按「截图 → 派单 → 读码验真 → 出包 → adb 直推」流程。
 
 ## 6. 经验（可复用）
 
@@ -99,3 +101,6 @@
 | 模型选择器照搬参考图的闪电图标 | 用户明确「闪电就不需要了，我只是给你图片参考」✗ |
 | 给麦克风/加号做圆底按钮 | 用户多次否决（要纯 icon，三钮同 40dp，发送实心圆）✗ |
 | 构建 debug APK | 用户明令只要 release，别浪费时间 ✗ |
+| 顶栏用 material 默认字形（Menu/Edit） | 用户三次否决「icon 丑」，改自绘矢量 ✗ |
+| 模型选择用全屏 ModalBottomSheet | 用户要紧凑弹窗（锚对话框上方 300dp）✗ |
+| 生成设置卡里显示「这个提供方还没启用模型」死文案 | 列表必须含当前模型 + 给「去设置里拉取」可点入口 ✗ |
