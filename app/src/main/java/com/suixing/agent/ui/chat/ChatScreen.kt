@@ -517,13 +517,20 @@ fun ChatScreen(
     val viewportHeight by remember {
         derivedStateOf { listState.layoutInfo.viewportSize.height }
     }
+    var lastViewportHeight by remember { mutableStateOf(0) }
     LaunchedEffect(viewportHeight) {
-        if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
-        withFrameNanos { }
+        val previous = lastViewportHeight
+        lastViewportHeight = viewportHeight
+        if (previous <= 0 || delta0(viewportHeight, previous)) return@LaunchedEffect
+        if (!following || !settings.autoFollow) return@LaunchedEffect
+        // The bottom padding is measured from the composer's top, so it already follows the
+        // keyboard frame by frame; the scroll offset does not. Moving the content by exactly
+        // the viewport's own change each frame is what keeps the last card glued 16dp above
+        // the composer for the whole transition. Pinning instead (instant or delayed) leaves
+        // the card frozen while the composer moves and then snaps it — the dip the user sees.
         programmatic = true
         try {
-            listState.scrollToItem(itemCount - 1)
-            listState.scrollBy(FOLLOW_SCROLL_PX)
+            listState.scrollBy(-(viewportHeight - previous).toFloat())
         } finally {
             programmatic = false
         }
@@ -1113,7 +1120,7 @@ private fun UnifiedSelector(
             )
             .padding(vertical = 8.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(
             text = model,
@@ -1712,7 +1719,7 @@ private fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> Un
 private fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(28.dp)
+            .size(26.dp)
             .clip(CircleShape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -3640,7 +3647,7 @@ private fun Composer(
                             .padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
                             .height(48.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                     Box {
                         IconButton(
@@ -3753,7 +3760,7 @@ private fun Composer(
                         IconButton(
                             onClick = onMic,
                             enabled = !running,
-                            modifier = Modifier.size(36.dp),
+                            modifier = Modifier.size(30.dp),
                         ) {
                             Icon(
                                 ImageVector.vectorResource(R.drawable.ic_mic),
@@ -4599,7 +4606,7 @@ private fun ContextRing(
     var open by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier
-            .size(32.dp)
+            .size(26.dp)
             .clip(CircleShape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -5084,6 +5091,8 @@ private const val FOLLOW_SCROLL_PX = 200_000f
  * the position at all.
  */
 private const val HOLD_TO_SELECT_MS = 450L
+
+private fun delta0(a: Int, b: Int) = a == b
 
 /**
  * The size of a viewport change that is a jump rather than a frame of an animation.
