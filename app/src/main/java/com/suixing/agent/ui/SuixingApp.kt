@@ -194,7 +194,7 @@ fun SuixingApp() {
         // the strip behind the keyboard was left unpainted and the window's own white showed
         // through the keyboard's rounded corners as a pale seam. This box is not inset, so
         // everything the keyboard covers is already the app's own background.
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
             Scaffold(
                 modifier = Modifier.imePadding(),
                 containerColor = MaterialTheme.colorScheme.background,
