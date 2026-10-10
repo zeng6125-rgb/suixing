@@ -3753,13 +3753,13 @@ private fun Composer(
                         IconButton(
                             onClick = onMic,
                             enabled = !running,
-                            modifier = Modifier.size(40.dp),
+                            modifier = Modifier.size(36.dp),
                         ) {
                             Icon(
                                 ImageVector.vectorResource(R.drawable.ic_mic),
                                 contentDescription = "语音输入",
                                 tint = scheme.onSurfaceVariant,
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(18.dp),
                             )
                         }
                     }
@@ -4608,8 +4608,8 @@ private fun ContextRing(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(Modifier.size(22.dp)) {
-            val stroke = 2.5.dp.toPx()
+        Canvas(Modifier.size(18.dp)) {
+            val stroke = 2.dp.toPx()
             val ringSize = Size(size.width - stroke, size.height - stroke)
             val topLeft = Offset(stroke / 2f, stroke / 2f)
             drawArc(
