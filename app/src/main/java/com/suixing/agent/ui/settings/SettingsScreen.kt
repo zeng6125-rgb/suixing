@@ -78,6 +78,7 @@ import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
+import com.suixing.agent.data.label
 import com.suixing.agent.data.COMPRESS_MAX_PERCENT
 import com.suixing.agent.data.COMPRESS_MIN_PERCENT
 import com.suixing.agent.data.COMPRESS_STEP_PERCENT
@@ -91,6 +92,7 @@ import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.REASONING_LEVELS
+import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
@@ -1328,7 +1330,7 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
             item {
                 LabeledBlock(label = "工具审批", hint = "模型每次动手前要不要问你。") {
                     SegmentedPill(
-                        options = ApprovalMode.entries.map { modeLabel(it) },
+                        options = ApprovalMode.entries.map { it.label },
                         selectedIndex = ApprovalMode.entries.indexOf(stored.approvalMode),
                         onSelect = { index ->
                             scope.persist { it.copy(approvalMode = ApprovalMode.entries[index]) }
@@ -1517,8 +1519,8 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
             }
             item {
                 SettingRow(
-                    title = "思考过程默认展开",
-                    subtitle = "关掉时思考过程默认收起，只显示用时和 token 数。",
+                    title = "历史思考块展开",
+                    subtitle = "正在思考的那一块总是展开。开＝历史思考块也展开；关＝历史块收起成一行标题，点它仍可逐块展开。",
                     control = {
                         Switch(
                             checked = stored.expandReasoning,
@@ -1693,6 +1695,36 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                         }
                         OutlinedButton(onClick = { Core.speaker.stop() }) { Text("停止朗读") }
                     }
+                }
+            }
+            item {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "语音输入",
+                    subtitle = "开＝输入框右侧显示麦克风，用随行自己的录音发给你配置的转写接口（不会再弹系统识别面板）；" +
+                        "关＝完全不显示麦克风。",
+                    control = {
+                        Switch(
+                            checked = stored.voiceInput,
+                            onCheckedChange = { on -> scope.persist { it.copy(voiceInput = on) } },
+                        )
+                    },
+                )
+            }
+            if (stored.voiceInput) {
+                item {
+                    OutlinedTextField(
+                        value = stored.asrModel,
+                        onValueChange = { value -> scope.persist { it.copy(asrModel = value) } },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("语音转写模型") },
+                        placeholder = { Text("whisper-1") },
+                        singleLine = true,
+                        shape = MaterialTheme.shapes.small,
+                        supportingText = {
+                            Text("留空时点麦克风只会提示来这里填。转写用上面那对服务商（baseUrl 与 Key），接口：/audio/transcriptions。")
+                        },
+                    )
                 }
             }
         }
@@ -2216,30 +2248,14 @@ private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
 /** A row that leaves this page: the chevron is what says so before it is tapped. */
 @Composable
 private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.small)
-            .clickable(onClick = onClick)
-            // 12dp：分组卡里的行距，卡片自己的内边距在 SettingsGroup 上。
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(text = title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Icon(
-            imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_right),
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(18.dp),
-        )
-    }
+    // 行本身只有一份实现（Common.SettingRow），这里只接上「离开这一页」这件事：
+    // 点击 + 右侧 chevron。几何、字号、行高都在 SettingRow 里，改那里就是改全站。
+    SettingRow(
+        title = title,
+        subtitle = subtitle,
+        onClick = onClick,
+        control = { RowChevron() },
+    )
 }
 
 @Composable
@@ -2267,10 +2283,4 @@ private fun LabeledSlider(
             steps = steps,
         )
     }
-}
-
-private fun modeLabel(mode: ApprovalMode): String = when (mode) {
-    ApprovalMode.AUTO -> "自动允许"
-    ApprovalMode.ASK -> "每次询问"
-    ApprovalMode.DENY -> "禁止"
 }

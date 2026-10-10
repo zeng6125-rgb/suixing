@@ -40,7 +40,12 @@ class TodoStore(private val file: File) {
         if (!file.exists()) {
             emptyList()
         } else {
-            runCatching { json.decodeFromString<List<TodoItem>>(file.readText()) }.getOrDefault(emptyList())
+            runCatching { json.decodeFromString<List<TodoItem>>(file.readText()) }.getOrElse {
+                // A corrupt board must not read back as "no tasks at all": keep the bad file next
+                // to the original name, or the next write would bury it for good.
+                file.renameTo(File(file.parentFile, "todos.corrupt.json"))
+                emptyList()
+            }
         }
     }
 
@@ -63,8 +68,11 @@ class TodoStore(private val file: File) {
         val temp = File(file.parentFile, "${file.name}.tmp")
         temp.writeText(text)
         if (!temp.renameTo(file)) {
-            file.writeText(text)
-            temp.delete()
+            try {
+                file.writeText(text)
+            } finally {
+                temp.delete()
+            }
         }
         stored
     }

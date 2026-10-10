@@ -5,7 +5,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.lang.reflect.Method
 import java.util.concurrent.TimeUnit
 

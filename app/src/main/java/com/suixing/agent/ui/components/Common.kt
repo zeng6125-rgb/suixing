@@ -192,21 +192,52 @@ fun StatusPill(
     }
 }
 
-/** Label on the left, control on the right; the settings screens are made of these. */
+/**
+ * 全站唯一的「列表行」：左边标题（可带前置图标、可带副标题），右边控件。
+ * 设置页、关于页、文件页的行都从这里出——曾经每页各写一遍，行高、内边距、
+ * 副标题字号各不相同。
+ *
+ * 标准（改这里就是改全站）：
+ *  - 纵向 **12dp**：两行行盒 43dp + 24dp = 67dp；单行 25dp + 24dp = 49dp，仍在 48dp 触控下限之上。
+ *  - 标题 `bodyLarge`、副标题 `bodySmall`、控件前 12dp。
+ *  - **不加横向 padding**：横向留白归容器——卡内的行由 SuixingCard 的 16dp 给，
+ *    页面级的行由调用方用 [modifier] 传 16dp。在这里加会让卡里的行变成 32dp 缩进。
+ */
 @Composable
 fun SettingRow(
     title: String,
     subtitle: String? = null,
+    leading: (@Composable () -> Unit)? = null,
     control: (@Composable () -> Unit)? = null,
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    titleMaxLines: Int = Int.MAX_VALUE,
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 10.dp),
+            .then(
+                if (onClick == null) {
+                    Modifier
+                } else {
+                    // 行自带圆角点击区：水波纹跟着圆角走，而不是溢成一个方角。
+                    Modifier.clip(MaterialTheme.shapes.small).clickable(onClick = onClick)
+                },
+            )
+            .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(12.dp))
+        }
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = titleMaxLines,
+                overflow = TextOverflow.Ellipsis,
+            )
             if (subtitle != null) {
                 Text(
                     text = subtitle,
@@ -220,6 +251,17 @@ fun SettingRow(
             control()
         }
     }
+}
+
+/** 行的「后面还有一页」标记：一个 18dp 的 chevron、一种颜色，全站只有这一份。 */
+@Composable
+fun RowChevron() {
+    Icon(
+        painter = painterResource(R.drawable.ic_chevron_right),
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.size(18.dp),
+    )
 }
 
 /** Segmented pill control: one rounded track, the active segment filled. */
@@ -349,15 +391,15 @@ fun SuixingTopBar(
                                 modifier = Modifier
                                     .weight(1f, fill = false)
                                     .then(
-                                        if (interactive) {
+                                        // 可点与否只看这一处：原来靠上面的 `interactive` 保证
+                                        // 这里的 `!!` 安全，两处一旦不同步就是点击即崩。
+                                        onSubtitleClick?.let { tap ->
                                             Modifier
                                                 .heightIn(min = 48.dp)
                                                 .clip(RoundedCornerShape(12.dp))
-                                                .clickable(onClick = onSubtitleClick!!)
+                                                .clickable(onClick = tap)
                                                 .padding(horizontal = 6.dp)
-                                        } else {
-                                            Modifier
-                                        },
+                                        } ?: Modifier,
                                     ),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {

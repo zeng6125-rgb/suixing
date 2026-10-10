@@ -434,6 +434,8 @@ class UiTools(
         val label = args.str("label")?.trim().orEmpty()
         val text = args.str("text").orEmpty()
         if (label.isEmpty()) return ToolResult.failure("缺少参数 label")
+        // Same check as type(): an empty text would otherwise "succeed" while writing nothing.
+        if (text.isEmpty()) return ToolResult.failure("缺少参数 text")
 
         if (service == null) {
             return ToolResult.failure(

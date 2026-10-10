@@ -14,7 +14,6 @@ import androidx.core.app.NotificationCompat
 import com.suixing.agent.MainActivity
 import com.suixing.agent.R
 import com.suixing.agent.agent.AgentEvent
-import com.suixing.agent.agent.RunState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.Schedule

@@ -69,15 +69,19 @@ fun UsageScreen(onBack: () -> Unit) {
         // no run id, and each of those is its own group — matching the chat bubble's merge
         // guard (ChatScreen.kt:1148, `run.isNotEmpty()`). Folding them into one BASE_RUN
         // group instead would add every old reply in a chat up as though it were one run.
-        longestTurn = chats.maxOfOrNull { chat ->
-            chat.messages
-                .filter { it.role == Roles.ASSISTANT }
-                .groupBy { message -> Transcript.runOf(message).ifEmpty { message.id } }
-                .values
-                .maxOfOrNull { rounds ->
-                    rounds.last().promptTokens.toLong() + rounds.sumOf { it.completionTokens.toLong() }
-                } ?: 0L
-        } ?: 0L
+        // Every chat's every message is walked here — the heaviest step on this page, so it
+        // stays off the main thread like the store refresh above.
+        longestTurn = withContext(Dispatchers.IO) {
+            chats.maxOfOrNull { chat ->
+                chat.messages
+                    .filter { it.role == Roles.ASSISTANT }
+                    .groupBy { message -> Transcript.runOf(message).ifEmpty { message.id } }
+                    .values
+                    .maxOfOrNull { rounds ->
+                        rounds.last().promptTokens.toLong() + rounds.sumOf { it.completionTokens.toLong() }
+                    } ?: 0L
+            } ?: 0L
+        }
     }
     val scheme = MaterialTheme.colorScheme
     Scaffold(
@@ -91,7 +95,7 @@ fun UsageScreen(onBack: () -> Unit) {
                 .padding(padding)
                 .navigationBarsPadding(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -101,13 +105,13 @@ fun UsageScreen(onBack: () -> Unit) {
                 }
             }
             item {
-                SectionTitle("近 ${days.size} 天")
+                SectionTitle("近 30 天")
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.large,
                     color = scheme.surfaceContainer,
                 ) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (days.isEmpty()) {
                             Text(
                                 text = "还没有用量记录",
@@ -156,7 +160,7 @@ fun UsageScreen(onBack: () -> Unit) {
                     shape = MaterialTheme.shapes.large,
                     color = scheme.surfaceContainer,
                 ) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (models.isEmpty()) {
                             Text(
                                 text = "还没有用量记录",
@@ -201,7 +205,7 @@ private fun StatCard(title: String, value: String, modifier: Modifier = Modifier
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
-        Column(Modifier.padding(14.dp)) {
+        Column(Modifier.padding(16.dp)) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.labelSmall,

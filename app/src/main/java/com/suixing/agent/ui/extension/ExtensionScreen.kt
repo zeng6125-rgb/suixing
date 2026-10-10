@@ -2,9 +2,7 @@ package com.suixing.agent.ui.extension
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -56,7 +54,6 @@ fun ExtensionScreen(onBack: () -> Unit) {
                     }
                 },
             )
-            Spacer(Modifier.height(8.dp))
             MemorySection(
                 refresh = memoryRefresh,
                 newRequest = memoryNew,

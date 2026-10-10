@@ -13,7 +13,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
-import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Base64
@@ -181,20 +180,27 @@ import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.voice.Dictation
+import com.suixing.agent.voice.DictationRecorder
 import com.suixing.agent.data.Assistant
+import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.TODO_COMPLETED
+import com.suixing.agent.data.TODO_IN_PROGRESS
+import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.forAssistant
 import com.suixing.agent.data.groupModels
+import com.suixing.agent.data.label
 import com.suixing.agent.data.modelOffers
 import com.suixing.agent.data.choiceFor
+import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.DrawerButton
-import com.suixing.agent.ui.components.FeatherIcon
 import com.suixing.agent.ui.components.FlatIconButton
 import com.suixing.agent.ui.components.FlatPainterButton
 import com.suixing.agent.ui.components.LocalHeldImePx
@@ -218,6 +224,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 
 private val SUGGESTIONS = listOf(
     "看看现在屏幕上是什么",
@@ -379,9 +386,18 @@ fun ChatScreen(
     // The cache count is the newest round's too: context is cumulative, so an older round's
     // cache figure says nothing about the window as it stands now.
     val newestUsage = visible.lastOrNull { it.usage != null }?.usage
-    val contextUsed = state.stats?.lastPromptTokens?.takeIf { it > 0 }
-        ?: newestUsage?.prompt
-        ?: 0
+    // The number itself is picked by [ringReading], in the order that keeps it honest: the
+    // endpoint's own count for the round that just reported, else the newest stored round's,
+    // else — only when neither exists — the live run's estimate off the wire's characters.
+    // That last one is what takes 「暂无数据」 off the card: many gateways ignore
+    // `stream_options.include_usage` (see LlmClient's own note), and for those the ring had no
+    // number for the whole conversation. A proportion labelled 「约」 beats a blank.
+    val reading = ringReading(
+        liveReported = state.stats?.lastPromptTokens ?: 0,
+        newestStored = newestUsage?.prompt ?: 0,
+        liveEstimate = state.stats?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
+    )
+    val contextUsed = reading.tokens
     // The cache figure the ring's card shows is the whole conversation's, summed once in the
     // view model ([SessionStats.cachePercent]); the newest round's own ratio is no longer read
     // here, so nothing is derived from it.
@@ -391,11 +407,18 @@ fun ChatScreen(
     val session = viewModel.sessionStats.collectAsState(initial = null).value
     val sessionTokens = session?.tokens ?: 0
     val sessionTurns = session?.turns ?: 0
+    // What the three sums below are keyed on: how many rows there are, and which row is last.
+    //
+    // Not the list itself. `remember` compares its keys by equality, and a list of thousands of
+    // messages compares element by element — on every recomposition, which is once per publish
+    // (twelve a second) while an answer streams. These three walks only move when a row lands or
+    // the last one is replaced, and that pair says exactly that in constant time.
+    val rowsKey = state.messages.size to state.messages.lastOrNull()?.id
     // What each run actually took, summed over its own messages. A message's own `elapsedMs`
     // is one round's call — the model thinking, then calling a tool, then thinking again are
     // several messages in one run — while the status line the user watched counted the whole
     // run. Showing the round's number under the card is what made the two disagree.
-    val runElapsed = remember(state.messages) {
+    val runElapsed = remember(rowsKey) {
         state.messages.asSequence()
             .filter { !it.runId.isNullOrEmpty() && it.elapsedMs > 0 }
             .groupBy { it.runId }
@@ -404,13 +427,13 @@ fun ChatScreen(
     // The conversation's own clock, summed off the very rows [SessionStats] divides its speed
     // by — so 「会话总用时」 and 「会话输出速度」 are two readings of one measurement rather
     // than two tallies that can drift apart. The tally carries the speed but not the total.
-    val sessionElapsedMs = remember(state.messages) { state.messages.sumOf { it.elapsedMs } }
+    val sessionElapsedMs = remember(rowsKey) { state.messages.sumOf { it.elapsedMs } }
     // The conversation's spend, split the way the endpoint reports it, for the ring's card: the
     // prompt the cache could not answer, the cache reads, and the output. The card used to give
     // the total and the hit rate only; the user asked for the three parts by name —
     // 「未缓存输入」「缓存读取」「输出」 — and in full, because these are the figures a bill is
     // checked against and a rounded one cannot be checked against anything.
-    val sessionSplit = remember(state.messages) { sessionSplitOf(state.messages) }
+    val sessionSplit = remember(rowsKey) { sessionSplitOf(state.messages) }
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.
@@ -761,7 +784,7 @@ fun ChatScreen(
                             ),
                         contentAlignment = Alignment.Center,
                     ) {
-                        EmptyHero(onPick = { setDraft(text = it) })
+                        EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
                     }
                 } else {
                     // In px, converted once: a raw pixel threshold would be a couple of
@@ -888,9 +911,10 @@ fun ChatScreen(
                                     row = row,
                                     assistantName = assistant?.label ?: "随行",
                                     assistantFace = assistant?.face ?: "",
+                                    assistantAvatarPath = assistant?.avatarPath ?: "",
                                     showReasoning = settings.showReasoning,
-                                    expandReasoning = settings.expandReasoning,
                                     expandTools = settings.expandTools,
+                                    expandReasoning = settings.expandReasoning,
                                     reasoningMaxHeight = settings.reasoningHeight.dp,
                                     followReasoning = settings.followReasoning,
                                     bubbleMaxWidth = bubbleMaxWidth,
@@ -971,11 +995,12 @@ fun ChatScreen(
                                         // persona.
                                         name = assistant?.label ?: "随行",
                                         face = assistant?.face ?: "",
+                                        avatarPath = assistant?.avatarPath ?: "",
                                         runningTool = state.runningTool,
                                         liveStats = state.stats,
                                         contextWindow = contextWindow,
-                                        expandReasoning = settings.expandReasoning,
                                         expandTools = settings.expandTools,
+                                        expandReasoning = settings.expandReasoning,
                                         reasoningMaxHeight = settings.reasoningHeight.dp,
                                         followReasoning = settings.followReasoning,
                                         bubbleMaxWidth = bubbleMaxWidth,
@@ -1115,6 +1140,7 @@ fun ChatScreen(
                     assistantId = state.assistantId,
                     contextWindow = contextWindow,
                     contextUsed = contextUsed,
+                    contextEstimated = reading.estimated,
                     sessionTokens = sessionTokens,
                     sessionSplit = sessionSplit,
                     sessionTurns = sessionTurns,
@@ -1131,6 +1157,7 @@ fun ChatScreen(
                     onPickModel = { provider, model -> viewModel.chooseModel(provider.id, model) },
                     onPrefetchWindows = { viewModel.prefetchWindows() },
                     pendingSteers = state.pendingSteers,
+                    todos = state.todos,
                     onPromoteSteer = { viewModel.promoteSteer(it) },
                     onRetractSteer = { viewModel.retractSteer(it) },
                     attachment = attachment,
@@ -1182,6 +1209,13 @@ fun ChatScreen(
                             micPermission.launch(Manifest.permission.RECORD_AUDIO)
                         }
                     },
+                    voiceInput = settings.voiceInput,
+                    approvalMode = settings.approvalMode,
+                    // Written through the same repository the settings page writes, so the two
+                    // entries cannot drift: the page re-reads the flow this update feeds.
+                    onPickApproval = { mode ->
+                        scope.launch { Core.settings.update { it.copy(approvalMode = mode) } }
+                    },
                     onOpenSettings = onOpenSettings,
                     jumpToLatest = { jumpToLatest() },
                     showJump = !atEnd,
@@ -1210,9 +1244,12 @@ fun ChatScreen(
         }
         if (voiceOpen) {
             VoiceOverlay(
+                // 转写要用这份设置里的服务商与模型。
+                settings = settings,
                 // Just above the composer, never over it: the capsule's whole point is that the
                 // user can still read what they are dictating into.
                 bottomInset = composerH + 8.dp,
+                onOpenSettings = onOpenSettings,
                 onResult = { text -> setDraft(text = if (input.isBlank()) text else "$input $text") },
                 onDismiss = { voiceOpen = false },
             )
@@ -1438,14 +1475,20 @@ private fun LoadingSkeleton() {
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun EmptyHero(onPick: (String) -> Unit) {
+private fun EmptyHero(onPick: (String) -> Unit, assistant: Assistant? = null) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // The app's own mark on its gradient disc: the launcher asset is pure white for
-        // the home screen, and white on a light canvas would vanish.
-        SuixingMark(size = 92.dp)
+        // the home screen, and white on a light canvas would vanish. A persona with an uploaded
+        // picture shows that picture instead — this hero is where the user is about to talk to
+        // *it*, and an empty chat was the one assistant surface still showing the app's feather.
+        if (assistant?.avatarPath.isNullOrBlank()) {
+            SuixingMark(size = 92.dp)
+        } else {
+            AssistantAvatar(assistant = assistant, size = 92.dp)
+        }
         Spacer(Modifier.height(6.dp))
         Text("我们开始吧", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(6.dp))
@@ -1896,9 +1939,12 @@ private fun MessageRow(
     row: ChatRow,
     assistantName: String,
     assistantFace: String = "",
+    /** The persona's uploaded picture, if it has one; see [AssistantAvatar]. */
+    assistantAvatarPath: String = "",
     showReasoning: Boolean,
-    expandReasoning: Boolean,
     expandTools: Boolean,
+    /** 外观 → 历史思考块默认展开; see [ReasoningBlock.expandReasoning]. */
+    expandReasoning: Boolean = true,
     reasoningMaxHeight: Dp,
     /** 外观 → 思考块跟随最新; [ReasoningBlock.followReasoning]. */
     followReasoning: Boolean = true,
@@ -1930,14 +1976,15 @@ private fun MessageRow(
             streaming = false,
             name = assistantName,
             face = assistantFace,
+            avatarPath = assistantAvatarPath,
             branch = row.branch,
             usage = row.usage,
             contextWindow = contextWindow,
             runElapsedMs = runElapsedMs,
             engineLabel = engineLabel,
             message = row.message,
-            expandReasoning = expandReasoning,
             expandTools = expandTools,
+            expandReasoning = expandReasoning,
             reasoningMaxHeight = reasoningMaxHeight,
             followReasoning = followReasoning,
             bubbleMaxWidth = bubbleMaxWidth,
@@ -1955,6 +2002,7 @@ private fun MessageRow(
             parts = row.parts,
             streaming = false,
             face = assistantFace,
+            avatarPath = assistantAvatarPath,
             bubbleMaxWidth = bubbleMaxWidth,
             reasoningExpansion = reasoningExpansion,
         )
@@ -2277,8 +2325,9 @@ private fun AssistantRow(
     /** 「提供方 / 模型」 for the usage card; blank leaves that line out. */
     engineLabel: String = "",
     message: StoredMessage? = null,
-    expandReasoning: Boolean = false,
     expandTools: Boolean = false,
+    /** 外观 → 历史思考块默认展开; see [ReasoningBlock.expandReasoning]. */
+    expandReasoning: Boolean = true,
     reasoningMaxHeight: Dp = 180.dp,
     /** 外观 → 思考块跟随最新; [ReasoningBlock.followReasoning]. */
     followReasoning: Boolean = true,
@@ -2343,6 +2392,8 @@ private fun AssistantRow(
                     note = liveStats?.note.orEmpty(),
                     reasoningMaxHeight = reasoningMaxHeight,
                     followReasoning = followReasoning,
+                    // The card's thinks are settled ones: this is what decides whether they open.
+                    expandReasoning = expandReasoning,
                     // The stored blocks answer to their message, so the table keeps their
                     // state apart from the live run's and from every other message's.
                     messageId = message?.id.orEmpty(),
@@ -2382,13 +2433,12 @@ private fun AssistantRow(
                                 expansion = reasoningExpansion,
                                 reasoningTokens = part.tokens,
                                 elapsedMs = part.elapsedMs,
-                                // Thinking is the reason to run a thinking model at all, so a
-                                // live block starts open. A stored one does not, whatever the
-                                // 思考过程默认展开 setting says: that setting is about watching
-                                // thoughts arrive, and honouring it here is what kept re-opening
-                                // blocks the user had already watched fold. Anything the user
-                                // opened by hand is in the expansion table and still wins.
-                                startExpanded = streaming && expandReasoning,
+                                // Whether a block nobody has touched is open is the appearance
+                                // setting's business, and the block owns that rule: live ones are
+                                // always open, settled ones follow 历史思考块默认展开. A tap on
+                                // the header is the only thing that closes one, and the expansion
+                                // table remembers it across the hand-over to the stored message.
+                                expandReasoning = expandReasoning,
                                 maxHeight = reasoningMaxHeight,
                                 followReasoning = followReasoning,
                             )
@@ -2802,7 +2852,14 @@ private fun ReasoningBlock(
     expansion: ReasoningExpansion,
     reasoningTokens: Int = 0,
     elapsedMs: Long = 0,
-    startExpanded: Boolean = false,
+    /**
+     * 外观 → 历史思考块默认展开 ([AppSettings.expandReasoning]): what a block does when the
+     * user has never touched its header. A block that is still arriving is always open — it is
+     * the reason to run a thinking model, and watching it arrive is the point. One that has
+     * settled opens only if this is on: with it off, the transcript stays a transcript, and the
+     * header tap is the way into any think the reader wants in full.
+     */
+    expandReasoning: Boolean = true,
     /**
      * Inside an expanded summary card the block is a row of the card's grid, not a
      * card of its own: no surface, no second header height — just the icon slot, the
@@ -2820,17 +2877,18 @@ private fun ReasoningBlock(
      */
     followReasoning: Boolean = true,
 ) {
-    // The table decides, and it outlives this composable: a think opens while it streams,
-    // folds when it settles, and a header the user tapped is theirs from then on — the
-    // automatic fold never overwrites a manual choice, and a manual fold is never undone.
-    val expanded = expansion.stored(blockId) ?: (streaming || startExpanded)
-    var wasStreaming by remember { mutableStateOf(streaming) }
-    LaunchedEffect(streaming) {
-        if (wasStreaming && !streaming && expansion.stored(blockId) == null) {
-            expansion.set(blockId, false)
-        }
-        wasStreaming = streaming
-    }
+    // Open unless the user closed it. Both halves of the report are answered here: a block used
+    // to fold itself the moment its answer landed, and — past 200 lines — to draw only its first
+    // 200 with a 「展开全部 N 行」 button, so the chain being read was replaced by a control the
+    // moment it grew. The chain is now drawn whole (its height cap below is the bound, not its
+    // length), and the only thing that closes a block is a tap on its own header — recorded in
+    // the expansion table, which outlives the hand-over from the live row to the stored message.
+    //
+    // What a block nobody has touched does is the one thing the appearance setting still decides:
+    // a think that is still arriving is open (watching it arrive is why the model was asked to
+    // think), and one that has settled follows 历史思考块默认展开. Off, a finished think folds to
+    // its header — the reader's tap is the way in, and the table remembers it per conversation.
+    val expanded = expansion.stored(blockId) ?: (streaming || expandReasoning)
     val lines = remember(text) { text.split('\n') }
     val meta = buildList {
         if (reasoningTokens > 0) add("$reasoningTokens tokens")
@@ -2851,9 +2909,6 @@ private fun ReasoningBlock(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            val cap = 200
-            var uncapped by remember { mutableStateOf(false) }
-            val shown = if (uncapped || lines.size <= cap) lines else lines.subList(0, cap)
             val inner = rememberLazyListState()
             // Whether this chain is chasing its own tail, and whether the hand has taken it
             // over. The same pair, and the same rules, as the transcript's own follow — see
@@ -2879,17 +2934,17 @@ private fun ReasoningBlock(
                     }
             }
             // Every growth of the chain is a trigger — that is what "跟随最新" is for.
-            LaunchedEffect(shown.size, expanded, follow, followReasoning) {
+            LaunchedEffect(lines.size, expanded, follow, followReasoning) {
                 if (!expanded || !streaming || !followReasoning || !follow) return@LaunchedEffect
                 if (inner.isScrollInProgress && !autoScrolled) return@LaunchedEffect
-                if (shown.isEmpty()) return@LaunchedEffect
+                if (lines.isEmpty()) return@LaunchedEffect
                 autoScrolled = true
                 lastAutoAt = SystemClock.uptimeMillis()
                 // Instant, not animated. The chain grows every frame or two while the think
                 // streams, and an [animateScrollToItem] that is still in flight when the next
                 // line lands is simply dropped — the view froze mid-chain, which is exactly
                 // what the user saw. A jump they cannot watch beats a follow that never arrives.
-                inner.scrollToItem(shown.lastIndex)
+                inner.scrollToItem(lines.lastIndex)
             }
             LazyColumn(
                 state = inner,
@@ -2900,8 +2955,8 @@ private fun ReasoningBlock(
                     .heightIn(max = maxHeight),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                items(shown.size) { index ->
-                    val line = shown[index]
+                items(lines.size) { index ->
+                    val line = lines[index]
                     if (line.isBlank()) {
                         Spacer(Modifier.height(4.dp))
                     } else {
@@ -2913,26 +2968,7 @@ private fun ReasoningBlock(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (index == shown.lastIndex && streaming) BlinkingCursor()
-                }
-                if (!uncapped && lines.size > cap) {
-                    item {
-                        // The compact text button, not the dialog-size one: M3's default
-                        // TextButton carries a 40dp container and 24dp of horizontal padding
-                        // per side, which inside the chain read as a slab the width of the
-                        // block. 10dp + 32dp puts it on the same shelf as [ProcessStatus] — a
-                        // control the user taps, not a section of its own.
-                        TextButton(
-                            onClick = { uncapped = true },
-                            contentPadding = PaddingValues(horizontal = 10.dp),
-                            modifier = Modifier.heightIn(min = 32.dp),
-                        ) {
-                            Text(
-                                text = "展开全部 ${lines.size} 行",
-                                style = MaterialTheme.typography.labelMedium,
-                            )
-                        }
-                    }
+                    if (index == lines.lastIndex && streaming) BlinkingCursor()
                 }
             }
         }
@@ -3330,6 +3366,8 @@ private fun TurnSummary(
     reasoningMaxHeight: Dp = 180.dp,
     /** 外观 → 思考块跟随最新; [ReasoningBlock.followReasoning]. */
     followReasoning: Boolean = true,
+    /** 外观 → 历史思考块默认展开; passed on to each think in this card. */
+    expandReasoning: Boolean = true,
     /**
      * The run's own note — the compression line, when there was one. It belongs in this
      * header rather than only in the status line: the status line is gone the moment the run
@@ -3424,12 +3462,10 @@ private fun TurnSummary(
                             expansion = reasoningExpansion,
                             reasoningTokens = part.tokens,
                             elapsedMs = part.elapsedMs,
-                            // A stored think starts folded, whatever 思考过程默认展开 says:
-                            // that setting is about watching a think arrive, and the user's
-                            // rule is that a finished one folds unless they opened it
-                            // themselves — which the expansion table records, and it always
-                            // wins over this default.
-                            startExpanded = false,
+                            // A think from an earlier launch is a settled one, so it opens only if
+                            // 历史思考块默认展开 is on; a tap on its header decides it per
+                            // conversation either way (the expansion table is keyed by chat).
+                            expandReasoning = expandReasoning,
                             nested = true,
                             maxHeight = reasoningMaxHeight,
                             followReasoning = followReasoning,
@@ -4177,6 +4213,8 @@ private fun Composer(
     contextWindow: Int,
     /** Tokens the newest round filled of that window, and how many of them were cached. */
     contextUsed: Int,
+    /** True when [contextUsed] is this app's own estimate rather than the endpoint's count. */
+    contextEstimated: Boolean = false,
     /** Everything this conversation has ever spent, for the ring's detail card. */
     sessionTokens: Int,
     /** That spend in the endpoint's own three parts, for the same card. */
@@ -4210,12 +4248,22 @@ private fun Composer(
     onRequestCompress: () -> Boolean,
     /** Lines queued for the run that is going, oldest first. */
     pendingSteers: List<PendingSteer>,
+    /**
+     * The agent's own task board, as its last `todo_write` left it. Drawn above the queue, and
+     * only while this run is going: the board is the run's plan, not a second transcript.
+     */
+    todos: List<TodoItem> = emptyList(),
     /** Sends a queued line now, cutting the round in flight. */
     onPromoteSteer: (String) -> Unit,
     /** Drops a queued line before the model reads it; 「修改」 uses it too. */
     onRetractSteer: (String) -> Unit,
     onFocused: () -> Unit,
     onMic: () -> Unit,
+    /** 设置里的「语音输入」：关着的时候这一排里连麦克风都不画。 */
+    voiceInput: Boolean,
+    /** 工具审批 mode in force, and the picker that changes it; see [ApprovalMode]. */
+    approvalMode: ApprovalMode,
+    onPickApproval: (ApprovalMode) -> Unit,
     /** The empty provider list's way out: straight into the model settings page. */
     onOpenSettings: () -> Unit,
     /** Scrolls the transcript to its newest line; the stack's own corner button. */
@@ -4239,6 +4287,10 @@ private fun Composer(
     val popupEdgePx = with(density) { POPUP_EDGE.toPx() }
     var menuOpen by remember { mutableStateOf(false) }
     var sheetOpen by remember { mutableStateOf(false) }
+    // The approval mode's own card, anchored to its button like the other two.
+    var approvalOpen by remember { mutableStateOf(false) }
+    var approvalAnchorLeft by remember { mutableStateOf(0f) }
+    var approvalWidth by remember { mutableStateOf(0) }
     // The model capsule's right edge in window pixels: the sheet is aligned to it so the card
     // hangs off the button that opened it rather than off the free space around it. Measured
     // here because the capsule is this row's child, and read by [GenerationSheet].
@@ -4248,9 +4300,6 @@ private fun Composer(
     // button" means. Read from the layout, because the row's paddings and the label's own
     // width decide it.
     val ctx = LocalContext.current
-    // No recognizer on the device means the mic entry would be a dead control, and
-    // the user has no patience for those: the row simply drops it.
-    val speechAvailable = remember { SpeechRecognizer.isRecognitionAvailable(ctx) }
     // The two cards this row opens are focus-less (see [MenuCard]'s focusable): a focusable
     // popup window takes the keyboard away from the field, the shell then lays the composer
     // out a keyboard lower, and the card stays anchored to where the composer was — 250dp
@@ -4258,7 +4307,7 @@ private fun Composer(
     // window cannot see a tap outside its own bounds and cannot see BACK, so both are caught
     // here. The scrim is a window of its own, composed before the cards: windows stack in
     // composition order, so a scrim composed after them would cover them instead.
-    if (menuOpen || sheetOpen) {
+    if (menuOpen || sheetOpen || approvalOpen) {
         Popup(properties = PopupProperties(focusable = false)) {
             Box(
                 Modifier
@@ -4269,15 +4318,17 @@ private fun Composer(
                     ) {
                         menuOpen = false
                         sheetOpen = false
+                        approvalOpen = false
                     },
             )
         }
     }
     // Focus-less popups do not receive BACK either: without this the press falls through to
     // the activity and finishes it.
-    BackHandler(enabled = menuOpen || sheetOpen) {
+    BackHandler(enabled = menuOpen || sheetOpen || approvalOpen) {
         menuOpen = false
         sheetOpen = false
+        approvalOpen = false
     }
     // Nothing here paints a background: the transcript scrolls right down to the gesture
     // bar behind the pill, so the composer reads as something floating over the
@@ -4343,6 +4394,47 @@ private fun Composer(
             attachment?.let {
                 AttachmentChip(attachment = it, onRemove = onClearAttachment)
                 Spacer(Modifier.height(8.dp))
+            }
+            // The agent's own board, above the queue: what it is doing right now, then what the
+            // user has queued for it. Same inset and spacing as the queue rows below, because
+            // they answer the same question — "what is going on" — and a board in different
+            // clothes would read as another app's card.
+            //
+            // Drawn only while this conversation's run is going: the plan belongs to the run
+            // that made it, and once the answer has landed the transcript is the record. The
+            // board itself is emptied when a run starts (see ChatViewModel.start), so a run that
+            // never touches the todo tools cannot inherit the last one's list.
+            if (running && todos.isNotEmpty()) {
+                val rows = todoRows(todos)
+                val done = todos.count { it.status == TODO_COMPLETED }
+                val open = todos.size - done
+                val shownOpen = rows.count { it.status != TODO_COMPLETED }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = STEER_QUEUE_INSET),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    rows.forEachIndexed { index, item ->
+                        TodoQueueRow(
+                            item = item,
+                            // The tally rides the first row only: one number for the board,
+                            // repeated on every line it would read as several boards.
+                            tally = if (index == 0) "$done/${todos.size}" else null,
+                        )
+                    }
+                    if (open > shownOpen) {
+                        Text(
+                            text = "还有 ${open - shownOpen} 项",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 4.dp),
+                        )
+                    }
+                }
+                // Tight to what follows, exactly as the queue is: these rows belong to the field
+                // they sit above, not to the transcript behind them.
+                Spacer(Modifier.height(3.dp))
             }
             // Queued lines sit directly above the field they came from: the user's own words
             // on their way to the model, not messages yet — so they are inset from the pill
@@ -4528,38 +4620,119 @@ private fun Composer(
                                 .widthIn(max = popupCap(200.dp, windowWidth))
                                 .onSizeChanged { plusWidth = it.width },
                         ) {
-                            MenuItemRow(ImageVector.vectorResource(R.drawable.ic_image), "图片") {
-                                menuOpen = false
-                                onPickImage()
-                            }
-                            MenuItemRow(ImageVector.vectorResource(R.drawable.ic_camera), "拍照") {
-                                menuOpen = false
-                                onTakePhoto()
-                            }
+                            MenuItemRow(
+                                icon = ImageVector.vectorResource(R.drawable.ic_image),
+                                label = "图片",
+                                onClick = {
+                                    menuOpen = false
+                                    onPickImage()
+                                },
+                            )
+                            MenuItemRow(
+                                icon = ImageVector.vectorResource(R.drawable.ic_camera),
+                                label = "拍照",
+                                onClick = {
+                                    menuOpen = false
+                                    onTakePhoto()
+                                },
+                            )
                             MenuItemRow(
                                 icon = ImageVector.vectorResource(R.drawable.ic_file),
                                 label = "文件",
-                            ) {
-                                menuOpen = false
-                                onPickFile()
-                            }
+                                onClick = {
+                                    menuOpen = false
+                                    onPickFile()
+                                },
+                            )
                             // Always listed: the entry disappearing between runs made users
                             // think the feature was gone. With no run in flight the engine
                             // refuses and the toast says why — a visible refusal beats a
                             // missing menu item.
-                            MenuItemRow(ImageVector.vectorResource(R.drawable.ic_minimize_2), "压缩上下文") {
-                                menuOpen = false
-                                val asked = onRequestCompress()
-                                Toast.makeText(
-                                    ctx,
-                                    if (asked) {
-                                        "已请求压缩，本轮结束后生效"
-                                    } else {
-                                        "压缩在任务进行中才生效：等下一轮开跑再点它"
+                            MenuItemRow(
+                                icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+                                label = "压缩上下文",
+                                onClick = {
+                                    menuOpen = false
+                                    val asked = onRequestCompress()
+                                    Toast.makeText(
+                                        ctx,
+                                        if (asked) {
+                                            "已请求压缩，本轮结束后生效"
+                                        } else {
+                                            "压缩在任务进行中才生效：等下一轮开跑再点它"
+                                        },
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                },
+                            )
+                        }
+                    }
+                    // 工具审批, right of the add button: the same choice the settings page
+                    // offers (自动运行 / 每次询问 / 禁止), one tap from the field it governs —
+                    // asking for approval is a decision about the question being typed, and
+                    // walking to 设置 mid-thought is how the setting stayed on whatever it was.
+                    // The icon is the mode itself, so the row says which one is in force without
+                    // being opened: a tick when it runs on its own, a shield while it asks, an
+                    // alert shield when it refuses.
+                    Box(
+                        Modifier.onGloballyPositioned {
+                            approvalAnchorLeft = it.boundsInWindow().left
+                        },
+                    ) {
+                        IconButton(
+                            onClick = { approvalOpen = true },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
+                                contentDescription = "工具审批：${approvalMode.label}",
+                                tint = when (approvalMode) {
+                                    ApprovalMode.DENY -> scheme.error
+                                    ApprovalMode.AUTO -> scheme.primary
+                                    else -> scheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        MenuCard(
+                            visible = approvalOpen,
+                            onDismiss = { approvalOpen = false },
+                            alignment = Alignment.BottomStart,
+                            offset = with(density) {
+                                IntOffset(
+                                    popupNudge(
+                                        anchorLeft = approvalAnchorLeft,
+                                        width = approvalWidth,
+                                        windowPx = screenWidthPx,
+                                        edgePx = popupEdgePx,
+                                    ).roundToInt(),
+                                    -48.dp.roundToPx(),
+                                )
+                            },
+                            focusable = false,
+                            modifier = Modifier
+                                .widthIn(max = popupCap(220.dp, windowWidth))
+                                .onSizeChanged { approvalWidth = it.width },
+                        ) {
+                            ApprovalMode.entries.forEach { mode ->
+                                MenuItemRow(
+                                    icon = ImageVector.vectorResource(approvalIcon(mode)),
+                                    label = mode.label,
+                                    selected = mode == approvalMode,
+                                    onClick = {
+                                        approvalOpen = false
+                                        onPickApproval(mode)
                                     },
-                                    Toast.LENGTH_SHORT,
-                                ).show()
+                                )
                             }
+                            // The mode is read when a run starts (see ApprovalGate), so saying
+                            // so here is the difference between a setting and a surprise.
+                            Text(
+                                text = "下一次任务生效",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = scheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
+                            )
                         }
                     }
                     // One selector for both decisions: the model and the reasoning
@@ -4641,6 +4814,7 @@ private fun Composer(
                     // next question still fits in the window.
                     ContextRing(
                         used = contextUsed,
+                        estimated = contextEstimated,
                         window = contextWindow,
                         sessionTokens = sessionTokens,
                         sessionSplit = sessionSplit,
@@ -4650,9 +4824,9 @@ private fun Composer(
                         sessionElapsedMs = sessionElapsedMs,
                         live = stats,
                     )
-                    // The mic only earns its slot when a recognizer actually exists on
-                    // the device: a dead control is worse than no control.
-                    if (speechAvailable) {
+                    // 设置里的「语音输入」是唯一的开关，默认关：关着时这里什么都不画，连占位都不留。
+                    // 开着也不需要系统识别器了——我们自己的录音链路走 AudioRecord，不会再弹系统面板。
+                    if (voiceInput) {
                         IconButton(
                             onClick = onMic,
                             enabled = !running,
@@ -4858,7 +5032,13 @@ private fun popupNudgeCentred(anchorCentre: Float, width: Int, windowPx: Float, 
 
 /** One row of a popup menu: icon, label, and the whole row as the target. */
 @Composable
-private fun MenuItemRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+private fun MenuItemRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    /** Ticked on the right when this row is the one in force; the caller says which. */
+    selected: Boolean = false,
+) {
     val scheme = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
@@ -4880,6 +5060,15 @@ private fun MenuItemRow(icon: ImageVector, label: String, onClick: () -> Unit) {
         )
         Spacer(Modifier.width(10.dp))
         Text(text = label, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface)
+        if (selected) {
+            Spacer(Modifier.width(10.dp))
+            Icon(
+                imageVector = ImageVector.vectorResource(R.drawable.ic_check),
+                contentDescription = null,
+                tint = scheme.primary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
     }
 }
 
@@ -5306,8 +5495,8 @@ private sealed interface VoicePhase {
 /**
  * The recognizer's error codes in words a user can act on.
  *
- * Every one of these used to be swallowed — the card simply vanished — so a device whose
- * recognizer will not serve third-party apps looked exactly like a dead microphone.
+ * Kept even though the in-app recognizer is gone: the system-activity fallback still reports
+ * codes through this table when the ROM's own screen answers with one.
  */
 private fun voiceErrorMessage(error: Int): String = when (error) {
     SpeechRecognizer.ERROR_CLIENT -> "识别服务拒绝了这个应用（ERROR_CLIENT）"
@@ -5326,132 +5515,89 @@ private fun voiceErrorMessage(error: Int): String = when (error) {
 }
 
 /**
- * In-app dictation: a slim capsule just above the composer, with the recognizer's own partial
- * results in it.
+ * 随行自己的听写：输入框上方一条细胶囊，屏幕上从头到尾只有它。
  *
- * [SpeechRecognizer] owns the microphone itself; this only draws the capsule and reads what it
- * reports. It used to be a big centred card over a dark scrim, and the verdict on that was
- * 「太丑」: the transcript underneath stays readable now, which is the whole reason for a capsule.
+ * 录音走 [DictationRecorder]（`AudioRecord`，16k/mono/PCM16 → wav），转写走 [Dictation]：把 wav
+ * 发给用户已经配置好的那个服务商。**这条路完全不碰 `SpeechRecognizer`** —— 之前两版都栽在它上面：
+ * 设备端模型没装、`EXTRA_PREFER_OFFLINE` 也拦不住 ROM 自己的识别面板，而那个面板被用户否了两次。
  *
- * **Which engine**: the on-device recognizer first ([SpeechRecognizer.createOnDeviceSpeechRecognizer],
- * API 31+) because it answers without putting any system panel on screen — the panel the user is
- * complaining about is the ROM's own, and it is the classic path that summons it. The classic path
- * still runs when there is no on-device model, with `EXTRA_PREFER_OFFLINE` set so an installed
- * offline engine is used where there is one. [VoiceEngine] says which one this attempt got and the
- * capsule prints it, so a report about this screen can name the path it took.
- *
- * A result closes the capsule. A failure keeps it open with the reason — and, because some devices
- * (MIUI's AsrService answers ERROR_CLIENT) only let their own speech screen bind the recognizer,
- * offers the system's input as the way out.
+ * 手势与按钮：长按胶囊＝说完了（失败态＝重来一次），「说完了」按钮做同一件事，× 取消；端点检测
+ * （静音约 1.2 秒或录满 60 秒）会自己收尾。没配转写模型时**不录音**，直接说清楚并给一个「去设置」，
+ * 绝不静默回落到系统识别；系统识别只在用户主动点「改用系统识别」时才出现。
  */
 @Composable
 private fun VoiceOverlay(
+    /** 这一份设置：转写要用它的服务商与模型，所以由调用方直接传进来。 */
+    settings: AppSettings,
     /** How far up the composer reaches: the capsule sits just above it, never over it. */
     bottomInset: Dp,
+    /** 「去设置」的去处：没填转写模型时用得上。 */
+    onOpenSettings: () -> Unit,
     onResult: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    var partial by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
     var phase by remember { mutableStateOf<VoicePhase>(VoicePhase.Preparing) }
     // The microphone's own level, 0..1: what the capsule's bars are drawn from.
     var level by remember { mutableStateOf(0f) }
-    // Retrying means a new recognizer: the failed one is spent, and reusing it would replay
-    // the same refusal.
-    var attempt by remember { mutableStateOf(0) }
-    // One automatic hand-off per visit, or a device that refuses us would throw the system
-    // speech screen at the user again on every retry.
-    var fellBack by remember { mutableStateOf(false) }
+    var elapsed by remember { mutableStateOf(0L) }
     // Set the moment this card hands the job to the system's own speech screen. That screen is
-    // a screen, not a dialog behind ours, so drawing the card while it is up stacks the two —
-    // which is what the user saw: our failure card over an activity already listening.
+    // a screen, not a dialog behind ours, so drawing the card while it is up stacks the two.
     var handedOff by remember { mutableStateOf(false) }
-    val engine = remember(attempt) { voiceEngine(context) }
-    val recognizer = remember(attempt) {
-        val created = if (engine == VoiceEngine.ON_DEVICE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-        } else {
-            SpeechRecognizer.createSpeechRecognizer(context)
+    // 我们自己的录音：这条路完全不碰 SpeechRecognizer，所以屏幕上不会出现任何系统识别面板。
+    val recorder = remember { DictationRecorder(context) }
+    val asrReady = remember(settings.asrModel, settings.baseUrl, settings.apiKey) {
+        Dictation.configured(settings)
+    }
+
+    fun finish() {
+        if (phase !is VoicePhase.Listening) return
+        val wav = recorder.stop()
+        if (wav == null) {
+            phase = VoicePhase.Failed("没有录到声音", 0)
+            return
         }
-        created.apply {
-            setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    phase = VoicePhase.Listening
-                }
-
-                override fun onBeginningOfSpeech() = Unit
-
-                // The system reports the microphone in dB and the useful part of it is the top of
-                // the range: about -2dB is loud, -12dB is a quiet room. Mapped once here so the
-                // capsule can draw a level instead of a negative number.
-                override fun onRmsChanged(rmsdB: Float) {
-                    level = ((rmsdB + 12f) / 12f).coerceIn(0f, 1f)
-                }
-
-                override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-                override fun onEndOfSpeech() {
-                    level = 0f
-                    phase = VoicePhase.Thinking
-                }
-
-                override fun onError(error: Int) {
-                    // "Nobody spoke" is not a failure to report: the card closes the way it
-                    // always did. Everything else stays on screen with its reason.
-                    if (error == SpeechRecognizer.ERROR_NO_MATCH ||
-                        error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
-                    ) {
-                        onDismiss()
-                    } else {
-                        phase = VoicePhase.Failed(voiceErrorMessage(error), error)
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val best = results
-                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
-                        .orEmpty()
-                        .trim()
-                    if (best.isNotEmpty()) onResult(best)
+        phase = VoicePhase.Thinking
+        scope.launch {
+            val outcome = Dictation.transcribe(settings, wav)
+            wav.delete()
+            outcome
+                .onSuccess { text ->
+                    onResult(text)
                     onDismiss()
                 }
-
-                override fun onPartialResults(partialResults: Bundle?) {
-                    partial = partialResults
-                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
-                        .orEmpty()
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) = Unit
-            })
+                .onFailure { error -> phase = VoicePhase.Failed(error.message ?: "转写失败", 0) }
         }
     }
-    DisposableEffect(recognizer) {
-        recognizer.startListening(
-            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
-                )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
-                // Only the classic path reads this, and it is the cheap half of 「don't put a
-                // panel on my screen」: on a ROM that ships an offline engine the request is
-                // served locally, and the online panel — the one the user called 丑 — never
-                // appears. The on-device recognizer is already local and ignores it.
-                if (engine != VoiceEngine.ON_DEVICE) {
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-                }
-            },
-        )
-        onDispose {
-            recognizer.cancel()
-            recognizer.destroy()
+
+    fun begin() {
+        if (!asrReady) {
+            // 不静默回落到系统识别：那正是用户否掉两次的东西，缺什么就说什么。
+            phase = VoicePhase.Failed("还没填语音转写模型", 0)
+            return
         }
+        if (!recorder.start()) {
+            phase = VoicePhase.Failed("拿不到麦克风", 0)
+            return
+        }
+        // 端点检测在录音线程上判定，收尾必须回到主线程。
+        recorder.onAutoStop = { scope.launch { finish() } }
+        phase = VoicePhase.Listening
+    }
+
+    DisposableEffect(Unit) {
+        begin()
+        onDispose { recorder.cancel() }
+    }
+    // 秒数与竖条：从录音器读，10 次/秒足够，也省掉一条动画。
+    LaunchedEffect(phase) {
+        while (phase is VoicePhase.Listening) {
+            level = recorder.level
+            elapsed = recorder.elapsedMs
+            delay(100)
+        }
+        level = 0f
     }
     // The way out when the in-app recognizer will not have us: the system's own speech
     // screen, which on this device is the one that can reach the installed recognizer.
@@ -5462,6 +5608,10 @@ private fun VoiceOverlay(
             ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             ?.firstOrNull()
             ?.trim()
+        voiceTrace(
+            context,
+            "systemActivity result=${result.resultCode} chars=${text?.length ?: 0}",
+        )
         if (result.resultCode == Activity.RESULT_OK && !text.isNullOrEmpty()) {
             onResult(text)
             // The same pair the in-app recognizer's onResults calls: the words go into the field
@@ -5481,8 +5631,12 @@ private fun VoiceOverlay(
         }
     }
     val useSystemInput: () -> Unit = {
-        // Our own recognizer would keep the microphone while the system screen wants it.
-        recognizer.cancel()
+        // 这是**用户主动**选的兜底，不再自动交接：那个系统面板正是被否掉两次的东西，只在用户
+        // 自己要的时候才拉起来。诊断仍留痕，顺便记下这台机器本来会走哪条识别引擎。
+        voiceTrace(context, "handoff=systemActivity systemEngine=${voiceEngine(context).name}")
+        // 我们自己的录音要先放手，否则系统界面拿不到麦克风。
+        recorder.cancel()
+        phase = VoicePhase.Preparing
         // From here on the system screen owns the job, and this card stops drawing: it is not a
         // dialog behind ours, it is the foreground.
         handedOff = true
@@ -5505,21 +5659,12 @@ private fun VoiceOverlay(
         }
     }
     val failure = phase as? VoicePhase.Failed
-    LaunchedEffect(failure?.code) {
-        // A recognizer that refuses this app is the MIUI case; hand the job to the system's
-        // own input once, without making the user ask for it.
-        if (failure?.code == SpeechRecognizer.ERROR_CLIENT && !fellBack) {
-            fellBack = true
-            useSystemInput()
-        }
-    }
     val listening = phase is VoicePhase.Listening
     val scheme = MaterialTheme.colorScheme
     val title = when {
         failure != null -> failure.message
-        partial.isNotEmpty() -> partial
-        listening -> "请说话…"
-        phase is VoicePhase.Thinking -> "正在识别…"
+        listening -> "正在听… " + formatDictationTime(elapsed)
+        phase is VoicePhase.Thinking -> "正在转写…"
         else -> "正在准备麦克风…"
     }
     // Nothing to draw once the system screen has it. Everything above still runs — the launcher
@@ -5550,13 +5695,8 @@ private fun VoiceOverlay(
                 .pointerInput(phase) {
                     detectTapGestures(
                         onLongPress = {
-                            if (failure != null) {
-                                partial = ""
-                                phase = VoicePhase.Preparing
-                                attempt++
-                            } else {
-                                recognizer.stopListening()
-                            }
+                            // 长按＝「说完了」，正在录音时唯一的快捷手势；失败态长按＝重来一次。
+                            if (listening) finish() else if (failure != null) begin()
                         },
                     )
                 },
@@ -5596,11 +5736,14 @@ private fun VoiceOverlay(
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        // Which recognizer this attempt got, and the one gesture that is not a
-                        // button. The engine name is the line to quote in a bug report: it is the
-                        // difference between 「ROM 拒绝第三方」 and 「设备端模型没装」.
+                        // 转写走的是哪个模型，以及那个不占按钮的手势。留空时这行就是「去设置里
+                        // 填一个」的提示，所以失败态的说明在下面那行按钮上。
                         Text(
-                            text = engine.label + if (failure != null) " · 长按重试" else " · 长按结束",
+                            text = when {
+                                failure != null -> "长按重试"
+                                listening -> "长按说完 · 转写：${settings.asrModel.ifBlank { "未配置" }}"
+                                else -> "转写：${settings.asrModel.ifBlank { "未配置" }}"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = scheme.onSurfaceVariant,
                             maxLines = 1,
@@ -5618,12 +5761,26 @@ private fun VoiceOverlay(
                     )
                 }
             }
-            if (failure != null) {
-                // One way out, and only when the in-app recognizer has actually given up: the
-                // system's own speech screen, which on this device is what can reach the installed
-                // recognizer. 重试 and 取消 moved to the long press and the × above.
+            if (listening) {
+                // 唯一的主按钮：说完了。端点检测也会自动收尾，这个按钮是给「我现在就说完了」用的。
                 Spacer(Modifier.height(6.dp))
-                TextButton(onClick = useSystemInput) { Text("改用系统语音输入") }
+                TextButton(onClick = { finish() }) { Text("说完了") }
+            }
+            if (failure != null) {
+                // 失败态两条路：补配置，或者重来。系统识别只在用户主动点的时候才出现 —— 那个面板
+                // 被否掉过两次，不能自动弹。
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (!asrReady) {
+                        Button(onClick = { onOpenSettings(); onDismiss() }) { Text("去设置") }
+                    } else {
+                        TextButton(onClick = { begin() }) { Text("重试") }
+                    }
+                    TextButton(onClick = useSystemInput) { Text("改用系统识别") }
+                }
             }
         }
     }
@@ -5650,9 +5807,52 @@ private enum class VoiceEngine(val label: String) {
  * the classic service, where the offline preference is the best that can be asked for.
  */
 private fun voiceEngine(context: Context): VoiceEngine {
-    val onDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+    val sdk = Build.VERSION.SDK_INT
+    val onDevice = sdk >= Build.VERSION_CODES.S &&
         runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }.getOrDefault(false)
-    return if (onDevice) VoiceEngine.ON_DEVICE else VoiceEngine.SYSTEM
+    val engine = if (onDevice) VoiceEngine.ON_DEVICE else VoiceEngine.SYSTEM
+    // 诊断：用户报「还是走系统界面」时，这一行就能区分「设备端模型没装」与「ROM 拒绝了第三方」。
+    voiceTrace(
+        context,
+        "engine sdk=$sdk isOnDeviceAvailable=$onDevice engine=$engine " +
+            "preferOffline=${engine != VoiceEngine.ON_DEVICE}",
+    )
+    return engine
+}
+
+/**
+ * 语音链的诊断日志：`filesDir/voice-trace.log`。
+ *
+ * 三条路径（设备端 / 经典服务 / 系统识别 Activity）在屏幕上长得一样，用户报「丑、还是走系统的」
+ * 时无法只从截图分辨；这个文件把每一步写下来：选了哪条引擎、识别器回了什么错误码、有没有把系统
+ * Activity 拉起来。只写日志，不改行为。
+ */
+private fun voiceTrace(context: Context, line: String) {
+    val stamp = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+    val app = context.applicationContext
+    voiceTraceWorker.execute {
+        runCatching {
+            val file = File(app.filesDir, "voice-trace.log")
+            if (file.length() > 32 * 1024) {
+                file.writeText(file.readText().takeLast(16 * 1024))
+            }
+            file.appendText("$stamp $line\n")
+        }
+    }
+}
+
+private val voiceTraceWorker = Executors.newSingleThreadExecutor()
+
+/**
+ * 胶囊上的录音计时：`0:07`。分钟只在超过一分钟时出现，平时两位数字更安静。
+ */
+private fun formatDictationTime(millis: Long): String {
+    val seconds = (millis / 1000).coerceAtLeast(0)
+    return if (seconds < 60) {
+        "0:${seconds.toString().padStart(2, '0')}"
+    } else {
+        "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
+    }
 }
 
 /**
@@ -5711,6 +5911,8 @@ private enum class AttachKind { IMAGE, FILE }
 @Composable
 private fun ContextRing(
     used: Int,
+    /** True when [used] is this app's own estimate; the card says 「约」 when it is. */
+    estimated: Boolean = false,
     window: Int,
     /** Everything this conversation has ever spent, prompt + completion. */
     sessionTokens: Int,
@@ -5855,6 +6057,7 @@ private fun ContextRing(
                     ) {
                         ContextRingCard(
                             used = used,
+                            estimated = estimated,
                             window = window,
                             sessionTokens = sessionTokens,
                             sessionSplit = sessionSplit,
@@ -5875,6 +6078,8 @@ private fun ContextRing(
 @Composable
 private fun ContextRingCard(
     used: Int,
+    /** True when [used] is this app's own estimate rather than a count the endpoint sent. */
+    estimated: Boolean = false,
     window: Int,
     sessionTokens: Int,
     sessionSplit: SessionSplit,
@@ -5919,13 +6124,16 @@ private fun ContextRingCard(
             RingDetail(
                 "上下文占用",
                 if (known) {
-                    "${shortTokens(used)} / ${shortTokens(window)}（$percent%）"
+                    // 「约」 only when the number is this app's own estimate: the endpoint's own
+                    // count is a fact and reads as one, and an estimate presented as a fact is
+                    // the one thing this card must not do.
+                    "${if (estimated) "约 " else ""}${shortTokens(used)} / ${shortTokens(window)}（$percent%）"
                 } else {
                     // No invented denominator, and no editor either: where the window is
                     // filled in is the settings page, which also fills it from the endpoint's
                     // own context_window when the user has not said otherwise. The ring only
                     // reports.
-                    "${shortTokens(used)} · 窗口未设置 · 到设置里填"
+                    "${if (estimated) "约 " else ""}${shortTokens(used)} · 窗口未设置 · 到设置里填"
                 },
             )
             // The conversation's own hit rate, not the newest round's: the user asked for
@@ -5939,12 +6147,31 @@ private fun ContextRingCard(
             // missing row as the reading having been dropped. A priced session with no cache
             // hits yet is a 0%, not a gap.
             RingDetail("缓存命中", "$sessionCachePercent%")
-            // The fixed half of the card: what the whole conversation has cost, not what the
-            // window holds right now. No label here repeats 「会话」: this is the conversation's
-            // own card, so the prefix said nothing the card did not already say, and the user
-            // asked for it back off 「会话总用时」 first and then everywhere it appeared. The
-            // lines that belong to the round in flight are the ones that need the qualifier,
-            // and they say 「本轮」.
+            // The rows below are in three groups, in this order: 上下文 (the two above) →
+            // 本会话累计 → 速度与时间. They used to be stacked in the order the features landed,
+            // which put 「输出速度」 above the total and the two per-round lines at the very bottom
+            // — the user asked for the ordering to make sense. The grouping is carried by the
+            // names (「累计…」) rather than by a divider or a heading: every row is already a
+            // label/value pair, so a separator would add chrome and answer nothing.
+            //
+            // The per-round pair that used to sit here (「本轮输入」/「本轮输出」) is gone: the user
+            // asked for it off, and it was the only consumer of the round's own two figures — the
+            // arc's number and these totals come from other sources, so nothing else went with it.
+            if (sessionTokens > 0) {
+                // 本会话累计: the whole conversation's spend, not the context on screen. Every
+                // round re-sends the context, so this is the number a bill would be built from —
+                // and the same tally the usage page shows. Labelled 「累计」 rather than 「总量」
+                // because it counts each round's re-send, which is why it can dwarf the
+                // 「上下文占用」 line above it.
+                RingDetail("累计用量", "${fullTokens(sessionTokens.toLong())} tok · $sessionTurns 轮")
+                // The split under the total, by the names the user asked for: what the cache
+                // could not answer, what it did, and what came back. All three are the whole
+                // conversation's, like the total above them.
+                RingDetail("未缓存输入", "${fullTokens(sessionSplit.uncached)} tok")
+                RingDetail("缓存读取", "${fullTokens(sessionSplit.cached)} tok")
+                RingDetail("输出", "${fullTokens(sessionSplit.output)} tok")
+            }
+            // 速度与时间 last: they are about the work, not about the window or the bill.
             if (sessionPerSecond > 0) {
                 RingDetail(
                     "输出速度",
@@ -5958,27 +6185,6 @@ private fun ContextRingCard(
                     "总用时",
                     remember(sessionElapsedMs) { formatRunElapsed(sessionElapsedMs) },
                 )
-            }
-            if (sessionTokens > 0) {
-                // The whole conversation's spend, not the context on screen: every round
-                // re-sends the context, so this is the number a bill would be built from —
-                // and it is the same tally the usage page shows. Labelled 「累计」 rather
-                // than 「总量」 because it counts each round's re-send, which is why it can
-                // dwarf the 「上下文」 line right above it.
-                RingDetail("累计用量", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
-                // The split under the total, by the names the user asked for: what the cache
-                // could not answer, what it did, and what came back. These three are the whole
-                // conversation's, like the total above them — the per-round halves are the
-                // 「本轮输入」/「本轮输出」 lines at the bottom of the card.
-                RingDetail("未缓存输入", "${fullTokens(sessionSplit.uncached)} tok")
-                RingDetail("缓存读取", "${fullTokens(sessionSplit.cached)} tok")
-                RingDetail("输出", "${fullTokens(sessionSplit.output)} tok")
-            }
-            // What the run in flight has spent so far, split into its two halves: the only
-            // lines here that move, so they sit last, and they leave the moment it settles.
-            live?.let {
-                RingDetail("本轮输入", "${shortTokens(it.lastPromptTokens)} tok")
-                RingDetail("本轮输出", "${shortTokens(it.tokensOut)} tok")
             }
             }
         }
@@ -6301,6 +6507,85 @@ private fun SteerQueueRow(
 }
 
 /**
+ * One line of the agent's board, above the composer.
+ *
+ * The same body as [SteerQueueRow] on purpose — 36dp, the same radius and container — because
+ * the two stacks sit one above the other and a different shape would read as a different app's
+ * card. What differs is the content: the glyph is the item's status (a tick once it is done,
+ * the list glyph while it is still ahead), the row being worked on is tinted with the brand
+ * colour, and a finished line is dimmed rather than removed mid-drag of the eye.
+ *
+ * [tally] is 「已完成/总数」, drawn on the board's first row alone.
+ */
+@Composable
+private fun TodoQueueRow(item: TodoItem, tally: String?) {
+    val scheme = MaterialTheme.colorScheme
+    val done = item.status == TODO_COMPLETED
+    val active = item.status == TODO_IN_PROGRESS
+    val ink = when {
+        active -> scheme.primary
+        done -> scheme.onSurfaceVariant.copy(alpha = 0.6f)
+        else -> scheme.onSurfaceVariant
+    }
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = scheme.surfaceContainerHigh,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(36.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 10.dp, end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = ImageVector.vectorResource(
+                    if (done) R.drawable.ic_circle_check else R.drawable.ic_list_checks,
+                ),
+                contentDescription = null,
+                tint = if (active) scheme.primary else scheme.onSurfaceVariant,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = item.subject,
+                style = MaterialTheme.typography.labelMedium,
+                color = ink,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (tally != null) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = tally,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The board rows worth drawing: the items still open, in the order the model wrote them, and —
+ * once everything is done — the last few that finished.
+ *
+ * Finished items leave the row as they finish, which is what "创建、完成、消失" describes: the
+ * plan on screen is what is *left*, and the tally is what says how far along the whole board is.
+ * Showing the whole list instead would push the one item being worked on off the bottom of a
+ * three-row strip as soon as a plan grew past it.
+ */
+internal fun todoRows(todos: List<TodoItem>, limit: Int = TODO_ROWS_SHOWN): List<TodoItem> {
+    if (limit <= 0) return emptyList()
+    val open = todos.filterNot { it.status == TODO_COMPLETED }
+    return if (open.isEmpty()) todos.takeLast(limit) else open.take(limit)
+}
+
+/**
  * One icon action of a queued row.
  *
  * The touch target is the 40dp node the ripple and the click live on, with the glyph drawn
@@ -6383,6 +6668,45 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
     }
 }
 
+/**
+ * What the ring draws, and whether the number is the endpoint's own or this app's estimate.
+ *
+ * Three sources, in one order, and the order is the whole point:
+ *
+ * 1. [liveReported] — the count the endpoint itself sent for the round in flight. The only
+ *    honest measure of 「上下文用了多少」 (see `StreamStats.lastPromptTokens`).
+ * 2. [newestStored] — the newest round in the transcript that carries a count. This is what the
+ *    ring reads on a conversation that was just opened, and between the start of a round and
+ *    the endpoint's usage block at its end.
+ * 3. [liveEstimate] — the run's own character-based estimate, used *only* when neither of the
+ *    above exists. Some gateways ignore `stream_options.include_usage`, and for those the ring
+ *    had nothing to draw for the whole conversation: it read 「暂无数据」 while the app was
+ *    plainly using the window. An estimate is a proportion, not a price, so it is flagged
+ *    ([estimated]) and the card says 「约」 — but a proportion that says 6% beats a blank.
+ */
+internal data class RingReading(val tokens: Int, val estimated: Boolean)
+
+/**
+ * The glyph for an approval mode, from the drawables the app already ships.
+ *
+ * A tick when tools run on their own, a person-with-shield while every call is put to the user,
+ * an alert shield when they are refused. The icon is the state, which is what makes the row's
+ * button readable without opening it.
+ */
+private fun approvalIcon(mode: ApprovalMode): Int = when (mode) {
+    ApprovalMode.AUTO -> R.drawable.ic_circle_check
+    ApprovalMode.ASK -> R.drawable.ic_shield_user
+    ApprovalMode.DENY -> R.drawable.ic_shield_alert
+}
+
+/** The reading for the three sources above; 0 means there is nothing to draw at all. */
+internal fun ringReading(liveReported: Int, newestStored: Int, liveEstimate: Int): RingReading = when {
+    liveReported > 0 -> RingReading(liveReported, estimated = false)
+    newestStored > 0 -> RingReading(newestStored, estimated = false)
+    liveEstimate > 0 -> RingReading(liveEstimate, estimated = true)
+    else -> RingReading(0, estimated = false)
+}
+
 /** True while the last item is on screen — the state that lets a reply auto-scroll. */
 private fun LazyListState.atEnd(slack: Int = 24): Boolean {
     val info = layoutInfo
@@ -6452,6 +6776,13 @@ private const val KEYBOARD_ANIM_MS = 220
 
 /** How many queued lines are drawn before the rest collapse into one count. */
 private const val STEER_ROWS_SHOWN = 3
+
+/**
+ * How many board rows are drawn above the queue — the same three as the queue, for the same
+ * reason: this stack sits over the field the user is typing into, and a long plan must not
+ * push that field off the screen. The tally covers the items that do not fit.
+ */
+private const val TODO_ROWS_SHOWN = 3
 
 private const val ATTACHMENT_MAX_WIDTH = 1280
 

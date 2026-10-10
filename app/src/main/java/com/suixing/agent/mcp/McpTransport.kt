@@ -207,13 +207,13 @@ class HttpTransport(
 
     override suspend fun exchange(message: JsonObject, timeoutMs: Long): JsonObject =
         withContext(Dispatchers.IO) {
-            val body = post(message)
+            val body = post(message, timeoutMs)
             if (body.isBlank()) throw McpException("MCP 服务器返回了空响应：$url")
             parse(body)
         }
 
     override suspend fun notify(message: JsonObject) {
-        withContext(Dispatchers.IO) { post(message) }
+        withContext(Dispatchers.IO) { post(message, McpTransport.DEFAULT_TIMEOUT_MS) }
     }
 
     override fun close() {
@@ -221,7 +221,15 @@ class HttpTransport(
         client.connectionPool.evictAll()
     }
 
-    private fun post(message: JsonObject): String {
+    private fun post(message: JsonObject, timeoutMs: Long): String {
+        // The caller's deadline is honoured per call. A client built from [client] shares its
+        // dispatcher and connection pool, so this neither changes the 180s default nor breaks
+        // close(); stdio has always honoured timeoutMs, the HTTP path used to ignore it.
+        val deadline = timeoutMs.coerceAtLeast(1L)
+        val callClient = client.newBuilder()
+            .callTimeout(deadline, TimeUnit.MILLISECONDS)
+            .readTimeout(deadline, TimeUnit.MILLISECONDS)
+            .build()
         val request = Request.Builder()
             .url(url)
             .post(message.toString().toRequestBody(JSON_MEDIA))
@@ -229,7 +237,7 @@ class HttpTransport(
             .apply { headers.forEach { (key, value) -> header(key, value) } }
             .build()
         val response = try {
-            client.newCall(request).execute()
+            callClient.newCall(request).execute()
         } catch (error: Exception) {
             throw McpException("请求 MCP 服务器失败：${error.message ?: error::class.java.simpleName}")
         }

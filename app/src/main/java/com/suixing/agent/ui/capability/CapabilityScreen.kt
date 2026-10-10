@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -55,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
+import com.suixing.agent.capability.allFilesAccessIntents
 import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.capability.ShizukuManager
 import com.suixing.agent.core.Core
@@ -206,6 +206,8 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 granted = state.rootReady,
                 lines = tierLines(TIER_ROOT, state, settings),
                 actionLabel = if (probing) "检测中…" else "检测",
+                // 探测要跑几秒，期间按钮必须点不动：否则连点会叠起多次 probeRoot()。
+                actionEnabled = !probing,
                 onAction = {
                     scope.launch {
                         probing = true
@@ -274,7 +276,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                             // Started through the launcher, not through the hub: the launcher
                             // is what reports that the user came back. The global list is the
                             // fallback for ROMs that only ship that one.
-                            val opened = allFilesSettingsIntents(context).any { intent ->
+                            val opened = allFilesAccessIntents(context).any { intent ->
                                 runCatching { allFilesLauncher.launch(intent) }.isSuccess
                             }
                             notice = if (opened) {
@@ -299,7 +301,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
             SectionCard(
                 title = "这四档权限分别能做什么",
                 icon = ImageVector.vectorResource(R.drawable.ic_circle_question_mark),
-                subtitle = if (explainerOpen) "点标题收起" else "点标题展开",
+                subtitle = if (explainerOpen) "点右侧按钮收起" else "点右侧按钮展开",
                 trailing = {
                     TextButton(onClick = { explainerOpen = !explainerOpen }) {
                         Text(if (explainerOpen) "收起" else "展开")
@@ -749,21 +751,4 @@ private fun formatAgo(timestamp: Long): String {
         delta < 86_400_000L -> "${delta / 3_600_000L} 小时前"
         else -> "${delta / 86_400_000L} 天前"
     }
-}
-
-/**
- * The "all files access" pages, in the order they should be tried: the per-app entry is the
- * precise target, the global list is what some ROMs ship instead.
- *
- * Second copy of the same two intents as capability/CapabilityHub.kt:128-141. That one starts
- * the page itself, which tells us nothing about the user coming back; the launcher here needs
- * the Intent in hand, so the list is built locally. Keep the two in step.
- */
-private fun allFilesSettingsIntents(context: Context): List<Intent> {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
-    return listOf(
-        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-            .setData(Uri.parse("package:${context.packageName}")),
-        Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
-    )
 }

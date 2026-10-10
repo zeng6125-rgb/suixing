@@ -7,6 +7,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import com.suixing.agent.ui.components.MdBlock
 import com.suixing.agent.ui.components.inlineMarkdown
+import com.suixing.agent.ui.components.listStart
+import com.suixing.agent.ui.components.orderedMarker
 import com.suixing.agent.ui.components.parseMarkdown
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -311,5 +313,101 @@ class MarkdownTest {
         // between the body weight and a heading without shouting inside a paragraph.
         assertEquals(FontWeight.SemiBold, middle.item.fontWeight)
         assertEquals(FontStyle.Italic, middle.item.fontStyle)
+    }
+
+    // ------------------------------------------------------------------ 有序列表的序号
+
+    /** The markers an ordered list would draw, in order — the same call the renderer makes. */
+    private fun markers(blocks: List<MdBlock>): String = blocks
+        .filterIsInstance<MdBlock.Bullet>()
+        .flatMap { block -> block.items.indices.map { orderedMarker(block, it) } }
+        .joinToString(" ")
+
+    private fun userChain(count: Int): String = (1..count).joinToString("\n") { "$it. tool$it" }
+
+    @Test
+    fun `a tight ordered list is one block, not one block per line`() {
+        // 分水岭：单 \n 分隔的连续 N. 行必须并进同一个块。若这里变成 3 个各含 1 项的块，
+        // 下面每条断言都会退回「所有序号都是 1」。
+        val blocks = parseMarkdown("1. a\n2. b\n3. c")
+        assertEquals(1, blocks.size)
+        val list = blocks.single() as MdBlock.Bullet
+        assertEquals(listOf("a", "b", "c"), list.items)
+        assertEquals(1, list.start)
+    }
+
+    @Test
+    fun `a fifty-one item chain of thought is numbered one to fifty-one`() {
+        // 用户真机那条「数工具」的思维链：1→51，单 \n 分隔。
+        val blocks = parseMarkdown(userChain(51))
+        assertEquals(1, blocks.size)
+        assertEquals((1..51).joinToString(" ") { "$it." }, markers(blocks))
+    }
+
+    @Test
+    fun `a list rendered one line at a time still keeps its own numbers`() {
+        // 思维链是按行渲染的（ChatScreen 把 text 拆成行后逐行交给 MarkdownText），
+        // 所以每个块只有一项：序号只能来自源码里的字面数字，数不出 1、2、3。
+        val lines = userChain(51).split('\n')
+        val drawn = lines.map { line -> markers(parseMarkdown(line)) }
+        assertEquals((1..51).map { "$it." }, drawn)
+    }
+
+    @Test
+    fun `a list that starts at three counts from three`() {
+        val blocks = parseMarkdown("3. a\n4. b\n5. c")
+        assertEquals(3, (blocks.single() as MdBlock.Bullet).start)
+        assertEquals("3. 4. 5.", markers(blocks))
+    }
+
+    @Test
+    fun `a loose list is two blocks and each keeps its own number`() {
+        // 空行分隔（loose）＝ 两个列表：第二段从它自己写的 2 开始，而不是被重新从 1 数。
+        val tight = parseMarkdown("1. a\n2. b")
+        val loose = parseMarkdown("1. a\n\n2. b")
+        assertEquals(1, tight.size)
+        assertEquals(2, loose.size)
+        assertEquals("1. 2.", markers(tight))
+        assertEquals("1. 2.", markers(loose))
+    }
+
+    @Test
+    fun `only the first number of a run decides the counting`() {
+        // CommonMark 同样忽略后续项的字面数字：1. / 7. 是一个列表，序号 1、2。
+        val blocks = parseMarkdown("1. a\n7. b")
+        assertEquals(1, blocks.size)
+        assertEquals("1. 2.", markers(blocks))
+    }
+
+    @Test
+    fun `a paren marker is the same list and keeps its start`() {
+        val blocks = parseMarkdown("1) a\n2) b")
+        assertEquals(1, blocks.size)
+        assertEquals("1. 2.", markers(blocks))
+        assertEquals("7. 8.", markers(parseMarkdown("7) a\n8) b")))
+    }
+
+    @Test
+    fun `a nested ordered list keeps its own start`() {
+        val blocks = parseMarkdown("1. a\n   3. b\n   4. c")
+        assertEquals(2, blocks.size)
+        val outer = blocks[0] as MdBlock.Bullet
+        val inner = blocks[1] as MdBlock.Bullet
+        assertEquals(0, outer.depth)
+        assertEquals(1, inner.depth)
+        assertEquals(3, inner.start)
+        assertEquals("1.", markers(listOf(outer)))
+        assertEquals("3. 4.", markers(listOf(inner)))
+    }
+
+    @Test
+    fun `a start too wide for the marker column is clamped`() {
+        // 22dp 的序号列放不下更宽的数字，而 Int 也存不下任意长的数字串：两种都退回 1。
+        assertEquals(9999, listStart("12345"))
+        assertEquals(1, listStart("99999999999999999999"))
+        assertEquals(9999, (parseMarkdown("12345. a").single() as MdBlock.Bullet).start)
+        assertEquals(1, (parseMarkdown("99999999999999999999. a").single() as MdBlock.Bullet).start)
+        // 0. 是 CommonMark 允许的起点，序号就是 0、1、2。
+        assertEquals("0. 1.", markers(parseMarkdown("0. a\n0. b")))
     }
 }

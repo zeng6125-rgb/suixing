@@ -75,7 +75,13 @@ import com.suixing.agent.ui.theme.color
 import kotlinx.coroutines.launch
 
 /** The tab strip's three faces, in the order the pills are drawn. */
-private val TABS = listOf("工具", "Skill", "MCP")
+/**
+ * 工具 / 技能 / MCP / 插件，按「现在就能用的能力」排到「以后可装卸的扩展」。
+ *
+ * 插件排最后：它是将来承载其它能力的壳，形态还没定，把一个空标签放在第一眼的位置只会让
+ * 页面看起来是坏的。标签名统一用中文，MCP 是专有名词所以保留（原来写作 "Skill"）。
+ */
+private val TABS = listOf("工具", "技能", "MCP", "插件")
 
 private const val MCP_GROUP = "MCP（外部）"
 private const val OTHER_GROUP = "其它"
@@ -210,12 +216,14 @@ fun ToolsScreen(onBack: () -> Unit) {
                 subtitle = when (tab) {
                     0 -> "模型能调用的全部工具"
                     1 -> "技能给模型加知识"
-                    else -> "MCP 给模型加工具"
+                    2 -> "MCP 给模型加工具"
+                    else -> "插件：随行的一切能力都以插件形式提供"
                 },
                 onBack = onBack,
                 actions = {
-                    // 工具栏没有可刷新的东西：那一栏跟着 MCP 状态与能力状态自己变。
-                    if (tab != 0) {
+                    // 工具页与插件页没有可刷新的东西：工具那栏跟着 MCP 状态与能力状态自己变，
+                    // 插件页现在只有一个说明（还没有可装卸的东西）。
+                    if (tab == 1 || tab == 2) {
                         IconButton(
                             onClick = {
                                 if (tab == 1) {
@@ -312,7 +320,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                     },
                 )
 
-                else -> McpSection(
+                2 -> McpSection(
                     onEdit = {
                         mcpEditing = it
                         mcpEditorOpen = true
@@ -320,6 +328,8 @@ fun ToolsScreen(onBack: () -> Unit) {
                     onDelete = { mcpDeleting = it },
                     onNotify = ::notify,
                 )
+
+                else -> PluginsTab()
             }
         }
 
@@ -493,14 +503,20 @@ private fun ToolsTab() {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth().height(44.dp),
+                // 不要给这个框写死高度：OutlinedTextField 的内容（浮动标签 + 文字行盒 + 上下留白）
+                // 有自己的最小高度，把外层约束压到 44dp 之后放不下，字的下缘（带降部的汉字/字母）
+                // 就被裁掉 —— 0.8.76 收紧密度时压的就是这一处，用户看到的截断即它。
+                // 密度靠下面那些行内边距与间距拿，不靠裁这一个唯一有输入文字的控件。
+                modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("搜索工具名") },
             )
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "已启用 ${tools.size} / 共 ${tools.size}",
+                    // 内置工具是全局的、不可修改的，所以「已启用 X / 共 X」这种计数没有意义
+                    // （两个数永远相等）：这里只报一共有多少个。
+                    text = "共 ${tools.size} 个工具",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -514,7 +530,8 @@ private fun ToolsTab() {
                 }
             }
             Text(
-                text = "只读总览：全局没有禁用开关，要按助手关掉某些工具，去助手的编辑页。",
+                text = "全局工具默认不可修改：这里只能看名称、用途和它需要的权限。" +
+                    "要按助手关掉某些工具，去那个助手的编辑页。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -540,6 +557,55 @@ private fun ToolsTab() {
                 }
             }
         }
+    }
+}
+
+/**
+ * 「插件」 tab: the place, and the words, for the idea — not the plugins themselves.
+ *
+ * The user's framing is DSH's: everything the app can do is something you can put in and take
+ * out. What a plugin *is* here has not been decided yet, so this tab deliberately stops at an
+ * explanation. No invented list, no disabled "install" button, no placeholder rows: a screen
+ * that pretends to have content is worse than one that says it has none. When the first real
+ * shape arrives, its list replaces the [EmptyState] below.
+ */
+@Composable
+private fun PluginsTab() {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item { PluginsIntroCard() }
+        item {
+            EmptyState(
+                title = "还没有可安装的插件",
+                subtitle = "插件的形态还在确定中，定下来之后会出现在这里。",
+            )
+        }
+    }
+}
+
+@Composable
+private fun PluginsIntroCard() {
+    SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SoftIcon(ImageVector.vectorResource(R.drawable.ic_cpu), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
+            Spacer(Modifier.width(12.dp))
+            Text("什么是插件", style = MaterialTheme.typography.titleMedium)
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = "插件是可以装卸的扩展：随行的每一项能力，将来都以插件的形式提供——" +
+                "装一个就多一份本事，卸掉就干净地消失，不用等应用更新。",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "现在还没有可安装的插件，这一页先放着，等形态定下来再填。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

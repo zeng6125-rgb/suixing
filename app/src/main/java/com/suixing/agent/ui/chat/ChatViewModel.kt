@@ -8,11 +8,13 @@ import com.suixing.agent.agent.RunState
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Assistant
+import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.LiveDraft
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
@@ -20,6 +22,7 @@ import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.service.AgentForegroundService
 import com.suixing.agent.ui.settings.withUpstreamDefaults
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -119,6 +122,16 @@ data class ChatUiState(
     val draft: Draft = Draft(),
     /** Lines queued for the run that is going, oldest first; see [PendingSteer]. */
     val pendingSteers: List<PendingSteer> = emptyList(),
+    /**
+     * The agent's own task board, as the last `todo_write` left it — drawn above the composer
+     * while the run that wrote it is going.
+     *
+     * Read from `TodoStore` rather than carried in the event: the board is app-wide, its writes
+     * are the whole list, and the file is the only copy that cannot drift from what the model
+     * believes it has planned. Empty between runs (see [start]), so a plan cannot outlive the
+     * run that made it.
+     */
+    val todos: List<TodoItem> = emptyList(),
     /**
      * This conversation's compression record, oldest first.
      *
@@ -270,8 +283,37 @@ class ChatViewModel : ViewModel() {
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
 
     /**
+     * What the memo below is keyed on: everything that can move the tally.
+     *
+     * The last row is named by its id and its three counts rather than by the object itself: a
+     * message can carry a screenshot as base64, and comparing two of those on every publish
+     * would cost more than the walk this memo exists to avoid. The counts are in the key so a
+     * row whose usage was written after it first appeared is still caught.
+     */
+    private data class StatsKey(
+        val rows: Int,
+        val lastId: String?,
+        val lastPrompt: Int,
+        val lastCompletion: Int,
+        val lastCached: Int,
+        val window: Int,
+    )
+
+    /** The tally and the key it was built under; see [sessionStats]. */
+    private var statsKey: StatsKey? = null
+    private var statsValue: SessionStats? = null
+
+    /**
      * The on-screen conversation's tally for the drawer. distinctUntilChanged matters: the
      * state itself changes on every token, while these numbers change once a reply lands.
+     *
+     * Memoised, because that is the whole cost of this flow. `SessionStats.of` walks the whole
+     * conversation six times (four sums and two counts), and the state it is built from
+     * republishes twelve times a second while an answer streams — for a long chat that walk ran
+     * on the main thread on every one of those publishes, for numbers that only move when a row
+     * lands. A row's counts are written before it is emitted (`withUsage` in the engine) and
+     * nothing rewrites them afterwards, so the last row plus the row count is enough to know the
+     * tally is unchanged.
      */
     val sessionStats: Flow<SessionStats?> = combine(state, Core.settings.flow) { snapshot, settings ->
         // The window of the model this conversation would send with, not the app-wide
@@ -279,7 +321,21 @@ class ChatViewModel : ViewModel() {
         // usage against the wrong denominator.
         val assistant = settings.assistant(snapshot.assistantId) ?: settings.activeAssistant()
         val model = settings.choiceFor(snapshot.providerId, snapshot.model, assistant).model
-        SessionStats.of(snapshot.messages, settings.contextWindowFor(model))
+        val window = settings.contextWindowFor(model)
+        val last = snapshot.messages.lastOrNull()
+        val key = StatsKey(
+            rows = snapshot.messages.size,
+            lastId = last?.id,
+            lastPrompt = last?.promptTokens ?: 0,
+            lastCompletion = last?.completionTokens ?: 0,
+            lastCached = last?.cachedTokens ?: 0,
+            window = window,
+        )
+        if (key != statsKey) {
+            statsKey = key
+            statsValue = SessionStats.of(snapshot.messages, window)
+        }
+        statsValue
     }.distinctUntilChanged()
 
     /** The per-conversation run-state watcher; replaced whenever the display switches. */
@@ -323,6 +379,16 @@ class ChatViewModel : ViewModel() {
      * back must still show what is waiting — and still offer to retract it.
      */
     private val steers = mutableMapOf<String, List<PendingSteer>>()
+
+    /**
+     * The board the last `todo_write` left behind, held so it can be republished.
+     *
+     * One copy, not one per conversation: the board is app-wide — the file is shared, and two
+     * runs write the same list — so a per-chat copy would be a second source of truth that the
+     * next run's write would contradict. Cleared when a run starts, which is what keeps it from
+     * being the *previous* run's plan on screen.
+     */
+    private var todos: List<TodoItem> = emptyList()
 
     /**
      * One live copy per running conversation, keyed by chat id. A single slot is what
@@ -537,6 +603,9 @@ class ChatViewModel : ViewModel() {
                 // The queue belongs to the run, not to the screen: coming back to it must
                 // still show what is waiting.
                 pendingSteers = steers[conversation.id].orEmpty(),
+                // And so does the board: it is read from disk on tool events, so a state built
+                // here would otherwise be the one place it is missing.
+                todos = todos,
             )
         } else {
             // A conversation that never picked a persona keeps the one already on screen,
@@ -749,9 +818,11 @@ class ChatViewModel : ViewModel() {
 
     fun deleteAssistant(assistant: Assistant) {
         viewModelScope.launch {
+            var removed = false
             Core.settings.update { settings ->
                 // The app always needs one persona to fall back on.
                 if (settings.assistants.size <= 1) return@update settings
+                removed = true
                 val list = settings.assistants.filterNot { it.id == assistant.id }
                 settings.copy(
                     assistants = list,
@@ -762,6 +833,11 @@ class ChatViewModel : ViewModel() {
                     },
                 )
             }
+            // The persona's pictures go with the persona, and only if it really went: the sweep
+            // is by id, so a picture picked and then abandoned by closing the editor — a file
+            // settings never heard about — is taken by the same call. Nothing else would ever
+            // name it again.
+            if (removed) AssistantAvatarStore.deleteAllFor(Core.appContext, assistant.id)
             val settings = Core.settings.current()
             val next = settings.assistant(_state.value.assistantId) ?: settings.activeAssistant()
             editDisplayed { it.copy(assistantId = next?.id.orEmpty()) }
@@ -953,6 +1029,23 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
+     * Re-reads the board and puts it on screen.
+     *
+     * There is no flow to collect: [TodoStore] writes the whole list under a lock and nothing
+     * else in the app touches it, so the two tool events are the clock. Off the main thread
+     * because the board is a file, and this runs on the reader thread that delivers events.
+     * Published to whatever conversation is on screen — the board is app-wide — while the row
+     * itself is drawn only for a run that is going (see the composer's own condition).
+     */
+    private fun refreshTodos() {
+        viewModelScope.launch {
+            val board = withContext(Dispatchers.IO) { Core.todos.read() }
+            todos = board
+            _state.update { it.copy(todos = board) }
+        }
+    }
+
+    /**
      * Asks the run on screen to fold the conversation at its next turn boundary.
      *
      * Only a flag: the engine consumes it between rounds, so nothing in flight is cut and
@@ -987,6 +1080,12 @@ class ChatViewModel : ViewModel() {
                 status = shown.status,
             ),
         )
+        // A new run starts with an empty board on screen. The file still holds the last run's
+        // items — it is the app-wide board, not this run's — and drawing them here would show
+        // the previous task's plan wearing the new run's clothes, most visibly for a run that
+        // never touches the todo tools at all. The first `todo_write` of this run puts it back.
+        todos = emptyList()
+        _state.update { it.copy(todos = emptyList()) }
         jobs[chatId] = viewModelScope.launch {
             AgentForegroundService.start(Core.appContext, "随行正在执行任务")
             // The draft writer rides inside the run's own coroutine, so it stops the moment
@@ -1203,6 +1302,15 @@ class ChatViewModel : ViewModel() {
             }
         }
         putSession(next)
+        // The board above the composer: the only two events that can change it are the todo
+        // tool starting and finishing, and reading it back here is what makes the row appear,
+        // tick and go without anything polling a file. Both ends are read: the write is a
+        // finished call's result, and the model may also re-read the board mid-run.
+        if (event is AgentEvent.ToolStarted && event.name == TODO_TOOL ||
+            event is AgentEvent.ToolFinished && event.name == TODO_TOOL
+        ) {
+            refreshTodos()
+        }
         // Saved straight away: a handed-over line that only lived in memory would vanish the
         // moment the user switches conversations, which is when they go looking for it.
         if (event is AgentEvent.Steered) viewModelScope.launch { saveSession(next) }
@@ -1762,3 +1870,13 @@ private const val DELTA_PUBLISH_MS = 80L
  * the bubble. 64 characters are far more than any two answers share by accident.
  */
 private const val LIVE_DRAFT_PROBE_CHARS = 64
+
+/**
+ * The one tool that writes the board (`tools/TodoTools.kt:26`), named here because this is the
+ * only place the UI needs to recognise it.
+ *
+ * A literal rather than a reference: `TodoTools` declares its names inline in its specs and
+ * exposes no constant, and a name shared across packages would mean changing a file that this
+ * screen has no other business with — the tool's own spec is the source of truth either way.
+ */
+private const val TODO_TOOL = "todo_write"

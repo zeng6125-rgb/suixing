@@ -16,6 +16,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.nio.charset.Charset
 import java.util.concurrent.TimeUnit
 
@@ -119,12 +121,26 @@ class WebTools(
                     if (declared > MAX_DOWNLOAD_BYTES) {
                         return@use ToolResult.failure("文件太大（${declared / 1024 / 1024} MB），上限 ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB")
                     }
-                    body.byteStream().use { input ->
-                        target.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    if (target.length() > MAX_DOWNLOAD_BYTES) {
-                        target.delete()
-                        return@use ToolResult.failure("文件超过 ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB，已删除")
+                    // Written beside the target and renamed only once it is complete: a
+                    // half-finished download must never sit under the final name, where the
+                    // model would read it as if it were whole.
+                    val part = File("${target.absolutePath}.part")
+                    part.delete()
+                    try {
+                        body.byteStream().use { input ->
+                            part.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        if (part.length() > MAX_DOWNLOAD_BYTES) {
+                            part.delete()
+                            return@use ToolResult.failure("文件超过 ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB，已删除")
+                        }
+                        if (!part.renameTo(target)) {
+                            part.delete()
+                            return@use ToolResult.failure("下载失败：无法写入 ${target.absolutePath}")
+                        }
+                    } catch (error: Exception) {
+                        part.delete()
+                        throw error
                     }
                     ToolResult.success("已保存到 ${target.absolutePath}（${humanSize(target.length())}）")
                 }
@@ -249,7 +265,8 @@ class WebTools(
 
     /** OkHttp only trusts the charset in Content-Type, so decode the bytes ourselves. */
     private fun readText(response: Response): String {
-        val bytes = response.body?.bytes() ?: return ""
+        val (bytes, truncated) = readCapped(response)
+        if (bytes.isEmpty()) return ""
         val declared = Regex("charset=[\"']?([A-Za-z0-9_\\-]+)", RegexOption.IGNORE_CASE)
             .find(response.header("Content-Type").orEmpty())
             ?.groupValues?.get(1)
@@ -259,13 +276,44 @@ class WebTools(
         ).find(String(bytes, Charsets.ISO_8859_1))?.groupValues?.get(1)
         val name = declared ?: fromMeta ?: "utf-8"
         val charset = runCatching { Charset.forName(name) }.getOrDefault(Charsets.UTF_8)
-        return runCatching { String(bytes, charset) }.getOrDefault(String(bytes, Charsets.UTF_8))
+        val text = runCatching { String(bytes, charset) }.getOrDefault(String(bytes, Charsets.UTF_8))
+        return if (truncated) "$text\n…（响应过大，只读取了前 ${humanSize(MAX_FETCH_BYTES.toLong())}）" else text
+    }
+
+    /**
+     * Reads at most [MAX_FETCH_BYTES] into memory. `body.bytes()` pulls the whole response in and
+     * only then could anything be truncated, so one web_fetch of a big page — or of a URL that
+     * turned out to be a video — can OOM the app; this stops reading at the cap instead.
+     */
+    private fun readCapped(response: Response): Pair<ByteArray, Boolean> {
+        val body = response.body ?: return ByteArray(0) to false
+        val declared = body.contentLength()
+        body.byteStream().use { input ->
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(16 * 1024)
+            while (out.size() < MAX_FETCH_BYTES) {
+                val room = (MAX_FETCH_BYTES.toLong() - out.size()).coerceAtMost(buffer.size.toLong()).toInt()
+                val read = input.read(buffer, 0, room)
+                if (read <= 0) break
+                out.write(buffer, 0, read)
+            }
+            val bytes = out.toByteArray()
+            return bytes to (declared > MAX_FETCH_BYTES || bytes.size >= MAX_FETCH_BYTES)
+        }
     }
 
     private companion object {
         const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
         const val MAX_DOWNLOAD_BYTES = 64L * 1024L * 1024L
+
+        /**
+         * How much of a fetched response may enter memory. The tool's own output is capped at
+         * 60k characters (≈240 KB worst-case UTF-8) and markup still has to be stripped on top
+         * of that, so 1 MB is several times more than any useful answer while keeping a mistaken
+         * binary URL from pulling tens of megabytes into RAM.
+         */
+        const val MAX_FETCH_BYTES = 1024 * 1024
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         val client: OkHttpClient = OkHttpClient.Builder()

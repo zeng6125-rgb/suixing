@@ -80,7 +80,7 @@ fun AssistantSheet(
             // 选一张卡就是选完了：表要收起来，否则用户看着还开着的半屏列表不知道有没有生效。
             onPicked = onDismiss,
             modifier = Modifier
-                .padding(horizontal = 18.dp)
+                .padding(horizontal = 16.dp)
                 .padding(bottom = 22.dp)
                 // 表里没有可滚动的父容器，高度只能在这里封顶（表头 + 列表 ≈ 540dp），
                 // 列表自己的 verticalScroll 才拿得到有界的高度。
@@ -150,10 +150,10 @@ fun AssistantListContent(
                 .fillMaxWidth()
                 .weight(1f, fill = false)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             assistants.chunked(2).forEach { pair ->
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     pair.forEach { assistant ->
                         AssistantCard(
                             assistant = assistant,

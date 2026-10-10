@@ -139,7 +139,7 @@ class SystemTools(
             appendLine("屏幕: ${metrics.widthPixels} x ${metrics.heightPixels}, 密度 ${metrics.densityDpi}dpi")
             appendLine("当前时间: $time")
             if (battery >= 0) appendLine("电量: $battery%")
-            appendLine("内部存储: 可用 ${"%.1f".format(freeGb)} GB / 共 ${"%.1f".format(totalGb)} GB")
+            appendLine("内部存储: 可用 ${"%.1f".format(Locale.US, freeGb)} GB / 共 ${"%.1f".format(Locale.US, totalGb)} GB")
             appendLine("本应用: ${context.packageName} v$versionName")
         }.trim())
     } catch (error: Exception) {
@@ -176,29 +176,37 @@ class SystemTools(
         }
     }
 
-    private fun openApp(args: JsonObject): ToolResult = runCatching {
+    private suspend fun openApp(args: JsonObject): ToolResult {
         val target = args.str("target")?.trim().orEmpty()
         if (target.isEmpty()) return ToolResult.failure("缺少参数 target")
-        val manager = context.packageManager
-        val direct = manager.getLaunchIntentForPackage(target)
-        val intent = direct ?: run {
-            val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            val match = manager.queryIntentActivities(launcher, 0).firstOrNull { info ->
-                val label = runCatching { info.loadLabel(manager).toString() }.getOrDefault("")
-                val pkg = info.activityInfo?.packageName.orEmpty()
-                label.equals(target, ignoreCase = true) || label.contains(target, ignoreCase = true) ||
-                    pkg.equals(target, ignoreCase = true)
-            } ?: return ToolResult.failure("找不到应用「$target」，可以先用 list_apps 查包名")
-            manager.getLaunchIntentForPackage(match.activityInfo?.packageName.orEmpty())
-                ?: return ToolResult.failure("找到应用但没有启动入口：${match.activityInfo?.packageName}")
+        // The lookup scans every installed app (queryIntentActivities + loadLabel), which is a
+        // visible stall on the main thread; only the launch itself stays there.
+        val found = withContext(Dispatchers.IO) { runCatching { resolveLaunchIntent(target) } }
+        val intent = found.getOrElse { error ->
+            return ToolResult.failure(error.message ?: "打开应用失败：${error.javaClass.simpleName}")
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
         // The screen is about to belong to another app. There is no touch point to draw a ring
         // around, so the edge flash is the whole signal that the agent did this.
         TouchFx.handoff(context)
-        ToolResult.success("已打开 ${intent.component?.packageName ?: target}")
-    }.getOrElse { ToolResult.failure("打开应用失败：${it.message ?: it.javaClass.simpleName}") }
+        return ToolResult.success("已打开 ${intent.component?.packageName ?: target}")
+    }
+
+    /** PackageManager lookups only, off the main thread; throws when nothing matches. */
+    private fun resolveLaunchIntent(target: String): Intent {
+        val manager = context.packageManager
+        manager.getLaunchIntentForPackage(target)?.let { return it }
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val match = manager.queryIntentActivities(launcher, 0).firstOrNull { info ->
+            val label = runCatching { info.loadLabel(manager).toString() }.getOrDefault("")
+            val pkg = info.activityInfo?.packageName.orEmpty()
+            label.equals(target, ignoreCase = true) || label.contains(target, ignoreCase = true) ||
+                pkg.equals(target, ignoreCase = true)
+        } ?: throw IllegalStateException("找不到应用「$target」，可以先用 list_apps 查包名")
+        return manager.getLaunchIntentForPackage(match.activityInfo?.packageName.orEmpty())
+            ?: throw IllegalStateException("找到应用但没有启动入口：${match.activityInfo?.packageName}")
+    }
 
     private fun openUrl(args: JsonObject): ToolResult = runCatching {
         val url = args.str("url")?.trim().orEmpty()

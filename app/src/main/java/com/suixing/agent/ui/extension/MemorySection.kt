@@ -16,6 +16,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -74,7 +75,7 @@ fun MemorySection(
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
                 SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
@@ -84,7 +85,7 @@ fun MemorySection(
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "它用 memory_write 记东西，记满 40 条；这里改动会立刻影响它下次回答。",
+                        text = "它用 memory_write 记东西，单条最多 4000 字；这里改动会立刻影响它下次回答。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -118,7 +119,7 @@ fun MemorySection(
                         )
                         IconButton(
                             onClick = { deleting = row.key },
-                            modifier = Modifier.size(30.dp),
+                            modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
                         ) {
                             Icon(
                                 ImageVector.vectorResource(R.drawable.ic_x),

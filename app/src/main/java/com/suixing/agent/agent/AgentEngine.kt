@@ -97,6 +97,10 @@ private data class WireSpan(val id: String, val from: Int, val to: Int)
  * parks on a [CompletableDeferred], so the run resumes the moment the user taps
  * approve or reject in the UI.
  *
+ * The mode arrives per call from the settings snapshot the run started with, so switching it
+ * while a run is in flight does not change that run — the next one obeys the new mode. (The
+ * composer's picker tells the user the same thing.)
+ *
  * 「总是允许」 and 「总是拒绝」 are written to settings rather than kept in a field,
  * because a decision that evaporates on restart is not a memory, it is a nuisance.
  */
@@ -1708,6 +1712,12 @@ class AgentEngine(
         append(settings.systemPrompt.trim())
         append("\n\n## 可用工具\n")
         append(registry.promptSummary())
+        // 禁止档下每一次调用都必然失败（[request] 直接返回 false，模型只会拿到「用户拒绝了
+        // 这次调用。」），而上面那张工具表照旧列着。不在这里说明，模型就会一轮轮撞墙、把整轮
+        // 时间花在被拒的调用上，而不是直接回答用户。
+        if (settings.approvalMode == ApprovalMode.DENY) {
+            append("\n\n注意：用户当前已禁止工具调用，你这一轮无法执行任何工具。请直接用文字回答，不要尝试调用工具。")
+        }
         if (skillCatalog.isNotBlank()) {
             append("\n\n")
             append(skillCatalog)

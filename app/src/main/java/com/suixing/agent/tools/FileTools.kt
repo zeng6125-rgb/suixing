@@ -84,11 +84,11 @@ class FileTools(private val context: Context) : ToolGroup() {
         ),
         ToolSpec(
             "delete_path",
-            "删除文件或目录（目录会递归删除）。这是不可逆操作。",
+            "删除文件或目录（目录默认不递归：非空目录会被拒绝，确认要整树删除时传 recursive=true）。这是不可逆操作。",
             Schema.objectOf(
                 properties = listOf(
                     "path" to Schema.string("要删除的路径"),
-                    "recursive" to Schema.boolean("目录是否递归删除，默认 true", default = true),
+                    "recursive" to Schema.boolean("目录是否递归删除，默认 false", default = false),
                 ),
                 required = listOf("path"),
             ),
@@ -430,7 +430,9 @@ internal fun resolveUserPath(context: Context, raw: String?): File {
 
 internal fun humanSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
-    bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
-    bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
-    else -> "%.2f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
+    // Locale.US on purpose: a size is a number, and a German or French device would otherwise
+    // render it as "1,5 KB" while every other size in the app stays ASCII.
+    bytes < 1024 * 1024 -> "%.1f KB".format(Locale.US, bytes / 1024.0)
+    bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(Locale.US, bytes / 1024.0 / 1024.0)
+    else -> "%.2f GB".format(Locale.US, bytes / 1024.0 / 1024.0 / 1024.0)
 }

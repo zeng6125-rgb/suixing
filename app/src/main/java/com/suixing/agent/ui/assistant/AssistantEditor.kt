@@ -47,7 +47,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -82,6 +81,8 @@ fun AssistantEditor(
     val isNew = settings.assistant(initial.id) == null
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    /** Set when picking a picture fails; cleared on the next successful pick. */
+    var notice by remember { mutableStateOf<String?>(null) }
     // The picture is written the moment it is picked, not on save: the pick arrives as a
     // content:// uri that is only readable while the picker's grant lasts, and the draft holds
     // the path to the file we made out of it. A pick that fails leaves the old picture alone.
@@ -91,8 +92,14 @@ fun AssistantEditor(
         if (uri != null) {
             val previous = draft.avatarPath
             scope.launch {
-                AssistantAvatarStore.save(context, draft.id, uri, previous)?.let { path ->
+                val path = AssistantAvatarStore.save(context, draft.id, uri, previous)
+                if (path != null) {
+                    notice = null
                     draft = draft.copy(avatarPath = path)
+                } else {
+                    // A pick can fail (huge picture, revoked grant, file already gone). The old
+                    // picture is left alone, so without this line the tap would look ignored.
+                    notice = "这张图没能保存下来，头像保持原样。可以换一张，或直接用下面的表情。"
                 }
             }
         }
@@ -138,7 +145,7 @@ fun AssistantEditor(
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 16.dp)
                         .padding(top = 12.dp, bottom = 30.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     IdentitySection(
                         draft = draft,
@@ -170,6 +177,13 @@ fun AssistantEditor(
                     PromptSection(draft = draft, onDraft = { draft = it })
                     ModelSection(draft = draft, settings = settings, onDraft = { draft = it })
                     ToolSection(draft = draft, toolNames = toolNames, onDraft = { draft = it })
+                    notice?.let { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                     if (onDelete != null) {
                         OutlinedButton(
                             onClick = onDelete,
@@ -177,6 +191,14 @@ fun AssistantEditor(
                         ) {
                             Text("删除这个助手", color = MaterialTheme.colorScheme.error)
                         }
+                    } else {
+                        // The delete entry is simply absent when there is one assistant left;
+                        // saying why is the difference between a rule and a missing button.
+                        Text(
+                            text = "至少要留一个助手，所以这个删不掉：先新建一个，再回来删它。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     Text(
                         text = "留空的项会跟随「设置」里的当前值，所以只改名字也能用。",
@@ -244,7 +266,10 @@ private fun IdentitySection(
                     ),
                 ) {
                     Box(Modifier.size(42.dp), contentAlignment = Alignment.Center) {
-                        Text(emoji, fontSize = 19.sp)
+                        // 19sp 不写死：按 titleLarge 的比例给，用户调「外观→字号」时这个
+                        // emoji 跟着缩放（写死 sp 会把缩放静默关掉）。
+                        val face = MaterialTheme.typography.titleLarge
+                        Text(emoji, style = face.copy(fontSize = face.fontSize * (19f / 22f)))
                     }
                 }
             }
@@ -315,7 +340,7 @@ private fun ModelSection(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(

@@ -71,7 +71,7 @@ internal fun backoffDelayMs(attempt: Int): Long {
 class McpManager(
     private val store: McpStore,
     private val registry: ToolRegistry,
-    private val clientVersion: String = APP_VERSION,
+    private val clientVersion: String = store.appVersionName(),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
     private val mutex = Mutex()
@@ -160,21 +160,6 @@ class McpManager(
             it.copy(status = McpStatus.DISCONNECTED, toolCount = 0, serverName = "", error = null, attempt = 0)
         }
         publishTools()
-    }
-
-    suspend fun closeAll() {
-        synchronized(jobLock) {
-            reconnectJobs.values.forEach { it.cancel() }
-            reconnectJobs.clear()
-        }
-        val all = mutex.withLock {
-            val snapshot = clients.toMap()
-            clients.clear()
-            toolsByServer.clear()
-            snapshot
-        }
-        all.values.forEach { it.close() }
-        registry.replaceDynamic(MCP_PREFIX, emptyList())
     }
 
     /**
@@ -327,7 +312,7 @@ class McpManager(
 
     private fun toolFor(server: String, client: McpClient, remote: McpToolSpec): Tool = object : Tool {
         override val spec: ToolSpec = ToolSpec(
-            name = toolName(server, remote.name),
+            name = mcpToolName(server, remote.name),
             description = remote.description.ifBlank { "MCP 服务「$server」提供的工具 ${remote.name}" },
             parameters = remote.inputSchema,
         )
@@ -358,23 +343,38 @@ class McpManager(
         HttpTransport(config.url.trim(), McpProtocol.parseHeaders(config.headers))
     }
 
-    private fun toolName(server: String, tool: String): String {
-        val prefix = MCP_PREFIX + sanitize(server) + "__"
-        val room = (MAX_TOOL_NAME - prefix.length).coerceAtLeast(8)
-        return prefix + sanitize(tool).take(room)
-    }
-
-    private fun sanitize(value: String): String = buildString {
-        for (ch in value) {
-            append(if (ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' || ch == '_' || ch == '-') ch else '_')
-        }
-    }.ifEmpty { "_" }
-
     companion object {
         const val MCP_PREFIX = "mcp__"
-        const val APP_VERSION = "0.7.0"
-
-        /** Function names are limited to 64 characters by the OpenAI API. */
-        private const val MAX_TOOL_NAME = 64
     }
 }
+
+/** Function names are limited to 64 characters by the OpenAI API. */
+internal const val MCP_TOOL_NAME_MAX = 64
+
+/** How much of the server name fits in a tool name; anything longer becomes a short hash. */
+private const val MCP_SERVER_SLICE = 24
+
+/**
+ * The name the model sees for a server's tool: `mcp__<server>__<tool>`, always within
+ * [MCP_TOOL_NAME_MAX]. The server slice is fixed, so a long server name can never eat the tool's
+ * own name — which is what used to push the total past the API limit — and a four-hex suffix of
+ * the full name keeps two long server names from colliding after the slice.
+ */
+internal fun mcpToolName(server: String, tool: String): String {
+    val clean = sanitizeMcpName(server)
+    val serverPart = if (clean.length <= MCP_SERVER_SLICE) {
+        clean
+    } else {
+        clean.take(MCP_SERVER_SLICE - 5) + "_" + clean.hashCode().toUInt().toString(16).take(4)
+    }
+    val prefix = "${McpManager.MCP_PREFIX}${serverPart}__"
+    val room = (MCP_TOOL_NAME_MAX - prefix.length).coerceAtLeast(1)
+    return prefix + sanitizeMcpName(tool).take(room)
+}
+
+/** Keeps a server or tool name to the characters the API accepts in a function name. */
+internal fun sanitizeMcpName(value: String): String = buildString {
+    for (ch in value) {
+        append(if (ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' || ch == '_' || ch == '-') ch else '_')
+    }
+}.ifEmpty { "_" }

@@ -155,7 +155,10 @@ class ScheduleTools(
         }
         schedules.upsert(armed)
         SchedulerService.arm(context)
-        ToolResult.success("已更新 ${armed.id}「${armed.title}」，下一次 ${format(armed.nextAt)}。")
+        ToolResult.success(
+            "已更新 ${armed.id}「${armed.title}」，下一次 " +
+                (armed.nextAt.takeIf { it > 0L }?.let { format(it) } ?: "不会触发") + "。",
+        )
     }
 
     private suspend fun delete(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
@@ -216,15 +219,11 @@ class ScheduleTools(
         }
     }
 
-    private fun describe(schedule: Schedule): String = when (schedule.kind) {
-        SCHEDULE_AT -> "一次性 ${format(schedule.atMillis)}"
-        SCHEDULE_EVERY -> "每 ${schedule.everySeconds} 秒"
-        SCHEDULE_DAILY -> "每天 ${schedule.timeOfDay}"
-        else -> schedule.kind
-    }
+    // 同一个提醒在两处说成两句话，用户就得自己对齐它们：定时任务页与工具回执共用下面那两个
+    // 顶层函数，这里只把实例的时区递过去。
+    private fun describe(schedule: Schedule): String = describeSchedule(schedule, zone)
 
-    private fun format(millis: Long): String =
-        MOMENT_FORMAT.format(Instant.ofEpochMilli(millis).atZone(zone))
+    private fun format(millis: Long): String = formatScheduleMoment(millis, zone)
 
     private companion object {
         val TIMING_KEYS = listOf("at", "every_seconds", "daily")
@@ -233,7 +232,26 @@ class ScheduleTools(
             DateTimeFormatter.ofPattern("HH:mm:ss"),
             DateTimeFormatter.ofPattern("HH:mm"),
         )
-
-        val MOMENT_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
     }
 }
+
+/**
+ * 「每天 07:30」/「每 300 秒」/「一次性 2026-10-12 07:30」——一行说清这条提醒什么时候响。
+ *
+ * 定时任务页（[com.suixing.agent.ui.schedules.SchedulesScreen]）和工具回执读的是同一份。
+ */
+fun describeSchedule(
+    schedule: Schedule,
+    zone: ZoneId = ZoneId.systemDefault(),
+): String = when (schedule.kind) {
+    SCHEDULE_AT -> "一次性 ${formatScheduleMoment(schedule.atMillis, zone)}"
+    SCHEDULE_EVERY -> "每 ${schedule.everySeconds} 秒"
+    SCHEDULE_DAILY -> "每天 ${schedule.timeOfDay}"
+    else -> schedule.kind
+}
+
+/** 本地时区的「2026-10-12 07:30」。 */
+fun formatScheduleMoment(millis: Long, zone: ZoneId = ZoneId.systemDefault()): String =
+    MOMENT_FORMAT.format(Instant.ofEpochMilli(millis).atZone(zone))
+
+private val MOMENT_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")

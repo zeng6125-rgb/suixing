@@ -112,7 +112,12 @@ class ScheduleStore(private val file: File) {
         if (!file.exists()) {
             emptyList()
         } else {
-            runCatching { json.decodeFromString<List<Schedule>>(file.readText()) }.getOrDefault(emptyList())
+            runCatching { json.decodeFromString<List<Schedule>>(file.readText()) }.getOrElse {
+                // A corrupt board must not read back as "no reminders at all": keep the bad file
+                // next to the original name, or the next write would bury it for good.
+                file.renameTo(File(file.parentFile, "schedules.corrupt.json"))
+                emptyList()
+            }
         }
     }
 
@@ -124,8 +129,11 @@ class ScheduleStore(private val file: File) {
         val temp = File(file.parentFile, "${file.name}.tmp")
         temp.writeText(text)
         if (!temp.renameTo(file)) {
-            file.writeText(text)
-            temp.delete()
+            try {
+                file.writeText(text)
+            } finally {
+                temp.delete()
+            }
         }
         items
     }
@@ -147,6 +155,10 @@ class ScheduleStore(private val file: File) {
      * The scheduler needs exactly one alarm at a time — the nearest one — because a single
      * alarm that re-arms itself cannot drift out of step with the file the way several
      * alarms, each with its own idea of the list, can.
+     *
+     * 只有测试在用（ScheduleStoreTest）：调度服务自己走 `nextTriggerAfter` + `minByOrNull`
+     * （SchedulerService.kt:211-215），因为它还要拿到 schedule 本体，好把 id 放进 PendingIntent。
+     * 保留这个只返回时刻的入口，给将来只关心"下一次什么时候响"的调用方。
      */
     fun nextDueAt(now: Long, zone: ZoneId = ZoneId.systemDefault()): Long =
         read().filter { it.enabled }

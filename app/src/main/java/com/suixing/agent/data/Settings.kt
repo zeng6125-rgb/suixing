@@ -27,6 +27,18 @@ enum class ApprovalMode {
 }
 
 /**
+ * The three modes as the user sees them — one source of truth for the settings page and for the
+ * composer's quick picker. Two screens naming the same state differently is how a user ends up
+ * believing they are two settings; the wording here is the user's own.
+ */
+val ApprovalMode.label: String
+    get() = when (this) {
+        ApprovalMode.AUTO -> "自动运行"
+        ApprovalMode.ASK -> "每次询问"
+        ApprovalMode.DENY -> "禁止"
+    }
+
+/**
  * One OpenAI-compatible endpoint the user set up.
  *
  * Aggregating proxies (one LAN address that fronts many upstream vendors) report
@@ -179,6 +191,22 @@ data class AppSettings(
     val searchApiKey: String = "",
     /** Read every finished reply out loud through the system TTS engine. */
     val speakReplies: Boolean = false,
+    /**
+     * 语音输入：随行自己录音 + 走已配置的服务商转写。
+     *
+     * **默认关**，关掉时输入框那排里连麦克风按钮都不画。开着才用自己的录音链路 —— 它完全不碰
+     * `SpeechRecognizer`，所以不会再把系统/ROM 的识别面板弹到屏幕上（那个面板被用户否了两次）。
+     */
+    val voiceInput: Boolean = false,
+    /**
+     * 语音转写模型，例如 `whisper-1`。
+     *
+     * 空＝没配：开关可以打开，但点麦克风不会开始录音，只会提示去设置里填。填了才用
+     * [baseUrl] / [apiKey] 那对服务商凭据 POST [asrPath]。
+     */
+    val asrModel: String = "",
+    /** 转写接口的路径，拼在 [baseUrl] 后面；换服务商时这里通常不用动。 */
+    val asrPath: String = "/audio/transcriptions",
     /** Keep the thinking block on the transcript once the answer is there. */
     val showReasoning: Boolean = true,
     /**
@@ -236,7 +264,15 @@ data class AppSettings(
     val showTimestamps: Boolean = true,
     /** 工具调用卡片默认展开 */
     val expandTools: Boolean = false,
-    /** 思考过程默认展开 */
+    /**
+     * 历史思考块默认展开。
+     *
+     * 正在流式的那一块**总是**展开（看它怎么想是调用思考模型的目的），这个开关管的是**已经结束
+     * 的**思考块：开＝默认展开，关＝折叠成一行标题，用户点标题仍可逐块展开（按会话记住）。默认
+     * false，即关掉时对话流保持「一段回复 + 一行思考标题」的密度。
+     *
+     * 字段名与默认值保持不变：老配置里的键照旧读得出来，变的只是它影响的显示行为。
+     */
     val expandReasoning: Boolean = false,
     /**
      * 展开的思考块内滚高度上限（dp）：180 矮 / 240 中 / 320 高。
@@ -369,7 +405,18 @@ const val DEFAULT_SYSTEM_PROMPT = """你是随行，运行在用户安卓手机�
 - 用简洁的中文回答，必要时用短列表。"""
 
 class SettingsRepository(private val context: Context) {
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    /**
+     * `coerceInputValues` is what keeps one unknown value from costing the user everything:
+     * an enum this build does not know (a file written by a newer version, or a hand-edited
+     * one) would otherwise throw, and [decode] answers a throw by resetting *every* setting
+     * to its default. Coerced, the single bad field falls back to its own default and the
+     * rest of the file survives.
+     */
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        coerceInputValues = true
+    }
     private val key = stringPreferencesKey("settings_json")
 
     val flow: Flow<AppSettings> = context.settingsDataStore.data.map { prefs -> decode(prefs[key]) }

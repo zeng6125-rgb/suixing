@@ -3,7 +3,6 @@ package com.suixing.agent.capability
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.provider.Settings
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.service.SuixingAccessibilityService
@@ -217,21 +216,11 @@ class CapabilityHub(
 
     /**
      * Returns false when the settings screen could not be opened. "All files access"
-     * only exists from Android 11 (API 30); on older releases both intents fail.
+     * only exists from Android 11 (API 30); on older releases the list is empty and
+     * both intents fail. The two intents and their order come from AllFilesAccess.kt.
      */
-    fun openAllFilesSettings(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-        val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-            .setData(android.net.Uri.parse("package:${context.packageName}"))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return runCatching { context.startActivity(intent) }
-            .recoverCatching {
-                context.startActivity(
-                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }
-            .isSuccess
+    fun openAllFilesSettings(): Boolean = allFilesAccessIntents(context).any { intent ->
+        runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
     }
 
     fun openAppDetails() {

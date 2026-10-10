@@ -7,8 +7,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -106,7 +104,6 @@ import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
-import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.service.FloatConsoleService
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
@@ -117,6 +114,7 @@ import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
+import com.suixing.agent.ui.schedules.SchedulesScreen
 import com.suixing.agent.ui.settings.AboutScreen
 import com.suixing.agent.ui.settings.AssistantScreen
 import com.suixing.agent.ui.settings.ProfileScreen
@@ -125,11 +123,9 @@ import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
 import com.suixing.agent.ui.theme.LocalDarkTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 
 /**
  * The one curve every page transition rides, so push and pop are the same motion played
@@ -142,12 +138,17 @@ import kotlinx.coroutines.withContext
  * and it has to still be moving when the eye lands on it; the leaving page only has to be
  * gone.
  *
- * 上一版（淡入 260 + 缩 0.98，淡出 180 + 缩 0.99）用户仍说「没有动效」。读码结论：三条
- * 通道里两条没有对比 —— 进出的两页都自己铺满不透明的 background，而品牌色与动态色里
- * background 与 surface 同色，所以交叉淡化只换了字，页面底色从头到尾是同一个；缩放只有
- * 1–2%，缩出来那一圈露的是外壳 Scaffold 的 containerColor = surface，与页面底色一样，
- * 等于没缩。位移是唯一对着静止的屏幕边框也看得见的通道，这一版把它加回来（更早那版的
- * 位移是 height / 28 ≈ 32px，同样小到看不见）。
+ * 全站唯一的转场规格：进（enter）、出（exit）、返回进（popEnter）、返回出（popExit）四套全部
+ * 只由下面这组常量和 [NAV_SHIFT_DIVISOR] 决定 —— NavHost 上一次配好，任何目的地都不再单独
+ * 覆盖。用户的原话是「动画开闭的尽量各个页面都统一，主要还是统一」。
+ *
+ * 主通道是淡入淡出，位移只有屏宽/12。用户看过 ChatGPT 之后要的是「退出也有动画，连贯虽然
+ * 不易察觉」：进页从右侧挪一小步、旧页向左让一小步，返回把这两步原样倒放（回来的那页从左
+ * 侧挪回原位）—— 来回是同一段动效的正反两面，不是两套手调的参数。
+ *
+ * 缩放不再参与：0.8.67 修过 scaleIn(0.96) 在页边露缝（露出来的是外壳 Scaffold 的
+ * containerColor = surface，与页面底色同色，等于没缩还多一条缝），位移是唯一对着静止的屏幕
+ * 边框也看得见的通道。
  */
 private const val NAV_FADE_MS = 240
 private const val NAV_ENTER_MS = 280
@@ -157,6 +158,7 @@ private val NAV_EASING = FastOutSlowInEasing
 /**
  * 横向位移的除数：屏宽 / 12 ≈ 8% 屏宽（1080p 面板上 ≈ 90px）。够看得见，又短到不会和
  * 抽屉那条 300dp 的左滑读成同一个手势 —— 抽屉是整块面板推入，页面只是「动了一下」。
+ * 四条转场（进/出/返回进/返回出）都按它算，正负号就是方向。
  */
 private const val NAV_SHIFT_DIVISOR = 12
 
@@ -225,39 +227,10 @@ fun SuixingApp() {
     // A row inside the settings page pushes, so back returns to the list it came from.
     val push: (String) -> Unit = { target -> navController.navigate(target) }
 
-    // 抽屉里点走一行时，记下出发的是哪一页：用户按返回回到那一页，抽屉应该还是开着的
-    // （用户原话「在侧边栏进入另一个页面，回来的状态要保持，现在每次回来侧边栏都会被关掉」）。
-    // 只由抽屉自己的入口置位——聊天页那个「打开设置」不是从抽屉走的，不该把抽屉带回来。
-    // remember 而不是 rememberSaveable：存下来的 "chat" 会在冷启动那一帧（起始页正是 chat）
-    // 把抽屉弹开；rotation 不走这条路（manifest 里 configChanges 已含 orientation）。
-    var drawerReturnTo by remember { mutableStateOf<String?>(null) }
-    // 恢复只恢复状态，不重放动画（用户纠正：「不是让你去返回的时候，那个侧边栏的动画再来一遍
-    // 啊？」）。这一位只由下面的恢复路径置起，由「用户自己拉开抽屉」那条路清掉——清的那一刻
-    // 抽屉是关着的，换 spec 不会打断任何正在跑的动画。于是恢复那一次是瞬时出现，之后每次手动
-    // 打开照常演 240ms 左滑。
-    var drawerInstant by remember { mutableStateOf(false) }
-    // 用户自己收起抽屉（遮罩、返回键）：记下的出发页一起清掉，回来时不该再弹出来。
-    val closeDrawer: () -> Unit = {
-        drawerOpen = false
-        drawerReturnTo = null
-    }
-    // 抽屉里的一行：比 open 多记一件事。目标是当前页时（点会话、点新对话）不记——那不是
-    // 「去了别的页」，记下来会当场被判成「回到出发页」而把抽屉又弹开。
-    val openFromDrawer: (String) -> Unit = { target ->
-        if (target != route) drawerReturnTo = route
-        open(target)
-    }
-    // 回到出发的那一页就把抽屉放回去：状态要，动画不要（见 drawerInstant）。这个 effect 只挂
-    // 在 route 上、不挂 drawerReturnTo：点走的那一帧，抽屉的关闭和导航都还没生效，两个键都挂
-    // 着会在那一帧就把抽屉判成「该开着」又弹回来；只认路由变化，就只在真的回到那一页时触发。
-    LaunchedEffect(route) {
-        val from = drawerReturnTo
-        if (from != null && route == from) {
-            drawerReturnTo = null
-            drawerInstant = true
-            drawerOpen = true
-        }
-    }
+    // 用户自己收起抽屉（遮罩、返回键）。抽屉只在用户自己拉开时打开：返回上一页不会把它
+    // 重新打开（用户看过 ChatGPT 之后明确说的：「也不会说把侧边栏重新打开」），所以这里
+    // 不需要记「从哪一页走的」。
+    val closeDrawer: () -> Unit = { drawerOpen = false }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
     // IME inset frame by frame. The shell lays itself out by a *clamped* copy of that inset:
@@ -284,12 +257,7 @@ fun SuixingApp() {
         imeDir = 0
     }
     CompositionLocalProvider(
-        // 用户自己拉开抽屉（聊天页那个汉堡键）：把「恢复不重放动画」那一位还回去，
-        // 下一次开合照常演左滑。
-        LocalOpenSidebar provides {
-            drawerInstant = false
-            drawerOpen = true
-        },
+        LocalOpenSidebar provides { drawerOpen = true },
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
@@ -372,44 +340,46 @@ fun SuixingApp() {
                     // (1/12 screen width): the drawer already owns the long leftward slide,
                     // and a second full-width sweep under it would read as two panels
                     // fighting, while a small one only says "this page moved".
-                    // 整幅横移，不再缩放：缩放 0.96 会在新页四周留出一圈缝，缝里透出的正是
-                    // 上一页——用户的原话是「页面是共存的，并不是单独的」。现在新页从右侧
-                    // 整幅滑入（完全盖住旧页），旧页只做 1/3 幅的视差左移 + 淡出，读起来是
-                    // 一页盖一页的推入，而不是两页叠在一起。抽屉仍是它自己的 300dp 左滑，
-                    // 与这里的整幅推入方向不同，不会混。
+                    // 位移只有屏宽/12（NAV_SHIFT_DIVISOR）：新页从右侧挪一小步、旧页向左让
+                    // 一小步，返回时这两步原样倒放。整幅横移那一版（新页整幅滑入、旧页 1/3
+                    // 幅视差）在用户看过 ChatGPT 之后仍嫌「不够连贯」——小位移 + 淡入淡出
+                    // 才是那一段观感的来源。抽屉仍是它自己的 300dp 左滑，与页面这一小步
+                    // 方向不同，不会混。
+                    // 四套转场全在这一个地方配：进/出/返回进/返回出都是同一组 NAV_* 常量、
+                    // 同一个位移除数，方向互为镜像（见文件顶部那段）。返回的动画上一版被砍
+                    // 成瞬时，用户否了：「退出页面的动画加回来吧……退出也有动画，连贯虽然不
+                    // 易察觉」。这里不再有任何按目的地分叉的条件。
                     enterTransition = {
                         fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
-                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) { it }
+                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
+                                it / NAV_SHIFT_DIVISOR
+                            }
                     },
                     exitTransition = {
                         fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) { -it / 3 }
+                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
+                                -it / NAV_SHIFT_DIVISOR
+                            }
                     },
-                    // 返回 chat 的这一趟，就是「从抽屉进入的那几页回到来源页」：用户要的是连续性
-                    // ——回来时看到的就该是离开时那一屏，页面若再演一遍滑入滑出就是两层动画。
-                    // 只认 targetState == chat（能压在 chat 上面的只有抽屉那几个顶层页）：从设置
-                    // 子页返回设置列表（settings/model → settings）targetState 是 settings，
-                    // 仍照常演动画，那是另一种返回。
                     popEnterTransition = {
-                        if (targetState.destination.route == "chat") {
-                            EnterTransition.None
-                        } else {
-                            fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
-                                slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) { -it / 3 }
-                        }
+                        fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
+                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
+                                -it / NAV_SHIFT_DIVISOR
+                            }
                     },
                     popExitTransition = {
-                        if (targetState.destination.route == "chat") {
-                            ExitTransition.None
-                        } else {
-                            fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                                slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) { it }
-                        }
+                        fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
+                                it / NAV_SHIFT_DIVISOR
+                            }
                     },
                 ) {
                     composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
                     composable("files") { FilesScreen(onBack = { navController.popBackStack() }) }
                     composable("tasks") { TasksScreen(onBack = { navController.popBackStack() }) }
+                    // 定时任务是「到点自己跑」的那一份，与 agent 的 todo 看板（"tasks"）是两件
+                    // 事：抽屉那行说的「任务」一直指的是后者，用户以为是摆设，才有了这一页。
+                    composable("schedules") { SchedulesScreen(onBack = { navController.popBackStack() }) }
                     composable("settings") {
                         SettingsScreen(
                             onOpen = push,
@@ -466,8 +436,6 @@ fun SuixingApp() {
             }
             Drawer(
                 open = drawerOpen,
-                // 恢复那一次瞬时出现（见 drawerInstant），不重放滑入。
-                instant = drawerInstant,
                 route = route,
                 conversations = conversations,
                 activeId = activeConversationId,
@@ -475,14 +443,14 @@ fun SuixingApp() {
                 onClose = closeDrawer,
                 onNew = {
                     chat.newConversation()
-                    openFromDrawer("chat")
+                    open("chat")
                 },
                 onOpenConversation = { conversation ->
                     chat.openConversation(conversation)
-                    openFromDrawer("chat")
+                    open("chat")
                 },
                 onDeleteConversation = { chat.deleteConversation(it) },
-                onNavigate = openFromDrawer,
+                onNavigate = open,
                 onAssistants = {
                     // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
                     drawerOpen = false
@@ -548,8 +516,6 @@ fun SuixingApp() {
 @Composable
 private fun BoxScope.Drawer(
     open: Boolean,
-    /** 恢复（回到出发页）那一次：立即出现，不重放滑入动画——用户明确要的。 */
-    instant: Boolean,
     route: String,
     conversations: List<Conversation>,
     activeId: String,
@@ -564,9 +530,6 @@ private fun BoxScope.Drawer(
     onAssistants: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    // The board changes behind our back (the agent writes it mid-run), so the count is
-    // re-read every time the drawer opens rather than cached for the process.
-    var todoCount by remember { mutableStateOf(0) }
     // Every delete entry in the drawer funnels through this one confirmation: a swipe
     // of the thumb on a row must not be able to erase a conversation outright.
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
@@ -578,9 +541,6 @@ private fun BoxScope.Drawer(
             // 设置 included, would sit off-screen with nothing able to scroll them.
             // Dropping the keyboard gives the panel the height it was laid out for.
             keyboard?.hide()
-            todoCount = withContext(Dispatchers.IO) {
-                Core.todos.read().count { it.status != TODO_COMPLETED }
-            }
         }
     }
 
@@ -588,12 +548,9 @@ private fun BoxScope.Drawer(
     // 当场发出的，面板若还按 200/160ms 慢慢退，就会和新页面的入场（280ms）同帧叠着演，
     // 屏幕上同时有两条滑动（用户说「动画有点奇怪」）。缩到 120ms 让面板先退干净、页面再
     // 到位；入场保持原样（240/180），那是用户已经接受的一半。
-    // instant（恢复的那一次）连 240ms 的左滑都不演：用户要的是「回来时抽屉本来就还在」的
-    // 连续性，不是重新拉开一遍面板。遮罩与面板走同一条路，否则会出现「面板已经在了、遮罩
-    // 还在淡入」的错位。
     AnimatedVisibility(
         visible = open,
-        enter = if (instant) EnterTransition.None else fadeIn(tween(180)),
+        enter = fadeIn(tween(180)),
         exit = fadeOut(tween(120)),
     ) {
         Box(
@@ -611,7 +568,7 @@ private fun BoxScope.Drawer(
     AnimatedVisibility(
         visible = open,
         modifier = Modifier.align(Alignment.CenterStart),
-        enter = if (instant) EnterTransition.None else slideInHorizontally(tween(240)) { -it },
+        enter = slideInHorizontally(tween(240)) { -it },
         exit = slideOutHorizontally(tween(120)) { -it },
     ) {
         Surface(
@@ -696,11 +653,10 @@ private fun BoxScope.Drawer(
                     onClick = onAssistants,
                 )
                 DrawerAction(
-                    label = "任务",
-                    icon = painterResource(R.drawable.ic_list_checks),
-                    selected = route == "tasks",
-                    onClick = { onNavigate("tasks") },
-                    badge = if (todoCount > 0) "$todoCount" else null,
+                    label = "定时任务",
+                    icon = painterResource(R.drawable.ic_clock),
+                    selected = route == "schedules",
+                    onClick = { onNavigate("schedules") },
                 )
                 DrawerAction(
                     label = "文件",
@@ -987,6 +943,3 @@ private fun ApprovalDialog(
         },
     )
 }
-
-/** Shared content padding so every screen lines up with the same gutters. */
-internal val ScreenPadding = PaddingValues(horizontal = 16.dp)

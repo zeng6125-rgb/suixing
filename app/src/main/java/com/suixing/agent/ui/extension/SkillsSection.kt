@@ -131,12 +131,12 @@ private fun SkillGroupHeader(title: String, count: Int) {
  * only place they are shown. A skill made on this device has no URL to show.
  */
 private fun downloadedLine(skill: Skill): String {
-    val when_ = if (skill.sourceAt > 0L) {
+    val stamp = if (skill.sourceAt > 0L) {
         " · " + SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(skill.sourceAt))
     } else {
         ""
     }
-    return "来源：${skill.sourceUrl}$when_"
+    return "来源：${skill.sourceUrl}$stamp"
 }
 
 private fun sourceLabel(source: SkillSource): String = when (source) {

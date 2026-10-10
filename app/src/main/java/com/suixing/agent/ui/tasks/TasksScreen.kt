@@ -59,8 +59,10 @@ import kotlinx.coroutines.withContext
 fun TasksScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var items by remember { mutableStateOf<List<TodoItem>>(emptyList()) }
+    var loaded by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         items = withContext(Dispatchers.IO) { Core.todos.read() }
+        loaded = true
     }
     val save: (List<TodoItem>) -> Unit = { next ->
         items = next
@@ -78,8 +80,19 @@ fun TasksScreen(onBack: () -> Unit) {
                 .padding(padding)
                 .navigationBarsPadding(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (loaded && items.isEmpty()) {
+                item(key = "empty") {
+                    Text(
+                        text = "任务板是空的。在对话里让模型做多步任务，它会把步骤记到这里；" +
+                            "出现之后点一下切换状态，长按删除。",
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             todoGroup("进行中", TODO_IN_PROGRESS, scheme.primary, items, save)
             todoGroup("待办", TODO_PENDING, scheme.onSurfaceVariant, items, save)
             todoGroup("已完成", TODO_COMPLETED, scheme.tertiary, items, save)
@@ -138,7 +151,7 @@ private fun LazyListScope.todoGroup(
                         },
                         onLongClick = { save(board.filterNot { it.id == row.id }) },
                     )
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(

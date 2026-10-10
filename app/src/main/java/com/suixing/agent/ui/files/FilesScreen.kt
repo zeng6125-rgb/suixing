@@ -3,11 +3,8 @@ package com.suixing.agent.ui.files
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -20,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -52,13 +50,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
+import com.suixing.agent.capability.allFilesAccessIntents
 import com.suixing.agent.tools.humanSize
 import com.suixing.agent.tools.workspaceDir
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.RowChevron
+import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
+import com.suixing.agent.ui.theme.FileTypeColors
 import com.suixing.agent.ui.theme.MonoStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -147,7 +150,7 @@ fun FilesScreen(onBack: () -> Unit) {
                                 // The grant lives in the system settings app, so it is reached
                                 // through the launcher and re-read on the way back. Only a ROM
                                 // without either page falls through to the message.
-                                val opened = allFilesSettingsIntents(context).any { intent ->
+                                val opened = allFilesAccessIntents(context).any { intent ->
                                     runCatching { allFilesLauncher.launch(intent) }.isSuccess
                                 }
                                 if (!opened) {
@@ -242,6 +245,7 @@ fun FilesScreen(onBack: () -> Unit) {
             Text(
                 text = "这个目录是空的",
                 modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
+                textAlign = TextAlign.Center,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -262,7 +266,7 @@ fun FilesScreen(onBack: () -> Unit) {
                     }
                 }
             }
-            item { Spacer(Modifier.height(16.dp)) }
+            item { Spacer(Modifier.height(72.dp)) }
         }
     }
 
@@ -282,9 +286,10 @@ private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (F
     val segments = remember(root, current) {
         val tail = ArrayDeque<File>()
         var walk = current
-        while (walk != root && walk.parentFile != null) {
+        while (walk != root) {
+            val parent = walk.parentFile ?: break
             tail.addFirst(walk)
-            walk = walk.parentFile!!
+            walk = parent
         }
         buildList {
             add(rootLabel to root)
@@ -339,36 +344,18 @@ private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (F
 @Composable
 private fun EntryRow(entry: Entry, onClick: () -> Unit) {
     val (icon, tint) = iconFor(entry.file)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        SoftIcon(icon, size = 36.dp, tint = tint)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = entry.file.name,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = "${entry.size} · ${entry.modified}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (entry.file.isDirectory) {
-            Icon(
-                ImageVector.vectorResource(R.drawable.ic_chevron_right),
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.outline,
-            )
-        }
-    }
+    // 行本身只有一份实现（Common.SettingRow）。这一页的行不在卡片里，所以横向 16dp
+    // 由这里给（SettingRow 自己不加横向 padding）；纵向 12dp、标题 bodyLarge、
+    // 副标题 bodySmall 都是全站统一值。
+    SettingRow(
+        title = entry.file.name,
+        subtitle = "${entry.size} · ${entry.modified}",
+        leading = { SoftIcon(icon, size = 36.dp, tint = tint) },
+        control = if (entry.file.isDirectory) ({ RowChevron() }) else null,
+        onClick = onClick,
+        modifier = Modifier.padding(horizontal = 16.dp),
+        titleMaxLines = 1,
+    )
 }
 
 @Composable
@@ -393,7 +380,7 @@ private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, on
                 Text(
                     text = content,
                     modifier = Modifier
-                        .height(320.dp)
+                        .heightIn(max = 320.dp)
                         .verticalScroll(rememberScrollState())
                         .padding(12.dp),
                     style = MonoStyle,
@@ -414,39 +401,23 @@ private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, on
 /** Extension-driven icon and colour, so the list is scannable without reading names. */
 @Composable
 private fun iconFor(file: File): Pair<ImageVector, Color> {
-    if (file.isDirectory) return ImageVector.vectorResource(R.drawable.ic_folder) to Color(0xFFAD7BF9)
+    if (file.isDirectory) return ImageVector.vectorResource(R.drawable.ic_folder) to FileTypeColors.folder
     return when (file.extension.lowercase(Locale.ROOT)) {
-        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> ImageVector.vectorResource(R.drawable.ic_image) to Color(0xFF89C8AF)
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> ImageVector.vectorResource(R.drawable.ic_image) to FileTypeColors.image
         "kt", "kts", "java", "py", "js", "ts", "tsx", "jsx", "c", "cpp", "h", "rs", "go", "sh",
         "json", "yml", "yaml", "xml", "toml", "gradle", "html", "css", "sql",
-        -> ImageVector.vectorResource(R.drawable.ic_file_code) to Color(0xFF7FB3E8)
-        "md", "txt", "log", "csv", "ini", "conf", "properties" -> ImageVector.vectorResource(R.drawable.ic_file_text) to Color(0xFFB9B4AA)
-        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> ImageVector.vectorResource(R.drawable.ic_file_archive) to Color(0xFFF0C070)
-        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> ImageVector.vectorResource(R.drawable.ic_music) to Color(0xFFD1A3E8)
-        "mp4", "mkv", "mov", "avi", "webm" -> ImageVector.vectorResource(R.drawable.ic_film) to Color(0xFFE89A9A)
-        else -> ImageVector.vectorResource(R.drawable.ic_file) to Color(0xFF9A958C)
+        -> ImageVector.vectorResource(R.drawable.ic_file_code) to FileTypeColors.code
+        "md", "txt", "log", "csv", "ini", "conf", "properties" -> ImageVector.vectorResource(R.drawable.ic_file_text) to FileTypeColors.text
+        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> ImageVector.vectorResource(R.drawable.ic_file_archive) to FileTypeColors.archive
+        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> ImageVector.vectorResource(R.drawable.ic_music) to FileTypeColors.audio
+        "mp4", "mkv", "mov", "avi", "webm" -> ImageVector.vectorResource(R.drawable.ic_film) to FileTypeColors.video
+        else -> ImageVector.vectorResource(R.drawable.ic_file) to FileTypeColors.other
     }
 }
 
 private fun relativePath(root: File, current: File, rootLabel: String): String {
     if (current == root) return rootLabel
     return current.absolutePath.removePrefix(root.absolutePath).trimStart('/')
-}
-
-/**
- * 「所有文件访问权限」的两个设置页，按顺序试：单个应用的入口更准，全局列表是有些 ROM 才有的那个。
- *
- * Third copy of the same two intents (capability/CapabilityHub.kt and
- * ui/capability/CapabilityScreen.kt hold the other two): this one needs the Intent in hand
- * because the grant is read back through a launcher. Keep the three in step.
- */
-private fun allFilesSettingsIntents(context: Context): List<Intent> {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
-    return listOf(
-        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-            .setData(Uri.parse("package:${context.packageName}")),
-        Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
-    )
 }
 
 private fun copyToClipboard(context: Context, text: String) {

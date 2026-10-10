@@ -41,6 +41,14 @@ class McpStore(private val context: Context) {
 
     private val file: File get() = File(context.filesDir, "mcp.json")
 
+    /**
+     * The app's own versionName, read from the package. MCP hands it to servers as the client
+     * version, and a constant in the source drifts behind the build every release.
+     */
+    fun appVersionName(): String = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    }.getOrNull().orEmpty().ifBlank { "unknown" }
+
     suspend fun load(): List<McpServerConfig> = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext emptyList()
         try {
@@ -54,6 +62,18 @@ class McpStore(private val context: Context) {
     }
 
     suspend fun save(configs: List<McpServerConfig>) = withContext(Dispatchers.IO) {
-        file.writeText(json.encodeToString(ListSerializer(McpServerConfig.serializer()), configs))
+        file.parentFile?.mkdirs()
+        // Temp file then rename, as in the other stores: a kill mid-write would leave a
+        // truncated file, and a truncated file reads back as "no servers at all".
+        val text = json.encodeToString(ListSerializer(McpServerConfig.serializer()), configs)
+        val temp = File(file.parentFile, "${file.name}.tmp")
+        temp.writeText(text)
+        if (!temp.renameTo(file)) {
+            try {
+                file.writeText(text)
+            } finally {
+                temp.delete()
+            }
+        }
     }
 }

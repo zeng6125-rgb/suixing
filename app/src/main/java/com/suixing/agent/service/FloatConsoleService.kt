@@ -57,8 +57,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -108,6 +112,11 @@ class FloatConsoleService : Service() {
         /** The engine publishes a running tool as 「🔧 name…」 on [AgentEngine.RunHandle.liveLine]. */
         private const val TOOL_LIVE_PREFIX = "🔧 "
 
+        /** 诊断日志：用户报「球不出现」时，这一个文件就能分辨三种完全不同的原因。 */
+        private const val CONSOLE_TRACE_FILE = "console-trace.log"
+        private const val CONSOLE_TRACE_MAX_BYTES = 32 * 1024
+        private const val CONSOLE_TRACE_KEEP_BYTES = 16 * 1024
+
         /** Overlay windows are the user's to grant; without it there is nothing to show. */
         fun canDrawOverlays(context: Context): Boolean = Settings.canDrawOverlays(context)
 
@@ -117,12 +126,13 @@ class FloatConsoleService : Service() {
         /**
          * Brings the console up.
          *
-         * @return false when the overlay permission has not been granted, in which case
-         *   nothing is started at all — a window the system will reject is not worth
-         *   asking for.
+         * @return false when no host can carry the window at all: the overlay permission has not
+         *   been granted *and* the accessibility service is not connected either. With the
+         *   accessibility host the grant is not needed — its window is granted by virtue of the
+         *   service being enabled — so a device with the service on can show the ball without it.
          */
         fun start(context: Context): Boolean {
-            if (!canDrawOverlays(context)) return false
+            if (!canDrawOverlays(context) && SuixingAccessibilityService.instance() == null) return false
             val intent = Intent(context, FloatConsoleService::class.java)
             return runCatching { context.startForegroundService(intent) }.isSuccess
         }
@@ -145,9 +155,15 @@ class FloatConsoleService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** The trace file is written from its own thread: a log must never hold up a frame. */
+    private val traceWorker = Executors.newSingleThreadExecutor()
+
     private lateinit var palette: Palette
     private lateinit var windowManager: WindowManager
     private lateinit var params: WindowManager.LayoutParams
+
+    /** Which kind of overlay window is up: accessibility (preferred) or application. */
+    private var windowType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
     private lateinit var root: LinearLayout
     private lateinit var panel: LinearLayout
     private lateinit var statusDot: View
@@ -226,7 +242,9 @@ class FloatConsoleService : Service() {
                 palette = paletteFor(Core.settings.current().themeMode)
                 buildConsole()
                 observeRun()
+                watchAccessibility()
                 ProcessLifecycleOwner.get().lifecycle.addObserver(appLifecycle)
+                trace("service=start")
                 // 常驻 shows the ball as soon as the console is up *and* the user has left 随行;
                 // in front of the app it is never shown. With only 「运行时显示」 ticked this
                 // first decision is "stay hidden", and the observer above catches the moment the
@@ -240,6 +258,7 @@ class FloatConsoleService : Service() {
     }
 
     override fun onDestroy() {
+        trace("service=stop")
         if (::root.isInitialized) ProcessLifecycleOwner.get().lifecycle.removeObserver(appLifecycle)
         dotPulse?.cancel()
         scope.cancel()
@@ -250,16 +269,49 @@ class FloatConsoleService : Service() {
     // ------------------------------------------------------------------ 窗口
 
     /**
-     * Builds the window and the views but does not attach them: whether the console is
-     * visible at all depends on where the user is and on the two switches, which
-     * [refreshVisibility] decides.
+     * Builds the views, and the window they live in.
+     *
+     * Which kind of window that is decided by [createWindow], and re-decided whenever the
+     * accessibility service connects or goes away ([watchAccessibility]).
      */
     private fun buildConsole() {
-        windowManager = getSystemService(WindowManager::class.java)
+        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        panel = buildPanel()
+        root.addView(buildBall())
+        root.addView(panel)
+        createWindow()
+    }
+
+    /**
+     * The host the window is added from, and which kind of window it is.
+     *
+     * `TYPE_APPLICATION_OVERLAY` needs SYSTEM_ALERT_WINDOW **and** is the kind MIUI and its kin hide
+     * the moment the app leaves the foreground — which is the only moment this console is shown at
+     * all, so on that ROM the ball could never be seen however the switches were set. An
+     * accessibility service's own context is a system-trusted host: `TYPE_ACCESSIBILITY_OVERLAY`
+     * needs no permission and is not hidden in the background. The application window stays as the
+     * fallback for a device with no accessibility service connected.
+     */
+    private fun windowHost(): Pair<Context, Int> {
+        val service = SuixingAccessibilityService.instance()
+        return if (service != null) {
+            service to WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+        } else {
+            applicationContext to WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        }
+    }
+
+    private fun createWindow() {
+        val (host, type) = windowHost()
+        // The host's own WindowManager: an accessibility overlay belongs to that service's window
+        // stack, and every later updateViewLayout goes through the same one.
+        windowManager = host.getSystemService(WindowManager::class.java)
+            ?: getSystemService(WindowManager::class.java)
+        windowType = type
         params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            type,
             // Not focusable while collapsed, so the ball never steals the keyboard from
             // the app underneath; not touch-modal, so taps beside it still reach that app.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -270,11 +322,31 @@ class FloatConsoleService : Service() {
             x = dp(12)
             y = dp(180)
         }
+        trace("window host=${if (type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) "accessibility" else "application"}")
+    }
 
-        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        panel = buildPanel()
-        root.addView(buildBall())
-        root.addView(panel)
+    /**
+     * Rebuilds the window when the accessibility service appears or goes away.
+     *
+     * The host cannot be switched on a live window: a window belongs to the stack it was added to,
+     * so the old one is taken down and the new one is built in its place — and put back up if it was
+     * up, or the console would vanish on the user when they enable the service.
+     */
+    private fun watchAccessibility() {
+        scope.launch {
+            Core.capabilities.state.collect { state ->
+                val wanted = if (state.accessibility) {
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                } else {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                }
+                if (wanted == windowType) return@collect
+                val wasAttached = attached
+                detach()
+                createWindow()
+                if (wasAttached) attach()
+            }
+        }
     }
 
     private fun attach() {
@@ -282,32 +354,70 @@ class FloatConsoleService : Service() {
         // The flag follows what the window manager actually did. A window the system refused
         // (the permission was revoked between the check and now) must not be remembered as
         // attached, or the console would stay invisible for the rest of the run.
-        attached = runCatching { windowManager.addView(root, params) }.isSuccess
+        val added = runCatching { windowManager.addView(root, params) }
+        attached = added.isSuccess
+        val error = added.exceptionOrNull()
+        trace(
+            "attach=${if (attached) "ok" else "failed"} " +
+                "host=${if (windowType == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) "accessibility" else "application"}" +
+                if (error == null) "" else " error=${error.javaClass.simpleName}: ${error.message}",
+        )
     }
 
     private fun detach() {
         if (!attached) return
         runCatching { windowManager.removeView(root) }
         attached = false
+        trace("detach")
     }
 
     /**
      * Whether the console is on screen right now — see [appLifecycle] for what each switch means.
      *
-     * Re-read from the settings on every call rather than cached: both switches can be flipped
-     * while the console is up, and a cached copy would leave the ball disagreeing with its own
-     * switch.
+     * Read from the synchronous copy of the settings rather than from `current()`, which is
+     * suspending and cannot be awaited from a lifecycle callback or a touch listener.
      */
     private fun refreshVisibility() {
         val settings = consoleSettings
-        val foreground = ProcessLifecycleOwner.get().lifecycle.currentState
-            .isAtLeast(Lifecycle.State.STARTED)
+        val lifecycle = ProcessLifecycleOwner.get().lifecycle.currentState
+        val foreground = lifecycle.isAtLeast(Lifecycle.State.STARTED)
         val running = Core.engine.runsFlow.value.isNotEmpty()
         // 前台一律不显示；不在前台时：常驻 ⇒ 一直显示，否则看 B（运行时才显示）。
         val visible = !foreground &&
             (settings.resident || (settings.whileRunning && running))
+        trace(
+            "state lifecycle=$lifecycle foreground=$foreground running=$running " +
+                "resident=${settings.resident} whileRunning=${settings.whileRunning} visible=$visible attached=$attached",
+        )
         if (visible) attach() else detach()
     }
+
+    /**
+     * One line per decision, appended to `filesDir/console-trace.log`.
+     *
+     * 「球不出现」 has three completely different causes — the service never started, the visibility
+     * rule decided no, or the window manager refused the window — and from the phone they look
+     * identical. This file tells them apart: the first line is `service=start`, the rule prints all
+     * four of its inputs, and a refused window prints the exception. Keep it small, it is written
+     * from a phone.
+     */
+    private fun trace(line: String) {
+        val entry = "${stamp()} $line canDrawOverlays=${Settings.canDrawOverlays(this)} " +
+            "accessibility=${SuixingAccessibilityService.instance() != null} " +
+            "runs=${Core.engine.runsFlow.value.size}\n"
+        traceWorker.execute {
+            runCatching {
+                val file = File(filesDir, CONSOLE_TRACE_FILE)
+                if (file.length() > CONSOLE_TRACE_MAX_BYTES) {
+                    val tail = file.readText().takeLast(CONSOLE_TRACE_KEEP_BYTES)
+                    file.writeText("— 已截断，仅保留最近一段 —\n$tail")
+                }
+                file.appendText(entry)
+            }
+        }
+    }
+
+    private fun stamp(): String = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
 
     /**
      * The panel's width: whatever the user last dragged it to, or 268dp, and never wider than the
@@ -766,6 +876,7 @@ class FloatConsoleService : Service() {
                     whileRunning = stored.consoleWhileRunning,
                     widthDp = stored.consoleWidthDp,
                 )
+                trace("settings resident=${stored.floatingConsole} whileRunning=${stored.consoleWhileRunning} width=${stored.consoleWidthDp}")
                 applyPanelWidth()
                 refreshVisibility()
             }

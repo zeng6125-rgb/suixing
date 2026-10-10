@@ -20,7 +20,9 @@ import android.view.Display
 import android.view.RoundedCorner
 import android.view.View
 import android.view.WindowManager
+import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
@@ -120,17 +122,16 @@ private const val FX_BREATH_MIN_ALPHA = 0.22f
 private const val FX_BREATH_MAX_ALPHA = 0.55f
 
 /**
- * How long the light lingers after the last driving action, once nothing is driving any more.
+ * How long the light fades out after the driving run has left.
  *
- * This no longer decides whether the edge is lit — [shouldLight] does, and its first answer is the
- * run's own life. What is left for this number is the tail: a run can leave long after its last
- * tap (it reads the screen, it thinks, it answers), and the edge fades on the first tick whose last
- * action is older than this, instead of going out the instant the id disappears.
+ * The light is on while a run that drove is still alive ([shouldLight]); this number is only the
+ * fade of that one episode. A run can leave long after its last tap — it reads the screen, it
+ * thinks, it answers — and going dark on the very frame the run disappears reads as a glitch
+ * rather than as a state ending.
  *
- * The timer version of this was the 「会断」 report: 6s after *any* action the light went out — a
- * model turn between two taps routinely takes longer — and came back on the next tap, so one task
- * read as 亮-暗-亮. Six seconds still bridges the hand-over between two runs of a conversation, so
- * an ending turn does not blink the light out before the next one starts.
+ * It can never light the edge on its own: the fade counts from the departure ([drivingLeftAt]), and
+ * a departure only exists if a run had switched the light on. 6s 曾经是「距上次动作多久」，那正是
+ * 用户报的「不在执行任务也会显示」—— 一次驱动动作之后光自己亮了 6 秒，跟有没有 run 在跑无关。
  */
 private const val FX_BREATH_HOLD_MS = 6000L
 
@@ -168,14 +169,6 @@ private const val FX_BREATH_TICK_MS = 1000L
 private const val FX_DRIVING_GRACE_MS = 5_000L
 
 /**
- * A background job can operate the phone with no chat run in flight, and then there is no run
- * whose ending could put the light out. That path is bounded by time instead: the light stays
- * for this long after the last action, so a job that dies mid-way still lets go of it.
- */
-private const val FX_JOB_DRIVING_ID = "job"
-private const val FX_JOB_WINDOW_MS = 20_000L
-
-/**
  * Effects are invisible when they fail: a window the system refused to add looks exactly like a
  * run that never asked for one, and which of the two it was decides where to look next. Nothing
  * else in the app can tell them apart, so every entry writes a line here. It is a diagnostic, not
@@ -184,6 +177,15 @@ private const val FX_JOB_WINDOW_MS = 20_000L
 private const val FX_TRACE_FILE = "fx-trace.log"
 private const val FX_TRACE_MAX_BYTES = 48 * 1024
 private const val FX_TRACE_KEEP_BYTES = 24 * 1024
+
+/**
+ * How often the light's own state is written while it does not change.
+ *
+ * The `light=` line is written whenever the answer flips — that is the timeline a 「灯不该亮却亮着」
+ * report is read from — and then once every this often, so a light that stays on for ten minutes
+ * still says why. Ten seconds stays well inside the trace's own cap.
+ */
+private const val FX_LIGHT_TRACE_MS = 10_000L
 
 /** Built once, like the gesture patterns: what the user typed is not a diagnostic anyway. */
 private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
@@ -199,7 +201,8 @@ private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
  * The flash says "something just happened"; the faint breath of the same rainbow ring that
  * [noteDriving] switches on says "it is still happening". Only driving earns the breath — a run
  * that reads the screen or only answers in words shows nothing, because the user asked to see
- * their phone being operated, not to be told that someone is looking at it.
+ * their phone being operated, not to be told that someone is looking at it. 随行自己在前台时也
+ * 不亮（用户口径：在前台一律不显示）—— 用户正看着 App 的时候，光没有要传达的信息。
  *
  * Nothing here steers anything: the accessibility service calls it after it has decided
  * to dispatch a gesture, so the drawing can never claim something the phone did not do.
@@ -254,12 +257,23 @@ object TouchFx {
     private var lastDrivingAt = 0L
 
     /**
-     * When a driving action happened with no run in flight — see [FX_JOB_DRIVING_ID].
+     * When the last driving run left, which is what the fade [FX_BREATH_HOLD_MS] counts from.
      *
-     * Volatile for the same reason as [drivingIds].
+     * Zero means no episode is finishing. Set by the ticker on the tick that sees the departure, so
+     * a tail can only extend a light a run had already switched on — a timer alone cannot light the
+     * edge. Volatile for the same reason as [drivingIds].
      */
     @Volatile
-    private var jobDrivingUntil = 0L
+    private var drivingLeftAt = 0L
+
+    /** The last answer handed to the view, so the trace writes a line when it flips. Main thread. */
+    private var lastLit = false
+
+    /** When the trace last wrote a `light=` line, so a long run still shows as a heartbeat. */
+    private var lastLightTraceAt = 0L
+
+    /** The process-lifecycle observer is added once, from the main thread — see [watchForeground]. */
+    private var watchingForeground = false
 
     /** The run set as the previous tick saw it, so a tick can tell which run just ended. */
     private var previousIds: Set<String> = emptySet()
@@ -376,26 +390,23 @@ object TouchFx {
      * The run ids are captured here rather than passed in from the tools: the run that drove is
      * the one whose ending has to put the light out, and the engine already knows which those are.
      *
-     * With no run in flight — a background job operating the phone — there is nothing to watch
-     * for an ending, so the light follows the actions themselves and then a fixed window.
-     *
      * Ids are added, never replaced: a run that drove keeps the light for as long as it lives,
      * even if the next action is taken while a different set of runs happens to be in flight.
      * Ids that have ended are dropped by the ticker, so a later run in the same conversation
      * starts from nothing rather than inheriting the light from the one before it.
+     *
+     * 没有任何 run 在飞时这里什么也不点亮（原来的 job 窗口已删）：后台定时任务本身也是 run
+     * （SchedulerService 走 Core.engine.startRun），所以「没有 run 的一次驱动动作」不是任务，
+     * 它只该留下那一圈光晕，不该让边缘一直亮着 —— 用户报的正是这个。
      */
     fun noteDriving(context: Context) {
         appContext = context.applicationContext
         val running = Core.engine.runsFlow.value.keys
         lastDrivingAt = SystemClock.uptimeMillis()
         trace(context, "entry=noteDriving runs=${running.size} ids=${running.joinToString(",")}")
-        if (running.isEmpty()) {
-            jobDrivingUntil = lastDrivingAt + FX_JOB_WINDOW_MS
-            drivingIds = drivingIds + FX_JOB_DRIVING_ID
-        } else {
-            jobDrivingUntil = 0L
-            drivingIds = (drivingIds - FX_JOB_DRIVING_ID) + running
-        }
+        drivingIds = drivingIds + running
+        // 一次驱动动作开一段新的亮灯：上一段的收尾淡出到此为止。
+        drivingLeftAt = 0L
         // Also (re)starts the ticker: the first tick is immediate, so the light comes on with the
         // action instead of up to a second after it.
         main.removeCallbacks(ticker)
@@ -403,7 +414,9 @@ object TouchFx {
     }
 
     /**
-     * The light mirrors a state that lives in the engine, so it is polled rather than pushed.
+     * The light mirrors a state that lives in the engine, so it is polled rather than pushed — and
+     * every path that changes one of its inputs re-asks [shouldLight] through [apply] instead of
+     * waiting for the next tick.
      *
      * Nothing has to switch it off, which is the point: a run that dies without telling anyone
      * cannot leave the light on, because the next tick sees that its id is gone. The ticker
@@ -440,29 +453,106 @@ object TouchFx {
     }
 
     /**
-     * 该不该亮：一道只从状态推导的纯判断，不看任何 view。
+     * 该不该亮：只从状态推，不看任何 view，也**不看「上一次动作有多近」**。
      *
-     * 主体是 run 的存活 —— 操作过手机的那个 run 还在跑，光就一直在，模型想多久、工具跑多久都
-     * 不灭（用户口径：「只要 run 还在，光就保持在亮态」）。按这个顺序问三种亮法：
+     * 主判据只有一条：**驱动过手机的 run 还活着**（[drivingIds] 里有 id 且 `it in running`）。
+     * 用户的两次真机反馈把这条钉死了：光不能由时间自己点起来（「不在执行任务也会显示」），也
+     * 不能在随行自己的前台亮（「有时候在前台也会自动显示」）。
      *
-     * 1. 还有活着的 driving run：亮。**主路径**，也是「会断」的修法 —— 从前这里只有「距上次动
-     *    作 6 秒内」，而两次动作之间的一次模型回合经常比 6 秒长。
-     * 2. 没有 run 可等（后台 job 在操作手机）：由它行动时刻记下的 [FX_JOB_WINDOW_MS] 兜底，否则
-     *    一个中途死掉的 job 会让光永远亮着。
-     * 3. 已经没有 run 在操作了：只剩最后一次动作之后的收尾尾巴 [FX_BREATH_HOLD_MS]。
+     * 三种亮法，按优先级：
+     * 1. `foreground` → 一律不亮，而且立刻灭：进前台不留尾巴（用户口径：在前台一律不显示）。
+     * 2. 驱动过的 run 还活着 → 亮。模型想多久、读屏多久都不灭。
+     * 3. 那个 run 刚离场（[drivingLeftAt] 起 [FX_BREATH_HOLD_MS] 之内）→ 亮，这一段是它的淡出。
+     *    它只能延长已经亮起来的一段：没有 run 亮过就没有 [drivingLeftAt]，时间自己点不着灯。
      *
-     * 抽成一道纯判断是为了 [overlay]：窗口被系统收走、无障碍服务重连、跳转到别的界面之后新建
-     * 的 view 是「关着」的，只有重新问一遍才知道该不该亮 —— 「点击跳转后直接没了」就是新画布
-     * 没有继承状态。
+     * 抽成一道纯判断，是因为每个会改变输入的路径都要重问一遍（[apply]）：窗口重建、进出前台、
+     * 驱动动作。窗口被系统收走、无障碍服务重连、跳转之后新建的 view 都是「关着」的 —— 「点击
+     * 跳转后直接没了」就是新画布没有继承状态。
      */
-    private fun shouldLight(now: Long, running: Set<String>): Boolean =
-        drivingIds.any { it != FX_JOB_DRIVING_ID && it in running } ||
-            (FX_JOB_DRIVING_ID in drivingIds && now < jobDrivingUntil) ||
-            now - lastDrivingAt < FX_BREATH_HOLD_MS
+    private fun shouldLight(now: Long, running: Set<String>, foreground: Boolean): Boolean {
+        if (foreground) return false
+        if (drivingIds.any { it in running }) return true
+        return drivingLeftAt != 0L && now - drivingLeftAt < FX_BREATH_HOLD_MS
+    }
+
+    /**
+     * 重新算一次「该不该亮」，并立刻落到 view 上；返回这次算出来的答案。
+     *
+     * 每个会改变输入的路径都走这里，而不是只等一秒一次的 ticker —— ticker、窗口重建
+     * （[overlay]）、进出前台（[watchForeground]）、驱动动作（[noteDriving]，它立刻 post 一次
+     * ticker）。跳转和切前后台都是一瞬间的事，一秒就是「光没回来」和「光马上回来」的差别。
+     *
+     * Main thread only, like every other window operation here.
+     */
+    private fun apply(reason: String, context: Context? = null): Boolean {
+        val app = appContext ?: context ?: return false
+        watchForeground()
+        val now = SystemClock.uptimeMillis()
+        val running = Core.engine.runsFlow.value.keys
+        val inForeground = foreground()
+        val lit = shouldLight(now, running, inForeground)
+        traceLight(app, reason, lit, running, now, inForeground)
+        if (lit) overlay(app)?.setBreathing(true) else view?.setBreathing(false)
+        return lit
+    }
+
+    /**
+     * 判死用的一行：三个输入 + 结论 + 是谁问的。
+     *
+     * 变化时必写，另外每 [FX_LIGHT_TRACE_MS] 写一次心跳 —— 一次复现就能看出「谁把灯点亮的」和
+     * 「谁没把它熄掉」。Main thread only, like [apply].
+     */
+    private fun traceLight(
+        app: Context,
+        reason: String,
+        lit: Boolean,
+        running: Set<String>,
+        now: Long,
+        foreground: Boolean,
+    ) {
+        if (lit == lastLit && now - lastLightTraceAt < FX_LIGHT_TRACE_MS) return
+        lastLit = lit
+        lastLightTraceAt = now
+        trace(
+            app,
+            "light=${if (lit) "on" else "off"} reason=$reason foreground=$foreground " +
+                "drivingAlive=${drivingIds.any { it in running }} running=${running.size} " +
+                "drivingIds=${drivingIds.size} sinceAction=${now - lastDrivingAt}ms " +
+                "sinceLeft=${if (drivingLeftAt == 0L) "-" else "${now - drivingLeftAt}ms"}",
+        )
+    }
+
+    /**
+     * 随行自己在前台吗 —— 与悬浮球同一条口径（用户：「在前台一律不显示」）。
+     *
+     * 进程级判定，所以无障碍服务和前台服务都不会让它保持 STARTED：STARTED 就是「用户正看着
+     * 随行」，而不是「随行在跑」。Main thread only.
+     */
+    private fun foreground(): Boolean =
+        ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+
+    /**
+     * 进出前台各重算一次，不等 ticker：进前台立刻灭（不留 6 秒尾巴），退到后台且驱动 run 还活着
+     * 立刻亮。注册只在主线程做一次 —— [apply] 就是主线程，[ProcessLifecycleOwner] 也只认主线程。
+     */
+    private fun watchForeground() {
+        if (watchingForeground) return
+        watchingForeground = true
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    apply("foreground")
+                }
+
+                override fun onStop(owner: LifecycleOwner) {
+                    apply("background")
+                }
+            },
+        )
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
-            val app = appContext
             val now = SystemClock.uptimeMillis()
             val running = Core.engine.runsFlow.value.keys
             val departed = previousIds - running
@@ -472,6 +562,10 @@ object TouchFx {
             // this tick rather than after the light's grace period. A run that merely shared the
             // screen with the one that drove does not earn the trip on its own.
             val drivingLeft = departed.any { it in drivingIds }
+            if (drivingLeft) {
+                // 亮灯这一段的收尾从这里起算：尾巴只能延长一段已经亮起来的灯，时间自己点不着。
+                drivingLeftAt = now
+            }
             if (drivingLeft && running.none { it in drivingIds }) {
                 // Armed, not taken. A conversation can run its next turn the moment this one ends
                 // — a steered message waiting its turn, a task list moving to its next item — and
@@ -482,34 +576,18 @@ object TouchFx {
                 main.removeCallbacks(returnCheck)
                 main.postDelayed(returnCheck, FX_RETURN_QUIET_MS)
             }
-            // An id that ended stops counting as driving.
-            drivingIds = drivingIds - departed
-            // 灯跟着 run 走，不跟着「上一次动作有多近」走：那个操作过手机的 run 只要还活着，光
-            // 就一直在（见 shouldLight）——模型在两次动作之间想十几秒是常事，按时间熄灯的那个
-            // 版本就是把一次任务切成一亮一灭的。
-            // 两个窗口，两种含义：真 run 由它自己的存活决定；后台 job 没有 run 可等，只能用
-            // 它行动时刻记下的 FX_JOB_WINDOW_MS。只读第一个会让 job 那个窗口变成死代码。
-            if (app != null && shouldLight(now, running)) {
-                overlay(app)?.setBreathing(true)
+            // An id that ended stops counting as driving, and an id from a run nobody is watching
+            // any more cannot light anything either: what stays is exactly 「still alive and drove」.
+            // The trim happens here rather than in [apply] on purpose — the departure above needs
+            // the id to still be in the set on the tick that sees it.
+            drivingIds = drivingIds.intersect(running)
+            val lit = apply("tick")
+            // 亮着就还要人熄灯（收尾那几秒），前台里虽然不亮、但活着的驱动 run 还等着离场（自动
+            // 返回就靠这一 tick 发现），所以两种都要继续；只有「不亮 + 没有活着的驱动 run」才停表。
+            if (lit || drivingIds.any { it in running }) {
                 main.postDelayed(this, FX_BREATH_TICK_MS)
             } else {
-                // The light going out is not the run being over, and clearing every id here is
-                // what made [returnToApp] unreachable: once the ids were gone, `it in drivingIds`
-                // above could never be true again, so the trip home happened only in the one case
-                // where a run ended inside the six-second hold. What is kept is exactly the runs
-                // that are still alive and were driving — an id whose run has ended is dropped
-                // either way, so the next run in the conversation starts from nothing.
-                drivingIds = drivingIds.intersect(running)
-                jobDrivingUntil = 0L
-                // Draws one last frame without the light, which is what lets the window go.
-                view?.setBreathing(false)
-                // Still watching for a departure, so the tick has to keep coming; a set that came
-                // out empty means there is nothing left to hand the phone back for.
-                if (drivingIds.isEmpty()) {
-                    main.removeCallbacks(this)
-                } else {
-                    main.postDelayed(this, FX_BREATH_TICK_MS)
-                }
+                main.removeCallbacks(this)
             }
         }
     }
@@ -754,11 +832,15 @@ object TouchFx {
         manager = windowManager
         view = fx
         // 画布是新的，「该不该亮」不是：跳转、服务重连、窗口重建之后新 view 的呼吸是关的，只有
-        // 按当前状态先对一遍，光才不会跟着旧画布一起消失 —— 「点击跳转后直接没了」一半是上面
-        // 那道时间规则，另一半就是这里从来没有人把状态补回来。
-        if (shouldLight(SystemClock.uptimeMillis(), Core.engine.runsFlow.value.keys)) {
-            fx.setBreathing(true)
-        }
+        // 按当前状态立刻对一遍，光才不会跟着旧画布一起消失 —— 「跳转后不显示」一半是旧的亮灯
+        // 规则，另一半就是这里从来没有人把状态补回来。这里直接算、直接点亮（不经过 [apply]，
+        // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
+        val now = SystemClock.uptimeMillis()
+        val running = Core.engine.runsFlow.value.keys
+        val inForeground = foreground()
+        val lit = shouldLight(now, running, inForeground)
+        traceLight(context, "overlay", lit, running, now, inForeground)
+        if (lit) fx.setBreathing(true)
         return fx
     }
 

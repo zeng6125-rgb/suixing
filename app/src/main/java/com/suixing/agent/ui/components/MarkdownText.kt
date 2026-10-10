@@ -66,6 +66,15 @@ sealed interface MdBlock {
         val ordered: Boolean,
         /** Nesting level, 0 = top level. One block holds one level's items. */
         val depth: Int = 0,
+        /**
+         * The number the source's *first* item carried, for an ordered list; 1 for bullets.
+         *
+         * The literal number has to survive parsing, because the renderer cannot always count:
+         * a caller that draws one line at a time (the thinking block does exactly that) hands the
+         * parser a single `7. foo` line, and the only place that 7 exists is the source. Numbering
+         * such a block from 1 is what made every item of a 51-item chain of thought read "1.".
+         */
+        val start: Int = 1,
     ) : MdBlock
     data class Code(val language: String, val code: String) : MdBlock
     data class Quote(val text: String) : MdBlock
@@ -104,6 +113,23 @@ private fun indentDepth(whitespace: String): Int {
 }
 
 private const val MAX_LIST_DEPTH = 4
+
+/**
+ * The largest marker a list may start at.
+ *
+ * A number past this is a formatting accident, not a list position: the marker column is 22dp,
+ * and a wider number would push the item text off its own row. It also keeps `start + index`
+ * inside an Int for a source that wrote an absurd number.
+ */
+private const val MAX_LIST_START = 9999
+
+/**
+ * The literal number a list marker carried, ready to be a [MdBlock.Bullet.start].
+ *
+ * Anything that cannot be a sensible start degrades to 1: a run of digits too long for an Int, or
+ * one past [MAX_LIST_START].
+ */
+internal fun listStart(digits: String): Int = (digits.toIntOrNull() ?: 1).coerceIn(0, MAX_LIST_START)
 
 fun parseMarkdown(source: String): List<MdBlock> {
     val lines = source.replace("\r\n", "\n").replace('\r', '\n').split('\n')
@@ -179,6 +205,9 @@ fun parseMarkdown(source: String): List<MdBlock> {
             }
             ordered != null -> {
                 val depth = indentDepth(ordered.groupValues[1])
+                // Read off the first line of the run, before the loop consumes it: the rest of
+                // the run's numbers are the source's business, and CommonMark ignores them too.
+                val start = listStart(ordered.groupValues[2])
                 val items = mutableListOf<String>()
                 while (index < lines.size) {
                     val item = MD_ORDERED.matchEntire(lines[index]) ?: break
@@ -186,7 +215,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
                     items += item.groupValues[3]
                     index++
                 }
-                blocks += MdBlock.Bullet(items, ordered = true, depth = depth)
+                blocks += MdBlock.Bullet(items, ordered = true, depth = depth, start = start)
             }
             else -> {
                 val paragraph = mutableListOf<String>()
@@ -763,6 +792,17 @@ private fun HeadingBlock(
     )
 }
 
+/**
+ * The marker drawn for item [index] of an ordered list: the source's own start plus the item's
+ * place in the block.
+ *
+ * Counting from 1 instead is what turned a 51-item chain of thought into 51 lines all reading
+ * "1.": that caller renders one line at a time, so every block it parses holds exactly one item
+ * and `${index + 1}` is always 1. Taken from the source, the number is right however the text was
+ * cut up, and a list written `3. a` / `4. b` keeps its 3 and 4 rather than being renumbered.
+ */
+internal fun orderedMarker(block: MdBlock.Bullet, index: Int): String = "${block.start + index}."
+
 @Composable
 private fun BulletBlock(
     block: MdBlock.Bullet,
@@ -798,7 +838,7 @@ private fun BulletBlock(
                         // The number is a text line of its own, so it needs no offset: the
                         // row's top edge already puts it on the item's first-line baseline.
                         Text(
-                            text = "${index + 1}.",
+                            text = orderedMarker(block, index),
                             style = style,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
