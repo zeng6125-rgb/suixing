@@ -110,6 +110,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -437,6 +438,9 @@ fun ChatScreen(
     // the "user scrolled away" branch below, following goes false, and the run stops
     // following its own output — which is exactly what it used to do.
     var programmatic by remember { mutableStateOf(false) }
+    // When the last pin ran: the scroll watcher below sees our own pin's scrolling a beat late
+    // (the programmatic guard is already down by then) and would read it as a user drag.
+    var lastPinAt by remember { mutableLongStateOf(0L) }
     LaunchedEffect(listState) {
         // The hand wins the moment it moves. `canScrollBackward` is false while the list sits
         // at its end and true the instant a drag lifts it off, so following is dropped on the
@@ -444,7 +448,14 @@ fun ChatScreen(
         // stream kept the list pinned while the user dragged, and they had to fight it.
         snapshotFlow { listState.isScrollInProgress to listState.canScrollBackward }
             .collect { (scrolling, canScrollBack) ->
-                if (scrolling && !programmatic && canScrollBack) {
+                // Our own pin scrolls synchronously; by the time this collector sees the
+                // scrolling flag the programmatic guard is already down, and it read the pin as
+                // a user drag and killed following mid-transition — the card then froze while
+                // the viewport kept growing, which is the dip. Ignore scrolling that lands
+                // within 120ms of a pin; a real hand drag never does.
+                if (scrolling && !programmatic && canScrollBack &&
+                    SystemClock.uptimeMillis() - lastPinAt > 120
+                ) {
                     following = false
                 } else if (!scrolling && listState.atEnd(slack = 8)) {
                     // Released at the end again — or the user tapped 跳最新, which sets
@@ -524,16 +535,64 @@ fun ChatScreen(
     // 0.8.15-0.8.17; the viewport-height variants that replaced it (single compensation, then a
     // frame loop) each regressed one direction of the transition, so it comes back as it was.
     val keyboardInset = WindowInsets.ime.getBottom(LocalDensity.current)
+    // Diagnostic trace of the platform's own inset sequence plus our reaction to it, flushed to
+    // files/ime-trace.log once a transition settles. The screen recorder cannot resolve a 120Hz
+    // display's single-frame rebound at 10fps; this can. Removed once the dip is understood.
+    val insetTrace = remember { StringBuilder() }
     LaunchedEffect(keyboardInset) {
+        insetTrace.append(
+            "${SystemClock.uptimeMillis()} inset=$keyboardInset " +
+                "viewport=${listState.layoutInfo.viewportSize.height} " +
+                "off=${listState.firstVisibleItemIndex}:${listState.firstVisibleItemScrollOffset}\n",
+        )
+        delay(400)
+        val text = insetTrace.toString()
+        if (text.isNotEmpty()) {
+            insetTrace.setLength(0)
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    File(Core.appContext.filesDir, "ime-trace.log").appendText(text)
+                }
+            }
+        }
+    }
+    // One keyboard transition has one direction. The platform's inset animation ends with a
+    // small rebound of a few pixels the other way, and following it faithfully is what put a
+    // visible one-frame hitch at the end of every close on a 120Hz display. Opposite-direction
+    // changes below the clamp are the rebound, not a new transition: they are dropped. Real
+    // frames of a transition are 30-80px, so the clamp cannot eat one.
+    var followDir by remember { mutableStateOf(0) }
+    var lastInset by remember { mutableStateOf(-1) }
+    LaunchedEffect(keyboardInset) {
+        val previous = lastInset
+        lastInset = keyboardInset
+        if (previous < 0) return@LaunchedEffect
+        val delta = keyboardInset - previous
+        if (delta == 0) return@LaunchedEffect
+        val dir = if (delta > 0) 1 else -1
+        if (followDir != 0 && dir != followDir && abs(delta) <= REBOUND_CLAMP_PX) return@LaunchedEffect
+        followDir = dir
+        // Closing (inset shrinking) needs no pin: as the viewport grows the list clamps its own
+        // offset down to the new end, frame by frame — measured smooth in ime-trace.log. Pinning
+        // on top of that clamp is what froze the offset for 17 frames and then jumped it. Only
+        // opening (inset growing) leaves the end below the fold and needs the pin.
+        if (dir < 0) return@LaunchedEffect
         if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
         withFrameNanos { }
         programmatic = true
+        lastPinAt = SystemClock.uptimeMillis()
         try {
             listState.scrollToItem(itemCount - 1)
             listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
         }
+    }
+    // The transition is over once the inset has been still for a beat: forget its direction so
+    // the next one, whichever way it goes, is followed from its first frame.
+    LaunchedEffect(keyboardInset) {
+        delay(300)
+        followDir = 0
     }
     val atEnd by remember { derivedStateOf { listState.atEnd() } }
 
@@ -5090,6 +5149,9 @@ private const val FOLLOW_SCROLL_PX = 200_000f
  * the position at all.
  */
 private const val HOLD_TO_SELECT_MS = 450L
+
+/** Largest opposite-direction inset change treated as the platform animation's rebound. */
+private const val REBOUND_CLAMP_PX = 24
 
 /**
  * The size of a viewport change that is a jump rather than a frame of an animation.
