@@ -195,6 +195,7 @@ import com.suixing.agent.ui.components.markdownBody
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -517,25 +518,23 @@ fun ChatScreen(
     val viewportHeight by remember {
         derivedStateOf { listState.layoutInfo.viewportSize.height }
     }
-    var lastViewportHeight by remember { mutableStateOf(0) }
-    LaunchedEffect(viewportHeight) {
-        val previous = lastViewportHeight
-        lastViewportHeight = viewportHeight
-        if (previous <= 0 || delta0(viewportHeight, previous)) return@LaunchedEffect
-        if (!following || !settings.autoFollow) return@LaunchedEffect
-        // The bottom padding is measured from the composer's top, so it already follows the
-        // keyboard frame by frame; the scroll offset does not. Moving the content by exactly
-        // the viewport's own change each frame is what keeps the last card glued 16dp above
-        // the composer for the whole transition. Pinning instead (instant or delayed) leaves
-        // the card frozen while the composer moves and then snaps it — the dip the user sees.
+    // The keyboard's own inset, read raw: the platform animates it frame by frame, so this
+    // effect re-runs on every frame of the keyboard's motion and the instant pin inside it is
+    // what keeps the last card glued above the composer. This is the trigger that worked in
+    // 0.8.15-0.8.17; the viewport-height variants that replaced it (single compensation, then a
+    // frame loop) each regressed one direction of the transition, so it comes back as it was.
+    val keyboardInset = WindowInsets.ime.getBottom(LocalDensity.current)
+    LaunchedEffect(keyboardInset) {
+        if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
+        withFrameNanos { }
         programmatic = true
         try {
-            listState.scrollBy(-(viewportHeight - previous).toFloat())
+            listState.scrollToItem(itemCount - 1)
+            listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
         }
     }
-
     val atEnd by remember { derivedStateOf { listState.atEnd() } }
 
     // 外观 → 气泡宽度. Measured against the screen, which is what the setting promises
@@ -5091,8 +5090,6 @@ private const val FOLLOW_SCROLL_PX = 200_000f
  * the position at all.
  */
 private const val HOLD_TO_SELECT_MS = 450L
-
-private fun delta0(a: Int, b: Int) = a == b
 
 /**
  * The size of a viewport change that is a jump rather than a frame of an animation.
