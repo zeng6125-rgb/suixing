@@ -11,8 +11,8 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.Outline
 import android.graphics.PixelFormat
+import android.graphics.Point
 import android.graphics.PorterDuff
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -26,7 +26,6 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
-import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -42,17 +41,26 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.R
 import com.suixing.agent.agent.AgentEngine
+import com.suixing.agent.agent.AgentEvent
 import com.suixing.agent.agent.RunState
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
+import com.suixing.agent.data.Conversation
+import com.suixing.agent.data.Roles
+import com.suixing.agent.data.StoredMessage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * A floating console for the run that is in progress: a ball that expands into a
@@ -65,8 +73,11 @@ import kotlin.math.abs
  * is on screen.
  *
  * Everything it does goes through the engine's own interface ([Core.engine]'s
- * `runState`, `cancel()`, `steer()` and `liveLine`): the console owns no state and
- * starts no runs, so it cannot disagree with the chat screen about what is happening.
+ * `runState`, `cancel()`, `steer()` and `liveLine`): the console owns no state of its own, so it
+ * cannot disagree with the chat screen about what is happening. Its panel's own box is the one
+ * exception, and it is not really one: a line typed there while nothing is running becomes the
+ * conversation's next turn through the very [AgentEngine.startRun] the chat screen calls, with the
+ * same registry, gate and stores — a run started here shows up in the chat as any other does.
  */
 class FloatConsoleService : Service() {
 
@@ -78,11 +89,24 @@ class FloatConsoleService : Service() {
         private const val THEME_SYSTEM = 0
         private const val THEME_DARK = 2
 
-        /** The ball is brand-coloured in both themes, like the launcher icon it borrows. */
-        private const val BALL_TOP = 0xFF0E2A1F.toInt()
-        private const val BALL_BOTTOM = 0xFF245E45.toInt()
+        /**
+         * The ball's one colour: a flat brand green in both themes, because the icon on it is
+         * white in both. It used to be a two-stop gradient plus a 6dp elevation.
+         */
+        private const val BALL_COLOR = 0xFF1F6B4C.toInt()
         private const val STATUS_RUNNING = 0xFF5FD8A0.toInt()
         private const val STATUS_IDLE = 0xFF9AA5A0.toInt()
+
+        /** The panel's width: the default, and the range the resize handle may drag it through. */
+        private const val PANEL_DEFAULT_DP = 268
+        private const val PANEL_MIN_DP = 200
+        private const val PANEL_MAX_DP = 420
+
+        /** How much of a message the panel's summary keeps, per line. */
+        private const val MESSAGE_PREVIEW_CHARS = 56
+
+        /** The engine publishes a running tool as 「🔧 name…」 on [AgentEngine.RunHandle.liveLine]. */
+        private const val TOOL_LIVE_PREFIX = "🔧 "
 
         /** Overlay windows are the user's to grant; without it there is nothing to show. */
         fun canDrawOverlays(context: Context): Boolean = Settings.canDrawOverlays(context)
@@ -130,7 +154,10 @@ class FloatConsoleService : Service() {
     private lateinit var stateText: TextView
     private lateinit var liveText: TextView
     private lateinit var statsText: TextView
+    private lateinit var conversationText: TextView
+    private lateinit var recentText: TextView
     private lateinit var steerInput: EditText
+    private lateinit var sendButton: TextView
     private lateinit var stopArea: LinearLayout
     private lateinit var feedbackText: TextView
 
@@ -143,18 +170,48 @@ class FloatConsoleService : Service() {
     private var windowStartY = 0
     private var dragging = false
 
+    /** The resize gesture: where the finger went down, and how wide the panel was then. */
+    private var resizeStartX = 0f
+    private var resizeStartWidth = 0
+
+    /**
+     * The three settings this service reads synchronously, kept as one readable copy.
+     *
+     * [SettingsRepository] offers a cold flow and a suspending `current()`, and every reader here —
+     * a touch listener, a lifecycle callback, the layout pass — runs where neither can be awaited.
+     * The collector in [observeRun] is the only writer and it writes on every change, so this copy
+     * is never more than one emission behind.
+     */
+    private data class ConsoleSettings(
+        val resident: Boolean = false,
+        val whileRunning: Boolean = true,
+        val widthDp: Int = 0,
+    )
+
+    private var consoleSettings = ConsoleSettings()
+
     /** The system's own threshold, so a drag feels the same here as anywhere else. */
     private val touchSlop: Float by lazy { ViewConfiguration.get(this).scaledTouchSlop.toFloat() }
 
     /**
-     * The console is only worth showing once the user has left 随行: the chat screen has
-     * the same stop button and the same input box, and a ball floating over the very
-     * screen that already shows the run is one more thing covering the answer.
+     * The console's visibility, re-decided on every lifecycle change and every run change.
+     *
+     * **In front of 随行 it is never shown**, whatever the switches say: the chat screen already
+     * has the same stop button and the same input box, so a ball over that screen is one more
+     * thing covering the answer. Everything below applies only once the user has left.
+     *
+     * Behind that, two switches, both the user's: 常驻 ([AppSettings.floatingConsole], the drawer
+     * row's own switch) keeps the ball there whether or not anything is running;
+     * [AppSettings.consoleWhileRunning] shows it only while a run is in flight, so the run ending
+     * is what takes it back down. With neither of them on, the background shows nothing at all.
+     *
+     * Whether the service is running stays the drawer row's business: these switches only choose
+     * what the user sees while it does.
      */
     private val appLifecycle = object : DefaultLifecycleObserver {
-        override fun onStart(owner: LifecycleOwner) = detach()
+        override fun onStart(owner: LifecycleOwner) = refreshVisibility()
 
-        override fun onStop(owner: LifecycleOwner) = attachIfRunning()
+        override fun onStop(owner: LifecycleOwner) = refreshVisibility()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -170,12 +227,14 @@ class FloatConsoleService : Service() {
                 buildConsole()
                 observeRun()
                 ProcessLifecycleOwner.get().lifecycle.addObserver(appLifecycle)
-                // A run normally starts from the app, so the first decision is almost always
-                // "stay hidden"; the observer above catches the moment the user leaves.
-                attachIfRunning()
+                // 常驻 shows the ball as soon as the console is up *and* the user has left 随行;
+                // in front of the app it is never shown. With only 「运行时显示」 ticked this
+                // first decision is "stay hidden", and the observer above catches the moment the
+                // user leaves — or a run starting while they are away.
+                refreshVisibility()
             }
         } else {
-            attachIfRunning()
+            refreshVisibility()
         }
         return START_NOT_STICKY
     }
@@ -192,7 +251,8 @@ class FloatConsoleService : Service() {
 
     /**
      * Builds the window and the views but does not attach them: whether the console is
-     * visible at all depends on where the user is, which [attachIfRunning] decides.
+     * visible at all depends on where the user is and on the two switches, which
+     * [refreshVisibility] decides.
      */
     private fun buildConsole() {
         windowManager = getSystemService(WindowManager::class.java)
@@ -231,37 +291,113 @@ class FloatConsoleService : Service() {
         attached = false
     }
 
-    private fun attachIfRunning() {
-        val foreground = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-        if (!foreground && Core.engine.runsFlow.value.isNotEmpty()) attach() else detach()
+    /**
+     * Whether the console is on screen right now — see [appLifecycle] for what each switch means.
+     *
+     * Re-read from the settings on every call rather than cached: both switches can be flipped
+     * while the console is up, and a cached copy would leave the ball disagreeing with its own
+     * switch.
+     */
+    private fun refreshVisibility() {
+        val settings = consoleSettings
+        val foreground = ProcessLifecycleOwner.get().lifecycle.currentState
+            .isAtLeast(Lifecycle.State.STARTED)
+        val running = Core.engine.runsFlow.value.isNotEmpty()
+        // 前台一律不显示；不在前台时：常驻 ⇒ 一直显示，否则看 B（运行时才显示）。
+        val visible = !foreground &&
+            (settings.resident || (settings.whileRunning && running))
+        if (visible) attach() else detach()
     }
 
     /**
-     * A 52dp brand disc with the launcher's feather on it, and a dot that says whether a
-     * run is live. Drawn from views rather than Compose: this window lives outside any
-     * activity, so there is no composition to host it.
+     * The panel's width: whatever the user last dragged it to, or 268dp, and never wider than the
+     * window it floats in.
+     *
+     * A fixed 268dp is 74% of a 360dp screen and 100% of nothing at all in split screen, where the
+     * window can be 300dp wide: the card then ran off the right edge and its own text was cut.
+     */
+    private fun panelWidth(): Int = minOf(
+        dp(consoleSettings.widthDp.takeIf { it > 0 } ?: PANEL_DEFAULT_DP),
+        windowWidthPx() - dp(24),
+    ).coerceAtLeast(panelMinWidth())
+
+    /** The panel's width, re-applied whenever the stored one changes under it. */
+    private fun applyPanelWidth() {
+        (panel.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
+            val width = panelWidth()
+            if (layout.width == width) return
+            layout.width = width
+            panel.layoutParams = layout
+        }
+    }
+
+    private fun panelMinWidth(): Int = dp(PANEL_MIN_DP)
+
+    /** The widest the handle may drag: the ceiling, or the window, whichever is smaller. */
+    private fun panelMaxWidth(): Int =
+        minOf(dp(PANEL_MAX_DP), windowWidthPx() - dp(24)).coerceAtLeast(panelMinWidth())
+
+    /**
+     * The width of the window the console floats in, in px — not the display's own.
+     *
+     * `resources.displayMetrics` reports the whole screen, so in split screen it hands the panel a
+     * width the window does not have. `currentWindowMetrics` is the window's own bounds, which is
+     * what a width cap has to be measured against; below R that call does not exist and the
+     * display's real size is the best answer available.
+     */
+    @Suppress("DEPRECATION")
+    private fun windowWidthPx(): Int {
+        val manager = getSystemService(WindowManager::class.java)
+            ?: return resources.displayMetrics.widthPixels
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val width = runCatching { manager.currentWindowMetrics.bounds.width() }.getOrDefault(0)
+            if (width > 0) return width
+        }
+        val point = Point()
+        manager.defaultDisplay?.getRealSize(point)
+        return point.x.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+    }
+
+    /**
+     * Keeps the window inside the window's own width.
+     *
+     * The panel is a child of the same window as the ball, so the window may not start closer to
+     * the right edge than the panel is wide — dragged further right, the panel simply left the
+     * screen and its buttons were cut in half. [extraWidth] carries the panel's intended width for
+     * the moment it becomes visible, when this window has not been measured with it yet.
+     */
+    private fun clampX(extraWidth: Int = 0) {
+        val width = maxOf(root.width, extraWidth, dp(44))
+        params.x = params.x.coerceIn(0, (windowWidthPx() - width).coerceAtLeast(0))
+    }
+
+    /**
+     * A 44dp brand disc with the feather on it, and a dot that says whether a run is live. Drawn
+     * from views rather than Compose: this window lives outside any activity, so there is no
+     * composition to host it.
      */
     private fun buildBall(): FrameLayout {
-        val size = dp(52)
+        val size = dp(44)
         val ball = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(size, size)
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(BALL_TOP, BALL_BOTTOM),
-            ).apply { shape = GradientDrawable.OVAL }
-            // A real shadow needs an outline: without one the window draws as a flat disc.
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) =
-                    outline.setOval(0, 0, view.width, view.height)
+            // A flat disc: one solid colour, no gradient, no shadow, no ring around it. The
+            // verdict on the dressed-up version was 「就干净的小球就行了」 — the elevation and the
+            // outline that existed only to give that shadow a shape went with it.
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(BALL_COLOR)
             }
-            elevation = dp(6).toFloat()
             setOnTouchListener { view, event -> onBallTouch(view, event) }
         }
         ball.addView(
             ImageView(this).apply {
-                setImageResource(R.drawable.ic_launcher_foreground)
+                // A dedicated vector, not the launcher's foreground: that one is drawn on a 108dp
+                // canvas with the art inside its safe zone, so at this size its ink came out about
+                // 12×18dp in a 30dp box — small, and soft from the downscale. This one is framed
+                // for the box it is drawn in. The white tint stays: the disc is the brand gradient.
+                setImageResource(R.drawable.ic_console_feather)
                 setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
-                layoutParams = FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER)
+                layoutParams = FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER)
             },
         )
         statusDot = View(this).apply {
@@ -283,7 +419,7 @@ class FloatConsoleService : Service() {
             setStroke(dp(1), palette.stroke)
         }
         setPadding(dp(16), dp(14), dp(16), dp(14))
-        layoutParams = LinearLayout.LayoutParams(dp(268), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        layoutParams = LinearLayout.LayoutParams(panelWidth(), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             topMargin = dp(8)
         }
 
@@ -327,8 +463,30 @@ class FloatConsoleService : Service() {
         }
         addView(statsText)
 
+        // 能看：which conversation this panel is talking about, and its last line or two. Without
+        // the name the box below would write into a chat the user cannot see; without the lines
+        // the panel could only ever say what the run is doing, never what was asked.
+        conversationText = TextView(context).apply {
+            setTextColor(palette.accent)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, dp(2), 0, 0)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        addView(conversationText)
+
+        recentText = TextView(context).apply {
+            setTextColor(palette.muted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, dp(2), 0, dp(8))
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        addView(recentText)
+
         steerInput = EditText(context).apply {
-            hint = "对它说一句…"
+            // Neutral on purpose: this one box both steers a run and opens the next turn.
+            hint = "说一句…"
             setHintTextColor(palette.muted)
             setTextColor(palette.ink)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -347,7 +505,10 @@ class FloatConsoleService : Service() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(steerInput)
-                addView(actionButton("插话", accent = true) { sendSteering() })
+                // One button for both cases, labelled by the run state: 「插话」 into the run in
+                // flight, 「发送」 when nothing is running. See [sendFromPanel].
+                sendButton = actionButton("发送", accent = true) { sendFromPanel() }
+                addView(sendButton)
             },
         )
 
@@ -376,6 +537,71 @@ class FloatConsoleService : Service() {
             visibility = View.GONE
         }
         addView(feedbackText)
+        // Last, so it reads as the panel's own corner: the handle that says 「this card can be
+        // dragged wider」 without a label.
+        addView(resizeHandle())
+    }
+
+    /**
+     * The panel's resize handle: drag sideways to widen or narrow the card.
+     *
+     * Width only. The height follows the content — the stop area grows a row per run in flight,
+     * and a fixed height would cut exactly those rows off.
+     */
+    private fun resizeHandle(): View = View(this).apply {
+        background = GradientDrawable().apply {
+            cornerRadius = dp(2).toFloat()
+            setColor(palette.muted)
+        }
+        layoutParams = LinearLayout.LayoutParams(dp(30), dp(4)).apply {
+            gravity = Gravity.END
+            topMargin = dp(10)
+        }
+        setOnTouchListener { _, event -> onResizeTouch(event) }
+    }
+
+    /**
+     * The drag itself: the finger's own delta is what changes the width, so the handle keeps up
+     * with the gesture instead of jumping to where it points.
+     *
+     * The last width is written to the settings on the lift, not on every frame — a save per move
+     * would have the console writing a JSON file sixty times a second.
+     */
+    private fun onResizeTouch(event: MotionEvent): Boolean = when (event.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+            resizeStartX = event.rawX
+            resizeStartWidth = panel.width
+            true
+        }
+
+        MotionEvent.ACTION_MOVE -> {
+            val width = (resizeStartWidth + (event.rawX - resizeStartX)).toInt()
+                .coerceIn(panelMinWidth(), panelMaxWidth())
+            (panel.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
+                layout.width = width
+                panel.layoutParams = layout
+            }
+            true
+        }
+
+        MotionEvent.ACTION_UP -> {
+            rememberPanelWidth(panel.width)
+            // A wider panel may no longer fit where a narrower one did, so the window is pulled
+            // back inside the screen with the width it just got.
+            clampX(panelWidth())
+            if (attached) runCatching { windowManager.updateViewLayout(root, params) }
+            true
+        }
+
+        else -> false
+    }
+
+    /** Remembers the dragged width in dp, so a density change cannot resize the card on its own. */
+    private fun rememberPanelWidth(px: Int) {
+        val widthDp = (px / resources.displayMetrics.density).roundToInt()
+        Core.appScope.launch {
+            Core.settings.update { it.copy(consoleWidthDp = widthDp.coerceIn(PANEL_MIN_DP, PANEL_MAX_DP)) }
+        }
     }
 
     private fun collapseButton(): TextView = TextView(this).apply {
@@ -434,7 +660,13 @@ class FloatConsoleService : Service() {
         }
 
         MotionEvent.ACTION_UP -> {
-            if (!dragging) setExpanded(panel.visibility != View.VISIBLE)
+            if (!dragging) {
+                setExpanded(panel.visibility != View.VISIBLE)
+            } else {
+                // The ball may be dropped anywhere; the panel is what has to stay reachable.
+                clampX(if (panel.visibility == View.VISIBLE) panelWidth() else 0)
+                if (attached) runCatching { windowManager.updateViewLayout(root, params) }
+            }
             true
         }
 
@@ -447,6 +679,17 @@ class FloatConsoleService : Service() {
      */
     private fun setExpanded(expanded: Boolean) {
         panel.visibility = if (expanded) View.VISIBLE else View.GONE
+        // Expanding widens this window to the panel's width, so the ball's own position can now be
+        // too far right for it: pulled back before the layout that would hang the card off-screen.
+        if (expanded) {
+            // Also the moment to re-measure: a rotation or a split-screen resize changes the window
+            // the card has to fit in, and this width was decided when the panel was built.
+            (panel.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+                lp.width = panelWidth()
+                panel.layoutParams = lp
+            }
+            clampX(panelWidth())
+        }
         val flags = params.flags
         params.flags = if (expanded) {
             flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
@@ -470,7 +713,7 @@ class FloatConsoleService : Service() {
     // ------------------------------------------------------------------ 状态
 
     /**
-     * Mirrors the engine's run state into the panel.
+     * Mirrors the engine's run state into the panel, and keeps the panel's own two lines current.
      *
      * The state comes from [Core.engine] rather than from anything local, so the panel
      * and the chat screen can never tell two different stories about the same run.
@@ -488,19 +731,90 @@ class FloatConsoleService : Service() {
                     // area, unlike the panel, shows every run in flight.
                     val handle = runs.values.maxByOrNull { it.startedAt }
                     val state = handle?.state?.value ?: RunState.Idle
-                    stateText.text = state.title()
+                    stateText.text = consoleStatus(state, handle)
                     statsText.text = state.detail()
                     // The live line is re-read on every state, and the engine ticks its state
                     // while a run is in flight, so this stays current without a second stream.
                     liveText.text = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
+                    // One button, two meanings, decided by the same question the label answers:
+                    // while something is running a line typed here joins that run, and with
+                    // nothing running it opens the conversation's next turn. The chat composer
+                    // reads the same way, so the two never disagree about what a tap will do.
+                    sendButton.text = if (state is RunState.Running) "插话" else "发送"
                     setStatusDot(state is RunState.Running)
                     renderStopArea(runs.values.sortedByDescending { it.startedAt })
+                    renderConversation()
                     // Re-decided here as well, because a run can also start with the app already
                     // in the background (a reminder): this is the only place that sees one
                     // appear, and without it the ball would wait for the next trip out of the
                     // app to show up — or never show for a run that both starts and ends there.
-                    attachIfRunning()
+                    refreshVisibility()
                 }
+        }
+        // Which conversation the panel is talking about: the list re-emits on every save, so the
+        // title, the last lines and a rename all land without polling.
+        scope.launch {
+            Core.chats.conversations.collectLatest { renderConversation() }
+        }
+        // Both visibility switches live in the settings: a flip has to be felt at once, or the
+        // ball would sit there disagreeing with the switch that turned it off. This collector is
+        // also the only writer of [consoleSettings] — the synchronous copy everything else reads.
+        scope.launch {
+            Core.settings.flow.collect { stored ->
+                consoleSettings = ConsoleSettings(
+                    resident = stored.floatingConsole,
+                    whileRunning = stored.consoleWhileRunning,
+                    widthDp = stored.consoleWidthDp,
+                )
+                applyPanelWidth()
+                refreshVisibility()
+            }
+        }
+    }
+
+    /**
+     * The run's own title, except while a `ui_*` tool is on screen.
+     *
+     * 「正在操作手机」 is what the user wants to read when the agent is the one driving, and the
+     * tool's own name says nothing about that. Read off the live line the engine already publishes
+     * (`🔧 name…`), so nothing new has to be plumbed through for it.
+     */
+    private fun consoleStatus(state: RunState, handle: AgentEngine.RunHandle?): String {
+        val live = handle?.liveLine.orEmpty()
+        if (state is RunState.Running && live.startsWith(TOOL_LIVE_PREFIX)) {
+            val tool = live.removePrefix(TOOL_LIVE_PREFIX).trimEnd('…')
+            if (tool.startsWith("ui_")) return "正在操作手机（$tool）"
+        }
+        return state.title()
+    }
+
+    /**
+     * The conversation the panel is showing, and its last one or two lines.
+     *
+     * The one running wins over the one used last, because that is the chat a steer typed here
+     * would land in: the panel must name the conversation its own box writes to, or the user would
+     * be typing into a chat they cannot see. With nothing running it falls back to the top of the
+     * list, which is the conversation the app itself would open.
+     */
+    private fun renderConversation() {
+        val conversations = Core.chats.conversations.value
+        val running = Core.engine.newestRun()?.chatId
+        val conversation: Conversation? =
+            conversations.firstOrNull { it.id == running } ?: conversations.firstOrNull()
+        if (conversation == null) {
+            conversationText.text = "还没有会话"
+            recentText.text = "在下面的输入框里说一句，就会开一个新会话"
+            return
+        }
+        conversationText.text = conversation.title.ifBlank { "新会话" }
+        val recent = conversation.messages.takeLast(2)
+        recentText.text = if (recent.isEmpty()) {
+            "这个会话还没有消息"
+        } else {
+            recent.joinToString("\n") { message ->
+                val speaker = if (message.role == Roles.USER) "你：" else "随行："
+                speaker + message.text.replace('\n', ' ').trim().take(MESSAGE_PREVIEW_CHARS)
+            }
         }
     }
 
@@ -596,20 +910,102 @@ class FloatConsoleService : Service() {
             ?: "会话 ${handle.chatId.take(6)}"
     }
 
-    private fun sendSteering() {
+    /**
+     * The panel's box: 能发 — a line typed here reaches the conversation the panel names.
+     *
+     * Two cases, one button. A run in flight gets the line as a steer, which is what the console
+     * has always done. With nothing running the line becomes that conversation's next turn, and
+     * that goes through [Core.engine]'s own [AgentEngine.startRun] with the app's registry, gate
+     * and stores — the same call the chat screen makes, not a second sending path that could start
+     * a run the chat screen cannot see or stop.
+     */
+    private fun sendFromPanel() {
         val text = steerInput.text.toString().trim()
         if (text.isEmpty()) return
         val handle = Core.engine.newestRun()
-        // The line needs an id of its own: the engine's queue is keyed by it, and the console has
-        // no way to retract or promote what it says, so nothing else ever reads this one.
-        val queued = handle != null &&
-            Core.engine.steer(handle.chatId, java.util.UUID.randomUUID().toString(), text)
-        if (queued) {
-            steerInput.setText("")
-            statsText.text = "已插话，模型下一轮就能看到"
-            hideKeyboard()
-        } else {
-            statsText.text = "当前没有进行中的任务，这句话没有发出"
+        if (handle != null) {
+            // The line needs an id of its own: the engine's queue is keyed by it, and the console
+            // has no way to retract or promote what it says, so nothing else ever reads this one.
+            val queued = Core.engine.steer(handle.chatId, UUID.randomUUID().toString(), text)
+            if (queued) {
+                steerInput.setText("")
+                statsText.text = "已插话，模型下一轮就能看到"
+                hideKeyboard()
+            } else {
+                statsText.text = "这句话没有发出：任务刚好结束了"
+            }
+            return
+        }
+        steerInput.setText("")
+        hideKeyboard()
+        statsText.text = "已发送，正在等回答…"
+        val chatId = Core.chats.conversations.value.firstOrNull()?.id
+        // On the app's own scope, not the service's: the answer outlives the panel being collapsed
+        // or the console being taken down, and the run has to keep writing its transcript.
+        Core.appScope.launch {
+            // A run that fails throws, and this scope has no handler of its own: unguarded, one
+            // refused endpoint would take the process down with the question already saved.
+            runCatching { startRunFor(chatId, text) }
+        }
+    }
+
+    /**
+     * Starts the conversation's next turn and saves what it produced.
+     *
+     * The shape is the reminder path's, for the same reason: with no chat screen collecting the
+     * run's events, the messages the engine emits on its way out are the only copy of the answer
+     * there is — so they are gathered here and merged with what the run returned.
+     */
+    private suspend fun startRunFor(chatId: String?, text: String) {
+        val conversation = Core.chats.conversations.value.firstOrNull { it.id == chatId }
+            ?: Core.chats.create(text.take(18))
+        val title = conversation.title.ifBlank { text.take(18) }
+        val question = StoredMessage(id = UUID.randomUUID().toString(), role = Roles.USER, text = text)
+        val history = conversation.messages + question
+        // The question is saved before the run: a run that is refused, stopped or killed still
+        // leaves the user's own line in the transcript to look at.
+        Core.chats.save(conversation.copy(title = title, messages = history))
+        val emitted = mutableListOf<StoredMessage>()
+        try {
+            val produced = Core.engine.startRun(
+                chatId = conversation.id,
+                title = title,
+                history = history,
+                settings = Core.settings.current(),
+                registry = Core.tools,
+                capabilities = Core.capabilities,
+                skills = Core.skills,
+                memory = Core.memory,
+                profile = Core.profile,
+                gate = Core.gate,
+                onEvent = { event ->
+                    when (event) {
+                        is AgentEvent.AssistantMessage -> emitted += event.message
+                        is AgentEvent.ToolMessage -> emitted += event.message
+                        else -> Unit
+                    }
+                },
+            )
+            // Invariant: `emitted` is `produced` in the same order, plus what the engine emits
+            // while ending a stopped run. A short `emitted` falls back to `produced` rather than
+            // saving a transcript with the wrong messages in it.
+            val transcript = if (emitted.size >= produced.size) {
+                produced + emitted.drop(produced.size)
+            } else {
+                produced
+            }
+            withContext(NonCancellable) {
+                Core.chats.save(conversation.copy(title = title, messages = history + transcript))
+            }
+        } catch (cancellation: CancellationException) {
+            // Stopping the run cancels this coroutine, and a cancelled coroutine refuses to
+            // suspend: the save has to run under NonCancellable or the answer the user waited for
+            // would be lost with the process still holding it. Rethrown, because swallowing it
+            // here would turn a stop into a normal ending.
+            withContext(NonCancellable) {
+                Core.chats.save(conversation.copy(title = title, messages = history + emitted))
+            }
+            throw cancellation
         }
     }
 

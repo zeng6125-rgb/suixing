@@ -40,9 +40,16 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.skills.Skill
+import com.suixing.agent.skills.SkillSource
+import com.suixing.agent.skills.groupSkills
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SoftIcon
+import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.theme.MonoStyle
+import com.suixing.agent.ui.theme.Tone
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Skills are instruction documents. Only their names and one-line descriptions
@@ -76,23 +83,66 @@ fun SkillsSection(
 
             loaded.isEmpty() -> item {
                 Text(
-                    text = "还没有技能。把写好的 SKILL.md 文件夹拷到上面的目录，" +
-                        "或点右上角「导入技能」从文件管理器选一个文件夹。",
+                    text = "还没有技能。可以在右上角「导入技能」里选一个含 SKILL.md 的文件夹、" +
+                        "选一个 .md 文件，或直接填一个 SKILL.md 的链接导入。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
-            else -> items(loaded, key = { it.path }) { skill ->
-                SkillCard(
-                    skill = skill,
-                    onView = { onView(skill) },
-                    onDelete = { onDelete(skill) },
-                    onToggle = { enabled -> onToggle(skill, enabled) },
-                )
+            else -> {
+                // Grouped by where the skill came from. The switch is a badge on the card, not
+                // a group of its own: a switched-off download is still a download, and a user
+                // who turned something off is looking for it where they left it.
+                for (group in groupSkills(loaded)) {
+                    item(key = "group-${group.title}") { SkillGroupHeader(group.title, group.skills.size) }
+                    items(group.skills, key = { it.path }) { skill ->
+                        SkillCard(
+                            skill = skill,
+                            onView = { onView(skill) },
+                            onDelete = { onDelete(skill) },
+                            onToggle = { enabled -> onToggle(skill, enabled) },
+                        )
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun SkillGroupHeader(title: String, count: Int) {
+    Row(
+        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "$count",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 「来源：链接 · 2026-10-11」 — the two facts that make a downloaded file checkable, and the
+ * only place they are shown. A skill made on this device has no URL to show.
+ */
+private fun downloadedLine(skill: Skill): String {
+    val when_ = if (skill.sourceAt > 0L) {
+        " · " + SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(skill.sourceAt))
+    } else {
+        ""
+    }
+    return "来源：${skill.sourceUrl}$when_"
+}
+
+private fun sourceLabel(source: SkillSource): String = when (source) {
+    SkillSource.USER -> "我创建的"
+    SkillSource.DOWNLOADED -> "网络下载"
+    SkillSource.BUILTIN -> "内置"
 }
 
 @Composable
@@ -108,6 +158,16 @@ private fun SkillIntroCard(rootPath: String) {
             text = "技能是写给模型看的操作手册：一段固定的流程、一套规范、某个 App 的用法。" +
                 "模型平时只看到技能的名字和用途，需要时才用 skill_read 读全文，所以装很多也不占上下文。",
             style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            // Why the switch starts off, said where the user first meets it: the catalogue
+            // goes into the system prompt, so an unopened file would be instructions the
+            // model follows on the user's behalf without the user ever having read them.
+            text = "新导入、新下载或模型新建的技能都是关闭的：看过内容、确认没问题，再打开开关，" +
+                "它才会进入模型的技能目录。关掉的技能留在本机，只是模型看不到。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(10.dp))
         Surface(
@@ -176,6 +236,27 @@ private fun SkillCard(
         }
 
         Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatusPill(
+                text = sourceLabel(skill.source),
+                tone = if (skill.source == SkillSource.DOWNLOADED) Tone.WARN else Tone.INFO,
+            )
+            // A skill that is off is not in the system prompt, so it must not look like one
+            // that is: the switch alone is easy to miss when scrolling a list of cards.
+            if (!skill.enabled) StatusPill(text = "已关闭 · 不生效", tone = Tone.OFF)
+        }
+        if (skill.source == SkillSource.DOWNLOADED && skill.sourceUrl.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = downloadedLine(skill),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
         Text(
             text = skill.path,
             style = MaterialTheme.typography.labelSmall,
@@ -188,14 +269,6 @@ private fun SkillCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onView) { Text("查看全文") }
             Spacer(Modifier.weight(1f))
-            if (!skill.enabled) {
-                Text(
-                    text = "已停用",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.width(8.dp))
-            }
             Text(
                 text = "${skill.body.length} 字",
                 style = MaterialTheme.typography.labelSmall,

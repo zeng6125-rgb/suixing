@@ -33,9 +33,13 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.pow
 
-/** px, not dp: the effects sit next to touches, which the system reports in px. */
-private const val FX_RING_MAX_RADIUS = 96f
-private const val FX_RING_HOLD_RADIUS = 24f
+/**
+ * dp, not px: the effects sit next to touches, which the system reports in px, but their sizes
+ * belong to the panel's own scale. These were raw pixels — a 96px ring is 48dp on a 2x phone and
+ * 24dp on a 4x one — so the same gesture read as a different gesture from one device to the next.
+ */
+private const val FX_RING_MAX_RADIUS_DP = 32f
+private const val FX_RING_HOLD_RADIUS_DP = 8f
 private const val FX_RING_DURATION_MS = 260L
 private const val FX_LONG_PRESS_HOLD_MS = 600L
 private const val FX_SWIPE_DURATION_MS = 320L
@@ -48,8 +52,8 @@ private const val FX_EDGE_DURATION_MS = 350L
 private const val FX_EDGE_THROTTLE_MS = 800L
 
 private const val FX_COLOR_BRAND = 0xFF1F6B4C.toInt()
-private const val FX_RING_STROKE_PX = 6f
-private const val FX_TRAIL_STROKE_PX = 4f
+private const val FX_RING_STROKE_DP = 2f
+private const val FX_TRAIL_STROKE_DP = 1.5f
 
 /**
  * The edge light is a halo that fades inward, and these are its numbers — Operit's, which is the
@@ -67,6 +71,15 @@ private const val FX_TRAIL_STROKE_PX = 4f
 private const val FX_HALO_WIDTH_FRACTION = 0.046f
 private const val FX_HALO_BANDS = 16
 private const val FX_HALO_FALLOFF = 1.55f
+
+/**
+ * Ceiling for the band above, in dp.
+ *
+ * The fraction alone scales with the short side, which is right on a phone and wrong on anything
+ * wider: a tablet's short side hands the band a width no phone ever showed, and the light stops
+ * reading as a glow and starts reading as a bar. The cap is the widest band worth drawing.
+ */
+private const val FX_HALO_MAX_WIDTH_DP = 24f
 
 /**
  * 彩虹环的颜色：绕屏幕中心一圈的角度渐变，**首尾同色**，所以 0° 那里没有接缝。
@@ -107,16 +120,17 @@ private const val FX_BREATH_MIN_ALPHA = 0.22f
 private const val FX_BREATH_MAX_ALPHA = 0.55f
 
 /**
- * How long the edge stays lit after the last driving action.
+ * How long the light lingers after the last driving action, once nothing is driving any more.
  *
- * Long enough to bridge the gap between two taps of one sequence — a tap, a screen settling, the
- * next tap — and short enough that a run waiting on a model or a long shell command goes dark
- * while the user is watching it. The light means 「it is operating the phone right now」; a run in
- * flight is not the same thing, which is what the first version got wrong.
+ * This no longer decides whether the edge is lit — [shouldLight] does, and its first answer is the
+ * run's own life. What is left for this number is the tail: a run can leave long after its last
+ * tap (it reads the screen, it thinks, it answers), and the edge fades on the first tick whose last
+ * action is older than this, instead of going out the instant the id disappears.
  *
- * Four seconds read as 「灭得太快」: a model turn between two taps routinely overruns it, so the
- * light went out mid-sequence and came back, which looks like a stutter rather than a state. Six
- * covers that turn without turning the light into something that lingers after the run is over.
+ * The timer version of this was the 「会断」 report: 6s after *any* action the light went out — a
+ * model turn between two taps routinely takes longer — and came back on the next tap, so one task
+ * read as 亮-暗-亮. Six seconds still bridges the hand-over between two runs of a conversation, so
+ * an ending turn does not blink the light out before the next one starts.
  */
 private const val FX_BREATH_HOLD_MS = 6000L
 
@@ -396,6 +410,9 @@ object TouchFx {
      * stops itself once the light is out **and** no driving run is left, so no timer runs while
      * the agent is idle — a dark ticker with a run still in flight is the one that watches for
      * the departure that brings the user back to the app.
+     *
+     * 亮不亮由 [shouldLight] 回答，而那个答案是状态推出来的：所以每一 tick 都重新问一遍，窗口
+     * 中途被重建（跳转 / 服务重连）也不会留下一块暗着的画布。
      */
     /**
      * How long the way home is held back after the last driving run ends.
@@ -422,6 +439,27 @@ object TouchFx {
         }
     }
 
+    /**
+     * 该不该亮：一道只从状态推导的纯判断，不看任何 view。
+     *
+     * 主体是 run 的存活 —— 操作过手机的那个 run 还在跑，光就一直在，模型想多久、工具跑多久都
+     * 不灭（用户口径：「只要 run 还在，光就保持在亮态」）。按这个顺序问三种亮法：
+     *
+     * 1. 还有活着的 driving run：亮。**主路径**，也是「会断」的修法 —— 从前这里只有「距上次动
+     *    作 6 秒内」，而两次动作之间的一次模型回合经常比 6 秒长。
+     * 2. 没有 run 可等（后台 job 在操作手机）：由它行动时刻记下的 [FX_JOB_WINDOW_MS] 兜底，否则
+     *    一个中途死掉的 job 会让光永远亮着。
+     * 3. 已经没有 run 在操作了：只剩最后一次动作之后的收尾尾巴 [FX_BREATH_HOLD_MS]。
+     *
+     * 抽成一道纯判断是为了 [overlay]：窗口被系统收走、无障碍服务重连、跳转到别的界面之后新建
+     * 的 view 是「关着」的，只有重新问一遍才知道该不该亮 —— 「点击跳转后直接没了」就是新画布
+     * 没有继承状态。
+     */
+    private fun shouldLight(now: Long, running: Set<String>): Boolean =
+        drivingIds.any { it != FX_JOB_DRIVING_ID && it in running } ||
+            (FX_JOB_DRIVING_ID in drivingIds && now < jobDrivingUntil) ||
+            now - lastDrivingAt < FX_BREATH_HOLD_MS
+
     private val ticker = object : Runnable {
         override fun run() {
             val app = appContext
@@ -446,18 +484,12 @@ object TouchFx {
             }
             // An id that ended stops counting as driving.
             drivingIds = drivingIds - departed
-            // The light follows the actions, not the run: 「agent 没有操作的时候仍旧显示」 was the
-            // complaint, and a run spends most of its life waiting on a model or a tool. The hold
-            // period has to outlast one of those turns without lingering after the run ends — see
-            // FX_BREATH_HOLD_MS for the numbers and why they moved off four seconds.
-            // Two windows, two meanings: while a run is driving, the light holds for
-            // FX_BREATH_HOLD_MS after the last action; a background job driving the screen has
-            // no run to watch, so it gets its own longer window (FX_JOB_WINDOW_MS) recorded at
-            // the moment of the action. Reading only the first made the job window dead code.
-            val lit = app != null &&
-                (now - lastDrivingAt < FX_BREATH_HOLD_MS ||
-                    (FX_JOB_DRIVING_ID in drivingIds && now < jobDrivingUntil))
-            if (lit && app != null) {
+            // 灯跟着 run 走，不跟着「上一次动作有多近」走：那个操作过手机的 run 只要还活着，光
+            // 就一直在（见 shouldLight）——模型在两次动作之间想十几秒是常事，按时间熄灯的那个
+            // 版本就是把一次任务切成一亮一灭的。
+            // 两个窗口，两种含义：真 run 由它自己的存活决定；后台 job 没有 run 可等，只能用
+            // 它行动时刻记下的 FX_JOB_WINDOW_MS。只读第一个会让 job 那个窗口变成死代码。
+            if (app != null && shouldLight(now, running)) {
                 overlay(app)?.setBreathing(true)
                 main.postDelayed(this, FX_BREATH_TICK_MS)
             } else {
@@ -633,7 +665,14 @@ object TouchFx {
      * told apart from.
      */
     private fun overlay(context: Context): FxView? {
-        view?.let { return it }
+        // 留着一个已经不在窗口树上的 view 是最坏的状态：系统把它收走了（跳转到别的界面、无障碍
+        // 服务重连、ROM 自己回收悬浮窗），而我们还在往它上面画 —— invalidate() 对不在树上的 view
+        // 不会再触发 onDraw，光从此不会回来，从外面看和「没有特效」一模一样。窗口在不在树上才是
+        // 真的，所以丢掉它重建，而不是继续信旧实例。这就是「不依赖旧的 view 状态」。
+        view?.let { fx ->
+            if (fx.isAttachedToWindow) return fx
+            release("窗口已不在窗口树上")
+        }
         val host = serviceContext ?: context.applicationContext
         val accessibility = serviceContext != null
         if (!accessibility && !Settings.canDrawOverlays(context)) {
@@ -714,6 +753,12 @@ object TouchFx {
         }
         manager = windowManager
         view = fx
+        // 画布是新的，「该不该亮」不是：跳转、服务重连、窗口重建之后新 view 的呼吸是关的，只有
+        // 按当前状态先对一遍，光才不会跟着旧画布一起消失 —— 「点击跳转后直接没了」一半是上面
+        // 那道时间规则，另一半就是这里从来没有人把状态补回来。
+        if (shouldLight(SystemClock.uptimeMillis(), Core.engine.runsFlow.value.keys)) {
+            fx.setBreathing(true)
+        }
         return fx
     }
 
@@ -813,6 +858,14 @@ private class FxView(
     private class Trail(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val startAt: Long)
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * The panel's own scale. Every size this view draws is written in dp and converted here, so
+     * the ring a finger gets is the same ring on a 2x phone and on a 4x one.
+     */
+    private val density = resources.displayMetrics.density
+
+    private fun dp(value: Float): Float = value * density
 
     /**
      * The edge light's own paint, kept apart from [paint] because it carries a shader: a shader
@@ -916,9 +969,10 @@ private class FxView(
             0f
         }
         val radius = if (growing) {
-            FX_RING_HOLD_RADIUS + (FX_RING_MAX_RADIUS - FX_RING_HOLD_RADIUS) * progress
+            dp(FX_RING_HOLD_RADIUS_DP) +
+                (dp(FX_RING_MAX_RADIUS_DP) - dp(FX_RING_HOLD_RADIUS_DP)) * progress
         } else {
-            FX_RING_HOLD_RADIUS
+            dp(FX_RING_HOLD_RADIUS_DP)
         }
         // Held-down and expanding are different messages, so only the second one fades: a
         // long press that faded while the finger was still down would read as a tap.
@@ -931,7 +985,7 @@ private class FxView(
         canvas.drawCircle(ring.x, ring.y, radius, paint)
 
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = FX_RING_STROKE_PX
+        paint.strokeWidth = dp(FX_RING_STROKE_DP)
         paint.color = FX_COLOR_BRAND
         paint.alpha = (alpha * 255).toInt()
         canvas.drawCircle(ring.x, ring.y, radius, paint)
@@ -940,7 +994,7 @@ private class FxView(
     private fun drawTrail(canvas: Canvas, trail: Trail, now: Long) {
         val progress = ((now - trail.startAt).toFloat() / FX_SWIPE_DURATION_MS).coerceIn(0f, 1f)
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = FX_TRAIL_STROKE_PX
+        paint.strokeWidth = dp(FX_TRAIL_STROKE_DP)
         paint.color = FX_COLOR_BRAND
         paint.alpha = (0.4f * (1f - progress * 0.4f) * 255).toInt()
         canvas.drawLine(
@@ -994,7 +1048,10 @@ private class FxView(
     private fun drawGlow(canvas: Canvas, alpha: Float, now: Long) {
         if (alpha <= 0.01f) return
         val outer = edgeShape()
-        val fadeWidth = minOf(edgeRect.width(), edgeRect.height()) * FX_HALO_WIDTH_FRACTION
+        // Proportional to the short side, then capped: the fraction alone keeps growing with the
+        // panel, and past [FX_HALO_MAX_WIDTH_DP] the light reads as a bar laid on the screen.
+        val fadeWidth = (minOf(edgeRect.width(), edgeRect.height()) * FX_HALO_WIDTH_FRACTION)
+            .coerceAtMost(dp(FX_HALO_MAX_WIDTH_DP))
         glowPaint.style = Paint.Style.FILL
         glowPaint.shader = rainbow(edgeRect, now)
         for (band in 0 until FX_HALO_BANDS) {

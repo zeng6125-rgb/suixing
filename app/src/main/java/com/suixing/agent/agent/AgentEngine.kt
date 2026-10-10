@@ -905,10 +905,21 @@ class AgentEngine(
         // Built once and measured once: the system prompt carries the skills catalogue and
         // the memory entries, so it is both the largest fixed part of the prompt and the one
         // the user can do least about.
+        //
+        // The catalogue follows the same switch the tools do. A persona can hide `skill_read`,
+        // and ChatViewModel passes a registry with those names already filtered out; a
+        // catalogue whose entries cannot be read is worse than none at all — it advertises
+        // skills, spends context on them, and leaves the model guessing at procedures it is
+        // not allowed to look up.
+        //
+        // Asked through all() rather than find(): "skill_read is not in the visible set" is the
+        // question, and it is the same list the prompt is about to summarise.
+        val readable = registry.all().any { it.spec.name == "skill_read" }
+        val skillCatalog = if (readable) skills.catalog(skills.list()) else ""
         val systemText = systemPrompt(
             settings,
             registry,
-            skills.catalog(skills.list()),
+            skillCatalog,
             memory.entries.value,
             profile.text.value,
         )

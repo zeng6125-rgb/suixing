@@ -7,6 +7,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -229,6 +231,11 @@ fun SuixingApp() {
     // remember 而不是 rememberSaveable：存下来的 "chat" 会在冷启动那一帧（起始页正是 chat）
     // 把抽屉弹开；rotation 不走这条路（manifest 里 configChanges 已含 orientation）。
     var drawerReturnTo by remember { mutableStateOf<String?>(null) }
+    // 恢复只恢复状态，不重放动画（用户纠正：「不是让你去返回的时候，那个侧边栏的动画再来一遍
+    // 啊？」）。这一位只由下面的恢复路径置起，由「用户自己拉开抽屉」那条路清掉——清的那一刻
+    // 抽屉是关着的，换 spec 不会打断任何正在跑的动画。于是恢复那一次是瞬时出现，之后每次手动
+    // 打开照常演 240ms 左滑。
+    var drawerInstant by remember { mutableStateOf(false) }
     // 用户自己收起抽屉（遮罩、返回键）：记下的出发页一起清掉，回来时不该再弹出来。
     val closeDrawer: () -> Unit = {
         drawerOpen = false
@@ -240,13 +247,14 @@ fun SuixingApp() {
         if (target != route) drawerReturnTo = route
         open(target)
     }
-    // 回到出发的那一页就把抽屉放回去。这个 effect 只挂在 route 上、不挂 drawerReturnTo：
-    // 点走的那一帧，抽屉的关闭和导航都还没生效，两个键都挂着会在那一帧就把抽屉判成「该开着」
-    // 又弹回来；只认路由变化，就只在真的回到那一页时触发。
+    // 回到出发的那一页就把抽屉放回去：状态要，动画不要（见 drawerInstant）。这个 effect 只挂
+    // 在 route 上、不挂 drawerReturnTo：点走的那一帧，抽屉的关闭和导航都还没生效，两个键都挂
+    // 着会在那一帧就把抽屉判成「该开着」又弹回来；只认路由变化，就只在真的回到那一页时触发。
     LaunchedEffect(route) {
         val from = drawerReturnTo
         if (from != null && route == from) {
             drawerReturnTo = null
+            drawerInstant = true
             drawerOpen = true
         }
     }
@@ -276,7 +284,12 @@ fun SuixingApp() {
         imeDir = 0
     }
     CompositionLocalProvider(
-        LocalOpenSidebar provides { drawerOpen = true },
+        // 用户自己拉开抽屉（聊天页那个汉堡键）：把「恢复不重放动画」那一位还回去，
+        // 下一次开合照常演左滑。
+        LocalOpenSidebar provides {
+            drawerInstant = false
+            drawerOpen = true
+        },
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
@@ -372,13 +385,26 @@ fun SuixingApp() {
                         fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
                             slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) { -it / 3 }
                     },
+                    // 返回 chat 的这一趟，就是「从抽屉进入的那几页回到来源页」：用户要的是连续性
+                    // ——回来时看到的就该是离开时那一屏，页面若再演一遍滑入滑出就是两层动画。
+                    // 只认 targetState == chat（能压在 chat 上面的只有抽屉那几个顶层页）：从设置
+                    // 子页返回设置列表（settings/model → settings）targetState 是 settings，
+                    // 仍照常演动画，那是另一种返回。
                     popEnterTransition = {
-                        fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
-                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) { -it / 3 }
+                        if (targetState.destination.route == "chat") {
+                            EnterTransition.None
+                        } else {
+                            fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
+                                slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) { -it / 3 }
+                        }
                     },
                     popExitTransition = {
-                        fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) { it }
+                        if (targetState.destination.route == "chat") {
+                            ExitTransition.None
+                        } else {
+                            fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                                slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) { it }
+                        }
                     },
                 ) {
                     composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
@@ -440,6 +466,8 @@ fun SuixingApp() {
             }
             Drawer(
                 open = drawerOpen,
+                // 恢复那一次瞬时出现（见 drawerInstant），不重放滑入。
+                instant = drawerInstant,
                 route = route,
                 conversations = conversations,
                 activeId = activeConversationId,
@@ -520,6 +548,8 @@ fun SuixingApp() {
 @Composable
 private fun BoxScope.Drawer(
     open: Boolean,
+    /** 恢复（回到出发页）那一次：立即出现，不重放滑入动画——用户明确要的。 */
+    instant: Boolean,
     route: String,
     conversations: List<Conversation>,
     activeId: String,
@@ -558,9 +588,12 @@ private fun BoxScope.Drawer(
     // 当场发出的，面板若还按 200/160ms 慢慢退，就会和新页面的入场（280ms）同帧叠着演，
     // 屏幕上同时有两条滑动（用户说「动画有点奇怪」）。缩到 120ms 让面板先退干净、页面再
     // 到位；入场保持原样（240/180），那是用户已经接受的一半。
+    // instant（恢复的那一次）连 240ms 的左滑都不演：用户要的是「回来时抽屉本来就还在」的
+    // 连续性，不是重新拉开一遍面板。遮罩与面板走同一条路，否则会出现「面板已经在了、遮罩
+    // 还在淡入」的错位。
     AnimatedVisibility(
         visible = open,
-        enter = fadeIn(tween(180)),
+        enter = if (instant) EnterTransition.None else fadeIn(tween(180)),
         exit = fadeOut(tween(120)),
     ) {
         Box(
@@ -578,7 +611,7 @@ private fun BoxScope.Drawer(
     AnimatedVisibility(
         visible = open,
         modifier = Modifier.align(Alignment.CenterStart),
-        enter = slideInHorizontally(tween(240)) { -it },
+        enter = if (instant) EnterTransition.None else slideInHorizontally(tween(240)) { -it },
         exit = slideOutHorizontally(tween(120)) { -it },
     ) {
         Surface(

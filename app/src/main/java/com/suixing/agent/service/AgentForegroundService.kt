@@ -66,9 +66,13 @@ class AgentForegroundService : Service() {
         // Started after startForeground, not in onCreate: a process that is already
         // running a foreground service may start another one on Android 12+, and one
         // that is merely about to is not.
-        // The console appears only when the user switched it on; a run is silent otherwise.
+        // The console appears when either switch could show it: 常驻, or 「运行时显示」, which is
+        // the one that needs it most — the drawer switch is off, the user is in another app, and
+        // this run is the only reason a ball should be on their screen at all. With both off a run
+        // is silent, as before.
         scope.launch {
-            if (!Core.settings.current().floatingConsole) return@launch
+            val settings = Core.settings.current()
+            if (!settings.floatingConsole && !settings.consoleWhileRunning) return@launch
             // The console declines to start without the overlay grant, and a run that quietly
             // shows no ball is indistinguishable from a broken switch: say why in the
             // notification the run already has, with the one tap that fixes it. Any other

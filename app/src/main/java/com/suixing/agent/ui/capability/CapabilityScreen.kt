@@ -32,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -220,14 +221,12 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 summary = "agent 跑起来时，屏幕上有个能停止、能插话的悬浮球",
                 granted = overlayGranted,
                 lines = if (overlayGranted) {
-                    // Read-only here: the switch itself lives in the drawer's bottom row, and
-                    // two places to flip it would disagree the moment one of them lagged.
                     listOf(
                         "已授权：系统权限已就绪",
                         if (settings.floatingConsole) {
-                            "抽屉开关：已打开，agent 运行时悬浮球会出现"
+                            "抽屉开关（常驻）：已打开，不在前台时球一直在"
                         } else {
-                            "抽屉开关：已关闭，去左侧抽屉底部的「悬浮窗控制台」那一行打开"
+                            "抽屉开关（常驻）：已关闭，去左侧抽屉底部的「悬浮窗控制台」那一行打开"
                         },
                     )
                 } else {
@@ -239,6 +238,14 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 actionLabel = if (overlayGranted) "打开系统设置" else "去授权",
                 onAction = {
                     overlayLauncher.launch(FloatConsoleService.overlayPermissionIntent(context))
+                },
+                footer = {
+                    ConsoleRunningSwitch(
+                        checked = settings.consoleWhileRunning,
+                        onChange = { on ->
+                            scope.launch { Core.settings.update { it.copy(consoleWhileRunning = on) } }
+                        },
+                    )
                 },
             )
 
@@ -620,6 +627,8 @@ private fun CapabilityCard(
     onAction: () -> Unit,
     /** False for a tier with nothing to open (标准档): the button is shown, but inert. */
     actionEnabled: Boolean = true,
+    /** 卡片底部的额外内容：目前只有悬浮窗那张卡片用它放自己的第二个开关。 */
+    footer: (@Composable () -> Unit)? = null,
 ) {
     SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -684,6 +693,34 @@ private fun CapabilityCard(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
             ) { Text(actionLabel) }
         }
+        footer?.let {
+            Spacer(Modifier.height(10.dp))
+            it()
+        }
+    }
+}
+
+/**
+ * 悬浮窗的第二个开关：运行时显示。
+ *
+ * 与抽屉那行分开写，因为两者问的不是同一件事：抽屉那一个是「常驻」（不在前台就一直在），
+ * 这一个只在常驻关掉时才有话说 —— 不在前台且正在跑任务才出现，跑完自动收起。三句话必须一次
+ * 说全，否则很容易被读成常驻的加强版。
+ */
+@Composable
+private fun ConsoleRunningSwitch(checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("运行时显示", style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = "不在前台时，只有正在跑任务才显示悬浮球，跑完自动收起。" +
+                    "常驻打开时球一直都在，不看这个开关；两个都关，后台完全不显示。前台一律不显示。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 

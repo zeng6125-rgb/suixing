@@ -154,6 +154,7 @@ fun ToolsScreen(onBack: () -> Unit) {
     var skillViewing by remember { mutableStateOf<Skill?>(null) }
     var skillDeleting by remember { mutableStateOf<Skill?>(null) }
     var skillImportMenu by remember { mutableStateOf(false) }
+    var skillUrlImport by remember { mutableStateOf(false) }
     var skillRefresh by remember { mutableIntStateOf(0) }
 
     fun notify(text: String) {
@@ -171,7 +172,13 @@ fun ToolsScreen(onBack: () -> Unit) {
             }
             skillRefresh++
             snackbar.showSnackbar(
-                if (count == 0) "没找到技能：需要含 SKILL.md 的文件夹，或一个 .md 文件" else "已导入 $count 个技能",
+                if (count == 0) {
+                    "没找到技能：需要含 SKILL.md 的文件夹，或一个 .md 文件"
+                } else {
+                    // Says the switch is off before the user goes looking for the skill in the
+                    // model's catalogue: they will not find it there until they open it.
+                    "已导入 $count 个技能，默认关闭，打开开关后生效"
+                },
             )
         }
     }
@@ -192,7 +199,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                 return@launch
             }
             skillRefresh++
-            snackbar.showSnackbar("已导入技能「${skill.name}」")
+            snackbar.showSnackbar("已导入技能「${skill.name}」，默认关闭，打开开关后生效")
         }
     }
 
@@ -268,6 +275,16 @@ fun ToolsScreen(onBack: () -> Unit) {
                                     onClick = {
                                         skillImportMenu = false
                                         fileImporter.launch(arrayOf("text/markdown", "text/plain", "*/*"))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("从链接导入") },
+                                    leadingIcon = {
+                                        Icon(ImageVector.vectorResource(R.drawable.ic_download), null, modifier = Modifier.size(20.dp))
+                                    },
+                                    onClick = {
+                                        skillImportMenu = false
+                                        skillUrlImport = true
                                     },
                                 )
                             }
@@ -374,6 +391,78 @@ fun ToolsScreen(onBack: () -> Unit) {
             },
         )
     }
+
+    if (skillUrlImport) {
+        SkillUrlImportDialog(
+            onDismiss = { skillUrlImport = false },
+            onImport = { url ->
+                skillUrlImport = false
+                scope.launch {
+                    val skill = runCatching { Core.skills.importUrl(url) }.getOrElse { error ->
+                        snackbar.showSnackbar("导入失败：${error.message ?: error::class.java.simpleName}")
+                        return@launch
+                    }
+                    skillRefresh++
+                    snackbar.showSnackbar("已下载技能「${skill.name}」，默认关闭，打开开关后生效")
+                }
+            },
+        )
+    }
+}
+
+/**
+ * 「从链接导入」: one URL in, one skill out.
+ *
+ * The dialog checks only the scheme, which is the same check the import itself makes, so a
+ * mistyped address is answered here instead of after a download. Everything else — the
+ * ceilings, the folder name, the switched-off default — belongs to `SkillStore.importUrl`.
+ */
+@Composable
+private fun SkillUrlImportDialog(
+    onDismiss: () -> Unit,
+    onImport: (String) -> Unit,
+) {
+    var url by remember { mutableStateOf("") }
+    val usable = url.trim().startsWith("http://") || url.trim().startsWith("https://")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("从链接导入技能") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    text = "填一个 SKILL.md 的地址（http 或 https）。导入后技能默认关闭，" +
+                        "看过内容再打开开关，它才会进入模型的技能目录。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("技能文件地址") },
+                    placeholder = { Text("https://example.com/SKILL.md") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (url.isNotBlank() && !usable) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "链接必须以 http:// 或 https:// 开头",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onImport(url.trim()) }, enabled = usable) { Text("导入") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

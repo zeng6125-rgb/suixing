@@ -1,5 +1,8 @@
 package com.suixing.agent.ui.assistant
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -35,9 +39,11 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -49,11 +55,13 @@ import com.suixing.agent.R
 import com.suixing.agent.data.ASSISTANT_AVATARS
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
+import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.DEFAULT_SYSTEM_PROMPT
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SettingRow
+import kotlinx.coroutines.launch
 
 /**
  * Create or edit one persona.
@@ -72,6 +80,23 @@ fun AssistantEditor(
 ) {
     var draft by remember(initial) { mutableStateOf(initial) }
     val isNew = settings.assistant(initial.id) == null
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // The picture is written the moment it is picked, not on save: the pick arrives as a
+    // content:// uri that is only readable while the picker's grant lasts, and the draft holds
+    // the path to the file we made out of it. A pick that fails leaves the old picture alone.
+    val pickPicture = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            val previous = draft.avatarPath
+            scope.launch {
+                AssistantAvatarStore.save(context, draft.id, uri, previous)?.let { path ->
+                    draft = draft.copy(avatarPath = path)
+                }
+            }
+        }
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -91,15 +116,13 @@ fun AssistantEditor(
                             title = if (isNew) "新建助手" else "编辑助手",
                             subtitle = draft.label,
                             leading = {
-                                Surface(
-                                    modifier = Modifier.size(38.dp),
+                                AssistantAvatar(
+                                    face = draft.face,
+                                    avatarPath = draft.avatarPath,
+                                    size = 38.dp,
                                     shape = MaterialTheme.shapes.medium,
-                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Text(draft.face, fontSize = 19.sp)
-                                    }
-                                }
+                                    containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                )
                             },
                             actions = {
                                 TextButton(onClick = { onSave(draft) }) { Text("保存") }
@@ -117,7 +140,33 @@ fun AssistantEditor(
                         .padding(top = 12.dp, bottom = 30.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    IdentitySection(draft = draft, onDraft = { draft = it })
+                    IdentitySection(
+                        draft = draft,
+                        onDraft = { draft = it },
+                        onPickPicture = {
+                            pickPicture.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                        onClearPicture = {
+                            // Explicitly "remove my picture", so the file goes with the path:
+                            // leaving it would keep a photo the user asked to be rid of, and the
+                            // id sweep on delete is not what this is.
+                            val previous = draft.avatarPath
+                            draft = draft.copy(avatarPath = "")
+                            scope.launch { AssistantAvatarStore.delete(context, previous) }
+                        },
+                        onPickEmoji = { emoji ->
+                            // An emoji tap means "this is my face": it takes the picture's place
+                            // instead of being hidden behind it, which is what a picture that
+                            // wins over the grid would have looked like.
+                            val previous = draft.avatarPath
+                            draft = draft.copy(avatar = emoji, avatarPath = "")
+                            if (previous.isNotBlank()) {
+                                scope.launch { AssistantAvatarStore.delete(context, previous) }
+                            }
+                        },
+                    )
                     PromptSection(draft = draft, onDraft = { draft = it })
                     ModelSection(draft = draft, settings = settings, onDraft = { draft = it })
                     ToolSection(draft = draft, toolNames = toolNames, onDraft = { draft = it })
@@ -142,17 +191,43 @@ fun AssistantEditor(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun IdentitySection(draft: Assistant, onDraft: (Assistant) -> Unit) {
+private fun IdentitySection(
+    draft: Assistant,
+    onDraft: (Assistant) -> Unit,
+    onPickPicture: () -> Unit,
+    onClearPicture: () -> Unit,
+    onPickEmoji: (String) -> Unit,
+) {
     SectionCard(title = "身份", icon = ImageVector.vectorResource(R.drawable.ic_id_card), subtitle = "名字与头像") {
+        // The picture first, and apart from the emoji grid: the two are the same choice, and a
+        // photo is what most users reach for. The emoji below stays the fallback for anyone who
+        // does not want to hand over a picture.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AssistantAvatar(
+                face = draft.face,
+                avatarPath = draft.avatarPath,
+                size = 64.dp,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                TextButton(onClick = onPickPicture) {
+                    Text(if (draft.avatarPath.isBlank()) "上传图片" else "换一张")
+                }
+                if (draft.avatarPath.isNotBlank()) {
+                    TextButton(onClick = onClearPicture) { Text("恢复默认图标") }
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             ASSISTANT_AVATARS.forEach { emoji ->
-                val selected = draft.avatar == emoji
+                val selected = draft.avatarPath.isBlank() && draft.avatar == emoji
                 Surface(
-                    onClick = { onDraft(draft.copy(avatar = emoji)) },
+                    onClick = { onPickEmoji(emoji) },
                     shape = CircleShape,
                     color = if (selected) {
                         MaterialTheme.colorScheme.primaryContainer

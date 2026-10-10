@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The feather for the floating console's ball, drawn for the 24dp box it lands in.
+
+  Not ic_launcher_foreground: that one is an adaptive-icon foreground on a 108dp canvas with the
+  art inside its safe zone, so scaling it into a small box left the ink at about 12×18dp and soft.
+  Same three strokes as Logo.kt's FeatherIcon (vane outline, shaft with its calamus, one barb),
+  framed so the mark fills the box instead of floating inside it.
+
+  White because the ball tints it with SRC_IN over the brand gradient; a path with no colour of
+  its own draws nothing at all, and a tint can only filter pixels that exist.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M6.1,20.5 C9.4,13.4 8.8,3.8 19.2,1.6 C18.2,7.5 11.4,17.6 6.1,20.5 Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M4.8,22.4 L19.2,1.6"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M11.3,13 L13.5,13.2"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round" />
+</vector>

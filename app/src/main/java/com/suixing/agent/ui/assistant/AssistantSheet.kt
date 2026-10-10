@@ -1,9 +1,7 @@
 package com.suixing.agent.ui.assistant
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,11 +30,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
@@ -231,15 +227,15 @@ private fun AssistantCard(
     ) {
         Column(Modifier.padding(start = 13.dp, end = 6.dp, top = 12.dp, bottom = 13.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(MaterialTheme.shapes.small)
-                        .background(scheme.surfaceContainerHigh),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(assistant.face, fontSize = 20.sp)
-                }
+                // The persona's picture, its emoji, or the brand feather — one composable for
+                // all three, so this card cannot disagree with the chat bubble about the face.
+                AssistantAvatar(
+                    face = assistant.face,
+                    avatarPath = assistant.avatarPath,
+                    size = 38.dp,
+                    shape = MaterialTheme.shapes.small,
+                    containerColor = scheme.surfaceContainerHigh,
+                )
                 Spacer(Modifier.weight(1f))
                 // One slot for "this is the app-wide default" and "make it one": the star is
                 // the action, and once taken it greys out rather than disappearing, so cards

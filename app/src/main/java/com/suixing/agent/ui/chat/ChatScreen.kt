@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
@@ -506,7 +507,6 @@ fun ChatScreen(
         // stream kept the list pinned while the user dragged, and they had to fight it.
         snapshotFlow { listState.isScrollInProgress to listState.canScrollBackward }
             .collect { (scrolling, canScrollBack) ->
-                scrollDiag(context, "watch:$scrolling/$canScrollBack", listState, following, itemCount) // 量完删
                 // Our own pin scrolls synchronously; by the time this collector sees the
                 // scrolling flag the programmatic guard is already down, and it read the pin as
                 // a user drag and killed following mid-transition — the card then froze while
@@ -579,7 +579,6 @@ fun ChatScreen(
         pinnedCount = itemCount
         programmatic = true
         try {
-            if (added) scrollDiag(context, "pin:added", listState, following, itemCount) // 量完删
             if (!gateOpen()) return@LaunchedEffect
             listState.scrollToItem(itemCount - 1)
             if (!gateOpen()) return@LaunchedEffect
@@ -594,7 +593,6 @@ fun ChatScreen(
             // every send is worse than a jump they never see.
             if (added) {
                 withFrameNanos { }
-                scrollDiag(context, "pin:second", listState, following, itemCount) // 量完删
                 if (!gateOpen()) return@LaunchedEffect
                 listState.scrollToItem(itemCount - 1)
                 if (!gateOpen()) return@LaunchedEffect
@@ -793,6 +791,13 @@ fun ChatScreen(
                                         following = false
                                         scrollDiag(context, "press:down", listState, wasFollowing, itemCount) // 量完删
                                         var movedUp = false
+                                        // Whether the list itself moved. A hand can travel less than
+                                        // the 12dp above and still send the list a long way: a fling,
+                                        // and — the case that matters — a drag *downward*, which is
+                                        // the gesture that reads older messages. `programmatic` is
+                                        // excluded so our own pin cannot pass for a hand: a tap that
+                                        // happens to land during a pin is still a tap.
+                                        var scrolled = false
                                         var released = false
                                         while (!released) {
                                             val next = awaitPointerEvent(PointerEventPass.Initial)
@@ -803,13 +808,18 @@ fun ChatScreen(
                                             if (!released && downY - next.changes.first().position.y > releaseDragPx) {
                                                 movedUp = true
                                             }
+                                            if (!released && !programmatic && listState.isScrollInProgress) {
+                                                scrolled = true
+                                            }
                                         }
-                                        scrollDiag(context, "press:up:movedUp=$movedUp", listState, following, itemCount) // 量完删
-                                        // A tap is not the user reaching into the content: short, and
-                                        // never dragged up. The long press that starts a selection,
-                                        // and any drag, leave the follow released until the scroll
-                                        // watcher re-arms it at the end.
-                                        if (!movedUp && SystemClock.uptimeMillis() - pressedAt < HOLD_TO_SELECT_MS) {
+                                        // A tap is not the user reaching into the content: short, never
+                                        // dragged up, and a list that never moved. The long press that
+                                        // starts a selection, any drag — in either direction — and
+                                        // anything the list itself scrolled leave the follow released
+                                        // until the scroll watcher re-arms it at the end.
+                                        val atEndNow = listState.atEnd(slack = 8)
+                                        scrollDiag(context, "press:up:movedUp=$movedUp:scrolled=$scrolled:atEnd=$atEndNow", listState, following, itemCount) // 量完删
+                                        if (restoresFollow(movedUp, scrolled, atEndNow, SystemClock.uptimeMillis() - pressedAt)) {
                                             following = wasFollowing
                                         }
                                     }
@@ -1200,6 +1210,9 @@ fun ChatScreen(
         }
         if (voiceOpen) {
             VoiceOverlay(
+                // Just above the composer, never over it: the capsule's whole point is that the
+                // user can still read what they are dictating into.
+                bottomInset = composerH + 8.dp,
                 onResult = { text -> setDraft(text = if (input.isBlank()) text else "$input $text") },
                 onDismiss = { voiceOpen = false },
             )
@@ -2099,15 +2112,45 @@ private fun TurnMetrics(
             }
         }
         Box(Modifier.align(Alignment.TopStart)) {
+            // Focus-less, like the composer's own cards and for the same reason (see [MenuCard]'s
+            // `focusable`): a focusable popup window takes the keyboard away from the field, and a
+            // reader looking up what a turn cost has not left the conversation. This card sits in
+            // the transcript, so it was the one place still doing it — the composer's two cards
+            // were already focus-less. A focus-less window can see neither a tap outside itself
+            // nor BACK, so both are handled here: the scrim is a window of its own and is composed
+            // before the card, because windows stack in composition order.
+            if (open != null) {
+                Popup(properties = PopupProperties(focusable = false)) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { open = null },
+                    )
+                }
+                BackHandler { open = null }
+            }
             MenuCard(
                 visible = open != null,
                 onDismiss = { open = null },
                 alignment = Alignment.BottomStart,
                 offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
+                // The card's own Column already swallows the taps that land on it (see MenuCard).
+                focusable = false,
             ) {
                 // Intrinsic width: every row is as wide as the widest one, which is what puts the
-                // numbers on one column while the popup still hugs its content.
-                Column(Modifier.width(IntrinsicSize.Max).widthIn(min = 208.dp)) {
+                // numbers on one column while the popup still hugs its content. The cap is what
+                // keeps a long 「提供方 / 模型」 line from pushing the card past the window.
+                Column(
+                    Modifier
+                        .width(IntrinsicSize.Max)
+                        .widthIn(
+                            min = 208.dp,
+                            max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp),
+                        ),
+                ) {
                 when (shown) {
                     MetricCard.TIME -> {
                         if (elapsedMs > 0) RingDetail("总用时", elapsed)
@@ -2219,6 +2262,8 @@ private fun AssistantRow(
     name: String = "随行",
     /** The persona's emoji face; blank falls back to the brand feather. */
     face: String = "",
+    /** The picture the user uploaded for this persona; blank falls back to [face]. */
+    avatarPath: String = "",
     /** The tool this reply is waiting on right now, so its card can say so live. */
     runningTool: String? = null,
     branch: Branch? = null,
@@ -2262,26 +2307,14 @@ private fun AssistantRow(
             // The avatar sits in the card's header rather than beside it: the reply is one
             // object, and an avatar floating outside the card made it two.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // The persona's own face first: a persona the user gave an emoji keeps
-                // it, and only a blank face falls back to the brand feather.
-                Surface(
-                    modifier = Modifier.size(24.dp),
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                ) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        if (face.isNotBlank()) {
-                            Text(text = face, fontSize = 14.sp, maxLines = 1)
-                        } else {
-                            Icon(
-                                imageVector = FeatherIcon,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(15.dp),
-                            )
-                        }
-                    }
-                }
+                // One composable for all three faces — the uploaded picture, the persona's
+                // emoji, the brand feather — so this card, the assistant sheet and the editor
+                // cannot disagree about what a persona looks like.
+                AssistantAvatar(
+                    face = face,
+                    avatarPath = avatarPath,
+                    size = 24.dp,
+                )
                 Spacer(Modifier.width(12.dp))
                 Text(
                     text = name,
@@ -3693,18 +3726,25 @@ private fun TurnScrubber(
                         val destination = selectionRow
                         // A finger that has really dragged and then wanders off the strip was
                         // after the transcript rather than a turn, so the jump is dropped and the
-                        // strip springs back. Tested on all four sides of the rail, not just the
-                        // left: dragging past the top or bottom line is just as much a "not this".
-                        // A tap and a still hold never cancel — pointing at a line is the answer.
+                        // strip springs back. Tested on the two sides and the bottom of the rail —
+                        // not the top. Pushing up past the first line is precisely how the turns
+                        // above the window are unlocked (see [scrubberPull]), and cancelling there
+                        // made the user's own gesture work against itself: one turn of unlock is
+                        // about 17dp of travel, and this tolerance killed the whole gesture at
+                        // 28dp — so the harder they pulled for more history, the more certainly
+                        // the lift did nothing at all. Which is what "导航条条数没增加" is: the
+                        // strip had unlocked a line or two and then thrown the jump away.
+                        //
                         // Measured here rather than read from the composition's own rail height:
                         // this handler is keyed on Unit and never restarts, so a window that has
-                        // since gained or lost a turn would be judged against a stale box.
+                        // since gained or lost a turn would be judged against a stale box. It
+                        // cannot: the window is a fixed number of lines that slides, so its size —
+                        // the only thing this needs — is the same at the lift as at the press.
                         val railBottomPx =
                             hitRowPx * railRows.size + hitGapPx * (railRows.size - 1)
                         val cancelled = dragged && (
                             pointer.x < -exitPx ||
                                 pointer.x > railWidthPx + exitPx ||
-                                pointer.y < -exitPx ||
                                 pointer.y > railBottomPx + exitPx
                             )
                         pressRow = -1
@@ -3798,7 +3838,7 @@ private fun TurnScrubber(
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
-                    .widthIn(max = SCRUBBER_LABEL_MAX)
+                    .widthIn(max = scrubberLabelMax(LocalConfiguration.current.screenWidthDp.dp))
                     .clip(RoundedCornerShape(8.dp))
                     .background(scheme.inverseSurface)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -3897,6 +3937,18 @@ private val SCRUBBER_LABEL_GAP = 6.dp
 
 /** The label's longest line, so it never covers the bubble it floats over. */
 private val SCRUBBER_LABEL_MAX = 180.dp
+
+/**
+ * The label bubble's own cap: [SCRUBBER_LABEL_MAX], or what is left of the window once the rail it
+ * sits beside, its gap and the two margins are taken out.
+ *
+ * The bubble is drawn to the rail's left and the rail hugs the right edge, so a flat 180dp ran off
+ * the left of a narrow window — the split-screen case, where the window is not the display.
+ */
+private fun scrubberLabelMax(windowWidth: Dp): Dp = minOf(
+    SCRUBBER_LABEL_MAX,
+    windowWidth - POPUP_EDGE * 2 - SCRUBBER_RAIL - SCRUBBER_LABEL_GAP,
+)
 
 /** How far a line grows once its label is out, and while it is merely touched. */
 private const val SCRUBBER_PRESS_SCALE = 1.4f
@@ -4180,6 +4232,11 @@ private fun Composer(
 ) {
     val scheme = MaterialTheme.colorScheme
     val density = LocalDensity.current
+    // The window's own width, which is what a popup has to fit inside. `screenWidthDp` is the
+    // window's, not the display's, so a card that fits here also fits a split-screen window.
+    val windowWidth = LocalConfiguration.current.screenWidthDp.dp
+    val screenWidthPx = with(density) { windowWidth.toPx() }
+    val popupEdgePx = with(density) { POPUP_EDGE.toPx() }
     var menuOpen by remember { mutableStateOf(false) }
     var sheetOpen by remember { mutableStateOf(false) }
     // The model capsule's right edge in window pixels: the sheet is aligned to it so the card
@@ -4255,10 +4312,13 @@ private fun Composer(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        // Clear of the scrubber column on the right edge: 4dp edge gap +
-                        // 24dp longest line + 12dp of air, so the disc never sits on a
-                        // turn line.
-                        .padding(end = 40.dp),
+                        // 24dp inside this box, and the box itself is 16dp inside the screen, so
+                        // the disc's right edge sits 40dp from the screen edge. The scrubber's
+                        // own column is 4dp of edge gap plus 24dp of line, i.e. 28dp: 12dp of air
+                        // between the disc and a turn line, which is what keeps them from reading
+                        // as one control. It used to be 40dp here, which put the disc 56dp out —
+                        // far enough that the user asked for it closer to the ring.
+                        .padding(end = 24.dp),
                     horizontalArrangement = Arrangement.End,
                 ) {
                     // Deliberately one step up from the shared 40dp disc: this button is
@@ -4422,7 +4482,12 @@ private fun Composer(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                    Box {
+                    // The anchor's own left edge and the card's width, both measured: the card opens
+                    // to the right of this button, and on a window narrower than the button plus
+                    // the card it used to hang off the screen's right edge.
+                    var plusAnchorLeft by remember { mutableStateOf(0f) }
+                    var plusWidth by remember { mutableStateOf(0) }
+                    Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
                         IconButton(
                             onClick = { menuOpen = true },
                             modifier = Modifier.size(40.dp),
@@ -4444,12 +4509,24 @@ private fun Composer(
                             // to clear the whole 40dp button plus the 8dp of air — -8dp alone
                             // left the card sitting on top of the plus button.
                             alignment = Alignment.BottomStart,
-                            offset = with(density) { IntOffset(0, -48.dp.roundToPx()) },
+                            offset = with(density) {
+                                IntOffset(
+                                    popupNudge(
+                                        anchorLeft = plusAnchorLeft,
+                                        width = plusWidth,
+                                        windowPx = screenWidthPx,
+                                        edgePx = popupEdgePx,
+                                    ).roundToInt(),
+                                    -48.dp.roundToPx(),
+                                )
+                            },
                             // Same reason as the model sheet: this card hangs off a button of
                             // the composer too, and a focusable popup here would move the
                             // composer out from under it.
                             focusable = false,
-                            modifier = Modifier.widthIn(max = 200.dp),
+                            modifier = Modifier
+                                .widthIn(max = popupCap(200.dp, windowWidth))
+                                .onSizeChanged { plusWidth = it.width },
                         ) {
                             MenuItemRow(ImageVector.vectorResource(R.drawable.ic_image), "图片") {
                                 menuOpen = false
@@ -4503,7 +4580,15 @@ private fun Composer(
                         // the user asked for it above the model button. Right-aligned inside
                         // the free space so the capsule sits against the ring, as asked.
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                            Box {
+                                // The probe and the capsule are siblings here, and that is the whole
+                                // of it: as a *wrapper* around them the probe stretched this box —
+                                // a Box is as wide as its widest child, and a full-width child makes
+                                // it the whole free space — and the capsule inside then sat at that
+                                // box's own start (TopStart, the default), i.e. the model selector
+                                // at the far left of an empty row with the ring way off to the
+                                // right. That is exactly the screenshot the user sent: the
+                                // right-alignment was written and had nothing to align.
+                                //
                                 // Zero-height probe at the capsule's TOP edge: the popup hangs
                                 // off it bottom-aligned, so its bottom edge lands 8dp above the
                                 // capsule. Hung on the capsule box itself, BottomStart put the
@@ -4549,7 +4634,6 @@ private fun Composer(
                                 },
                                 )
                                 }
-                        }
                         }
                     }
                     // Left of the mic, where the user asked for it: the mic is the control
@@ -4676,13 +4760,16 @@ private fun MenuCard(
     offset: IntOffset,
     modifier: Modifier = Modifier,
     /**
-     * Whether the popup's own window takes focus. True is the platform default and is what
-     * a card opened from a message wants. False is for the composer's cards: a focusable
-     * popup window takes the keyboard away from the field, the shell then drops the whole
-     * composer by the keyboard's height, and the card that was anchored 8dp above the model
-     * button is left floating a keyboard above it — the card the user photographed as 偏上.
-     * Focus-less means the card cannot see a tap outside its own bounds and cannot see BACK,
-     * so those two live with the caller: see the scrim and BackHandler in [Composer].
+     * Whether the popup's own window takes focus. True is the platform default, and is only right
+     * for a card whose own subject is the keyboard. False is for the cards that hang off this
+     * screen's bars: a focusable popup window takes the keyboard away from the field, the shell
+     * then drops the whole composer by the keyboard's height, and a card anchored 8dp above a
+     * button of that row is left floating a keyboard above it — the card the user photographed as
+     * 偏上. The same focus is what used to close the input method when the user only wanted to
+     * read a number, which is why the ring's card and the transcript's own metric card are
+     * focus-less too. Focus-less means the card cannot see a tap outside its own bounds and cannot
+     * see BACK, so both live with the caller: see the scrim and BackHandler in [Composer], and the
+     * same pair at the metric card's call site.
      */
     focusable: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
@@ -4731,6 +4818,42 @@ private fun MenuCard(
             )
         }
     }
+}
+
+/** The margin a popup keeps from the window's own edges. */
+private val POPUP_EDGE = 8.dp
+
+/**
+ * A popup's width cap: the width it wants, never wider than the window it opens in.
+ *
+ * [windowWidth] is `screenWidthDp`, the window's own width — in split screen the display's width
+ * would hand a card a size the window does not have. A card wider than its window is a card whose
+ * right half is off the screen: the model sheet's 340dp needs a 356dp window to fit.
+ */
+private fun popupCap(nominal: Dp, windowWidth: Dp): Dp = minOf(nominal, windowWidth - POPUP_EDGE * 2)
+
+/**
+ * How far a popup anchored at [anchorLeft] has to move to stay inside the window.
+ *
+ * The card is [width] wide and opens to the right of its anchor, so only its left edge can be
+ * moved; [edgePx] of air is kept on both sides. The same rule the model sheet's own nudge uses,
+ * shared here so the card hung off the row's left end obeys it too.
+ */
+private fun popupNudge(anchorLeft: Float, width: Int, windowPx: Float, edgePx: Float): Float {
+    if (width <= 0 || anchorLeft == 0f) return 0f
+    val left = anchorLeft.coerceIn(edgePx, (windowPx - edgePx - width).coerceAtLeast(edgePx))
+    return left - anchorLeft
+}
+
+/**
+ * [popupNudge] for a card centred on its anchor instead of left-aligned to it — the ring's own
+ * detail card, which is centred on a ring that sits at the row's right end.
+ */
+private fun popupNudgeCentred(anchorCentre: Float, width: Int, windowPx: Float, edgePx: Float): Float {
+    if (width <= 0 || anchorCentre == 0f) return 0f
+    val desired = anchorCentre - width / 2f
+    val left = desired.coerceIn(edgePx, (windowPx - edgePx - width).coerceAtLeast(edgePx))
+    return left - desired
 }
 
 /** One row of a popup menu: icon, label, and the whole row as the target. */
@@ -4881,8 +5004,9 @@ private fun GenerationSheet(
     var anchorLeft by remember { mutableStateOf(0f) }
     var anchorRight by remember { mutableStateOf(0f) }
     var sheetWidth by remember { mutableStateOf(0) }
-    val screenPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
-    val edge = with(density) { 8.dp.toPx() }
+    val windowWidth = LocalConfiguration.current.screenWidthDp.dp
+    val screenPx = with(density) { windowWidth.toPx() }
+    val edge = with(density) { POPUP_EDGE.toPx() }
     // Right-aligned to the capsule that opened it, not centred: centred put the sheet's mass to
     // the left of the ring, which read as left-aligned. Falls back to the free space's own right
     // edge until the capsule has been measured — the two agree whenever the name is long enough
@@ -4936,7 +5060,7 @@ private fun GenerationSheet(
         // to find a model, and 264dp of content cut the long ones at the card's edge. The 340dp
         // that first fixed this is back, but only while the list is up.
         modifier = Modifier
-            .widthIn(max = if (picking) 340.dp else 300.dp)
+            .widthIn(max = popupCap(if (picking) 340.dp else 300.dp, windowWidth))
             .onSizeChanged { sheetWidth = it.width },
     ) {
         if (!picking) {
@@ -5202,19 +5326,36 @@ private fun voiceErrorMessage(error: Int): String = when (error) {
 }
 
 /**
- * In-app dictation: a floating card over a scrim, with the recognizer's partial
- * results live in the middle.
+ * In-app dictation: a slim capsule just above the composer, with the recognizer's own partial
+ * results in it.
  *
- * [SpeechRecognizer] owns the microphone itself; this only draws the card and reads
- * what it reports. A result closes the card. A failure keeps it open with the reason —
- * and, because some devices (MIUI's AsrService answers ERROR_CLIENT) only let their own
- * speech screen bind the recognizer, offers the system's input as the way out.
+ * [SpeechRecognizer] owns the microphone itself; this only draws the capsule and reads what it
+ * reports. It used to be a big centred card over a dark scrim, and the verdict on that was
+ * 「太丑」: the transcript underneath stays readable now, which is the whole reason for a capsule.
+ *
+ * **Which engine**: the on-device recognizer first ([SpeechRecognizer.createOnDeviceSpeechRecognizer],
+ * API 31+) because it answers without putting any system panel on screen — the panel the user is
+ * complaining about is the ROM's own, and it is the classic path that summons it. The classic path
+ * still runs when there is no on-device model, with `EXTRA_PREFER_OFFLINE` set so an installed
+ * offline engine is used where there is one. [VoiceEngine] says which one this attempt got and the
+ * capsule prints it, so a report about this screen can name the path it took.
+ *
+ * A result closes the capsule. A failure keeps it open with the reason — and, because some devices
+ * (MIUI's AsrService answers ERROR_CLIENT) only let their own speech screen bind the recognizer,
+ * offers the system's input as the way out.
  */
 @Composable
-private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
+private fun VoiceOverlay(
+    /** How far up the composer reaches: the capsule sits just above it, never over it. */
+    bottomInset: Dp,
+    onResult: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
     val context = LocalContext.current
     var partial by remember { mutableStateOf("") }
     var phase by remember { mutableStateOf<VoicePhase>(VoicePhase.Preparing) }
+    // The microphone's own level, 0..1: what the capsule's bars are drawn from.
+    var level by remember { mutableStateOf(0f) }
     // Retrying means a new recognizer: the failed one is spent, and reusing it would replay
     // the same refusal.
     var attempt by remember { mutableStateOf(0) }
@@ -5225,18 +5366,32 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     // a screen, not a dialog behind ours, so drawing the card while it is up stacks the two —
     // which is what the user saw: our failure card over an activity already listening.
     var handedOff by remember { mutableStateOf(false) }
+    val engine = remember(attempt) { voiceEngine(context) }
     val recognizer = remember(attempt) {
-        SpeechRecognizer.createSpeechRecognizer(context).apply {
+        val created = if (engine == VoiceEngine.ON_DEVICE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+        } else {
+            SpeechRecognizer.createSpeechRecognizer(context)
+        }
+        created.apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     phase = VoicePhase.Listening
                 }
 
                 override fun onBeginningOfSpeech() = Unit
-                override fun onRmsChanged(rmsdB: Float) = Unit
+
+                // The system reports the microphone in dB and the useful part of it is the top of
+                // the range: about -2dB is loud, -12dB is a quiet room. Mapped once here so the
+                // capsule can draw a level instead of a negative number.
+                override fun onRmsChanged(rmsdB: Float) {
+                    level = ((rmsdB + 12f) / 12f).coerceIn(0f, 1f)
+                }
+
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
 
                 override fun onEndOfSpeech() {
+                    level = 0f
                     phase = VoicePhase.Thinking
                 }
 
@@ -5284,6 +5439,13 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
                 putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
+                // Only the classic path reads this, and it is the cheap half of 「don't put a
+                // panel on my screen」: on a ROM that ships an offline engine the request is
+                // served locally, and the online panel — the one the user called 丑 — never
+                // appears. The on-device recognizer is already local and ignores it.
+                if (engine != VoiceEngine.ON_DEVICE) {
+                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                }
             },
         )
         onDispose {
@@ -5353,29 +5515,23 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     }
     val listening = phase is VoicePhase.Listening
     val scheme = MaterialTheme.colorScheme
-    // Two rings breathing out of the disc while the mic is open: the only motion on
-    // the card, and it stops the moment recognition ends.
-    val pulse = rememberInfiniteTransition(label = "voice-pulse")
-    val ring by pulse.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.7f,
-        animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Restart),
-        label = "voice-ring",
-    )
-    val ringAlpha by pulse.animateFloat(
-        initialValue = 0.45f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Restart),
-        label = "voice-ring-alpha",
-    )
+    val title = when {
+        failure != null -> failure.message
+        partial.isNotEmpty() -> partial
+        listening -> "请说话…"
+        phase is VoicePhase.Thinking -> "正在识别…"
+        else -> "正在准备麦克风…"
+    }
     // Nothing to draw once the system screen has it. Everything above still runs — the launcher
     // and its result callback are what close this overlay from here.
     if (handedOff) return
     Box(Modifier.fillMaxSize()) {
+        // Tap anywhere to give up — but with no scrim: the transcript stays readable while the mic
+        // is open, which is the point of a capsule. The dark overlay over the whole screen is half
+        // of what made the old card read as 丑.
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.4f))
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
@@ -5384,110 +5540,147 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
         )
         Column(
             modifier = Modifier
-                .align(Alignment.Center)
-                // 24dp, not 40: the failed state has three ways out and the narrower card was
-                // what squeezed them off its own right edge.
-                .padding(horizontal = 24.dp)
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 16.dp)
+                .padding(bottom = bottomInset + 8.dp)
                 .fillMaxWidth()
-                .shadow(
-                    elevation = 8.dp,
-                    shape = RoundedCornerShape(24.dp),
-                    ambientColor = Color.Black.copy(alpha = 0.25f),
-                    spotColor = Color.Black.copy(alpha = 0.25f),
-                )
-                .clip(RoundedCornerShape(24.dp))
-                .background(scheme.surface)
-                .padding(24.dp),
+                // One gesture for the two things a finger wants here: 长按 ends the sentence while
+                // it is listening, and asks for one more try once it has failed. Everything else
+                // that used to be a button on the old card lives here now.
+                .pointerInput(phase) {
+                    detectTapGestures(
+                        onLongPress = {
+                            if (failure != null) {
+                                partial = ""
+                                phase = VoicePhase.Preparing
+                                attempt++
+                            } else {
+                                recognizer.stopListening()
+                            }
+                        },
+                    )
+                },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                if (listening) {
-                    Box(
-                        Modifier
-                            .size(88.dp * ring)
-                            .clip(CircleShape)
-                            .background(scheme.primary.copy(alpha = ringAlpha)),
-                    )
-                    Box(
-                        Modifier
-                            .size(88.dp * (1f + (ring - 1f) * 0.6f))
-                            .clip(CircleShape)
-                            .background(scheme.primary.copy(alpha = ringAlpha * 0.6f)),
-                    )
-                }
-                Box(
-                    Modifier
-                        .size(88.dp)
-                        .clip(CircleShape)
-                        .background(scheme.primaryContainer),
-                    contentAlignment = Alignment.Center,
+            Surface(
+                shape = MaterialTheme.shapes.large,
+                color = scheme.surfaceContainerHigh.copy(alpha = 0.94f),
+                contentColor = scheme.onSurface,
+                shadowElevation = 0.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_mic),
-                        contentDescription = null,
-                        tint = scheme.onPrimaryContainer,
-                        modifier = Modifier.size(36.dp),
+                    if (failure == null) {
+                        VoiceBars(level = level, active = listening, tint = scheme.primary)
+                        Spacer(Modifier.width(12.dp))
+                    } else {
+                        Icon(
+                            imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
+                            contentDescription = null,
+                            tint = scheme.error,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = title,
+                            style = if (failure != null) {
+                                MaterialTheme.typography.bodyMedium
+                            } else {
+                                MaterialTheme.typography.titleSmall
+                            },
+                            color = if (failure != null) scheme.error else scheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        // Which recognizer this attempt got, and the one gesture that is not a
+                        // button. The engine name is the line to quote in a bug report: it is the
+                        // difference between 「ROM 拒绝第三方」 and 「设备端模型没装」.
+                        Text(
+                            text = engine.label + if (failure != null) " · 长按重试" else " · 长按结束",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = scheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    CircleActionButton(
+                        icon = ImageVector.vectorResource(R.drawable.ic_x),
+                        contentDescription = "取消",
+                        onClick = onDismiss,
+                        containerColor = scheme.surfaceContainerHighest,
+                        contentColor = scheme.onSurfaceVariant,
+                        shadowElevation = 0.dp,
                     )
                 }
             }
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = when {
-                    failure != null -> failure.message
-                    partial.isNotEmpty() -> partial
-                    phase is VoicePhase.Listening -> "请说话…"
-                    phase is VoicePhase.Thinking -> "正在识别…"
-                    else -> "正在准备麦克风…"
-                },
-                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp),
-                color = if (partial.isEmpty()) scheme.onSurfaceVariant else scheme.onSurface,
-                textAlign = TextAlign.Center,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(20.dp))
-            if (failure == null) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onDismiss) { Text("取消") }
-                    Button(
-                        onClick = { recognizer.stopListening() },
-                        shape = RoundedCornerShape(12.dp),
-                    ) {
-                        Text("完成")
-                    }
-                }
-            } else {
-                // Two rows, not one. The three buttons are about 268dp of content in a card
-                // that leaves 232dp of it, and an M3 Button has a minimum size it will not go
-                // below — so the third one was cut off at the card's right edge and read as a
-                // plain green block. The ways out go on the first row; 「重试」 gets the width
-                // of the card on the second, which is also the one the user reaches for most.
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onDismiss) { Text("取消") }
-                    TextButton(onClick = useSystemInput) { Text("改用系统语音输入") }
-                }
-                Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // The two ways out of a recognizer that will not work: the system's own
-                    // speech screen, or one more try with a fresh recognizer.
-                    Button(
-                        onClick = {
-                            partial = ""
-                            phase = VoicePhase.Preparing
-                            attempt++
-                        },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("重试")
-                    }
-                }
+            if (failure != null) {
+                // One way out, and only when the in-app recognizer has actually given up: the
+                // system's own speech screen, which on this device is what can reach the installed
+                // recognizer. 重试 and 取消 moved to the long press and the × above.
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = useSystemInput) { Text("改用系统语音输入") }
             }
         }
     }
 }
 
+/**
+ * Which recognizer an attempt is using, and what the capsule prints for it.
+ *
+ * The order is the fallback order: the on-device model answers without any system panel; the
+ * classic service with `EXTRA_PREFER_OFFLINE` still answers locally on a ROM that ships an offline
+ * engine; and only a device with neither falls back to the online service — the one that puts the
+ * ROM's own speech screen on top of the app.
+ */
+private enum class VoiceEngine(val label: String) {
+    ON_DEVICE("设备端识别"),
+    SYSTEM("系统识别服务（优先离线）"),
+}
+
+/**
+ * The engine this device can actually offer — the availability test the capsule reports.
+ *
+ * `isOnDeviceRecognitionAvailable` is API 31+ and a device without the model installed answers
+ * false, which is exactly the case that used to end up on the online panel. Everything else keeps
+ * the classic service, where the offline preference is the best that can be asked for.
+ */
+private fun voiceEngine(context: Context): VoiceEngine {
+    val onDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }.getOrDefault(false)
+    return if (onDevice) VoiceEngine.ON_DEVICE else VoiceEngine.SYSTEM
+}
+
+/**
+ * Five bars that answer the microphone: taller as the level rises, and still while it is quiet.
+ *
+ * The middle one is the tallest so the shape reads as a level rather than as a random row of
+ * blocks — the four grey squares the user saw were a placeholder, this is the real input.
+ */
+@Composable
+private fun VoiceBars(level: Float, active: Boolean, tint: Color) {
+    val shape = listOf(0.45f, 0.75f, 1f, 0.75f, 0.45f)
+    val shown = if (active) level else 0.12f
+    Row(
+        modifier = Modifier.height(22.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        shape.forEach { weight ->
+            Box(
+                Modifier
+                    .width(3.dp)
+                    .height((6f + 14f * shown * weight).dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(tint.copy(alpha = if (active) 1f else 0.5f)),
+            )
+        }
+    }
+}
 /** What the next question carries along: an image for the model, or a file on disk. */
 data class Attachment(
     val base64: String,
@@ -5536,6 +5729,19 @@ private fun ContextRing(
     val tone = if (fraction >= 0.8f) scheme.error else scheme.primary
     val track = scheme.surfaceVariant
     var open by remember { mutableStateOf(false) }
+    // A focus-less popup does not receive BACK either: without this the press falls through to the
+    // activity and finishes it. Same pair the composer's own cards use.
+    BackHandler(enabled = open) { open = false }
+    // The card opens upward, centred on the ring — and the ring sits at the row's right end, so a
+    // 264dp card centred on it hung off the screen's right edge. Both the anchor and the card are
+    // measured and the card is slid back inside the window, the same rule the model sheet uses.
+    var ringAnchorCentreX by remember { mutableStateOf(0f) }
+    var ringCardWidth by remember { mutableStateOf(0) }
+    val density = LocalDensity.current
+    val ringScreenWidthPx = with(density) {
+        LocalConfiguration.current.screenWidthDp.dp.toPx()
+    }
+    val ringEdgePx = with(density) { POPUP_EDGE.toPx() }
     // The number in the middle, as a whole percent: the arc is a shape and the number is the
     // figure behind it. A window that was never set has no percentage to show (0 = unlimited,
     // not 0%), and 0% is a ring with no arc to read it against.
@@ -5595,25 +5801,70 @@ private fun ContextRing(
         }
         // The card's anchor: a zero-height box at the ring's top edge, so the popup opens
         // upward from the ring instead of covering the row it belongs to.
-        Box(Modifier.align(Alignment.TopCenter)) {
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .onGloballyPositioned { ringAnchorCentreX = it.boundsInWindow().center.x },
+        ) {
+            // A focusable window takes the keyboard away from the field below — the user asked why
+            // tapping the ring closes the input method, and that is the whole of the answer: the
+            // popup grabs focus, the IME goes, and the composer is then laid out a keyboard lower
+            // while this card stays where it was. The card is focus-less instead, which means its
+            // window can see neither a tap outside itself nor BACK; both are caught here, the way
+            // the composer's own cards do it (see [MenuCard]'s `focusable`). The scrim is a window
+            // of its own, composed before the card: windows stack in composition order, so a scrim
+            // composed after it would cover it instead.
             if (open) {
+                Popup(properties = PopupProperties(focusable = false)) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { open = false },
+                    )
+                }
                 Popup(
                     alignment = Alignment.BottomCenter,
-                    offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
+                    offset = with(density) {
+                        IntOffset(
+                            popupNudgeCentred(
+                                anchorCentre = ringAnchorCentreX,
+                                width = ringCardWidth,
+                                windowPx = ringScreenWidthPx,
+                                edgePx = ringEdgePx,
+                            ).roundToInt(),
+                            -8.dp.roundToPx(),
+                        )
+                    },
                     onDismissRequest = { open = false },
-                    properties = PopupProperties(focusable = true),
+                    properties = PopupProperties(focusable = false),
                 ) {
-                    ContextRingCard(
-                        used = used,
-                        window = window,
-                        sessionTokens = sessionTokens,
-                        sessionSplit = sessionSplit,
-                        sessionTurns = sessionTurns,
-                        sessionPerSecond = sessionPerSecond,
-                        sessionCachePercent = sessionCachePercent,
-                        sessionElapsedMs = sessionElapsedMs,
-                        live = live,
-                    )
+                    Box(
+                        Modifier
+                            .onSizeChanged { ringCardWidth = it.width }
+                            // A focus-less window only receives what lands inside it, and drawing
+                            // its own background is not the same as consuming a touch: without
+                            // this the tap on the card would fall through to the transcript the
+                            // card is floating over.
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) {},
+                    ) {
+                        ContextRingCard(
+                            used = used,
+                            window = window,
+                            sessionTokens = sessionTokens,
+                            sessionSplit = sessionSplit,
+                            sessionTurns = sessionTurns,
+                            sessionPerSecond = sessionPerSecond,
+                            sessionCachePercent = sessionCachePercent,
+                            sessionElapsedMs = sessionElapsedMs,
+                            live = live,
+                        )
+                    }
                 }
             }
         }
@@ -5641,8 +5892,9 @@ private fun ContextRingCard(
             // 264dp, not 240: the value on the 「上下文占用」 line is a sentence of its own
             // (「12.3k / 200k（6%）」, or the 窗口未设置 form) and the old cap ellipsized it.
             // Still inside a 360dp screen's own margin, and still narrower than the
-            // transcript's full width.
-            .widthIn(max = 264.dp)
+            // transcript's full width. Capped against the window, so a split-screen window
+            // gets a card that fits it rather than one that hangs off its edge.
+            .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
             .shadow(
                 elevation = 8.dp,
                 shape = RoundedCornerShape(16.dp),
@@ -5817,10 +6069,14 @@ private fun sessionSplitOf(messages: List<StoredMessage>): SessionSplit = Sessio
  * 量完删 — an instrument, not a feature (task-9). The jump the user reported reproduces only on
  * their own device, after a cold start, and it is a race between a finger landing and a pin that
  * is already in flight; adb is out of bounds this round, so the readings that race is about are
- * appended to filesDir/scroll-diag.log at the moments that decide it — a conversation's opening
- * pin, the two-pass pin of a newly added item, a finger landing, a finger lifting, and every
- * change the scroll watcher sees. The log is the only way to tell "the guard is not being reached"
- * from "the scroll happens anyway", which is why the numbers are read rather than reasoned about.
+ * appended to filesDir/scroll-diag.log. Only the three moments that decide it are written now —
+ * a conversation's opening pin, a finger landing and a finger lifting — because the scroll path
+ * itself must not carry file IO: a line per pin or per watcher emit was on the frame the scroll
+ * was already fighting for. In the log, `press:up:movedUp=…:scrolled=…:atEnd=…` is the line that
+ * settles the chase-the-bottom report: `movedUp=false scrolled=true` on an upward read (a finger
+ * dragging down) means the gesture was a scroll and the follow must stay released; if that line
+ * shows `scrolled=false` while the list plainly moved, the flag is missing its scroll and the
+ * `press:down` line's `first=`/`itemCount` say where it started.
  * Delete this function and its call sites (all marked 量完删) once the log has answered.
  */
 private fun scrollDiag(
@@ -6134,6 +6390,25 @@ private fun LazyListState.atEnd(slack: Int = 24): Boolean {
     return last.index >= info.totalItemsCount - 1 &&
         last.offset + last.size <= info.viewportEndOffset + slack
 }
+
+/**
+ * Whether a gesture that has just ended may hand the follow back to the transcript.
+ *
+ * Only a tap does, and a tap is all three of these: it was short, it never dragged upward, and the
+ * list never moved. The last one is the one that was missing. Keyed on "did not drag up" alone, a
+ * drag *downward* — the gesture that reads older messages, and the one a flick is made of — counted
+ * as a tap, so the follow was handed back the instant the finger lifted and the next publish hauled
+ * the transcript to its end again: the position chasing the bottom, on every scroll.
+ *
+ * `atEnd` is the second half of the same idea: the follow may only be re-armed while the list is
+ * still where the follow wants it, so a tap that ends anywhere else cannot restore it either.
+ */
+internal fun restoresFollow(
+    movedUp: Boolean,
+    scrolled: Boolean,
+    atEnd: Boolean,
+    heldMs: Long,
+): Boolean = !movedUp && !scrolled && atEnd && heldMs < HOLD_TO_SELECT_MS
 
 /** Far more than any transcript: the list clamps this to its own end. */
 private const val FOLLOW_SCROLL_PX = 200_000f

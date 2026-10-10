@@ -16,6 +16,17 @@ data class Assistant(
     val name: String = "新助手",
     /** A single emoji; the card and the chat avatar both draw it. */
     val avatar: String = "🪶",
+    /**
+     * A picture the user picked, as a path relative to the app's own files directory —
+     * `assistants/<id>-<stamp>.png`, written by [AssistantAvatarStore]. Blank means "use
+     * [avatar]".
+     *
+     * Relative on purpose: the app's private directory is named after the install, so an
+     * absolute path stored here would point at nothing after a reinstall or a restore. The
+     * file itself is capped at 256px on its longest side, so a 4MB photo from the gallery
+     * never lands in this JSON or in the private directory at full size.
+     */
+    val avatarPath: String = "",
     val description: String = "",
     val systemPrompt: String = "",
     /** Provider id + model id; empty means "whatever is active right now". */

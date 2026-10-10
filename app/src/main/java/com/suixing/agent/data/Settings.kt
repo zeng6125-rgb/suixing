@@ -211,8 +211,21 @@ data class AppSettings(
     val alwaysDeniedTools: List<String> = emptyList(),
     /** 聊天：列表在底部时自动跟随新消息。 */
     val autoFollow: Boolean = true,
-    /** 悬浮窗控制台：开启后 agent 运行时显示悬浮球；关闭则永不显示。 */
+    /**
+     * 悬浮窗控制台：抽屉那行的开关，打开＝常驻——只要随行不在前台，不管是空闲还是正在跑，球都在。
+     *
+     * 前台一律不显示（聊天页已经有同一套停止与输入控件），所以这个开关只在离开随行之后生效。
+     */
     val floatingConsole: Boolean = false,
+    /**
+     * 悬浮窗：不在前台时，只有正在跑任务才显示悬浮球，任务一结束就自动收起。
+     *
+     * 与 [floatingConsole] 独立：那一个是「常驻」，这个只管「有没有任务在跑」。仅当常驻关掉时
+     * 它才有话说；两个都关，后台就什么都不显示。前台同样一律不显示。
+     */
+    val consoleWhileRunning: Boolean = true,
+    /** 悬浮窗展开面板的宽度，dp；0 表示用默认宽度。右下角的拖拽手柄写这里。 */
+    val consoleWidthDp: Int = 0,
     /** 0 小, 1 标准, 2 大, 3 特大 */
     val fontScale: Int = 1,
     /** 0 窄, 1 标准, 2 宽 —— 助手气泡最多占屏宽的比例，由聊天页读取 */
