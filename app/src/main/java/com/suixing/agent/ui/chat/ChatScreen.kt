@@ -485,19 +485,19 @@ fun ChatScreen(
         if (listState.isScrollInProgress && !programmatic) return@LaunchedEffect
         programmatic = true
         try {
-            // Instant: content growth is not a motion the user is watching, and the viewport
-            // effect below owns whatever motion the keyboard brings.
             listState.scrollToItem(itemCount - 1)
             listState.scrollBy(FOLLOW_SCROLL_PX)
-            // A second pass, animated, once the new item has been measured. The first scroll
-            // runs in the frame the item was added, when its height is still unknown, so the
-            // end it lands on is short by exactly the height of what just appeared — the status
-            // line of a fresh question ended up under the composer that way. Animated because
-            // the correction is a nudge of a few dozen pixels, and a visible jump is what made
-            // the keyboard-down case feel wrong.
+            // A second pass once the new item has been measured. The first scroll runs in the
+            // frame the item was added, when its height is still unknown, so the end it lands on
+            // is short by exactly the height of what just appeared — the status line of a fresh
+            // question ended up under the composer that way.
+            //
+            // Both passes are instant. Animating this was a mistake: it is a correction of a few
+            // dozen pixels that the user did not ask to watch, and a moving scroll position after
+            // every send is worse than a jump they never see.
             withFrameNanos { }
-            listState.animateScrollToItem(itemCount - 1)
-            listState.animateScrollBy(FOLLOW_SCROLL_PX)
+            listState.scrollToItem(itemCount - 1)
+            listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
         }
@@ -526,22 +526,14 @@ fun ChatScreen(
         withFrameNanos { }
         programmatic = true
         try {
-            val delta = (viewportHeight - previous).toFloat()
-            if (previous > 0 && abs(delta) in 1f..KEYBOARD_JUMP_PX) {
-                // A frame of the platform's own keyboard animation: deltas of a few pixels, and
-                // following them one for one is what makes the motion match the keyboard exactly.
-                listState.scrollBy(-delta)
-            } else if (previous > 0) {
-                // Pin to the end, animated, and nothing else. Compensating by the viewport delta
-                // instead was wrong by the amount the bottom padding itself changes with the
-                // keyboard (the padding is measured from the composer, which moves): the list
-                // ended a few dozen pixels away from where it started, every single time.
-                listState.animateScrollToItem(itemCount - 1)
-                listState.animateScrollBy(FOLLOW_SCROLL_PX)
-            } else {
-                listState.scrollToItem(itemCount - 1)
-                listState.scrollBy(FOLLOW_SCROLL_PX)
-            }
+            // Instant, and that is the whole point: this runs on every frame of the platform's
+            // own keyboard animation, so following it one frame at a time IS the smooth motion —
+            // the keyboard's. Every version of this that animated the scroll itself (a delta
+            // compensation, then an animated pin to the end) moved the list further than the
+            // keyboard did and left the reading position somewhere new. The user's verdict on
+            // both was 「滚动位置变了」, and they were right.
+            listState.scrollToItem(itemCount - 1)
+            listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
         }
