@@ -106,6 +106,7 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.service.FloatConsoleService
+import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
@@ -193,6 +194,9 @@ fun SuixingApp() {
     }.collectAsState(initial = "")
 
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    // 抽屉里那张半屏助手表：和聊天页那张是同一个 AssistantSheet，只是宿主换成了外壳。
+    // remember 而不是 rememberSaveable（与聊天页那张表一致）：进程重启后它不该自己弹回来。
+    var shellAssistants by remember { mutableStateOf(false) }
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -218,6 +222,34 @@ fun SuixingApp() {
     }
     // A row inside the settings page pushes, so back returns to the list it came from.
     val push: (String) -> Unit = { target -> navController.navigate(target) }
+
+    // 抽屉里点走一行时，记下出发的是哪一页：用户按返回回到那一页，抽屉应该还是开着的
+    // （用户原话「在侧边栏进入另一个页面，回来的状态要保持，现在每次回来侧边栏都会被关掉」）。
+    // 只由抽屉自己的入口置位——聊天页那个「打开设置」不是从抽屉走的，不该把抽屉带回来。
+    // remember 而不是 rememberSaveable：存下来的 "chat" 会在冷启动那一帧（起始页正是 chat）
+    // 把抽屉弹开；rotation 不走这条路（manifest 里 configChanges 已含 orientation）。
+    var drawerReturnTo by remember { mutableStateOf<String?>(null) }
+    // 用户自己收起抽屉（遮罩、返回键）：记下的出发页一起清掉，回来时不该再弹出来。
+    val closeDrawer: () -> Unit = {
+        drawerOpen = false
+        drawerReturnTo = null
+    }
+    // 抽屉里的一行：比 open 多记一件事。目标是当前页时（点会话、点新对话）不记——那不是
+    // 「去了别的页」，记下来会当场被判成「回到出发页」而把抽屉又弹开。
+    val openFromDrawer: (String) -> Unit = { target ->
+        if (target != route) drawerReturnTo = route
+        open(target)
+    }
+    // 回到出发的那一页就把抽屉放回去。这个 effect 只挂在 route 上、不挂 drawerReturnTo：
+    // 点走的那一帧，抽屉的关闭和导航都还没生效，两个键都挂着会在那一帧就把抽屉判成「该开着」
+    // 又弹回来；只认路由变化，就只在真的回到那一页时触发。
+    LaunchedEffect(route) {
+        val from = drawerReturnTo
+        if (from != null && route == from) {
+            drawerReturnTo = null
+            drawerOpen = true
+        }
+    }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
     // IME inset frame by frame. The shell lays itself out by a *clamped* copy of that inset:
@@ -252,10 +284,10 @@ fun SuixingApp() {
     ) {
         // The drawer is the shell's own panel rather than a ModalNavigationDrawer, so
         // nothing else consumes BACK: without this, BACK with the drawer open finished
-        // the activity and dropped the user on the home screen. 助手 now leaves through
-        // the navigation stack instead of a sheet, so the drawer is the only case left
-        // here — the approval card is a dialog of its own and swallows BACK first.
-        BackHandler(enabled = drawerOpen) { drawerOpen = false }
+        // the activity and dropped the user on the home screen. 助手 opens a half-screen
+        // sheet of its own again and a sheet swallows BACK first, so the drawer is the
+        // only case left here — the approval card is a dialog and swallows BACK too.
+        BackHandler(enabled = drawerOpen) { closeDrawer() }
         // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
         // the strip behind the keyboard was left unpainted and the window's own white showed
         // through the keyboard's rounded corners as a pale seam. This box is not inset, so
@@ -412,17 +444,22 @@ fun SuixingApp() {
                 conversations = conversations,
                 activeId = activeConversationId,
                 runningId = runningIds,
-                onClose = { drawerOpen = false },
+                onClose = closeDrawer,
                 onNew = {
                     chat.newConversation()
-                    open("chat")
+                    openFromDrawer("chat")
                 },
                 onOpenConversation = { conversation ->
                     chat.openConversation(conversation)
-                    open("chat")
+                    openFromDrawer("chat")
                 },
                 onDeleteConversation = { chat.deleteConversation(it) },
-                onNavigate = open,
+                onNavigate = openFromDrawer,
+                onAssistants = {
+                    // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
+                    drawerOpen = false
+                    shellAssistants = true
+                },
                 consoleOn = settings.floatingConsole,
                 onToggleConsole = {
                     if (settings.floatingConsole) {
@@ -461,8 +498,20 @@ fun SuixingApp() {
         )
     }
 
-    // 外壳里不再有第二张「助手」表：抽屉那一行推的是整页，半屏的表只剩聊天页自己那个
-    // 随手切换助手的窗口（ChatScreen 里那张，属于对话而不属于外壳）。
+    // 抽屉里那张半屏表。挂在外壳、不在任何一页里：抽屉是外壳自己的面板，表跟着它走，
+    // 与聊天页那张共用同一个 AssistantSheet（回调也同一套）。
+    if (shellAssistants) {
+        AssistantSheet(
+            assistants = settings.assistants,
+            activeId = assistantId.ifBlank { settings.activeAssistantId },
+            settings = settings,
+            onUse = { chat.useAssistant(it) },
+            onSetDefault = { chat.setDefaultAssistant(it) },
+            onSave = { chat.saveAssistant(it) },
+            onDelete = { chat.deleteAssistant(it) },
+            onDismiss = { shellAssistants = false },
+        )
+    }
 }
 
 /**
@@ -482,6 +531,7 @@ private fun BoxScope.Drawer(
     consoleOn: Boolean,
     onToggleConsole: () -> Unit,
     onNavigate: (String) -> Unit,
+    onAssistants: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     // The board changes behind our back (the agent writes it mid-run), so the count is
@@ -504,10 +554,14 @@ private fun BoxScope.Drawer(
         }
     }
 
+    // 遮罩与面板同一条出场时长（120ms），而且刻意短于路由转场：抽屉里点一行时，导航是
+    // 当场发出的，面板若还按 200/160ms 慢慢退，就会和新页面的入场（280ms）同帧叠着演，
+    // 屏幕上同时有两条滑动（用户说「动画有点奇怪」）。缩到 120ms 让面板先退干净、页面再
+    // 到位；入场保持原样（240/180），那是用户已经接受的一半。
     AnimatedVisibility(
         visible = open,
         enter = fadeIn(tween(180)),
-        exit = fadeOut(tween(160)),
+        exit = fadeOut(tween(120)),
     ) {
         Box(
             Modifier
@@ -525,7 +579,7 @@ private fun BoxScope.Drawer(
         visible = open,
         modifier = Modifier.align(Alignment.CenterStart),
         enter = slideInHorizontally(tween(240)) { -it },
-        exit = slideOutHorizontally(tween(200)) { -it },
+        exit = slideOutHorizontally(tween(120)) { -it },
     ) {
         Surface(
             modifier = Modifier
@@ -599,13 +653,14 @@ private fun BoxScope.Drawer(
                     color = scheme.outlineVariant,
                 )
                 Spacer(Modifier.height(6.dp))
-                // 助手这一行现在也是一次普通导航：它推的是整页（route = "assistants"），
-                // 和「任务」「文件」同一套开关语义，抽屉里不再有第二种打开方式。
+                // 助手这一行开的是半屏表，不是整页：在抽屉里挑助手是「挑完接着聊」，
+                // 不该被推到一整页上去。整页仍是设置页「助手」那一行的目的地
+                // （route = "assistants"），两个宿主共用同一份 AssistantListContent。
                 DrawerAction(
                     label = "助手",
                     icon = painterResource(R.drawable.ic_bot),
                     selected = route == "assistants",
-                    onClick = { onNavigate("assistants") },
+                    onClick = onAssistants,
                 )
                 DrawerAction(
                     label = "任务",
@@ -688,7 +743,7 @@ private fun ConversationRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp),
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
         color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
     ) {
         Row(
@@ -705,7 +760,7 @@ private fun ConversationRow(
             }
             Text(
                 text = conversation.title,
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
+                style = MaterialTheme.typography.bodyMedium,
                 color = if (selected) scheme.primary else scheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -791,14 +846,14 @@ private fun DrawerAction(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 2.dp),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp)
-                .padding(horizontal = 14.dp),
+                .padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(

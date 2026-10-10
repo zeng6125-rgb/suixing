@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -212,7 +211,7 @@ private fun SettingsRoot(
                 .padding(padding)
                 .navigationBarsPadding(),
             // 72dp 的页尾：最后一行不被导航条压住。
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item { SettingsStatusCard(capabilities, settings) }
@@ -347,7 +346,7 @@ private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
         )
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
+            shape = MaterialTheme.shapes.large,
             color = MaterialTheme.colorScheme.surfaceContainerLow,
         ) {
             Column(Modifier.padding(horizontal = 16.dp)) {
@@ -577,7 +576,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
@@ -1167,7 +1166,7 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
@@ -1186,6 +1185,21 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                 }
             }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
+            item {
+                // 与「插话方式」挨着：两行都是「你在输入框里敲下去之后会发生什么」。
+                SettingRow(
+                    title = "回车键发送",
+                    subtitle = "开：按回车直接发送（运行中则当作插话送进去）；关：回车换行，" +
+                        "用发送键提交。",
+                    control = {
+                        Switch(
+                            checked = stored.enterKeySends,
+                            onCheckedChange = { on -> scope.persist { it.copy(enterKeySends = on) } },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             item {
                 SettingRow(
                     title = "自动压缩上下文",
@@ -1334,7 +1348,7 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
             }
             if (stored.approvalMode == ApprovalMode.ASK) {
                 item {
-                    HorizontalDivider()
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -1382,7 +1396,7 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                     }
                 }
                 item {
-                    HorizontalDivider()
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -1448,7 +1462,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
@@ -1629,7 +1643,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
@@ -1704,7 +1718,7 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
@@ -1749,7 +1763,7 @@ private fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
         Column {
@@ -1848,7 +1862,6 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
     val tint = if (outcome.ok) Tone.OK.color(LocalDarkTheme.current) else Tone.WARN.color(LocalDarkTheme.current)
     SuixingCard(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        contentPadding = PaddingValues(14.dp),
     ) {
         Row(verticalAlignment = Alignment.Top) {
             Icon(

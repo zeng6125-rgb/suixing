@@ -4,6 +4,7 @@ import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.capability.ShellResult
+import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -124,10 +125,11 @@ class ShellTools(
             "local" -> "local"
             "shizuku" -> "shizuku"
             "root" -> "root"
-            else -> when {
-                capabilities.state.value.rootReady -> "root"
-                capabilities.state.value.shellReady -> "shizuku"
-                else -> "local"
+            // No mode asked for: the tier the user fixed decides (see [CapabilityState.shellTier]).
+            else -> when (capabilities.shellTier()) {
+                ShellTier.ROOT -> "root"
+                ShellTier.SHIZUKU -> "shizuku"
+                ShellTier.LOCAL -> "local"
             }
         }
         val result: ShellResult = when (chosen) {
@@ -219,8 +221,8 @@ class ShellTools(
             }
             else -> return@withContext ToolResult.failure("不支持的操作：$action")
         }
-        val state = capabilities.state.value
-        if (!state.shellReady && !state.rootReady) {
+        val channel = capabilities.shellTier()
+        if (channel == ShellTier.LOCAL) {
             return@withContext ToolResult.failure(
                 "该操作需要 Shizuku（shell 用户）或 root 权限。请到「能力」页开启 Shizuku 并授权随行。",
             )
@@ -228,8 +230,9 @@ class ShellTools(
         // `action=start` runs `monkey`, which launches an app: the same handoff `open_app` draws.
         // After the privilege check, so nothing flashes for a command that never runs.
         drawInputFx(command, tool = "app_action")
-        val result = if (state.rootReady) Shell.root(command) else Shell.shizuku(command)
-        val label = if (state.rootReady) "root" else "shizuku(shell)"
+        val root = channel == ShellTier.ROOT
+        val result = if (root) Shell.root(command) else Shell.shizuku(command)
+        val label = if (root) "root" else "shizuku(shell)"
         val prefix = "[$label] exit=${result.exitCode}\n"
         if (result.ok) ToolResult.success(prefix + result.render()) else ToolResult.failure(prefix + result.render())
     }

@@ -7,6 +7,7 @@ import android.util.Base64
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.capability.ShellResult
+import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.service.SuixingAccessibilityService
 import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
@@ -215,26 +216,27 @@ class UiTools(
 
     private fun accessibility(): SuixingAccessibilityService? = SuixingAccessibilityService.instance()
 
-    private fun privileged(): Boolean =
-        capabilities.state.value.let { it.rootReady || it.shellReady }
+    /** Whether a shell fallback exists at all under the tier the user fixed; see [ShellTier]. */
+    private fun privileged(): Boolean = capabilities.shellTier() != ShellTier.LOCAL
 
     private fun blocked(): ToolResult = ToolResult.failure(
         "还不能操作屏幕：无障碍服务没开，Shizuku / root 也没授权。请到「能力」页开启任意一个。",
     )
 
-    /** Runs [command] as root or shell; null when neither is granted. */
-    private suspend fun shell(command: String): ShellResult? {
-        val state = capabilities.state.value
-        return withContext(Dispatchers.IO) {
-            when {
-                state.rootReady -> Shell.root(command)
-                state.shellReady -> Shell.shizuku(command)
-                else -> null
-            }
+    /** Runs [command] through the resolved channel; null when that is [ShellTier.LOCAL]. */
+    private suspend fun shell(command: String): ShellResult? = withContext(Dispatchers.IO) {
+        when (capabilities.shellTier()) {
+            ShellTier.ROOT -> Shell.root(command)
+            ShellTier.SHIZUKU -> Shell.shizuku(command)
+            ShellTier.LOCAL -> null
         }
     }
 
-    private fun shellName(): String = if (capabilities.state.value.rootReady) "root" else "Shizuku"
+    private fun shellName(): String = when (capabilities.shellTier()) {
+        ShellTier.ROOT -> "root"
+        ShellTier.SHIZUKU -> "Shizuku"
+        ShellTier.LOCAL -> "应用自身权限"
+    }
 
     /** Scratch file in the app's external files dir — writable by the app, shell and root alike. */
     private fun scratch(name: String): File =

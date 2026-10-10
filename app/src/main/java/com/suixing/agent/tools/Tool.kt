@@ -2,6 +2,7 @@ package com.suixing.agent.tools
 
 import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
+import com.suixing.agent.capability.CapabilityTiers
 import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.ScheduleStore
@@ -19,10 +20,12 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 
-const val TIER_NONE = "none"
-const val TIER_ACCESSIBILITY = "accessibility"
-const val TIER_SHELL = "shell"
-const val TIER_ROOT = "root"
+// The 执行档次 keys, declared in capability/ beside the state that resolves them and re-exported
+// here because every tool declares its tier with these names.
+const val TIER_NONE = CapabilityTiers.NONE
+const val TIER_ACCESSIBILITY = CapabilityTiers.ACCESSIBILITY
+const val TIER_SHELL = CapabilityTiers.SHELL
+const val TIER_ROOT = CapabilityTiers.ROOT
 
 data class ToolSpec(
     val name: String,

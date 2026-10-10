@@ -66,7 +66,7 @@ fun SkillsSection(
     val loaded = skills
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 100.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { SkillIntroCard(rootPath) }
@@ -143,7 +143,7 @@ private fun SkillCard(
     onDelete: () -> Unit,
     onToggle: (Boolean) -> Unit,
 ) {
-    SuixingCard(contentPadding = PaddingValues(16.dp)) {
+    SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_book_open), tint = MaterialTheme.colorScheme.tertiary)
             Spacer(Modifier.width(12.dp))

@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -110,7 +111,6 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Spacer(Modifier.height(2.dp))
             CapabilityHero(state)
 
             notice?.let { text ->
@@ -140,6 +140,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
             CapabilityTierPicker(
                 preferred = settings.preferredCapability,
                 state = state,
+                settings = settings,
                 onPick = { key ->
                     scope.launch { Core.settings.update { it.copy(preferredCapability = key) } }
                 },
@@ -151,11 +152,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_bot),
                 summary = "装上就有，不需要任何授权",
                 granted = true,
-                lines = listOf(
-                    "聊天、记忆、待办、定时、技能、网络与文件工具都在这一档",
-                    "文件只能读写应用私有目录，碰不到 /sdcard 的其它目录",
-                    "要操作别的应用、执行命令或改系统文件，再往下开一档",
-                ),
+                lines = tierLines(TIER_NONE, state, settings),
                 actionLabel = "无需开启",
                 actionEnabled = false,
                 onAction = {},
@@ -166,15 +163,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_pointer),
                 summary = "读屏、点击、滑动、输入文字、截图",
                 granted = state.accessibility,
-                lines = listOf(
-                    if (state.accessibility) {
-                        "已连接，ui_* 系列工具可用"
-                    } else if (state.shellReady || state.rootReady) {
-                        "未连接。ui_* 会走 Shizuku / root 的 input、screencap 兜底，但打不了中文"
-                    } else {
-                        "未连接，且没有 Shizuku / root 兜底，ui_* 系列工具会被拒绝执行"
-                    },
-                ),
+                lines = tierLines(TIER_ACCESSIBILITY, state, settings),
                 actionLabel = if (state.accessibility) "打开设置" else "去开启",
                 onAction = { Core.capabilities.openAccessibilitySettings() },
             )
@@ -184,11 +173,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_terminal),
                 summary = "am / pm / input / dumpsys，读写 /sdcard 与 Android/data",
                 granted = state.shellReady,
-                lines = buildList {
-                    add(if (state.shizukuInstalled) "Shizuku 已安装" else "未检测到 Shizuku")
-                    add(if (state.shizukuAlive) "服务正在运行" else "服务未运行，需先启动 Shizuku")
-                    add(if (state.shizukuGranted) "随行已获授权" else "随行未获授权")
-                },
+                lines = tierLines(TIER_SHELL, state, settings),
                 actionLabel = shizukuActionLabel(state),
                 onAction = {
                     when {
@@ -218,19 +203,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
                 summary = "最高权限，可直接读写系统文件",
                 granted = state.rootReady,
-                lines = listOfNotNull(
-                    when {
-                        !state.rootProbed -> "尚未检测"
-                        state.root -> "检测到 su 可用"
-                        else -> "未检测到 su"
-                    },
-                    "这一档要靠 KernelSU / Magisk 给 su 授权，没装就没有",
-                    if (state.rootProbed && settings.rootCheckedAt > 0L) {
-                        "上次检测：${formatAgo(settings.rootCheckedAt)}（结果已记住，下次打开自动复核）"
-                    } else {
-                        "检测一次即可，之后每次打开都会自动复核"
-                    },
-                ),
+                lines = tierLines(TIER_ROOT, state, settings),
                 actionLabel = if (probing) "检测中…" else "检测",
                 onAction = {
                     scope.launch {
@@ -381,7 +354,7 @@ private fun CapabilityHero(state: CapabilityState) {
                 ),
             ),
         ) {
-            Column(Modifier.padding(18.dp)) {
+            Column(Modifier.padding(14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
                         modifier = Modifier.size(42.dp),
@@ -460,6 +433,7 @@ private data class TierOption(val key: String, val label: String, val ready: Boo
 private fun CapabilityTierPicker(
     preferred: String,
     state: CapabilityState,
+    settings: AppSettings,
     onPick: (String) -> Unit,
 ) {
     val options = listOf(
@@ -521,7 +495,78 @@ private fun CapabilityTierPicker(
                 MaterialTheme.colorScheme.onSurfaceVariant
             },
         )
+        // 「选一档看这一档解锁了什么」：条目和下面四张卡片读同一份 tierLines，不另写一套文案。
+        // 没固定档（自动）时按「当前已经开出来的最高档」画，和上面那句摘要说的是同一档。
+        val shown = if (preferred.isNotBlank()) {
+            preferred
+        } else {
+            when {
+                state.rootReady -> TIER_ROOT
+                state.shellReady -> TIER_SHELL
+                state.accessibility -> TIER_ACCESSIBILITY
+                else -> TIER_NONE
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        tierLines(shown, state, settings).forEach { line ->
+            Row(Modifier.padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(MaterialTheme.colorScheme.outline),
+                )
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
+}
+
+/**
+ * 一档权限解锁了什么，按档取。
+ *
+ * 上面选择器的明细和下面四张卡片都读这一份，两处不会再各说各的。[settings] 只有 Root 那一条
+ * 用得上（上次检测时间），其余条目只看 [state]。
+ */
+private fun tierLines(key: String, state: CapabilityState, settings: AppSettings): List<String> = when (key) {
+    TIER_NONE -> listOf(
+        "聊天、记忆、待办、定时、技能、网络与文件工具都在这一档",
+        "文件只能读写应用私有目录，碰不到 /sdcard 的其它目录",
+        "要操作别的应用、执行命令或改系统文件，再往下开一档",
+    )
+    TIER_ACCESSIBILITY -> listOf(
+        if (state.accessibility) {
+            "已连接，ui_* 系列工具可用"
+        } else if (state.shellReady || state.rootReady) {
+            "未连接。ui_* 会走 Shizuku / root 的 input、screencap 兜底，但打不了中文"
+        } else {
+            "未连接，且没有 Shizuku / root 兜底，ui_* 系列工具会被拒绝执行"
+        },
+    )
+    TIER_SHELL -> listOf(
+        if (state.shizukuInstalled) "Shizuku 已安装" else "未检测到 Shizuku",
+        if (state.shizukuAlive) "服务正在运行" else "服务未运行，需先启动 Shizuku",
+        if (state.shizukuGranted) "随行已获授权" else "随行未获授权",
+    )
+    TIER_ROOT -> listOfNotNull(
+        when {
+            !state.rootProbed -> "尚未检测"
+            state.root -> "检测到 su 可用"
+            else -> "未检测到 su"
+        },
+        "这一档要靠 KernelSU / Magisk 给 su 授权，没装就没有",
+        if (state.rootProbed && settings.rootCheckedAt > 0L) {
+            "上次检测：${formatAgo(settings.rootCheckedAt)}（结果已记住，下次打开自动复核）"
+        } else {
+            "检测一次即可，之后每次打开都会自动复核"
+        },
+    )
+    else -> listOf("自动：按当前能用的最高档执行。")
 }
 
 /** 选中的那一档现在意味着什么；不可用时直接说清去下面哪张卡片点哪个按钮。 */
@@ -554,7 +599,7 @@ private fun shizukuActionLabel(state: CapabilityState): String = when {
 
 @Composable
 private fun ExplainerRow(title: String, body: String) {
-    Column(Modifier.padding(vertical = 10.dp)) {
+    Column(Modifier.padding(vertical = 6.dp)) {
         Text(title, style = MaterialTheme.typography.titleSmall)
         Text(
             text = body,
@@ -576,7 +621,7 @@ private fun CapabilityCard(
     /** False for a tier with nothing to open (标准档): the button is shown, but inert. */
     actionEnabled: Boolean = true,
 ) {
-    SuixingCard {
+    SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(
                 icon = icon,
@@ -601,9 +646,9 @@ private fun CapabilityCard(
                 icon = if (granted) ImageVector.vectorResource(R.drawable.ic_circle_check) else null,
             )
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
         lines.forEach { line ->
-            Row(Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
                         .size(5.dp)
@@ -618,13 +663,26 @@ private fun CapabilityCard(
                 )
             }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
         if (!actionEnabled) {
-            OutlinedButton(onClick = {}, enabled = false) { Text(actionLabel) }
+            OutlinedButton(
+                onClick = {},
+                enabled = false,
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+            ) { Text(actionLabel) }
         } else if (granted) {
-            OutlinedButton(onClick = onAction) { Text(actionLabel) }
+            OutlinedButton(
+                onClick = onAction,
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+            ) { Text(actionLabel) }
         } else {
-            Button(onClick = onAction) { Text(actionLabel) }
+            Button(
+                onClick = onAction,
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+            ) { Text(actionLabel) }
         }
     }
 }

@@ -272,6 +272,14 @@ data class AppSettings(
      * 本来的行为（在设置项出现之前，思考块一直在追尾）。
      */
     val followReasoning: Boolean = true,
+    /**
+     * 输入框里按回车是直接发送，还是换行。
+     *
+     * 放在类末尾并有默认值，所以老 JSON 里没有这个键时读出来就是 true——也就是它本来的行为
+     * （回车一直是发送，见 ChatScreen 的 `ImeAction.Send`），升级上来的人不会因为缺键就把
+     * 回车变成换行。false 时回车只换行，提交交给发送键。
+     */
+    val enterKeySends: Boolean = true,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 

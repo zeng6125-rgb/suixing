@@ -77,7 +77,7 @@ fun TasksScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             todoGroup("进行中", TODO_IN_PROGRESS, scheme.primary, items, save)

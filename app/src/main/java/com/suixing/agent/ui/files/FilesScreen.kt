@@ -3,6 +3,13 @@ package com.suixing.agent.ui.files
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -66,8 +73,29 @@ private class Entry(val file: File, val size: String, val modified: String)
 @Composable
 fun FilesScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    val root = remember { workspaceDir(context) }
+    // Two roots, and the app's own working directory stays the default: it is where the model
+    // reads and writes by relative path. /sdcard is the second one, and it only opens after the
+    // user grants 「所有文件访问权限」 — without it the listing above it is invisible to us.
+    val appRoot = remember { workspaceDir(context) }
+    val externalRoot = remember { Environment.getExternalStorageDirectory() }
+    val supportsAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    var allFilesGranted by remember {
+        mutableStateOf(supportsAllFiles && Environment.isExternalStorageManager())
+    }
+    var root by remember { mutableStateOf(appRoot) }
     var current by remember { mutableStateOf(root) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    val allFilesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        allFilesGranted = supportsAllFiles && Environment.isExternalStorageManager()
+        // Coming back with the grant lands straight in /sdcard: that is what the button was for.
+        if (allFilesGranted) {
+            root = externalRoot
+            current = externalRoot
+        }
+    }
+    val rootLabel = if (root == appRoot) "工作目录" else "/sdcard"
     var entries by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var listError by remember { mutableStateOf<String?>(null) }
     var listing by remember { mutableStateOf(true) }
@@ -105,28 +133,80 @@ fun FilesScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         PageTopBar(
             title = "文件",
-            subtitle = relativePath(root, current),
+            subtitle = relativePath(root, current, rootLabel),
             onBack = onBack,
             actions = {
+                IconButton(
+                    onClick = {
+                        if (root == appRoot) {
+                            if (allFilesGranted) {
+                                root = externalRoot
+                                current = externalRoot
+                                notice = null
+                            } else {
+                                // The grant lives in the system settings app, so it is reached
+                                // through the launcher and re-read on the way back. Only a ROM
+                                // without either page falls through to the message.
+                                val opened = allFilesSettingsIntents(context).any { intent ->
+                                    runCatching { allFilesLauncher.launch(intent) }.isSuccess
+                                }
+                                if (!opened) {
+                                    notice = "本机打不开「所有文件访问权限」设置，可以改用 Shizuku 或 root 拿全盘访问。"
+                                }
+                            }
+                        } else {
+                            root = appRoot
+                            current = appRoot
+                            notice = null
+                        }
+                    },
+                ) {
+                    Icon(
+                        ImageVector.vectorResource(R.drawable.ic_folder_open),
+                        contentDescription = if (root == appRoot) {
+                            if (allFilesGranted) "切换到 /sdcard" else "授权后查看 /sdcard"
+                        } else {
+                            "回到应用目录"
+                        },
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
                 IconButton(onClick = { reload++ }) {
                     Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), contentDescription = "刷新", modifier = Modifier.size(20.dp))
                 }
                 if (current != root) {
-                    IconButton(onClick = { current = current.parentFile ?: root }) {
+                    // 夹在当前根之内：/sdcard 的上一级是 /storage/emulated，走出去之后面包屑就
+                    // 不是一条祖先链了。
+                    IconButton(
+                        onClick = {
+                            current = current.parentFile
+                                ?.takeIf { it.absolutePath.startsWith(root.absolutePath) }
+                                ?: root
+                        },
+                    ) {
                         Icon(ImageVector.vectorResource(R.drawable.ic_arrow_up), contentDescription = "上一级", modifier = Modifier.size(20.dp))
                     }
                 }
             },
         )
 
-        Breadcrumbs(root = root, current = current) { current = it }
+        Breadcrumbs(root = root, current = current, rootLabel = rootLabel) { current = it }
 
         Spacer(Modifier.height(8.dp))
 
         if (current == root) {
             Text(
-                text = "这里是随行的默认工作目录，模型用相对路径读写的文件都在这里。" +
-                    "授予「所有文件访问权限」后，也可以直接访问 /sdcard。",
+                text = if (root == appRoot) {
+                    if (allFilesGranted) {
+                        "这里是随行的默认工作目录，模型用相对路径读写的文件都在这里。" +
+                            "顶栏的文件夹按钮可以切到 /sdcard。"
+                    } else {
+                        "这里是随行的默认工作目录，模型用相对路径读写的文件都在这里。" +
+                            "顶栏的文件夹按钮会带你去开「所有文件访问权限」，开完就能看 /sdcard。"
+                    }
+                } else {
+                    "正在浏览 /sdcard：共享存储里的文件都能进。顶栏的文件夹按钮可以回到应用目录。"
+                },
                 modifier = Modifier.padding(horizontal = 16.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -141,6 +221,15 @@ fun FilesScreen(onBack: () -> Unit) {
         }
 
         listError?.let { message ->
+            Text(
+                text = message,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        notice?.let { message ->
             Text(
                 text = message,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -189,7 +278,7 @@ fun FilesScreen(onBack: () -> Unit) {
 
 /** Path segments as tappable chips, so any ancestor is one tap away. */
 @Composable
-private fun Breadcrumbs(root: File, current: File, onJump: (File) -> Unit) {
+private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (File) -> Unit) {
     val segments = remember(root, current) {
         val tail = ArrayDeque<File>()
         var walk = current
@@ -198,7 +287,7 @@ private fun Breadcrumbs(root: File, current: File, onJump: (File) -> Unit) {
             walk = walk.parentFile!!
         }
         buildList {
-            add("工作目录" to root)
+            add(rootLabel to root)
             tail.forEach { add(it.name to it) }
         }
     }
@@ -339,9 +428,25 @@ private fun iconFor(file: File): Pair<ImageVector, Color> {
     }
 }
 
-private fun relativePath(root: File, current: File): String {
-    if (current == root) return "工作目录"
+private fun relativePath(root: File, current: File, rootLabel: String): String {
+    if (current == root) return rootLabel
     return current.absolutePath.removePrefix(root.absolutePath).trimStart('/')
+}
+
+/**
+ * 「所有文件访问权限」的两个设置页，按顺序试：单个应用的入口更准，全局列表是有些 ROM 才有的那个。
+ *
+ * Third copy of the same two intents (capability/CapabilityHub.kt and
+ * ui/capability/CapabilityScreen.kt hold the other two): this one needs the Intent in hand
+ * because the grant is read back through a launcher. Keep the three in step.
+ */
+private fun allFilesSettingsIntents(context: Context): List<Intent> {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
+    return listOf(
+        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+            .setData(Uri.parse("package:${context.packageName}")),
+        Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+    )
 }
 
 private fun copyToClipboard(context: Context, text: String) {

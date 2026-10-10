@@ -842,7 +842,7 @@ private fun CodeBlock(block: MdBlock.Code) {
                     // in the same place. An empty label left that row blank and the whole block
                     // read as if something had failed to render; the user said so. 「代码」 is
                     // what a block with no language is, and it keeps the row's height honest.
-                    text = block.language.ifBlank { "代码" },
+                    text = block.language.ifBlank { "Markdown" },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

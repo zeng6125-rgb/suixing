@@ -404,7 +404,7 @@ private fun ToolsTab() {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().height(44.dp),
                 singleLine = true,
                 label = { Text("搜索工具名") },
             )
@@ -437,7 +437,7 @@ private fun ToolsTab() {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 grouped.forEach { (group, groupTools) ->
                     item(key = "group-$group") { GroupHeader(group, groupTools.size) }
@@ -474,7 +474,7 @@ private fun requirementOf(tier: String, capabilities: CapabilityState): Pair<Str
 @Composable
 private fun GroupHeader(name: String, count: Int) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
@@ -488,7 +488,7 @@ private fun GroupHeader(name: String, count: Int) {
 
 @Composable
 private fun ToolRow(name: String, description: String, requirement: Pair<String, Boolean>?) {
-    SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)) {
+    SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = name,
@@ -528,7 +528,7 @@ private fun McpSection(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 100.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { McpIntroCard() }
@@ -624,7 +624,7 @@ private fun ServerCard(
         McpStatus.FAILED -> Tone.WARN
         McpStatus.DISCONNECTED -> Tone.OFF
     }
-    SuixingCard(contentPadding = PaddingValues(16.dp)) {
+    SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_server), tint = tone.color(dark))
             Spacer(Modifier.width(12.dp))
@@ -656,9 +656,9 @@ private fun ServerCard(
             ) {
                 Text(
                     text = target,
-                    modifier = Modifier.fillMaxWidth().padding(10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(6.dp),
                     style = MonoStyle,
-                    maxLines = 3,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -778,7 +778,7 @@ private fun McpEditorDialog(
                         onValueChange = { command = it },
                         label = { Text("启动命令") },
                         placeholder = { Text("python /sdcard/mcp/server.py") },
-                        minLines = 2,
+                        minLines = 1,
                         shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -787,7 +787,7 @@ private fun McpEditorDialog(
                         value = env,
                         onValueChange = { env = it },
                         label = { Text("环境变量（每行 KEY=VALUE，可空）") },
-                        minLines = 2,
+                        minLines = 1,
                         shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -806,7 +806,7 @@ private fun McpEditorDialog(
                         value = headers,
                         onValueChange = { headers = it },
                         label = { Text("请求头（每行 Name: value，可空）") },
-                        minLines = 2,
+                        minLines = 1,
                         shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth(),
                     )

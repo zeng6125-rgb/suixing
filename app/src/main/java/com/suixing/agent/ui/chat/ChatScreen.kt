@@ -322,6 +322,14 @@ fun ChatScreen(
         ActivityResultContracts.GetContent(),
     ) { uri -> attach(uri, AttachKind.FILE) }
 
+    // How much of the conversation is drawn. A long chat used to be grouped, measured and
+    // turned into rows in full on every state change, however far back the reader was —
+    // the whole transcript priced on every streamed round. What is drawn instead is a
+    // suffix, in whole turns: always the newest ones, so a streaming answer keeps its place
+    // in it, and 加载更早 only ever grows it. The count resets with the conversation: the
+    // window is a property of the chat being read, not of the screen that reads it.
+    var shownTurns by remember(state.conversationId) { mutableIntStateOf(PAGE_TURNS) }
+    val page = remember(state.messages, shownTurns) { turnPage(state.messages, shownTurns) }
     // Tool-only assistant turns carry no text of their own, so their tool calls are
     // folded into the bubble above them instead of standing alone in the transcript.
     // Only the branch the user picked is drawn; the other answers stay on disk.
@@ -332,11 +340,12 @@ fun ChatScreen(
     // rounds leave the stored list in the same state update that empties liveParts.
     val visible = remember(
         state.messages,
+        page,
         state.activeRuns,
         state.runningHere,
         state.liveRunId,
     ) {
-        groupRows(state.messages, state.activeRuns, state.runningHere)
+        groupRows(state.messages.drop(page.from), state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
     val reasoning = if (settings.showReasoning) state.reasoning else ""
@@ -395,6 +404,12 @@ fun ChatScreen(
     // by — so 「会话总用时」 and 「会话输出速度」 are two readings of one measurement rather
     // than two tallies that can drift apart. The tally carries the speed but not the total.
     val sessionElapsedMs = remember(state.messages) { state.messages.sumOf { it.elapsedMs } }
+    // The conversation's spend, split the way the endpoint reports it, for the ring's card: the
+    // prompt the cache could not answer, the cache reads, and the output. The card used to give
+    // the total and the hit rate only; the user asked for the three parts by name —
+    // 「未缓存输入」「缓存读取」「输出」 — and in full, because these are the figures a bill is
+    // checked against and a rounded one cannot be checked against anything.
+    val sessionSplit = remember(state.messages) { sessionSplitOf(state.messages) }
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.
@@ -449,18 +464,26 @@ fun ChatScreen(
         ReasoningExpansion(state.conversationId, reasoningExpanded)
     }
 
+    // The 「加载更早」 line sits above the transcript as an item of its own, so every row
+    // below it is one item further down than its place in [visible].
+    val rowOffset = if (page.hasEarlier) 1 else 0
     // The live card and, under it, its progress caption: both are items of the list, so
     // the count everything else scrolls by includes them.
-    val itemCount = visible.size + if (live) 2 else 0
+    val itemCount = visible.size + rowOffset + if (live) 2 else 0
 
     // The user's own messages are the landmarks of a conversation, so the status line can
     // say "turn 2 of 5" and jump between them without the engine knowing anything about it.
     // Steered lines ride inside the turn they steer, so counting them would draw one
     // landmark per interjection — a question plus two steers is still one turn.
-    val turnIndices = remember(visible) {
-        visible.indices.filter {
-            visible[it].message.role == Roles.USER && !visible[it].message.steer
-        }
+    // The indices are the list's own, [rowOffset] included, because that is what the strip
+    // jumps to; the drawn turns are the tail of the conversation, which is why the labels
+    // that name them are numbered from [TurnPage.earlier] rather than from one.
+    val turnIndices = remember(visible, rowOffset) {
+        visible.indices
+            .filter {
+                visible[it].message.role == Roles.USER && !visible[it].message.steer
+            }
+            .map { it + rowOffset }
     }
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
     val currentTurn = turnIndices.indexOfLast { it <= firstVisible }.coerceAtLeast(0) + 1
@@ -483,6 +506,7 @@ fun ChatScreen(
         // stream kept the list pinned while the user dragged, and they had to fight it.
         snapshotFlow { listState.isScrollInProgress to listState.canScrollBackward }
             .collect { (scrolling, canScrollBack) ->
+                scrollDiag(context, "watch:$scrolling/$canScrollBack", listState, following, itemCount) // 量完删
                 // Our own pin scrolls synchronously; by the time this collector sees the
                 // scrolling flag the programmatic guard is already down, and it read the pin as
                 // a user drag and killed following mid-transition — the card then froze while
@@ -508,7 +532,14 @@ fun ChatScreen(
         if (itemCount <= 0) return@LaunchedEffect
         programmatic = true
         try {
+            scrollDiag(context, "cold-pin:begin", listState, following, itemCount) // 量完删
+            // Re-checked before each scroll, because `following` is not a key of this effect: a
+            // hand that lands after it starts is in the middle of a pin it cannot stop, and this
+            // pass is the one that makes the jump — a cold start is the only time the landing
+            // point is wrong, so the pull to the end is the only time it shows.
+            if (!following) return@LaunchedEffect
             listState.scrollToItem(itemCount - 1)
+            if (!following) return@LaunchedEffect
             listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
@@ -531,7 +562,13 @@ fun ChatScreen(
         state.status,
         settings.autoFollow,
     ) {
-        if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
+        // Re-taken before every scroll below, not just at the top. `following` is not a key of
+        // this effect, so a finger that lands while a pin is in flight used to be dragged to the
+        // end by the scrolls already on their way — which is the jump the user reported, and the
+        // reason it only ever showed on a cold start: that is where the first pin takes the
+        // two-pass path, with a frame wait between the passes that gives the hand time to land.
+        fun gateOpen() = following && settings.autoFollow
+        if (itemCount <= 0 || !gateOpen()) return@LaunchedEffect
         // A drag in flight pauses the pin: content updates land between the frames of a
         // gesture, and pinning on one of them yanks the list back to the end under the user's
         // finger — which is what made "scroll up a little" not enough. The release effect
@@ -542,7 +579,10 @@ fun ChatScreen(
         pinnedCount = itemCount
         programmatic = true
         try {
+            if (added) scrollDiag(context, "pin:added", listState, following, itemCount) // 量完删
+            if (!gateOpen()) return@LaunchedEffect
             listState.scrollToItem(itemCount - 1)
+            if (!gateOpen()) return@LaunchedEffect
             listState.scrollBy(FOLLOW_SCROLL_PX)
             // A second pass once the new item has been measured. The first scroll runs in the
             // frame the item was added, when its height is still unknown, so the end it lands on
@@ -554,7 +594,10 @@ fun ChatScreen(
             // every send is worse than a jump they never see.
             if (added) {
                 withFrameNanos { }
+                scrollDiag(context, "pin:second", listState, following, itemCount) // 量完删
+                if (!gateOpen()) return@LaunchedEffect
                 listState.scrollToItem(itemCount - 1)
+                if (!gateOpen()) return@LaunchedEffect
                 listState.scrollBy(FOLLOW_SCROLL_PX)
             }
         } finally {
@@ -748,6 +791,7 @@ fun ChatScreen(
                                         val downY = down.changes.first().position.y
                                         val wasFollowing = following
                                         following = false
+                                        scrollDiag(context, "press:down", listState, wasFollowing, itemCount) // 量完删
                                         var movedUp = false
                                         var released = false
                                         while (!released) {
@@ -760,6 +804,7 @@ fun ChatScreen(
                                                 movedUp = true
                                             }
                                         }
+                                        scrollDiag(context, "press:up:movedUp=$movedUp", listState, following, itemCount) // 量完删
                                         // A tap is not the user reaching into the content: short, and
                                         // never dragged up. The long press that starts a selection,
                                         // and any drag, leave the follow released until the scroll
@@ -792,6 +837,31 @@ fun ChatScreen(
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
+                        if (page.hasEarlier) {
+                            // The way back into the turns that are not drawn yet, and the only
+                            // way there: the page is a suffix of the conversation, so an older
+                            // turn is reached from the oldest end forward, never by jumping into
+                            // the middle of a turn the grouping has not seen. One page a tap;
+                            // reading is not following, so the follow is dropped with it.
+                            item(key = "load-earlier") {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    TextButton(
+                                        onClick = {
+                                            following = false
+                                            shownTurns += PAGE_TURNS
+                                        },
+                                    ) {
+                                        Text(
+                                            text = "加载更早的 $PAGE_TURNS 轮 · 上面还有 ${page.earlier} 轮",
+                                            style = MaterialTheme.typography.labelLarge,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
                             // One placeable per item: the list's own 16dp spacing applies
                             // between the placeables of a single item as well, which is what
@@ -986,6 +1056,7 @@ fun ChatScreen(
             // One line per turn on the right edge; the old ◀ i/N ▶ row lived in the
             // composer and fought the status line for width.
             TurnScrubber(
+                conversationId = state.conversationId,
                 turns = turnIndices.size,
                 current = currentTurn,
                 modifier = Modifier
@@ -996,7 +1067,9 @@ fun ChatScreen(
                     // the label carries the opening words of the question too — but only
                     // its first line and only 8 characters, because the label floats over
                     // the transcript and has to be readable in the glance it gets.
-                    val opening = visible.getOrNull(turnIndices.getOrElse(turn) { -1 })
+                    // Numbered from [TurnPage.earlier]: the drawn turns are the tail of the
+                    // conversation, and calling the oldest one drawn 「第 1 轮」 would be a lie.
+                    val opening = visible.getOrNull(turnIndices.getOrElse(turn) { -1 } - rowOffset)
                         ?.message
                         ?.text
                         ?.lineSequence()
@@ -1004,9 +1077,9 @@ fun ChatScreen(
                         ?.trim()
                         .orEmpty()
                     if (opening.isEmpty()) {
-                        "第 ${turn + 1} 轮"
+                        "第 ${page.earlier + turn + 1} 轮"
                     } else {
-                        "第 ${turn + 1} 轮 · ${opening.take(8)}"
+                        "第 ${page.earlier + turn + 1} 轮 · ${opening.take(8)}"
                     }
                 },
                 onJumpTo = { turn ->
@@ -1033,6 +1106,7 @@ fun ChatScreen(
                     contextWindow = contextWindow,
                     contextUsed = contextUsed,
                     sessionTokens = sessionTokens,
+                    sessionSplit = sessionSplit,
                     sessionTurns = sessionTurns,
                     sessionPerSecond = session?.perSecond ?: 0.0,
                     sessionCachePercent = session?.cachePercent ?: 0,
@@ -1291,9 +1365,9 @@ private fun UnifiedSelector(
     ) {
         Text(
             text = model,
-            style = MaterialTheme.typography.labelMedium.copy(
-                fontSize = 13.sp,
-            ),
+            // labelMedium as it comes: it is 13sp already, and writing the same number again
+            // as a literal also pinned the size against 「外观 → 字号」, which scales the ramp.
+            style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1309,7 +1383,7 @@ private fun UnifiedSelector(
         Surface(shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.primaryContainer) {
             Text(
                 text = level,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                 // Never ellipsized: the level is a fixed short word, and a "xh…" badge is
                 // both unreadable and pointless — the name beside it is what gets cut.
@@ -1338,7 +1412,7 @@ private fun UnifiedSelector(
 private fun LoadingSkeleton() {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(
-            text = "正在打开…",
+            text = "加载会话中…",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
         )
@@ -1756,6 +1830,52 @@ internal fun groupRows(
         }
     }
     return rows
+}
+
+/**
+ * How many turns of a conversation are drawn when it is opened, and how many each 「加载更早」
+ * adds. Twelve is two of the scrubber's own six-row windows: enough that a chat opens on real
+ * scrollback rather than a screenful, small enough that the grouping, the checkpoint map and the
+ * turn landmarks are priced on a tail instead of on a transcript that can run to thousands of
+ * messages — and the strip can be unlocked a whole window further back before the reader meets
+ * the drawn edge and the button takes over.
+ */
+internal const val PAGE_TURNS = 12
+
+/**
+ * The part of a conversation the transcript draws.
+ *
+ * [from] is the message it starts at, [drawn] of the conversation's [turns] are in it, and
+ * [earlier] is what that leaves above it — which is also the number the oldest drawn turn really
+ * is, since a turn is what the reader counts in. A page is always a suffix, the newest turns:
+ * that is where a conversation is read from and where a streaming answer lives.
+ */
+internal data class TurnPage(val from: Int, val turns: Int, val drawn: Int) {
+    /** Turns above the drawn part. */
+    val earlier: Int get() = turns - drawn
+    val hasEarlier: Boolean get() = earlier > 0
+}
+
+/**
+ * Which page of [messages] a request for [want] turns draws. The cut is made on a turn boundary
+ * and never inside one: a run's rounds belong to the card the grouping builds for them, and half
+ * of one drawn alone would be a card of tools whose question is not on screen. [want] below a
+ * single turn is read as one: a page with nothing in it is not a page.
+ */
+internal fun turnPage(messages: List<StoredMessage>, want: Int): TurnPage {
+    val starts = messages.indices.filter {
+        messages[it].role == Roles.USER && !messages[it].steer
+    }
+    if (starts.isEmpty()) return TurnPage(from = 0, turns = 0, drawn = 0)
+    val drawn = want.coerceIn(1, starts.size)
+    val first = starts.size - drawn
+    // A conversation that opens with something other than a question keeps it, as long as its
+    // first turn is drawn; from the second turn on, the page starts at the question itself.
+    return TurnPage(
+        from = if (first == 0) 0 else starts[first],
+        turns = starts.size,
+        drawn = drawn,
+    )
 }
 
 @Composable
@@ -2449,7 +2569,10 @@ private fun ProcessCard(
     val scheme = MaterialTheme.colorScheme
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        // From the theme, not a 16dp literal: SettingsScreen's AdvancedSection documents itself
+        // as "same chrome as the process cards in the chat screen", and 16 written twice stops
+        // being one shape the moment 外观 → 圆角 moves off the standard tier.
+        shape = MaterialTheme.shapes.medium,
         color = scheme.surfaceContainer,
     ) {
         Column {
@@ -3402,6 +3525,11 @@ private fun ContextChip(tokens: Int, window: Int, live: StreamStats? = null) {
  * is the longest line and the only brand-coloured one; turns already read keep a weaker
  * brand tint, and the ones still ahead are outline grey.
  *
+ * Dragging to the top line unlocks what is above it: the window slides up for as long as the
+ * finger keeps pushing past the rail's top edge, one turn per row of travel, so a long
+ * conversation is reachable in a single drag without the strip ever changing size. The unlocked
+ * amount belongs to the conversation it was pulled in and is dropped when another is opened.
+ *
  * Holding the strip brings up a label naming the turn under the finger, and dragging then
  * walks that label along the lines; lifting commits the jump. The whole rail is one gesture
  * handler rather than a tap target per row, which is what lets the rows sit close together:
@@ -3411,6 +3539,8 @@ private fun ContextChip(tokens: Int, window: Int, live: StreamStats? = null) {
  */
 @Composable
 private fun TurnScrubber(
+    /** The conversation whose window this is: opening another one resets it. */
+    conversationId: String,
     turns: Int,
     current: Int,
     modifier: Modifier = Modifier,
@@ -3419,15 +3549,14 @@ private fun TurnScrubber(
 ) {
     if (turns <= 1) return
     val scheme = MaterialTheme.colorScheme
+    // How far above the window the finger has pulled the strip — the turns it has unlocked in
+    // this conversation. Kept for as long as the chat is open, dropped the moment another is
+    // opened: a deep conversation unlocked in one chat must not decide what the next one shows.
+    var unlocked by remember(conversationId) { mutableIntStateOf(0) }
     // The last few turns, always including the one being read: sampling the whole
     // conversation into five evenly spaced lines is what made "which line is which turn"
     // impossible to tell, and made the jump land somewhere the user did not point at.
-    val window = remember(turns, current) {
-        val last = turns - 1
-        val start = (last - SCRUBBER_VISIBLE + 1).coerceAtLeast(0)
-            .coerceAtMost((current - 1).coerceAtLeast(0))
-        start until (start + SCRUBBER_VISIBLE).coerceAtMost(turns)
-    }
+    val window = remember(turns, current, unlocked) { scrubberWindow(turns, current, unlocked) }
     val rows = remember(window) { window.toList() }
     val rowCount = rows.size
     // A gesture outlives the recomposition it started in, so it reads the turns and the
@@ -3542,6 +3671,18 @@ private fun TurnScrubber(
                                     hitPitchPx,
                                     railRows.size,
                                 )
+                                // On the top line the strip gives ground: a finger that keeps
+                                // pushing up unlocks the turns above the window, one row of
+                                // travel at a time, so the whole conversation is reachable in
+                                // one drag. The window slides rather than grows, so the rows
+                                // never move under the hand and the line the finger is on stays
+                                // the line it is on.
+                                unlocked = scrubberPull(
+                                    y = change.position.y,
+                                    rowPx = hitRowPx,
+                                    pitchPx = hitPitchPx,
+                                    pull = unlocked,
+                                )
                             }
                             pressed = change.pressed
                             // Consumed here so the transcript under the rail never scrolls
@@ -3568,7 +3709,15 @@ private fun TurnScrubber(
                             )
                         pressRow = -1
                         shown = false
-                        if (!cancelled) railRows.getOrNull(destination)?.let(latestJump)
+                        // The strip recentres on wherever the jump lands: the unlocked turns
+                        // were the ones this drag could reach, and the window goes back to
+                        // naming the turn being read instead of staying slid up over turns the
+                        // reader has not left yet.
+                        unlocked = 0
+                        // [latestRows], not the snapshot the hit test was matched against: a
+                        // drag that unlocked its way up the conversation is aimed at a turn
+                        // that snapshot never held.
+                        if (!cancelled) latestRows.getOrNull(destination)?.let(latestJump)
                     }
                 },
             verticalArrangement = Arrangement.spacedBy(SCRUBBER_GAP),
@@ -3668,8 +3817,43 @@ private fun scrubberRowFor(y: Float, rowPx: Float, pitchPx: Float, rows: Int): I
     return ((y - rowPx / 2f) / pitchPx).roundToInt().coerceIn(0, rows - 1)
 }
 
+/**
+ * The turns the strip draws: [SCRUBBER_VISIBLE] lines ending at the newest turn, slid up so the
+ * turn being read is on them, and — while a finger has pulled past the top line — slid up
+ * [unlocked] turns further, so the turns above the window can be reached.
+ *
+ * The window is a fixed number of lines that moves rather than one that grows. Growing it would
+ * change the rail's height mid-drag, and the rail is centred: every line would shift down by
+ * half of what was added, under a finger that is holding one of them. Sliding keeps every line
+ * where it is and changes only which turn each one names, so the line under the finger is always
+ * the line the label is on.
+ */
+internal fun scrubberWindow(turns: Int, current: Int, unlocked: Int): IntRange {
+    if (turns <= 0) return IntRange.EMPTY
+    val last = turns - 1
+    val reading = (last - SCRUBBER_VISIBLE + 1).coerceAtLeast(0)
+        .coerceAtMost((current - 1).coerceAtLeast(0))
+    val start = (reading - unlocked.coerceAtLeast(0)).coerceAtLeast(0)
+    return start until (start + SCRUBBER_VISIBLE).coerceAtMost(turns)
+}
+
+/**
+ * How far the strip has been unlocked by a finger at [y], given how far it already was: the top
+ * line gives ground from the moment the finger is on it — the band the hit test calls the top
+ * line, its centre half a row either side — and every further row of upward travel above it
+ * unlocks one more turn. Monotonic — coming back down the strip does not re-lock the turns it
+ * just reached, or the drag would take them away again the moment it turned around.
+ */
+internal fun scrubberPull(y: Float, rowPx: Float, pitchPx: Float, pull: Int): Int {
+    if (pitchPx <= 0f) return pull
+    val topBand = rowPx / 2f + pitchPx / 2f
+    val overshoot = topBand - y
+    if (overshoot < 0f) return pull
+    return maxOf(pull, (overshoot / pitchPx).toInt() + 1)
+}
+
 /** How many turns the scrubber draws before the window slides up to the newest ones. */
-private const val SCRUBBER_VISIBLE = 6
+internal const val SCRUBBER_VISIBLE = 6
 
 /** The rail's width, and so every row's hit width: the longest line the rail draws. */
 private val SCRUBBER_RAIL = 24.dp
@@ -3943,6 +4127,8 @@ private fun Composer(
     contextUsed: Int,
     /** Everything this conversation has ever spent, for the ring's detail card. */
     sessionTokens: Int,
+    /** That spend in the endpoint's own three parts, for the same card. */
+    sessionSplit: SessionSplit,
     /** How many questions that tally was built from. */
     sessionTurns: Int,
     /** The session's own output speed, cache hit rate and wall clock, for the ring's card. */
@@ -4185,8 +4371,16 @@ private fun Composer(
                         cursorBrush = SolidColor(scheme.primary),
                         maxLines = 5,
                         // Enter sends — and while a run is live it sends the line to that
-                        // run instead of starting a second one.
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        // run instead of starting a second one. 「回车键发送」 turned off makes
+                        // the key a newline instead: the field is already multi-line, and the
+                        // action button under it is then the only way to submit.
+                        keyboardOptions = KeyboardOptions(
+                            imeAction = if (settings.enterKeySends) {
+                                ImeAction.Send
+                            } else {
+                                ImeAction.Default
+                            },
+                        ),
                         keyboardActions = KeyboardActions(
                             onSend = {
                                 val text = input.trim()
@@ -4365,6 +4559,7 @@ private fun Composer(
                         used = contextUsed,
                         window = contextWindow,
                         sessionTokens = sessionTokens,
+                        sessionSplit = sessionSplit,
                         sessionTurns = sessionTurns,
                         sessionPerSecond = sessionPerSecond,
                         sessionCachePercent = sessionCachePercent,
@@ -4860,7 +5055,12 @@ private fun GenerationSheet(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = ripple(),
                                 ) { folded[owner.id] = open }
-                                .padding(top = 8.dp, bottom = 2.dp),
+                                // 4dp of side air, not none: this row clips itself to
+                                // shapes.small for its ripple, and a label sitting flush against
+                                // that edge had the descender of a name like "qwen" cut by the
+                                // corner arc — worse the rounder the 外观 corner setting is. The
+                                // vendor rows below are inset by the same 4dp.
+                                .padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
@@ -5021,6 +5221,10 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     // One automatic hand-off per visit, or a device that refuses us would throw the system
     // speech screen at the user again on every retry.
     var fellBack by remember { mutableStateOf(false) }
+    // Set the moment this card hands the job to the system's own speech screen. That screen is
+    // a screen, not a dialog behind ours, so drawing the card while it is up stacks the two —
+    // which is what the user saw: our failure card over an activity already listening.
+    var handedOff by remember { mutableStateOf(false) }
     val recognizer = remember(attempt) {
         SpeechRecognizer.createSpeechRecognizer(context).apply {
             setRecognitionListener(object : RecognitionListener {
@@ -5098,6 +5302,12 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
             ?.trim()
         if (result.resultCode == Activity.RESULT_OK && !text.isNullOrEmpty()) {
             onResult(text)
+            // The same pair the in-app recognizer's onResults calls: the words go into the field
+            // and the card closes. Without it the overlay stayed composed after the system screen
+            // was gone — nothing drawn, because it had been handed off, but still open, so the
+            // next tap on the mic (voiceOpen already true) brought an overlay back that could
+            // never draw again.
+            onDismiss()
         } else {
             // Backing out of the system screen is the user's own decision and says nothing;
             // an OK with no words is the recognizer having heard nothing, which used to look
@@ -5111,6 +5321,9 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
     val useSystemInput: () -> Unit = {
         // Our own recognizer would keep the microphone while the system screen wants it.
         recognizer.cancel()
+        // From here on the system screen owns the job, and this card stops drawing: it is not a
+        // dialog behind ours, it is the foreground.
+        handedOff = true
         try {
             systemInput.launch(
                 Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -5123,6 +5336,9 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                 },
             )
         } catch (missing: ActivityNotFoundException) {
+            // Nothing was handed off after all: putting the card back is the only way the user
+            // ever sees why there is no way out on this device.
+            handedOff = false
             phase = VoicePhase.Failed("这台设备没有可用的系统语音输入", 0)
         }
     }
@@ -5152,6 +5368,9 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
         animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Restart),
         label = "voice-ring-alpha",
     )
+    // Nothing to draw once the system screen has it. Everything above still runs — the launcher
+    // and its result callback are what close this overlay from here.
+    if (handedOff) return
     Box(Modifier.fillMaxSize()) {
         Box(
             Modifier
@@ -5166,7 +5385,9 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(horizontal = 40.dp)
+                // 24dp, not 40: the failed state has three ways out and the narrower card was
+                // what squeezed them off its own right edge.
+                .padding(horizontal = 24.dp)
                 .fillMaxWidth()
                 .shadow(
                     elevation = 8.dp,
@@ -5226,12 +5447,30 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onDismiss) { Text("取消") }
-                if (failure != null) {
+            if (failure == null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onDismiss) { Text("取消") }
+                    Button(
+                        onClick = { recognizer.stopListening() },
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Text("完成")
+                    }
+                }
+            } else {
+                // Two rows, not one. The three buttons are about 268dp of content in a card
+                // that leaves 232dp of it, and an M3 Button has a minimum size it will not go
+                // below — so the third one was cut off at the card's right edge and read as a
+                // plain green block. The ways out go on the first row; 「重试」 gets the width
+                // of the card on the second, which is also the one the user reaches for most.
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onDismiss) { Text("取消") }
+                    TextButton(onClick = useSystemInput) { Text("改用系统语音输入") }
+                }
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     // The two ways out of a recognizer that will not work: the system's own
                     // speech screen, or one more try with a fresh recognizer.
-                    TextButton(onClick = useSystemInput) { Text("改用系统语音输入") }
                     Button(
                         onClick = {
                             partial = ""
@@ -5239,15 +5478,9 @@ private fun VoiceOverlay(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                             attempt++
                         },
                         shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("重试")
-                    }
-                } else {
-                    Button(
-                        onClick = { recognizer.stopListening() },
-                        shape = RoundedCornerShape(12.dp),
-                    ) {
-                        Text("完成")
                     }
                 }
             }
@@ -5288,6 +5521,8 @@ private fun ContextRing(
     window: Int,
     /** Everything this conversation has ever spent, prompt + completion. */
     sessionTokens: Int,
+    /** That spend in the endpoint's own three parts. */
+    sessionSplit: SessionSplit,
     /** How many questions that tally was built from, so 「累计」 cannot read as 「本轮」. */
     sessionTurns: Int,
     sessionPerSecond: Double,
@@ -5342,17 +5577,17 @@ private fun ContextRing(
                 )
             }
         }
-        // 8sp, one step up from the 7sp the arc's 18dp of clear space was first sized for: Bold
-        // at 7sp was still read as "could be a little bigger" when the user looked at the ring.
-        // Three digits at 8sp are about 13.4dp of the 18dp, so the longest reading still has
-        // room either side. Bold, not Medium: at this size the user read the Medium weight as
-        // thin, and the ring is the only place these digits appear — the extra weight costs
-        // nothing elsewhere.
+        // 9sp, two steps up from the 7sp the arc's clear space was first sized for: Bold at 7sp
+        // was read as "could be a little bigger" twice, the second time with a figure. Three
+        // digits at 9sp are about 15dp of the 18dp of clear space inside the arc, so the
+        // longest reading still fits. Bold, not Medium: at this size the user read the Medium
+        // weight as thin, and the ring is the only place these digits appear — the extra weight
+        // costs nothing elsewhere.
         if (percent > 0) {
             Text(
                 text = percent.toString(),
-                fontSize = 8.sp,
-                lineHeight = 9.sp,
+                fontSize = 9.sp,
+                lineHeight = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = tone,
                 maxLines = 1,
@@ -5372,6 +5607,7 @@ private fun ContextRing(
                         used = used,
                         window = window,
                         sessionTokens = sessionTokens,
+                        sessionSplit = sessionSplit,
                         sessionTurns = sessionTurns,
                         sessionPerSecond = sessionPerSecond,
                         sessionCachePercent = sessionCachePercent,
@@ -5390,6 +5626,7 @@ private fun ContextRingCard(
     used: Int,
     window: Int,
     sessionTokens: Int,
+    sessionSplit: SessionSplit,
     sessionTurns: Int,
     sessionPerSecond: Double,
     sessionCachePercent: Int,
@@ -5477,6 +5714,13 @@ private fun ContextRingCard(
                 // than 「总量」 because it counts each round's re-send, which is why it can
                 // dwarf the 「上下文」 line right above it.
                 RingDetail("累计用量", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
+                // The split under the total, by the names the user asked for: what the cache
+                // could not answer, what it did, and what came back. These three are the whole
+                // conversation's, like the total above them — the per-round halves are the
+                // 「本轮输入」/「本轮输出」 lines at the bottom of the card.
+                RingDetail("未缓存输入", "${fullTokens(sessionSplit.uncached)} tok")
+                RingDetail("缓存读取", "${fullTokens(sessionSplit.cached)} tok")
+                RingDetail("输出", "${fullTokens(sessionSplit.output)} tok")
             }
             // What the run in flight has spent so far, split into its two halves: the only
             // lines here that move, so they sit last, and they leave the moment it settles.
@@ -5545,6 +5789,59 @@ private fun shortTokens(tokens: Int): String = when {
     tokens < 1000 -> "$tokens"
     tokens < 1_000_000 -> String.format(Locale.US, "%.1fk", tokens / 1000.0)
     else -> String.format(Locale.US, "%.1fM", tokens / 1_000_000.0)
+}
+
+/**
+ * The whole number, thousands separated: 「8,502,144 tok」.
+ *
+ * [shortTokens] answers "how big is this" at a glance, which is right for a window or a meter.
+ * The three rows of the ring's split are read against a bill instead, so they are given in
+ * full — a rounded figure cannot be checked against anything.
+ */
+private fun fullTokens(tokens: Long): String = String.format(Locale.US, "%,d", tokens)
+
+/** The three parts of a conversation's spend, as the endpoint itself reports them. */
+private data class SessionSplit(val uncached: Long, val cached: Long, val output: Long)
+
+/**
+ * Sums [SessionSplit] off the stored usage rows, the same rows [SessionStats] divides its hit
+ * rate by, so the parts and the rate are two readings of one measurement.
+ */
+private fun sessionSplitOf(messages: List<StoredMessage>): SessionSplit = SessionSplit(
+    uncached = messages.sumOf { it.promptTokens.toLong() - it.cachedTokens.toLong() }.coerceAtLeast(0L),
+    cached = messages.sumOf { it.cachedTokens.toLong() },
+    output = messages.sumOf { it.completionTokens.toLong() },
+)
+
+/**
+ * 量完删 — an instrument, not a feature (task-9). The jump the user reported reproduces only on
+ * their own device, after a cold start, and it is a race between a finger landing and a pin that
+ * is already in flight; adb is out of bounds this round, so the readings that race is about are
+ * appended to filesDir/scroll-diag.log at the moments that decide it — a conversation's opening
+ * pin, the two-pass pin of a newly added item, a finger landing, a finger lifting, and every
+ * change the scroll watcher sees. The log is the only way to tell "the guard is not being reached"
+ * from "the scroll happens anyway", which is why the numbers are read rather than reasoned about.
+ * Delete this function and its call sites (all marked 量完删) once the log has answered.
+ */
+private fun scrollDiag(
+    context: Context,
+    event: String,
+    state: LazyListState,
+    following: Boolean,
+    itemCount: Int,
+) {
+    runCatching {
+        File(context.filesDir, "scroll-diag.log").appendText(
+            "${SystemClock.uptimeMillis()} $event" +
+                " following=$following" +
+                " itemCount=$itemCount" +
+                " first=${state.firstVisibleItemIndex}+${state.firstVisibleItemScrollOffset}" +
+                " scrolling=${state.isScrollInProgress}" +
+                " canBack=${state.canScrollBackward}" +
+                " canForward=${state.canScrollForward}" +
+                "\n",
+        )
+    }
 }
 
 /**

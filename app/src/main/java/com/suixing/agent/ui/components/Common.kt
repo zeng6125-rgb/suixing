@@ -78,7 +78,7 @@ fun SuixingCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainer,
-    contentPadding: PaddingValues = PaddingValues(18.dp),
+    contentPadding: PaddingValues = PaddingValues(16.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val shape = MaterialTheme.shapes.large
@@ -113,7 +113,7 @@ fun SectionCard(
     subtitle: String? = null,
     trailing: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
-    contentPadding: PaddingValues = PaddingValues(18.dp),
+    contentPadding: PaddingValues = PaddingValues(16.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     SuixingCard(modifier = modifier, contentPadding = contentPadding) {
@@ -432,10 +432,11 @@ fun PageTopBar(
     subtitle: String? = null,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
-    // 栏底不再画任何线：发丝线去掉了——用户明确说「顶栏不要分割线了」，与聊天页同一条规矩。
-    // 这一栏的分层改由 surfaceContainerLow 底色 + 栏下 12dp 空隙承担，不靠阴影
-    // （README「不用阴影」）：阴影在滚动内容上方是一圈灰雾，浅色侧尤其脏。
-    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) {
+    // 栏底不画线，也不再铺另一层底色：底色与页面同一个 background（用户原话「顶栏的颜色和
+    // 页面颜色一致就行，不用分色块」——这一栏原本用 surfaceContainerLow，于是只有子页顶上
+    // 挂着一块看得见的色块）。分层只剩栏下那 12dp 空隙，也不靠阴影（README「不用阴影」）：
+    // 阴影在滚动内容上方是一圈灰雾，浅色侧尤其脏。
+    Surface(color = MaterialTheme.colorScheme.background) {
         Column {
             Row(
                 modifier = Modifier
@@ -445,6 +446,8 @@ fun PageTopBar(
                     // 两行挤成了紧贴的一坨。min 而非固定高度，字号调到「特大」时这栏
                     // 跟着长，而不是把标题裁掉一半。
                     .heightIn(min = 64.dp)
+                    // 12dp 是这一栏自己的「栏内 inset」，不是页面 gutter——页面横向留白全站
+                    // 统一 16dp，两者不是同一层，所以这里故意不跟 16dp 走。别当违规改掉。
                     .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
