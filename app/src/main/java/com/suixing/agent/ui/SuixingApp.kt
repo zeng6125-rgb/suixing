@@ -96,12 +96,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
-import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import androidx.navigation.navArgument
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
@@ -117,6 +115,7 @@ import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
+import com.suixing.agent.ui.settings.AboutScreen
 import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
@@ -344,21 +343,24 @@ fun SuixingApp() {
                         )
                     }
                     composable("capability") { CapabilityScreen(onBack = { navController.popBackStack() }) }
-                    composable("tools") {
-                        ToolsScreen(onBack = { navController.popBackStack() }, onOpen = push)
+                    composable("tools") { ToolsScreen(onBack = { navController.popBackStack() }) }
+                    composable("about") { AboutScreen(onBack = { navController.popBackStack() }) }
+                    // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
+                    composable("extension") {
+                        ExtensionScreen(onBack = { navController.popBackStack() })
                     }
-                    composable(
-                        route = "extension?tab={tab}",
-                        arguments = listOf(
-                            navArgument("tab") {
-                                type = NavType.IntType
-                                defaultValue = 0
-                            },
-                        ),
-                    ) { entry ->
-                        ExtensionScreen(
-                            initialTab = entry.arguments?.getInt("tab") ?: 0,
-                            onBack = { navController.popBackStack() },
+                    // 助手设置：抽屉那一行和设置页那一行打开的是同一张表。这张表是它自己的
+                    // 窗口，退出它就回到推它上来的那一页。
+                    composable("assistants") {
+                        AssistantSheet(
+                            assistants = settings.assistants,
+                            activeId = assistantId.ifBlank { settings.activeAssistantId },
+                            settings = settings,
+                            onUse = { chat.useAssistant(it) },
+                            onSetDefault = { chat.setDefaultAssistant(it) },
+                            onSave = { chat.saveAssistant(it) },
+                            onDelete = { chat.deleteAssistant(it) },
+                            onDismiss = { navController.popBackStack() },
                         )
                     }
                 }

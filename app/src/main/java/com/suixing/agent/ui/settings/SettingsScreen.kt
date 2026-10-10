@@ -76,6 +76,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
+import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
@@ -91,6 +92,8 @@ import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingRow
+import com.suixing.agent.ui.components.SoftIcon
+import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
@@ -166,13 +169,21 @@ fun SettingsScreen(onOpen: (String) -> Unit, onBack: () -> Unit) {
     }
 }
 
-/** The six ways in. Plain rows, not cards: a card per entry would be six boxes of air. */
+/**
+ * The home list: a live status card first, then every entry in a group.
+ *
+ * 状态先给，入口后给；一组一张圆角卡片，行是「标题 + 当前值 + 箭头」，点进去才是控件。
+ * 这一页只做导航：每一行都通到一个独立页面，没有一个开关留在列表里。
+ */
 @Composable
 private fun SettingsRoot(
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
     onOpenPage: (SettingsPage) -> Unit,
 ) {
+    val capabilities by Core.capabilities.state.collectAsState()
+    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         // The screen owns its insets: the header pads the status bar itself, and the list
@@ -186,134 +197,154 @@ private fun SettingsRoot(
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            // 72dp 的页尾：最后一行不被导航条压住。
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 72.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            item { SettingsStatusCard(capabilities, settings) }
             item {
-                SettingsEntry(
-                    title = "模型与生成",
-                    summary = "接口、模型与采样",
-                    icon = ImageVector.vectorResource(R.drawable.ic_bot),
-                    onClick = { onOpenPage(SettingsPage.MODEL) },
+                SettingsGroup(
+                    title = "模型与对话",
+                    rows = listOf(
+                        SettingsGroupRow("模型与生成", "接口、模型与采样") {
+                            onOpenPage(SettingsPage.MODEL)
+                        },
+                        SettingsGroupRow("插话与运行", "插话落点、压缩与工具审批") {
+                            onOpenPage(SettingsPage.STEER)
+                        },
+                        SettingsGroupRow("外观", "主题、配色与排版") {
+                            onOpenPage(SettingsPage.APPEARANCE)
+                        },
+                    ),
                 )
             }
             item {
-                SettingsEntry(
-                    title = "插话与运行",
-                    summary = "插话落点、压缩与工具审批",
-                    icon = ImageVector.vectorResource(R.drawable.ic_sliders_horizontal),
-                    onClick = { onOpenPage(SettingsPage.STEER) },
+                SettingsGroup(
+                    title = "能力与连接",
+                    rows = listOf(
+                        // 权限不是这一页的子页：能力清单是一份用户管理的清单，不是一组开关。
+                        SettingsGroupRow("权限", "无障碍、Shizuku、root 与悬浮窗") {
+                            onOpen("capability")
+                        },
+                        SettingsGroupRow("工具", "工具、Skill 与 MCP 的管理") {
+                            onOpen("tools")
+                        },
+                        SettingsGroupRow("网络与语音", "搜索走哪里、回复读不读出来") {
+                            onOpenPage(SettingsPage.NETWORK)
+                        },
+                    ),
                 )
             }
             item {
-                SettingsEntry(
-                    title = "外观",
-                    summary = "主题、配色与排版",
-                    icon = ImageVector.vectorResource(R.drawable.ic_palette),
-                    onClick = { onOpenPage(SettingsPage.APPEARANCE) },
-                )
-            }
-            item {
-                // No page of its own: the capabilities themselves live on a screen the
-                // user already has, and repeating them here would be a second copy to
-                // keep in sync.
-                SettingsEntry(
-                    title = "权限",
-                    summary = "root 与系统能力",
-                    icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
-                    onClick = { onOpen("capability") },
-                )
-            }
-            item {
-                // The inventory of what the agent can actually reach: read-only, and the
-                // one place the three faces (tools, skills, MCP) are seen together.
-                SettingsEntry(
-                    title = "工具",
-                    summary = "工具、Skill 与 MCP 总览",
-                    icon = ImageVector.vectorResource(R.drawable.ic_wrench),
-                    onClick = { onOpen("tools") },
-                )
-            }
-            item {
-                SettingsEntry(
-                    title = "网络与语音",
-                    summary = "搜索走哪里、回复读不读出来",
-                    icon = ImageVector.vectorResource(R.drawable.ic_compass),
-                    onClick = { onOpenPage(SettingsPage.NETWORK) },
-                )
-            }
-            item {
-                SettingsEntry(
-                    title = "用量",
-                    summary = "tokens · 30 日柱状 · 按模型",
-                    icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
-                    onClick = { onOpenPage(SettingsPage.USAGE) },
-                )
-            }
-            item {
-                SettingsEntry(
-                    title = "数据",
-                    summary = "MCP、记忆、悬浮窗与关于",
-                    icon = ImageVector.vectorResource(R.drawable.ic_database),
-                    onClick = { onOpenPage(SettingsPage.DATA) },
+                SettingsGroup(
+                    title = "数据与关于",
+                    rows = listOf(
+                        SettingsGroupRow("数据", "记忆、助手与会话文件") {
+                            onOpenPage(SettingsPage.DATA)
+                        },
+                        SettingsGroupRow("用量", "tokens · 30 日柱状 · 按模型") {
+                            onOpenPage(SettingsPage.USAGE)
+                        },
+                        SettingsGroupRow("关于", "版本、隐私与开源许可") {
+                            onOpen("about")
+                        },
+                    ),
                 )
             }
         }
     }
 }
 
-/** One way into a page: icon tile, title, one-line summary, chevron. */
+/**
+ * 实时状态卡：先给状态，再给入口。
+ *
+ * 两条都是现成的读数——[Core.capabilities] 的探测结果，和 [Core.settings] 里的当前模型——
+ * 这里只是把它们放到第一屏，不新造数据源。
+ */
 @Composable
-private fun SettingsEntry(
-    title: String,
-    summary: String,
-    icon: ImageVector,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(64.dp)
-            .clip(MaterialTheme.shapes.medium)
-            .clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(22.dp),
+private fun SettingsStatusCard(capabilities: CapabilityState, settings: AppSettings) {
+    val tier = when {
+        capabilities.rootReady -> "Root 档"
+        capabilities.shellReady -> "Shizuku 档"
+        capabilities.accessibility -> "无障碍档"
+        else -> "标准档"
+    }
+    val checks = buildString {
+        append(if (capabilities.accessibility) "无障碍 已开" else "无障碍 未开")
+        append(" · ")
+        append(if (capabilities.shellReady) "Shizuku 已连" else "Shizuku 未连")
+        append(" · ")
+        append(if (capabilities.rootReady) "Root 已就绪" else "Root 未检测")
+    }
+    val model = if (settings.configured) {
+        val provider = settings.activeProvider()?.label
+        "模型：${settings.shortModel}" + if (provider.isNullOrBlank()) "" else "（$provider）"
+    } else {
+        "模型：还没配置接口与密钥"
+    }
+
+    SuixingCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SoftIcon(ImageVector.vectorResource(R.drawable.ic_shield_user))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("当前能力", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = checks,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            StatusPill(
+                text = tier,
+                tone = if (tier == "标准档") Tone.OFF else Tone.OK,
             )
         }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = summary,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Icon(
-            imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_right),
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp),
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = model,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/** One row of a group: the title and the value it currently holds, plus the way in. */
+private class SettingsGroupRow(
+    val title: String,
+    val summary: String,
+    val onClick: () -> Unit,
+)
+
+/** A group name over one rounded card that holds all of that group's rows. */
+@Composable
+private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
+        )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+        ) {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                rows.forEachIndexed { index, row ->
+                    if (index > 0) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                    SettingsLink(title = row.title, subtitle = row.summary, onClick = row.onClick)
+                }
+            }
+        }
     }
 }
 
@@ -1566,11 +1597,11 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
 }
 
 /**
- * 数据: the two lists that live on their own screens, plus everything that is text only.
+ * 数据：只有「内容存在哪」的几条入口，每一行都通到一个只属于数据的地方。
  *
- * The 悬浮窗控制台 row is here rather than on a 权限 page because there is no 权限 page —
- * that row hands off to the capability screen — and this page is already where the
- * read-only text (关于, the key note) lives, which is what an explanation is.
+ * MCP 与技能搬去了工具页，悬浮窗的授权卡本来就在权限页（CapabilityScreen 里的
+ * 「悬浮窗控制台」卡，granted = FloatConsoleService.canDrawOverlays），关于自己成了一页
+ * （[AboutScreen]）——这一页原来什么都放一点，重复的入口正是要删的东西。
  */
 @Composable
 private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
@@ -1584,77 +1615,30 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 72.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                SettingsLink(
+                SettingsGroup(
                     title = "记忆",
-                    subtitle = "模型自己写下的长期备忘",
-                    onClick = { onOpen("extension?tab=2") },
-                )
-            }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
-            item {
-                SettingsLink(
-                    title = "MCP 服务器",
-                    subtitle = "给模型外挂工具",
-                    onClick = { onOpen("extension?tab=0") },
-                )
-            }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
-            item {
-                // Read-only on purpose: the switch is the drawer's bottom row, next to the
-                // run it starts, so a second one here would be a second source of truth.
-                SettingRow(
-                    title = "悬浮窗控制台",
-                    subtitle = "开关在左侧抽屉底部的「悬浮窗控制台」那一行；这里只说明权限",
-                )
-            }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
-            item {
-                Text(
-                    text = "关于",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    rows = listOf(
+                        SettingsGroupRow("用户记忆", "模型自己写下的长期备忘") {
+                            onOpen("extension")
+                        },
+                    ),
                 )
             }
             item {
-                Text(
-                    text = "跟着你走的手机智能体：说一句话，它就能读屏、点按、跑命令、翻文件。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            item {
-                Text(
-                    text = "回答由你自己配置的模型服务提供；对话、记忆与密钥都只留在这台手机上。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_badge_check),
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.height(15.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "API Key 只保存在本机应用私有目录，不会上传到任何第三方服务。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            item {
-                // Lucide 是 ISC 许可：它要求保留版权与许可声明，这一页是 App 唯一的出处说明。
-                Text(
-                    text = "图标：Lucide（ISC License）",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                SettingsGroup(
+                    title = "助手与文件",
+                    rows = listOf(
+                        SettingsGroupRow("助手设置", "每个助手的名字、提示词、模型与工具") {
+                            onOpen("assistants")
+                        },
+                        SettingsGroupRow("会话文件", "agent 在会话里读写的工作区文件") {
+                            onOpen("files")
+                        },
+                    ),
                 )
             }
         }
@@ -2127,7 +2111,8 @@ private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
             .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
+            // 12dp：分组卡里的行距，卡片自己的内边距在 SettingsGroup 上。
+            .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
