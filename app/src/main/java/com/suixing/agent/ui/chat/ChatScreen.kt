@@ -21,8 +21,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -35,6 +37,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
@@ -65,6 +69,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -112,9 +117,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -135,6 +142,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -199,6 +207,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.io.File
@@ -904,6 +913,24 @@ fun ChatScreen(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 4.dp),
+                labelOf = { turn ->
+                    // A number alone cannot tell two turns about the same thing apart, so
+                    // the label carries the opening words of the question too — but only
+                    // its first line and only 8 characters, because the label floats over
+                    // the transcript and has to be readable in the glance it gets.
+                    val opening = visible.getOrNull(turnIndices.getOrElse(turn) { -1 })
+                        ?.message
+                        ?.text
+                        ?.lineSequence()
+                        ?.firstOrNull { it.isNotBlank() }
+                        ?.trim()
+                        .orEmpty()
+                    if (opening.isEmpty()) {
+                        "第 ${turn + 1} 轮"
+                    } else {
+                        "第 ${turn + 1} 轮 · ${opening.take(8)}"
+                    }
+                },
                 onJumpTo = { turn ->
                     // Choosing a turn is reading, not following: the stream must not drag
                     // the view back down while the user is somewhere else in the answer.
@@ -1342,7 +1369,7 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
  * One bubble of the transcript: the message that owns it, the parts of the reply in the
  * order they arrived, and whether it opens a new time bucket.
  */
-private data class ChatRow(
+internal data class ChatRow(
     val message: StoredMessage,
     val showTimeLabel: Boolean,
     val parts: List<Part> = emptyList(),
@@ -1375,7 +1402,7 @@ private data class ChatRow(
  * the model is still working and the same call after it lands are the same widget — which
  * is what stops the tool block from flickering into a different shape when the run ends.
  */
-private data class ToolLine(
+internal data class ToolLine(
     val name: String,
     val args: String,
     val done: Boolean,
@@ -1405,7 +1432,7 @@ private data class ToolLine(
     }
 }
 
-private sealed interface Part {
+internal sealed interface Part {
     /**
      * One round of thinking, with that round's own numbers.
      *
@@ -1443,7 +1470,7 @@ private sealed interface Part {
  * Context size is cumulative, so only the newest round knows the real prompt size and
  * only its cache count is meaningful; tokens and time add up across rounds instead.
  */
-private data class Usage(
+internal data class Usage(
     val prompt: Int = 0,
     val completion: Int = 0,
     val reasoning: Int = 0,
@@ -1477,7 +1504,7 @@ private data class Usage(
  * [index] is where [runs] the user is looking at, so the arrows are pure
  * navigation and never rewrite the transcript.
  */
-private data class Branch(
+internal data class Branch(
     val turnId: String,
     val runs: List<String>,
     val index: Int,
@@ -1506,7 +1533,7 @@ private fun StoredMessage.isVisible(): Boolean = when (role) {
  * tools it ran read as one block; a text-less assistant turn is skipped rather than
  * drawn as an empty bubble.
  */
-private fun groupRows(
+internal fun groupRows(
     messages: List<StoredMessage>,
     activeRuns: Map<String, String>,
     running: Boolean,
@@ -3186,12 +3213,20 @@ private fun ContextChip(tokens: Int, window: Int, live: StreamStats? = null) {
  * reading something older than it, so "where am I" is always on screen. The turn being read
  * is the longest line and the only brand-coloured one; turns already read keep a weaker
  * brand tint, and the ones still ahead are outline grey.
+ *
+ * Holding the strip brings up a label naming the turn under the finger, and dragging then
+ * walks that label along the lines; lifting commits the jump. The whole rail is one gesture
+ * handler rather than a tap target per row, which is what lets the rows sit close together:
+ * the finger is matched to the nearest line, so it never has to land inside one.
+ * (Interaction and the drag/exit thresholds are borrowed from Aether's ConversationTimeline;
+ * the code here is our own.)
  */
 @Composable
 private fun TurnScrubber(
     turns: Int,
     current: Int,
     modifier: Modifier = Modifier,
+    labelOf: (Int) -> String,
     onJumpTo: (Int) -> Unit,
 ) {
     if (turns <= 1) return
@@ -3205,47 +3240,242 @@ private fun TurnScrubber(
             .coerceAtMost((current - 1).coerceAtLeast(0))
         start until (start + SCRUBBER_VISIBLE).coerceAtMost(turns)
     }
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        horizontalAlignment = Alignment.End,
-    ) {
-        window.forEach { turn ->
-            val read = turn < current - 1
-            val active = turn == current - 1
-            Box(
-                modifier = Modifier
-                    .height(18.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = ripple(),
-                    ) { onJumpTo(turn) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
-                    Modifier
-                        // The turn being read is the longest and the only full-strength
-                        // brand line. It used to fall into the "not reached" branch and come
-                        // out grey, which is exactly backwards.
-                        .width(if (active) 24.dp else if (read) 20.dp else 12.dp)
-                        .height(if (active) 3.dp else 2.dp)
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(
-                            when {
-                                active -> scheme.primary
-                                read -> scheme.primary.copy(alpha = 0.45f)
-                                else -> scheme.outlineVariant
-                            },
-                        ),
+    val rows = remember(window) { window.toList() }
+    val rowCount = rows.size
+    // A gesture outlives the recomposition it started in, so it reads the turns and the
+    // jump through these instead of closing over values a new message has replaced.
+    val latestRows by rememberUpdatedState(rows)
+    val latestJump by rememberUpdatedState(onJumpTo)
+    // Which row the finger is on, which row the label names, and whether the label is out.
+    // All three are cleared when the finger lifts, so no frame can leave the rail stuck open.
+    var pressRow by remember { mutableIntStateOf(-1) }
+    var selectionRow by remember { mutableIntStateOf(0) }
+    var shown by remember { mutableStateOf(false) }
+    val selected = selectionRow.coerceIn(0, rowCount - 1)
+
+    val density = LocalDensity.current
+    val rowPx = with(density) { SCRUBBER_ROW.toPx() }
+    val gapPx = with(density) { SCRUBBER_GAP.toPx() }
+    val railPx = with(density) { SCRUBBER_RAIL.toPx() }
+    val labelGapPx = with(density) { SCRUBBER_LABEL_GAP.toPx() }
+    // The label rides beside its own row, and only the rows know where they sit, so it is
+    // measured off the rail's vertical centre: the strip itself is centred on the reading
+    // area and its height changes with the number of turns in the window.
+    val railHeightPx = rowPx * rowCount + gapPx * (rowCount - 1)
+    val labelDyPx = selected * (rowPx + gapPx) + rowPx / 2f - railHeightPx / 2f
+
+    Box(modifier = modifier.width(SCRUBBER_RAIL)) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                // One handler for the whole rail instead of a clickable per row: the finger
+                // is matched to the nearest line, so a press between two lines still lands
+                // on one of them and a drag can cross rows without dropping the gesture.
+                .pointerInput(Unit) {
+                    val hitRowPx = SCRUBBER_ROW.toPx()
+                    val hitPitchPx = SCRUBBER_ROW.toPx() + SCRUBBER_GAP.toPx()
+                    val dragPx = SCRUBBER_DRAG_THRESHOLD.toPx()
+                    val exitPx = SCRUBBER_EXIT_TOLERANCE.toPx()
+                    awaitEachGesture {
+                        val railRows = latestRows
+                        if (railRows.isEmpty()) return@awaitEachGesture
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        val startRow =
+                            scrubberRowFor(down.position.y, hitRowPx, hitPitchPx, railRows.size)
+                        pressRow = startRow
+                        selectionRow = startRow
+                        shown = false
+                        var travel = 0f
+                        var pointer = down.position
+                        // True only until the hold has run out; after that the pointer is
+                        // awaited without a deadline, so a slow drag is never cut short.
+                        var waiting = true
+                        var pressed = true
+                        while (pressed) {
+                            val event = if (waiting) {
+                                withTimeoutOrNull(SCRUBBER_LONG_PRESS_MS) { awaitPointerEvent() }
+                            } else {
+                                awaitPointerEvent()
+                            }
+                            if (event == null) {
+                                // The hold ran out: the label comes up and stays up until the
+                                // finger lifts. This is the "press and hold to see it" half.
+                                waiting = false
+                                shown = true
+                                continue
+                            }
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null) {
+                                pressed = false
+                                continue
+                            }
+                            travel += abs(change.position.y - pointer.y)
+                            pointer = change.position
+                            if (travel >= dragPx) {
+                                // Dragging is an answer in itself, so it skips the rest of the
+                                // hold and starts previewing turns at once.
+                                waiting = false
+                                shown = true
+                                selectionRow = scrubberRowFor(
+                                    change.position.y,
+                                    hitRowPx,
+                                    hitPitchPx,
+                                    railRows.size,
+                                )
+                            }
+                            pressed = change.pressed
+                            // Consumed here so the transcript under the rail never scrolls
+                            // along: dragging the strip previews turns, it does not move the
+                            // conversation. The jump happens once, on the lift.
+                            change.consume()
+                        }
+                        val destination = selectionRow
+                        // A finger that wanders this far off the strip was after the
+                        // transcript rather than a turn, so the jump is dropped.
+                        val cancelled = pointer.x < -exitPx
+                        pressRow = -1
+                        shown = false
+                        if (!cancelled) railRows.getOrNull(destination)?.let(latestJump)
+                    }
+                },
+            verticalArrangement = Arrangement.spacedBy(SCRUBBER_GAP),
+            horizontalAlignment = Alignment.End,
+        ) {
+            rows.forEachIndexed { row, turn ->
+                val read = turn < current - 1
+                val active = turn == current - 1
+                val chosen = shown && row == selected
+                val scale by animateFloatAsState(
+                    targetValue = when {
+                        chosen -> SCRUBBER_PRESS_SCALE
+                        row == pressRow -> SCRUBBER_TOUCH_SCALE
+                        else -> 1f
+                    },
+                    animationSpec = tween(110, easing = SCRUBBER_EASING),
+                    label = "scrubber_row_scale",
                 )
+                Box(
+                    modifier = Modifier.height(SCRUBBER_ROW),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            // The turn being read is the longest and the only full-strength
+                            // brand line. It used to fall into the "not reached" branch and come
+                            // out grey, which is exactly backwards.
+                            .width(if (active) 24.dp else if (read) 20.dp else 12.dp)
+                            .height(if (active) 3.dp else 2.dp)
+                            // Grown out of its right edge: the enlargement then never walks the
+                            // line off the 4dp edge gap, and never re-lays-out the rows under a
+                            // finger that is still dragging.
+                            .graphicsLayer {
+                                scaleX = scale
+                                scaleY = scale
+                                transformOrigin = TransformOrigin(1f, 0.5f)
+                            }
+                            .clip(RoundedCornerShape(1.dp))
+                            .background(
+                                when {
+                                    // Lit while it is the one being previewed, so dragging
+                                    // onto a turn that has not been read yet still shows up.
+                                    chosen -> scheme.primary
+                                    active -> scheme.primary
+                                    read -> scheme.primary.copy(alpha = 0.45f)
+                                    else -> scheme.outlineVariant
+                                },
+                            ),
+                    )
+                }
             }
+        }
+        AnimatedVisibility(
+            visible = shown,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                // Layout-neutral on purpose: the label hangs off the rail's left edge and must
+                // not widen it, or the strip would drift out over the bubbles it clears today.
+                .offset { IntOffset(-(railPx + labelGapPx).roundToInt(), labelDyPx.roundToInt()) },
+            enter = fadeIn(tween(SCRUBBER_LABEL_IN_MS)) + scaleIn(
+                initialScale = 0.96f,
+                animationSpec = tween(190, easing = SCRUBBER_EASING),
+            ),
+            exit = fadeOut(tween(SCRUBBER_LABEL_OUT_MS)) + scaleOut(
+                targetScale = 0.98f,
+                animationSpec = tween(130, easing = SCRUBBER_EASING),
+            ),
+        ) {
+            Text(
+                text = latestRows.getOrNull(selected)?.let(labelOf).orEmpty(),
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.inverseOnSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .widthIn(max = SCRUBBER_LABEL_MAX)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(scheme.inverseSurface)
+                    .padding(horizontal = 9.dp, vertical = 5.dp),
+            )
         }
     }
 }
 
+/**
+ * Which line a finger at [y] is on. Rows are found by their centre rather than by their box,
+ * so the air between two lines belongs to whichever is nearer — that is what allows the strip
+ * to be packed tighter than a fingertip is wide.
+ */
+private fun scrubberRowFor(y: Float, rowPx: Float, pitchPx: Float, rows: Int): Int {
+    if (rows <= 1) return 0
+    return ((y - rowPx / 2f) / pitchPx).roundToInt().coerceIn(0, rows - 1)
+}
+
 /** How many turns the scrubber draws before the window slides up to the newest ones. */
 private const val SCRUBBER_VISIBLE = 6
+
+/** The rail's width, and so every row's hit width: the longest line the rail draws. */
+private val SCRUBBER_RAIL = 24.dp
+
+/**
+ * One row's box. Shorter than the old 18dp because the finger is matched to the nearest line
+ * instead of having to land inside a box — the rows no longer need to be big enough to hit,
+ * only far enough apart to tell apart.
+ */
+private val SCRUBBER_ROW = 14.dp
+
+/** Air between rows: half the old 6dp, which was most of what made the strip read as sparse. */
+private val SCRUBBER_GAP = 3.dp
+
+/** How far the finger travels before a press turns into a drag. Aether's own threshold. */
+private val SCRUBBER_DRAG_THRESHOLD = 18.dp
+
+/** Drifting this far left of the rail drops the jump. Aether's own exit tolerance. */
+private val SCRUBBER_EXIT_TOLERANCE = 28.dp
+
+/**
+ * How long a still finger waits before the label appears. Shorter than the platform's long
+ * press because a scrubber has to answer at once, but long enough that a plain tap on a line
+ * never flashes a label on its way to jumping.
+ */
+private const val SCRUBBER_LONG_PRESS_MS = 220L
+
+/** The label's fade in, and its fade out once the finger lifts. */
+private const val SCRUBBER_LABEL_IN_MS = 150
+private const val SCRUBBER_LABEL_OUT_MS = 150
+
+/** Air between the rail and the label. */
+private val SCRUBBER_LABEL_GAP = 6.dp
+
+/** The label's longest line, so it never covers the bubble it floats over. */
+private val SCRUBBER_LABEL_MAX = 180.dp
+
+/** How far a line grows once its label is out, and while it is merely touched. */
+private const val SCRUBBER_PRESS_SCALE = 1.4f
+private const val SCRUBBER_TOUCH_SCALE = 1.12f
+
+/** Aether's motion curve, borrowed for the row scale and the label's entry and exit. */
+private val SCRUBBER_EASING = CubicBezierEasing(0.22f, 0.84f, 0.18f, 1f)
 
 /** How far a queued line is inset from the pill on each side, so it reads as narrower. */
 private val STEER_QUEUE_INSET = 12.dp
@@ -3746,23 +3976,22 @@ private fun Composer(
                                 menuOpen = false
                                 onPickFile()
                             }
-                            // Only while a run is going: the engine consumes the request at
-                            // a turn boundary, and with no run there is no boundary — a
-                            // greyed-out entry would only invite a tap that cannot work.
-                            if (running) {
-                                MenuItemRow(ImageVector.vectorResource(R.drawable.ic_minimize_2), "压缩上下文") {
-                                    menuOpen = false
-                                    val asked = onRequestCompress()
-                                    Toast.makeText(
-                                        ctx,
-                                        if (asked) {
-                                            "已请求压缩，本轮结束后生效"
-                                        } else {
-                                            "没有正在进行的任务，无需压缩"
-                                        },
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                }
+                            // Always listed: the entry disappearing between runs made users
+                            // think the feature was gone. With no run in flight the engine
+                            // refuses and the toast says why — a visible refusal beats a
+                            // missing menu item.
+                            MenuItemRow(ImageVector.vectorResource(R.drawable.ic_minimize_2), "压缩上下文") {
+                                menuOpen = false
+                                val asked = onRequestCompress()
+                                Toast.makeText(
+                                    ctx,
+                                    if (asked) {
+                                        "已请求压缩，本轮结束后生效"
+                                    } else {
+                                        "压缩在任务进行中才生效：等下一轮开跑再点它"
+                                    },
+                                    Toast.LENGTH_SHORT,
+                                ).show()
                             }
                         }
                     }
@@ -3785,18 +4014,25 @@ private fun Composer(
                         // the free space so the capsule sits against the ring, as asked.
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
                             Box {
-                                GenerationSheet(
-                                    settings = settings,
-                                    assistantId = assistantId,
-                                    conversationProviderId = conversationProviderId,
-                                    conversationModel = conversationModel,
-                                    conversationReasoningEffort = conversationReasoningEffort,
-                                    onChooseReasoning = onChooseReasoning,
-                                    visible = sheetOpen,
-                                    onPickModel = onPickModel,
-                                    onOpenSettings = onOpenSettings,
-                                    onDismiss = { sheetOpen = false },
-                                )
+                                // Zero-height probe at the capsule's TOP edge: the popup hangs
+                                // off it bottom-aligned, so its bottom edge lands 8dp above the
+                                // capsule. Hung on the capsule box itself, BottomStart put the
+                                // popup's bottom on the capsule's bottom — covering the button
+                                // that opened it, which is what the user photographed.
+                                Box(Modifier.fillMaxWidth().height(0.dp)) {
+                                    GenerationSheet(
+                                        settings = settings,
+                                        assistantId = assistantId,
+                                        conversationProviderId = conversationProviderId,
+                                        conversationModel = conversationModel,
+                                        conversationReasoningEffort = conversationReasoningEffort,
+                                        onChooseReasoning = onChooseReasoning,
+                                        visible = sheetOpen,
+                                        onPickModel = onPickModel,
+                                        onOpenSettings = onOpenSettings,
+                                        onDismiss = { sheetOpen = false },
+                                    )
+                                }
                                 UnifiedSelector(
                                 settings = settings,
                                 assistantId = assistantId,
@@ -4164,7 +4400,7 @@ private fun GenerationSheet(
         onDismiss = onDismiss,
         alignment = Alignment.BottomStart,
         offset = with(density) { IntOffset(nudge.roundToInt(), -8.dp.roundToPx()) },
-        modifier = Modifier.widthIn(max = 300.dp).onSizeChanged { sheetWidth = it.width },
+        modifier = Modifier.widthIn(max = 340.dp).onSizeChanged { sheetWidth = it.width },
     ) {
         if (!picking) {
             // Page one: one big name to tap, one slider to drag, nothing else.
@@ -4273,7 +4509,10 @@ private fun GenerationSheet(
                         ) {
                             Text(
                                 text = owner.shortLabel,
-                                style = MaterialTheme.typography.labelSmall.copy(
+                                // labelMedium, not labelSmall: at 11sp the group titles read a
+                                // size class below the model rows they head, and long provider
+                                // names truncated early. Same family as the rows, one weight up.
+                                style = MaterialTheme.typography.labelMedium.copy(
                                     fontWeight = FontWeight.SemiBold,
                                 ),
                                 color = scheme.primary,
@@ -4300,7 +4539,10 @@ private fun GenerationSheet(
                             if (groups.size > 1) {
                                 Text(
                                     text = group,
-                                    style = MaterialTheme.typography.labelSmall,
+                                    // Same size class as the provider titles above: two levels
+                                    // of group heading reading at two different sizes made the
+                                    // list look like three unrelated fonts.
+                                    style = MaterialTheme.typography.labelMedium,
                                     color = scheme.onSurfaceVariant,
                                     modifier = Modifier.padding(start = 4.dp, top = 4.dp),
                                 )
@@ -4844,7 +5086,9 @@ private fun RingDetail(label: String, value: String) {
         Text(
             text = value,
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface,
+            // A shade under the label's own tone: the numbers are the detail, and at full
+            // onSurface they read heavier than the labels they belong to.
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.End,

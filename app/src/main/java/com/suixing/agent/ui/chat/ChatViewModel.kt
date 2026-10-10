@@ -627,32 +627,37 @@ class ChatViewModel : ViewModel() {
     fun prefetchWindows() {
         viewModelScope.launch {
             val settings = Core.settings.current()
-            val shown = _state.value
-            val assistant = settings.assistant(shown.assistantId) ?: settings.activeAssistant()
-            val choice = settings.choiceFor(shown.providerId, shown.model, assistant)
-            if (choice.baseUrl.isBlank()) return@launch
-            val key = choice.baseUrl.trimEnd('/') + "|" + choice.apiKey
-            if (!windowsAsked.add(key)) return@launch
-            val endpoint = settings.copy(
-                baseUrl = choice.baseUrl,
-                apiKey = choice.apiKey,
-                model = choice.model,
-            )
-            runCatching { llm.listModelDetails(endpoint) }
-                .onSuccess { details ->
-                    val windows = details
-                        .mapNotNull { model -> model.contextLength?.let { model.id to it } }
-                        .toMap()
-                    if (windows.isEmpty()) return@onSuccess
-                    Core.settings.update { stored ->
-                        stored.copy(
-                            modelContexts = stored.modelContexts.withUpstreamDefaults(windows),
-                        )
+            // Every endpoint, not just the one this conversation happens to use: the ring and
+            // the settings page both read windows by model id, and a provider the user has not
+            // switched to yet would otherwise stay 「unlimited」 forever — which is exactly the
+            // complaint about a newly added provider. Still at most one probe per endpoint per
+            // process, and still only when the picker is opened.
+            val gathered = mutableMapOf<String, Int>()
+            for (provider in settings.providers) {
+                if (provider.baseUrl.isBlank()) continue
+                val key = provider.baseUrl.trimEnd('/') + "|" + provider.apiKey
+                if (!windowsAsked.add(key)) continue
+                val endpoint = settings.copy(
+                    baseUrl = provider.baseUrl,
+                    apiKey = provider.apiKey,
+                    // /models does not care which model the endpoint copy names; give it one
+                    // the provider actually knows so the request shape stays valid.
+                    model = provider.enabled.firstOrNull() ?: provider.models.firstOrNull().orEmpty(),
+                )
+                runCatching { llm.listModelDetails(endpoint) }
+                    .onSuccess { details ->
+                        for (model in details) {
+                            model.contextLength?.let { gathered[model.id] = it }
+                        }
                     }
-                }
-                // A failed probe is not worth a word on screen: the window simply stays as
-                // it was, and the settings page can be asked to fetch again.
-                .onFailure { windowsAsked.remove(key) }
+                    // A failed probe is not worth a word on screen: the window simply stays as
+                    // it was, and the settings page can be asked to fetch again.
+                    .onFailure { windowsAsked.remove(key) }
+            }
+            if (gathered.isEmpty()) return@launch
+            Core.settings.update { stored ->
+                stored.copy(modelContexts = stored.modelContexts.withUpstreamDefaults(gathered))
+            }
         }
     }
 

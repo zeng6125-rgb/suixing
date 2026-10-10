@@ -61,6 +61,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import kotlinx.coroutines.delay
+import kotlin.math.abs
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -229,9 +232,30 @@ fun SuixingApp() {
         // which is the ramp's own last colour) makes the corners exactly the canvas's bottom
         // colour, continuous with the pixel row above the keyboard.
         val rootDensity = LocalDensity.current
+        val imeRawPx = WindowInsets.ime.getBottom(rootDensity)
+        // The platform's keyboard animation ends with a rebound of a few pixels the other way
+        // (measured on device: the composer overshot ~6px past its resting place and snapped
+        // back, which on a 120Hz panel reads as a hitch at the end of every close). The inset
+        // the whole shell is laid out by is therefore clamped like the list's follow: an
+        // opposite-direction change inside the clamp is the rebound and is dropped; real
+        // transition frames are 30-80px and pass untouched.
+        var heldImePx by remember { mutableIntStateOf(0) }
+        var imeDir by remember { mutableIntStateOf(0) }
+        LaunchedEffect(imeRawPx) {
+            val delta = imeRawPx - heldImePx
+            if (delta == 0) return@LaunchedEffect
+            val dir = if (delta > 0) 1 else -1
+            val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
+            if (imeDir != 0 && dir != imeDir && rebound) return@LaunchedEffect
+            imeDir = dir
+            heldImePx = imeRawPx
+        }
+        LaunchedEffect(imeRawPx) {
+            delay(300)
+            imeDir = 0
+        }
         val gradientEndPx = with(rootDensity) {
-            (LocalConfiguration.current.screenHeightDp.dp.toPx() -
-                WindowInsets.ime.getBottom(rootDensity)).coerceAtLeast(1f)
+            (LocalConfiguration.current.screenHeightDp.dp.toPx() - heldImePx).coerceAtLeast(1f)
         }
         Box(
             Modifier.fillMaxSize().background(
@@ -251,7 +275,7 @@ fun SuixingApp() {
         ) {
             Box(Modifier.fillMaxSize())
             Scaffold(
-                modifier = Modifier.imePadding(),
+                modifier = Modifier.padding(bottom = with(rootDensity) { heldImePx.toDp() }),
                 // surface, not background: the scaffold covers the strip behind the keyboard, and
                 // its white container was exactly the pale seam the keyboard's rounded corners
                 // revealed against the chat canvas.
