@@ -199,6 +199,7 @@ import com.suixing.agent.ui.components.FlatPainterButton
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
+import com.suixing.agent.ui.components.PressPill
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
@@ -804,6 +805,7 @@ fun ChatScreen(
                                     expandReasoning = settings.expandReasoning,
                                     expandTools = settings.expandTools,
                                     reasoningMaxHeight = settings.reasoningHeight.dp,
+                                    followReasoning = settings.followReasoning,
                                     bubbleMaxWidth = bubbleMaxWidth,
                                     contextWindow = contextWindow,
                                     runElapsedMs = runElapsed[row.message.runId] ?: 0L,
@@ -888,6 +890,7 @@ fun ChatScreen(
                                         expandReasoning = settings.expandReasoning,
                                         expandTools = settings.expandTools,
                                         reasoningMaxHeight = settings.reasoningHeight.dp,
+                                        followReasoning = settings.followReasoning,
                                         bubbleMaxWidth = bubbleMaxWidth,
                                         reasoningExpansion = reasoningExpansion,
                                     )
@@ -1186,40 +1189,33 @@ private fun ChatTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // Both discs come from the shared helpers at their 40dp/20dp default — see the
+        // table in CircleActionButton — so the header, the composer and a page's back
+        // button are the same disc. The capsule between them is [PressPill], the same
+        // shape and shadow the composer's input uses: this bar floats over the transcript
+        // and has no surface of its own, so the two pills are what the user reads as "a
+        // field I can type in" and "the conversation I am in".
         FlatPainterButton(
             painter = painterResource(R.drawable.ic_menu_soft),
             contentDescription = "打开侧边栏",
             onClick = { openDrawer?.invoke() },
-            iconSize = 22.dp,
         )
-        Surface(
+        PressPill(
             modifier = Modifier
                 .weight(1f)
-                .height(44.dp)
-                .shadow(
-                    elevation = 6.dp,
-                    shape = CircleShape,
-                    ambientColor = Color.Black.copy(alpha = 0.12f),
-                    spotColor = Color.Black.copy(alpha = 0.12f),
-                ),
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surface,
+                .height(44.dp),
         ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-                Text(
-                    text = title,
-                    style = titleBarStyle(),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 14.dp),
-                )
-            }
+            Text(
+                text = title,
+                style = titleBarStyle(),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         FlatPainterButton(
             painter = painterResource(R.drawable.ic_compose),
             contentDescription = "新对话",
             onClick = onNew,
-            iconSize = 22.dp,
         )
     }
 }
@@ -1764,6 +1760,8 @@ private fun MessageRow(
     expandReasoning: Boolean,
     expandTools: Boolean,
     reasoningMaxHeight: Dp,
+    /** 外观 → 思考块跟随最新; [ReasoningBlock.followReasoning]. */
+    followReasoning: Boolean = true,
     bubbleMaxWidth: Dp,
     contextWindow: Int,
     /** What this row's whole run took; 0 falls back to the message's own round. */
@@ -1801,6 +1799,7 @@ private fun MessageRow(
             expandReasoning = expandReasoning,
             expandTools = expandTools,
             reasoningMaxHeight = reasoningMaxHeight,
+            followReasoning = followReasoning,
             bubbleMaxWidth = bubbleMaxWidth,
             reasoningExpansion = reasoningExpansion,
             onBranch = onBranch,
@@ -2109,6 +2108,8 @@ private fun AssistantRow(
     expandReasoning: Boolean = false,
     expandTools: Boolean = false,
     reasoningMaxHeight: Dp = 180.dp,
+    /** 外观 → 思考块跟随最新; [ReasoningBlock.followReasoning]. */
+    followReasoning: Boolean = true,
     /** 外观 → 气泡宽度: the card's cap. [Dp.Infinity] leaves it at the row's own width. */
     bubbleMaxWidth: Dp = Dp.Infinity,
     /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
@@ -2181,6 +2182,7 @@ private fun AssistantRow(
                     // show — the compression record is the separator card's job.
                     note = liveStats?.note.orEmpty(),
                     reasoningMaxHeight = reasoningMaxHeight,
+                    followReasoning = followReasoning,
                     // The stored blocks answer to their message, so the table keeps their
                     // state apart from the live run's and from every other message's.
                     messageId = message?.id.orEmpty(),
@@ -2228,6 +2230,7 @@ private fun AssistantRow(
                                 // opened by hand is in the expansion table and still wins.
                                 startExpanded = streaming && expandReasoning,
                                 maxHeight = reasoningMaxHeight,
+                                followReasoning = followReasoning,
                             )
                             if (!last) Spacer(Modifier.height(10.dp))
                         }
@@ -2645,6 +2648,14 @@ private fun ReasoningBlock(
     nested: Boolean = false,
     /** How tall the chain's inner scroll may grow; the appearance page owns it. */
     maxHeight: Dp = 180.dp,
+    /**
+     * 外观 → 思考块跟随最新: whether the chain's own scroll chases its tail while the think
+     * streams. A parameter rather than a composition local because this is the one value the
+     * nested rows already carry [maxHeight] for, and a second hidden channel for a second
+     * boolean is how two sources of the same truth start to disagree. Defaults to true, which
+     * is what the block did before the switch existed.
+     */
+    followReasoning: Boolean = true,
 ) {
     // The table decides, and it outlives this composable: a think opens while it streams,
     // folds when it settles, and a header the user tapped is theirs from then on — the
@@ -2681,10 +2692,41 @@ private fun ReasoningBlock(
             var uncapped by remember { mutableStateOf(false) }
             val shown = if (uncapped || lines.size <= cap) lines else lines.subList(0, cap)
             val inner = rememberLazyListState()
-            LaunchedEffect(shown.size, expanded) {
-                if (expanded && streaming && shown.isNotEmpty()) {
-                    inner.animateScrollToItem(shown.lastIndex)
-                }
+            // Whether this chain is chasing its own tail, and whether the hand has taken it
+            // over. The same pair, and the same rules, as the transcript's own follow — see
+            // the screen's `following`/`programmatic` above.
+            var follow by remember(blockId) { mutableStateOf(true) }
+            var autoScrolled by remember(blockId) { mutableStateOf(false) }
+            var lastAutoAt by remember(blockId) { mutableLongStateOf(0L) }
+            LaunchedEffect(inner) {
+                snapshotFlow { inner.isScrollInProgress to inner.canScrollBackward }
+                    .collect { (scrolling, canScrollBack) ->
+                        if (scrolling && !autoScrolled && canScrollBack &&
+                            SystemClock.uptimeMillis() - lastAutoAt > 120
+                        ) {
+                            // The hand wins the moment it lifts the chain off its tail; the
+                            // next frame of the stream must not yank it back down.
+                            follow = false
+                        } else if (!scrolling && inner.atEnd(slack = 8)) {
+                            // Released at the bottom again: the chain may chase its tail once
+                            // more. A chain that never left its end keeps following anyway.
+                            follow = true
+                        }
+                        autoScrolled = false
+                    }
+            }
+            // Every growth of the chain is a trigger — that is what "跟随最新" is for.
+            LaunchedEffect(shown.size, expanded, follow, followReasoning) {
+                if (!expanded || !streaming || !followReasoning || !follow) return@LaunchedEffect
+                if (inner.isScrollInProgress && !autoScrolled) return@LaunchedEffect
+                if (shown.isEmpty()) return@LaunchedEffect
+                autoScrolled = true
+                lastAutoAt = SystemClock.uptimeMillis()
+                // Instant, not animated. The chain grows every frame or two while the think
+                // streams, and an [animateScrollToItem] that is still in flight when the next
+                // line lands is simply dropped — the view froze mid-chain, which is exactly
+                // what the user saw. A jump they cannot watch beats a follow that never arrives.
+                inner.scrollToItem(shown.lastIndex)
             }
             LazyColumn(
                 state = inner,
@@ -2712,8 +2754,20 @@ private fun ReasoningBlock(
                 }
                 if (!uncapped && lines.size > cap) {
                     item {
-                        TextButton(onClick = { uncapped = true }) {
-                            Text("展开全部 ${lines.size} 行")
+                        // The compact text button, not the dialog-size one: M3's default
+                        // TextButton carries a 40dp container and 24dp of horizontal padding
+                        // per side, which inside the chain read as a slab the width of the
+                        // block. 10dp + 32dp puts it on the same shelf as [ProcessStatus] — a
+                        // control the user taps, not a section of its own.
+                        TextButton(
+                            onClick = { uncapped = true },
+                            contentPadding = PaddingValues(horizontal = 10.dp),
+                            modifier = Modifier.heightIn(min = 32.dp),
+                        ) {
+                            Text(
+                                text = "展开全部 ${lines.size} 行",
+                                style = MaterialTheme.typography.labelMedium,
+                            )
                         }
                     }
                 }
@@ -3111,6 +3165,8 @@ private fun TurnSummary(
     live: StreamStats?,
     contextWindow: Int,
     reasoningMaxHeight: Dp = 180.dp,
+    /** 外观 → 思考块跟随最新; [ReasoningBlock.followReasoning]. */
+    followReasoning: Boolean = true,
     /**
      * The run's own note — the compression line, when there was one. It belongs in this
      * header rather than only in the status line: the status line is gone the moment the run
@@ -3213,6 +3269,7 @@ private fun TurnSummary(
                             startExpanded = false,
                             nested = true,
                             maxHeight = reasoningMaxHeight,
+                            followReasoning = followReasoning,
                         )
 
                         is Part.Tools -> {
@@ -4006,6 +4063,10 @@ private fun Composer(
                         .padding(end = 40.dp),
                     horizontalArrangement = Arrangement.End,
                 ) {
+                    // Deliberately one step up from the shared 40dp disc: this button is
+                    // the only one that floats alone over the transcript with no bar behind
+                    // it, and it has to be found without looking. Keep it a size larger
+                    // than the header's discs rather than flattening it into the scale.
                     CircleActionButton(
                         icon = ImageVector.vectorResource(R.drawable.ic_arrow_down),
                         contentDescription = "回到最新",

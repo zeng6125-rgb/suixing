@@ -264,6 +264,14 @@ data class AppSettings(
      * 行为，升级上来的人不会因为缺键就每轮都总结一次。
      */
     val profileEveryTurns: Int = DEFAULT_PROFILE_EVERY_TURNS,
+    /**
+     * 思考块（展开的思考过程）在做「跟随最新」：流式增长时内滚自动到底，
+     * 用户一上手就停，滚回底部自动恢复跟随。
+     *
+     * 放在类末尾并有默认值，所以老 JSON 里没有这个键时读出来就是 true——也就是它
+     * 本来的行为（在设置项出现之前，思考块一直在追尾）。
+     */
+    val followReasoning: Boolean = true,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 

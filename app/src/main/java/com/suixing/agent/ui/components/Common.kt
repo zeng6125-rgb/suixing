@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -319,8 +320,10 @@ fun SuixingTopBar(
             val openSidebar = LocalOpenSidebar.current
             if (openSidebar != null) {
                 // The round handle, not the rounded square: the user held the square
-                // against a circular reference and read the button as unchanged.
-                DrawerButton(size = 38.dp)
+                // against a circular reference and read the button as unchanged. Its 44dp
+                // is the chat header's own handle size — this bar and that one are the
+                // app's top bars, and their handles were 38dp and 44dp side by side.
+                DrawerButton(size = 44.dp)
                 Spacer(Modifier.width(10.dp))
             }
             if (leading != null) {
@@ -500,6 +503,10 @@ fun PageTopBar(
  * A lifted disc button: the chat header floats over the transcript with no bar of its
  * own, so each of its buttons carries its own surface and the same soft shadow the
  * composer's capsule casts — a flat glyph over scrolling content has nothing to sit on.
+ *
+ * The disc sizes across the app are one scale, because every disc is read against the ones
+ * beside it — see the table in [CircleActionButton]: this one is the 40dp disc with a 20dp
+ * glyph, and it answers across the whole 48dp of the box it is drawn in.
  */
 @Composable
 fun FlatIconButton(
@@ -508,26 +515,46 @@ fun FlatIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
-    iconSize: Dp = 26.dp,
+    size: Dp = 40.dp,
+    iconSize: Dp = 20.dp,
 ) {
-    Surface(
-        onClick = onClick,
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    // The same two boxes as [CircleActionButton]: the outer one is the whole 48dp touch
+    // target, the inner one only the drawing — a pressed disc lifts, the box it lives in
+    // does not move.
+    Box(
         modifier = modifier
-            .size(44.dp)
-            .shadow(
-                elevation = 6.dp,
-                shape = CircleShape,
-                ambientColor = Color.Black.copy(alpha = 0.12f),
-                spotColor = Color.Black.copy(alpha = 0.12f),
+            .minimumInteractiveComponentSize()
+            .clickable(
+                interactionSource = interaction,
+                indication = ripple(
+                    color = tint,
+                    bounded = false,
+                    radius = size / 2,
+                ),
+                role = Role.Button,
+                onClick = onClick,
             ),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        contentColor = tint,
+        contentAlignment = Alignment.Center,
     ) {
-        Box(contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .shadow(
+                    elevation = if (pressed) 8.dp else 6.dp,
+                    shape = CircleShape,
+                    ambientColor = Color.Black.copy(alpha = 0.12f),
+                    spotColor = Color.Black.copy(alpha = 0.12f),
+                )
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
+                tint = tint,
                 modifier = Modifier.size(iconSize),
             )
         }
@@ -563,32 +590,118 @@ fun FlatPainterButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color = handleInk(),
-    iconSize: Dp = 22.dp,
+    size: Dp = 40.dp,
+    iconSize: Dp = 20.dp,
 ) {
-    Surface(
-        onClick = onClick,
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    // Same two boxes as [FlatIconButton]: a 40dp disc drawn inside a 48dp touch target,
+    // lifting 2dp while held. The disc had no size parameter before, so it stayed 44dp
+    // wherever it was used and could not sit beside the 40dp discs it was drawn with.
+    Box(
         modifier = modifier
-            .size(44.dp)
-            .shadow(
-                elevation = 6.dp,
-                shape = CircleShape,
-                ambientColor = Color.Black.copy(alpha = 0.12f),
-                spotColor = Color.Black.copy(alpha = 0.12f),
+            .minimumInteractiveComponentSize()
+            .clickable(
+                interactionSource = interaction,
+                indication = ripple(
+                    color = tint,
+                    bounded = false,
+                    radius = size / 2,
+                ),
+                role = Role.Button,
+                onClick = onClick,
             ),
-        shape = CircleShape,
-        color = handleDisc(),
-        contentColor = tint,
+        contentAlignment = Alignment.Center,
     ) {
-        Box(contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .shadow(
+                    elevation = if (pressed) 8.dp else 6.dp,
+                    shape = CircleShape,
+                    ambientColor = Color.Black.copy(alpha = 0.12f),
+                    spotColor = Color.Black.copy(alpha = 0.12f),
+                )
+                .clip(CircleShape)
+                .background(handleDisc()),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
                 painter = painter,
                 contentDescription = contentDescription,
+                tint = tint,
                 modifier = Modifier.size(iconSize),
             )
         }
     }
 }
 
+/**
+ * A capsule that carries a title rather than an action — the chat header's own bar.
+ *
+ * It was drawn inline in the chat header, which is how it ended up the only 44dp capsule
+ * in the app with its own shadow numbers while every disc beside it came from a helper.
+ * It takes no click: nothing about the conversation's name is a button, so it is a
+ * surface, and [onClick] exists only for the caller that later wants it tappable — a
+ * capsule that answers a tap is the same shape whether or not anything happens.
+ */
+@Composable
+fun PressPill(
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    color: Color = MaterialTheme.colorScheme.surface,
+    contentColor: Color = LocalContentColor.current,
+    elevation: Dp = 6.dp,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val shape = RoundedCornerShape(50)
+    val shadowed = modifier.shadow(
+        elevation = elevation,
+        shape = shape,
+        ambientColor = Color.Black.copy(alpha = 0.12f),
+        spotColor = Color.Black.copy(alpha = 0.12f),
+    )
+    Surface(
+        modifier = if (onClick == null) shadowed else shadowed.clickable(onClick = onClick),
+        shape = shape,
+        color = color,
+        contentColor = contentColor,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            content = content,
+        )
+    }
+}
+
+/**
+ * A filled disc that lifts when pressed — the app's one round action button.
+ *
+ * One helper for the composer's send/stop/steer, the jump-to-latest button and a page's
+ * back button, so the discs on a screen cannot drift apart in size, colour or shadow.
+ *
+ * The scale, and why it has two steps rather than one: a disc is read against the discs
+ * beside it, and shape decides which family it belongs to. A control with a label keeps
+ * the form's 40dp rail; a disc carrying only a glyph gets the 48dp touch box and stays
+ * inside it visually at 40dp. 44dp exists only for the two headers' handles — the one
+ * button the user grabs without looking, and the one the composer capsule is built around.
+ *
+ * | element                  | disc | glyph | touch | shape            |
+ * |--------------------------|------|-------|-------|------------------|
+ * | composer send/stop/steer | 40   | 22    | 48    | circle, flat     |
+ * | composer capsule host    | 44   | —     | —     | large (22 radius)|
+ * | header / back            | 40   | 20    | 48    | circle, lifted   |
+ * | drawer handle            | 44   | 20    | 48    | circle, lifted   |
+ * | jump to latest (chat)    | 48   | 22    | 48    | circle, lifted   |
+ * | inline (copy output)     | 28   | 16    | 28    | circle, flat     |
+ *
+ * The inline row and the jump button are the deliberate exceptions. The first lives in the
+ * corner of a code block, where a 48dp box would cover the text it copies. The second floats
+ * alone over the transcript with no bar behind it and has to be found without looking, so it
+ * is one step *up* from the shared disc rather than flattened into it. Never below 36dp for a
+ * standalone disc, and never a glyph below 18dp unless it sits in that inline slot.
+ */
 @Composable
 fun CircleActionButton(
     icon: ImageVector,
@@ -699,7 +812,7 @@ private fun CircleActionButton(
  * Public because the chat header is not a [SuixingTopBar]: it is a solid bar of its own.
  */
 @Composable
-fun DrawerButton(size: Dp = 40.dp, shape: Shape = CircleShape) {
+fun DrawerButton(size: Dp = 44.dp, shape: Shape = CircleShape) {
     val open = LocalOpenSidebar.current ?: return
     // One glyph, drawn once: the chat header's handle is this same drawable through
     // FlatPainterButton, so the two headers cannot drift into two hamburgers.
@@ -712,7 +825,7 @@ fun DrawerButton(size: Dp = 40.dp, shape: Shape = CircleShape) {
             size = size,
             containerColor = handleDisc(),
             contentColor = handleInk(),
-            iconSize = 22.dp,
+            iconSize = 20.dp,
         )
         return
     }

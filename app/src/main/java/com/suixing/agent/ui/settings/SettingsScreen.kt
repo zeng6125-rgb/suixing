@@ -1526,6 +1526,19 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
             }
             item {
                 SettingRow(
+                    title = "思考块跟随最新",
+                    subtitle = "思考过程流式输出时自动滚到底部；关掉后停在当前位置",
+                    control = {
+                        Switch(
+                            checked = stored.followReasoning,
+                            onCheckedChange = { on -> scope.persist { it.copy(followReasoning = on) } },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
+                SettingRow(
                     title = "自动跟随新消息",
                     subtitle = "在底部时新回复自动滚到底；上滑看历史就暂停跟随。",
                     control = {
@@ -1579,6 +1592,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 expandTools = defaults.expandTools,
                                 expandReasoning = defaults.expandReasoning,
                                 autoFollow = defaults.autoFollow,
+                                followReasoning = defaults.followReasoning,
                             )
                         }
                     },
