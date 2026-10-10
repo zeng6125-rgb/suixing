@@ -516,22 +516,11 @@ fun ChatScreen(
     val viewportHeight by remember {
         derivedStateOf { listState.layoutInfo.viewportSize.height }
     }
-    var lastViewportHeight by remember { mutableStateOf(0) }
     LaunchedEffect(viewportHeight) {
-        val previous = lastViewportHeight
-        lastViewportHeight = viewportHeight
         if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
-        // One frame first: the new height is already known while the list is still laid out at
-        // the old one, and scrolling against that lands on the old end.
         withFrameNanos { }
         programmatic = true
         try {
-            // Instant, and that is the whole point: this runs on every frame of the platform's
-            // own keyboard animation, so following it one frame at a time IS the smooth motion —
-            // the keyboard's. Every version of this that animated the scroll itself (a delta
-            // compensation, then an animated pin to the end) moved the list further than the
-            // keyboard did and left the reading position somewhere new. The user's verdict on
-            // both was 「滚动位置变了」, and they were right.
             listState.scrollToItem(itemCount - 1)
             listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
@@ -613,7 +602,7 @@ fun ChatScreen(
                                 top = with(LocalDensity.current) {
                                     WindowInsets.statusBars.getTop(this).toDp()
                                 } + 60.dp,
-                                bottom = stackFootprint + 40.dp,
+                                bottom = composerH + 40.dp,
                             ),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -670,7 +659,7 @@ fun ChatScreen(
                             // 16dp of air, the number the user measured as right with the
                             // keyboard down: the last card reads as separate from the field
                             // without a band of empty canvas under it.
-                            bottom = stackFootprint + 16.dp,
+                            bottom = composerH + 48.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
