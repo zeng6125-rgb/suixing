@@ -3459,16 +3459,21 @@ private fun TurnScrubber(
         label = "scrubber_label_dy",
     )
 
-    // Full width, not SCRUBBER_RAIL: the label is a child of this box, and a child can never
-    // be measured wider than its parent — at the rail's own 24dp the bubble was squeezed into
-    // a 24dp-wide square with 9dp of padding either side, which left about 6dp for the text and
-    // ellipsized it to a single character. That square is the dark blob the user photographed.
-    // The rail itself keeps its own width below, so the gesture area and the drawn lines are
-    // exactly what they were; only the measuring constraint changes.
+    // Full width for the *measuring constraint only*: the label is a child of this box, and a
+    // child can never be measured wider than its parent — at the rail's own 24dp the bubble was
+    // squeezed into a 24dp-wide square with 9dp of padding either side, which left about 6dp
+    // for the text and ellipsized it to a single character. That square is the dark blob the
+    // user photographed. The gesture lives on the rail itself below (24dp wide, the height of
+    // the drawn lines), because a full-width column here turned every touch across the
+    // transcript's right edge into a scrubber press: a long press meant to select text landed
+    // on a turn, the jump on the lift moved the list, and the selection went with it.
     Box(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier
-                .fillMaxWidth()
+                // The touch area is the rail and nothing else: exactly the width of the longest
+                // line drawn, and the height of the rows plus their gaps.
+                .width(SCRUBBER_RAIL)
+                .align(Alignment.CenterEnd)
                 // One handler for the whole rail instead of a clickable per row: the finger
                 // is matched to the nearest line, so a press between two lines still lands
                 // on one of them and a drag can cross rows without dropping the gesture.
