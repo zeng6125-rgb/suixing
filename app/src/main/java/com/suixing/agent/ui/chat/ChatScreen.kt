@@ -63,6 +63,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -3448,7 +3449,7 @@ private fun Composer(
             // up it already covers that strip, and padding for it as well pushed the card a
             // navigation bar's height above the keyboard — the gap that grew the moment the
             // keyboard opened, while the keyboard-down spacing looked right.
-            .windowInsetsPadding(WindowInsets.navigationBars.exclude(WindowInsets.ime))
+            .navigationBarsPadding()
             .padding(horizontal = 16.dp)
             .padding(top = 6.dp, bottom = 12.dp)
             // Measured after the navigation-bar inset is applied, so the number the
