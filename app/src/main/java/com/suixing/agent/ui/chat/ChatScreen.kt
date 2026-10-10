@@ -38,6 +38,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -194,6 +196,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.io.File
 import java.text.SimpleDateFormat
@@ -482,19 +485,19 @@ fun ChatScreen(
         if (listState.isScrollInProgress && !programmatic) return@LaunchedEffect
         programmatic = true
         try {
-            // Instant, not animated: the list is being held at its end while content grows, and
-            // animating that both fought the platform's own keyboard animation (the card shot up
-            // and then settled back) and made the keyboard-down case — which was already right —
-            // feel wrong. The keyboard's own animation is the only motion this needs.
+            // Instant: content growth is not a motion the user is watching, and the viewport
+            // effect below owns whatever motion the keyboard brings.
             listState.scrollToItem(itemCount - 1)
             listState.scrollBy(FOLLOW_SCROLL_PX)
-            // A second pass after the new item has been measured. The first scroll runs in the
-            // frame the item was added, when its height is still unknown, so the end it lands on
-            // is short by exactly the height of what just appeared — which is how the status
-            // line of a fresh question ended up under the composer.
+            // A second pass, animated, once the new item has been measured. The first scroll
+            // runs in the frame the item was added, when its height is still unknown, so the
+            // end it lands on is short by exactly the height of what just appeared — the status
+            // line of a fresh question ended up under the composer that way. Animated because
+            // the correction is a nudge of a few dozen pixels, and a visible jump is what made
+            // the keyboard-down case feel wrong.
             withFrameNanos { }
-            listState.scrollToItem(itemCount - 1)
-            listState.scrollBy(FOLLOW_SCROLL_PX)
+            listState.animateScrollToItem(itemCount - 1)
+            listState.animateScrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
         }
@@ -513,15 +516,32 @@ fun ChatScreen(
     val viewportHeight by remember {
         derivedStateOf { listState.layoutInfo.viewportSize.height }
     }
+    var lastViewportHeight by remember { mutableStateOf(0) }
     LaunchedEffect(viewportHeight) {
+        val previous = lastViewportHeight
+        lastViewportHeight = viewportHeight
         if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
         // One frame first: the new height is already known while the list is still laid out at
         // the old one, and scrolling against that lands on the old end.
         withFrameNanos { }
         programmatic = true
         try {
-            listState.scrollToItem(itemCount - 1)
-            listState.scrollBy(FOLLOW_SCROLL_PX)
+            val delta = (viewportHeight - previous).toFloat()
+            if (previous > 0 && abs(delta) in 1f..KEYBOARD_JUMP_PX) {
+                // A frame of the platform's own keyboard animation: deltas of a few pixels, and
+                // following them one for one is what makes the motion match the keyboard exactly.
+                listState.scrollBy(-delta)
+            } else if (previous > 0) {
+                // Pin to the end, animated, and nothing else. Compensating by the viewport delta
+                // instead was wrong by the amount the bottom padding itself changes with the
+                // keyboard (the padding is measured from the composer, which moves): the list
+                // ended a few dozen pixels away from where it started, every single time.
+                listState.animateScrollToItem(itemCount - 1)
+                listState.animateScrollBy(FOLLOW_SCROLL_PX)
+            } else {
+                listState.scrollToItem(itemCount - 1)
+                listState.scrollBy(FOLLOW_SCROLL_PX)
+            }
         } finally {
             programmatic = false
         }
@@ -5082,6 +5102,19 @@ private const val FOLLOW_SCROLL_PX = 200_000f
  * the position at all.
  */
 private const val HOLD_TO_SELECT_MS = 450L
+
+/**
+ * The size of a viewport change that is a jump rather than a frame of an animation.
+ *
+ * The platform animates the IME inset frame by frame where it can — deltas of a few pixels, and
+ * the list follows them one for one, which is what makes the motion match the keyboard. A ROM
+ * that hands the whole inset over at once produces one delta of several hundred pixels instead,
+ * and that is the one worth animating.
+ */
+private const val KEYBOARD_JUMP_PX = 40f
+
+/** Matches the platform's own keyboard animation, so the two read as one motion. */
+private const val KEYBOARD_ANIM_MS = 220
 
 /** How many queued lines are drawn before the rest collapse into one count. */
 private const val STEER_ROWS_SHOWN = 3
