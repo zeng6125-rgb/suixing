@@ -232,6 +232,23 @@ data class AppSettings(
      * screen, so it opens at 180 and the user decides in 外观 how much room it may take.
      */
     val reasoningHeight: Int = 180,
+    /**
+     * 用户在「能力」页自选的首选执行档，取值是 tools/Tool.kt 里那套档位名
+     * （[com.suixing.agent.tools.TIER_NONE] / `accessibility` / `shell` / `root`），
+     * 空串 = 自动（按当前已开启的最高档）。
+     *
+     * 只是「首选」：该档不可用时执行链回落到原来的自动判定，所以一个过期或还没开出来
+     * 的选择不会把操作卡死。空串也是老设置的语义——老 JSON 没有这个键时，自动就是它
+     * 原本的行为，所以 [migrated] 不需要动它。
+     */
+    val preferredCapability: String = "",
+    /**
+     * 自动压缩的触发阈值：上下文估算占到窗口的百分之几时就压缩。
+     *
+     * 放在类末尾并有默认值，所以老 JSON 里没有这个键时读出来就是 80——也就是它
+     * 从前的固定值，行为不变。真正生效的是 [compressAtFraction]，越界的值在那里兜底。
+     */
+    val compressAtPercent: Int = DEFAULT_COMPRESS_AT_PERCENT,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 
@@ -262,7 +279,23 @@ data class AppSettings(
 
     /** The context ceiling for [model]; 0 when the user never set one for it. */
     fun contextWindowFor(model: String): Int = modelContexts[model] ?: 0
+
+    /**
+     * 实际使用的压缩阈值，0.20–0.95。
+     *
+     * 只有这个范围里的值算数：老文件、手改过的 JSON 或将来改窄了范围，都会落到默认的
+     * 80%，而不是按 0% 或 300% 去压。
+     */
+    val compressAtFraction: Float
+        get() = (compressAtPercent.takeIf { it in COMPRESS_MIN_PERCENT..COMPRESS_MAX_PERCENT }
+            ?: DEFAULT_COMPRESS_AT_PERCENT) / 100f
 }
+
+/** 压缩阈值的取值边界、步长与默认值：设置页和引擎共用一套，免得两边各写一份。 */
+const val COMPRESS_MIN_PERCENT = 20
+const val COMPRESS_MAX_PERCENT = 95
+const val COMPRESS_STEP_PERCENT = 5
+const val DEFAULT_COMPRESS_AT_PERCENT = 80
 
 const val DEFAULT_SYSTEM_PROMPT = """你是随行，运行在用户安卓手机上的智能体。
 

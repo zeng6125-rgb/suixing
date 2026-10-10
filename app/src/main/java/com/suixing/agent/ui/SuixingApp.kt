@@ -7,6 +7,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -14,8 +15,9 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -124,6 +126,23 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+
+/**
+ * The one curve every page transition rides, so push and pop are the same motion played
+ * forwards and backwards rather than two hand-tuned pairs.
+ *
+ * `FastOutSlowInEasing` and not `LinearEasing`: the drawer already slides at a constant
+ * speed, and a page that leaves at the same speed reads as a panel rather than a page.
+ *
+ * The enter is longer than the exit on purpose — the arriving page is the one being read,
+ * and it has to still be moving when the eye lands on it; the leaving page only has to be
+ * gone. The previous pair was the other way round in effect (a 220ms enter whose whole
+ * displacement was `height / 28` — 32px on a 1080p-class panel — and a 120ms exit that was
+ * a plain fade), which is why the user could not see a transition at all.
+ */
+private const val NAV_ENTER_MS = 260
+private const val NAV_EXIT_MS = 180
+private val NAV_EASING = FastOutSlowInEasing
 
 /**
  * The app shell.
@@ -289,12 +308,31 @@ fun SuixingApp() {
                     navController = navController,
                     startDestination = "chat",
                     modifier = Modifier.padding(padding),
+                    // Every destination enters and leaves with the same curve and the same
+                    // two channels — a fade and a depth change — so a push and a pop read as
+                    // one gesture played backwards. The motion is scale, never a horizontal
+                    // sweep: the drawer already owns the leftward slide, and a second
+                    // sideways movement under it would read as two panels fighting.
                     enterTransition = {
-                        fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 28 }
+                        fadeIn(tween(NAV_ENTER_MS, easing = NAV_EASING)) +
+                            scaleIn(tween(NAV_ENTER_MS, easing = NAV_EASING), initialScale = 0.98f)
                     },
-                    exitTransition = { fadeOut(tween(120)) },
-                    popEnterTransition = { fadeIn(tween(220)) },
-                    popExitTransition = { fadeOut(tween(120)) },
+                    // The leaving page is not what the user is looking at, so it goes first
+                    // and gets out of the way: shorter than the enter, and shallower — a
+                    // deeper shrink would be visible as the page they were reading walks
+                    // backwards.
+                    exitTransition = {
+                        fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                            scaleOut(tween(NAV_EXIT_MS, easing = NAV_EASING), targetScale = 0.99f)
+                    },
+                    popEnterTransition = {
+                        fadeIn(tween(NAV_ENTER_MS, easing = NAV_EASING)) +
+                            scaleIn(tween(NAV_ENTER_MS, easing = NAV_EASING), initialScale = 0.99f)
+                    },
+                    popExitTransition = {
+                        fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                            scaleOut(tween(NAV_EXIT_MS, easing = NAV_EASING), targetScale = 0.98f)
+                    },
                 ) {
                     composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
                     composable("files") { FilesScreen(onBack = { navController.popBackStack() }) }

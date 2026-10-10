@@ -251,26 +251,29 @@ fun ChatScreen(
         viewModel.onDraftChange(state.conversationId, Draft(text, uri, name))
     }
     var editing by remember { mutableStateOf<StoredMessage?>(null) }
-    // The composer stack's own measured height (navigation bar inset included: the
-    // modifier sits inside the measured node), so the list's bottom padding is what
-    // the stack actually occupies instead of a guess that leaves a band in both the
-    // keyboard-up and keyboard-down states.
+    // The composer stack's own measured height: the node inside all of its paddings, so the
+    // gesture bar's strip and its own 12dp of air are not in it (they are added back below).
     var composerH by remember { mutableStateOf(0.dp) }
-    // Where the composer's top edge sits in the window, and where the transcript's bottom edge
-    // does: their difference is the room the list has to leave for the floating stack, and it is
-    // the only form of that number that survives the keyboard changing what is below it.
-    var composerTopY by remember { mutableStateOf(0f) }
-    var transcriptBottomY by remember { mutableStateOf(0f) }
-    // The room the floating stack takes out of the transcript: from its top edge to the list's
-    // bottom edge. Falls back to the composer's own height until both edges have been measured,
-    // which is the same number the two agreed on before the keyboard was ever opened.
+    // The keyboard's clamped inset, and the gesture bar's own: the composer's bottom padding is
+    // the difference between them (see the stack's own modifier), and it is the one term of the
+    // stack's footprint that moves while the keyboard does.
+    val heldIme = LocalHeldImePx.current
+    val navBarPx = with(LocalDensity.current) { WindowInsets.navigationBars.getBottom(this) }
+    fun navBarPad(ime: Int): Int = (navBarPx - ime).coerceAtLeast(0)
+    // The room the floating stack takes out of the transcript: the composer's height, the strip
+    // under it, and its 12dp of air. Measured on the device (uiautomator bounds, keyboard down:
+    // pill 297px + 33px + 60px = the 390px between the composer's top edge and the list's own
+    // bottom edge), and derived here rather than measured from those two edges.
+    //
+    // Those two edges are written in a layout callback and read by the next frame's composition,
+    // so the list was always laid out with the *previous* frame's room, and the keyboard moves
+    // exactly one term of it — the strip under the composer, which grows back as the keys leave.
+    // That one frame of lag is the last few pixels of a close: the card sat that frame's strip
+    // closer to the composer, and the pin put it back on the next frame. The inset that moves
+    // the strip is known here, before the layout, and it is the same clamped one the shell lays
+    // itself out with.
     val stackFootprint = with(LocalDensity.current) {
-        // Subtract first, convert once: rounding each endpoint to whole pixels before
-        // subtracting left the two keyboard states 1-2px apart, because the endpoints'
-        // fractional parts differ between them. The float difference converted once keeps the
-        // algebraic gap identical in both states (error at most half a pixel, invisible).
-        val measured = (transcriptBottomY - composerTopY).coerceAtLeast(0f)
-        if (measured > 0f) with(LocalDensity.current) { measured.toDp() } else composerH
+        composerH + (navBarPad(heldIme) + COMPOSER_BOTTOM_PAD.roundToPx()).toDp()
     }
 
     var voiceOpen by remember { mutableStateOf(false) }
@@ -580,7 +583,7 @@ fun ChatScreen(
         // No pin here on purpose. This effect runs before layout, so a pin here uses last
         // frame's composer position and lands a few pixels short until the next frame — the
         // tiny end-of-close "settle" the user felt as a rebound. The pin lives in the composer's
-        // layout callback instead (onTopInWindow), where the position is this frame's.
+        // layout callback instead (onPlaced), where the position is this frame's.
     }
     // The transition is over once the inset has been still for a beat: forget its direction so
     // the next one, whichever way it goes, is followed from its first frame.
@@ -591,21 +594,20 @@ fun ChatScreen(
     // The keyboard is a layout change, so the list has to be moved by exactly what the
     // composer is moved by, in the same frame the composer moves.
     //
-    // The composer's bottom edge is pinned to the window — navigationBars above it, see the
-    // stack's own padding — so its top moves 1:1 with the clamped IME inset, and the room it
-    // takes out of the transcript (stackFootprint, the list's own bottom padding) changes by
-    // exactly that delta. Compensating the list by the same delta here, before this frame's
-    // layout, puts the last card where the composer is going to be in the frame it gets
-    // there. The clamp is the same one the shell lays itself out with (LocalHeldImePx), so
-    // the platform's end-of-animation rebound is not followed by either of them.
+    // Two terms, because the room the stack takes out of the transcript has two: the scaffold
+    // the composer sits on, which the clamped inset moves by the whole delta, and the strip the
+    // composer pads itself by at the bottom, which grows back by that same delta as the keys
+    // leave (it is the navigation bar's height once the keyboard is fully down, and nothing
+    // while it is up). The list's own bottom padding carries both terms — see stackFootprint —
+    // so compensating by the first one alone left the card that frame's strip short, which is
+    // the settle the user kept feeling. Compensating here, before this frame's layout, puts the
+    // last card where the composer is going to be in the frame it gets there. The clamp is the
+    // same one the shell lays itself out with (LocalHeldImePx), so the platform's
+    // end-of-animation rebound is not followed by either of them.
     //
     // The pin in the composer's layout callback below stays as the correction, but on its own
     // it is always one frame late: the LazyColumn is measured before the composer is placed,
-    // so a scroll dispatched from that callback can only land in the next frame's layout. The
-    // last frame of a close is the platform's easing tail — 1-6px — which is exactly the
-    // residual settle at the end of every collapse, and why the two frames the user captured
-    // differed by so little.
-    val heldIme = LocalHeldImePx.current
+    // so a scroll dispatched from that callback can only land in the next frame's layout.
     var lastHeldIme by remember { mutableIntStateOf(-1) }
     LaunchedEffect(heldIme) {
         val previous = lastHeldIme
@@ -615,7 +617,10 @@ fun ChatScreen(
         programmatic = true
         lastPinAt = SystemClock.uptimeMillis()
         try {
-            listState.dispatchRawDelta((heldIme - previous).toFloat())
+            listState.dispatchRawDelta(
+                (heldIme - previous).toFloat() +
+                    (navBarPad(heldIme) - navBarPad(previous)).toFloat(),
+            )
         } finally {
             programmatic = false
         }
@@ -708,11 +713,6 @@ fun ChatScreen(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
-                            // The list's own bottom edge, for the padding above: it is the
-                            // boundary the floating composer is measured against.
-                            .onGloballyPositioned { coordinates ->
-                                transcriptBottomY = coordinates.boundsInWindow().bottom
-                            }
                             // A long press is the user reaching into the content — almost
                             // always to select text — and the follow scroll below would pull
                             // the end back under their finger: the position moved, and the
@@ -1067,8 +1067,7 @@ fun ChatScreen(
                     jumpToLatest = { jumpToLatest() },
                     showJump = !atEnd,
                     onHeightChanged = { composerH = it },
-                    onTopInWindow = { top ->
-                        composerTopY = top
+                    onPlaced = {
                         // The keyboard follow lives here, in the composer's own layout
                         // callback: this runs after the composer has been placed for this
                         // frame, so the pin uses the position the user is actually seeing.
@@ -1955,10 +1954,10 @@ private fun TurnMetrics(
                 Column(Modifier.width(IntrinsicSize.Max).widthIn(min = 208.dp)) {
                 when (shown) {
                     MetricCard.TIME -> {
-                        if (elapsedMs > 0) RingDetail("本轮总用时", elapsed)
+                        if (elapsedMs > 0) RingDetail("总用时", elapsed)
                         if (firstTokenMs > 0) {
                             RingDetail(
-                                "首个 token 耗时",
+                                "首 token 平均（TTFT）",
                                 remember(firstTokenMs) {
                                     String.format(
                                         Locale.getDefault(),
@@ -1970,7 +1969,7 @@ private fun TurnMetrics(
                         }
                         if (completionTokens > 0 && elapsedMs > 0) {
                             RingDetail(
-                                "输出速度",
+                                "输出速度（TPS）",
                                 remember(completionTokens, elapsedMs) {
                                     String.format(
                                         Locale.getDefault(),
@@ -1983,17 +1982,17 @@ private fun TurnMetrics(
                     }
 
                     MetricCard.USAGE -> {
-                        if (total > 0) RingDetail("本轮合计 tokens", "${shortTokens(total)} tok")
+                        if (total > 0) RingDetail("本轮用量", "${shortTokens(total)} tok")
                         if (promptTokens > 0) {
-                            RingDetail("输入 tokens", "${shortTokens(promptTokens)} tok")
-                            RingDetail("缓存命中 tokens", "${shortTokens(cachedTokens)} tok")
+                            RingDetail("输入", "${shortTokens(promptTokens)} tok")
+                            RingDetail("缓存读取", "${shortTokens(cachedTokens)} tok")
                             RingDetail(
-                                "未命中缓存 tokens",
+                                "未缓存输入",
                                 "${shortTokens((promptTokens - cachedTokens).coerceAtLeast(0))} tok",
                             )
                             if (cachedTokens > 0) {
                                 RingDetail(
-                                    "缓存命中率",
+                                    "缓存命中",
                                     remember(promptTokens, cachedTokens) {
                                         String.format(
                                             Locale.getDefault(),
@@ -2005,7 +2004,7 @@ private fun TurnMetrics(
                             }
                         }
                         if (completionTokens > 0) {
-                            RingDetail("输出 tokens", "${shortTokens(completionTokens)} tok")
+                            RingDetail("输出", "${shortTokens(completionTokens)} tok")
                         }
                     }
                 }
@@ -3835,10 +3834,13 @@ private fun Composer(
     jumpToLatest: () -> Unit,
     /** Shown while the transcript is scrolled away from its end. */
     showJump: Boolean,
-    /** The stack's measured height, so the list can pad by what it truly occupies. */
+    /**
+     * The stack's own measured height, so the list can pad by the room it truly takes out of the
+     * transcript (the caller adds the strip under it and its own 12dp of air).
+     */
     onHeightChanged: (Dp) -> Unit,
-    /** The composer's top edge in window coordinates, for the transcript's bottom padding. */
-    onTopInWindow: (Float) -> Unit,
+    /** Called once the stack has been placed for this frame: the caller's follow pin rides it. */
+    onPlaced: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val density = LocalDensity.current
@@ -3903,13 +3905,12 @@ private fun Composer(
                 },
             )
             .padding(horizontal = 16.dp)
-            .padding(top = 6.dp, bottom = 12.dp)
-            // Measured after the navigation-bar inset is applied, so the number the
-            // list pads by is the stack's true footprint on screen.
+            // The air under the pill, named: the list's own padding is this plus the strip
+            // above, and it is measured here, inside the padding (see COMPOSER_BOTTOM_PAD).
+            .padding(top = 6.dp, bottom = COMPOSER_BOTTOM_PAD)
             .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) }
-            .onGloballyPositioned { coordinates ->
-                onTopInWindow(coordinates.boundsInWindow().top)
-            },
+            // Placed for this frame: the caller's follow pin is dispatched from here.
+            .onGloballyPositioned { onPlaced() },
     ) {
         Column {
             // The jump-to-latest button rides the stack's own top: 12dp above whatever
@@ -4576,11 +4577,13 @@ private fun GenerationSheet(
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].
         focusable = false,
-        // 260dp, not the 340dp it was: page one is one model name and one slider, and 340dp
-        // is 94% of a 360dp screen — the card read as a full-width panel rather than as
-        // something hanging off the button that opened it. 260dp leaves the content 224dp
-        // after MenuCard's own 18dp padding either side, which is a whole model id.
-        modifier = Modifier.widthIn(max = 260.dp).onSizeChanged { sheetWidth = it.width },
+        // 300dp, not the 340dp it was, and up from 260dp: page one is one model name and one
+        // slider, and 340dp is 94% of a 360dp screen — the card read as a full-width panel
+        // rather than as something hanging off the button that opened it. The model list is
+        // the page that needs the room: its titles and its model names are one size now
+        // (bodyMedium, 14sp), and at 260dp a long endpoint name was cut at the card's edge.
+        // 300dp leaves the content 264dp after MenuCard's own 18dp padding either side.
+        modifier = Modifier.widthIn(max = 300.dp).onSizeChanged { sheetWidth = it.width },
     ) {
         if (!picking) {
             // Page one: one big name to tap, one slider to drag, nothing else.
@@ -4703,14 +4706,22 @@ private fun GenerationSheet(
                         ) {
                             Text(
                                 text = owner.shortLabel,
-                                // labelMedium, not labelSmall: at 11sp the group titles read a
-                                // size class below the model rows they head, and long provider
-                                // names truncated early. Same family as the rows, one weight up.
-                                style = MaterialTheme.typography.labelMedium.copy(
+                                // bodyMedium, the size the model rows themselves are set in:
+                                // two levels of heading over the rows read as a list of three
+                                // unrelated sizes when they were smaller than what they head.
+                                // Weight and colour are what separate the levels now — SemiBold
+                                // in the accent colour here, onSurfaceVariant on the vendor
+                                // rows below.
+                                style = MaterialTheme.typography.bodyMedium.copy(
                                     fontWeight = FontWeight.SemiBold,
                                 ),
                                 color = scheme.primary,
-                                modifier = Modifier.weight(1f),
+                                // Not `weight(1f)`: a fixed share of the row is what cut long
+                                // endpoint names short. `fill = false` leaves the label its own
+                                // width and wraps it on the row's second line when the name is
+                                // longer than what is left of it — a name is never shortened,
+                                // and the chevron stays on the right edge either way.
+                                modifier = Modifier.weight(1f, fill = false),
                             )
                             Icon(
                                 imageVector = if (open) {
@@ -4733,10 +4744,11 @@ private fun GenerationSheet(
                             if (groups.size > 1) {
                                 Text(
                                     text = group,
-                                    // Same size class as the provider titles above: two levels
-                                    // of group heading reading at two different sizes made the
-                                    // list look like three unrelated fonts.
-                                    style = MaterialTheme.typography.labelMedium,
+                                    // Same size class as the provider titles above and as the
+                                    // model rows below: one size for the whole list, with the
+                                    // colour and the weight telling the levels apart. No
+                                    // maxLines: a long vendor name wraps rather than being cut.
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = scheme.onSurfaceVariant,
                                     modifier = Modifier.padding(start = 4.dp, top = 4.dp),
                                 )
@@ -5192,10 +5204,10 @@ private fun ContextRingCard(
     val percent = if (known) used * 100 / window else 0
     Column(
         modifier = Modifier
-            // 264dp, not 240: the labels on this card are sentences now (「未命中缓存 tokens」,
-            // 「上下文占用」) and the old cap ellipsized the value on the longest line. Still
-            // inside a 360dp screen's own margin, and still narrower than the transcript's
-            // full width.
+            // 264dp, not 240: the value on the 「上下文占用」 line is a sentence of its own
+            // (「12.3k / 200k（6%）」, or the 窗口未设置 form) and the old cap ellipsized it.
+            // Still inside a 360dp screen's own margin, and still narrower than the
+            // transcript's full width.
             .widthIn(max = 264.dp)
             .shadow(
                 elevation = 8.dp,
@@ -5261,7 +5273,7 @@ private fun ContextRingCard(
  * One label/value line of the ring's and the metrics' cards.
  *
  * The value is right-aligned on a shared column rather than set beside the label: a stack of
- * 「输入 tokens 83.6k / 缓存命中 tokens 82.4k / 未命中缓存 tokens 1.2k」 reads as a table when the
+ * 「输入 83.6k / 缓存读取 82.4k / 未缓存输入 1.2k」 reads as a table when the
  * numbers line up on one edge, and as prose when each number starts wherever its label happened
  * to end. The card itself is given a floor width so that column has room to exist.
  */
@@ -5288,8 +5300,10 @@ private fun RingDetail(label: String, value: String) {
         Text(
             text = value,
             // A size under the label: the numbers are the detail of the line, and at the
-            // label's own size they read as a second heading beside it.
-            style = MaterialTheme.typography.labelSmall,
+            // label's own size they read as a second heading beside it. SemiBold, so that a
+            // size down is still the heavier of the two: the number is what the line is for,
+            // and the label carries it in the regular weight.
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
             // A shade under the label's own tone: the numbers are the detail, and at full
             // onSurface they read heavier than the labels they belong to.
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
@@ -5618,6 +5632,15 @@ private const val HOLD_TO_SELECT_MS = 450L
 
 /** How far an upward drag has to travel to release the follow, in dp (converted per density). */
 private val RELEASE_DRAG_DP = 12.dp
+
+/**
+ * The air the composer leaves under its pill, in dp.
+ *
+ * Named because two places have to agree on it: the composer's own bottom padding, and the room
+ * the transcript leaves for the stack (the caller's stackFootprint). They were a literal 12.dp
+ * in one of them and a measured number in the other, which is how the two drifted a frame apart.
+ */
+private val COMPOSER_BOTTOM_PAD = 12.dp
 
 /** Largest opposite-direction inset change treated as the platform animation's rebound. */
 private const val REBOUND_CLAMP_PX = 24

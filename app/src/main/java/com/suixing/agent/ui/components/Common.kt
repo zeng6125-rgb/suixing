@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -416,50 +417,63 @@ fun PageTopBar(
     subtitle: String? = null,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shadowElevation = 2.dp,
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .heightIn(min = 56.dp)
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // No disc behind the glyph on purpose: this bar is a filled surface of its
-            // own, and a button with a second surface colour on top of it read as a
-            // sticker. The chat header is the other way round — it floats over the
-            // transcript with no fill, so there every button carries its own disc.
-            CircleActionButton(
-                painter = painterResource(R.drawable.ic_arrow_left),
-                contentDescription = "返回",
-                onClick = onBack,
-                containerColor = Color.Transparent,
-                shadowElevation = 0.dp,
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+    // 层级靠 surfaceContainerLow 底 + 1dp 发丝线，不靠阴影（README「不用阴影」）：
+    // 阴影在滚动内容上方是一圈灰雾，浅色侧尤其脏；发丝线只画一条边，内容从下面滑过时
+    // 边界始终干净。这条线是这一栏唯一的层级信号，所以它不能省。
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    // 56 → 64dp：标题 25sp + 副标题 18sp 的行盒只占 43dp，56 的高度把
+                    // 两行挤成了紧贴的一坨。min 而非固定高度，字号调到「特大」时这栏
+                    // 跟着长，而不是把标题裁掉一半。
+                    .heightIn(min = 64.dp)
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // No disc behind the glyph on purpose: this bar is a filled surface of its
+                // own, and a button with a second surface colour on top of it read as a
+                // sticker. The chat header is the other way round — it floats over the
+                // transcript with no fill, so there every button carries its own disc.
+                CircleActionButton(
+                    painter = painterResource(R.drawable.ic_arrow_left),
+                    contentDescription = "返回",
+                    onClick = onBack,
+                    containerColor = Color.Transparent,
+                    shadowElevation = 0.dp,
                 )
-                if (subtitle != null) {
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
                     Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (subtitle != null) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
+                actions()
             }
-            actions()
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
         }
     }
+    // The gap every page's first control keeps from the bar. It lives here rather than in the
+    // twelve call sites: the bar owns its own breathing room, so a page cannot forget it and
+    // look cramped. 12dp reads as deliberate without wasting a row of content.
+    Spacer(Modifier.height(12.dp))
 }
 
 /**

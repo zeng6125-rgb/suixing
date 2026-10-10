@@ -211,7 +211,14 @@ private fun ToolsTab() {
     }
 }
 
-/** The privilege a tool needs, with whether it is granted right now; null when it needs none. */
+/**
+ * The privilege a tool needs, with whether it is granted right now; null when it needs none.
+ *
+ * [TIER_ROOT] is never emitted by the registry: every group in `com.suixing.agent.tools` takes the
+ * [TIER_NONE] default except ShellTools ([TIER_SHELL]) and UiTools ([TIER_ACCESSIBILITY]), and
+ * root is a *runtime* escalation inside those two (ShellTools.kt:128, UiTools.kt:219), not a tier
+ * a tool is registered under. The arm is kept because [TIER_ROOT] is a real registry value.
+ */
 private fun requirementOf(tier: String, capabilities: CapabilityState): Pair<String, Boolean>? =
     when (tier) {
         TIER_ACCESSIBILITY -> "需要无障碍" to capabilities.accessibility
@@ -238,7 +245,7 @@ private fun GroupHeader(name: String, count: Int) {
 
 @Composable
 private fun ToolRow(name: String, description: String, requirement: Pair<String, Boolean>?) {
-    SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
+    SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = name,
@@ -256,12 +263,12 @@ private fun ToolRow(name: String, description: String, requirement: Pair<String,
             }
         }
         if (description.isNotBlank()) {
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(2.dp))
             Text(
                 text = description,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }

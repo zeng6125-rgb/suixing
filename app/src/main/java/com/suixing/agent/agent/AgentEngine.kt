@@ -1306,7 +1306,9 @@ class AgentEngine(
         // looks wrong, the first question is whether the estimate or the conversation was at fault,
         // and the two numbers side by side answer it without a debugger.
         val realBefore = lastPromptTokens
-        if (!asked && before <= window * COMPRESS_AT) return
+        // Threshold from the settings snapshot this run was started with, so a change in
+        // 设置 applies from the next run on rather than mid-run.
+        if (!asked && before <= window * settings.compressAtFraction) return
 
         // The cut never splits an assistant's tool_calls from their results: a lone
         // tool message is a hard 400 on every OpenAI-compatible endpoint.
@@ -1679,9 +1681,6 @@ private const val MAX_TOOL_OUTPUT = 8_000
 
         /** Below this many messages there is nothing worth summarising. */
         private const val MIN_MESSAGES = 8
-
-        /** Compress at 80% of the window: the next round has to fit in what is left. */
-        private const val COMPRESS_AT = 0.8
 
         private const val ROLE_TOOL = "tool"
         private const val ROLE_SYSTEM = "system"

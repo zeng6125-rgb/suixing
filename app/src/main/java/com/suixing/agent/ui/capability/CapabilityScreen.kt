@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -49,6 +50,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.capability.CapabilityState
@@ -56,6 +58,10 @@ import com.suixing.agent.capability.ShizukuManager
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.service.FloatConsoleService
+import com.suixing.agent.tools.TIER_ACCESSIBILITY
+import com.suixing.agent.tools.TIER_NONE
+import com.suixing.agent.tools.TIER_ROOT
+import com.suixing.agent.tools.TIER_SHELL
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SectionCard
@@ -128,6 +134,17 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 }
             }
 
+            // 自选档位：Hero 说的是「机器现在给到了哪一档」，这一块说的是「用户想要哪一档」。
+            // 想要的档还没开出来时照样记下来，等它可用就生效。放在提示条之后，是为了让
+            // 下面那些卡片触发的提示条留在原来的位置上。
+            CapabilityTierPicker(
+                preferred = settings.preferredCapability,
+                state = state,
+                onPick = { key ->
+                    scope.launch { Core.settings.update { it.copy(preferredCapability = key) } }
+                },
+            )
+
             // 第一档不是「还没开的权限」，而是这个应用本身：装上就有，其余三档都是它的叠加。
             CapabilityCard(
                 title = "标准档（默认）",
@@ -172,11 +189,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     add(if (state.shizukuAlive) "服务正在运行" else "服务未运行，需先启动 Shizuku")
                     add(if (state.shizukuGranted) "随行已获授权" else "随行未获授权")
                 },
-                actionLabel = when {
-                    !state.shizukuInstalled -> "去安装"
-                    !state.shizukuGranted -> "请求授权"
-                    else -> "重新授权"
-                },
+                actionLabel = shizukuActionLabel(state),
                 onAction = {
                     when {
                         !state.shizukuInstalled -> {
@@ -431,6 +444,112 @@ private fun CapabilityHero(state: CapabilityState) {
             }
         }
     }
+}
+
+/** 自选档位的一格：[key] 存进 [AppSettings.preferredCapability]，[ready] 决定它是否置灰。 */
+private data class TierOption(val key: String, val label: String, val ready: Boolean)
+
+/**
+ * 用户自选执行档。
+ *
+ * 四档的可用性用的是和下面四张卡片同一套判据（[CapabilityState]），置灰只说明「现在
+ * 还用不了」，不是禁用：点下去仍然记下这个选择，并说清该去下面哪张卡片点哪个按钮——
+ * 手指落在这一档上必须有回音。再点一次已选中的那一档就回到自动，否则选出去就退不回来。
+ */
+@Composable
+private fun CapabilityTierPicker(
+    preferred: String,
+    state: CapabilityState,
+    onPick: (String) -> Unit,
+) {
+    val options = listOf(
+        // 标准档装上就有，永远可用；另外三档的判定与下面三张卡片的 granted 一一对应。
+        TierOption(TIER_NONE, "标准档", true),
+        TierOption(TIER_ACCESSIBILITY, "无障碍", state.accessibility),
+        TierOption(TIER_SHELL, "Shizuku", state.shellReady),
+        TierOption(TIER_ROOT, "Root", state.rootReady),
+    )
+    val missing = options.any { it.key == preferred && !it.ready }
+    SuixingCard {
+        Text("执行档次", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "选择随行用哪一档权限执行操作；更高的档位能做的事更多，需要先开启。" +
+                "点已选中的那一档可回到自动。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        // 和 SegmentedPill 同一个形状与配色，只是这里每一格要能单独置灰：共用组件做不到，
+        // 而「不可用但仍可点」是这一块的要求。
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            Row(Modifier.padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                options.forEach { option ->
+                    val active = option.key == preferred
+                    Surface(
+                        onClick = { onPick(if (active) "" else option.key) },
+                        modifier = Modifier.weight(1f),
+                        shape = CircleShape,
+                        color = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
+                        contentColor = when {
+                            active -> MaterialTheme.colorScheme.onPrimary
+                            option.ready -> MaterialTheme.colorScheme.onSurfaceVariant
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                        },
+                    ) {
+                        Text(
+                            text = option.label,
+                            modifier = Modifier.padding(vertical = 9.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = tierSummary(preferred, state),
+            style = MaterialTheme.typography.bodySmall,
+            // 选中的那一档还没开出来时用 error 说话：点了有反应这件事得看得见。
+            color = if (missing) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+    }
+}
+
+/** 选中的那一档现在意味着什么；不可用时直接说清去下面哪张卡片点哪个按钮。 */
+private fun tierSummary(preferred: String, state: CapabilityState): String = when (preferred) {
+    TIER_NONE -> "已选标准档：只用应用自身权限，不需要任何授权。"
+    TIER_ACCESSIBILITY -> if (state.accessibility) {
+        "已选无障碍：ui_* 系列工具走无障碍服务。"
+    } else {
+        "无障碍还没开：先在下面「无障碍」卡片点「去开启」。"
+    }
+    TIER_SHELL -> if (state.shellReady) {
+        "已选 Shizuku：shell 类操作走 ADB。"
+    } else {
+        "Shizuku 还没就绪：先在下面「Shizuku（ADB 级）」卡片点「${shizukuActionLabel(state)}」。"
+    }
+    TIER_ROOT -> if (state.rootReady) {
+        "已选 Root：需要最高权限的操作走 su。"
+    } else {
+        "Root 还没就绪：先在下面「Root」卡片点「检测」，用 KernelSU / Magisk 给随行授权。"
+    }
+    else -> "自动：按当前已开启的最高档执行。点下面任意一档可以固定它。"
+}
+
+/** Shizuku 卡片的按钮文案，也是「先去哪开」那句话里引用的那一个：两处必须是同一个。 */
+private fun shizukuActionLabel(state: CapabilityState): String = when {
+    !state.shizukuInstalled -> "去安装"
+    !state.shizukuGranted -> "请求授权"
+    else -> "重新授权"
 }
 
 @Composable

@@ -66,17 +66,22 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
+import com.suixing.agent.data.COMPRESS_MAX_PERCENT
+import com.suixing.agent.data.COMPRESS_MIN_PERCENT
+import com.suixing.agent.data.COMPRESS_STEP_PERCENT
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
@@ -1146,6 +1151,56 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                             checked = stored.autoCompress,
                             onCheckedChange = { on -> scope.persist { it.copy(autoCompress = on) } },
                         )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
+                SettingRow(
+                    title = "自动压缩阈值",
+                    subtitle = "上下文用到窗口的这个比例时，自动把较早的对话压成摘要；" +
+                        "调高更省钱但更容易触顶，调低更保险但会提前丢细节。" +
+                        (if (stored.autoCompress) "" else "（自动压缩已关闭，这一项暂不生效。）"),
+                    control = {
+                        // 关掉开关也留着这一行，只是置灰：藏起来用户就找不到它了。
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.alpha(if (stored.autoCompress) 1f else 0.38f),
+                        ) {
+                            IconButton(
+                                enabled = stored.autoCompress,
+                                onClick = {
+                                    scope.persist { s ->
+                                        s.copy(
+                                            compressAtPercent =
+                                                (s.compressAtPercent - COMPRESS_STEP_PERCENT)
+                                                    .coerceIn(COMPRESS_MIN_PERCENT, COMPRESS_MAX_PERCENT),
+                                        )
+                                    }
+                                },
+                            ) { Text("−", style = MaterialTheme.typography.titleLarge) }
+                            Text(
+                                text = "${stored.compressAtPercent.coerceIn(
+                                    COMPRESS_MIN_PERCENT,
+                                    COMPRESS_MAX_PERCENT,
+                                )}%",
+                                style = MaterialTheme.typography.bodyLarge,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.widthIn(min = 44.dp),
+                            )
+                            IconButton(
+                                enabled = stored.autoCompress,
+                                onClick = {
+                                    scope.persist { s ->
+                                        s.copy(
+                                            compressAtPercent =
+                                                (s.compressAtPercent + COMPRESS_STEP_PERCENT)
+                                                    .coerceIn(COMPRESS_MIN_PERCENT, COMPRESS_MAX_PERCENT),
+                                        )
+                                    }
+                                },
+                            ) { Text("+", style = MaterialTheme.typography.titleLarge) }
+                        }
                     },
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
