@@ -730,13 +730,15 @@ fun ChatScreen(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
-                            // A long press is the user reaching into the content — almost
-                            // always to select text — and the follow scroll below would pull
-                            // the end back under their finger: the position moved, and the
-                            // selection went with it. A drag already wins that argument; this
-                            // gives a press the same right. The events are only observed, at
-                            // the initial pass, so selection and scrolling still receive them
-                            // untouched — nothing here consumes anything.
+                            // A finger on the transcript releases the follow the instant it lands,
+                            // not after a threshold. Waiting for the 450ms long press — or for 12dp
+                            // of travel — meant a streaming answer kept pinning the list to its end
+                            // under a finger that had already started selecting text, and the
+                            // position, with the selection on it, moved. A drag wins that argument
+                            // through the scroll watcher below; this gives a press the same right
+                            // from its first frame. The events are only observed, at the initial
+                            // pass, so selection and scrolling still receive them untouched —
+                            // nothing here consumes anything.
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {
                                     while (true) {
@@ -744,21 +746,26 @@ fun ChatScreen(
                                         if (down.changes.none { it.pressed }) continue
                                         val pressedAt = SystemClock.uptimeMillis()
                                         val downY = down.changes.first().position.y
+                                        val wasFollowing = following
+                                        following = false
+                                        var movedUp = false
                                         var released = false
                                         while (!released) {
                                             val next = awaitPointerEvent(PointerEventPass.Initial)
                                             released = next.changes.none { it.pressed }
-                                            // A small upward move releases the follow before
-                                            // the list's own touch slop ever starts a scroll:
-                                            // waiting for isScrollInProgress meant a short
-                                            // drag did nothing and the pin kept yanking the
-                                            // view back down. Observed only, never consumed.
+                                            // Remembered, not acted on: the follow is already down.
+                                            // An upward move is what separates a drag, which must
+                                            // stay released, from a plain tap, which must not.
                                             if (!released && downY - next.changes.first().position.y > releaseDragPx) {
-                                                following = false
+                                                movedUp = true
                                             }
                                         }
-                                        if (SystemClock.uptimeMillis() - pressedAt >= HOLD_TO_SELECT_MS) {
-                                            following = false
+                                        // A tap is not the user reaching into the content: short, and
+                                        // never dragged up. The long press that starts a selection,
+                                        // and any drag, leave the follow released until the scroll
+                                        // watcher re-arms it at the end.
+                                        if (!movedUp && SystemClock.uptimeMillis() - pressedAt < HOLD_TO_SELECT_MS) {
+                                            following = wasFollowing
                                         }
                                     }
                                 }
