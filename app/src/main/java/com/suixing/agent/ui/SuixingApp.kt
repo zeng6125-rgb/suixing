@@ -116,6 +116,7 @@ import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.SettingsScreen
+import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
@@ -305,6 +306,9 @@ fun SuixingApp() {
                         )
                     }
                     composable("capability") { CapabilityScreen(onBack = { navController.popBackStack() }) }
+                    composable("tools") {
+                        ToolsScreen(onBack = { navController.popBackStack() }, onOpen = push)
+                    }
                     composable(
                         route = "extension?tab={tab}",
                         arguments = listOf(

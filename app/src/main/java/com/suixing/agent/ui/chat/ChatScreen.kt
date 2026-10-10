@@ -17,6 +17,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Base64
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -493,6 +494,13 @@ fun ChatScreen(
             programmatic = false
         }
     }
+    // The item count the last pin saw. A pin that is only following growing text needs one
+    // pass: the item's new height is measured in the very layout the scroll lands in, so the
+    // end it reaches is the real end. The second pass exists for the frame an item was
+    // *added* in, where its height is still unknown — and running it on every publish doubled
+    // the work of a pin that already runs twelve times a second: four full re-measures of the
+    // list per publish while an answer streams, which is one of the frames the ghost lives in.
+    var pinnedCount by remember { mutableIntStateOf(-1) }
     // Every event that can change the height of the last item is a trigger: the streamed
     // text, a tool row appearing or finishing, and the status line — not just the count.
     LaunchedEffect(
@@ -510,6 +518,8 @@ fun ChatScreen(
         // above has already dropped `following` by then; this is the belt to that pair of
         // braces for the frame or two before it runs.
         if (listState.isScrollInProgress && !programmatic) return@LaunchedEffect
+        val added = pinnedCount != itemCount
+        pinnedCount = itemCount
         programmatic = true
         try {
             listState.scrollToItem(itemCount - 1)
@@ -522,9 +532,11 @@ fun ChatScreen(
             // Both passes are instant. Animating this was a mistake: it is a correction of a few
             // dozen pixels that the user did not ask to watch, and a moving scroll position after
             // every send is worse than a jump they never see.
-            withFrameNanos { }
-            listState.scrollToItem(itemCount - 1)
-            listState.scrollBy(FOLLOW_SCROLL_PX)
+            if (added) {
+                withFrameNanos { }
+                listState.scrollToItem(itemCount - 1)
+                listState.scrollBy(FOLLOW_SCROLL_PX)
+            }
         } finally {
             programmatic = false
         }
@@ -575,6 +587,38 @@ fun ChatScreen(
     LaunchedEffect(keyboardInset) {
         delay(300)
         followDir = 0
+    }
+    // The keyboard is a layout change, so the list has to be moved by exactly what the
+    // composer is moved by, in the same frame the composer moves.
+    //
+    // The composer's bottom edge is pinned to the window — navigationBars above it, see the
+    // stack's own padding — so its top moves 1:1 with the clamped IME inset, and the room it
+    // takes out of the transcript (stackFootprint, the list's own bottom padding) changes by
+    // exactly that delta. Compensating the list by the same delta here, before this frame's
+    // layout, puts the last card where the composer is going to be in the frame it gets
+    // there. The clamp is the same one the shell lays itself out with (LocalHeldImePx), so
+    // the platform's end-of-animation rebound is not followed by either of them.
+    //
+    // The pin in the composer's layout callback below stays as the correction, but on its own
+    // it is always one frame late: the LazyColumn is measured before the composer is placed,
+    // so a scroll dispatched from that callback can only land in the next frame's layout. The
+    // last frame of a close is the platform's easing tail — 1-6px — which is exactly the
+    // residual settle at the end of every collapse, and why the two frames the user captured
+    // differed by so little.
+    val heldIme = LocalHeldImePx.current
+    var lastHeldIme by remember { mutableIntStateOf(-1) }
+    LaunchedEffect(heldIme) {
+        val previous = lastHeldIme
+        lastHeldIme = heldIme
+        if (previous < 0 || heldIme == previous) return@LaunchedEffect
+        if (!following || !settings.autoFollow) return@LaunchedEffect
+        programmatic = true
+        lastPinAt = SystemClock.uptimeMillis()
+        try {
+            listState.dispatchRawDelta((heldIme - previous).toFloat())
+        } finally {
+            programmatic = false
+        }
     }
     val atEnd by remember { derivedStateOf { listState.atEnd() } }
 
@@ -1911,10 +1955,10 @@ private fun TurnMetrics(
                 Column(Modifier.width(IntrinsicSize.Max).widthIn(min = 208.dp)) {
                 when (shown) {
                     MetricCard.TIME -> {
-                        if (elapsedMs > 0) RingDetail("总用时", elapsed)
+                        if (elapsedMs > 0) RingDetail("本轮总用时", elapsed)
                         if (firstTokenMs > 0) {
                             RingDetail(
-                                "首 token",
+                                "首个 token 耗时",
                                 remember(firstTokenMs) {
                                     String.format(
                                         Locale.getDefault(),
@@ -1926,7 +1970,7 @@ private fun TurnMetrics(
                         }
                         if (completionTokens > 0 && elapsedMs > 0) {
                             RingDetail(
-                                "速度",
+                                "输出速度",
                                 remember(completionTokens, elapsedMs) {
                                     String.format(
                                         Locale.getDefault(),
@@ -1939,12 +1983,12 @@ private fun TurnMetrics(
                     }
 
                     MetricCard.USAGE -> {
-                        if (total > 0) RingDetail("本轮用量", "${shortTokens(total)} tok")
+                        if (total > 0) RingDetail("本轮合计 tokens", "${shortTokens(total)} tok")
                         if (promptTokens > 0) {
-                            RingDetail("入", "${shortTokens(promptTokens)} tok")
-                            RingDetail("缓存 token", "${shortTokens(cachedTokens)} tok")
+                            RingDetail("输入 tokens", "${shortTokens(promptTokens)} tok")
+                            RingDetail("缓存命中 tokens", "${shortTokens(cachedTokens)} tok")
                             RingDetail(
-                                "未缓存",
+                                "未命中缓存 tokens",
                                 "${shortTokens((promptTokens - cachedTokens).coerceAtLeast(0))} tok",
                             )
                             if (cachedTokens > 0) {
@@ -1961,7 +2005,7 @@ private fun TurnMetrics(
                             }
                         }
                         if (completionTokens > 0) {
-                            RingDetail("输出", "${shortTokens(completionTokens)} tok")
+                            RingDetail("输出 tokens", "${shortTokens(completionTokens)} tok")
                         }
                     }
                 }
@@ -2182,7 +2226,20 @@ private fun AssistantRow(
                             // line at a time is not selectable in practice, and wrapping a
                             // container that re-measures its content on every frame is what
                             // made the live bubble flash the previous layout.
-                            if (streaming) {
+                            // Selectable from the frame AFTER the bubble lands, never in the
+                            // frame it lands in. The hand-over from the live row to the
+                            // stored one builds this subtree from scratch, and wrapping the
+                            // whole answer in a SelectionContainer in that same frame makes
+                            // it re-measure text that was laid out a frame ago without one —
+                            // the frame that then still paints the old layout is the ghost
+                            // at the end of every stream. One frame later the same wrap costs
+                            // its measure and nothing is drawn stale.
+                            var selectable by remember { mutableStateOf(false) }
+                            LaunchedEffect(Unit) {
+                                withFrameNanos { }
+                                selectable = true
+                            }
+                            if (streaming || !selectable) {
                                 MarkdownText(text = part.text)
                             } else {
                                 SelectionContainer { MarkdownText(text = part.text) }
@@ -3787,6 +3844,10 @@ private fun Composer(
     val density = LocalDensity.current
     var menuOpen by remember { mutableStateOf(false) }
     var sheetOpen by remember { mutableStateOf(false) }
+    // The model capsule's right edge in window pixels: the sheet is aligned to it so the card
+    // hangs off the button that opened it rather than off the free space around it. Measured
+    // here because the capsule is this row's child, and read by [GenerationSheet].
+    var capsuleRight by remember { mutableStateOf(0f) }
     // Where the model button's centre sits, in window pixels: the 生成设置 sheet is centred
     // on it rather than on the composer or the screen, which is what "right above the model
     // button" means. Read from the layout, because the row's paddings and the label's own
@@ -3795,6 +3856,34 @@ private fun Composer(
     // No recognizer on the device means the mic entry would be a dead control, and
     // the user has no patience for those: the row simply drops it.
     val speechAvailable = remember { SpeechRecognizer.isRecognitionAvailable(ctx) }
+    // The two cards this row opens are focus-less (see [MenuCard]'s focusable): a focusable
+    // popup window takes the keyboard away from the field, the shell then lays the composer
+    // out a keyboard lower, and the card stays anchored to where the composer was — 250dp
+    // above the button it belongs to, which is the 偏上 the user photographed. A focus-less
+    // window cannot see a tap outside its own bounds and cannot see BACK, so both are caught
+    // here. The scrim is a window of its own, composed before the cards: windows stack in
+    // composition order, so a scrim composed after them would cover them instead.
+    if (menuOpen || sheetOpen) {
+        Popup(properties = PopupProperties(focusable = false)) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) {
+                        menuOpen = false
+                        sheetOpen = false
+                    },
+            )
+        }
+    }
+    // Focus-less popups do not receive BACK either: without this the press falls through to
+    // the activity and finishes it.
+    BackHandler(enabled = menuOpen || sheetOpen) {
+        menuOpen = false
+        sheetOpen = false
+    }
     // Nothing here paints a background: the transcript scrolls right down to the gesture
     // bar behind the pill, so the composer reads as something floating over the
     // conversation rather than an opaque strip that cuts it off.
@@ -4007,6 +4096,10 @@ private fun Composer(
                             // left the card sitting on top of the plus button.
                             alignment = Alignment.BottomStart,
                             offset = with(density) { IntOffset(0, -48.dp.roundToPx()) },
+                            // Same reason as the model sheet: this card hangs off a button of
+                            // the composer too, and a focusable popup here would move the
+                            // composer out from under it.
+                            focusable = false,
                             modifier = Modifier.widthIn(max = 200.dp),
                         ) {
                             MenuItemRow(ImageVector.vectorResource(R.drawable.ic_image), "图片") {
@@ -4076,11 +4169,22 @@ private fun Composer(
                                         conversationReasoningEffort = conversationReasoningEffort,
                                         onChooseReasoning = onChooseReasoning,
                                         visible = sheetOpen,
+                                        capsuleRight = capsuleRight,
                                         onPickModel = onPickModel,
                                         onOpenSettings = onOpenSettings,
                                         onDismiss = { sheetOpen = false },
                                     )
                                 }
+                                // The capsule's own right edge, measured: the sheet hangs off
+                                // the button that opened it, and the free space around the
+                                // button is wider than the button whenever the model name is
+                                // short — right-aligning to the free space left the card that
+                                // far to the right of the control it belongs to.
+                                Box(
+                                    Modifier.onGloballyPositioned {
+                                        capsuleRight = it.boundsInWindow().right
+                                    },
+                                ) {
                                 UnifiedSelector(
                                 settings = settings,
                                 assistantId = assistantId,
@@ -4094,7 +4198,8 @@ private fun Composer(
                                     // worth asking for — once per endpoint per process.
                                     onPrefetchWindows()
                                 },
-                            )
+                                )
+                                }
                         }
                         }
                     }
@@ -4218,6 +4323,16 @@ private fun MenuCard(
     alignment: Alignment,
     offset: IntOffset,
     modifier: Modifier = Modifier,
+    /**
+     * Whether the popup's own window takes focus. True is the platform default and is what
+     * a card opened from a message wants. False is for the composer's cards: a focusable
+     * popup window takes the keyboard away from the field, the shell then drops the whole
+     * composer by the keyboard's height, and the card that was anchored 8dp above the model
+     * button is left floating a keyboard above it — the card the user photographed as 偏上.
+     * Focus-less means the card cannot see a tap outside its own bounds and cannot see BACK,
+     * so those two live with the caller: see the scrim and BackHandler in [Composer].
+     */
+    focusable: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -4237,7 +4352,7 @@ private fun MenuCard(
         alignment = alignment,
         offset = offset,
         onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true),
+        properties = PopupProperties(focusable = focusable),
     ) {
         AnimatedVisibility(
             visible = visible,
@@ -4374,6 +4489,13 @@ private fun GenerationSheet(
     /** The model button's centre, in window pixels; 0 until the composer has measured it. */
     /** Whether the card is open. It animates in and out on this, so it stays composed. */
     visible: Boolean,
+    /**
+     * The model capsule's right edge in window pixels, or 0 before the composer has measured
+     * it. The sheet is right-aligned to this edge rather than to the free space around the
+     * capsule: the free space is wider than the button whenever the model name is short, and
+     * the card then sat that far to the right of the control it belongs to.
+     */
+    capsuleRight: Float,
     onPickModel: (ProviderConfig, String) -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
@@ -4409,14 +4531,16 @@ private fun GenerationSheet(
     var sheetWidth by remember { mutableStateOf(0) }
     val screenPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
     val edge = with(density) { 8.dp.toPx() }
-    // Right-aligned to the composer's content edge, not centred on the capsule: centred put the
-    // sheet's mass to the left of the ring, which read as left-aligned. The user asked for
-    // right-aligned, and the composer's right edge is the one edge this row already has.
+    // Right-aligned to the capsule that opened it, not centred: centred put the sheet's mass to
+    // the left of the ring, which read as left-aligned. Falls back to the free space's own right
+    // edge until the capsule has been measured — the two agree whenever the name is long enough
+    // to fill the row, which is the case the old anchor was written for.
     val nudge = if (sheetWidth <= 0 || anchorLeft == 0f) {
         0f
     } else {
         val width = sheetWidth.toFloat()
-        val left = (anchorRight - width)
+        val right = if (capsuleRight > 0f) capsuleRight else anchorRight
+        val left = (right - width)
             .coerceIn(edge, (screenPx - edge - width).coerceAtLeast(edge))
         left - anchorLeft
     }
@@ -4448,10 +4572,31 @@ private fun GenerationSheet(
         onDismiss = onDismiss,
         alignment = Alignment.BottomStart,
         offset = with(density) { IntOffset(nudge.roundToInt(), -8.dp.roundToPx()) },
-        modifier = Modifier.widthIn(max = 340.dp).onSizeChanged { sheetWidth = it.width },
+        // Focus-less: opening this card must not take the keyboard off the field, or the
+        // composer falls by the keyboard's height under a card anchored to where it used to
+        // be. See [MenuCard]'s focusable and the scrim in [Composer].
+        focusable = false,
+        // 260dp, not the 340dp it was: page one is one model name and one slider, and 340dp
+        // is 94% of a 360dp screen — the card read as a full-width panel rather than as
+        // something hanging off the button that opened it. 260dp leaves the content 224dp
+        // after MenuCard's own 18dp padding either side, which is a whole model id.
+        modifier = Modifier.widthIn(max = 260.dp).onSizeChanged { sheetWidth = it.width },
     ) {
         if (!picking) {
             // Page one: one big name to tap, one slider to drag, nothing else.
+            //
+            // Hugs its own content instead of the card's cap. The only control here that
+            // could have decided the width is the slider, and a slider is as wide as what it
+            // slides on — so a fillMaxWidth slider pinned the card to its maximum, which is
+            // what made a card holding two short lines look like a panel. widthIn is written
+            // first on purpose: the intrinsic size is then coerced into the floor and the cap,
+            // so a short model id gives a narrow card and a long one is still cut off at the
+            // cap rather than at the screen's edge.
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 200.dp, max = 260.dp)
+                    .width(IntrinsicSize.Max),
+            ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -4500,6 +4645,7 @@ private fun GenerationSheet(
                 // The level belongs to this conversation, like the model pick beside it:
                 // writing it to the app-wide default here is what re-timed every other chat.
                 onChooseReasoning(REASONING_LEVELS[index].first)
+            }
             }
         } else {
             // Page two: every endpoint's models, the one that answers this conversation first
@@ -5046,7 +5192,11 @@ private fun ContextRingCard(
     val percent = if (known) used * 100 / window else 0
     Column(
         modifier = Modifier
-            .widthIn(max = 240.dp)
+            // 264dp, not 240: the labels on this card are sentences now (「未命中缓存 tokens」,
+            // 「上下文占用」) and the old cap ellipsized the value on the longest line. Still
+            // inside a 360dp screen's own margin, and still narrower than the transcript's
+            // full width.
+            .widthIn(max = 264.dp)
             .shadow(
                 elevation = 8.dp,
                 shape = RoundedCornerShape(16.dp),
@@ -5069,7 +5219,7 @@ private fun ContextRingCard(
             // without the card asking for the screen's width.
             Column(Modifier.width(IntrinsicSize.Max).widthIn(min = 208.dp)) {
             RingDetail(
-                "上下文",
+                "上下文占用",
                 if (known) {
                     "${shortTokens(used)} / ${shortTokens(window)}（$percent%）"
                 } else {
@@ -5086,7 +5236,7 @@ private fun ContextRingCard(
                 val hit = remember(cachePercent) {
                     String.format(Locale.getDefault(), "%.2f%%", cachePercent)
                 }
-                RingDetail("缓存命中", hit)
+                RingDetail("缓存命中率", hit)
             }
             live?.let {
                 RingDetail(
@@ -5111,9 +5261,9 @@ private fun ContextRingCard(
  * One label/value line of the ring's and the metrics' cards.
  *
  * The value is right-aligned on a shared column rather than set beside the label: a stack of
- * 「入 83.6k / 缓存 token 82.4k / 未缓存 1.2k」 reads as a table when the numbers line up on one
- * edge, and as prose when each number starts wherever its label happened to end. The card
- * itself is given a floor width so that column has room to exist.
+ * 「输入 tokens 83.6k / 缓存命中 tokens 82.4k / 未命中缓存 tokens 1.2k」 reads as a table when the
+ * numbers line up on one edge, and as prose when each number starts wherever its label happened
+ * to end. The card itself is given a floor width so that column has room to exist.
  */
 @Composable
 private fun RingDetail(label: String, value: String) {
@@ -5121,7 +5271,11 @@ private fun RingDetail(label: String, value: String) {
         // Fills its parent, and the parent is sized to the widest row (see the cards): that is
         // what lines the numbers up. It deliberately does not ask for the screen's width — the
         // first attempt did, and a popup that should hug its content grew to the full screen.
-        modifier = Modifier.fillMaxWidth(),
+        // 1.5dp top and bottom is the line spacing the user asked for: two rows meet with 3dp
+        // between them, and a card's own 12-14dp of padding swallows the outer two halves.
+        modifier = Modifier.fillMaxWidth().padding(vertical = 1.5.dp),
+        // Centred, and it has to be said: the value is a size smaller than its label, so a
+        // Top alignment would hang the number off the label's cap line.
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -5133,7 +5287,9 @@ private fun RingDetail(label: String, value: String) {
         Spacer(Modifier.width(12.dp))
         Text(
             text = value,
-            style = MaterialTheme.typography.labelMedium,
+            // A size under the label: the numbers are the detail of the line, and at the
+            // label's own size they read as a second heading beside it.
+            style = MaterialTheme.typography.labelSmall,
             // A shade under the label's own tone: the numbers are the detail, and at full
             // onSurface they read heavier than the labels they belong to.
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),

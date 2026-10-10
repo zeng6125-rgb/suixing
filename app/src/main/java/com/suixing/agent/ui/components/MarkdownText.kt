@@ -603,7 +603,10 @@ private class MarkdownCache {
         var searchFrom = text.length
         while (true) {
             val at = text.lastIndexOf("\n\n", searchFrom - 1)
-            if (at <= 0) return ""
+            // at == 0 is a blank line at the very top of the answer, and "\n\n" is a settled
+            // prefix like any other (its parse is empty). Treating it as "nothing settled"
+            // re-parsed the whole answer on every publish for as long as it was there.
+            if (at < 0) return ""
             val candidate = text.substring(0, at + 2)
             if (candidate.count { it == '`' } % 2 == 0) return candidate
             searchFrom = at

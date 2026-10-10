@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.capability.CapabilityState
+import com.suixing.agent.capability.ShizukuManager
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.service.FloatConsoleService
@@ -127,8 +128,24 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 }
             }
 
+            // 第一档不是「还没开的权限」，而是这个应用本身：装上就有，其余三档都是它的叠加。
             CapabilityCard(
-                title = "无障碍服务",
+                title = "标准档（默认）",
+                icon = ImageVector.vectorResource(R.drawable.ic_bot),
+                summary = "装上就有，不需要任何授权",
+                granted = true,
+                lines = listOf(
+                    "聊天、记忆、待办、定时、技能、网络与文件工具都在这一档",
+                    "文件只能读写应用私有目录，碰不到 /sdcard 的其它目录",
+                    "要操作别的应用、执行命令或改系统文件，再往下开一档",
+                ),
+                actionLabel = "无需开启",
+                actionEnabled = false,
+                onAction = {},
+            )
+
+            CapabilityCard(
+                title = "无障碍",
                 icon = ImageVector.vectorResource(R.drawable.ic_pointer),
                 summary = "读屏、点击、滑动、输入文字、截图",
                 granted = state.accessibility,
@@ -146,7 +163,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
             )
 
             CapabilityCard(
-                title = "Shizuku（ADB 级权限）",
+                title = "Shizuku（ADB 级）",
                 icon = ImageVector.vectorResource(R.drawable.ic_terminal),
                 summary = "am / pm / input / dumpsys，读写 /sdcard 与 Android/data",
                 granted = state.shellReady,
@@ -156,17 +173,29 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     add(if (state.shizukuGranted) "随行已获授权" else "随行未获授权")
                 },
                 actionLabel = when {
-                    !state.shizukuInstalled -> "安装 Shizuku"
+                    !state.shizukuInstalled -> "去安装"
                     !state.shizukuGranted -> "请求授权"
                     else -> "重新授权"
                 },
                 onAction = {
-                    if (!state.shizukuInstalled) {
-                        Core.capabilities.openShizukuApp()
-                    } else if (Core.capabilities.requestShizuku()) {
-                        notice = null
-                    } else {
-                        notice = "Shizuku 服务未运行：先打开 Shizuku 应用并启动服务，再回来请求授权。"
+                    when {
+                        !state.shizukuInstalled -> {
+                            val opened = openShizukuStore(context)
+                            notice = if (opened) {
+                                null
+                            } else {
+                                "本机没有能打开商店页的应用，请手动搜索安装 Shizuku" +
+                                    "（包名 moe.shizuku.privileged.api）。"
+                            }
+                        }
+
+                        Core.capabilities.requestShizuku() -> notice = null
+                        else -> {
+                            // 服务没起来时，用户下一步只有一件事可做：去 Shizuku 应用里把它启动。
+                            Core.capabilities.openShizukuApp()
+                            notice = "Shizuku 服务未运行，已为你打开 Shizuku 应用：" +
+                                "在里面启动服务，再回来点「请求授权」。"
+                        }
                     }
                 },
             )
@@ -182,13 +211,14 @@ fun CapabilityScreen(onBack: () -> Unit) {
                         state.root -> "检测到 su 可用"
                         else -> "未检测到 su"
                     },
+                    "这一档要靠 KernelSU / Magisk 给 su 授权，没装就没有",
                     if (state.rootProbed && settings.rootCheckedAt > 0L) {
                         "上次检测：${formatAgo(settings.rootCheckedAt)}（结果已记住，下次打开自动复核）"
                     } else {
                         "检测一次即可，之后每次打开都会自动复核"
                     },
                 ),
-                actionLabel = if (probing) "检测中…" else "重新检测",
+                actionLabel = if (probing) "检测中…" else "检测",
                 onAction = {
                     scope.launch {
                         probing = true
@@ -274,7 +304,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
             }
 
             SectionCard(
-                title = "这三档权限分别能做什么",
+                title = "这四档权限分别能做什么",
                 icon = ImageVector.vectorResource(R.drawable.ic_circle_question_mark),
                 subtitle = if (explainerOpen) "点标题收起" else "点标题展开",
                 trailing = {
@@ -284,6 +314,8 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 },
             ) {
                 if (explainerOpen) {
+                    ExplainerRow("标准档", "默认就在这一档：聊天、记忆与文件工具，只能碰应用私有目录。")
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     ExplainerRow("无障碍", "看得见屏幕、点得动按钮，但碰不到命令与系统目录。")
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     ExplainerRow("Shizuku", "相当于把手机连上电脑用 adb：能执行 shell、装卸应用、读写 Android/data，重启后要重新启动服务。")
@@ -291,7 +323,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     ExplainerRow("Root", "最稳也最危险，系统分区可写。不开也能正常用。")
                 } else {
                     Text(
-                        text = "三档权限是叠加的：拿到 Shizuku 就自动拥有无障碍的能力，root 又覆盖前两档。",
+                        text = "四档权限是叠加的：标准档人人都有，拿到 Shizuku 就自动拥有无障碍的能力，root 又覆盖前两档。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -313,16 +345,16 @@ private fun CapabilityHero(state: CapabilityState) {
         else -> 0
     }
     val label = when (level) {
-        3 -> "最高权限"
-        2 -> "无障碍 + ADB"
-        1 -> "仅无障碍"
-        else -> "基础模式"
+        3 -> "最高权限（root）"
+        2 -> "标准档 + ADB"
+        1 -> "标准档 + 无障碍"
+        else -> "标准档"
     }
     val detail = when (level) {
         3 -> "系统文件可写，自动化最稳"
         2 -> "能跑 shell、装卸应用、读 Android/data"
         1 -> "能读屏点击，但不能执行命令"
-        else -> "只能聊天与读写应用私有目录"
+        else -> "无需授权：聊天、记忆、待办与文件工具（应用私有目录）"
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -367,21 +399,21 @@ private fun CapabilityHero(state: CapabilityState) {
                         )
                     }
                     Text(
-                        text = "$level / 3",
+                        text = "${level + 1} / 4",
                         style = MaterialTheme.typography.titleMedium,
                         color = scheme.onPrimary.copy(alpha = 0.85f),
                     )
                 }
                 Spacer(Modifier.height(14.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    repeat(3) { index ->
+                    repeat(4) { index ->
                         Box(
                             Modifier
                                 .weight(1f)
                                 .height(5.dp)
                                 .clip(RoundedCornerShape(3.dp))
                                 .background(
-                                    if (index < level) {
+                                    if (index <= level) {
                                         scheme.onPrimary
                                     } else {
                                         scheme.onPrimary.copy(alpha = 0.25f)
@@ -422,6 +454,8 @@ private fun CapabilityCard(
     lines: List<String>,
     actionLabel: String,
     onAction: () -> Unit,
+    /** False for a tier with nothing to open (标准档): the button is shown, but inert. */
+    actionEnabled: Boolean = true,
 ) {
     SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -466,12 +500,30 @@ private fun CapabilityCard(
             }
         }
         Spacer(Modifier.height(12.dp))
-        if (granted) {
+        if (!actionEnabled) {
+            OutlinedButton(onClick = {}, enabled = false) { Text(actionLabel) }
+        } else if (granted) {
             OutlinedButton(onClick = onAction) { Text(actionLabel) }
         } else {
             Button(onClick = onAction) { Text(actionLabel) }
         }
     }
+}
+
+/**
+ * The store page for Shizuku, with the browser as the fallback for a device without a
+ * market app. [CapabilityHub.openShizukuApp] launches the app itself and falls back to our
+ * own app-details page — which is a dead end when Shizuku is not installed yet, so the
+ * "not installed" case goes here instead.
+ */
+private fun openShizukuStore(context: Context): Boolean {
+    val id = ShizukuManager.SHIZUKU_PACKAGE
+    val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$id"))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    if (runCatching { context.startActivity(market) }.isSuccess) return true
+    val web = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$id"))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    return runCatching { context.startActivity(web) }.isSuccess
 }
 
 /** 「刚刚 / N 分钟前 / N 小时前 / N 天前」for the remembered root probe. */

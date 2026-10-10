@@ -31,6 +31,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -393,8 +394,12 @@ val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
  * padding is dead space while the keyboard covers the gesture bar, which is the band that
  * appeared between the field and the keys. Clamped rather than raw so the platform's
  * end-of-animation rebound does not flicker the band back for a frame.
+ *
+ * `compositionLocalOf`, not `staticCompositionLocalOf`: this value changes on every frame of a
+ * keyboard transition, and the static variant has no read tracking — every change would
+ * invalidate the whole provided subtree (the entire NavHost) instead of just its readers.
  */
-val LocalHeldImePx = staticCompositionLocalOf { 0 }
+val LocalHeldImePx = compositionLocalOf { 0 }
 
 /**
  * The bar for a page that is not a top-level destination: a back button instead of the

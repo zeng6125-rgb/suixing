@@ -3,16 +3,21 @@ package com.suixing.agent.service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.SweepGradient
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Display
+import android.view.RoundedCorner
 import android.view.View
 import android.view.WindowManager
 import androidx.lifecycle.Lifecycle
@@ -44,7 +49,42 @@ private const val FX_EDGE_THROTTLE_MS = 800L
 private const val FX_COLOR_BRAND = 0xFF1F6B4C.toInt()
 private const val FX_RING_STROKE_PX = 6f
 private const val FX_TRAIL_STROKE_PX = 4f
-private const val FX_EDGE_STROKE_PX = 14f
+
+/**
+ * The bright line of the ring, 6~10px by the user's own number.
+ *
+ * Thinner than the 14px it was: at 14 the band was wide enough to read as something laid on the
+ * screen rather than as the screen's own edge, which is the 「没有严格按照边缘画」 half of the
+ * report. Visibility does not come from the width any more — the ring is a saturated rainbow now
+ * instead of one dark green, so the same alpha is several times brighter than it was.
+ */
+private const val FX_EDGE_STROKE_PX = 8f
+
+/**
+ * 彩虹环的颜色：绕屏幕中心一圈的角度渐变，**首尾同色**，所以 0° 那里没有接缝。
+ *
+ * 红 → 橙 → 黄 → 绿 → 青 → 蓝 → 品红 → 红，八段等分（`SweepGradient` 的 positions 传 null）。
+ * 颜色不透明，亮度由 `Paint.alpha` 调（shader 的输出会被 paint 的 alpha 调制，所以呼吸与闪光
+ * 的 alpha 仍然有效）。
+ */
+private val FX_RAINBOW = intArrayOf(
+    0xFFFF0000.toInt(),
+    0xFFFF7F00.toInt(),
+    0xFFFFFF00.toInt(),
+    0xFF00FF00.toInt(),
+    0xFF00FFFF.toInt(),
+    0xFF0000FF.toInt(),
+    0xFFFF00FF.toInt(),
+    0xFFFF0000.toInt(),
+)
+
+/**
+ * 色相转一圈的时间：2s，即 0.18°/ms。
+ *
+ * 取模之后再算角度，不是图省事：`uptimeMillis` 开机一天就是 8 位数，直接乘 0.18 会让结果落进
+ * float 精度不够的区间（间隔 2°），色相就会一跳一跳。
+ */
+private const val FX_HUE_PERIOD_MS = 2000L
 
 /**
  * The breathing edge: the same stroke, turned up until it is seen at a glance without becoming
@@ -75,7 +115,9 @@ private const val FX_BREATH_HOLD_MS = 6000L
 /**
  * The screen's own shape: a radius the size of a modern panel's corners.
  *
- * 52px read as 「不符合手机边缘」 on a 1080p panel whose corners are nearer 100px.
+ * 52px read as 「不符合手机边缘」 on a 1080p panel whose corners are nearer 100px. It is only the
+ * fallback now — [screenCornerRadius] asks the display for its real corner on API 31+ and lands
+ * here when the platform does not report one.
  *
  * The inset is zero because the path is now built on the display's real bounds rather than on the
  * view's measured size — see [displayBounds]. Centering the stroke on the true edge is what makes
@@ -138,10 +180,10 @@ private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
  * the edge when a gesture starts. An agent that taps silently is indistinguishable from
  * one that is stuck, which is exactly the confusion this removes.
  *
- * The flash says "something just happened"; the faint breath of the same green that [noteDriving]
- * switches on says "it is still happening". Only driving earns the breath — a run that reads the
- * screen or only answers in words shows nothing, because the user asked to see their phone being
- * operated, not to be told that someone is looking at it.
+ * The flash says "something just happened"; the faint breath of the same rainbow ring that
+ * [noteDriving] switches on says "it is still happening". Only driving earns the breath — a run
+ * that reads the screen or only answers in words shows nothing, because the user asked to see
+ * their phone being operated, not to be told that someone is looking at it.
  *
  * Nothing here steers anything: the accessibility service calls it after it has decided
  * to dispatch a gesture, so the drawing can never claim something the phone did not do.
@@ -265,27 +307,24 @@ object TouchFx {
     }
 
     fun tap(context: Context, x: Float, y: Float) {
-        trace(context, "entry=tap x=$x y=$y")
         noteDriving(context)
-        post(context) { fx ->
+        post(context, "entry=tap x=$x y=$y") { fx ->
             flashEdge(fx)
             fx.addRing(x, y, holdMs = 0L, delayMs = 0L)
         }
     }
 
     fun longPress(context: Context, x: Float, y: Float) {
-        trace(context, "entry=longPress x=$x y=$y")
         noteDriving(context)
-        post(context) { fx ->
+        post(context, "entry=longPress x=$x y=$y") { fx ->
             flashEdge(fx)
             fx.addRing(x, y, holdMs = FX_LONG_PRESS_HOLD_MS, delayMs = 0L)
         }
     }
 
     fun swipe(context: Context, x1: Float, y1: Float, x2: Float, y2: Float) {
-        trace(context, "entry=swipe x1=$x1 y1=$y1 x2=$x2 y2=$y2")
         noteDriving(context)
-        post(context) { fx ->
+        post(context, "entry=swipe x1=$x1 y1=$y1 x2=$x2 y2=$y2") { fx ->
             flashEdge(fx)
             fx.addRing(x1, y1, holdMs = 0L, delayMs = 0L)
             // The far ring arrives with the finger rather than before it, so the pair reads as
@@ -305,9 +344,8 @@ object TouchFx {
      * with the gestures, so a launch straight after a tap does not flash twice.
      */
     fun handoff(context: Context) {
-        trace(context, "entry=handoff")
         noteDriving(context)
-        post(context) { fx ->
+        post(context, "entry=handoff") { fx ->
             flashEdge(fx)
         }
     }
@@ -374,7 +412,13 @@ object TouchFx {
             // complaint, and a run spends most of its life waiting on a model or a tool. The hold
             // period has to outlast one of those turns without lingering after the run ends — see
             // FX_BREATH_HOLD_MS for the numbers and why they moved off four seconds.
-            val lit = app != null && now - lastDrivingAt < FX_BREATH_HOLD_MS
+            // Two windows, two meanings: while a run is driving, the light holds for
+            // FX_BREATH_HOLD_MS after the last action; a background job driving the screen has
+            // no run to watch, so it gets its own longer window (FX_JOB_WINDOW_MS) recorded at
+            // the moment of the action. Reading only the first made the job window dead code.
+            val lit = app != null &&
+                (now - lastDrivingAt < FX_BREATH_HOLD_MS ||
+                    (FX_JOB_DRIVING_ID in drivingIds && now < jobDrivingUntil))
             if (lit && app != null) {
                 overlay(app)?.setBreathing(true)
                 main.postDelayed(this, FX_BREATH_TICK_MS)
@@ -411,12 +455,23 @@ object TouchFx {
         }
     }
 
-    /** Gestures come off the tool dispatcher, but windows and drawing are main-thread only. */
-    private fun post(context: Context, block: (FxView) -> Unit) {
+    /**
+     * Gestures come off the tool dispatcher, but windows and drawing are main-thread only.
+     *
+     * The entry line is written **here**, after [overlay] has run, and not by the caller: the
+     * window is created on this thread one hop after the caller posts, so a line written by the
+     * caller could only ever report the state *before* the effect — which is why an action that
+     * lit the screen a millisecond later still read `overlay=none`, and why the file could not
+     * answer the one question it exists for. `none` now means what it says: no window at the
+     * moment of the effect. ([noteDriving]'s own line still runs first and still reports the
+     * state before this post; it is about which runs are driving, not about the window.)
+     */
+    private fun post(context: Context, entry: String, block: (FxView) -> Unit) {
         val app = context.applicationContext
         main.post {
-            val fx = overlay(app) ?: return@post
-            block(fx)
+            val fx = overlay(app)
+            trace(app, entry)
+            if (fx != null) block(fx)
         }
     }
 
@@ -525,7 +580,7 @@ object TouchFx {
             noteOverlay(context, "failed（拿不到 WindowManager）")
             return null
         }
-        val fx = FxView(host, displayBounds(host)) { detach() }
+        val fx = FxView(host, displayBounds(host), screenCornerRadius(host)) { detach() }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -594,6 +649,26 @@ object TouchFx {
         return Rect(0, 0, metrics.widthPixels, metrics.heightPixels)
     }
 
+    /**
+     * The panel's own corner radius in px, which is the only radius the light can trace.
+     *
+     * 96px was a guess that happened to be near right on one 1080p panel; on a screen whose corners
+     * are rounder the ring cuts the corner, and on one that is squarer it bulges away from the
+     * edge — both read as 「没有严格按照边缘画」. API 31 publishes the real number, so ask for it;
+     * an older device, or a display that reports 0 (which is what "no rounded corner" looks like),
+     * falls back to the constant. Never throws: a missing corner is not worth losing the effect.
+     */
+    private fun screenCornerRadius(context: Context): Float {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return FX_EDGE_RADIUS_PX
+        val display = runCatching {
+            context.getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)
+        }.getOrNull() ?: return FX_EDGE_RADIUS_PX
+        val radius = runCatching {
+            display.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT)?.radius ?: 0
+        }.getOrDefault(0)
+        return if (radius > 0) radius.toFloat() else FX_EDGE_RADIUS_PX
+    }
+
     /** Added per gesture and removed when the last effect ends, so nothing is left over. */
     private fun detach() {
         val fx = view ?: return
@@ -605,6 +680,10 @@ object TouchFx {
         view = null
         runCatching { manager?.removeView(fx) }
         manager = null
+        // The log has to say what is true now, not what was true when the window was built:
+        // leaving the old "created" note behind made a taken-down window look alive, which is
+        // the kind of lie that costs an hour of guessing.
+        fx.context.applicationContext?.let { noteOverlay(it, "detached（空闲）") }
     }
 }
 
@@ -617,11 +696,13 @@ object TouchFx {
  *
  * [screenBounds] is the display's real extent, captured by [TouchFx.overlay] when the window was
  * created, and is what the edge light is drawn on rather than this view's own measured size — see
- * [TouchFx.displayBounds].
+ * [TouchFx.displayBounds]. [cornerPx] is the panel's own corner radius, so the ring follows the
+ * screen's shape rather than a guess at it.
  */
 private class FxView(
     context: Context,
     private val screenBounds: Rect,
+    private val cornerPx: Float,
     private val onIdle: () -> Unit,
 ) : View(context) {
 
@@ -630,12 +711,24 @@ private class FxView(
     private class Trail(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val startAt: Long)
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * The edge light's own paint, kept apart from [paint] because it carries a shader: a shader
+     * wins over `color`, so sharing one Paint would quietly repaint the rings and the trail with
+     * the rainbow as well.
+     */
+    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rings = mutableListOf<Ring>()
     private val trails = mutableListOf<Trail>()
     private val edgeRect = RectF()
     private val edgePath = Path()
     private var edgeStart = 0L
     private var idleReported = false
+
+    /** The ring's shader, rebuilt only when the screen's shape changes — see [rainbow]. */
+    private var rainbowShader: SweepGradient? = null
+    private val rainbowRect = RectF()
+    private val rainbowMatrix = Matrix()
 
     /** The breathing edge, which is a state rather than an effect with a duration. */
     private var breathing = false
@@ -687,7 +780,7 @@ private class FxView(
         val edgeElapsed = now - edgeStart
         // Under the flash, so an action still reads as brighter than the state it happened in.
         if (breathing) drawBreath(canvas, now)
-        if (edgeElapsed < FX_EDGE_DURATION_MS) drawEdge(canvas, edgeElapsed)
+        if (edgeElapsed < FX_EDGE_DURATION_MS) drawEdge(canvas, edgeElapsed, now)
 
         val animating = rings.isNotEmpty() || trails.isNotEmpty() || edgeElapsed < FX_EDGE_DURATION_MS
         when {
@@ -748,9 +841,10 @@ private class FxView(
         )
     }
 
-    private fun drawEdge(canvas: Canvas, elapsed: Long) {
+    private fun drawEdge(canvas: Canvas, elapsed: Long, now: Long) {
         val progress = (elapsed.toFloat() / FX_EDGE_DURATION_MS).coerceIn(0f, 1f)
-        drawGlow(canvas, edgeShape(), 0.7f * (1f - progress))
+        val path = edgeShape()
+        drawGlow(canvas, path, edgeRect, 0.7f * (1f - progress), now)
     }
 
     /**
@@ -764,7 +858,8 @@ private class FxView(
         val phase = ((now - breathStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
         val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
         val alpha = FX_BREATH_MIN_ALPHA + (FX_BREATH_MAX_ALPHA - FX_BREATH_MIN_ALPHA) * wave
-        drawGlow(canvas, edgeShape(), alpha)
+        val path = edgeShape()
+        drawGlow(canvas, path, edgeRect, alpha, now)
     }
 
     /**
@@ -774,17 +869,47 @@ private class FxView(
      * around the screen — the user's verdict on the first version was 「不太明显」 and then, when it
      * was made thicker, that it still looked like a box. Stacking strokes is what turns it into a
      * glow that falls off inward, which is the effect they asked for.
+     *
+     * All three passes carry the same sweep shader, so the colour at a given angle is identical
+     * across them and the band stays one rainbow instead of three offset ones. The alpha rides on
+     * the Paint, which is what makes the shader breathe: Skia multiplies a shader's output by the
+     * paint's alpha (the same reason `GradientDrawable.setAlpha` works on a gradient).
      */
-    private fun drawGlow(canvas: Canvas, path: Path, alpha: Float) {
-        paint.style = Paint.Style.STROKE
-        paint.color = FX_COLOR_BRAND
-        paint.strokeCap = Paint.Cap.ROUND
+    private fun drawGlow(canvas: Canvas, path: Path, rect: RectF, alpha: Float, now: Long) {
+        glowPaint.style = Paint.Style.STROKE
+        glowPaint.strokeCap = Paint.Cap.ROUND
+        glowPaint.strokeJoin = Paint.Join.ROUND
+        glowPaint.shader = rainbow(rect, now)
         for (pass in FX_GLOW_WIDTHS.indices) {
-            paint.strokeWidth = FX_EDGE_STROKE_PX * FX_GLOW_WIDTHS[pass]
-            paint.alpha = (alpha * FX_GLOW_WEIGHTS[pass] * 255f).toInt().coerceIn(0, 255)
-            if (paint.alpha <= 0) continue
-            canvas.drawPath(path, paint)
+            glowPaint.strokeWidth = FX_EDGE_STROKE_PX * FX_GLOW_WIDTHS[pass]
+            glowPaint.alpha = (alpha * FX_GLOW_WEIGHTS[pass] * 255f).toInt().coerceIn(0, 255)
+            if (glowPaint.alpha <= 0) continue
+            canvas.drawPath(path, glowPaint)
         }
+    }
+
+    /**
+     * 绕屏幕一圈的彩虹，每帧往前转一点色相。
+     *
+     * The gradient itself is built once and only rebuilt when the screen's shape changes; what
+     * moves per frame is its local matrix. Building a `SweepGradient` per frame would allocate one
+     * shader and one colour array 25 times a second for no visible difference.
+     *
+     * The rotation is driven off the clock rather than off a frame counter, so the colour turns at
+     * the same speed whatever the frame rate does — and the elapsed time is reduced modulo one turn
+     * *before* it becomes a float, which keeps the angle exact (see [FX_HUE_PERIOD_MS]).
+     */
+    private fun rainbow(rect: RectF, now: Long): SweepGradient {
+        var shader = rainbowShader
+        if (shader == null || rainbowRect != rect) {
+            shader = SweepGradient(rect.centerX(), rect.centerY(), FX_RAINBOW, null)
+            rainbowShader = shader
+            rainbowRect.set(rect)
+        }
+        val degrees = (now % FX_HUE_PERIOD_MS).toFloat() / FX_HUE_PERIOD_MS * 360f
+        rainbowMatrix.setRotate(degrees, rect.centerX(), rect.centerY())
+        shader.setLocalMatrix(rainbowMatrix)
+        return shader
     }
 
     /**
@@ -798,6 +923,10 @@ private class FxView(
      * panel's edge — 「没有完全覆盖好屏幕边缘」. The display's real bounds reach the status bar and
      * the gesture bar, and with the inset at zero the stroke is centred on the true edge: its outer
      * half is clipped by the window and its inner half is the glow that gets seen.
+     *
+     * One `addRoundRect` and not four sides: a path assembled from four line segments has a seam at
+     * every corner — a visible break in the light, the 「不连续」 half of the report — while this is
+     * a single closed contour the stroke runs round without ever lifting.
      */
     private fun edgeShape(): Path {
         val inset = FX_EDGE_INSET_PX
@@ -808,7 +937,7 @@ private class FxView(
             screenBounds.bottom - inset,
         )
         edgePath.reset()
-        edgePath.addRoundRect(edgeRect, FX_EDGE_RADIUS_PX, FX_EDGE_RADIUS_PX, Path.Direction.CW)
+        edgePath.addRoundRect(edgeRect, cornerPx, cornerPx, Path.Direction.CW)
         return edgePath
     }
 }

@@ -220,6 +220,16 @@ private fun SettingsRoot(
                 )
             }
             item {
+                // The inventory of what the agent can actually reach: read-only, and the
+                // one place the three faces (tools, skills, MCP) are seen together.
+                SettingsEntry(
+                    title = "工具",
+                    summary = "工具、Skill 与 MCP 总览",
+                    icon = ImageVector.vectorResource(R.drawable.ic_wrench),
+                    onClick = { onOpen("tools") },
+                )
+            }
+            item {
                 SettingsEntry(
                     title = "网络与语音",
                     summary = "搜索走哪里、回复读不读出来",
