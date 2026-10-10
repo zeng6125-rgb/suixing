@@ -884,6 +884,13 @@ class AgentEngine(
         // StringBuilder died with its round, which is how a stopped run showed the user a
         // paragraph that afterwards existed nowhere — not on screen, not on disk.
         var streamed = StringBuilder()
+        // The same argument as [streamed], for the thinking: a stopped run kept its paragraph but
+        // lost the chain that produced it, so the card came back with an empty reasoning block.
+        var reasoning = StringBuilder()
+        // Tool calls the model asked for that no result has come back for yet. A stop between the
+        // two leaves the call in the transcript with nothing answering it, which drew as an empty
+        // tool card — indistinguishable from a tool that returned nothing at all.
+        var openCalls: List<StoredToolCall> = emptyList()
         try {
             while (roundLimit <= 0 || round < roundLimit) {
                 round++
@@ -892,6 +899,8 @@ class AgentEngine(
                 // and a stop anywhere in this round — even one thrown out of the compression
                 // below — must not hand the same paragraph to [finishCancelled] a second time.
                 streamed = StringBuilder()
+                reasoning = StringBuilder()
+                openCalls = emptyList()
                 // Steering lands here, on the boundary between two model turns: the
                 // model has finished the previous turn and has not been asked for the
                 // next one, which is the only moment the wire can be edited safely.
@@ -905,7 +914,7 @@ class AgentEngine(
                 // line that outlives its step reads as a stall.
                 liveLine = ""
                 if (cancelled.get()) {
-                    finishCancelled(onEvent, streamed)
+                    finishCancelled(onEvent, streamed, reasoning, openCalls)
                     return produced
                 }
 
@@ -941,6 +950,7 @@ class AgentEngine(
                         onReasoning = { piece ->
                             if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
                             thinkingChars.addAndGet(piece.length)
+                            reasoning.append(piece)
                             liveLine = "思考中…"
                             onEvent(AgentEvent.ReasoningDelta(piece))
                         },
@@ -950,7 +960,7 @@ class AgentEngine(
                     // Cancelling a call surfaces as an IOException on the reading
                     // thread. It is a stop, not a failure, so it is reported as one.
                     if (cancelled.get()) {
-                            finishCancelled(onEvent, streamed)
+                            finishCancelled(onEvent, streamed, reasoning, openCalls)
                         return produced
                     }
                     // An immediate steer aborts the stream the same way, but nothing is
@@ -969,7 +979,7 @@ class AgentEngine(
                 // still being serialised — so nothing reads the flag, and this round would stream
                 // to the end and report the whole run as Done.
                 if (cancelled.get()) {
-                    finishCancelled(onEvent, streamed)
+                    finishCancelled(onEvent, streamed, reasoning, openCalls)
                     return produced
                 }
                 val elapsed = System.currentTimeMillis() - turnStartedAt
@@ -1027,14 +1037,18 @@ class AgentEngine(
                 spans += WireSpan(assistant.id, assistantAt, wire.size)
                 // This round's text is a message now, so a stop from here on (before a tool call,
                 // or while one is running) must not hand the same paragraph to [finishCancelled]
-                // again: it would land in the transcript as a second, identical bubble.
+                // again: it would land in the transcript as a second, identical bubble. The
+                // reasoning goes with it — it is already on this message — while the calls it asked
+                // for are now the ones a stop would leave unanswered.
                 streamed = StringBuilder()
+                reasoning = StringBuilder()
+                openCalls = assistant.toolCalls
 
                 for (call in turn.toolCalls) {
                     // Checked before every call, not after the batch: a stop means the
                     // tools the model asked for in the same breath do not run either.
                     if (cancelled.get()) {
-                            finishCancelled(onEvent, streamed)
+                            finishCancelled(onEvent, streamed, reasoning, openCalls)
                         return produced
                     }
                     val argsPreview = call.arguments.take(600)
@@ -1074,6 +1088,8 @@ class AgentEngine(
                     )
                     produced += stored
                     onEvent(AgentEvent.ToolMessage(stored))
+                    // Answered, so a stop from here on must not answer it a second time.
+                    openCalls = openCalls.filterNot { it.id == call.id }
                     val toolAt = wire.size
                     wire += ChatMessage.tool(call.id, output)
                     spans += WireSpan(stored.id, toolAt, wire.size)
@@ -1106,13 +1122,14 @@ class AgentEngine(
             // would kill the finally of whoever merely asked for a run. A cancellation that came
             // from the caller's own scope is the other thing entirely and still travels as one.
             if (cancelled.get() && caller?.isCancelled != true) {
-                finishCancelled(onEvent, streamed)
+                finishCancelled(onEvent, streamed, reasoning, openCalls)
                 return produced
             }
             // The caller's scope is gone: the stream still has to be taken down, the paragraph
             // that already arrived still has to be kept, and the state still has to say what
             // happened — by hand, because this branch rethrows.
-            emitPartial(onEvent, streamed)
+            emitPartial(onEvent, streamed, reasoning)
+            unansweredToolMessages(onEvent, openCalls)
             publish(RunState.Cancelled(stats()))
             throw cancellation
         } catch (error: Throwable) {
@@ -1122,7 +1139,7 @@ class AgentEngine(
             // screen for a button the user just pressed, and the caller would be handed a
             // throwable it turns into one too.
             if (cancelled.get()) {
-                finishCancelled(onEvent, streamed)
+                finishCancelled(onEvent, streamed, reasoning, openCalls)
                 return produced
             }
             publish(RunState.Failed(error.message ?: error::class.java.simpleName))
@@ -1147,10 +1164,46 @@ class AgentEngine(
      * reader of that list is the read-aloud path, and reading a stopped half-sentence out loud is
      * not what the stop button means.
      */
-    private fun finishCancelled(onEvent: (AgentEvent) -> Unit, partial: CharSequence) {
-        emitPartial(onEvent, partial)
+    private fun finishCancelled(
+        onEvent: (AgentEvent) -> Unit,
+        partial: CharSequence,
+        reasoning: CharSequence = "",
+        unanswered: List<StoredToolCall> = emptyList(),
+    ) {
+        emitPartial(onEvent, partial, reasoning)
+        // A call the model asked for and the stop arrived before: the transcript keeps the request,
+        // so something has to answer it. Without a result the card drew empty, which reads as a tool
+        // that returned nothing rather than as one that never ran — and the next run's replay would
+        // drop the whole assistant turn for being unanswered.
+        unansweredToolMessages(onEvent, unanswered)
         onEvent(AgentEvent.Finished(""))
         publish(RunState.Cancelled(stats()))
+    }
+
+    /**
+     * Answers, in the transcript, the tool calls a stop left hanging.
+     *
+     * The output says what happened rather than pretending the tool ran: a card that says 「已中断」
+     * is the truth, and it is also what keeps the assistant turn in the next run's replay —
+     * [sanitize] drops an assistant message whose `tool_calls` nobody answered, so silence here cost
+     * the model the whole turn.
+     */
+    private fun unansweredToolMessages(onEvent: (AgentEvent) -> Unit, calls: List<StoredToolCall>) {
+        calls.forEach { call ->
+            onEvent(
+                AgentEvent.ToolMessage(
+                    StoredMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = Roles.TOOL,
+                        toolName = call.name,
+                        toolArgs = call.arguments,
+                        toolOutput = INTERRUPTED_TOOL_OUTPUT,
+                        toolOk = false,
+                        toolCallId = call.id,
+                    ),
+                ),
+            )
+        }
     }
 
     /**
@@ -1159,15 +1212,19 @@ class AgentEngine(
      * Empty means the round's text is already a message of its own (the tool-call branch clears
      * the round's buffer the moment it emits one), so nothing is sent — otherwise the user would
      * see the same paragraph twice.
+     *
+     * [reasoning] travels with it for the same reason [partial] does: a stop used to keep the answer
+     * and throw the thinking away, so the card came back with an empty chain-of-thought block.
      */
-    private fun emitPartial(onEvent: (AgentEvent) -> Unit, partial: CharSequence) {
-        if (partial.isBlank()) return
+    private fun emitPartial(onEvent: (AgentEvent) -> Unit, partial: CharSequence, reasoning: CharSequence) {
+        if (partial.isBlank() && reasoning.isBlank()) return
         onEvent(
             AgentEvent.AssistantMessage(
                 StoredMessage(
                     id = UUID.randomUUID().toString(),
                     role = Roles.ASSISTANT,
                     text = partial.toString(),
+                    reasoning = reasoning.toString().takeIf { it.isNotBlank() },
                 ),
             ),
         )
@@ -1656,6 +1713,14 @@ private const val MAX_TOOL_OUTPUT = 8_000
  * function and has to price images the same way.
  */
 private const val IMAGE_TOKENS = 1000
+
+/**
+ * What a tool card says when the user stopped the run before the tool answered.
+ *
+ * It is a result, not a placeholder: the transcript has to answer the call it recorded, or the card
+ * draws empty and the next run's replay drops the whole assistant turn for being unanswered.
+ */
+private const val INTERRUPTED_TOOL_OUTPUT = "（已中断：任务被停止，这次调用没有结果）"
 
 /**
  * The same estimate for a stored message, used by the context trimmer: its text, plus a flat

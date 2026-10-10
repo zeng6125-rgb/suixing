@@ -647,6 +647,9 @@ fun ChatScreen(
                         EmptyHero(onPick = { setDraft(text = it) })
                     }
                 } else {
+                    // In px, converted once: a raw pixel threshold would be a couple of
+                    // millimetres on a dense screen and a centimetre on a sparse one.
+                    val releaseDragPx = with(LocalDensity.current) { RELEASE_DRAG_DP.toPx() }
                     LazyColumn(
                         state = listState,
                         modifier = Modifier
@@ -669,9 +672,19 @@ fun ChatScreen(
                                         val down = awaitPointerEvent(PointerEventPass.Initial)
                                         if (down.changes.none { it.pressed }) continue
                                         val pressedAt = SystemClock.uptimeMillis()
-                                        while (true) {
+                                        val downY = down.changes.first().position.y
+                                        var released = false
+                                        while (!released) {
                                             val next = awaitPointerEvent(PointerEventPass.Initial)
-                                            if (next.changes.none { it.pressed }) break
+                                            released = next.changes.none { it.pressed }
+                                            // A small upward move releases the follow before
+                                            // the list's own touch slop ever starts a scroll:
+                                            // waiting for isScrollInProgress meant a short
+                                            // drag did nothing and the pin kept yanking the
+                                            // view back down. Observed only, never consumed.
+                                            if (!released && downY - next.changes.first().position.y > releaseDragPx) {
+                                                following = false
+                                            }
                                         }
                                         if (SystemClock.uptimeMillis() - pressedAt >= HOLD_TO_SELECT_MS) {
                                             following = false
@@ -3514,26 +3527,6 @@ private fun Composer(
             },
     ) {
         Column {
-            // Zero-height anchor at the stack's top: the generation popup hangs off
-            // it, bottom-aligned, so it opens upward over the transcript instead of
-            // over the keys it belongs to.
-            Box(Modifier.fillMaxWidth().height(0.dp)) {
-                // Composed whether or not it is open: a card that is taken down the moment
-                // it is dismissed has no time to animate out, and this one has to (see
-                // MenuCard). When closed it draws nothing at all.
-                GenerationSheet(
-                    settings = settings,
-                    assistantId = assistantId,
-                    conversationProviderId = conversationProviderId,
-                    conversationModel = conversationModel,
-                    conversationReasoningEffort = conversationReasoningEffort,
-                    onChooseReasoning = onChooseReasoning,
-                    visible = sheetOpen,
-                    onPickModel = onPickModel,
-                    onOpenSettings = onOpenSettings,
-                    onDismiss = { sheetOpen = false },
-                )
-            }
             // The jump-to-latest button rides the stack's own top: 12dp above whatever
             // the next row is, end-aligned, so it can never hide behind the pill.
             if (showJump) {
@@ -3712,9 +3705,12 @@ private fun Composer(
                         MenuCard(
                             visible = menuOpen,
                             onDismiss = { menuOpen = false },
-                            // Opens upward from the button it belongs to.
+                            // Opens upward from the button it belongs to. BottomStart puts the
+                            // popup's bottom edge on the anchor's bottom edge, so the offset has
+                            // to clear the whole 40dp button plus the 8dp of air — -8dp alone
+                            // left the card sitting on top of the plus button.
                             alignment = Alignment.BottomStart,
-                            offset = with(density) { IntOffset(0, -8.dp.roundToPx()) },
+                            offset = with(density) { IntOffset(0, -48.dp.roundToPx()) },
                             modifier = Modifier.widthIn(max = 200.dp),
                         ) {
                             MenuItemRow(ImageVector.vectorResource(R.drawable.ic_image), "图片") {
@@ -3765,11 +3761,25 @@ private fun Composer(
                     // starve the name. The name itself caps at 160dp and ellipsizes after
                     // that, which is the one truncation the user asked for.
                     Box(Modifier.weight(1f)) {
-                        // Measured on the caption, not on the flexible box: the sheet is
-                        // centred on the model button, and the box now spans the free space
-                        // the controls leave.
-                        Box(Modifier) {
-                            UnifiedSelector(
+                        // The sheet hangs off the capsule itself, not off a probe at the top
+                        // of the stack: anchored there it opened above the whole composer, and
+                        // the user asked for it above the model button. Right-aligned inside
+                        // the free space so the capsule sits against the ring, as asked.
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                            Box {
+                                GenerationSheet(
+                                    settings = settings,
+                                    assistantId = assistantId,
+                                    conversationProviderId = conversationProviderId,
+                                    conversationModel = conversationModel,
+                                    conversationReasoningEffort = conversationReasoningEffort,
+                                    onChooseReasoning = onChooseReasoning,
+                                    visible = sheetOpen,
+                                    onPickModel = onPickModel,
+                                    onOpenSettings = onOpenSettings,
+                                    onDismiss = { sheetOpen = false },
+                                )
+                                UnifiedSelector(
                                 settings = settings,
                                 assistantId = assistantId,
                                 conversationProviderId = conversationProviderId,
@@ -3783,6 +3793,7 @@ private fun Composer(
                                     onPrefetchWindows()
                                 },
                             )
+                        }
                         }
                     }
                     // Left of the mic, where the user asked for it: the mic is the control
@@ -5138,6 +5149,9 @@ private const val FOLLOW_SCROLL_PX = 200_000f
  * the position at all.
  */
 private const val HOLD_TO_SELECT_MS = 450L
+
+/** How far an upward drag has to travel to release the follow, in dp (converted per density). */
+private val RELEASE_DRAG_DP = 12.dp
 
 /** Largest opposite-direction inset change treated as the platform animation's rebound. */
 private const val REBOUND_CLAMP_PX = 24

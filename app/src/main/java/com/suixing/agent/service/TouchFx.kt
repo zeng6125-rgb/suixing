@@ -6,11 +6,14 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.RectF
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.DisplayMetrics
 import android.view.View
 import android.view.WindowManager
 import androidx.lifecycle.Lifecycle
@@ -63,18 +66,26 @@ private const val FX_BREATH_MAX_ALPHA = 0.55f
  * next tap — and short enough that a run waiting on a model or a long shell command goes dark
  * while the user is watching it. The light means 「it is operating the phone right now」; a run in
  * flight is not the same thing, which is what the first version got wrong.
+ *
+ * Four seconds read as 「灭得太快」: a model turn between two taps routinely overruns it, so the
+ * light went out mid-sequence and came back, which looks like a stutter rather than a state. Six
+ * covers that turn without turning the light into something that lingers after the run is over.
  */
-private const val FX_BREATH_HOLD_MS = 4000L
+private const val FX_BREATH_HOLD_MS = 6000L
 
 /**
- * The screen's own shape: a radius the size of a modern panel's corners, and a few px in from
- * the edge so the stroke is neither half-eaten by those corners nor clipped by the window.
+ * The screen's own shape: a radius the size of a modern panel's corners.
  *
- * 52px read as 「不符合手机边缘」 on a 1080p panel whose corners are nearer 100px, and 8px of
- * inset left a visible gap between the light and the edge it is supposed to trace.
+ * 52px read as 「不符合手机边缘」 on a 1080p panel whose corners are nearer 100px.
+ *
+ * The inset is zero because the path is now built on the display's real bounds rather than on the
+ * view's measured size — see [displayBounds]. Centering the stroke on the true edge is what makes
+ * the light look like it comes off the screen instead of stopping short of it; the outer half of
+ * each glow pass is clipped by the window, and the inner half is the glow the user sees. An inset
+ * of 10px left a visible gap between the light and the edge it is supposed to trace.
  */
 private const val FX_EDGE_RADIUS_PX = 96f
-private const val FX_EDGE_INSET_PX = 10f
+private const val FX_EDGE_INSET_PX = 0f
 
 /** The three passes of [TouchFx]'s glow: stroke width as a multiple of the edge stroke, and how
  * much of the requested alpha each one carries. Widest and faintest first, so the bright line
@@ -150,6 +161,22 @@ object TouchFx {
     private var appContext: Context? = null
 
     /**
+     * The connected [SuixingAccessibilityService], set from [bindService] and cleared from
+     * [unbindService].
+     *
+     * Held separately from the `context` each entry point passes in, because the callers differ —
+     * the gesture methods pass the service itself, the tools pass the application context — but
+     * the window should be created from the service whenever one is connected, no matter who asked
+     * for the effect. An accessibility-overlay window is the whole point of this rewrite: it needs
+     * no SYSTEM_ALERT_WINDOW permission and, unlike TYPE_APPLICATION_OVERLAY, MIUI does not hide it
+     * when the app goes to the background (which is exactly when the agent is operating another
+     * app and the user most needs to see it). Volatile: written on the main thread from the service
+     * lifecycle, read from [overlay] which may run on the main thread from a tool dispatcher.
+     */
+    @Volatile
+    private var serviceContext: Context? = null
+
+    /**
      * The runs that were in flight when the agent last drove the screen.
      *
      * Volatile because it is written from the tool dispatcher and read from the ticker on the
@@ -180,6 +207,52 @@ object TouchFx {
     private val traceWorker = Executors.newSingleThreadExecutor()
     private var traceFile: File? = null
     private var lastOverlayNote: String? = null
+
+    /**
+     * Called from [SuixingAccessibilityService.onServiceConnected]: from here on the effects can
+     * live in an accessibility overlay window, which is the version of this that actually works on
+     * MIUI. See [overlay] for why that matters.
+     */
+    fun bindService(service: Context) {
+        serviceContext = service
+        appContext = service.applicationContext
+        // A window created earlier from the application context is a TYPE_APPLICATION_OVERLAY one:
+        // it is up and drawing, but it is the kind MIUI hides in the background. Dropping it here
+        // means the next effect rebuilds it as an accessibility overlay, so turning the service on
+        // upgrades the effects without waiting for a process restart.
+        main.post { release("accessibility-connected") }
+    }
+
+    /**
+     * Called from [SuixingAccessibilityService.onUnbind] / [SuixingAccessibilityService.onDestroy].
+     *
+     * Not optional: the system destroys an accessibility-overlay window when its service
+     * disconnects, without telling the app. Leaving [view] pointing at that dead window would make
+     * every later effect a silent no-op — [overlay] would happily return the stale view — which is
+     * precisely the 「要显示的时候不显示」 failure this rewrite is meant to remove. Clearing it lets
+     * the next effect rebuild a window from whatever host is still available.
+     */
+    fun unbindService(context: Context) {
+        serviceContext = null
+        main.post { release("accessibility-disconnected") }
+    }
+
+    /**
+     * Takes the window down and forgets it.
+     *
+     * Distinct from [detach]: this runs even while the light is breathing, because a window whose
+     * host service has gone away has to come down whatever state the effect is in. Runs on the main
+     * thread only, and a removal the system refuses is ignored — there is nothing to do about a
+     * window that is already gone.
+     */
+    private fun release(reason: String) {
+        val fx = view ?: return
+        val app = appContext
+        view = null
+        manager = null
+        runCatching { fx.context.getSystemService(WindowManager::class.java)?.removeView(fx) }
+        if (app != null) noteOverlay(app, "released（$reason）")
+    }
 
     fun tap(context: Context, x: Float, y: Float) {
         trace(context, "entry=tap x=$x y=$y")
@@ -402,22 +475,51 @@ object TouchFx {
         fx.flashEdge()
     }
 
+    /**
+     * The window the effects are drawn in, created on demand.
+     *
+     * Two hosts, in order of preference:
+     *
+     * 1. **Accessibility overlay** — [TYPE_ACCESSIBILITY_OVERLAY], added from the connected
+     *    [SuixingAccessibilityService]'s own context. This needs no SYSTEM_ALERT_WINDOW permission
+     *    at all (the accessibility service is already a system-trusted host, so the window is
+     *    granted by virtue of the service being enabled), and — the reason it exists here — MIUI
+     *    and its kin do **not** hide it when the app leaves the foreground. TYPE_APPLICATION_OVERLAY
+     *    is hidden, which is why the effects vanished exactly when the agent was operating another
+     *    app unless the user granted 「后台弹出界面」. This is the path that makes the effects
+     *    work without that setting.
+     * 2. **Application overlay** — [TYPE_APPLICATION_OVERLAY] from the application context, which
+     *    needs [Settings.canDrawOverlays]. Kept as the fallback so effects still exist when
+     *    gestures arrive over the privileged shell route with the accessibility service off; it is
+     *    visible while the app is in front, which is better than nothing.
+     *
+     * Both use the same flags, and the same [FxView], so the drawing is identical — only the host
+     * differs. A host that refuses the window is traced rather than swallowed: a window the system
+     * rejected and one that was never asked for are the two things a 「没有特效」 report has to be
+     * told apart from.
+     */
     private fun overlay(context: Context): FxView? {
         view?.let { return it }
-        if (!Settings.canDrawOverlays(context)) {
-            noteOverlay(context, "denied（没有悬浮窗权限）")
+        val host = serviceContext ?: context.applicationContext
+        val accessibility = serviceContext != null
+        if (!accessibility && !Settings.canDrawOverlays(context)) {
+            noteOverlay(context, "denied（没有悬浮窗权限，且无障碍服务未连接）")
             return null
         }
-        val windowManager = context.getSystemService(WindowManager::class.java)
+        val windowManager = host.getSystemService(WindowManager::class.java)
         if (windowManager == null) {
             noteOverlay(context, "failed（拿不到 WindowManager）")
             return null
         }
-        val fx = FxView(context) { detach() }
+        val fx = FxView(host, displayBounds(host)) { detach() }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            if (accessibility) {
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            } else {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            },
             // Never focusable and never touchable: the whole point is that the phone keeps
             // working normally underneath while the effect is drawn on top of it.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -434,13 +536,47 @@ object TouchFx {
         val added = runCatching { windowManager.addView(fx, params) }
         val error = added.exceptionOrNull()
         if (error != null) {
-            noteOverlay(context, "failed（addView: ${error.javaClass.simpleName}: ${error.message}）")
+            noteOverlay(
+                context,
+                "failed（${if (accessibility) "accessibility" else "application"}-overlay addView: " +
+                    "${error.javaClass.simpleName}: ${error.message}）",
+            )
             return null
         }
-        noteOverlay(context, "created")
+        noteOverlay(context, "created（${if (accessibility) "accessibility" else "application"}-overlay）")
         manager = windowManager
         view = fx
         return fx
+    }
+
+    /**
+     * The display's true bounds in px, which is what the edge light is drawn on.
+     *
+     * Not the view's measured size: an accessibility-overlay window is full-screen but its measured
+     * size lands a tick after the first draw, and an application-overlay one is laid out inside the
+     * system bars — either way the rounded rectangle came up short of the panel's edge, which is
+     * the 「没有完全覆盖好屏幕边缘」 report. The display bounds include the status bar and the
+     * gesture bar, so the light traces the whole screen from the first frame.
+     *
+     * [WindowManager.getCurrentWindowMetrics] from API 30; below that [Display.getRealSize], which
+     * is the pre-R name for the same physical extent. An empty result — no display attached, which
+     * happens on a service that is being torn down — falls through to the app's own metrics rather
+     * than drawing nothing.
+     */
+    private fun displayBounds(context: Context): Rect {
+        val manager = context.getSystemService(WindowManager::class.java)
+        if (manager != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bounds = runCatching { manager.currentWindowMetrics.bounds }.getOrNull()
+                if (bounds != null && !bounds.isEmpty) return bounds
+            } else {
+                val size = android.graphics.Point()
+                runCatching { manager.defaultDisplay.getRealSize(size) }
+                if (size.x > 0 && size.y > 0) return Rect(0, 0, size.x, size.y)
+            }
+        }
+        val metrics = context.resources.displayMetrics
+        return Rect(0, 0, metrics.widthPixels, metrics.heightPixels)
     }
 
     /** Added per gesture and removed when the last effect ends, so nothing is left over. */
