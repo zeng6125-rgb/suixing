@@ -539,27 +539,6 @@ fun ChatScreen(
     // 0.8.15-0.8.17; the viewport-height variants that replaced it (single compensation, then a
     // frame loop) each regressed one direction of the transition, so it comes back as it was.
     val keyboardInset = WindowInsets.ime.getBottom(LocalDensity.current)
-    // Diagnostic trace of the platform's own inset sequence plus our reaction to it, flushed to
-    // files/ime-trace.log once a transition settles. The screen recorder cannot resolve a 120Hz
-    // display's single-frame rebound at 10fps; this can. Removed once the dip is understood.
-    val insetTrace = remember { StringBuilder() }
-    LaunchedEffect(keyboardInset) {
-        insetTrace.append(
-            "${SystemClock.uptimeMillis()} inset=$keyboardInset " +
-                "viewport=${listState.layoutInfo.viewportSize.height} " +
-                "off=${listState.firstVisibleItemIndex}:${listState.firstVisibleItemScrollOffset}\n",
-        )
-        delay(400)
-        val text = insetTrace.toString()
-        if (text.isNotEmpty()) {
-            insetTrace.setLength(0)
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    File(Core.appContext.filesDir, "ime-trace.log").appendText(text)
-                }
-            }
-        }
-    }
     // One keyboard transition has one direction. The platform's inset animation ends with a
     // small rebound of a few pixels the other way, and following it faithfully is what put a
     // visible one-frame hitch at the end of every close on a 120Hz display. Opposite-direction
