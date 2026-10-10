@@ -1,5 +1,8 @@
 package com.suixing.agent.ui
 
+import android.app.Activity
+import android.graphics.drawable.ColorDrawable
+import androidx.compose.ui.graphics.toArgb
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -194,10 +197,21 @@ fun SuixingApp() {
         // the strip behind the keyboard was left unpainted and the window's own white showed
         // through the keyboard's rounded corners as a pale seam. This box is not inset, so
         // everything the keyboard covers is already the app's own background.
+        // The keyboard's rounded corners reveal whatever the WINDOW paints, and the window's
+        // static background resource can never match a theme whose surface changes with palette
+        // and dark mode — that mismatch was the pale seam. Sync the window to the live surface.
+        val activity = (LocalContext.current as? Activity)
+        val surfaceArgb = MaterialTheme.colorScheme.surface.toArgb()
+        LaunchedEffect(surfaceArgb) {
+            activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
+        }
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
             Scaffold(
                 modifier = Modifier.imePadding(),
-                containerColor = MaterialTheme.colorScheme.background,
+                // surface, not background: the scaffold covers the strip behind the keyboard, and
+                // its white container was exactly the pale seam the keyboard's rounded corners
+                // revealed against the chat canvas.
+                containerColor = MaterialTheme.colorScheme.surface,
                 // Screens own their top inset (their headers paint behind the status
                 // bar) and the composer owns the bottom one, so the scaffold reserves
                 // nothing for itself.
