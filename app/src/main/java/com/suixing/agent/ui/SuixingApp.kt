@@ -205,7 +205,12 @@ fun SuixingApp() {
         LaunchedEffect(surfaceArgb) {
             activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
         }
+        // The strip behind the keyboard stays unpainted: other apps' rounded keyboard corners
+        // show the wallpaper there, and ours showed our own canvas because the root painted the
+        // whole window. Insetting the painted layer by the IME (and making the window background
+        // transparent in MainActivity) is the adaptation they have and we were missing.
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+            Box(Modifier.fillMaxSize())
             Scaffold(
                 modifier = Modifier.imePadding(),
                 // surface, not background: the scaffold covers the strip behind the keyboard, and

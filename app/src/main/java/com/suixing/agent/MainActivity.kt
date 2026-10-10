@@ -59,13 +59,13 @@ class MainActivity : ComponentActivity() {
                 // but a solid navigation bar colour is exactly the grey band under the
                 // gesture pill the user photographed.
                 window.navigationBarColor = Color.TRANSPARENT
-                // The window's own background is what the system draws in the strip the
-                // keyboard covers, so it shows through the keyboard's rounded corners. Left at
-                // the platform default it is a pale seam against the app's background; set here
-                // per theme because the app's theme is a setting of its own, not the system's.
-                window.setBackgroundDrawable(
-                    ColorDrawable(if (dark) DARK_BACKGROUND else LIGHT_BACKGROUND),
-                )
+                // Transparent, and it has to stay that way: the keyboard's rounded corners reveal
+                // whatever the window paints behind them, and the apps the user held up as
+                // adapted show the wallpaper there. Painting the theme's surface here (as an
+                // earlier attempt did) only swapped one wrong colour for another — the seam is
+                // not a colour mismatch to fix but an area the window must not paint at all.
+                // The chat canvas is drawn by the root composable, inset by the IME.
+                window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             }
             SuixingTheme(
                 darkTheme = dark,
