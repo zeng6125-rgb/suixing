@@ -30,8 +30,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.exclude
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -187,7 +190,11 @@ fun SuixingApp() {
         // the activity and dropped the user on the home screen. The assistant sheet is a
         // window of its own, so it keeps handling BACK while it is up.
         BackHandler(enabled = drawerOpen) { drawerOpen = false }
-        Box(Modifier.fillMaxSize()) {
+        // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
+        // the strip behind the keyboard was left unpainted and the window's own white showed
+        // through the keyboard's rounded corners as a pale seam. This box is not inset, so
+        // everything the keyboard covers is already the app's own background.
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             Scaffold(
                 modifier = Modifier.imePadding(),
                 containerColor = MaterialTheme.colorScheme.background,
@@ -384,7 +391,7 @@ private fun BoxScope.Drawer(
                 Modifier
                     .fillMaxHeight()
                     .statusBarsPadding()
-                    .navigationBarsPadding()
+                    .windowInsetsPadding(WindowInsets.navigationBars.exclude(WindowInsets.ime))
                     // The keyboard can be up when the drawer is opened mid-sentence: the
                     // panel keeps clear of it the same way the shell does.
                     .imePadding()

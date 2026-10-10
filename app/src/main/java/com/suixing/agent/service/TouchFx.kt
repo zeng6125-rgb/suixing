@@ -57,6 +57,16 @@ private const val FX_BREATH_MIN_ALPHA = 0.22f
 private const val FX_BREATH_MAX_ALPHA = 0.55f
 
 /**
+ * How long the edge stays lit after the last driving action.
+ *
+ * Long enough to bridge the gap between two taps of one sequence — a tap, a screen settling, the
+ * next tap — and short enough that a run waiting on a model or a long shell command goes dark
+ * while the user is watching it. The light means 「it is operating the phone right now」; a run in
+ * flight is not the same thing, which is what the first version got wrong.
+ */
+private const val FX_BREATH_HOLD_MS = 4000L
+
+/**
  * The screen's own shape: a radius the size of a modern panel's corners, and a few px in from
  * the edge so the stroke is neither half-eaten by those corners nor clipped by the window.
  *
@@ -64,7 +74,13 @@ private const val FX_BREATH_MAX_ALPHA = 0.55f
  * inset left a visible gap between the light and the edge it is supposed to trace.
  */
 private const val FX_EDGE_RADIUS_PX = 96f
-private const val FX_EDGE_INSET_PX = 3f
+private const val FX_EDGE_INSET_PX = 10f
+
+/** The three passes of [TouchFx]'s glow: stroke width as a multiple of the edge stroke, and how
+ * much of the requested alpha each one carries. Widest and faintest first, so the bright line
+ * sits inside a soft band instead of on top of a hard edge. */
+private val FX_GLOW_WIDTHS = floatArrayOf(4f, 2f, 1f)
+private val FX_GLOW_WEIGHTS = floatArrayOf(0.22f, 0.45f, 1f)
 
 /**
  * The light is a state the user reads at a glance, not an animation to admire: 25fps while it
@@ -269,14 +285,13 @@ object TouchFx {
             // screen with the one that drove does not earn the trip on its own.
             val drivingLeft = departed.any { it in drivingIds }
             if (drivingLeft && running.none { it in drivingIds }) returnToApp()
-            // An id that ended stops counting as driving. The grace window below — not a stale id —
-            // is what carries the light across the boundary, so a run that only chats afterwards
-            // does not inherit it. Racing an action can only drop an id, which the grace covers.
+            // An id that ended stops counting as driving.
             drivingIds = drivingIds - departed
-            val lit = app != null &&
-                (running.any { it in drivingIds } ||
-                    now - lastDrivingAt < FX_DRIVING_GRACE_MS ||
-                    (FX_JOB_DRIVING_ID in drivingIds && now < jobDrivingUntil))
+            // The light follows the actions, not the run: 「agent 没有操作的时候仍旧显示」 was the
+            // complaint, and a run spends most of its life waiting on a model or a tool. Four
+            // seconds is long enough to bridge the gap between two taps of one sequence and short
+            // enough that an idle run goes dark while the user watches.
+            val lit = app != null && now - lastDrivingAt < FX_BREATH_HOLD_MS
             if (lit && app != null) {
                 overlay(app)?.setBreathing(true)
                 main.postDelayed(this, FX_BREATH_TICK_MS)
@@ -407,6 +422,10 @@ object TouchFx {
             // working normally underneath while the effect is drawn on top of it.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                // In screen, not merely no-limits: without it the window is laid out inside the
+                // system bars, so the glow started below the status bar and stopped above the
+                // gesture bar — 「边缘也不对，没有包括状态栏和手势条区域」.
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         )
@@ -572,11 +591,7 @@ private class FxView(context: Context, private val onIdle: () -> Unit) : View(co
 
     private fun drawEdge(canvas: Canvas, elapsed: Long) {
         val progress = (elapsed.toFloat() / FX_EDGE_DURATION_MS).coerceIn(0f, 1f)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = FX_EDGE_STROKE_PX
-        paint.color = FX_COLOR_BRAND
-        paint.alpha = (0.6f * (1f - progress) * 255).toInt()
-        canvas.drawPath(edgeShape(), paint)
+        drawGlow(canvas, edgeShape(), 0.7f * (1f - progress))
     }
 
     /**
@@ -590,11 +605,27 @@ private class FxView(context: Context, private val onIdle: () -> Unit) : View(co
         val phase = ((now - breathStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
         val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
         val alpha = FX_BREATH_MIN_ALPHA + (FX_BREATH_MAX_ALPHA - FX_BREATH_MIN_ALPHA) * wave
+        drawGlow(canvas, edgeShape(), alpha)
+    }
+
+    /**
+     * One edge, drawn as light rather than as a line.
+     *
+     * Three passes from wide and faint to narrow and bright: a single stroke reads as a rule drawn
+     * around the screen — the user's verdict on the first version was 「不太明显」 and then, when it
+     * was made thicker, that it still looked like a box. Stacking strokes is what turns it into a
+     * glow that falls off inward, which is the effect they asked for.
+     */
+    private fun drawGlow(canvas: Canvas, path: Path, alpha: Float) {
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = FX_EDGE_STROKE_PX
         paint.color = FX_COLOR_BRAND
-        paint.alpha = (alpha * 255).toInt()
-        canvas.drawPath(edgeShape(), paint)
+        paint.strokeCap = Paint.Cap.ROUND
+        for (pass in FX_GLOW_WIDTHS.indices) {
+            paint.strokeWidth = FX_EDGE_STROKE_PX * FX_GLOW_WIDTHS[pass]
+            paint.alpha = (alpha * FX_GLOW_WEIGHTS[pass] * 255f).toInt().coerceIn(0, 255)
+            if (paint.alpha <= 0) continue
+            canvas.drawPath(path, paint)
+        }
     }
 
     /**

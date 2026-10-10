@@ -57,8 +57,10 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -361,7 +363,11 @@ fun ChatScreen(
     // The run caption's text, and whether it carries a clock: the compression note is a
     // fact about the context rather than progress, so it never shows a duration.
     val statsNote = state.stats?.note.orEmpty()
-    val liveStatusText = statsNote.ifEmpty { state.status.ifBlank { "正在思考…" } }
+    val liveStatusText = statsNote.ifEmpty {
+        // No ellipsis: 「正在思考…」 was read as a truncation of something longer. The line
+        // already says the state, and the clock that follows says how long it has held.
+        state.status.ifBlank { "正在思考中" }
+    }
     // When the live run began, remembered per run so a switch away and back does not
     // restart the caption's clock. Written in an effect, never during composition.
     val runStartedAt = remember { mutableStateMapOf<String, Long>() }
@@ -467,6 +473,13 @@ fun ChatScreen(
             // Clamped by the list itself: a reply taller than the viewport should keep its
             // end on screen rather than its first line.
             listState.scrollBy(FOLLOW_SCROLL_PX)
+            // A second pass after the new item has been measured. The first scroll runs in the
+            // frame the item was added, when its height is still unknown, so the end it lands on
+            // is short by exactly the height of what just appeared — which is how the status
+            // line of a fresh question ended up under the composer.
+            withFrameNanos { }
+            listState.scrollToItem(itemCount - 1)
+            listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
         }
@@ -491,7 +504,12 @@ fun ChatScreen(
         withFrameNanos { }
         programmatic = true
         try {
-            listState.scrollToItem(itemCount - 1)
+            // Animated, not instant: the platform animates the keyboard itself over ~200ms,
+            // and where a ROM hands us the inset as a single jump an instant pin moves the
+            // last card in one frame while the keyboard is still rising — the stiffness the
+            // user reported when the keyboard opened (going down was already fine). Each new
+            // inset cancels the previous animation and continues from where it got to.
+            listState.animateScrollToItem(itemCount - 1)
             listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
@@ -719,12 +737,19 @@ fun ChatScreen(
                                     )
                                     // 8dp under the card: the run's progress belongs to the
                                     // bubble it describes, and 3dp read as cramped against it.
+                                    // 8dp under the card and 8dp under the caption itself: the
+                                    // line was top-heavy, sitting 8 above and 0 below while the
+                                    // list's own 16dp spacing only applied after it.
                                     if (state.runningHere) {
                                         RunStatusLine(
                                             text = liveStatusText,
                                             startedAt = runStartedAt[runKey] ?: 0L,
                                             timed = statsNote.isEmpty(),
-                                            modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                                            modifier = Modifier.padding(
+                                                start = 4.dp,
+                                                top = 8.dp,
+                                                bottom = 8.dp,
+                                            ),
                                         )
                                     }
                                 }
@@ -1831,7 +1856,9 @@ private fun MetricButton(icon: ImageVector, text: String, label: String, onClick
             imageVector = icon,
             contentDescription = label,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(14.dp),
+            // 15dp, the same as the copy and edit icons beside it: at 14dp these two read as a
+            // size smaller than the controls they sit next to.
+            modifier = Modifier.size(15.dp),
         )
         Text(
             text = text,
@@ -1976,10 +2003,13 @@ private fun AssistantRow(
                                 expansion = reasoningExpansion,
                                 reasoningTokens = part.tokens,
                                 elapsedMs = part.elapsedMs,
-                                // Thinking is the reason to run a thinking model at all, so
-                                // a live block starts open; it settles into the setting's
-                                // state once the reply is stored and drawn as its message.
-                                startExpanded = expandReasoning || streaming,
+                                // Thinking is the reason to run a thinking model at all, so a
+                                // live block starts open. A stored one does not, whatever the
+                                // 思考过程默认展开 setting says: that setting is about watching
+                                // thoughts arrive, and honouring it here is what kept re-opening
+                                // blocks the user had already watched fold. Anything the user
+                                // opened by hand is in the expansion table and still wins.
+                                startExpanded = streaming && expandReasoning,
                                 maxHeight = reasoningMaxHeight,
                             )
                             if (!last) Spacer(Modifier.height(10.dp))
@@ -2051,8 +2081,10 @@ private fun AssistantRow(
                         onBranch = onBranch,
                         onRegenerate = onRegenerate,
                     )
-                    // The round's own clock and cost sit right of 「重新回答」: the same row the
-                    // branch arrows live in, which is where this card's controls already are.
+                    Spacer(Modifier.weight(1f))
+                    // The round's clock and cost, right-aligned with the card's own copy and
+                    // edit controls: they are all "about this answer", and the row reads as one
+                    // group when they share the right edge.
                     TurnMetrics(
                         // The run's own clock when we have it: one round's call is not what
                         // the status line counted while the answer was arriving.
@@ -2062,7 +2094,6 @@ private fun AssistantRow(
                         completionTokens = message.completionTokens,
                         cachedTokens = message.cachedTokens,
                     )
-                    Spacer(Modifier.weight(1f))
                     MessageActions(message = message, onEdit = onEdit)
                 }
             }
@@ -3388,7 +3419,11 @@ private fun Composer(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
+            // The gesture bar's strip, but never on top of the keyboard: when the keyboard is
+            // up it already covers that strip, and padding for it as well pushed the card a
+            // navigation bar's height above the keyboard — the gap that grew the moment the
+            // keyboard opened, while the keyboard-down spacing looked right.
+            .windowInsetsPadding(WindowInsets.navigationBars.exclude(WindowInsets.ime))
             .padding(horizontal = 16.dp)
             .padding(top = 6.dp, bottom = 12.dp)
             // Measured after the navigation-bar inset is applied, so the number the
@@ -4666,22 +4701,34 @@ private fun ContextRingCard(
     }
 }
 
-/** One label/value line of the ring's card. */
+/**
+ * One label/value line of the ring's and the metrics' cards.
+ *
+ * The value is right-aligned on a shared column rather than set beside the label: a stack of
+ * 「入 83.6k / 缓存 token 82.4k / 未缓存 1.2k」 reads as a table when the numbers line up on one
+ * edge, and as prose when each number starts wherever its label happened to end. The card
+ * itself is given a floor width so that column has room to exist.
+ */
 @Composable
 private fun RingDetail(label: String, value: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier.fillMaxWidth().widthIn(min = 168.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.width(12.dp))
         Text(
             text = value,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
         )
     }
 }
