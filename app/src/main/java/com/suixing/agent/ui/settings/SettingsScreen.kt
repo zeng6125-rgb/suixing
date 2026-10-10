@@ -1625,6 +1625,9 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                         SettingsGroupRow("用户记忆", "模型自己写下的长期备忘") {
                             onOpen("extension")
                         },
+                        SettingsGroupRow("用户画像", "用户写给模型的长期自述：称呼、偏好与习惯") {
+                            onOpen("profile")
+                        },
                     ),
                 )
             }

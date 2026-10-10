@@ -7,6 +7,7 @@ import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.TodoStore
+import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.voice.Speaker
 import kotlinx.serialization.json.JsonArray
@@ -134,11 +135,12 @@ class ToolRegistry private constructor() {
         speaker: Speaker,
         settings: SettingsRepository,
         memory: MemoryStore,
+        profile: UserProfileStore,
         jobs: JobStore,
         todos: TodoStore,
         schedules: ScheduleStore,
     ) : this() {
-        add(SystemTools(context, memory))
+        add(SystemTools(context, memory, profile))
         add(FileTools(context))
         add(ShellTools(context, capabilities))
         add(UiTools(context, capabilities))

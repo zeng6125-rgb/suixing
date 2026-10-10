@@ -7,6 +7,7 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.llm.AssistantTurn
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
@@ -48,6 +49,7 @@ class InterruptPersistenceTest {
         val capabilities: CapabilityHub,
         val skills: SkillStore,
         val memory: MemoryStore,
+        val profile: UserProfileStore,
     )
 
     private fun quietDeps(): Deps = Deps(
@@ -59,6 +61,7 @@ class InterruptPersistenceTest {
         memory = mockk {
             every { entries } returns MutableStateFlow(emptyMap<String, MemoryEntry>())
         },
+        profile = mockk { every { text } returns MutableStateFlow("") },
     )
 
     private fun registryWith(tool: Tool): ToolRegistry = mockk {
@@ -97,6 +100,7 @@ class InterruptPersistenceTest {
         capabilities = deps.capabilities,
         skills = deps.skills,
         memory = deps.memory,
+        profile = deps.profile,
         gate = ApprovalGate(),
         onEvent = onEvent,
     )

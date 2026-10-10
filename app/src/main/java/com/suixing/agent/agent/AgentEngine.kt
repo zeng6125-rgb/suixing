@@ -6,6 +6,7 @@ import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.StoredMessage
@@ -422,6 +423,7 @@ class AgentEngine(
         capabilities: CapabilityHub,
         skills: SkillStore,
         memory: MemoryStore,
+        profile: UserProfileStore,
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
         checkpoints: List<ContextCheckpoint> = emptyList(),
@@ -456,6 +458,7 @@ class AgentEngine(
                 capabilities = capabilities,
                 skills = skills,
                 memory = memory,
+                profile = profile,
                 gate = gate,
                 onEvent = onEvent,
                 onCheckpoint = onCheckpoint,
@@ -768,6 +771,7 @@ class AgentEngine(
         capabilities: CapabilityHub,
         skills: SkillStore,
         memory: MemoryStore,
+        profile: UserProfileStore,
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
         onCheckpoint: (ContextCheckpoint) -> Unit,
@@ -794,6 +798,7 @@ class AgentEngine(
                     capabilities = capabilities,
                     skills = skills,
                     memory = memory,
+                    profile = profile,
                     gate = gate,
                     onEvent = onEvent,
                     onCheckpoint = onCheckpoint,
@@ -829,6 +834,7 @@ class AgentEngine(
         capabilities: CapabilityHub,
         skills: SkillStore,
         memory: MemoryStore,
+        profile: UserProfileStore,
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
         onCheckpoint: (ContextCheckpoint) -> Unit,
@@ -846,7 +852,13 @@ class AgentEngine(
         // Built once and measured once: the system prompt carries the skills catalogue and
         // the memory entries, so it is both the largest fixed part of the prompt and the one
         // the user can do least about.
-        val systemText = systemPrompt(settings, registry, skills.catalog(skills.list()), memory.entries.value)
+        val systemText = systemPrompt(
+            settings,
+            registry,
+            skills.catalog(skills.list()),
+            memory.entries.value,
+            profile.text.value,
+        )
         breakSystem = systemText.length / 4
         wire += ChatMessage.system(systemText)
 
@@ -1613,6 +1625,7 @@ class AgentEngine(
         registry: ToolRegistry,
         skillCatalog: String,
         memory: Map<String, MemoryEntry>,
+        profile: String,
     ): String = buildString {
         append(settings.systemPrompt.trim())
         append("\n\n## 可用工具\n")
@@ -1625,6 +1638,13 @@ class AgentEngine(
         if (remembered.isNotBlank()) {
             append("\n\n## 你记得的事\n")
             append(remembered)
+        }
+        // 画像紧跟在记忆之后：两段都是模型该知道的事，但一段是模型自己写的、一段是用户写的，
+        // 分开才不会让模型把自己的笔记当成用户的自述。空画像整段不出现，不留一个空标题。
+        val about = profile.trim()
+        if (about.isNotBlank()) {
+            append("\n\n## 关于用户（画像）\n")
+            append(about)
         }
         append(
             "\n\n调用工具时，参数必须是合法 JSON 对象。一次可以并行调用多个工具。" +

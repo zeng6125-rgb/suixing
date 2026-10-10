@@ -12,6 +12,7 @@ import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.TodoStore
 import com.suixing.agent.data.UsageStore
+import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.mcp.McpManager
 import com.suixing.agent.service.SchedulerService
 import com.suixing.agent.skills.SkillStore
@@ -40,6 +41,10 @@ object Core {
 
     /** The agent's long-term notes: `filesDir/memory.json`, shared with the UI. */
     lateinit var memory: MemoryStore
+        private set
+
+    /** 用户画像：`filesDir/profile.md`，纯文本，每次请求都注入系统提示词。 */
+    lateinit var profile: UserProfileStore
         private set
 
     lateinit var capabilities: CapabilityHub
@@ -97,6 +102,7 @@ object Core {
             settings = SettingsRepository(appContext)
             chats = ChatRepository(appContext)
             memory = MemoryStore(appContext)
+            profile = UserProfileStore(appContext)
             capabilities = CapabilityHub(appContext, settings)
             skills = SkillStore(appContext)
             speaker = Speaker(appContext)
@@ -105,12 +111,16 @@ object Core {
             schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))
             usage = UsageStore(appContext)
             tools = ToolRegistry(
-                appContext, capabilities, skills, speaker, settings, memory, jobs, todos, schedules,
+                appContext, capabilities, skills, speaker, settings, memory, profile, jobs, todos,
+                schedules,
             )
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)
             engine = AgentEngine(scope = appScope)
-            appScope.launch { memory.load() }
+            appScope.launch {
+                memory.load()
+                profile.load()
+            }
             // Alarms are dropped when the app is updated or force-stopped, so aiming the next
             // one on every launch is what keeps a reminder set weeks ago from going quiet.
             SchedulerService.arm(appContext)

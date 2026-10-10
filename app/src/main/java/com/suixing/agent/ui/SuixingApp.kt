@@ -116,6 +116,7 @@ import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.AboutScreen
+import com.suixing.agent.ui.settings.ProfileScreen
 import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
@@ -348,6 +349,10 @@ fun SuixingApp() {
                     // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
                     composable("extension") {
                         ExtensionScreen(onBack = { navController.popBackStack() })
+                    }
+                    // 用户画像：一份纯文本自述（filesDir/profile.md），随每次请求注入提示词。
+                    composable("profile") {
+                        ProfileScreen(onBack = { navController.popBackStack() })
                     }
                     // 助手设置：抽屉那一行和设置页那一行打开的是同一张表。这张表是它自己的
                     // 窗口，退出它就回到推它上来的那一页。

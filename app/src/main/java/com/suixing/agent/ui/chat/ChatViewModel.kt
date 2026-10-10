@@ -1038,6 +1038,7 @@ class ChatViewModel : ViewModel() {
                     capabilities = Core.capabilities,
                     skills = Core.skills,
                     memory = Core.memory,
+                    profile = Core.profile,
                     gate = gate,
                     // Captured per run: the engine's events carry no chat id, so the
                     // closure is what keeps two parallel runs out of each other's

@@ -102,6 +102,7 @@ class SchedulerService : Service() {
                 capabilities = Core.capabilities,
                 skills = Core.skills,
                 memory = Core.memory,
+                profile = Core.profile,
                 gate = Core.gate,
                 onEvent = { event ->
                     when (event) {

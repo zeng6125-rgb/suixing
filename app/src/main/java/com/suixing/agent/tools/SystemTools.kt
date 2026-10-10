@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -27,6 +28,7 @@ import kotlin.coroutines.resume
 class SystemTools(
     private val context: Context,
     private val memory: MemoryStore,
+    private val profile: UserProfileStore,
 ) : ToolGroup() {
 
     override val specs: List<ToolSpec> = listOf(
@@ -90,6 +92,20 @@ class SystemTools(
             "读取本地长期备忘；不传 key 则返回全部。",
             Schema.objectOf(properties = listOf("key" to Schema.string("要读取的键名，可省略"))),
         ),
+        ToolSpec(
+            "profile_write",
+            "整篇覆盖写入用户画像：这是关于用户的长期画像（称呼/偏好/习惯/环境），" +
+                "不要写一次性任务信息。先 profile_read 看现有内容，避免覆盖掉还成立的旧内容。",
+            Schema.objectOf(
+                properties = listOf("text" to Schema.string("画像全文，会覆盖旧内容")),
+                required = listOf("text"),
+            ),
+        ),
+        ToolSpec(
+            "profile_read",
+            "读取用户画像全文。它已经随每次请求带上，需要原样引用或准备覆盖写入时再读。",
+            Schema.objectOf(emptyList()),
+        ),
     )
 
     override suspend fun execute(name: String, args: JsonObject): ToolResult = when (name) {
@@ -101,6 +117,8 @@ class SystemTools(
         "clipboard_write" -> clipboardWrite(args)
         "memory_write" -> memoryWrite(args)
         "memory_read" -> memoryRead(args)
+        "profile_write" -> profileWrite(args)
+        "profile_read" -> profileRead()
         else -> ToolResult.failure("未知工具：$name")
     }
 
@@ -251,6 +269,29 @@ class SystemTools(
         return ToolResult.success(
             map.entries.joinToString("\n") { "${it.key} = ${it.value.value}" },
         )
+    }
+
+    private suspend fun profileWrite(args: JsonObject): ToolResult {
+        val text = args.str("text").orEmpty()
+        // Checked here instead of leaving it to the store: `write` can only answer false, and
+        // the generic "写入失败" would send the model looking in the wrong place for a profile
+        // that is merely too long.
+        if (text.length > UserProfileStore.MAX_LENGTH) {
+            return ToolResult.failure(
+                "内容过长（${text.length}/${UserProfileStore.MAX_LENGTH} 字），请精简后再写",
+            )
+        }
+        val ok = profile.write(text)
+        return if (ok) {
+            ToolResult.success("已更新用户画像（${text.length} 字）")
+        } else {
+            ToolResult.failure("写入用户画像失败，检查应用存储空间")
+        }
+    }
+
+    private suspend fun profileRead(): ToolResult {
+        val text = profile.text.value
+        return ToolResult.success(text.ifBlank { "（用户画像还是空的）" })
     }
 
     private suspend fun <T> onMainThread(block: () -> T): T = suspendCancellableCoroutine { continuation ->

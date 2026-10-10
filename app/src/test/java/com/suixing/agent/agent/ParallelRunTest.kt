@@ -7,6 +7,7 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.llm.AssistantTurn
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.skills.Skill
@@ -105,6 +106,7 @@ class ParallelRunTest {
         val capabilities: CapabilityHub,
         val skills: SkillStore,
         val memory: MemoryStore,
+        val profile: UserProfileStore,
     )
 
     private fun quietDeps(): Deps = Deps(
@@ -116,6 +118,7 @@ class ParallelRunTest {
         memory = mockk {
             every { entries } returns MutableStateFlow(emptyMap<String, MemoryEntry>())
         },
+        profile = mockk { every { text } returns MutableStateFlow("") },
     )
 
     private fun registryWith(tool: Tool): ToolRegistry = mockk {
@@ -195,7 +198,7 @@ class ParallelRunTest {
                 chatId = "c", title = "t", history = emptyList(),
                 settings = autoSettings(), registry = registryWith(echoTool()),
                 capabilities = deps.capabilities, skills = deps.skills, memory = deps.memory,
-                gate = ApprovalGate(), onEvent = {},
+                profile = deps.profile, gate = ApprovalGate(), onEvent = {},
             )
         }
         val run = start()
@@ -222,7 +225,7 @@ class ParallelRunTest {
                 chatId = "c", title = "t", history = emptyList(),
                 settings = autoSettings(), registry = registryWith(echoTool()),
                 capabilities = deps.capabilities, skills = deps.skills, memory = deps.memory,
-                gate = ApprovalGate(), onEvent = {},
+                profile = deps.profile, gate = ApprovalGate(), onEvent = {},
             )
         }
         awaitStarted(wire)
@@ -248,7 +251,7 @@ class ParallelRunTest {
                 chatId = "a", title = "a", history = emptyList(),
                 settings = autoSettings(model = "a"), registry = registryWith(echoTool()),
                 capabilities = deps.capabilities, skills = deps.skills, memory = deps.memory,
-                gate = ApprovalGate(), onEvent = {},
+                profile = deps.profile, gate = ApprovalGate(), onEvent = {},
             )
         }
         val b = async(Dispatchers.Default) {
@@ -256,7 +259,7 @@ class ParallelRunTest {
                 chatId = "b", title = "b", history = emptyList(),
                 settings = autoSettings(model = "b"), registry = registryWith(echoTool()),
                 capabilities = deps.capabilities, skills = deps.skills, memory = deps.memory,
-                gate = ApprovalGate(), onEvent = {},
+                profile = deps.profile, gate = ApprovalGate(), onEvent = {},
             )
         }
         awaitStarted(wire, "a")

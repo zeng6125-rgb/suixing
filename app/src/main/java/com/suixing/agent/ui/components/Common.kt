@@ -290,8 +290,13 @@ fun SuixingTopBar(
         Modifier
             .fillMaxWidth()
             .background(
+                // 三档渐隐，不是两档：两档（10% → 透明）在 68dp 的高度里到一半就淡没了，
+                // 按钮与标题看着像浮在文字上。现在顶部 18% 起步、过半仍有 6%，到栏底才归零，
+                // 于是这一栏有明确的「底」，又不会在栏下缘留一条硬边。
                 Brush.verticalGradient(
-                    listOf(scheme.primary.copy(alpha = 0.10f), Color.Transparent),
+                    0f to scheme.primary.copy(alpha = 0.18f),
+                    0.55f to scheme.primary.copy(alpha = 0.06f),
+                    1f to Color.Transparent,
                 ),
             ),
     ) {
