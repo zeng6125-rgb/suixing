@@ -3,10 +3,31 @@
   Android 12+ rules. `files/datastore/Suixing_settings.preferences_pb` holds both the
   settings and the API key, so it is excluded from cloud backup but included in
   device-to-device transfer (local, user initiated) to keep phone swaps painless.
+
+  Cloud backup carries no user content. Excluding only `datastore` kept the API key out but sent the
+  conversations themselves, which is the asymmetry the wrong way round — and a copy in the cloud is
+  not something the user asked for. The agent's notes, the profile, the task board, the reminders,
+  the job logs, the avatars the user picked and the MCP server definitions (whose headers/env can
+  hold tokens) stay on the device with them, as do the diagnostic logs — they carry fragments of
+  tool output, which is the user's data too. 「换机」 is served by device transfer below, which is
+  local and explicit.
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="datastore" />
+        <exclude domain="file" path="chats" />
+        <exclude domain="file" path="memory.json" />
+        <exclude domain="file" path="profile.md" />
+        <exclude domain="file" path="profile.state.json" />
+        <exclude domain="file" path="todos.json" />
+        <exclude domain="file" path="schedules.json" />
+        <exclude domain="file" path="mcp.json" />
+        <exclude domain="file" path="jobs" />
+        <exclude domain="file" path="assistants" />
+        <exclude domain="file" path="fx-trace.log" />
+        <exclude domain="file" path="voice-trace.log" />
+        <exclude domain="file" path="scroll-diag.log" />
+        <exclude domain="file" path="console-trace.log" />
     </cloud-backup>
     <device-transfer>
         <include domain="file" path="datastore" />

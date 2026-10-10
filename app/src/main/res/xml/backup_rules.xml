@@ -3,6 +3,13 @@
   Used on Android 11 and below (android:fullBackupContent), where cloud backup and
   device transfer share one rule set. The API key lives in the same DataStore file
   as every other setting, so the whole `datastore` directory stays out of backups.
+
+  `chats` is deliberately **not** excluded here, unlike in `data_extraction_rules.xml` (Android 12+,
+  where the two rule sets are separate): this one file governs both cloud backup *and* the local
+  device transfer, so excluding the conversations would also take them away from a phone swap — and
+  keeping them across a swap is worth more to the user than keeping them out of a cloud copy. The
+  cloud side of the privacy rule lives in `data_extraction_rules.xml`; do not "fix" the missing
+  exclude here without also giving up old-device transfer.
 -->
 <full-backup-content>
     <exclude domain="file" path="datastore" />
