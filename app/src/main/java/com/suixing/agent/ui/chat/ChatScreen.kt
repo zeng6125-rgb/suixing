@@ -602,7 +602,7 @@ fun ChatScreen(
                                 top = with(LocalDensity.current) {
                                     WindowInsets.statusBars.getTop(this).toDp()
                                 } + 60.dp,
-                                bottom = composerH + 40.dp,
+                                bottom = stackFootprint + 40.dp,
                             ),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -659,7 +659,7 @@ fun ChatScreen(
                             // 16dp of air, the number the user measured as right with the
                             // keyboard down: the last card reads as separate from the field
                             // without a band of empty canvas under it.
-                            bottom = composerH + 48.dp,
+                            bottom = stackFootprint + 16.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
