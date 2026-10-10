@@ -555,23 +555,10 @@ fun ChatScreen(
         val dir = if (delta > 0) 1 else -1
         if (followDir != 0 && dir != followDir && abs(delta) <= REBOUND_CLAMP_PX) return@LaunchedEffect
         followDir = dir
-        if (itemCount <= 0 || !following) return@LaunchedEffect
-        // Both directions, same mechanism, every frame: dispatchRawDelta is not suspend, so it
-        // survives this effect being restarted on the next inset frame, and it clamps at the
-        // list's own bound — one call per frame is the whole follow, in either direction.
-        //
-        // Closing used to be left to the list's clamp alone, which rested 8px short of the true
-        // end (the clamp's last frame and the padding update do not land together); a delayed
-        // correction pin then produced exactly the sink-and-rise it was meant to hide. Pinning
-        // closing per frame lands on the end on the transition's own last frame, so there is
-        // nothing left to correct afterwards.
-        programmatic = true
-        lastPinAt = SystemClock.uptimeMillis()
-        try {
-            listState.dispatchRawDelta(FOLLOW_SCROLL_PX)
-        } finally {
-            programmatic = false
-        }
+        // No pin here on purpose. This effect runs before layout, so a pin here uses last
+        // frame's composer position and lands a few pixels short until the next frame — the
+        // tiny end-of-close "settle" the user felt as a rebound. The pin lives in the composer's
+        // layout callback instead (onTopInWindow), where the position is this frame's.
     }
     // The transition is over once the inset has been still for a beat: forget its direction so
     // the next one, whichever way it goes, is followed from its first frame.
@@ -988,7 +975,25 @@ fun ChatScreen(
                     jumpToLatest = { jumpToLatest() },
                     showJump = !atEnd,
                     onHeightChanged = { composerH = it },
-                    onTopInWindow = { composerTopY = it },
+                    onTopInWindow = { top ->
+                        composerTopY = top
+                        // The keyboard follow lives here, in the composer's own layout
+                        // callback: this runs after the composer has been placed for this
+                        // frame, so the pin uses the position the user is actually seeing.
+                        // Pinning from the inset effect instead ran before layout and landed a
+                        // few pixels short every frame, which read as a settle at the end of a
+                        // close. At the end dispatchRawDelta consumes nothing and triggers no
+                        // further layout, so the loop stops by itself.
+                        if (following && settings.autoFollow) {
+                            programmatic = true
+                            lastPinAt = SystemClock.uptimeMillis()
+                            try {
+                                listState.dispatchRawDelta(FOLLOW_SCROLL_PX)
+                            } finally {
+                                programmatic = false
+                            }
+                        }
+                    },
                 )
             }
             }
@@ -3484,7 +3489,6 @@ private fun Composer(
     // on it rather than on the composer or the screen, which is what "right above the model
     // button" means. Read from the layout, because the row's paddings and the label's own
     // width decide it.
-    var modelButtonCenter by remember { mutableStateOf(0f) }
     val ctx = LocalContext.current
     // No recognizer on the device means the mic entry would be a dead control, and
     // the user has no patience for those: the row simply drops it.
@@ -3524,7 +3528,6 @@ private fun Composer(
                     conversationModel = conversationModel,
                     conversationReasoningEffort = conversationReasoningEffort,
                     onChooseReasoning = onChooseReasoning,
-                    modelButtonCenterPx = modelButtonCenter,
                     visible = sheetOpen,
                     onPickModel = onPickModel,
                     onOpenSettings = onOpenSettings,
@@ -3765,11 +3768,7 @@ private fun Composer(
                         // Measured on the caption, not on the flexible box: the sheet is
                         // centred on the model button, and the box now spans the free space
                         // the controls leave.
-                        Box(
-                            Modifier.onGloballyPositioned {
-                                modelButtonCenter = it.boundsInWindow().center.x
-                            },
-                        ) {
+                        Box(Modifier) {
                             UnifiedSelector(
                                 settings = settings,
                                 assistantId = assistantId,
@@ -3883,11 +3882,10 @@ private fun statusLineStyle(): TextStyle = MaterialTheme.typography.labelMedium
  *
  * It hangs off the composer's zero-height anchor box (see `ComposerStack`, the `Box` at the
  * top of the stack): the sheet opens upward from there and its bottom edge lands 8dp above
- * that box, so it never covers the field it belongs to. Horizontally it is centred on the
- * model button — [modelButtonCenterPx] is that button's centre, measured in the composer —
- * and nudged back inside the screen when the button sits too close to an edge for a sheet
- * this wide. Centring on the button is the whole point: anchored to the composer's end it
- * used to open off to the right, which read as "the sheet is somewhere else".
+ * that box, so it never covers the field it belongs to. Horizontally its right edge lines up
+ * with the composer's content edge, and it is nudged back inside the screen when that would
+ * hang it off an edge. Right-aligned because centring it on the capsule put the sheet's mass
+ * left of the ring, which the user read as left-aligned.
  */
 /** How long a popup card's exit animation runs before the popup is taken down. */
 private const val MENU_EXIT_MS = 140L
@@ -4061,7 +4059,6 @@ private fun GenerationSheet(
     /** Writes a level onto this conversation alone; see the view model's chooseReasoning. */
     onChooseReasoning: (String) -> Unit,
     /** The model button's centre, in window pixels; 0 until the composer has measured it. */
-    modelButtonCenterPx: Float,
     /** Whether the card is open. It animates in and out on this, so it stays composed. */
     visible: Boolean,
     onPickModel: (ProviderConfig, String) -> Unit,
@@ -4095,23 +4092,30 @@ private fun GenerationSheet(
     // where the popup's alignment starts counting from, the second is what decides how far
     // a centred sheet would hang off an edge.
     var anchorLeft by remember { mutableStateOf(0f) }
+    var anchorRight by remember { mutableStateOf(0f) }
     var sheetWidth by remember { mutableStateOf(0) }
     val screenPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
     val edge = with(density) { 8.dp.toPx() }
+    // Right-aligned to the composer's content edge, not centred on the capsule: centred put the
+    // sheet's mass to the left of the ring, which read as left-aligned. The user asked for
+    // right-aligned, and the composer's right edge is the one edge this row already has.
     val nudge = if (sheetWidth <= 0 || anchorLeft == 0f) {
         0f
     } else {
         val width = sheetWidth.toFloat()
-        val left = (modelButtonCenterPx - width / 2f)
+        val left = (anchorRight - width)
             .coerceIn(edge, (screenPx - edge - width).coerceAtLeast(edge))
         left - anchorLeft
     }
     // Zero-height, full-width probe inside the composer's anchor box: it reads that box's
-    // left edge, which is the origin the popup's own alignment is measured from.
+    // edges, which are the origin the popup's own alignment is measured from.
     Box(
         Modifier
             .fillMaxWidth()
-            .onGloballyPositioned { anchorLeft = it.boundsInWindow().left },
+            .onGloballyPositioned {
+                anchorLeft = it.boundsInWindow().left
+                anchorRight = it.boundsInWindow().right
+            },
     )
     // Which page the sheet is on: the light one — the model that will answer and how hard it
     // thinks — or the full list of models. The list became a page of its own because the user
