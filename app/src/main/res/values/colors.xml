@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="window_background">#FFFFFFFF</color>
+    <!-- 启动窗口底色的两个「不随系统 uiMode 走」的版本。用户可以在 app 里强制浅/深，而系统画的
+         启动窗口只看系统 uiMode（values-night），所以被强制的那一套必须有自己固定的颜色，否则
+         「强制深色 + 系统浅色」会先闪一帧白（反向同理）。深色值与 values-night/colors.xml 里
+         那个保持一致，也就是 Color.kt 的 background = 0xFF0F1412。 -->
+    <color name="window_background_light">#FFFFFFFF</color>
+    <color name="window_background_dark">#FF0F1412</color>
     <color name="ic_launcher_background">#FF151619</color>
 </resources>

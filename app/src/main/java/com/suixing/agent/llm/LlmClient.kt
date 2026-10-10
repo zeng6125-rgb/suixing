@@ -13,7 +13,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
@@ -21,6 +20,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -207,7 +207,11 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                 if (line.isEmpty()) continue
                 if (!line.startsWith("data:")) continue
                 val data = line.removePrefix("data:").trim()
-                if (data.isEmpty() || data == "[DONE]") continue
+                if (data.isEmpty()) continue
+                // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
+                // connection open afterwards would otherwise leave this loop blocked until the read
+                // timeout — or the 10-minute call cap — with the whole answer already in hand.
+                if (data == "[DONE]") break
                 val chunk = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
                 chunk["error"]?.let { error ->
                     val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content ?: error.toString()
@@ -251,14 +255,17 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             chunk["usage"]?.let { element ->
                 (element as? JsonObject)?.let { usage = parseUsage(it) }
             }
-            val choice = chunk["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return
+            // `as?` rather than `jsonArray`/`jsonObject`, which throw on a JsonNull: gateways do send
+            // `"choices": null`, `"delta": null` or `"tool_calls": null` on some frames, and an
+            // IllegalArgumentException here would abort an answer that is otherwise arriving fine.
+            val choice = ((chunk["choices"] as? JsonArray)?.firstOrNull() as? JsonObject) ?: return
             choice["finish_reason"]?.let { element ->
                 if (element !is JsonNull) finishReason = element.jsonPrimitive.content
             }
             // A gateway streams `delta` chunks, whole `message` chunks, or both; the delta wins
             // when it carries the field, so a chunk that repeats itself is not counted twice.
-            val delta = choice["delta"]?.jsonObject
-            val message = choice["message"]?.jsonObject
+            val delta = choice["delta"] as? JsonObject
+            val message = choice["message"] as? JsonObject
 
             reasoningOf(chunk, choice, delta, message)?.let { piece ->
                 thinking.append(piece)
@@ -282,12 +289,12 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             } else {
                 message?.get("tool_calls")
             }
-            rawCalls?.jsonArray?.forEach { element ->
-                val item = element.jsonObject
+            (rawCalls as? JsonArray)?.forEach { element ->
+                val item = element as? JsonObject ?: return@forEach
                 val index = item["index"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
                 val call = calls.getOrPut(index) { MutableToolCall() }
                 item["id"]?.let { if (it !is JsonNull) call.id = it.jsonPrimitive.content }
-                val function = item["function"]?.jsonObject ?: return@forEach
+                val function = item["function"] as? JsonObject ?: return@forEach
                 function["name"]?.let { if (it !is JsonNull) call.name = it.jsonPrimitive.content }
                 function["arguments"]?.let { if (it !is JsonNull) call.arguments.append(it.jsonPrimitive.content) }
             }
@@ -652,6 +659,12 @@ internal fun describeError(error: Throwable): String {
             "找不到这个域名：检查接口地址的拼写，以及手机有没有连上网。"
         chain.any { it is SocketTimeoutException } ->
             "连接超时：地址或端口可能不对，也可能手机和服务器不在同一个网络。"
+        // OkHttp's own call timeout arrives as a plain InterruptedIOException("timeout"), which is
+        // NOT a SocketTimeoutException — so without this branch the user was shown the raw class
+        // name. The cap is [defaultClient]'s 10-minute callTimeout: one round that never finished.
+        chain.any { it is InterruptedIOException } ->
+            "这一轮请求超过 10 分钟被中断（回答太长，或服务器一直没结束）。" +
+                "可以再发一次，或把要求拆成几步。"
         chain.any { it is ConnectException } ->
             "连不上服务器：确认端口是开着的，而且手机和服务器在同一个网络。"
         chain.any { it is LlmException } ->

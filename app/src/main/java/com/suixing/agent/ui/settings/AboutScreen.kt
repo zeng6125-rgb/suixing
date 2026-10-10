@@ -163,7 +163,10 @@ private fun AboutLink(title: String, subtitle: String, url: String) {
             // 设备上没有浏览器时 startActivity 会抛 ActivityNotFoundException：以前这里只
             // runCatching，异常被吞掉、屏幕一动不动，用户以为是自己没点中。
             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                .onFailure { Toast.makeText(context, "打不开链接", Toast.LENGTH_SHORT).show() }
+                .onFailure {
+                    // 说出原因：这条路径上失败几乎只有「没有应用能处理这个链接」一种。
+                    Toast.makeText(context, "打不开链接：设备上没有可用的浏览器", Toast.LENGTH_SHORT).show()
+                }
         },
         control = { RowChevron() },
     )

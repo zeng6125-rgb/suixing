@@ -6,4 +6,15 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowDrawsSystemBarBackgrounds">true</item>
     </style>
+
+    <!-- 强制浅色 / 强制深色各一套：只换 windowBackground，其余（状态栏、导航栏、edge-to-edge）
+         全部继承 Theme.Suixing。上面那份 @color/window_background 是 uiMode 限定符，只在
+         「系统」是深色时才换成深色；用户在 app 里强制时系统并不知道，所以由 MainActivity 在
+         setContentView 之前 setTheme 挑这两套（见 MainActivity.onCreate 与 Core.themeMode）。 -->
+    <style name="Theme.Suixing.Light" parent="Theme.Suixing">
+        <item name="android:windowBackground">@color/window_background_light</item>
+    </style>
+    <style name="Theme.Suixing.Dark" parent="Theme.Suixing">
+        <item name="android:windowBackground">@color/window_background_dark</item>
+    </style>
 </resources>

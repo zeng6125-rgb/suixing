@@ -22,6 +22,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.io.File
 
 /**
@@ -31,6 +32,18 @@ import java.io.File
 object Core {
     @Volatile
     private var initialized = false
+
+    /**
+     * 主题模式的同步快照：1＝浅、2＝深、其它＝跟系统（与 `MainActivity` 里那份 when 同一套语义）。
+     *
+     * `settings.current()` 是挂起的，而 `MainActivity.onCreate` 必须在 `setContentView` **之前**
+     * 决定用哪套启动主题 —— 那一刻没有协程可以等。所以这里备一份同步可读的副本：[init] 里先同步
+     * 读一次（settings.json 只有几百字节），之后由收集器跟着用户的改动走。读不到时保持 0＝跟系统，
+     * 也就是资源系统本来的默认行为（不会崩，只是那一帧仍按系统 uiMode 画）。
+     */
+    @Volatile
+    var themeMode: Int = 0
+        private set
 
     lateinit var appContext: Context
         private set
@@ -117,6 +130,11 @@ object Core {
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)
             engine = AgentEngine(scope = appScope)
+            // 启动窗口的底色必须在 MainActivity 之前定下来，所以这一份是**同步**读的：
+            // settings.json 只有几百字节，读盘几毫秒；读不到就等于「跟系统」（0），不会崩。
+            themeMode = runCatching { runBlocking { settings.current().themeMode } }.getOrDefault(0)
+            // 用户在设置里改了主题：下一次冷启动就该按新的那一套画启动窗口。
+            appScope.launch { settings.flow.collect { themeMode = it.themeMode } }
             appScope.launch {
                 memory.load()
                 profile.load()

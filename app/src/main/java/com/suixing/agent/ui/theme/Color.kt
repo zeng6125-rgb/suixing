@@ -91,7 +91,13 @@ private val BrandLight = lightColorScheme(
 
     inverseSurface = Color(0xFF2A322D),
     inverseOnSurface = Color(0xFFE8EFEA),
-    outline = Color(0xFFBFC9C2),
+    // 3.52:1 on white — WCAG 1.4.11 wants ≥3:1 for a control's boundary, and M3's own baseline
+    // outline is ≈4.6:1, so this stays the lighter, quieter of the two. Fitted against the
+    // *darkest* light container (#E9EFEB → 3.02) rather than white alone, so an
+    // OutlinedTextField sitting inside a card is covered as well. It was #BFC9C2 (1.70:1) —
+    // a border nobody could see. outlineVariant below stays untouched: that one is a hairline
+    // between surfaces, not a control.
+    outline = Color(0xFF848A86),
     outlineVariant = Color(0xFFE2E8E4),
     scrim = Color(0xFF000000),
 
@@ -106,12 +112,21 @@ private val BrandLight = lightColorScheme(
 
 internal fun brandScheme(dark: Boolean) = if (dark) BrandDark else BrandLight
 
-/** Status tones used by the pills across the capability, MCP and settings screens. */
+/**
+ * Status tones used by the pills across the capability, MCP and settings screens.
+ *
+ * 浅色那一套是按**实测对比度**定的，不是挑好看的：胶囊文字是 13sp `labelMedium`（小字 ⇒ WCAG AA
+ * 要 4.5:1），而底色是 `color.copy(alpha = 0.15f)` 压 `surfaceContainer` —— 也就是文字压在自己的
+ * 淡底上，比压在纯白上还低。深色侧四个都在 4.5 以上，不用动；浅色侧 OK/WARN/OFF 原本只有
+ * 3.72 / 2.98 / 2.72，已按最小幅度压深到 4.56 / 4.57 / 4.60（INFO 5.05 本来就过）。
+ * 色相仍分开：OK 167°、WARN 35°、OFF 无彩度、INFO 199°，不会糊成同一个灰。
+ * 改这三个值之前请重新量一遍，别凭感觉调亮。
+ */
 enum class Tone { OK, WARN, OFF, INFO }
 
 internal fun Tone.color(dark: Boolean): Color = when (this) {
-    Tone.OK -> if (dark) Color(0xFF89C8AF) else Color(0xFF2E7D6B)
-    Tone.WARN -> if (dark) Color(0xFFF0C070) else Color(0xFFB4741A)
-    Tone.OFF -> if (dark) Color(0xFF9A958C) else Color(0xFF8A8A8A)
+    Tone.OK -> if (dark) Color(0xFF89C8AF) else Color(0xFF286C5D)
+    Tone.WARN -> if (dark) Color(0xFFF0C070) else Color(0xFF865713)
+    Tone.OFF -> if (dark) Color(0xFF9A958C) else Color(0xFF616161)
     Tone.INFO -> if (dark) Color(0xFF9CC3D6) else Color(0xFF2F6076)
 }

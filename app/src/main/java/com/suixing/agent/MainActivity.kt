@@ -43,6 +43,20 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 启动窗口的底色来自主题，而主题里的 @color/window_background 是 uiMode 限定符
+        // （values-night 里换）：用户**在 app 里强制深色**、而系统是浅色时，系统会先按浅色画
+        // 一帧白，再切成 app 的深色（反向同理）。这里在 setContentView 之前换成不依赖系统
+        // uiMode 的那一套（themes.xml 的 Theme.Suixing.Light / Theme.Suixing.Dark），读的是
+        // Core.themeMode 这份同步快照——挂起的 settings.current() 在这一刻等不了。
+        // 注意它改的是**本 Activity 窗口**的底色：系统画的启动窗口（Android 12+ 的启动画面）
+        // 在我们进程起来之前就已经画完了，任何 app 内设置都改不到它。
+        setTheme(
+            when (Core.themeMode) {
+                1 -> R.style.Theme_Suixing_Light
+                2 -> R.style.Theme_Suixing_Dark
+                else -> R.style.Theme_Suixing
+            },
+        )
         // The app draws its own headers and a floating nav bar, so it owns the
         // whole window instead of leaving two system-coloured strips behind.
         enableEdgeToEdge()

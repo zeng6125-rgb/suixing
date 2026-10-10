@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -162,6 +163,17 @@ private val NAV_EASING = FastOutSlowInEasing
  * 四条转场（进/出/返回进/返回出）都按它算，正负号就是方向。
  */
 private const val NAV_SHIFT_DIVISOR = 12
+
+/**
+ * 回到「抽屉的来源页」那一趟专用的淡入淡出时长：只淡、不位移、比常规 pop 短。
+ *
+ * 抽屉此刻已经在屏幕上（恢复不重放滑入），页面再做 8% 的位移就会被 45% 遮罩读成「两层各动
+ * 一半」；但全瞬时又会被读成「没有过渡」（用户前后两句话：「返回时候侧边栏遮挡的主页面为什么
+ * 也有动画」→「返回时的动画可以轻一点的淡淡的，这样又不会觉得没有过渡」）。140ms 的纯淡化
+ * 是这两句的交集：能感觉到，但不抢眼。其余每一次返回仍走 [NAV_FADE_MS]/[NAV_ENTER_MS]/
+ * [NAV_EXIT_MS] 那套全站统一规格。
+ */
+private const val NAV_DRAWER_RETURN_MS = 140
 
 /**
  * The app shell.
@@ -385,7 +397,8 @@ fun SuixingApp() {
                     // 四套转场全在这一个地方配：进/出/返回进/返回出都是同一组 NAV_* 常量、
                     // 同一个位移除数，方向互为镜像（见文件顶部那段）。返回的动画上一版被砍
                     // 成瞬时，用户否了：「退出页面的动画加回来吧……退出也有动画，连贯虽然不
-                    // 易察觉」。这里不再有任何按目的地分叉的条件。
+                    // 易察觉」。唯一的例外在下面那两条 pop 转场里（回到抽屉来源页的那一趟），
+                    // 除此之外没有任何按目的地分叉的条件。
                     enterTransition = {
                         fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
                             slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
@@ -398,17 +411,33 @@ fun SuixingApp() {
                                 -it / NAV_SHIFT_DIVISOR
                             }
                     },
+                    // 唯一的例外：这一趟 pop 的目的地正是「抽屉的来源页」——也就是我们马上要把抽屉
+                    // 放回去的那一次。抽屉此刻已经在那儿（恢复不重放滑入），页面若再滑一遍，就会被
+                    // 45% 遮罩读成「两层各动一半」（用户原话：「返回时候侧边栏遮挡的主页面为什么也
+                    // 有动画」）。但也**不能全瞬时**：他随后把口径说清了——「返回的时候也有动画，
+                    // 侧边栏不关闭，还是点进去的状态，返回时的动画可以轻一点的淡淡的，这样又不会
+                    // 觉得没有过渡」。所以这一趟只保留淡入淡出、去掉位移、时长压到 140ms：过渡在，
+                    // 但不抢眼。其余每一次返回照常走上面那套统一规格。两边共用同一个判断，只关一边
+                    // 会露出半截动画。
                     popEnterTransition = {
-                        fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
-                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
-                                -it / NAV_SHIFT_DIVISOR
-                            }
+                        if (targetState.destination.route == drawerReturnTo) {
+                            fadeIn(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
+                        } else {
+                            fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
+                                slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
+                                    -it / NAV_SHIFT_DIVISOR
+                                }
+                        }
                     },
                     popExitTransition = {
-                        fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
-                                it / NAV_SHIFT_DIVISOR
-                            }
+                        if (targetState.destination.route == drawerReturnTo) {
+                            fadeOut(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
+                        } else {
+                            fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                                slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
+                                    it / NAV_SHIFT_DIVISOR
+                                }
+                        }
                     },
                 ) {
                     composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
