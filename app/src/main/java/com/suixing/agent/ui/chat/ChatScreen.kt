@@ -239,6 +239,18 @@ fun ChatScreen(
     // the stack actually occupies instead of a guess that leaves a band in both the
     // keyboard-up and keyboard-down states.
     var composerH by remember { mutableStateOf(0.dp) }
+    // Where the composer's top edge sits in the window, and where the transcript's bottom edge
+    // does: their difference is the room the list has to leave for the floating stack, and it is
+    // the only form of that number that survives the keyboard changing what is below it.
+    var composerTopY by remember { mutableStateOf(0f) }
+    var transcriptBottomY by remember { mutableStateOf(0f) }
+    // The room the floating stack takes out of the transcript: from its top edge to the list's
+    // bottom edge. Falls back to the composer's own height until both edges have been measured,
+    // which is the same number the two agreed on before the keyboard was ever opened.
+    val stackFootprint = with(LocalDensity.current) {
+        val measured = (transcriptBottomY - composerTopY).coerceAtLeast(0f)
+        if (measured > 0f) measured.toDp() else composerH
+    }
 
     var voiceOpen by remember { mutableStateOf(false) }
     val micPermission = rememberLauncherForActivityResult(
@@ -490,29 +502,25 @@ fun ChatScreen(
 
     // The keyboard is not a scroll: it squeezes this screen's viewport from the bottom, so a
     // list pinned to its end keeps its offset and leaves its last card below the fold while
-    // the composer rises above the keys. Re-pin to the end — and only when the list was
-    // already at its end, because tapping the field must never move a transcript the user is
-    // reading.
+    // the composer rises above the keys.
     //
-    // The inset is read raw, not from a value the app animates itself: the platform already
-    // animates the IME inset frame by frame, so this effect re-runs on every frame of the
-    // keyboard's own animation and the card follows it up. Animating the inset a second time
-    // in the shell (and pinning to that) made the lift lag the keyboard and then catch up,
-    // which is exactly the stiffness this is meant to remove.
-    val keyboardInset = WindowInsets.ime.getBottom(LocalDensity.current)
-    LaunchedEffect(keyboardInset) {
+    // The trigger is the viewport's own height, not the IME inset. Measured on the device with
+    // the keyboard up and down (uiautomator bounds): pinning on the inset value left the last
+    // card 108px above the composer with the keyboard up against 48px with it down — the inset
+    // effect ran on the last value it was handed, and the layout settled 60px later with nothing
+    // left to re-pin it. The viewport height changes when the layout changes, which is the thing
+    // that actually has to be answered.
+    val viewportHeight by remember {
+        derivedStateOf { listState.layoutInfo.viewportSize.height }
+    }
+    LaunchedEffect(viewportHeight) {
         if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
-        // One frame first: the inset is already the new one while the list is still
-        // laid out at the old height, and scrolling against that lands on the old end.
+        // One frame first: the new height is already known while the list is still laid out at
+        // the old one, and scrolling against that lands on the old end.
         withFrameNanos { }
         programmatic = true
         try {
-            // Animated, not instant: the platform animates the keyboard itself over ~200ms,
-            // and where a ROM hands us the inset as a single jump an instant pin moves the
-            // last card in one frame while the keyboard is still rising — the stiffness the
-            // user reported when the keyboard opened (going down was already fine). Each new
-            // inset cancels the previous animation and continues from where it got to.
-            listState.animateScrollToItem(itemCount - 1)
+            listState.scrollToItem(itemCount - 1)
             listState.scrollBy(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
@@ -593,7 +601,7 @@ fun ChatScreen(
                                 top = with(LocalDensity.current) {
                                     WindowInsets.statusBars.getTop(this).toDp()
                                 } + 60.dp,
-                                bottom = composerH + 40.dp,
+                                bottom = stackFootprint + 40.dp,
                             ),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -604,6 +612,11 @@ fun ChatScreen(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
+                            // The list's own bottom edge, for the padding above: it is the
+                            // boundary the floating composer is measured against.
+                            .onGloballyPositioned { coordinates ->
+                                transcriptBottomY = coordinates.boundsInWindow().bottom
+                            }
                             // A long press is the user reaching into the content — almost
                             // always to select text — and the follow scroll below would pull
                             // the end back under their finger: the position moved, and the
@@ -636,12 +649,16 @@ fun ChatScreen(
                             top = with(LocalDensity.current) {
                                 WindowInsets.statusBars.getTop(this).toDp()
                             } + 76.dp,
-                            // The composer floats over the list, so the list leaves exactly
-                            // the room the stack occupies plus the air below it — measured,
-                            // not guessed, so neither the keyboard-up nor the keyboard-down
-                            // state leaves a blank band. 48dp of air: the last card was
-                            // reading as if it were glued to the input field.
-                            bottom = composerH + 48.dp,
+                            // The composer floats over the list, so the list leaves exactly the
+                            // room the stack occupies plus the air below it. Measured as the
+                            // distance from the composer's top edge to the list's own bottom
+                            // edge — not as the composer's height, which is what left the two
+                            // states different: the space *under* the composer changes with the
+                            // keyboard (96px with it down, 36px with it up on this device), and
+                            // 16dp of air, the number the user measured as right with the
+                            // keyboard down: the last card reads as separate from the field
+                            // without a band of empty canvas under it.
+                            bottom = stackFootprint + 16.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
@@ -919,6 +936,7 @@ fun ChatScreen(
                     jumpToLatest = { jumpToLatest() },
                     showJump = !atEnd,
                     onHeightChanged = { composerH = it },
+                    onTopInWindow = { composerTopY = it },
                 )
             }
             }
@@ -1774,7 +1792,7 @@ private fun TurnMetrics(
             ) {
                 // Intrinsic width: every row is as wide as the widest one, which is what puts the
                 // numbers on one column while the popup still hugs its content.
-                Column(Modifier.width(IntrinsicSize.Max)) {
+                Column(Modifier.width(IntrinsicSize.Max).widthIn(min = 208.dp)) {
                 when (shown) {
                     MetricCard.TIME -> {
                         if (elapsedMs > 0) RingDetail("总用时", elapsed)
@@ -3403,6 +3421,8 @@ private fun Composer(
     showJump: Boolean,
     /** The stack's measured height, so the list can pad by what it truly occupies. */
     onHeightChanged: (Dp) -> Unit,
+    /** The composer's top edge in window coordinates, for the transcript's bottom padding. */
+    onTopInWindow: (Float) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val density = LocalDensity.current
@@ -3432,7 +3452,10 @@ private fun Composer(
             .padding(top = 6.dp, bottom = 12.dp)
             // Measured after the navigation-bar inset is applied, so the number the
             // list pads by is the stack's true footprint on screen.
-            .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) },
+            .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) }
+            .onGloballyPositioned { coordinates ->
+                onTopInWindow(coordinates.boundsInWindow().top)
+            },
     ) {
         Column {
             // Zero-height anchor at the stack's top: the generation popup hangs off
@@ -4669,7 +4692,7 @@ private fun ContextRingCard(
         } else {
             // Same intrinsic-width trick as the metric cards: the numbers share one right edge
             // without the card asking for the screen's width.
-            Column(Modifier.width(IntrinsicSize.Max)) {
+            Column(Modifier.width(IntrinsicSize.Max).widthIn(min = 208.dp)) {
             RingDetail(
                 "上下文",
                 if (known) {
