@@ -46,10 +46,13 @@ import com.suixing.agent.data.Assistant
 import java.util.UUID
 
 /**
- * The persona picker.
+ * The persona picker as a half-screen sheet.
  *
- * Cards rather than a list, because the whole point of an assistant is the face
- * and the name — a row of text would make them all look alike.
+ * The sheet is the window and nothing else: the header, the cards and the editor all come
+ * from [AssistantListContent], which the full page
+ * ([com.suixing.agent.ui.settings.AssistantScreen]) draws too. Cards rather than a list,
+ * because the whole point of an assistant is the face and the name — a row of text would
+ * make them all look alike.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +68,57 @@ fun AssistantSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        AssistantListContent(
+            assistants = assistants,
+            activeId = activeId,
+            settings = settings,
+            onUse = onUse,
+            onSetDefault = onSetDefault,
+            onSave = onSave,
+            onDelete = onDelete,
+            // 选一张卡就是选完了：表要收起来，否则用户看着还开着的半屏列表不知道有没有生效。
+            onPicked = onDismiss,
+            modifier = Modifier
+                .padding(horizontal = 18.dp)
+                .padding(bottom = 22.dp)
+                // 表里没有可滚动的父容器，高度只能在这里封顶（表头 + 列表 ≈ 540dp），
+                // 列表自己的 verticalScroll 才拿得到有界的高度。
+                .heightIn(max = 540.dp),
+        )
+    }
+}
+
+/**
+ * The persona grid, its 新建 button and the editor — one implementation, two hosts.
+ *
+ * A page and the half-screen sheet differ in exactly three ways, and those are the three
+ * parameters: the page's own top bar already says 助手 ([title] is null there), a page has
+ * the whole window to fill ([modifier] carries its `weight`), and picking a persona closes
+ * the sheet but must not close the page ([onPicked]). Everything else — the grid, the
+ * 「当前 / 默认 / 设为默认」 semantics and the editor — is shared, so there is no second
+ * copy of the picker to keep in step.
+ */
+@Composable
+fun AssistantListContent(
+    assistants: List<Assistant>,
+    activeId: String,
+    settings: AppSettings,
+    onUse: (Assistant) -> Unit,
+    onSetDefault: (Assistant) -> Unit,
+    onSave: (Assistant) -> Unit,
+    onDelete: (Assistant) -> Unit,
+    /** What picking a persona means to the host: the sheet closes, the page stays. */
+    onPicked: () -> Unit,
+    modifier: Modifier = Modifier,
+    /** Null when the host's own bar already carries the title. */
+    title: String? = "助手",
+) {
     // Kept as an id rather than the object so a rotation no longer closes the editor: an
     // existing persona is looked up in settings again, and the one id that cannot be found
     // is the freshly created draft, which is rebuilt from its id and the same defaults.
@@ -74,62 +128,55 @@ fun AssistantSheet(
         assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface,
-    ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp)
-                .padding(bottom = 22.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("助手", style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        text = "每个助手有自己的名字、提示词、模型和工具",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                FilledTonalButton(
-                    onClick = { editingId = UUID.randomUUID().toString() },
-                ) {
-                    Icon(ImageVector.vectorResource(R.drawable.ic_plus), contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("新建")
-                }
+    Column(modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                if (title != null) Text(title, style = MaterialTheme.typography.titleLarge)
+                Text(
+                    text = "每个助手有自己的名字、提示词、模型和工具",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Spacer(Modifier.height(16.dp))
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 460.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+            FilledTonalButton(
+                onClick = { editingId = UUID.randomUUID().toString() },
             ) {
-                assistants.chunked(2).forEach { pair ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        pair.forEach { assistant ->
-                            AssistantCard(
-                                assistant = assistant,
-                                active = assistant.id == activeId,
-                                isDefault = assistant.id == settings.activeAssistantId,
-                                modelLabel = modelLabel(settings, assistant),
-                                modifier = Modifier.weight(1f),
-                                onClick = {
-                                    onUse(assistant)
-                                    onDismiss()
-                                },
-                                onEdit = { editingId = assistant.id },
-                                onSetDefault = { onSetDefault(assistant) },
-                            )
-                        }
-                        // An odd count leaves the last row half empty; a spacer keeps
-                        // the single card at half width instead of stretching it.
-                        if (pair.size == 1) Spacer(Modifier.weight(1f))
+                Icon(ImageVector.vectorResource(R.drawable.ic_plus), contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("新建")
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        // weight(fill = false)：宿主给的高度有界时列表占满剩余空间并自己滚动；列表短时
+        // 仍按内容收拢，半屏的表不会因此被撑成整屏。这里的 460dp 上限换成了宿主的封顶
+        // （表 540dp / 整页整屏），两种宿主都拿得到有界高度。
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f, fill = false)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            assistants.chunked(2).forEach { pair ->
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    pair.forEach { assistant ->
+                        AssistantCard(
+                            assistant = assistant,
+                            active = assistant.id == activeId,
+                            isDefault = assistant.id == settings.activeAssistantId,
+                            modelLabel = modelLabel(settings, assistant),
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                onUse(assistant)
+                                onPicked()
+                            },
+                            onEdit = { editingId = assistant.id },
+                            onSetDefault = { onSetDefault(assistant) },
+                        )
                     }
+                    // An odd count leaves the last row half empty; a spacer keeps
+                    // the single card at half width instead of stretching it.
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
         }

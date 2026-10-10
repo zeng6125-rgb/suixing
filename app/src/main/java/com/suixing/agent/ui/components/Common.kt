@@ -291,11 +291,17 @@ fun SuixingTopBar(
             .fillMaxWidth()
             .background(
                 // 三档渐隐，不是两档：两档（10% → 透明）在 68dp 的高度里到一半就淡没了，
-                // 按钮与标题看着像浮在文字上。现在顶部 18% 起步、过半仍有 6%，到栏底才归零，
-                // 于是这一栏有明确的「底」，又不会在栏下缘留一条硬边。
+                // 按钮与标题看着像浮在文字上。18%/6% 用户仍说「淡」——这一栏背后是整页
+                // surface，对比只来自 primary 与 surface 的色差，18% 在浅色主题里只有几个
+                // 色阶。现在 26%/10% 起步，到栏底才归零，于是这一栏有明确的「底」，又不会
+                // 在栏下缘留一条硬边。
+                //
+                // 没有叠 surfaceContainerLow(0.35) 的平铺：平铺在渐变最淡的栏底仍是满值，
+                // 栏底会立刻撞回页面的 surface，正好把这条渐变要消掉的那条硬边又画回来。
+                // 「有底」由 26% 的起步和下面那条 1dp 收边一起给，不需要再加一层。
                 Brush.verticalGradient(
-                    0f to scheme.primary.copy(alpha = 0.18f),
-                    0.55f to scheme.primary.copy(alpha = 0.06f),
+                    0f to scheme.primary.copy(alpha = 0.26f),
+                    0.55f to scheme.primary.copy(alpha = 0.10f),
                     1f to Color.Transparent,
                 ),
             ),
@@ -384,6 +390,8 @@ fun SuixingTopBar(
             }
             actions()
         }
+        // 栏底不再画任何线：发丝线、渐变收边都去掉了——用户明确说「顶栏不要分割线了」。
+        // 这一栏的分层改由渐变自己承担（顶部 26% 起步、到栏底归零），栏下缘本来就是软的。
     }
 }
 

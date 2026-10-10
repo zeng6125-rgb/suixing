@@ -249,6 +249,21 @@ data class AppSettings(
      * 从前的固定值，行为不变。真正生效的是 [compressAtFraction]，越界的值在那里兜底。
      */
     val compressAtPercent: Int = DEFAULT_COMPRESS_AT_PERCENT,
+    /**
+     * 让模型定期从对话里自己总结用户画像（`filesDir/profile.md`）。
+     *
+     * 与记忆是两回事：记忆是模型在任务里主动记下的键值（`memory.json`），这一项管的是它
+     * 隔几轮读一遍最近的对话、写出一份「关于用户这个人」的滚动摘要。默认开——画像的价值
+     * 就在于用户不用自己填。
+     */
+    val autoProfile: Boolean = true,
+    /**
+     * 每多少轮对话总结一次画像，见 [profileTurnThreshold]。
+     *
+     * 放在类末尾并有默认值，所以老 JSON 里没有这个键时读出来就是 8——也就是它本来该有的
+     * 行为，升级上来的人不会因为缺键就每轮都总结一次。
+     */
+    val profileEveryTurns: Int = DEFAULT_PROFILE_EVERY_TURNS,
 ) {
     val configured: Boolean get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 
@@ -289,6 +304,16 @@ data class AppSettings(
     val compressAtFraction: Float
         get() = (compressAtPercent.takeIf { it in COMPRESS_MIN_PERCENT..COMPRESS_MAX_PERCENT }
             ?: DEFAULT_COMPRESS_AT_PERCENT) / 100f
+
+    /**
+     * 实际使用的画像总结间隔，[PROFILE_MIN_TURNS]–[PROFILE_MAX_TURNS] 轮。
+     *
+     * 和 [compressAtFraction] 同样的道理：只有这个范围里的值算数，老文件、手改过的 JSON 或
+     * 将来改窄了范围，都落到默认的 8 轮，而不是按 0 轮去每轮总结一次。
+     */
+    val profileTurnThreshold: Int
+        get() = profileEveryTurns.takeIf { it in PROFILE_MIN_TURNS..PROFILE_MAX_TURNS }
+            ?: DEFAULT_PROFILE_EVERY_TURNS
 }
 
 /** 压缩阈值的取值边界、步长与默认值：设置页和引擎共用一套，免得两边各写一份。 */
@@ -296,6 +321,12 @@ const val COMPRESS_MIN_PERCENT = 20
 const val COMPRESS_MAX_PERCENT = 95
 const val COMPRESS_STEP_PERCENT = 5
 const val DEFAULT_COMPRESS_AT_PERCENT = 80
+
+/** 画像总结间隔的取值边界、步长与默认值，同样是设置页与引擎共用的一套。 */
+const val PROFILE_MIN_TURNS = 2
+const val PROFILE_MAX_TURNS = 40
+const val PROFILE_STEP_TURNS = 2
+const val DEFAULT_PROFILE_EVERY_TURNS = 8
 
 const val DEFAULT_SYSTEM_PROMPT = """你是随行，运行在用户安卓手机上的智能体。
 

@@ -9,15 +9,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -29,25 +32,34 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.agent.ProfileSummary
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.ui.components.PageTopBar
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 /**
- * 用户画像：一份用户写给模型的长期自述，存在 `filesDir/profile.md`。
+ * 用户画像：模型自己维护的、关于这个人的长期摘要，存在 `filesDir/profile.md`。
  *
- * 它和记忆一样是提示词的一部分——保存后模型下一轮就看到——但写的人不同：记忆是模型
- * 自己记的，这一篇是用户自己说的，所以是一整块纯文本，而不是一条条键值。
+ * 它和记忆一样是提示词的一部分——保存后模型下一轮就看到——但两条链路的来路不同：记忆是
+ * 模型在任务里主动调用工具记下的键值对（`memory.json`），这一篇是它隔几轮从对话里总结出来的
+ * 一整块纯文本（[com.suixing.agent.agent.ProfileSummarizer]），所以是一篇可以整篇重写的
+ * 自述，而不是一条条键值。用户仍然可以在这里手改，那是补充与纠正。
  */
 @Composable
 fun ProfileScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val stored by Core.profile.text.collectAsState()
+    val summary by Core.profile.summary.collectAsState()
     // null = 输入框还没被碰过，显示 store 里的值；一旦开始输入就以草稿为准，免得后台的
     // 一次 load 把用户正在写的东西冲掉。
     var draft by remember { mutableStateOf<String?>(null) }
+    var summarizing by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { Core.profile.load() }
 
@@ -71,8 +83,56 @@ fun ProfileScreen(onBack: () -> Unit) {
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (summary.lastProfileAt > 0) {
+                        "由模型自动维护 · 最近更新 ${stamp(summary.lastProfileAt)}"
+                    } else {
+                        "由模型自动维护 · 尚未总结"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                if (summarizing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                summarizing = true
+                                // 画像页可能先于会话页被打开：chats 还没 load 过就没有对话可总结。
+                                if (Core.chats.conversations.value.isEmpty()) Core.chats.load()
+                                val messages = Core.chats.conversations.value
+                                    .firstOrNull()?.messages.orEmpty()
+                                val outcome = Core.engine.summarizeProfileNow(
+                                    store = Core.profile,
+                                    settings = Core.settings.current(),
+                                    messages = messages,
+                                )
+                                summarizing = false
+                                snackbar.showSnackbar(
+                                    when (outcome) {
+                                        ProfileSummary.Updated -> "画像已更新"
+                                        ProfileSummary.Unchanged -> "没有新信息，画像未变"
+                                        is ProfileSummary.Failed -> outcome.reason
+                                    },
+                                )
+                            }
+                        },
+                    ) { Text("重新总结") }
+                }
+            }
             Text(
-                text = "这段文字会随每次请求发给模型；建议写称呼/偏好/长期习惯，不要写一次性任务。",
+                text = "模型会自动维护这段画像；你也可以在这里手动补充或纠正。" +
+                    "它随每次请求发给模型，写称呼、偏好、长期习惯这类关于你本人的长期信息，" +
+                    "不要写一次性任务。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -124,4 +184,18 @@ fun ProfileScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * 「最近更新」的时间戳：今天的只给时分（12:03），更早的带上月日——只写 12:03 会让一周前的
+ * 一次总结看起来像刚发生的。
+ */
+private fun stamp(at: Long): String {
+    val calendar = Calendar.getInstance()
+    val today = calendar.get(Calendar.DAY_OF_YEAR)
+    val year = calendar.get(Calendar.YEAR)
+    calendar.timeInMillis = at
+    val sameDay = calendar.get(Calendar.YEAR) == year && calendar.get(Calendar.DAY_OF_YEAR) == today
+    val pattern = if (sameDay) "HH:mm" else "M月d日 HH:mm"
+    return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(at))
 }

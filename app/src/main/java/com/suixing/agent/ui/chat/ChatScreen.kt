@@ -350,6 +350,19 @@ fun ChatScreen(
     val contextWindow = settings.contextWindowFor(
         settings.choiceFor(state.providerId, state.model, assistant).model,
     )
+    // Which endpoint a stored round ran on. A message keeps its model id and nothing else, so
+    // its owner is whichever endpoint lists that id — the same question the picker asks. Built
+    // once per settings change rather than per row: a long transcript redraws far more often.
+    // First endpoint wins, so the user's own order settles an id two of them both list.
+    val providerOfModel = remember(settings.providers) {
+        val owners = mutableMapOf<String, ProviderConfig>()
+        settings.providers.forEach { provider ->
+            (provider.enabled + provider.models + provider.aliases.keys).forEach { id ->
+                owners.putIfAbsent(id, provider)
+            }
+        }
+        owners
+    }
     // What the ring left of the mic draws: the newest round's own count, or the live run's
     // estimate while it streams — the same pair the summary card reads, so the two agree.
     // The cache count is the newest round's too: context is cumulative, so an older round's
@@ -358,16 +371,15 @@ fun ChatScreen(
     val contextUsed = state.stats?.lastPromptTokens?.takeIf { it > 0 }
         ?: newestUsage?.prompt
         ?: 0
-    // The newest round's hit rate, in the drawer's own convention: cached over prompt, to two
-    // decimals, and nothing when the endpoint reported no prompt to divide by. A whole
-    // percentage hid the difference between 96.4% and 96.9%, which is exactly the range a
-    // long conversation sits in.
-    val cachePercent = newestUsage?.takeIf { it.prompt > 0 }?.let { it.cached * 100.0 / it.prompt } ?: 0.0
+    // The cache figure the ring's card shows is the whole conversation's, summed once in the
+    // view model ([SessionStats.cachePercent]); the newest round's own ratio is no longer read
+    // here, so nothing is derived from it.
     // What the conversation has spent in total, summed once in the view model rather than
     // walked here: a long transcript is thousands of messages, and the ring's card is
     // redrawn far more often than the number changes.
-    val sessionTokens = viewModel.sessionStats.collectAsState(initial = null).value?.tokens ?: 0
-    val sessionTurns = viewModel.sessionStats.collectAsState(initial = null).value?.turns ?: 0
+    val session = viewModel.sessionStats.collectAsState(initial = null).value
+    val sessionTokens = session?.tokens ?: 0
+    val sessionTurns = session?.turns ?: 0
     // What each run actually took, summed over its own messages. A message's own `elapsedMs`
     // is one round's call — the model thinking, then calling a tool, then thinking again are
     // several messages in one run — while the status line the user watched counted the whole
@@ -378,6 +390,10 @@ fun ChatScreen(
             .groupBy { it.runId }
             .mapValues { (_, rows) -> rows.sumOf { it.elapsedMs } }
     }
+    // The conversation's own clock, summed off the very rows [SessionStats] divides its speed
+    // by — so 「会话总用时」 and 「会话输出速度」 are two readings of one measurement rather
+    // than two tallies that can drift apart. The tally carries the speed but not the total.
+    val sessionElapsedMs = remember(state.messages) { state.messages.sumOf { it.elapsedMs } }
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.
@@ -791,6 +807,13 @@ fun ChatScreen(
                                     bubbleMaxWidth = bubbleMaxWidth,
                                     contextWindow = contextWindow,
                                     runElapsedMs = runElapsed[row.message.runId] ?: 0L,
+                                    // The endpoint and the model that answered this round, as
+                                    // one line: a message keeps the id it ran on, and the
+                                    // owner is looked up from it. Just the id when no endpoint
+                                    // claims it — a stale pick is not worth a wrong name.
+                                    engineLabel = providerOfModel[row.message.model]
+                                        ?.let { "${it.label} / ${it.displayModel(row.message.model)}" }
+                                        ?: row.message.model,
                                     reasoningExpansion = reasoningExpansion,
                                     onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
                                     onRegenerate = { viewModel.regenerate() },
@@ -999,9 +1022,11 @@ fun ChatScreen(
                     assistantId = state.assistantId,
                     contextWindow = contextWindow,
                     contextUsed = contextUsed,
-                    cachePercent = cachePercent,
                     sessionTokens = sessionTokens,
                     sessionTurns = sessionTurns,
+                    sessionPerSecond = session?.perSecond ?: 0.0,
+                    sessionCachePercent = session?.cachePercent ?: 0,
+                    sessionElapsedMs = sessionElapsedMs,
                     conversationProviderId = state.providerId,
                     conversationModel = state.model,
                     conversationReasoningEffort = state.reasoningEffort,
@@ -1743,6 +1768,8 @@ private fun MessageRow(
     contextWindow: Int,
     /** What this row's whole run took; 0 falls back to the message's own round. */
     runElapsedMs: Long = 0L,
+    /** 「提供方 / 模型」 of the round this row shows; blank when it cannot be resolved. */
+    engineLabel: String = "",
     /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
     reasoningExpansion: ReasoningExpansion,
     onBranch: (String, String) -> Unit,
@@ -1769,6 +1796,7 @@ private fun MessageRow(
             usage = row.usage,
             contextWindow = contextWindow,
             runElapsedMs = runElapsedMs,
+            engineLabel = engineLabel,
             message = row.message,
             expandReasoning = expandReasoning,
             expandTools = expandTools,
@@ -1908,6 +1936,8 @@ private fun TurnMetrics(
     promptTokens: Int,
     completionTokens: Int,
     cachedTokens: Int,
+    /** 「提供方 / 模型」 that produced this round; blank leaves the line out. */
+    engineLabel: String = "",
 ) {
     val total = promptTokens + completionTokens
     if (elapsedMs <= 0 && total <= 0) return
@@ -1982,6 +2012,10 @@ private fun TurnMetrics(
                     }
 
                     MetricCard.USAGE -> {
+                        // Which endpoint answered, and which of its models: the two things every
+                        // figure below is read against, and the only line here that is not a
+                        // number. Left out when the id matches no endpoint on this device.
+                        if (engineLabel.isNotBlank()) RingDetail("提供方 / 模型", engineLabel)
                         if (total > 0) RingDetail("本轮用量", "${shortTokens(total)} tok")
                         if (promptTokens > 0) {
                             RingDetail("输入", "${shortTokens(promptTokens)} tok")
@@ -2069,6 +2103,8 @@ private fun AssistantRow(
     contextWindow: Int = 0,
     /** What the whole run took; 0 falls back to the message's own round. */
     runElapsedMs: Long = 0L,
+    /** 「提供方 / 模型」 for the usage card; blank leaves that line out. */
+    engineLabel: String = "",
     message: StoredMessage? = null,
     expandReasoning: Boolean = false,
     expandTools: Boolean = false,
@@ -2287,6 +2323,7 @@ private fun AssistantRow(
                         promptTokens = message.promptTokens,
                         completionTokens = message.completionTokens,
                         cachedTokens = message.cachedTokens,
+                        engineLabel = engineLabel,
                     )
                     MessageActions(message = message, onEdit = onEdit)
                 }
@@ -2370,6 +2407,15 @@ private fun BranchArrow(
 }
 
 /**
+ * How wide a process block's own name may get before it starts yielding.
+ *
+ * A name is short by nature — 「思考过程」 is four characters, `run_shell` nine — so it is never
+ * given a share of the row to fill: it takes what it needs and hands the rest to the status and
+ * the preview beside it. The cap only stops a long MCP name from eating the whole header.
+ */
+private val PROCESS_TITLE_MAX = 160.dp
+
+/**
  * The chrome every folded process block shares: thinking, a tool call and the turn's own
  * summary all draw through this, so a reply that thinks, calls, thinks again reads as one
  * repeating shape instead of three unrelated widgets stacked in a column.
@@ -2443,11 +2489,18 @@ private fun ProcessCard(
                     color = scheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    // fill = false: the title yields width to whatever sits after it
-                    // rather than claiming all of it. With a plain weight(1f) the chip
-                    // beside it was squeezed to zero width and stacked its own characters
-                    // vertically, which is what made one header 200dp tall.
-                    modifier = Modifier.weight(1f, fill = false),
+                    // The name takes what it needs, not half the row. `weight(1f, fill = false)`
+                    // used to hand it a share of the width and keep it even when the name was
+                    // short: the leftover sat right after 「思考过程」 as a band of nothing, and a
+                    // name as short as `run_shell` could come back cut in half inside it. With a
+                    // preview beside it the name yields at [PROCESS_TITLE_MAX]; without one it
+                    // still holds the row, which is what lets the summary card's long header
+                    // ellipsize instead of the chip after it.
+                    modifier = if (preview != null) {
+                        Modifier.widthIn(max = PROCESS_TITLE_MAX)
+                    } else {
+                        Modifier.weight(1f, fill = false)
+                    },
                 )
                 if (trailing != null) {
                     // The title and the status are two different facts; without this gap
@@ -2463,7 +2516,11 @@ private fun ProcessCard(
                         color = scheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        // The row's one flexible slot: it eats whatever the name, the status and
+                        // the chevron leave, so the chevron stays on the card's right edge and
+                        // nothing is left over behind it. It used to be `fill = false` as well,
+                        // which is what left that leftover band sitting after the chevron.
+                        modifier = Modifier.weight(1f),
                     )
                     previewTail?.invoke()
                 }
@@ -2669,10 +2726,10 @@ private fun ReasoningBlock(
         expansion.set(blockId, !expanded)
     }
     val status: @Composable () -> Unit = {
-        // A real gap after the title as well as between the items: with none, 「思考过程256
-        // tokens」 read as one word — the same complaint the " · " join earned, one word to
-        // the left.
-        if (meta.isNotEmpty()) Spacer(Modifier.width(8.dp))
+        // The gap in front of the first item belongs to the caller: [ProcessCard] already puts
+        // 8dp between the name and this trailing slot, so a second one here doubled it to 16dp —
+        // the band of nothing the user pointed at after 「思考过程」. The nested row below has no
+        // ProcessCard and adds its own.
         // Item by item with a real gap: joining them into one " · " string is what made
         // "256 tokens · 25.1s" read as a single glued-together word at 13sp.
         meta.forEachIndexed { index, item ->
@@ -2724,8 +2781,12 @@ private fun ReasoningBlock(
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
+                    // Takes what four characters need and hands the rest to the preview: the
+                    // half-row share this used to hold was the band of nothing after it.
+                    // [status] is called after the gap below, since this row draws its own
+                    // header instead of going through [ProcessCard].
                 )
+                if (meta.isNotEmpty()) Spacer(Modifier.width(8.dp))
                 status()
                 if (!expanded && firstLine.isNotEmpty()) {
                     Spacer(Modifier.width(8.dp))
@@ -2735,7 +2796,9 @@ private fun ReasoningBlock(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        // The row's one flexible slot, exactly as in [ProcessCard]: the preview
+                        // eats the leftover so the chevron sits on the right edge.
+                        modifier = Modifier.weight(1f),
                     )
                     if (streaming) BlinkingCursor()
                 }
@@ -2983,7 +3046,11 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+                // The name is short and fixed — it takes what it needs and yields the rest to
+                // the argument preview. Holding a half-row share cut it in the middle instead:
+                // `run_shell` came back as 「run_sh…」, which is the fragment the user read as
+                // 「sh」 sitting in the header.
+                modifier = Modifier.widthIn(max = PROCESS_TITLE_MAX),
             )
             Spacer(Modifier.width(8.dp))
             Text(
@@ -3328,7 +3395,13 @@ private fun TurnScrubber(
         label = "scrubber_label_dy",
     )
 
-    Box(modifier = modifier.width(SCRUBBER_RAIL)) {
+    // Full width, not SCRUBBER_RAIL: the label is a child of this box, and a child can never
+    // be measured wider than its parent — at the rail's own 24dp the bubble was squeezed into
+    // a 24dp-wide square with 9dp of padding either side, which left about 6dp for the text and
+    // ellipsized it to a single character. That square is the dark blob the user photographed.
+    // The rail itself keeps its own width below, so the gesture area and the drawn lines are
+    // exactly what they were; only the measuring constraint changes.
+    Box(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3497,15 +3570,20 @@ private fun TurnScrubber(
         ) {
             Text(
                 text = latestRows.getOrNull(selected)?.let(labelOf).orEmpty(),
+                // labelMedium rather than labelSmall, and a roomier box: the bubble floats
+                // over the transcript for as long as a finger holds the rail, so it has to be
+                // read at a glance. Still one line, and still capped at SCRUBBER_LABEL_MAX, so
+                // a long opening words the line short rather than wrapping it into a block.
                 style = MaterialTheme.typography.labelMedium,
                 color = scheme.inverseOnSurface,
                 maxLines = 1,
+                softWrap = false,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .widthIn(max = SCRUBBER_LABEL_MAX)
                     .clip(RoundedCornerShape(8.dp))
                     .background(scheme.inverseSurface)
-                    .padding(horizontal = 9.dp, vertical = 5.dp),
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
             )
         }
     }
@@ -3794,11 +3872,14 @@ private fun Composer(
     contextWindow: Int,
     /** Tokens the newest round filled of that window, and how many of them were cached. */
     contextUsed: Int,
-    cachePercent: Double,
     /** Everything this conversation has ever spent, for the ring's detail card. */
     sessionTokens: Int,
     /** How many questions that tally was built from. */
     sessionTurns: Int,
+    /** The session's own output speed, cache hit rate and wall clock, for the ring's card. */
+    sessionPerSecond: Double,
+    sessionCachePercent: Int,
+    sessionElapsedMs: Long,
     /** This conversation's own model pick, or null while it follows persona/defaults. */
     conversationProviderId: String?,
     conversationModel: String?,
@@ -4210,9 +4291,11 @@ private fun Composer(
                     ContextRing(
                         used = contextUsed,
                         window = contextWindow,
-                        cachePercent = cachePercent,
                         sessionTokens = sessionTokens,
                         sessionTurns = sessionTurns,
+                        sessionPerSecond = sessionPerSecond,
+                        sessionCachePercent = sessionCachePercent,
+                        sessionElapsedMs = sessionElapsedMs,
                         live = stats,
                     )
                     // The mic only earns its slot when a recognizer actually exists on
@@ -5107,19 +5190,23 @@ private enum class AttachKind { IMAGE, FILE }
  * of thing a gauge should be able to tell them. No denominator is invented — a made-up
  * fraction would be decoration pretending to be data.
  *
- * The touch target is 32dp, not the 48dp the primary controls use: this row also carries the
+ * The touch target is 26dp, not the 48dp the primary controls use: this row also carries the
  * model caption, the mic and the send button, and at 48dp the caption would be too narrow to
- * read on a 360dp-wide screen.
+ * read on a 360dp-wide screen. The arc is 22dp of that, which is what leaves room for the
+ * percentage in the middle: 22dp less the 2dp stroke either side is 18dp of clear space, and
+ * three digits at 7sp measure about 11.7dp by 8dp.
  */
 @Composable
 private fun ContextRing(
     used: Int,
     window: Int,
-    cachePercent: Double,
     /** Everything this conversation has ever spent, prompt + completion. */
     sessionTokens: Int,
     /** How many questions that tally was built from, so 「累计」 cannot read as 「本轮」. */
     sessionTurns: Int,
+    sessionPerSecond: Double,
+    sessionCachePercent: Int,
+    sessionElapsedMs: Long,
     live: StreamStats?,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -5128,6 +5215,10 @@ private fun ContextRing(
     val tone = if (fraction >= 0.8f) scheme.error else scheme.primary
     val track = scheme.surfaceVariant
     var open by remember { mutableStateOf(false) }
+    // The number in the middle, as a whole percent: the arc is a shape and the number is the
+    // figure behind it. A window that was never set has no percentage to show (0 = unlimited,
+    // not 0%), and 0% is a ring with no arc to read it against.
+    val percent = if (known) (fraction * 100).roundToInt() else 0
     Box(
         modifier = Modifier
             .size(26.dp)
@@ -5139,7 +5230,7 @@ private fun ContextRing(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(Modifier.size(18.dp)) {
+        Canvas(Modifier.size(22.dp)) {
             val stroke = 2.dp.toPx()
             val ringSize = Size(size.width - stroke, size.height - stroke)
             val topLeft = Offset(stroke / 2f, stroke / 2f)
@@ -5165,6 +5256,20 @@ private fun ContextRing(
                 )
             }
         }
+        // 7sp, the size the 18dp of clear space inside the arc takes: the digits sit on the
+        // ring's own centre, in the arc's colour. Bold, not Medium: at 7sp the user read the
+        // Medium weight as thin, and the ring is the only place these digits appear — the
+        // extra weight costs nothing elsewhere.
+        if (percent > 0) {
+            Text(
+                text = percent.toString(),
+                fontSize = 7.sp,
+                lineHeight = 8.sp,
+                fontWeight = FontWeight.Bold,
+                color = tone,
+                maxLines = 1,
+            )
+        }
         // The card's anchor: a zero-height box at the ring's top edge, so the popup opens
         // upward from the ring instead of covering the row it belongs to.
         Box(Modifier.align(Alignment.TopCenter)) {
@@ -5178,9 +5283,11 @@ private fun ContextRing(
                     ContextRingCard(
                         used = used,
                         window = window,
-                        cachePercent = cachePercent,
                         sessionTokens = sessionTokens,
                         sessionTurns = sessionTurns,
+                        sessionPerSecond = sessionPerSecond,
+                        sessionCachePercent = sessionCachePercent,
+                        sessionElapsedMs = sessionElapsedMs,
                         live = live,
                     )
                 }
@@ -5194,9 +5301,11 @@ private fun ContextRing(
 private fun ContextRingCard(
     used: Int,
     window: Int,
-    cachePercent: Double,
     sessionTokens: Int,
     sessionTurns: Int,
+    sessionPerSecond: Double,
+    sessionCachePercent: Int,
+    sessionElapsedMs: Long,
     live: StreamStats?,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -5242,18 +5351,30 @@ private fun ContextRingCard(
                     "${shortTokens(used)} · 窗口未设置 · 到设置里填"
                 },
             )
-            if (cachePercent > 0) {
-                // Two decimals, and formatted once per value rather than on every recomposition:
-                // the drawer's own convention, at the precision a long conversation needs.
-                val hit = remember(cachePercent) {
-                    String.format(Locale.getDefault(), "%.2f%%", cachePercent)
-                }
-                RingDetail("缓存命中率", hit)
+            // The conversation's own hit rate, not the newest round's: the user asked for
+            // 「总缓存命中率」 and a label of exactly 「缓存命中」. SessionStats.cachePercent is
+            // the whole session's cached tokens over its whole prompt, so it is the total this
+            // line is for; the newest round's own ratio was the wrong number under the wrong
+            // name. It sits here, above the speed and the clock, because it is a reading of the
+            // context the line above it is about.
+            if (sessionCachePercent > 0) {
+                RingDetail("缓存命中", "$sessionCachePercent%")
             }
-            live?.let {
+            // The fixed half of the card: what the whole conversation has cost, not what the
+            // window holds right now. Every label is written out — 「tps」「缓存」 alone would
+            // read as the round's own numbers, which is exactly what the lines below are.
+            if (sessionPerSecond > 0) {
                 RingDetail(
-                    "本轮",
-                    "入 ${shortTokens(it.lastPromptTokens)} · 出 ${shortTokens(it.tokensOut)}",
+                    "会话输出速度",
+                    remember(sessionPerSecond) {
+                        String.format(Locale.getDefault(), "%.1f tok/s", sessionPerSecond)
+                    },
+                )
+            }
+            if (sessionElapsedMs > 0) {
+                RingDetail(
+                    "会话总用时",
+                    remember(sessionElapsedMs) { formatRunElapsed(sessionElapsedMs) },
                 )
             }
             if (sessionTokens > 0) {
@@ -5262,7 +5383,13 @@ private fun ContextRingCard(
                 // and it is the same tally the usage page shows. Labelled 「累计」 rather
                 // than 「总量」 because it counts each round's re-send, which is why it can
                 // dwarf the 「上下文」 line right above it.
-                RingDetail("会话累计", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
+                RingDetail("会话累计用量", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
+            }
+            // What the run in flight has spent so far, split into its two halves: the only
+            // lines here that move, so they sit last, and they leave the moment it settles.
+            live?.let {
+                RingDetail("本轮输入", "${shortTokens(it.lastPromptTokens)} tok")
+                RingDetail("本轮输出", "${shortTokens(it.tokensOut)} tok")
             }
             }
         }

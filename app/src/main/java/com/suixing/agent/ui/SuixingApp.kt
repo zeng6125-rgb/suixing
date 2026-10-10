@@ -106,7 +106,6 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.service.FloatConsoleService
-import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
@@ -116,6 +115,7 @@ import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.AboutScreen
+import com.suixing.agent.ui.settings.AssistantScreen
 import com.suixing.agent.ui.settings.ProfileScreen
 import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
@@ -136,13 +136,25 @@ import kotlinx.coroutines.withContext
  *
  * The enter is longer than the exit on purpose — the arriving page is the one being read,
  * and it has to still be moving when the eye lands on it; the leaving page only has to be
- * gone. The previous pair was the other way round in effect (a 220ms enter whose whole
- * displacement was `height / 28` — 32px on a 1080p-class panel — and a 120ms exit that was
- * a plain fade), which is why the user could not see a transition at all.
+ * gone.
+ *
+ * 上一版（淡入 260 + 缩 0.98，淡出 180 + 缩 0.99）用户仍说「没有动效」。读码结论：三条
+ * 通道里两条没有对比 —— 进出的两页都自己铺满不透明的 background，而品牌色与动态色里
+ * background 与 surface 同色，所以交叉淡化只换了字，页面底色从头到尾是同一个；缩放只有
+ * 1–2%，缩出来那一圈露的是外壳 Scaffold 的 containerColor = surface，与页面底色一样，
+ * 等于没缩。位移是唯一对着静止的屏幕边框也看得见的通道，这一版把它加回来（更早那版的
+ * 位移是 height / 28 ≈ 32px，同样小到看不见）。
  */
-private const val NAV_ENTER_MS = 260
-private const val NAV_EXIT_MS = 180
+private const val NAV_FADE_MS = 240
+private const val NAV_ENTER_MS = 280
+private const val NAV_EXIT_MS = 200
 private val NAV_EASING = FastOutSlowInEasing
+
+/**
+ * 横向位移的除数：屏宽 / 12 ≈ 8% 屏宽（1080p 面板上 ≈ 90px）。够看得见，又短到不会和
+ * 抽屉那条 300dp 的左滑读成同一个手势 —— 抽屉是整块面板推入，页面只是「动了一下」。
+ */
+private const val NAV_SHIFT_DIVISOR = 12
 
 /**
  * The app shell.
@@ -180,7 +192,6 @@ fun SuixingApp() {
     }.collectAsState(initial = "")
 
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
-    var assistantsOpen by rememberSaveable { mutableStateOf(false) }
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -240,8 +251,9 @@ fun SuixingApp() {
     ) {
         // The drawer is the shell's own panel rather than a ModalNavigationDrawer, so
         // nothing else consumes BACK: without this, BACK with the drawer open finished
-        // the activity and dropped the user on the home screen. The assistant sheet is a
-        // window of its own, so it keeps handling BACK while it is up.
+        // the activity and dropped the user on the home screen. 助手 now leaves through
+        // the navigation stack instead of a sheet, so the drawer is the only case left
+        // here — the approval card is a dialog of its own and swallows BACK first.
         BackHandler(enabled = drawerOpen) { drawerOpen = false }
         // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
         // the strip behind the keyboard was left unpainted and the window's own white showed
@@ -308,30 +320,32 @@ fun SuixingApp() {
                     navController = navController,
                     startDestination = "chat",
                     modifier = Modifier.padding(padding),
-                    // Every destination enters and leaves with the same curve and the same
-                    // two channels — a fade and a depth change — so a push and a pop read as
-                    // one gesture played backwards. The motion is scale, never a horizontal
-                    // sweep: the drawer already owns the leftward slide, and a second
-                    // sideways movement under it would read as two panels fighting.
+                    // Every destination enters and leaves with the same three channels — a
+                    // fade, a short horizontal push and a depth change — so a push and a pop
+                    // read as one gesture played backwards. The push is deliberately short
+                    // (1/12 screen width): the drawer already owns the long leftward slide,
+                    // and a second full-width sweep under it would read as two panels
+                    // fighting, while a small one only says "this page moved".
+                    // 整幅横移，不再缩放：缩放 0.96 会在新页四周留出一圈缝，缝里透出的正是
+                    // 上一页——用户的原话是「页面是共存的，并不是单独的」。现在新页从右侧
+                    // 整幅滑入（完全盖住旧页），旧页只做 1/3 幅的视差左移 + 淡出，读起来是
+                    // 一页盖一页的推入，而不是两页叠在一起。抽屉仍是它自己的 300dp 左滑，
+                    // 与这里的整幅推入方向不同，不会混。
                     enterTransition = {
-                        fadeIn(tween(NAV_ENTER_MS, easing = NAV_EASING)) +
-                            scaleIn(tween(NAV_ENTER_MS, easing = NAV_EASING), initialScale = 0.98f)
+                        fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
+                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) { it }
                     },
-                    // The leaving page is not what the user is looking at, so it goes first
-                    // and gets out of the way: shorter than the enter, and shallower — a
-                    // deeper shrink would be visible as the page they were reading walks
-                    // backwards.
                     exitTransition = {
                         fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                            scaleOut(tween(NAV_EXIT_MS, easing = NAV_EASING), targetScale = 0.99f)
+                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) { -it / 3 }
                     },
                     popEnterTransition = {
-                        fadeIn(tween(NAV_ENTER_MS, easing = NAV_EASING)) +
-                            scaleIn(tween(NAV_ENTER_MS, easing = NAV_EASING), initialScale = 0.99f)
+                        fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
+                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) { -it / 3 }
                     },
                     popExitTransition = {
                         fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                            scaleOut(tween(NAV_EXIT_MS, easing = NAV_EASING), targetScale = 0.98f)
+                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) { it }
                     },
                 ) {
                     composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
@@ -354,10 +368,11 @@ fun SuixingApp() {
                     composable("profile") {
                         ProfileScreen(onBack = { navController.popBackStack() })
                     }
-                    // 助手设置：抽屉那一行和设置页那一行打开的是同一张表。这张表是它自己的
-                    // 窗口，退出它就回到推它上来的那一页。
+                    // 助手设置：一整页，不是半屏的表。抽屉那一行和设置页那一行都推这一页，
+                    // 于是「编辑助手」只有一条路、一个实现；半屏的表只剩聊天页那个随手
+                    // 切换助手的窗口。
                     composable("assistants") {
-                        AssistantSheet(
+                        AssistantScreen(
                             assistants = settings.assistants,
                             activeId = assistantId.ifBlank { settings.activeAssistantId },
                             settings = settings,
@@ -365,7 +380,7 @@ fun SuixingApp() {
                             onSetDefault = { chat.setDefaultAssistant(it) },
                             onSave = { chat.saveAssistant(it) },
                             onDelete = { chat.deleteAssistant(it) },
-                            onDismiss = { navController.popBackStack() },
+                            onBack = { navController.popBackStack() },
                         )
                     }
                 }
@@ -386,10 +401,6 @@ fun SuixingApp() {
                     open("chat")
                 },
                 onDeleteConversation = { chat.deleteConversation(it) },
-                onOpenAssistants = {
-                    drawerOpen = false
-                    assistantsOpen = true
-                },
                 onNavigate = open,
                 consoleOn = settings.floatingConsole,
                 onToggleConsole = {
@@ -429,22 +440,8 @@ fun SuixingApp() {
         )
     }
 
-    // The assistant picker used to live in the chat header's avatar, which the floating
-    // header no longer has; the drawer is where the rest of the app's switches live.
-    if (assistantsOpen) {
-        AssistantSheet(
-            assistants = settings.assistants,
-            // The conversation's own persona, not the app-wide default: a chat that never
-            // picked one falls back to the default, which is what "没指定就默认" means.
-            activeId = assistantId.ifBlank { settings.activeAssistantId },
-            settings = settings,
-            onUse = { chat.useAssistant(it) },
-            onSetDefault = { chat.setDefaultAssistant(it) },
-            onSave = { chat.saveAssistant(it) },
-            onDelete = { chat.deleteAssistant(it) },
-            onDismiss = { assistantsOpen = false },
-        )
-    }
+    // 外壳里不再有第二张「助手」表：抽屉那一行推的是整页，半屏的表只剩聊天页自己那个
+    // 随手切换助手的窗口（ChatScreen 里那张，属于对话而不属于外壳）。
 }
 
 /**
@@ -461,7 +458,6 @@ private fun BoxScope.Drawer(
     onNew: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
     onDeleteConversation: (Conversation) -> Unit,
-    onOpenAssistants: () -> Unit,
     consoleOn: Boolean,
     onToggleConsole: () -> Unit,
     onNavigate: (String) -> Unit,
@@ -582,11 +578,13 @@ private fun BoxScope.Drawer(
                     color = scheme.outlineVariant,
                 )
                 Spacer(Modifier.height(6.dp))
+                // 助手这一行现在也是一次普通导航：它推的是整页（route = "assistants"），
+                // 和「任务」「文件」同一套开关语义，抽屉里不再有第二种打开方式。
                 DrawerAction(
                     label = "助手",
                     icon = painterResource(R.drawable.ic_bot),
-                    selected = false,
-                    onClick = onOpenAssistants,
+                    selected = route == "assistants",
+                    onClick = { onNavigate("assistants") },
                 )
                 DrawerAction(
                     label = "任务",

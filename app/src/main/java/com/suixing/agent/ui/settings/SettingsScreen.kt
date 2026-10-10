@@ -83,6 +83,9 @@ import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.COMPRESS_MAX_PERCENT
 import com.suixing.agent.data.COMPRESS_MIN_PERCENT
 import com.suixing.agent.data.COMPRESS_STEP_PERCENT
+import com.suixing.agent.data.PROFILE_MAX_TURNS
+import com.suixing.agent.data.PROFILE_MIN_TURNS
+import com.suixing.agent.data.PROFILE_STEP_TURNS
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
@@ -1237,6 +1240,67 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
+                SettingRow(
+                    title = "自动整理用户画像",
+                    subtitle = "每几轮之后，用这个会话的端点单独跑一次总结，把关于用户这个人的长期信息" +
+                        "写进画像。与记忆不同：记忆是模型在任务里主动记下的键值，画像是它定期从对话里" +
+                        "读出来的滚动摘要。总结失败不打扰你，也不改动已有画像。",
+                    control = {
+                        Switch(
+                            checked = stored.autoProfile,
+                            onCheckedChange = { on -> scope.persist { it.copy(autoProfile = on) } },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
+                SettingRow(
+                    title = "画像整理间隔",
+                    subtitle = "每这么多轮整理一次；一轮 = 一次跑完的运行，跨会话累计。" +
+                        (if (stored.autoProfile) "" else "（自动整理已关闭，这一项暂不生效。）"),
+                    control = {
+                        // 与压缩阈值同款的 −/+ 步进：关掉开关也留着这一行，只是置灰。
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.alpha(if (stored.autoProfile) 1f else 0.38f),
+                        ) {
+                            IconButton(
+                                enabled = stored.autoProfile,
+                                onClick = {
+                                    scope.persist { s ->
+                                        s.copy(
+                                            profileEveryTurns =
+                                                (s.profileTurnThreshold - PROFILE_STEP_TURNS)
+                                                    .coerceIn(PROFILE_MIN_TURNS, PROFILE_MAX_TURNS),
+                                        )
+                                    }
+                                },
+                            ) { Text("−", style = MaterialTheme.typography.titleLarge) }
+                            Text(
+                                text = "${stored.profileTurnThreshold} 轮",
+                                style = MaterialTheme.typography.bodyLarge,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.widthIn(min = 44.dp),
+                            )
+                            IconButton(
+                                enabled = stored.autoProfile,
+                                onClick = {
+                                    scope.persist { s ->
+                                        s.copy(
+                                            profileEveryTurns =
+                                                (s.profileTurnThreshold + PROFILE_STEP_TURNS)
+                                                    .coerceIn(PROFILE_MIN_TURNS, PROFILE_MAX_TURNS),
+                                        )
+                                    }
+                                },
+                            ) { Text("+", style = MaterialTheme.typography.titleLarge) }
+                        }
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
                 LabeledBlock(label = "工具审批", hint = "模型每次动手前要不要问你。") {
                     SegmentedPill(
                         options = ApprovalMode.entries.map { modeLabel(it) },
@@ -1625,7 +1689,7 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                         SettingsGroupRow("用户记忆", "模型自己写下的长期备忘") {
                             onOpen("extension")
                         },
-                        SettingsGroupRow("用户画像", "用户写给模型的长期自述：称呼、偏好与习惯") {
+                        SettingsGroupRow("用户画像", "模型自己维护的长期自述：称呼、偏好与习惯，也可手改") {
                             onOpen("profile")
                         },
                     ),

@@ -31,6 +31,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.pow
 
 /** px, not dp: the effects sit next to touches, which the system reports in px. */
 private const val FX_RING_MAX_RADIUS = 96f
@@ -51,14 +52,21 @@ private const val FX_RING_STROKE_PX = 6f
 private const val FX_TRAIL_STROKE_PX = 4f
 
 /**
- * The bright line of the ring, 6~10px by the user's own number.
+ * The edge light is a halo that fades inward, and these are its numbers — Operit's, which is the
+ * app the user pointed at.
  *
- * Thinner than the 14px it was: at 14 the band was wide enough to read as something laid on the
- * screen rather than as the screen's own edge, which is the 「没有严格按照边缘画」 half of the
- * report. Visibility does not come from the width any more — the ring is a saturated rainbow now
- * instead of one dark green, so the same alpha is several times brighter than it was.
+ * It used to be a stroke: one line of a fixed width laid around the screen. A stroke is a rule
+ * drawn on the panel, and that is how it read (「像一个框」). What the user asked for is light
+ * coming off the edge, so the band is filled from the screen's own edge inward over
+ * [FX_HALO_WIDTH_FRACTION] of the short side, in [FX_HALO_BANDS] steps whose alpha follows
+ * `(1 - t)^1.55`: brightest at the edge, gone by the time the fade ends.
+ *
+ * [FX_HALO_BANDS] is the one number to touch by eye. 72 is what Operit uses and 16 is the cheap
+ * end of the same curve, so if the steps read as rings rather than as a fade, raise it.
  */
-private const val FX_EDGE_STROKE_PX = 8f
+private const val FX_HALO_WIDTH_FRACTION = 0.046f
+private const val FX_HALO_BANDS = 16
+private const val FX_HALO_FALLOFF = 1.55f
 
 /**
  * 彩虹环的颜色：绕屏幕中心一圈的角度渐变，**首尾同色**，所以 0° 那里没有接缝。
@@ -119,20 +127,14 @@ private const val FX_BREATH_HOLD_MS = 6000L
  * fallback now — [screenCornerRadius] asks the display for its real corner on API 31+ and lands
  * here when the platform does not report one.
  *
- * The inset is zero because the path is now built on the display's real bounds rather than on the
- * view's measured size — see [displayBounds]. Centering the stroke on the true edge is what makes
- * the light look like it comes off the screen instead of stopping short of it; the outer half of
- * each glow pass is clipped by the window, and the inner half is the glow the user sees. An inset
- * of 10px left a visible gap between the light and the edge it is supposed to trace.
+ * The inset is zero because the path is the display's real bounds rather than the view's measured
+ * size — see [displayBounds] — and because the halo is drawn inward from that edge: there is no
+ * outer half left to clip, so the light starts exactly on the panel's edge instead of stopping
+ * short of it. An inset of 10px left a visible gap between the light and the edge it is supposed
+ * to trace.
  */
 private const val FX_EDGE_RADIUS_PX = 96f
 private const val FX_EDGE_INSET_PX = 0f
-
-/** The three passes of [TouchFx]'s glow: stroke width as a multiple of the edge stroke, and how
- * much of the requested alpha each one carries. Widest and faintest first, so the bright line
- * sits inside a soft band instead of on top of a hard edge. */
-private val FX_GLOW_WIDTHS = floatArrayOf(4f, 2f, 1f)
-private val FX_GLOW_WEIGHTS = floatArrayOf(0.22f, 0.45f, 1f)
 
 /**
  * The light is a state the user reads at a glance, not an animation to admire: 25fps while it
@@ -580,7 +582,8 @@ object TouchFx {
             noteOverlay(context, "failed（拿不到 WindowManager）")
             return null
         }
-        val fx = FxView(host, displayBounds(host), screenCornerRadius(host)) { detach() }
+        val bounds = displayBounds(host)
+        val fx = FxView(host, bounds, screenCornerRadius(host)) { detach() }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -593,13 +596,39 @@ object TouchFx {
             // working normally underneath while the effect is drawn on top of it.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                // In screen, not merely no-limits: without it the window is laid out inside the
-                // system bars, so the glow started below the status bar and stopped above the
-                // gesture bar — 「边缘也不对，没有包括状态栏和手势条区域」.
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
-        )
+        ).apply {
+            // These two are what actually make the window full-screen, and why the light never
+            // reached the status bar without them.
+            //
+            // `FLAG_LAYOUT_IN_SCREEN` is not enough on its own, which is what the previous
+            // attempt assumed. In R+ a window's frame comes from `WindowLayout.computeFrames`,
+            // which insets the display frame by `LayoutParams.getFitInsetsTypes()` — and that
+            // defaults to `WindowInsets.Type.systemBars()` (LayoutParams.java:4259, with sides
+            // `Side.all()` at :4279). `FLAG_LAYOUT_IN_SCREEN` only reaches the parent frame and
+            // the cutout exception in that method, never those insets, so a MATCH_PARENT window
+            // was still laid out from the bottom of the status bar to the top of the gesture bar,
+            // and everything the glow drew above that was clipped away — 「没有包括状态栏」.
+            // Fitting no insets at all is how the system's own full-screen overlay asks for the
+            // same thing (DisplayPolicy.java:2799, the pointer-location window).
+            //
+            // ALWAYS for the cutout, for the notch and the punch-hole: any other mode clamps the
+            // window into `displayCutoutSafe` (WindowLayout.java:108-111), which is a second way
+            // for the top strip to go missing.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setFitInsetsTypes(0)
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                // Neither `setFitInsetsTypes` nor ALWAYS exists before R; SHORT_EDGES is the
+                // portrait cutout mode those releases have.
+                @Suppress("DEPRECATION")
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         // Swallowed before, which made a refused window indistinguishable from one never asked
         // for; the reason is the single most useful line this file can hold.
         val added = runCatching { windowManager.addView(fx, params) }
@@ -613,6 +642,13 @@ object TouchFx {
             return null
         }
         noteOverlay(context, "created（${if (accessibility) "accessibility" else "application"}-overlay）")
+        // The window's own size against the display's, one frame after it is added. Whether the
+        // window really spans the panel is the whole question the 「没有覆盖状态栏」 report turns
+        // on, and from outside this file it is invisible: a window the system laid out inside the
+        // bars draws a light that stops at them and looks exactly like a drawing bug.
+        fx.post {
+            trace(context, "window=${fx.width}x${fx.height} display=${bounds.width()}x${bounds.height()}")
+        }
         manager = windowManager
         view = fx
         return fx
@@ -624,20 +660,23 @@ object TouchFx {
      * Not the view's measured size: an accessibility-overlay window is full-screen but its measured
      * size lands a tick after the first draw, and an application-overlay one is laid out inside the
      * system bars — either way the rounded rectangle came up short of the panel's edge, which is
-     * the 「没有完全覆盖好屏幕边缘」 report. The display bounds include the status bar and the
-     * gesture bar, so the light traces the whole screen from the first frame.
+     * the 「没有完全覆盖好屏幕边缘」 report. These bounds include the status bar, the gesture bar
+     * and the cutout, so the light traces the whole screen from the first frame.
      *
-     * [WindowManager.getCurrentWindowMetrics] from API 30; below that `Display.getRealSize`, which
-     * is the pre-R name for the same physical extent. An empty result — no display attached, which
-     * happens on a service that is being torn down — falls through to the app's own metrics rather
-     * than drawing nothing.
+     * `getMaximumWindowMetrics` and not `getCurrentWindowMetrics`: the latter describes the window,
+     * which is exactly the thing that came up short, while the former is the largest area the
+     * display can hand to any window. Asking the display rather than the window is the point — it
+     * cannot inherit a layout mistake. From API 30; below that `Display.getRealSize`, which is the
+     * pre-R name for the same physical extent. An empty result — no display attached, which happens
+     * on a service that is being torn down — falls through to the app's own metrics rather than
+     * drawing nothing.
      */
     @Suppress("DEPRECATION") // defaultDisplay/getRealSize: minSdk 26, and this is the pre-R path.
     private fun displayBounds(context: Context): Rect {
         val manager = context.getSystemService(WindowManager::class.java)
         if (manager != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val bounds = runCatching { manager.currentWindowMetrics.bounds }.getOrNull()
+                val bounds = runCatching { manager.maximumWindowMetrics.bounds }.getOrNull()
                 if (bounds != null && !bounds.isEmpty) return bounds
             } else {
                 val size = android.graphics.Point()
@@ -722,6 +761,15 @@ private class FxView(
     private val trails = mutableListOf<Trail>()
     private val edgeRect = RectF()
     private val edgePath = Path()
+
+    /**
+     * Scratch paths for the halo, one band at a time.
+     *
+     * Reused rather than built per band: 16 bands at 25fps is 400 `Path.op` calls a second, and a
+     * fresh Path per band would be 400 allocations a second on top of that for no gain.
+     */
+    private val haloBand = Path()
+    private val haloInner = Path()
     private var edgeStart = 0L
     private var idleReported = false
 
@@ -843,8 +891,7 @@ private class FxView(
 
     private fun drawEdge(canvas: Canvas, elapsed: Long, now: Long) {
         val progress = (elapsed.toFloat() / FX_EDGE_DURATION_MS).coerceIn(0f, 1f)
-        val path = edgeShape()
-        drawGlow(canvas, path, edgeRect, 0.7f * (1f - progress), now)
+        drawGlow(canvas, 0.7f * (1f - progress), now)
     }
 
     /**
@@ -858,34 +905,72 @@ private class FxView(
         val phase = ((now - breathStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
         val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
         val alpha = FX_BREATH_MIN_ALPHA + (FX_BREATH_MAX_ALPHA - FX_BREATH_MIN_ALPHA) * wave
-        val path = edgeShape()
-        drawGlow(canvas, path, edgeRect, alpha, now)
+        drawGlow(canvas, alpha, now)
     }
 
     /**
      * One edge, drawn as light rather than as a line.
      *
-     * Three passes from wide and faint to narrow and bright: a single stroke reads as a rule drawn
-     * around the screen — the user's verdict on the first version was 「不太明显」 and then, when it
-     * was made thicker, that it still looked like a box. Stacking strokes is what turns it into a
-     * glow that falls off inward, which is the effect they asked for.
+     * The band is filled, not stroked. A stroke is one width laid around the screen and reads as a
+     * rule on the panel — 「像一个框」 was the user's verdict on it, at every width it was tried at.
+     * This is Operit's edge instead, the app the user pointed at: the light starts on the screen's
+     * own edge at full strength and fades inward over [FX_HALO_WIDTH_FRACTION] of the short side,
+     * in [FX_HALO_BANDS] steps whose alpha follows `(1 - t)^1.55`. What the eye gets is a glow
+     * coming off the panel rather than a border on it.
      *
-     * All three passes carry the same sweep shader, so the colour at a given angle is identical
-     * across them and the band stays one rainbow instead of three offset ones. The alpha rides on
-     * the Paint, which is what makes the shader breathe: Skia multiplies a shader's output by the
-     * paint's alpha (the same reason `GradientDrawable.setAlpha` works on a gradient).
+     * Starting at the true edge is also what covers the status bar and the gesture bar: there is no
+     * inset left for a gap to open in, and a pixel or two of layout error is hidden inside the
+     * brightest band instead of showing up as a strip the light does not reach. That is the second
+     * half of the answer to 「没有包括状态栏」 — the window flags are the first.
+     *
+     * Every band carries the same sweep shader, so the colour at a given angle is identical across
+     * them and the halo stays one rainbow. The alpha rides on the Paint, which is what makes the
+     * shader breathe: Skia multiplies a shader's output by the paint's alpha (the same reason
+     * `GradientDrawable.setAlpha` works on a gradient).
      */
-    private fun drawGlow(canvas: Canvas, path: Path, rect: RectF, alpha: Float, now: Long) {
-        glowPaint.style = Paint.Style.STROKE
-        glowPaint.strokeCap = Paint.Cap.ROUND
-        glowPaint.strokeJoin = Paint.Join.ROUND
-        glowPaint.shader = rainbow(rect, now)
-        for (pass in FX_GLOW_WIDTHS.indices) {
-            glowPaint.strokeWidth = FX_EDGE_STROKE_PX * FX_GLOW_WIDTHS[pass]
-            glowPaint.alpha = (alpha * FX_GLOW_WEIGHTS[pass] * 255f).toInt().coerceIn(0, 255)
-            if (glowPaint.alpha <= 0) continue
-            canvas.drawPath(path, glowPaint)
+    private fun drawGlow(canvas: Canvas, alpha: Float, now: Long) {
+        if (alpha <= 0.01f) return
+        val outer = edgeShape()
+        val fadeWidth = minOf(edgeRect.width(), edgeRect.height()) * FX_HALO_WIDTH_FRACTION
+        glowPaint.style = Paint.Style.FILL
+        glowPaint.shader = rainbow(edgeRect, now)
+        for (band in 0 until FX_HALO_BANDS) {
+            val startT = band / FX_HALO_BANDS.toFloat()
+            val endT = (band + 1) / FX_HALO_BANDS.toFloat()
+            val level = ((1f - startT).pow(FX_HALO_FALLOFF) * alpha * 255f).toInt().coerceIn(0, 255)
+            if (level <= 0) continue
+            haloBand.set(outer)
+            haloInnerBoundary(fadeWidth * endT)
+            haloBand.op(haloInner, Path.Op.DIFFERENCE)
+            glowPaint.alpha = level
+            canvas.drawPath(haloBand, glowPaint)
         }
+    }
+
+    /**
+     * The inner boundary of one band: the screen's shape moved in by [inset], its corners rounded
+     * by the same amount less.
+     *
+     * Subtracting the inset rather than holding the radius is what keeps a band one width all the
+     * way round. A corner's arc is centred `cornerPx` in from both edges, and moving the edge in by
+     * `inset` while shortening the radius by `inset` leaves that centre exactly where it was — so
+     * the two contours are concentric, and the fade is as wide around a corner as along a straight
+     * edge. Holding the radius would pinch the band at the corners; holding it *and* drawing the
+     * square corners Operit uses would balloon it there instead.
+     */
+    private fun haloInnerBoundary(inset: Float) {
+        val safe = inset.coerceAtMost(minOf(edgeRect.width(), edgeRect.height()) / 2f)
+        val radius = (cornerPx - safe).coerceAtLeast(0f)
+        haloInner.reset()
+        haloInner.addRoundRect(
+            edgeRect.left + safe,
+            edgeRect.top + safe,
+            edgeRect.right - safe,
+            edgeRect.bottom - safe,
+            radius,
+            radius,
+            Path.Direction.CW,
+        )
     }
 
     /**
@@ -921,12 +1006,11 @@ private class FxView(
      * screen. An accessibility-overlay window is not measured until after its first draw, and an
      * application-overlay one is laid out inside the system bars, so both came up short of the
      * panel's edge — 「没有完全覆盖好屏幕边缘」. The display's real bounds reach the status bar and
-     * the gesture bar, and with the inset at zero the stroke is centred on the true edge: its outer
-     * half is clipped by the window and its inner half is the glow that gets seen.
+     * the gesture bar, and with the inset at zero this contour *is* the edge the halo starts from.
      *
      * One `addRoundRect` and not four sides: a path assembled from four line segments has a seam at
      * every corner — a visible break in the light, the 「不连续」 half of the report — while this is
-     * a single closed contour the stroke runs round without ever lifting.
+     * a single closed contour that runs round without ever lifting.
      */
     private fun edgeShape(): Path {
         val inset = FX_EDGE_INSET_PX

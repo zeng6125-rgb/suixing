@@ -1125,6 +1125,12 @@ class ChatViewModel : ViewModel() {
             is AgentEvent.AssistantMessage -> base.copy(
                 messages = base.messages + event.message.copy(runId = base.runId),
                 parts = base.parts.sealThinking(base.thinkingStartedAt),
+                // The round is a message now, so the two live buffers start empty: from here
+                // they hold the round still being written, not the run so far. That is what
+                // lets the draft carry the part no message has yet — otherwise it would hand
+                // the whole run back as one paragraph and repeat the rounds already stored.
+                streaming = "",
+                reasoning = "",
             )
 
             is AgentEvent.ToolStarted -> base.copy(
@@ -1408,8 +1414,10 @@ class ChatViewModel : ViewModel() {
         while (true) {
             delay(LIVE_DRAFT_INTERVAL_MS)
             val live = sessions[chatId] ?: continue
-            // Only the answer: the reasoning chain is not what the user comes back for, and
-            // writing it would double the file for text the transcript redraws anyway.
+            // The answer, the thinking beside it, and the rounds this run has already
+            // produced. The reasoning and those rounds are not "extra": the session is the
+            // only place they exist until the run ends, so a run that never ends would
+            // otherwise leave a paragraph with no chain of thought and no tool cards.
             val text = live.streaming
             if (text.isBlank() || text == written) continue
             written = text
@@ -1419,6 +1427,8 @@ class ChatViewModel : ViewModel() {
                     runId = live.runId,
                     at = System.currentTimeMillis(),
                     text = text,
+                    reasoning = live.reasoning.takeIf { it.isNotBlank() },
+                    messages = live.messages.filter { it.runId == live.runId },
                 ),
             )
         }
@@ -1426,6 +1436,9 @@ class ChatViewModel : ViewModel() {
 
     /**
      * Turns the draft a killed run left behind back into a message.
+     *
+     * The rounds and the thinking the draft carries come back with the paragraph: they are
+     * what the card was made of, and no other copy of them outlives a run that never saved.
      *
      * Only when the run it belongs to is not already in the transcript: a draft that outlived
      * a clean finish would otherwise return as a second bubble saying the same thing. The
@@ -1438,6 +1451,11 @@ class ChatViewModel : ViewModel() {
         val shown = _state.value.takeIf { it.conversationId == chatId }
         val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }
         val messages = live?.messages ?: shown?.messages ?: stored?.messages.orEmpty()
+        // The rounds and tool results this run had already produced, put back before the
+        // paragraph that was still being written. Until the run ends they exist nowhere else,
+        // and leaving them out is what brought the card back as a bare sentence with no chain
+        // of thought and no tool row — the answer with its reasoning and its work removed.
+        val restored = draft.messages.filterNot { written -> messages.any { it.id == written.id } }
         // "This text is already in the transcript", not "this run has messages": a run that
         // used a tool has already stored messages under the same runId, and judging by the
         // run alone would throw the half-written final answer away — the one thing this
@@ -1449,21 +1467,31 @@ class ChatViewModel : ViewModel() {
                 message.role == Roles.ASSISTANT &&
                 message.text.trim().startsWith(probe)
         }
-        // An empty draft has no answer in it to save; clearing it is all that is left.
-        if (delivered || probe.isEmpty()) {
+        // The answer is real but unfinished, and nothing else can say so: StoredMessage has
+        // no field for it, and a bubble that looks complete would read as the model having
+        // stopped mid-sentence for no reason. The thinking rides along, for the reason the
+        // engine hands it over on a stop as well: the chain that produced the paragraph is
+        // part of what the user watched arrive.
+        val line = if (delivered || probe.isEmpty()) {
+            emptyList()
+        } else {
+            listOf(
+                StoredMessage(
+                    id = UUID.randomUUID().toString(),
+                    role = Roles.ASSISTANT,
+                    text = draft.text.trimEnd() + "\n\n（中断）",
+                    reasoning = draft.reasoning,
+                    runId = draft.runId,
+                ),
+            )
+        }
+        // Nothing this draft holds is missing from the transcript; clearing it is all that is
+        // left.
+        if (restored.isEmpty() && line.isEmpty()) {
             Core.chats.clearLive(chatId)
             return
         }
-        // The answer is real but unfinished, and nothing else can say so: StoredMessage has
-        // no field for it, and a bubble that looks complete would read as the model having
-        // stopped mid-sentence for no reason.
-        val line = StoredMessage(
-            id = UUID.randomUUID().toString(),
-            role = Roles.ASSISTANT,
-            text = draft.text.trimEnd() + "\n\n（中断）",
-            runId = draft.runId,
-        )
-        val next = messages + line
+        val next = messages + restored + line
         if (shown != null) _state.update { it.copy(messages = next) }
         live?.let { putSession(it.copy(messages = next)) }
         save(

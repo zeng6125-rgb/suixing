@@ -296,6 +296,9 @@ class AgentEngine(
 
     private val runs = MutableStateFlow<Map<String, RunHandle>>(emptyMap())
 
+    /** 画像整理器：收尾挂钩与「重新总结」共用一个，它自己无状态。 */
+    private val summarizer = ProfileSummarizer(llm)
+
     /** The runs in flight right now, keyed by conversation id. */
     val runsFlow: StateFlow<Map<String, RunHandle>> = runs.asStateFlow()
 
@@ -398,6 +401,49 @@ class AgentEngine(
     fun requestCompress(chatId: String): Boolean = runs.value[chatId]?.requestCompress() ?: false
 
     /**
+     * 手动「重新总结」用户画像：立刻跑一次，不看轮数门限，也不看 [AppSettings.autoProfile]
+     * ——这是用户自己按的。
+     *
+     * [store] 与 [settings] 由调用方递进来，理由和 [startRun] 一样：引擎不持有任何仓库。
+     * 端点在 [settings.profileEndpoint] 里现解析（会话自己的选择 → 助手的固定 → 全局默认），
+     * 而 [messages] 是拿来整理的那段对话——画像页给的是最近一次会话。
+     */
+    suspend fun summarizeProfileNow(
+        store: UserProfileStore,
+        settings: AppSettings,
+        messages: List<StoredMessage>,
+    ): ProfileSummary = summarizer.summarize(store, settings.profileEndpoint(), messages)
+
+    /**
+     * 收尾挂钩：一轮结束之后，按门限决定要不要重新总结用户画像。
+     *
+     * 三条门槛缺一不可——设置里开着自动整理、距上次总结的轮数到了
+     * [AppSettings.profileTurnThreshold]、没有别的会话还在跑。整理是**另一次请求**，不进主
+     * wire；整条链路都在引擎自己的 scope 上跑，失败只当没发生，用户不会被打扰，已有画像也
+     * 一个字都不动。
+     *
+     * 计数在跳过时**不归零**：别的会话还在跑就等下一次收尾，这一轮不会白数。
+     */
+    private fun scheduleProfileSummary(
+        settings: AppSettings,
+        profile: UserProfileStore,
+        history: List<StoredMessage>,
+        produced: List<StoredMessage>,
+    ) {
+        if (!settings.autoProfile) return
+        // 没有 scope = 没人给引擎一条长命的后台通道（构造时就是这么传的），那就没有自动整理。
+        val background = scope ?: return
+        background.launch {
+            val turns = profile.bumpTurn()
+            if (turns < settings.profileTurnThreshold) return@launch
+            // 别的会话还在跑：让它在自己的收尾处再算。两件事同时用一条线会让两边都慢，
+            // 而画像是可以晚一轮的东西。
+            if (runs.value.isNotEmpty()) return@launch
+            summarizer.summarize(profile, settings, history + produced)
+        }
+    }
+
+    /**
      * Runs one conversation and returns the messages it produced.
      *
      * The run happens on the caller's coroutine, but on a job of its own underneath it (see
@@ -449,8 +495,10 @@ class AgentEngine(
             onEvent(AgentEvent.Failed("这个会话已经有任务在跑了，先停下或等它结束。"))
             return emptyList()
         }
+        // 这一轮产出的消息：收尾的画像整理要连着它一起看这一轮说了什么，所以在这里接一下。
+        var produced: List<StoredMessage> = emptyList()
         try {
-            return handle.execute(
+            produced = handle.execute(
                 history = history,
                 checkpoints = checkpoints,
                 settings = settings,
@@ -463,11 +511,15 @@ class AgentEngine(
                 onEvent = onEvent,
                 onCheckpoint = onCheckpoint,
             )
+            return produced
         } finally {
             // Gone from [runs] before the state settles: a finished run is not a run, and the
             // console must stop offering to stop it. By identity, so a stale finally cannot
             // unregister a newer run that took the same key.
             runs.update { if (it[chatId] === handle) it - chatId else it }
+            // 终态已经发布、这一轮也已经不是「在跑的 run」了，才轮到画像整理：它另开一条
+            // 协程，不阻塞调用方，也不进这一轮的 wire。
+            scheduleProfileSummary(settings, profile, history, produced)
         }
     }
 

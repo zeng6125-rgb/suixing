@@ -207,4 +207,19 @@ data class LiveDraft(
     /** When the draft was last written, in milliseconds. */
     val at: Long,
     val text: String,
+    /**
+     * The thinking of the round still being written.
+     *
+     * Kept beside [text] because a run that is interrupted before that round lands has no
+     * message to carry its chain of thought, and the card came back with the block empty.
+     */
+    val reasoning: String? = null,
+    /**
+     * The rounds and tool results the run had already produced.
+     *
+     * Until the run ends these live only in the session, so a run that never gets to save
+     * them left the transcript with a bare paragraph and none of the tool cards the answer
+     * was actually made of.
+     */
+    val messages: List<StoredMessage> = emptyList(),
 )
