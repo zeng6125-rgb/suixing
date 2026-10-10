@@ -387,6 +387,16 @@ fun SuixingTopBar(
 val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 /**
+ * The keyboard height the shell has clamped to, in pixels.
+ *
+ * Children that carry an inset of their own have to subtract it: the composer's navigation-bar
+ * padding is dead space while the keyboard covers the gesture bar, which is the band that
+ * appeared between the field and the keys. Clamped rather than raw so the platform's
+ * end-of-animation rebound does not flicker the band back for a frame.
+ */
+val LocalHeldImePx = staticCompositionLocalOf { 0 }
+
+/**
  * The bar for a page that is not a top-level destination: a back button instead of the
  * drawer handle.
  *

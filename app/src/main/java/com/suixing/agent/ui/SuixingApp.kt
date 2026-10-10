@@ -110,6 +110,7 @@ import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
+import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
@@ -187,14 +188,35 @@ fun SuixingApp() {
     val push: (String) -> Unit = { target -> navController.navigate(target) }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
-    // IME inset frame by frame — so `imePadding()` moves the composer exactly as smoothly as
-    // the keyboard itself, in both directions. Animating that inset ourselves was a mistake
-    // twice over: it fought the platform's own animation (the composer lagged and then caught
-    // up, which read as a wobble) and it counted the whole IME height on top of the
-    // navigation-bar inset the composer already carries, leaving a band of empty space above
-    // the keyboard. `imePadding()` subtracts what the other insets have already consumed.
+    // IME inset frame by frame. The shell lays itself out by a *clamped* copy of that inset:
+    // the platform's own animation ends with a rebound of a few pixels the other way
+    // (measured on device: the composer overshot ~6px past its resting place and snapped
+    // back, which on a 120Hz panel reads as a hitch at the end of every close), and an
+    // opposite-direction change inside the clamp is that rebound and is dropped; real
+    // transition frames are 30-80px and pass untouched.
+    val rootDensity = LocalDensity.current
+    val imeRawPx = WindowInsets.ime.getBottom(rootDensity)
+    var heldImePx by remember { mutableIntStateOf(0) }
+    var imeDir by remember { mutableIntStateOf(0) }
+    LaunchedEffect(imeRawPx) {
+        val delta = imeRawPx - heldImePx
+        if (delta == 0) return@LaunchedEffect
+        val dir = if (delta > 0) 1 else -1
+        val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
+        if (imeDir != 0 && dir != imeDir && rebound) return@LaunchedEffect
+        imeDir = dir
+        heldImePx = imeRawPx
+    }
+    LaunchedEffect(imeRawPx) {
+        delay(300)
+        imeDir = 0
+    }
     CompositionLocalProvider(
         LocalOpenSidebar provides { drawerOpen = true },
+        // The clamped keyboard height, for children that have to subtract it from an inset of
+        // their own (the composer's navigation-bar padding: while the keyboard covers the
+        // gesture bar that padding is dead space, which is the band the user photographed).
+        LocalHeldImePx provides heldImePx,
     ) {
         // The drawer is the shell's own panel rather than a ModalNavigationDrawer, so
         // nothing else consumes BACK: without this, BACK with the drawer open finished
@@ -231,29 +253,6 @@ fun SuixingApp() {
         // rounded corners. Ending the root's ramp where the canvas ends (and clamping past it,
         // which is the ramp's own last colour) makes the corners exactly the canvas's bottom
         // colour, continuous with the pixel row above the keyboard.
-        val rootDensity = LocalDensity.current
-        val imeRawPx = WindowInsets.ime.getBottom(rootDensity)
-        // The platform's keyboard animation ends with a rebound of a few pixels the other way
-        // (measured on device: the composer overshot ~6px past its resting place and snapped
-        // back, which on a 120Hz panel reads as a hitch at the end of every close). The inset
-        // the whole shell is laid out by is therefore clamped like the list's follow: an
-        // opposite-direction change inside the clamp is the rebound and is dropped; real
-        // transition frames are 30-80px and pass untouched.
-        var heldImePx by remember { mutableIntStateOf(0) }
-        var imeDir by remember { mutableIntStateOf(0) }
-        LaunchedEffect(imeRawPx) {
-            val delta = imeRawPx - heldImePx
-            if (delta == 0) return@LaunchedEffect
-            val dir = if (delta > 0) 1 else -1
-            val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
-            if (imeDir != 0 && dir != imeDir && rebound) return@LaunchedEffect
-            imeDir = dir
-            heldImePx = imeRawPx
-        }
-        LaunchedEffect(imeRawPx) {
-            delay(300)
-            imeDir = 0
-        }
         val gradientEndPx = with(rootDensity) {
             (LocalConfiguration.current.screenHeightDp.dp.toPx() - heldImePx).coerceAtLeast(1f)
         }

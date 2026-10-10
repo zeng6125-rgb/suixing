@@ -167,8 +167,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
@@ -195,7 +195,7 @@ import com.suixing.agent.ui.components.DrawerButton
 import com.suixing.agent.ui.components.FeatherIcon
 import com.suixing.agent.ui.components.FlatIconButton
 import com.suixing.agent.ui.components.FlatPainterButton
-import com.suixing.agent.ui.components.LocalOpenSidebar
+import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.REASONING_LEVELS
@@ -209,6 +209,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.roundToInt
 import java.io.File
 import java.text.SimpleDateFormat
@@ -3262,7 +3263,14 @@ private fun TurnScrubber(
     // measured off the rail's vertical centre: the strip itself is centred on the reading
     // area and its height changes with the number of turns in the window.
     val railHeightPx = rowPx * rowCount + gapPx * (rowCount - 1)
-    val labelDyPx = selected * (rowPx + gapPx) + rowPx / 2f - railHeightPx / 2f
+    // Animated, not computed straight from the row: dragging the finger down three lines then
+    // has the label glide to each one instead of teleporting, which is what makes the drag read
+    // as moving along the strip rather than as three separate taps.
+    val labelDyPx by animateFloatAsState(
+        targetValue = selected * (rowPx + gapPx) + rowPx / 2f - railHeightPx / 2f,
+        animationSpec = tween(SCRUBBER_SELECT_MS, easing = SCRUBBER_EASING),
+        label = "scrubber_label_dy",
+    )
 
     Box(modifier = modifier.width(SCRUBBER_RAIL)) {
         Column(
@@ -3273,7 +3281,9 @@ private fun TurnScrubber(
                 // on one of them and a drag can cross rows without dropping the gesture.
                 .pointerInput(Unit) {
                     val hitRowPx = SCRUBBER_ROW.toPx()
+                    val hitGapPx = SCRUBBER_GAP.toPx()
                     val hitPitchPx = SCRUBBER_ROW.toPx() + SCRUBBER_GAP.toPx()
+                    val railWidthPx = SCRUBBER_RAIL.toPx()
                     val dragPx = SCRUBBER_DRAG_THRESHOLD.toPx()
                     val exitPx = SCRUBBER_EXIT_TOLERANCE.toPx()
                     awaitEachGesture {
@@ -3287,6 +3297,9 @@ private fun TurnScrubber(
                         selectionRow = startRow
                         shown = false
                         var travel = 0f
+                        // Only a gesture that really moved is eligible for the off-rail cancel
+                        // below; a tap and a still hold always jump.
+                        var dragged = false
                         var pointer = down.position
                         // True only until the hold has run out; after that the pointer is
                         // awaited without a deadline, so a slow drag is never cut short.
@@ -3310,12 +3323,20 @@ private fun TurnScrubber(
                                 pressed = false
                                 continue
                             }
-                            travel += abs(change.position.y - pointer.y)
+                            // Both axes, but only the dominant one per event: summing them
+                            // doubled the jitter during a still hold and could pop the label
+                            // before the 220ms hold, while counting Y alone let a purely
+                            // horizontal drag off the rail slip through as a jump.
+                            travel += max(
+                                abs(change.position.y - pointer.y),
+                                abs(change.position.x - pointer.x),
+                            )
                             pointer = change.position
                             if (travel >= dragPx) {
                                 // Dragging is an answer in itself, so it skips the rest of the
                                 // hold and starts previewing turns at once.
                                 waiting = false
+                                dragged = true
                                 shown = true
                                 selectionRow = scrubberRowFor(
                                     change.position.y,
@@ -3331,9 +3352,22 @@ private fun TurnScrubber(
                             change.consume()
                         }
                         val destination = selectionRow
-                        // A finger that wanders this far off the strip was after the
-                        // transcript rather than a turn, so the jump is dropped.
-                        val cancelled = pointer.x < -exitPx
+                        // A finger that has really dragged and then wanders off the strip was
+                        // after the transcript rather than a turn, so the jump is dropped and the
+                        // strip springs back. Tested on all four sides of the rail, not just the
+                        // left: dragging past the top or bottom line is just as much a "not this".
+                        // A tap and a still hold never cancel — pointing at a line is the answer.
+                        // Measured here rather than read from the composition's own rail height:
+                        // this handler is keyed on Unit and never restarts, so a window that has
+                        // since gained or lost a turn would be judged against a stale box.
+                        val railBottomPx =
+                            hitRowPx * railRows.size + hitGapPx * (railRows.size - 1)
+                        val cancelled = dragged && (
+                            pointer.x < -exitPx ||
+                                pointer.x > railWidthPx + exitPx ||
+                                pointer.y < -exitPx ||
+                                pointer.y > railBottomPx + exitPx
+                            )
                         pressRow = -1
                         shown = false
                         if (!cancelled) railRows.getOrNull(destination)?.let(latestJump)
@@ -3460,9 +3494,16 @@ private val SCRUBBER_EXIT_TOLERANCE = 28.dp
  */
 private const val SCRUBBER_LONG_PRESS_MS = 220L
 
-/** The label's fade in, and its fade out once the finger lifts. */
+/** The label's fade in, and its fade out once the finger lifts. Aether's own pair. */
 private const val SCRUBBER_LABEL_IN_MS = 150
-private const val SCRUBBER_LABEL_OUT_MS = 150
+private const val SCRUBBER_LABEL_OUT_MS = 110
+
+/**
+ * How long the label takes to glide to the line the finger has reached. Deliberately the same
+ * 110ms as the line's own growth above, so the two land together and the label never outruns
+ * the line it names.
+ */
+private const val SCRUBBER_SELECT_MS = 110
 
 /** Air between the rail and the label. */
 private val SCRUBBER_LABEL_GAP = 6.dp
@@ -3762,9 +3803,16 @@ private fun Composer(
             .fillMaxWidth()
             // The gesture bar's strip, but never on top of the keyboard: when the keyboard is
             // up it already covers that strip, and padding for it as well pushed the card a
-            // navigation bar's height above the keyboard — the gap that grew the moment the
-            // keyboard opened, while the keyboard-down spacing looked right.
-            .navigationBarsPadding()
+            // navigation bar's height above the keyboard — the band the user photographed.
+            // The shell's clamped keyboard height is what to subtract (clamped, so the
+            // platform's end-of-animation rebound cannot flicker the band back for a frame).
+            .padding(
+                bottom = with(density) {
+                    (WindowInsets.navigationBars.getBottom(this) - LocalHeldImePx.current)
+                        .coerceAtLeast(0)
+                        .toDp()
+                },
+            )
             .padding(horizontal = 16.dp)
             .padding(top = 6.dp, bottom = 12.dp)
             // Measured after the navigation-bar inset is applied, so the number the
