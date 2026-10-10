@@ -171,6 +171,16 @@ sealed interface LivePart {
     data class Thinking(val text: String, val tokens: Int = 0, val elapsedMs: Long = 0) : LivePart
     data class Tools(val calls: List<LiveTool>) : LivePart
     data class Text(val text: String) : LivePart
+
+    /**
+     * A line the user handed over while this run was going.
+     *
+     * The run's own stored rounds are hidden from the transcript for as long as it streams,
+     * because this bubble already draws them — and a steer stored as a message folds into
+     * exactly the row that is hidden. Without its own live part the line the user just typed
+     * had nowhere to appear until the run ended.
+     */
+    data class Steer(val message: StoredMessage) : LivePart
 }
 private data class RunSession(
     val chatId: String,
@@ -1142,16 +1152,35 @@ class ChatViewModel : ViewModel() {
             // The model has the line now: it leaves the queue and becomes a message in the
             // same breath, so a queued line is never both. Marked `steer` so the transcript
             // keeps reading it as an interruption rather than as the question being answered.
+            //
+            // It also becomes a live part, and that is the only way the user sees it while the
+            // run is going: this run's stored rounds are hidden from the transcript for as
+            // long as it streams (the live bubble draws them), and a stored steer folds into
+            // exactly the hidden row. The message still lands, because the run is what saves
+            // it — it is just not drawable yet.
+            //
+            // Off `base`, not `live`: the deltas buffered for this event were already taken
+            // out of their buffers a few lines up, so building on `live` would have thrown
+            // away whatever text and thinking had just arrived.
             is AgentEvent.Steered -> {
                 steers[chatId] = steers[chatId].orEmpty().filterNot { it.id == event.id }
                 publishSteers(chatId)
-                live.copy(
-                    messages = live.messages + StoredMessage(
-                        id = event.id,
-                        role = Roles.USER,
-                        text = event.text,
-                        steer = true,
-                    ),
+                val line = StoredMessage(
+                    id = event.id,
+                    role = Roles.USER,
+                    text = event.text,
+                    steer = true,
+                    // This run's id, like every other message it writes. The screen hides the
+                    // live run's stored rows while the bubble draws them; a steer without the
+                    // id slipped past that filter whenever no bubble was open yet (the model
+                    // had stored nothing back) and appeared twice — once settled, once live.
+                    // Nothing else keys off it: turns are opened by non-steer user messages
+                    // alone, and [Transcript.active] keeps every user message whatever its run.
+                    runId = base.runId,
+                )
+                base.copy(
+                    messages = base.messages + line,
+                    parts = base.parts.sealThinking(base.thinkingStartedAt) + LivePart.Steer(line),
                 )
             }
         }

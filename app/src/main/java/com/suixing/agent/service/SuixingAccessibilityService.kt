@@ -42,17 +42,25 @@ class SuixingAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         active = this
+        // Gives the effects an accessibility-overlay host: from here on they need no
+        // SYSTEM_ALERT_WINDOW permission and MIUI keeps them visible while the app is in the
+        // background, which is when the agent is operating another app. See TouchFx.overlay.
+        TouchFx.bindService(this)
         runCatching { Core.capabilities.onAccessibilityChanged(true) }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
         active = null
+        // The system destroys the effects' accessibility window with this service; TouchFx has to
+        // drop its reference or every later effect silently draws into a dead view.
+        TouchFx.unbindService(this)
         runCatching { Core.capabilities.onAccessibilityChanged(false) }
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         active = null
+        TouchFx.unbindService(this)
         runCatching { Core.capabilities.onAccessibilityChanged(false) }
         super.onDestroy()
     }

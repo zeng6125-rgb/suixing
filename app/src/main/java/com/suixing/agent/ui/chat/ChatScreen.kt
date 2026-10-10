@@ -789,6 +789,13 @@ fun ChatScreen(
                                                     Part.Tools(part.calls.map(ToolLine::of))
 
                                                 is LivePart.Text -> Part.Text(part.text)
+
+                                                // The stored copy of this line is hidden for as
+                                                // long as the run streams, so the live part is
+                                                // what puts it on screen the moment it is handed
+                                                // over. Same widget either way, which is why the
+                                                // bubble does not move when the run settles.
+                                                is LivePart.Steer -> Part.Steer(part.message)
                                             }
                                         },
                                         streaming = true,
@@ -1561,14 +1568,22 @@ private fun groupRows(
                     }
                     rows[index] = open.copy(parts = parts)
                 } else {
-                    // A tool result with no bubble above it (a transcript that starts
-                    // mid-turn) still gets drawn, just on its own.
+                    // A tool result with no bubble above it still gets drawn — and it opens
+                    // the bubble, claiming the run that produced it. The round that asked for
+                    // the call can carry neither text nor thinking (a pure tool-call round),
+                    // which makes it invisible to the assistant branch below, so nothing is
+                    // open by the time its result lands. Leaving this card unclaimed is what
+                    // split one answer: every following result of the same run started yet
+                    // another card, and the round that finally wrote prose could not fold
+                    // back in because its run no longer matched an open one.
                     rows += ChatRow(
                         message = message,
                         showTimeLabel = needsTimeLabel(previous, message),
                         parts = listOf(Part.Tools(listOf(ToolLine.of(message)))),
                     )
                     previous = message
+                    openIndex = rows.lastIndex
+                    openRun = message.runId.orEmpty()
                 }
             }
 

@@ -13,7 +13,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
-import android.util.DisplayMetrics
 import android.view.View
 import android.view.WindowManager
 import androidx.lifecycle.Lifecycle
@@ -146,10 +145,17 @@ private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
  *
  * Nothing here steers anything: the accessibility service calls it after it has decided
  * to dispatch a gesture, so the drawing can never claim something the phone did not do.
- * Without the overlay permission every entry point does nothing — a window the system
- * will reject is not worth asking for. If the permission is revoked while the window is up, the
- * system takes it away without calling anything back: no effect is drawn again in this process
- * until it restarts. That is left as it is rather than papered over with a state machine.
+ *
+ * The window is hosted by the connected accessibility service when there is one
+ * ([TYPE_ACCESSIBILITY_OVERLAY]) and falls back to the application context otherwise. The first
+ * needs no permission at all — an enabled accessibility service is already trusted to draw over
+ * other apps — and MIUI does not hide it when this app goes to the background, which is when the
+ * agent is operating a different app. The fallback still needs SYSTEM_ALERT_WINDOW, and without
+ * either host every entry point does nothing: a window the system will reject is not worth asking
+ * for. If a host goes away while the window is up — the permission is revoked, or the service is
+ * disconnected — [bindService]/[unbindService] and [release] drop the stale window so the next
+ * effect rebuilds from whatever is available, rather than drawing into a view the system has
+ * already destroyed.
  */
 object TouchFx {
 
@@ -247,10 +253,14 @@ object TouchFx {
      */
     private fun release(reason: String) {
         val fx = view ?: return
+        val windowManager = manager
         val app = appContext
         view = null
         manager = null
-        runCatching { fx.context.getSystemService(WindowManager::class.java)?.removeView(fx) }
+        // Through the captured WindowManager rather than fx.context: this runs on service
+        // disconnect, when asking the service for its system services again may find a context
+        // that is already being torn down. The manager that added the view can always remove it.
+        runCatching { windowManager?.removeView(fx) }
         if (app != null) noteOverlay(app, "released（$reason）")
     }
 
@@ -361,9 +371,9 @@ object TouchFx {
             // An id that ended stops counting as driving.
             drivingIds = drivingIds - departed
             // The light follows the actions, not the run: 「agent 没有操作的时候仍旧显示」 was the
-            // complaint, and a run spends most of its life waiting on a model or a tool. Four
-            // seconds is long enough to bridge the gap between two taps of one sequence and short
-            // enough that an idle run goes dark while the user watches.
+            // complaint, and a run spends most of its life waiting on a model or a tool. The hold
+            // period has to outlast one of those turns without lingering after the run ends — see
+            // FX_BREATH_HOLD_MS for the numbers and why they moved off four seconds.
             val lit = app != null && now - lastDrivingAt < FX_BREATH_HOLD_MS
             if (lit && app != null) {
                 overlay(app)?.setBreathing(true)
@@ -385,8 +395,12 @@ object TouchFx {
      * user out of whatever they were reading. Nothing happens when the app is already in front —
      * the ticker runs on the main thread, so the lifecycle answer is the live one — and a start
      * the system refuses is ignored, since being returned to the app is a courtesy, not a result.
-     * Starting an activity from the background is allowed here because the overlay permission the
-     * effects already need (SYSTEM_ALERT_WINDOW) is Android 10's documented exemption for it.
+     * Starting an activity from the background is allowed here only when the app holds
+     * SYSTEM_ALERT_WINDOW, which is Android 10's documented exemption for it. On the
+     * accessibility-overlay host this app may well not have that permission — not needing it for
+     * the effects is the point — in which case the system refuses the start and the user simply
+     * stays where they are. Being returned to the app is a courtesy, not a result, so that is
+     * acceptable rather than a reason to ask for a permission the effects do not need.
      */
     private fun returnToApp() {
         val app = appContext ?: return
@@ -558,11 +572,12 @@ object TouchFx {
      * the 「没有完全覆盖好屏幕边缘」 report. The display bounds include the status bar and the
      * gesture bar, so the light traces the whole screen from the first frame.
      *
-     * [WindowManager.getCurrentWindowMetrics] from API 30; below that [Display.getRealSize], which
+     * [WindowManager.getCurrentWindowMetrics] from API 30; below that `Display.getRealSize`, which
      * is the pre-R name for the same physical extent. An empty result — no display attached, which
      * happens on a service that is being torn down — falls through to the app's own metrics rather
      * than drawing nothing.
      */
+    @Suppress("DEPRECATION") // defaultDisplay/getRealSize: minSdk 26, and this is the pre-R path.
     private fun displayBounds(context: Context): Rect {
         val manager = context.getSystemService(WindowManager::class.java)
         if (manager != null) {
@@ -599,8 +614,16 @@ object TouchFx {
  * It redraws itself while something is animating, or while the breathing edge is on — the latter
  * at a fraction of the frame rate, since a glow that moves this slowly does not need one — and
  * reports idle the moment there is nothing left, which is what lets the window be taken down.
+ *
+ * [screenBounds] is the display's real extent, captured by [TouchFx.overlay] when the window was
+ * created, and is what the edge light is drawn on rather than this view's own measured size — see
+ * [TouchFx.displayBounds].
  */
-private class FxView(context: Context, private val onIdle: () -> Unit) : View(context) {
+private class FxView(
+    context: Context,
+    private val screenBounds: Rect,
+    private val onIdle: () -> Unit,
+) : View(context) {
 
     private class Ring(val x: Float, val y: Float, val startAt: Long, val holdMs: Long, val delayMs: Long)
 
@@ -768,10 +791,22 @@ private class FxView(context: Context, private val onIdle: () -> Unit) : View(co
      * The outline both edge effects are drawn on: the screen's own shape rather than a rectangle
      * around it. A phone's corners are round, so square corners read as a box laid on the screen
      * instead of a light coming off its edges — which is exactly what the user reported seeing.
+     *
+     * Sized from [screenBounds] rather than [width]/[height]: the view's measured size is not the
+     * screen. An accessibility-overlay window is not measured until after its first draw, and an
+     * application-overlay one is laid out inside the system bars, so both came up short of the
+     * panel's edge — 「没有完全覆盖好屏幕边缘」. The display's real bounds reach the status bar and
+     * the gesture bar, and with the inset at zero the stroke is centred on the true edge: its outer
+     * half is clipped by the window and its inner half is the glow that gets seen.
      */
     private fun edgeShape(): Path {
         val inset = FX_EDGE_INSET_PX
-        edgeRect.set(inset, inset, width - inset, height - inset)
+        edgeRect.set(
+            screenBounds.left + inset,
+            screenBounds.top + inset,
+            screenBounds.right - inset,
+            screenBounds.bottom - inset,
+        )
         edgePath.reset()
         edgePath.addRoundRect(edgeRect, FX_EDGE_RADIUS_PX, FX_EDGE_RADIUS_PX, Path.Direction.CW)
         return edgePath

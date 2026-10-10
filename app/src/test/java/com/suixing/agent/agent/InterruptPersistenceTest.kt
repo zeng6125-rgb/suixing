@@ -151,6 +151,43 @@ class InterruptPersistenceTest {
         assertTrue("and it did not invent an answer that never came", kept.message.text.isEmpty())
     }
 
+    /**
+     * The other half of the same stop. The chat screen cancels the run's job as well as its
+     * call, so the parked read comes back as a [kotlinx.coroutines.CancellationException]
+     * instead of an IOException — a second branch that has to keep the very same buffers.
+     */
+    @Test
+    fun `a stop that cancels the job rather than the call keeps the reasoning too`() = runBlocking {
+        val events = mutableListOf<AgentEvent>()
+        val wires = mutableListOf<List<ChatMessage>>()
+        val reasoningSeen = CompletableDeferred<Unit>()
+        val hold = CompletableDeferred<Unit>()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any()) } coAnswers {
+                wires += secondArg<List<ChatMessage>>()
+                (invocation.args[4] as (String) -> Unit)("想了一半")
+                reasoningSeen.complete(Unit)
+                // No cut(): the run's own job is cancelled, which is what the chat screen does.
+                withTimeout(5_000) { hold.await() }
+                AssistantTurn(text = "done", toolCalls = emptyList(), finishReason = "stop")
+            }
+        }
+        val engine = AgentEngine(llm = client)
+        val deps = quietDeps()
+
+        val run = async(Dispatchers.Default) {
+            startRun(engine, deps, registryWith(ParkingTool()), onEvent = { events += it })
+        }
+        withTimeout(5_000) { reasoningSeen.await() }
+
+        assertTrue("the stop lands", engine.cancel("c"))
+        run.await()
+
+        val kept = events.filterIsInstance<AgentEvent.AssistantMessage>().single()
+        assertEquals("the thinking is kept on this path as well", "想了一半", kept.message.reasoning)
+        assertTrue("and still no answer is invented", kept.message.text.isEmpty())
+    }
+
     @Test
     fun `a tool the stop left hanging is answered in the transcript`() = runBlocking {
         val events = mutableListOf<AgentEvent>()
