@@ -773,7 +773,7 @@ class ChatViewModel : ViewModel() {
                 activeRuns = it.activeRuns + (user.id to fresh),
                 streaming = "",
                 reasoning = "",
-                status = "正在思考…",
+                status = "正在思考中",
                 error = null,
             )
         }
@@ -1112,7 +1112,9 @@ class ChatViewModel : ViewModel() {
             )
 
             is AgentEvent.ToolStarted -> base.copy(
-                status = "调用 ${event.name}",
+                // 「正在调用」 rather than a bare verb: the line is a sentence the user reads
+                // while waiting, and 「调用 read_file」 read as a log entry.
+                status = "正在调用 ${event.name}",
                 runningTool = event.name,
                 parts = base.parts.sealThinking(base.thinkingStartedAt).startTool(event.name, event.args),
             )

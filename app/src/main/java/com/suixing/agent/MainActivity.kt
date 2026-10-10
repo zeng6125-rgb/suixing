@@ -3,6 +3,7 @@ package com.suixing.agent
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -58,6 +59,13 @@ class MainActivity : ComponentActivity() {
                 // but a solid navigation bar colour is exactly the grey band under the
                 // gesture pill the user photographed.
                 window.navigationBarColor = Color.TRANSPARENT
+                // The window's own background is what the system draws in the strip the
+                // keyboard covers, so it shows through the keyboard's rounded corners. Left at
+                // the platform default it is a pale seam against the app's background; set here
+                // per theme because the app's theme is a setting of its own, not the system's.
+                window.setBackgroundDrawable(
+                    ColorDrawable(if (dark) DARK_BACKGROUND else LIGHT_BACKGROUND),
+                )
             }
             SuixingTheme(
                 darkTheme = dark,
@@ -88,5 +96,9 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val REQUEST_NOTIFICATIONS = 1001
+
+        /** The two schemes' own background colours; see Color.kt and the window background. */
+        const val LIGHT_BACKGROUND = 0xFFFFFFFF.toInt()
+        const val DARK_BACKGROUND = 0xFF0F1412.toInt()
     }
 }

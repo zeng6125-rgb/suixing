@@ -47,6 +47,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -469,9 +470,11 @@ fun ChatScreen(
         if (listState.isScrollInProgress && !programmatic) return@LaunchedEffect
         programmatic = true
         try {
+            // Instant, not animated: the list is being held at its end while content grows, and
+            // animating that both fought the platform's own keyboard animation (the card shot up
+            // and then settled back) and made the keyboard-down case — which was already right —
+            // feel wrong. The keyboard's own animation is the only motion this needs.
             listState.scrollToItem(itemCount - 1)
-            // Clamped by the list itself: a reply taller than the viewport should keep its
-            // end on screen rather than its first line.
             listState.scrollBy(FOLLOW_SCROLL_PX)
             // A second pass after the new item has been measured. The first scroll runs in the
             // frame the item was added, when its height is still unknown, so the end it lands on
@@ -737,19 +740,16 @@ fun ChatScreen(
                                     )
                                     // 8dp under the card: the run's progress belongs to the
                                     // bubble it describes, and 3dp read as cramped against it.
-                                    // 8dp under the card and 8dp under the caption itself: the
-                                    // line was top-heavy, sitting 8 above and 0 below while the
-                                    // list's own 16dp spacing only applied after it.
+                                    // 16dp above, none below: the card's own bottom padding and
+                                    // the list's spacing already supply the air underneath, so an
+                                    // equal padding here left the line sitting high between the
+                                    // card above it and the gap below.
                                     if (state.runningHere) {
                                         RunStatusLine(
                                             text = liveStatusText,
                                             startedAt = runStartedAt[runKey] ?: 0L,
                                             timed = statsNote.isEmpty(),
-                                            modifier = Modifier.padding(
-                                                start = 4.dp,
-                                                top = 8.dp,
-                                                bottom = 8.dp,
-                                            ),
+                                            modifier = Modifier.padding(start = 4.dp, top = 16.dp),
                                         )
                                     }
                                 }
@@ -1772,6 +1772,9 @@ private fun TurnMetrics(
                 alignment = Alignment.BottomStart,
                 offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
             ) {
+                // Intrinsic width: every row is as wide as the widest one, which is what puts the
+                // numbers on one column while the popup still hugs its content.
+                Column(Modifier.width(IntrinsicSize.Max)) {
                 when (shown) {
                     MetricCard.TIME -> {
                         if (elapsedMs > 0) RingDetail("总用时", elapsed)
@@ -1827,6 +1830,7 @@ private fun TurnMetrics(
                             RingDetail("输出", "${shortTokens(completionTokens)} tok")
                         }
                     }
+                }
                 }
             }
         }
@@ -4663,6 +4667,9 @@ private fun ContextRingCard(
                 color = scheme.onSurfaceVariant,
             )
         } else {
+            // Same intrinsic-width trick as the metric cards: the numbers share one right edge
+            // without the card asking for the screen's width.
+            Column(Modifier.width(IntrinsicSize.Max)) {
             RingDetail(
                 "上下文",
                 if (known) {
@@ -4697,6 +4704,7 @@ private fun ContextRingCard(
                 // dwarf the 「上下文」 line right above it.
                 RingDetail("会话累计", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
             }
+            }
         }
     }
 }
@@ -4712,7 +4720,10 @@ private fun ContextRingCard(
 @Composable
 private fun RingDetail(label: String, value: String) {
     Row(
-        modifier = Modifier.fillMaxWidth().widthIn(min = 168.dp),
+        // Fills its parent, and the parent is sized to the widest row (see the cards): that is
+        // what lines the numbers up. It deliberately does not ask for the screen's width — the
+        // first attempt did, and a popup that should hug its content grew to the full screen.
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(

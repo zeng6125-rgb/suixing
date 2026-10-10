@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="window_background">#FF151619</color>
+    <!-- The dark scheme's own background (Color.kt: background = 0xFF0F1412). It has to match:
+         this is what the system draws in the strip the keyboard covers, so anything else shows
+         through the keyboard's rounded corners as a seam against the app's own background. -->
+    <color name="window_background">#FF0F1412</color>
 </resources>
