@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -433,9 +432,9 @@ fun PageTopBar(
     subtitle: String? = null,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
-    // 层级靠 surfaceContainerLow 底 + 1dp 发丝线，不靠阴影（README「不用阴影」）：
-    // 阴影在滚动内容上方是一圈灰雾，浅色侧尤其脏；发丝线只画一条边，内容从下面滑过时
-    // 边界始终干净。这条线是这一栏唯一的层级信号，所以它不能省。
+    // 栏底不再画任何线：发丝线去掉了——用户明确说「顶栏不要分割线了」，与聊天页同一条规矩。
+    // 这一栏的分层改由 surfaceContainerLow 底色 + 栏下 12dp 空隙承担，不靠阴影
+    // （README「不用阴影」）：阴影在滚动内容上方是一圈灰雾，浅色侧尤其脏。
     Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) {
         Column {
             Row(
@@ -480,10 +479,6 @@ fun PageTopBar(
                 }
                 actions()
             }
-            HorizontalDivider(
-                thickness = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
-            )
         }
     }
     // The gap every page's first control keeps from the bar. It lives here rather than in the

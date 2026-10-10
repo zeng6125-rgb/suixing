@@ -393,8 +393,35 @@ object TouchFx {
      *
      * Nothing has to switch it off, which is the point: a run that dies without telling anyone
      * cannot leave the light on, because the next tick sees that its id is gone. The ticker
-     * stops itself once the light is out, so no timer runs while the agent is idle.
+     * stops itself once the light is out **and** no driving run is left, so no timer runs while
+     * the agent is idle — a dark ticker with a run still in flight is the one that watches for
+     * the departure that brings the user back to the app.
      */
+    /**
+     * How long the way home is held back after the last driving run ends.
+     *
+     * Three seconds: longer than the gap between one turn of a conversation and its next, short
+     * enough that a user who is waiting for the trip does not think nothing happened. See
+     * [returnCheck] for what it is protecting against.
+     */
+    private const val FX_RETURN_QUIET_MS = 3000L
+
+    /**
+     * The trip home, answered only after the engine has gone quiet.
+     *
+     * Armed by a driving run's departure and asked [FX_RETURN_QUIET_MS] later: if anything is
+     * still running — the next turn of this conversation, another conversation's task, a queued
+     * message — the user is still being operated for and nothing happens. Only a whole engine at
+     * rest gets the phone handed back. [returnToApp] itself still decides whether the app is
+     * already in front and whether the system lets the start through.
+     */
+    private val returnCheck = object : Runnable {
+        override fun run() {
+            if (Core.engine.runsFlow.value.isNotEmpty()) return
+            returnToApp()
+        }
+    }
+
     private val ticker = object : Runnable {
         override fun run() {
             val app = appContext
@@ -407,7 +434,16 @@ object TouchFx {
             // this tick rather than after the light's grace period. A run that merely shared the
             // screen with the one that drove does not earn the trip on its own.
             val drivingLeft = departed.any { it in drivingIds }
-            if (drivingLeft && running.none { it in drivingIds }) returnToApp()
+            if (drivingLeft && running.none { it in drivingIds }) {
+                // Armed, not taken. A conversation can run its next turn the moment this one ends
+                // — a steered message waiting its turn, a task list moving to its next item — and
+                // handing the phone back between two of those would take it away again a second
+                // later. The user's worry was exactly that: 「万一是连续动作呢，那岂不是一直跳」.
+                // [returnCheck] answers after FX_RETURN_QUIET_MS, and anything still in flight
+                // then means this was not the end of the task.
+                main.removeCallbacks(returnCheck)
+                main.postDelayed(returnCheck, FX_RETURN_QUIET_MS)
+            }
             // An id that ended stops counting as driving.
             drivingIds = drivingIds - departed
             // The light follows the actions, not the run: 「agent 没有操作的时候仍旧显示」 was the
@@ -425,11 +461,23 @@ object TouchFx {
                 overlay(app)?.setBreathing(true)
                 main.postDelayed(this, FX_BREATH_TICK_MS)
             } else {
-                drivingIds = emptySet()
+                // The light going out is not the run being over, and clearing every id here is
+                // what made [returnToApp] unreachable: once the ids were gone, `it in drivingIds`
+                // above could never be true again, so the trip home happened only in the one case
+                // where a run ended inside the six-second hold. What is kept is exactly the runs
+                // that are still alive and were driving — an id whose run has ended is dropped
+                // either way, so the next run in the conversation starts from nothing.
+                drivingIds = drivingIds.intersect(running)
                 jobDrivingUntil = 0L
                 // Draws one last frame without the light, which is what lets the window go.
                 view?.setBreathing(false)
-                main.removeCallbacks(this)
+                // Still watching for a departure, so the tick has to keep coming; a set that came
+                // out empty means there is nothing left to hand the phone back for.
+                if (drivingIds.isEmpty()) {
+                    main.removeCallbacks(this)
+                } else {
+                    main.postDelayed(this, FX_BREATH_TICK_MS)
+                }
             }
         }
     }
@@ -451,10 +499,25 @@ object TouchFx {
     private fun returnToApp() {
         val app = appContext ?: return
         val foreground = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-        if (foreground) return
-        runCatching {
-            app.startActivity(Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        if (foreground) {
+            // 「还是不会自动返回」 has three candidates — the tick never got here, the app was
+            // already in front, or the system refused the start — and they look identical from
+            // outside. One line per call tells them apart: this one, then the two below.
+            trace(app, "entry=returnToApp foreground=true（已在前台）")
+            return
         }
+        // The exemption for a background activity start is holding SYSTEM_ALERT_WINDOW, so its
+        // answer is the first thing to check when the start below reports no error yet nothing
+        // happens: on the accessibility-overlay host this app may not have the permission at all.
+        val overlays = Settings.canDrawOverlays(app)
+        val error = runCatching {
+            app.startActivity(Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.exceptionOrNull()
+        trace(
+            app,
+            "entry=returnToApp canDrawOverlays=$overlays " +
+                "startActivity=${error?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "ok"}",
+        )
     }
 
     /**

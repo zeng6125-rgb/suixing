@@ -4733,13 +4733,16 @@ private fun GenerationSheet(
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].
         focusable = false,
-        // 300dp, not the 340dp it was, and up from 260dp: page one is one model name and one
-        // slider, and 340dp is 94% of a 360dp screen — the card read as a full-width panel
-        // rather than as something hanging off the button that opened it. The model list is
-        // the page that needs the room: its titles and its model names are one size now
-        // (bodyMedium, 14sp), and at 260dp a long endpoint name was cut at the card's edge.
-        // 300dp leaves the content 264dp after MenuCard's own 18dp padding either side.
-        modifier = Modifier.widthIn(max = 300.dp).onSizeChanged { sheetWidth = it.width },
+        // One width per page. Page one is one model name and one slider, and 340dp is 94% of a
+        // 360dp screen — at that width the card read as a full-width panel rather than as
+        // something hanging off the button that opened it, so page one keeps 300dp (content
+        // 264dp after MenuCard's own 18dp padding either side). The list page is the one that
+        // needs the room: its provider and vendor headings are single names the user is reading
+        // to find a model, and 264dp of content cut the long ones at the card's edge. The 340dp
+        // that first fixed this is back, but only while the list is up.
+        modifier = Modifier
+            .widthIn(max = if (picking) 340.dp else 300.dp)
+            .onSizeChanged { sheetWidth = it.width },
     ) {
         if (!picking) {
             // Page one: one big name to tap, one slider to drag, nothing else.
@@ -4872,11 +4875,16 @@ private fun GenerationSheet(
                                     fontWeight = FontWeight.SemiBold,
                                 ),
                                 color = scheme.primary,
-                                // Not `weight(1f)`: a fixed share of the row is what cut long
-                                // endpoint names short. `fill = false` leaves the label its own
-                                // width and wraps it on the row's second line when the name is
-                                // longer than what is left of it — a name is never shortened,
-                                // and the chevron stays on the right edge either way.
+                                // Two lines and an ellipsis, not "it wraps by itself": a
+                                // heading here is usually a host or a `vendor/model` pair, one
+                                // ASCII run with no break opportunity inside it, and such a run
+                                // cannot wrap — it was cut at the card's edge with nothing to
+                                // say it had been. Two lines let a real name through; the
+                                // ellipsis is the honest signal for the ones that still do not
+                                // fit. `fill = false` stays, so the chevron keeps the right edge
+                                // either way.
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false),
                             )
                             Icon(
@@ -4902,10 +4910,15 @@ private fun GenerationSheet(
                                     text = group,
                                     // Same size class as the provider titles above and as the
                                     // model rows below: one size for the whole list, with the
-                                    // colour and the weight telling the levels apart. No
-                                    // maxLines: a long vendor name wraps rather than being cut.
+                                    // colour and the weight telling the levels apart. Two lines
+                                    // and an ellipsis for the same reason as the provider title
+                                    // above: a vendor id is one unbreakable ASCII run, so with no
+                                    // cap it was cut at the card's edge with no sign of it, and
+                                    // the user reported exactly that.
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = scheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.padding(start = 4.dp, top = 4.dp),
                                 )
                             }
@@ -5329,15 +5342,17 @@ private fun ContextRing(
                 )
             }
         }
-        // 7sp, the size the 18dp of clear space inside the arc takes: the digits sit on the
-        // ring's own centre, in the arc's colour. Bold, not Medium: at 7sp the user read the
-        // Medium weight as thin, and the ring is the only place these digits appear — the
-        // extra weight costs nothing elsewhere.
+        // 8sp, one step up from the 7sp the arc's 18dp of clear space was first sized for: Bold
+        // at 7sp was still read as "could be a little bigger" when the user looked at the ring.
+        // Three digits at 8sp are about 13.4dp of the 18dp, so the longest reading still has
+        // room either side. Bold, not Medium: at this size the user read the Medium weight as
+        // thin, and the ring is the only place these digits appear — the extra weight costs
+        // nothing elsewhere.
         if (percent > 0) {
             Text(
                 text = percent.toString(),
-                fontSize = 7.sp,
-                lineHeight = 8.sp,
+                fontSize = 8.sp,
+                lineHeight = 9.sp,
                 fontWeight = FontWeight.Bold,
                 color = tone,
                 maxLines = 1,
@@ -5430,15 +5445,20 @@ private fun ContextRingCard(
             // line is for; the newest round's own ratio was the wrong number under the wrong
             // name. It sits here, above the speed and the clock, because it is a reading of the
             // context the line above it is about.
-            if (sessionCachePercent > 0) {
-                RingDetail("缓存命中", "$sessionCachePercent%")
-            }
+            // Drawn even when it reads 0%: the line used to be skipped whenever the ratio came
+            // out at zero, and the user — who had asked for this reading by name — read the
+            // missing row as the reading having been dropped. A priced session with no cache
+            // hits yet is a 0%, not a gap.
+            RingDetail("缓存命中", "$sessionCachePercent%")
             // The fixed half of the card: what the whole conversation has cost, not what the
-            // window holds right now. Every label is written out — 「tps」「缓存」 alone would
-            // read as the round's own numbers, which is exactly what the lines below are.
+            // window holds right now. No label here repeats 「会话」: this is the conversation's
+            // own card, so the prefix said nothing the card did not already say, and the user
+            // asked for it back off 「会话总用时」 first and then everywhere it appeared. The
+            // lines that belong to the round in flight are the ones that need the qualifier,
+            // and they say 「本轮」.
             if (sessionPerSecond > 0) {
                 RingDetail(
-                    "会话输出速度",
+                    "输出速度",
                     remember(sessionPerSecond) {
                         String.format(Locale.getDefault(), "%.1f tok/s", sessionPerSecond)
                     },
@@ -5446,7 +5466,7 @@ private fun ContextRingCard(
             }
             if (sessionElapsedMs > 0) {
                 RingDetail(
-                    "会话总用时",
+                    "总用时",
                     remember(sessionElapsedMs) { formatRunElapsed(sessionElapsedMs) },
                 )
             }
@@ -5456,7 +5476,7 @@ private fun ContextRingCard(
                 // and it is the same tally the usage page shows. Labelled 「累计」 rather
                 // than 「总量」 because it counts each round's re-send, which is why it can
                 // dwarf the 「上下文」 line right above it.
-                RingDetail("会话累计用量", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
+                RingDetail("累计用量", "${shortTokens(sessionTokens)} tok · $sessionTurns 轮")
             }
             // What the run in flight has spent so far, split into its two halves: the only
             // lines here that move, so they sit last, and they leave the moment it settles.

@@ -4,9 +4,13 @@ import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.ChatRepository
+import com.suixing.agent.data.LiveDraft
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.llm.AssistantTurn
 import com.suixing.agent.llm.ChatMessage
@@ -19,6 +23,9 @@ import com.suixing.agent.tools.Tool
 import com.suixing.agent.tools.ToolRegistry
 import com.suixing.agent.tools.ToolResult
 import com.suixing.agent.tools.ToolSpec
+import com.suixing.agent.ui.chat.liveDraftFor
+import com.suixing.agent.ui.chat.liveDraftRecovery
+import com.suixing.agent.ui.chat.sameContentAs
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -30,8 +37,12 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import java.io.IOException
 
 /**
@@ -274,6 +285,188 @@ class InterruptPersistenceTest {
         assertTrue(
             "together with the tool answer that keeps the turn from being dropped",
             replay.any { it.role == "tool" && it.toolCallId == "call_1" },
+        )
+    }
+
+    // ---- What a kill leaves on disk. Nothing runs after one, so the draft writer is the
+    // ---- only chance the thinking and the tool cards get, and it used to skip the round
+    // ---- that had no answer text yet — which is exactly the round a kill interrupts.
+
+    @get:Rule
+    val folder = TemporaryFolder()
+
+    private fun repository(): ChatRepository {
+        val context = mockk<android.content.Context>()
+        every { context.filesDir } returns folder.root
+        return ChatRepository(context)
+    }
+
+    /** The round the writer used to skip: thinking streamed, no answer text yet. */
+    @Test
+    fun `a round that has only thought so far is still written to the draft`() {
+        val draft = liveDraftFor(
+            chatId = "c1",
+            runId = "r1",
+            text = "",
+            reasoning = "我在想",
+            messages = emptyList(),
+        )
+
+        assertNotNull("thinking with no answer text is worth saving, not skipping", draft)
+        assertEquals("我在想", draft?.reasoning)
+        assertTrue("and with nothing written yet, the paragraph stays empty", draft?.text.orEmpty().isEmpty())
+    }
+
+    /** A tick with new thinking, or a finished tool card, is a new write. */
+    @Test
+    fun `the writer skips a tick that changed nothing and writes one that did`() {
+        val quiet = liveDraftFor("c1", "r1", text = "", reasoning = "我在想", messages = emptyList())
+        assertTrue(
+            "an unchanged tick must not pay for another file write",
+            quiet!!.sameContentAs(quiet.copy(at = quiet.at + 1_000)),
+        )
+        assertTrue(
+            "the timestamp alone changing is not content",
+            quiet.sameContentAs(liveDraftFor("c1", "r1", text = "", reasoning = "我在想", messages = emptyList())),
+        )
+
+        val thoughtMore = liveDraftFor("c1", "r1", text = "", reasoning = "我在想，还要看文件", messages = emptyList())
+        assertTrue("more thinking is a change", !thoughtMore!!.sameContentAs(quiet))
+
+        val answered = liveDraftFor("c1", "r1", text = "看完了", reasoning = "我在想", messages = emptyList())
+        assertTrue("the first answer text is a change", !answered!!.sameContentAs(quiet))
+
+        val withRound = liveDraftFor(
+            "c1",
+            "r1",
+            text = "",
+            reasoning = "我在想",
+            messages = listOf(StoredMessage(id = "m1", role = Roles.ASSISTANT, toolCalls = listOf(StoredToolCall(id = "call_1", name = "read_file", arguments = "{}")), runId = "r1")),
+        )
+        assertTrue("a finished round is a change", !withRound!!.sameContentAs(quiet))
+    }
+
+    /**
+     * The user's case, end to end and without the screen: a run streams thinking, calls a
+     * tool, gets its result, starts a second round, and the process dies. The next launch has
+     * only the draft, so this is the round trip that decides whether the thinking and the tool
+     * cards are still there — the assistant message has to carry its reasoning and the tool
+     * call has to have its answer.
+     */
+    @Test
+    fun `an interrupted run comes back with its reasoning and its tool round on a reload`() = runBlocking {
+        val chats = repository()
+        val call = StoredMessage(
+            id = "m1",
+            role = Roles.ASSISTANT,
+            text = "先看看",
+            toolCalls = listOf(StoredToolCall(id = "call_1", name = "read_file", arguments = "{}")),
+            runId = "r1",
+        )
+        val result = StoredMessage(
+            id = "m2",
+            role = Roles.TOOL,
+            text = "文件内容",
+            toolName = "read_file",
+            toolOutput = "文件内容",
+            toolOk = true,
+            toolCallId = "call_1",
+            runId = "r1",
+        )
+        val alreadyStored = listOf(call, result)
+        // The second round: thinking has begun and a sentence has come out of it, but the round
+        // never finished. Its rounds are the first round's, which only the draft has — the
+        // transcript is written when a run ends.
+        val draft = liveDraftFor(
+            chatId = "c1",
+            runId = "r1",
+            text = "我再想一下这个文件",
+            reasoning = "读完了，我再想一下",
+            messages = alreadyStored,
+        )
+        assertNotNull("the kill lands while the round is still thinking", draft)
+
+        chats.saveLive(draft!!)
+        val killed = listOf(StoredMessage(id = "q1", role = Roles.USER, text = "看看文件"))
+
+        val reloaded = chats.readLive("c1")
+        assertNotNull("the draft outlives the process that wrote it", reloaded)
+        assertEquals("读完了，我再想一下", reloaded?.reasoning)
+
+        val transcript = killed + liveDraftRecovery(reloaded!!, killed)
+
+        val interrupted = transcript.last()
+        assertEquals(Roles.ASSISTANT, interrupted.role)
+        assertEquals(
+            "the thinking the user watched arrive is on the card, not gone",
+            "读完了，我再想一下",
+            interrupted.reasoning,
+        )
+        assertTrue("and the card says it was cut off", interrupted.text.endsWith("（中断）"))
+
+        val restoredCall = transcript.firstOrNull { message -> message.toolCalls.any { it.id == "call_1" } }
+        val restoredAnswer = transcript.firstOrNull { message -> message.toolCallId == "call_1" }
+        assertNotNull("the tool card comes back", restoredCall)
+        assertNotNull("with its result, or the row would read as a call that never returned", restoredAnswer)
+        assertEquals("文件内容", restoredAnswer?.toolOutput)
+
+        chats.clearLive("c1")
+        assertNull("once it is in the transcript the draft is not read twice", chats.readLive("c1"))
+    }
+
+    /**
+     * The mirror of the case above: the run was killed *after* its answer landed. Appending
+     * the draft again would show the user the same paragraph twice, so the 64-character
+     * fingerprint of a delivered answer has to keep it out.
+     */
+    @Test
+    fun `an answer that already landed is not appended a second time`() {
+        val body = "已经写完的回答，前面这段是草稿的前缀，".repeat(8) + "并且还要更长一些"
+        val landed = listOf(
+            StoredMessage(id = "a1", role = Roles.ASSISTANT, text = body, runId = "r1"),
+        )
+        val draft = LiveDraft(
+            chatId = "c1",
+            runId = "r1",
+            at = 5L,
+            text = body.take(40),
+            reasoning = "想过了",
+            // The round behind that answer, already in the transcript under the same id.
+            messages = landed,
+        )
+
+        assertTrue(
+            "a delivered answer is not appended again",
+            liveDraftRecovery(draft, landed).isEmpty(),
+        )
+    }
+
+    /**
+     * Stopped while it was still thinking. There is no answer text at all, and that used to be
+     * the end of it: the marker was appended only when the draft had text, so a run killed
+     * mid-thought came back as nothing — the thinking the user had been watching on screen was
+     * exactly what the interruption threw away. The marker is the whole bubble in that case.
+     */
+    @Test
+    fun `a run stopped while it was only thinking comes back as the marker and its thinking`() {
+        val draft = LiveDraft(
+            chatId = "c1",
+            runId = "r1",
+            at = 5L,
+            text = "",
+            reasoning = "我先想想这个文件在哪",
+            messages = emptyList(),
+        )
+
+        val recovered = liveDraftRecovery(draft, emptyList())
+
+        assertEquals("one card comes back", 1, recovered.size)
+        assertEquals("（中断）", recovered.single().text)
+        assertEquals("我先想想这个文件在哪", recovered.single().reasoning)
+
+        assertTrue(
+            "a draft with neither thinking nor an answer stays out of the transcript",
+            liveDraftRecovery(draft.copy(reasoning = ""), emptyList()).isEmpty(),
         )
     }
 }

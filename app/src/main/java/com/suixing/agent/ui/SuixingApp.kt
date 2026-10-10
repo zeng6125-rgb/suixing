@@ -117,6 +117,7 @@ import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.AboutScreen
 import com.suixing.agent.ui.settings.AssistantScreen
 import com.suixing.agent.ui.settings.ProfileScreen
+import com.suixing.agent.ui.settings.SettingsPageRoute
 import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
@@ -356,6 +357,26 @@ fun SuixingApp() {
                             onOpen = push,
                             onBack = { navController.popBackStack() },
                         )
+                    }
+                    // 设置里的六个子页各是一条真路由，而不是设置页内部的 when 分支：同一
+                    // 个目的地里换内容，NavHost 不参与，于是进出完全没有转场——用户说的
+                    // 「就是复用的，根本没有切换动画」正是这个。走 push 而不是 open：抽屉
+                    // 是同级切换，设置子页是往下一层，返回要回到那份列表。
+                    listOf(
+                        "settings/model",
+                        "settings/steer",
+                        "settings/appearance",
+                        "settings/network",
+                        "settings/data",
+                        "settings/usage",
+                    ).forEach { route ->
+                        composable(route) {
+                            SettingsPageRoute(
+                                route = route,
+                                onOpen = push,
+                                onBack = { navController.popBackStack() },
+                            )
+                        }
                     }
                     composable("capability") { CapabilityScreen(onBack = { navController.popBackStack() }) }
                     composable("tools") { ToolsScreen(onBack = { navController.popBackStack() }) }

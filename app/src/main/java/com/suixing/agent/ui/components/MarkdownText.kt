@@ -837,7 +837,12 @@ private fun CodeBlock(block: MdBlock.Code) {
         Column(Modifier.padding(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = block.language,
+                    // A fenced block with no info string — a plain ``` — has an empty language,
+                    // and the title row is drawn for every block so the copy button always sits
+                    // in the same place. An empty label left that row blank and the whole block
+                    // read as if something had failed to render; the user said so. 「代码」 is
+                    // what a block with no language is, and it keeps the row's height honest.
+                    text = block.language.ifBlank { "代码" },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

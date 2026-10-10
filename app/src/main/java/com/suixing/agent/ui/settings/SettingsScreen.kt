@@ -2,7 +2,6 @@
 
 package com.suixing.agent.ui.settings
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -130,45 +129,57 @@ private const val NAME_WRITE_DEBOUNCE_MS = 400L
  * The pages the root list opens. 权限 is deliberately missing: it is not a page of this
  * screen at all, it hands off to the capability list, which is a list the user manages
  * rather than settings the user toggles.
+ *
+ * Each row is its own shell route ([route]), not a branch of a `when`: a page that swaps
+ * in place inside one destination gets no enter/exit transition at all — the shell's
+ * NavHost is the only thing that animates, and it only animates between destinations.
  */
-private enum class SettingsPage(val title: String) {
-    MODEL("模型与生成"),
-    STEER("插话与运行"),
-    APPEARANCE("外观"),
-    NETWORK("网络与语音"),
-    DATA("数据"),
-    USAGE("用量"),
+private enum class SettingsPage(val title: String, val route: String) {
+    MODEL("模型与生成", "settings/model"),
+    STEER("插话与运行", "settings/steer"),
+    APPEARANCE("外观", "settings/appearance"),
+    NETWORK("网络与语音", "settings/network"),
+    DATA("数据", "settings/data"),
+    USAGE("用量", "settings/usage"),
 }
 
 /**
- * Settings, in two levels: six rows, each opening its own page.
+ * Settings, in two levels: six rows, each pushing its own route.
  *
- * Which level is showing is internal state, not a navigation route — the shell's back
- * stack only ever knows "settings". So the arrow in the header goes to [onBack] (out of
- * the screen), and the way back to the list is the system back button, which
- * [BackHandler] takes over while a page is up.
+ * The list is all this screen is; every sub-page is a separate destination of its own
+ * (see [SettingsPageRoute]), which is what gives them a transition and a real back entry.
+ * The arrow in the header goes to [onBack] (out of the screen); the way back to the list
+ * is [onBack] of the sub-page, which the shell hands `popBackStack`.
  *
- * [onOpen] is still how a row that is really another screen gets there — MCP, memory and
+ * [onOpen] is also how a row that is really another screen gets there — MCP, memory and
  * the capability list each keep their own page.
  */
 @Composable
 fun SettingsScreen(onOpen: (String) -> Unit, onBack: () -> Unit) {
-    var page by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
-    BackHandler(enabled = page != null) { page = null }
+    SettingsRoot(
+        onBack = onBack,
+        onOpen = onOpen,
+        onOpenPage = { onOpen(it.route) },
+    )
+}
 
-    when (page) {
-        null -> SettingsRoot(
-            onBack = onBack,
-            onOpen = onOpen,
-            onOpenPage = { page = it },
-        )
-
-        SettingsPage.MODEL -> ModelSettingsPage(onBack = { page = null })
-        SettingsPage.STEER -> SteerSettingsPage(onBack = { page = null })
-        SettingsPage.APPEARANCE -> AppearanceSettingsPage(onBack = { page = null })
-        SettingsPage.NETWORK -> NetworkVoiceSettingsPage(onBack = { page = null })
-        SettingsPage.DATA -> DataSettingsPage(onBack = { page = null }, onOpen = onOpen)
-        SettingsPage.USAGE -> UsageScreen(onBack = { page = null })
+/**
+ * One settings sub-page, by route. The pages themselves are private to this file, so the
+ * shell has to come through here rather than naming them itself.
+ *
+ * A route that is not one of [SettingsPage]'s draws nothing: the shell only ever registers
+ * these six, and a blank frame beats crashing a released app over a typo.
+ */
+@Composable
+internal fun SettingsPageRoute(route: String, onOpen: (String) -> Unit, onBack: () -> Unit) {
+    when (SettingsPage.entries.firstOrNull { it.route == route }) {
+        SettingsPage.MODEL -> ModelSettingsPage(onBack = onBack)
+        SettingsPage.STEER -> SteerSettingsPage(onBack = onBack)
+        SettingsPage.APPEARANCE -> AppearanceSettingsPage(onBack = onBack)
+        SettingsPage.NETWORK -> NetworkVoiceSettingsPage(onBack = onBack)
+        SettingsPage.DATA -> DataSettingsPage(onBack = onBack, onOpen = onOpen)
+        SettingsPage.USAGE -> UsageScreen(onBack = onBack)
+        null -> Unit
     }
 }
 
@@ -2009,6 +2020,11 @@ private fun GroupHeader(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
+            // 组名是 `vendor/model`、`host:port` 这类断不开的 ASCII 串，右边又站着「全选」，
+            // 所以给它两行、溢出才收成省略号：一行时它只会被硬裁掉半截。宽度不改（弹窗仍是
+            // AlertDialog 的默认宽度），两行仍不够时是宽度问题，不在这一行里解决。
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
         TextButton(
             onClick = { onToggle(!all) },

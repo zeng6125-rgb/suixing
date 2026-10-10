@@ -36,6 +36,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
 
 /**
  * What the user has typed but not sent, per conversation. A single global field is
@@ -239,7 +240,12 @@ data class SessionStats(
                 turns = turns,
                 steps = steps,
                 tokens = tokens,
-                cachePercent = if (prompt > 0) cached * 100 / prompt else 0,
+                // The ratio is worked out in Long and rounded, not `cached * 100 / prompt` on
+                // Int: that multiplication overflows on a conversation whose cached tokens pass
+                // 21,474,837, and the negative percentage it produced was drawn as no line at
+                // all — the user saw 「缓存命中」 vanish. Whole percent, because the ring has
+                // room for three digits and a decimal point would not be one of them.
+                cachePercent = if (prompt > 0) (cached.toLong() * 100.0 / prompt).roundToInt() else 0,
                 perSecond = if (elapsed > 0) completion * 1000.0 / elapsed else 0.0,
                 contextTokens = newest?.promptTokens ?: 0,
                 contextWindow = contextWindow,
@@ -1404,13 +1410,16 @@ class ChatViewModel : ViewModel() {
     /**
      * Keeps the conversation's draft file in step with the answer being streamed.
      *
-     * Once a second, and only when the text actually changed: one write is an encode plus a
-     * file write plus a rename, and tokens can arrive every few milliseconds. A second is the
-     * interval where a kill costs the user the last tick instead of the whole answer, while a
-     * stalled stream costs nothing at all.
+     * Once a second, and only when the answer, the thinking or the round count actually
+     * changed: one write is an encode plus a file write plus a rename, and tokens can arrive
+     * every few milliseconds. A second is the interval where a kill costs the user the last
+     * tick instead of the whole answer, while a stalled stream costs nothing at all.
+     *
+     * Because nothing runs after the process is killed, this is the only place the thinking
+     * and the finished rounds can be saved at all — see [liveDraftFor].
      */
     private suspend fun writeLiveDraft(chatId: String) {
-        var written = ""
+        var written: LiveDraft? = null
         while (true) {
             delay(LIVE_DRAFT_INTERVAL_MS)
             val live = sessions[chatId] ?: continue
@@ -1418,19 +1427,16 @@ class ChatViewModel : ViewModel() {
             // produced. The reasoning and those rounds are not "extra": the session is the
             // only place they exist until the run ends, so a run that never ends would
             // otherwise leave a paragraph with no chain of thought and no tool cards.
-            val text = live.streaming
-            if (text.isBlank() || text == written) continue
-            written = text
-            Core.chats.saveLive(
-                LiveDraft(
-                    chatId = chatId,
-                    runId = live.runId,
-                    at = System.currentTimeMillis(),
-                    text = text,
-                    reasoning = live.reasoning.takeIf { it.isNotBlank() },
-                    messages = live.messages.filter { it.runId == live.runId },
-                ),
-            )
+            val next = liveDraftFor(
+                chatId = chatId,
+                runId = live.runId,
+                text = live.streaming,
+                reasoning = live.reasoning,
+                messages = live.messages,
+            ) ?: continue
+            if (next.sameContentAs(written)) continue
+            written = next
+            Core.chats.saveLive(next)
         }
     }
 
@@ -1455,43 +1461,14 @@ class ChatViewModel : ViewModel() {
         // paragraph that was still being written. Until the run ends they exist nowhere else,
         // and leaving them out is what brought the card back as a bare sentence with no chain
         // of thought and no tool row — the answer with its reasoning and its work removed.
-        val restored = draft.messages.filterNot { written -> messages.any { it.id == written.id } }
-        // "This text is already in the transcript", not "this run has messages": a run that
-        // used a tool has already stored messages under the same runId, and judging by the
-        // run alone would throw the half-written final answer away — the one thing this
-        // draft exists to save. The first 64 characters are the fingerprint; a cleanly
-        // finished answer starts with them, because the draft was its prefix.
-        val probe = draft.text.trim().take(LIVE_DRAFT_PROBE_CHARS)
-        val delivered = probe.isNotEmpty() && messages.any { message ->
-            message.runId == draft.runId &&
-                message.role == Roles.ASSISTANT &&
-                message.text.trim().startsWith(probe)
-        }
-        // The answer is real but unfinished, and nothing else can say so: StoredMessage has
-        // no field for it, and a bubble that looks complete would read as the model having
-        // stopped mid-sentence for no reason. The thinking rides along, for the reason the
-        // engine hands it over on a stop as well: the chain that produced the paragraph is
-        // part of what the user watched arrive.
-        val line = if (delivered || probe.isEmpty()) {
-            emptyList()
-        } else {
-            listOf(
-                StoredMessage(
-                    id = UUID.randomUUID().toString(),
-                    role = Roles.ASSISTANT,
-                    text = draft.text.trimEnd() + "\n\n（中断）",
-                    reasoning = draft.reasoning,
-                    runId = draft.runId,
-                ),
-            )
-        }
+        val restored = liveDraftRecovery(draft, messages)
         // Nothing this draft holds is missing from the transcript; clearing it is all that is
         // left.
-        if (restored.isEmpty() && line.isEmpty()) {
+        if (restored.isEmpty()) {
             Core.chats.clearLive(chatId)
             return
         }
-        val next = messages + restored + line
+        val next = messages + restored
         if (shown != null) _state.update { it.copy(messages = next) }
         live?.let { putSession(it.copy(messages = next)) }
         save(
@@ -1657,6 +1634,96 @@ private fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = C
     // is replaced by, so it must not leave the flag set.
     loading = false,
 )
+
+/**
+ * The draft to write for a run, or null when this run has nothing worth saving yet.
+ *
+ * The blank-text case is the one that mattered: a round that is still thinking, or that has
+ * only issued a tool call so far, has no answer text at all — and that is precisely the round
+ * a stop or a kill interrupts. Skipping it left no draft file behind, and everything the user
+ * had watched arrive (the thinking, the tool cards) went with the process, because nothing
+ * runs after a kill to save it.
+ *
+ * [messages] is filtered to this run: the rounds of an earlier answer in the same conversation
+ * are already in its transcript, and re-appending them would duplicate them.
+ */
+internal fun liveDraftFor(
+    chatId: String,
+    runId: String,
+    text: String,
+    reasoning: String,
+    messages: List<StoredMessage>,
+): LiveDraft? {
+    val mine = messages.filter { it.runId == runId }
+    if (text.isBlank() && reasoning.isBlank() && mine.isEmpty()) return null
+    return LiveDraft(
+        chatId = chatId,
+        runId = runId,
+        at = System.currentTimeMillis(),
+        text = text,
+        reasoning = reasoning.takeIf { it.isNotBlank() },
+        messages = mine,
+    )
+}
+
+/**
+ * Whether [other] already holds exactly this content, so the write can be skipped.
+ *
+ * [LiveDraft.at] is deliberately not compared: it changes on every tick, and comparing it
+ * would turn the interval into a write every second for a stream that has gone quiet. The
+ * rounds are compared whole rather than by id — a card whose result just arrived replaces the
+ * same id, and an id-only check would leave that write to the next tick, or to never.
+ */
+internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null &&
+    other.runId == runId &&
+    other.text == text &&
+    other.reasoning == reasoning &&
+    other.messages == messages
+
+/**
+ * What has to be appended to [messages] for the draft a killed run left behind to come back
+ * whole: the rounds and tool results it had already produced, then the half-written answer.
+ *
+ * The thinking rides along with that answer, for the reason the engine hands it over on a
+ * stop as well: the chain that produced the paragraph is part of what the user watched arrive.
+ *
+ * "This text is already in the transcript" is judged by the first [LIVE_DRAFT_PROBE_CHARS]
+ * characters, not by the run alone: a run that used a tool has already stored messages under
+ * the same runId, and judging by the run would throw the half-written final answer away — the
+ * one thing this draft exists to save. The interrupted answer is appended only when the draft
+ * is not already there; nothing else can say the answer is unfinished, because StoredMessage
+ * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
+ * for no reason.
+ */
+internal fun liveDraftRecovery(draft: LiveDraft, messages: List<StoredMessage>): List<StoredMessage> {
+    val restored = draft.messages.filterNot { written -> messages.any { it.id == written.id } }
+    val probe = draft.text.trim().take(LIVE_DRAFT_PROBE_CHARS)
+    val delivered = probe.isNotEmpty() && messages.any { message ->
+        message.runId == draft.runId &&
+            message.role == Roles.ASSISTANT &&
+            message.text.trim().startsWith(probe)
+    }
+    // Nothing left to say only when the answer already landed, or when the draft is empty in
+    // every sense. A run stopped while it was still thinking has no answer text at all, and
+    // that is not the same as having produced nothing: the thinking — and any tool round
+    // restored above — is exactly what the user watched arrive and expects to find again. The
+    // marker stands alone as the bubble's text in that case.
+    val body = draft.text.trimEnd()
+    val line = if (delivered || (probe.isEmpty() && draft.reasoning.isNullOrBlank() && restored.isEmpty())) {
+        emptyList()
+    } else {
+        listOf(
+            StoredMessage(
+                id = UUID.randomUUID().toString(),
+                role = Roles.ASSISTANT,
+                text = if (body.isEmpty()) "（中断）" else body + "\n\n（中断）",
+                reasoning = draft.reasoning,
+                runId = draft.runId,
+            ),
+        )
+    }
+    return restored + line
+}
 
 /** How many compressions of one conversation are kept; older ones are dropped. */
 private const val MAX_CHECKPOINTS = 10
