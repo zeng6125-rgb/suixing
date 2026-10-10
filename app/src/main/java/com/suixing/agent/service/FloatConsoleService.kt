@@ -114,8 +114,17 @@ class FloatConsoleService : Service() {
 
         /** 诊断日志：用户报「球不出现」时，这一个文件就能分辨三种完全不同的原因。 */
         private const val CONSOLE_TRACE_FILE = "console-trace.log"
-        private const val CONSOLE_TRACE_MAX_BYTES = 32 * 1024
-        private const val CONSOLE_TRACE_KEEP_BYTES = 16 * 1024
+
+        /**
+         * 上限 256KB、截断后保留尾部 128KB（外加头部 2KB）。
+         *
+         * 选「单文件 + 头尾保留」而不是按天清理：这个日志只在排查时有用，最需要的是**用户复现的
+         * 那一次**，而按天切分会让「今天的文件里只有一半」这种问题再出现一次；256KB 按每行约 130
+         * 字节算约 2000 行，够覆盖若干次开关 + 切前后台 + 跑任务，且永远不会撑爆用户存储。
+         */
+        private const val CONSOLE_TRACE_MAX_BYTES = 256 * 1024
+        private const val CONSOLE_TRACE_KEEP_BYTES = 128 * 1024
+        private const val CONSOLE_TRACE_HEAD_BYTES = 2 * 1024
 
         /** Overlay windows are the user's to grant; without it there is nothing to show. */
         fun canDrawOverlays(context: Context): Boolean = Settings.canDrawOverlays(context)
@@ -139,6 +148,21 @@ class FloatConsoleService : Service() {
 
         fun stop(context: Context) {
             runCatching { context.stopService(Intent(context, FloatConsoleService::class.java)) }
+        }
+
+        /**
+         * 服务此刻在不在。
+         *
+         * 给「回到前台时补一次启动」用：常驻开着而服务已经被系统回收时，没有任何东西在画球，
+         * 而设置里那个开关还亮着 —— 这一对不上就是用户看到的「明明开着却不显示」。
+         */
+        @Volatile
+        private var running = false
+
+        fun isRunning(): Boolean = running
+
+        internal fun markRunning(value: Boolean) {
+            running = value
         }
     }
 
@@ -233,6 +257,7 @@ class FloatConsoleService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        markRunning(true)
         ensureChannel()
         startForegroundCompat()
         if (!::root.isInitialized) {
@@ -258,12 +283,43 @@ class FloatConsoleService : Service() {
     }
 
     override fun onDestroy() {
+        // 这一行是「常驻静默失效」的唯一证据：被谁销毁、当时常驻是不是还开着，尾部字段都会写下来。
         trace("service=stop")
+        markRunning(false)
         if (::root.isInitialized) ProcessLifecycleOwner.get().lifecycle.removeObserver(appLifecycle)
         dotPulse?.cancel()
         scope.cancel()
         detach()
+        // 已经排队的日志照写（shutdown 不是 shutdownNow），之后这条线程自己退出：服务实例死了，
+        // 线程不该还留着。
+        traceWorker.shutdown()
         super.onDestroy()
+    }
+
+    /**
+     * 用户从最近任务里划掉了随行。
+     *
+     * 常驻时这不是结束：服务还在、球还在，只有这一行日志说明「刚才被划过一次」——把「球突然没了」
+     * 与「用户自己划掉了任务」分开。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        trace("service=taskRemoved（最近任务被划掉）")
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /**
+     * 旋转 / 分屏 / 折叠：窗口宽变了，面板的宽度与位置都要重新夹一次。
+     *
+     * 面板宽度是「用户拖的宽，但不超过窗口宽 − 24dp」：横屏时窗口更宽不用管，分屏或折叠成窄窗口
+     * 时原来那个宽度就会顶出屏幕，所以这里重算并重新夹住 x。
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!::root.isInitialized) return
+        trace("config width=${newConfig.screenWidthDp}dp")
+        applyPanelWidth()
+        clampX(panelWidth())
+        if (attached) runCatching { windowManager.updateViewLayout(root, params) }
     }
 
     // ------------------------------------------------------------------ 窗口
@@ -404,13 +460,19 @@ class FloatConsoleService : Service() {
     private fun trace(line: String) {
         val entry = "${stamp()} $line canDrawOverlays=${Settings.canDrawOverlays(this)} " +
             "accessibility=${SuixingAccessibilityService.instance() != null} " +
+            "resident=${consoleSettings.resident} " +
             "runs=${Core.engine.runsFlow.value.size}\n"
+        // 文件 IO 全在这条线程上：日志永远不该卡住一次绘制或一次手势。
         traceWorker.execute {
             runCatching {
                 val file = File(filesDir, CONSOLE_TRACE_FILE)
                 if (file.length() > CONSOLE_TRACE_MAX_BYTES) {
-                    val tail = file.readText().takeLast(CONSOLE_TRACE_KEEP_BYTES)
-                    file.writeText("— 已截断，仅保留最近一段 —\n$tail")
+                    // 头尾都留：尾部是刚发生的事，而头部那条 `service=start` 是判读的起点 ——
+                    // 只留尾部会把起点先丢掉，那正是「球不出现」最需要的一行。
+                    val text = file.readText()
+                    val head = text.take(CONSOLE_TRACE_HEAD_BYTES)
+                    val tail = text.takeLast(CONSOLE_TRACE_KEEP_BYTES)
+                    file.writeText("$head\n— 中间已截断（上限 ${CONSOLE_TRACE_MAX_BYTES / 1024}KB）—\n$tail")
                 }
                 file.appendText(entry)
             }
@@ -1056,7 +1118,11 @@ class FloatConsoleService : Service() {
         Core.appScope.launch {
             // A run that fails throws, and this scope has no handler of its own: unguarded, one
             // refused endpoint would take the process down with the question already saved.
-            runCatching { startRunFor(chatId, text) }
+            runCatching { startRunFor(chatId, text) }.onFailure { error ->
+                // 失败必须说出来：输入框已经被清空，用户只能靠这一行知道消息没发出去。
+                val reason = error.message ?: error::class.java.simpleName
+                scope.launch { statsText.text = "发送失败：$reason" }
+            }
         }
     }
 

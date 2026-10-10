@@ -2,6 +2,7 @@ package com.suixing.agent.ui.settings
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,7 +21,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -33,6 +35,8 @@ import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.SuixingCard
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * 关于：版本、这个应用是什么、密钥放在哪、以及用到的开源件与参考项目。
@@ -44,11 +48,14 @@ import com.suixing.agent.ui.components.SuixingCard
 @Composable
 fun AboutScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    // 读一次就够：版本号在进程活着的时候不会变。
-    val version = remember {
-        runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull().orEmpty().ifBlank { "?" }
+    // getPackageInfo 是 binder 调用：放在组合期（主线程）读会在冷启动那一帧上排队，所以先给
+    // 占位的 "?"，版本号从 IO 回来再填。读一次就够：版本号在进程活着的时候不会变。
+    val version by produceState(initialValue = "?") {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }.getOrNull().orEmpty().ifBlank { "?" }
+        }
     }
 
     Scaffold(
@@ -144,7 +151,7 @@ fun AboutScreen(onBack: () -> Unit) {
     }
 }
 
-/** 一行外链：点开交给系统浏览器，打不开就什么也不做。 */
+/** 一行外链：点开交给系统浏览器，打不开就明说。 */
 @Composable
 private fun AboutLink(title: String, subtitle: String, url: String) {
     val context = LocalContext.current
@@ -153,7 +160,10 @@ private fun AboutLink(title: String, subtitle: String, url: String) {
         title = title,
         subtitle = subtitle,
         onClick = {
+            // 设备上没有浏览器时 startActivity 会抛 ActivityNotFoundException：以前这里只
+            // runCatching，异常被吞掉、屏幕一动不动，用户以为是自己没点中。
             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                .onFailure { Toast.makeText(context, "打不开链接", Toast.LENGTH_SHORT).show() }
         },
         control = { RowChevron() },
     )

@@ -79,7 +79,9 @@ class ShellTools(
                 properties = listOf(
                     "command" to Schema.string("要执行的命令，如 `ls -l /sdcard/Download`"),
                     "mode" to Schema.string(
-                        "权限档位：auto（默认）/ local（本应用）/ shizuku（shell 用户）/ root",
+                        "权限档位：auto（默认）/ local（本应用）/ shizuku（shell 用户）/ root。" +
+                            "这是请求，不能超过用户在「能力」页固定的执行档次——" +
+                            "实际跑在哪个通道看输出前缀（[local(app)] / [shizuku(shell)] / [root]）。",
                         enumValues = listOf("auto", "local", "shizuku", "root"),
                         default = "auto",
                     ),
@@ -121,17 +123,7 @@ class ShellTools(
         drawInputFx(command, tool = "run_shell")
         val state = capabilities.state.value
         if (mode == "root" && !state.rootProbed) capabilities.probeRoot()
-        val chosen = when (mode) {
-            "local" -> "local"
-            "shizuku" -> "shizuku"
-            "root" -> "root"
-            // No mode asked for: the tier the user fixed decides (see [CapabilityState.shellTier]).
-            else -> when (capabilities.shellTier()) {
-                ShellTier.ROOT -> "root"
-                ShellTier.SHIZUKU -> "shizuku"
-                ShellTier.LOCAL -> "local"
-            }
-        }
+        val chosen = shellChannel(mode, capabilities.shellTier(), capabilities.rootAllowed.value)
         val result: ShellResult = when (chosen) {
             "root" -> Shell.root(command)
             "shizuku" -> Shell.shizuku(command)
@@ -244,3 +236,39 @@ class ShellTools(
      */
     private fun quote(raw: String): String = "'" + raw.replace("'", "'\\''") + "'"
 }
+
+/**
+ * The channel a `run_shell` call runs through: **the lower of what was asked for and what the
+ * device resolved to**.
+ *
+ * A top-level function, and not a step inside `runShell`, for one reason: this is a *rule*, and the
+ * rule is one sentence — an explicit tier is a request, not a permission. It can never go above the
+ * tier the user fixed (naming `shizuku` while 标准档 is fixed runs as the app), and it is never
+ * raised above what was asked for either (naming `shizuku` while Root is fixed runs Shizuku, not
+ * root). Naming `root` with 「允许使用 Root」 off is the same idea one step further: that tier is not
+ * reachable at all, so the request is the resolved channel and the clamp leaves it alone. Before
+ * any of this, naming a tier ran it outright — which made both the 执行档次 picker and the root
+ * switch suggestions the model could talk its way around.
+ *
+ * The comparison uses [ShellTier]'s own declaration order (LOCAL < SHIZUKU < ROOT, ascending
+ * privilege), so the two orderings cannot drift apart.
+ */
+internal fun shellChannel(mode: String, resolved: ShellTier, rootAllowed: Boolean): String {
+    // What the caller asked for, as a tier. Nothing asked for (auto, or a value this build does not
+    // know) asks for exactly what the device resolved.
+    val requested = when (mode) {
+        "local" -> ShellTier.LOCAL
+        "shizuku" -> ShellTier.SHIZUKU
+        "root" -> if (rootAllowed) ShellTier.ROOT else resolved
+        else -> resolved
+    }
+    return minOf(requested, resolved).channel
+}
+
+/** The string `runShell` carries around for a resolved tier. */
+private val ShellTier.channel: String
+    get() = when (this) {
+        ShellTier.ROOT -> "root"
+        ShellTier.SHIZUKU -> "shizuku"
+        ShellTier.LOCAL -> "local"
+    }

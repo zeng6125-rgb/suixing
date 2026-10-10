@@ -96,13 +96,22 @@
         </service>
 
         <!-- Alarms are dropped by a reboot; this puts the board back on the clock. Exported
-             because the system is the sender, and BOOT_COMPLETED is a protected broadcast
-             that no other app can forge. -->
+             because the system is the sender, and these are protected broadcasts that no other
+             app can forge.
+
+             The clock events matter as much as the reboot: 「每天 9:00」 is a local wall-clock
+             moment, so a device that changed time zone (or whose clock was corrected) would
+             otherwise keep the alarm aimed at the old instant until the app was next opened.
+             MY_PACKAGE_REPLACED covers the update path, where the alarms of the replaced
+             package are gone as well. None of the four needs a permission. -->
         <receiver
             android:name=".service.BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

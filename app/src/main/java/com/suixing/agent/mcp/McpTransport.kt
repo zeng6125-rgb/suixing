@@ -1,8 +1,11 @@
 package com.suixing.agent.mcp
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonPrimitive
@@ -41,6 +44,9 @@ interface McpTransport {
     }
 }
 
+/** How long a killed MCP process gets to exit on its own before it is killed forcibly. */
+private const val PROCESS_GRACE_MS = 300L
+
 /**
  * Spawns a child process and speaks newline-delimited JSON-RPC over its
  * stdin/stdout — the `stdio` transport of MCP.
@@ -61,6 +67,12 @@ class StdioTransport(
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<JsonObject>>()
     private val stderrTail = ArrayDeque<String>()
     private val writeLock = Any()
+
+    /**
+     * Only for reaping the child process: [close] has to return at once because it is called from
+     * the UI, while a server that ignores SIGTERM can take a moment to die.
+     */
+    private val reaper = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun start() = withContext(Dispatchers.IO) {
         if (process != null) return@withContext
@@ -107,12 +119,21 @@ class StdioTransport(
     }
 
     override fun close() {
-        process?.let { started ->
-            runCatching { started.destroy() }
-        }
+        val started = process
         process = null
         writer = null
         failAll("MCP 传输已关闭")
+        // The wait does not belong on the caller's thread: `close()` is called from the UI when a
+        // server is removed or switched off, and a stdio server that ignores SIGTERM would hold
+        // the frame for the whole grace period. Reaping moves to IO — the caller only needs the
+        // handles gone, which has already happened above.
+        reaper.launch {
+            val running = started ?: return@launch
+            runCatching {
+                running.destroy()
+                if (!running.waitFor(PROCESS_GRACE_MS, TimeUnit.MILLISECONDS)) running.destroyForcibly()
+            }
+        }
     }
 
     private suspend fun writeLine(message: JsonObject) = withContext(Dispatchers.IO) {

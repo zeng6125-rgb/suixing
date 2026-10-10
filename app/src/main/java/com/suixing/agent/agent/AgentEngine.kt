@@ -1425,7 +1425,10 @@ class AgentEngine(
         // rebuilds from the checkpoint — a prefix that differs by even one message is a prompt cache
         // miss for everything after it.
         val tail = wire.subList(cut, wire.size).toList()
-        val head = wire.first()
+        // firstOrNull rather than first(): the system message is always at index 0 today, and this
+        // function's whole job is to rewrite the wire — a crash here would take the run down over a
+        // state that simply has nothing to compress.
+        val head = wire.firstOrNull() ?: return
         wire.clear()
         wire += head
         wire += ChatMessage.system("[上下文摘要] $summary")
@@ -1604,8 +1607,23 @@ class AgentEngine(
      */
     private fun sanitize(messages: List<StoredMessage>): List<StoredMessage> {
         val answered = messages.filter { it.role == Roles.TOOL }.mapNotNull { it.toolCallId }.toSet()
-        return messages.filterNot { message ->
+        val assistants = messages.filterNot { message ->
             message.role == Roles.ASSISTANT && message.toolCalls.any { it.id !in answered }
+        }
+        // The mirror image, and the same 400 from the other side: a tool result whose assistant
+        // call has just been dropped — or one that arrived with no call at all — is a `tool`
+        // message with nothing that asked for it. Dropping only the assistant would trade one
+        // rejected request for another. A half-answered parallel round is how it happens: two
+        // calls, one result, then a stop or a kill before the second one lands.
+        val asked = assistants
+            .filter { it.role == Roles.ASSISTANT }
+            .flatMap { it.toolCalls }
+            .map { it.id }
+            .toSet()
+        return assistants.filter { message ->
+            if (message.role != Roles.TOOL) return@filter true
+            val id = message.toolCallId ?: return@filter false
+            id in asked
         }
     }
 
@@ -1766,9 +1784,9 @@ class AgentEngine(
 
     companion object {
         /** How much of the streamed answer the console's live line keeps, in characters. */
-private const val LIVE_LINE_CHARS = 40
+        private const val LIVE_LINE_CHARS = 40
 
-private const val MAX_TOOL_OUTPUT = 8_000
+        private const val MAX_TOOL_OUTPUT = 8_000
         private const val MAX_MEMORY_ENTRIES = 40
         private const val MAX_MEMORY_VALUE = 400
 
@@ -1837,8 +1855,13 @@ private const val INTERRUPTED_TOOL_OUTPUT = "（已中断：任务被停止，�
  * estimate made: a few hundred thousand characters charged as text against a window of tokens. It
  * did not merely compress early — it made the trimmer believe a handful of messages filled the
  * whole budget and drop the rest of the conversation from the replay, silently.
+ *
+ * `internal` rather than private because the chat screen's context ring falls back to the same
+ * estimate when an endpoint reports no usage: one implementation, so the ring and the trimmer can
+ * never disagree about how big the conversation is. Change the divisor here and the ring changes
+ * with it — which is the point.
  */
-private fun estimateTokens(message: StoredMessage): Int {
+internal fun estimateTokens(message: StoredMessage): Int {
     val text = message.text.length + message.toolOutput.orEmpty().length + message.toolArgs.orEmpty().length
     val image = if (message.imageBase64 != null) IMAGE_TOKENS else 0
     return text / 3 + image

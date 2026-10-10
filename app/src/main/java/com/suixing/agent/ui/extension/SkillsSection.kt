@@ -51,6 +51,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/** 一份就够：只在组合里读（主线程），每次重组现建等于白花一次 Locale 查询与分配。 */
+private val SKILL_DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+
 /**
  * Skills are instruction documents. Only their names and one-line descriptions
  * reach the model up front; the body is pulled in with the `skill_read` tool, so
@@ -64,13 +67,23 @@ fun SkillsSection(
     onToggle: (Skill, Boolean) -> Unit,
 ) {
     var skills by remember { mutableStateOf<List<Skill>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
     val rootPath = remember { Core.skills.root.absolutePath }
 
     LaunchedEffect(refresh) {
-        skills = Core.skills.list()
+        // list() 一路走到 parseSkill 的 file.readText()（SkillStore.kt:482），技能根目录是
+        // 用户可见的外部存储：任何一个读不了的文件都会让这个 effect 抛异常 —— 以前是协程炸掉，
+        // skills 仍是 null，页面永远停在转圈，失败与「正在加载」不可区分。
+        runCatching { Core.skills.list() }
+            .onSuccess {
+                skills = it
+                error = null
+            }
+            .onFailure { error = "读取技能失败：${it.message ?: it::class.java.simpleName}" }
     }
 
     val loaded = skills
+    val failure = error
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 100.dp),
@@ -79,6 +92,14 @@ fun SkillsSection(
         item { SkillIntroCard(rootPath) }
 
         when {
+            failure != null -> item {
+                Text(
+                    text = failure,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
             loaded == null -> item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
 
             loaded.isEmpty() -> item {
@@ -132,7 +153,7 @@ private fun SkillGroupHeader(title: String, count: Int) {
  */
 private fun downloadedLine(skill: Skill): String {
     val stamp = if (skill.sourceAt > 0L) {
-        " · " + SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(skill.sourceAt))
+        " · " + SKILL_DATE_FORMAT.format(Date(skill.sourceAt))
     } else {
         ""
     }
@@ -161,11 +182,20 @@ private fun SkillIntroCard(rootPath: String) {
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            // Why the switch starts off, said where the user first meets it: the catalogue
-            // goes into the system prompt, so an unopened file would be instructions the
-            // model follows on the user's behalf without the user ever having read them.
-            text = "新导入、新下载或模型新建的技能都是关闭的：看过内容、确认没问题，再打开开关，" +
-                "它才会进入模型的技能目录。关掉的技能留在本机，只是模型看不到。",
+            // The rule the user asked for, said where they first meet it: what was written in the
+            // conversation works at once, what came in from outside waits for a human to read it.
+            // The catalogue goes into the system prompt, so an unopened downloaded file would be
+            // instructions the model follows on the user's behalf without the user ever having
+            // read them — that is the whole reason the two cases differ.
+            text = "自己创建的（在对话里让模型新建的）默认开启，存下来就能用；" +
+                "从链接或文件导入的默认关闭，确认内容没问题再打开开关——" +
+                "下载来的文字是别人写的，模型会当成指令执行。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "关掉的技能留在本机，只是不进模型的技能目录、skill_read 也读不到。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

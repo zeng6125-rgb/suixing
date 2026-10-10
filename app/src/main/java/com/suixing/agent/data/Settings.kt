@@ -167,7 +167,21 @@ data class AppSettings(
      */
     val paletteMode: Int = 0,
     val themeMode: Int = 0,
-    val enableRoot: Boolean = false,
+    /**
+     * Whether the agent may use the root channel at all.
+     *
+     * **Default true on purpose, and that is the whole point of the switch.** Before it existed the
+     * app probed `su` on every cold start and used it when the device had it. A default of false
+     * would therefore have silently downgraded every existing user at the moment of upgrade — no
+     * superuser prompt any more, root gone from 执行档次, no warning — which is the opposite of what
+     * a switch is for. Default true = exactly the behaviour that was already there; only a user who
+     * turns it off gets the new behaviour.
+     *
+     * Off means: nothing probes root (so no superuser prompt on a cold start), and
+     * [com.suixing.agent.capability.CapabilityState.shellTier] never resolves to ROOT however the
+     * device is rooted.
+     */
+    val enableRoot: Boolean = true,
     /**
      * Off by default because the default endpoint (deepseek-chat) is text-only and
      * rejects any request carrying an image. Turn it on for vision models.

@@ -589,7 +589,14 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             .mapProvider(selected?.id) { it.copy(baseUrl = value) }
                     },
                     label = { Text("接口地址") },
-                    supportingText = { Text("例如 https://api.deepseek.com/v1") },
+                    // 明文 http 是刻意留着的（局域网里的 Ollama / LM Studio 就只有 http），但
+                    // key 会跟着明文走——这一句是用户敲下那个地址之前唯一的提醒。
+                    supportingText = {
+                        Text(
+                            "例如 https://api.deepseek.com/v1\n" +
+                                "填 http:// 地址时，API Key 会明文传输，仅建议在可信局域网内使用。",
+                        )
+                    },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth(),

@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.os.Environment
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -105,8 +106,10 @@ fun FilesScreen(onBack: () -> Unit) {
     var reload by remember { mutableIntStateOf(0) }
     var preview by remember { mutableStateOf<Pair<File, String>?>(null) }
     var loading by remember { mutableStateOf(false) }
+    // 预览读取是异步的，连点两个文件会起两个协程；只认最后一次点击，否则先点的那次
+    // 晚回来会把弹窗改成不是用户最后选的文件。
+    var previewRequest by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
-    val timeFormat = remember { SimpleDateFormat("M月d日 HH:mm", Locale.getDefault()) }
 
     // Directory listing and per-entry sizes are disk IO, so they run off the main
     // thread and land in state; doing it inside composition stutters the list.
@@ -121,6 +124,9 @@ fun FilesScreen(onBack: () -> Unit) {
         } else {
             listError = null
             entries = withContext(Dispatchers.IO) {
+                // 每次列目录现建：SimpleDateFormat 不是线程安全的，切目录时上一轮 IO
+                // 还没跑完（map/format 之间没有挂起点，取消拦不住它），共用一份会写坏结果。
+                val timeFormat = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
                 children.map { file ->
                     Entry(
                         file = file,
@@ -257,10 +263,11 @@ fun FilesScreen(onBack: () -> Unit) {
                     if (entry.file.isDirectory) {
                         current = entry.file
                     } else {
+                        val mine = ++previewRequest
                         scope.launch {
                             loading = true
                             val text = withContext(Dispatchers.IO) { readPreview(entry.file) }
-                            preview = entry.file to text
+                            if (mine == previewRequest) preview = entry.file to text
                             loading = false
                         }
                     }
@@ -275,7 +282,15 @@ fun FilesScreen(onBack: () -> Unit) {
             file = file,
             content = content,
             onDismiss = { preview = null },
-            onCopy = { copyToClipboard(context, content) },
+            // 复制按钮不关弹窗，而 notice 渲染在弹窗下面的页面里，此刻看不见；
+            // 所以失败必须用 Toast 当场告诉用户，notice 只是关窗后还留着的痕迹。
+            onCopy = {
+                if (!copyToClipboard(context, content)) {
+                    val message = "复制失败：系统未允许写入剪贴板"
+                    notice = message
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                }
+            },
         )
     }
 }
@@ -420,12 +435,11 @@ private fun relativePath(root: File, current: File, rootLabel: String): String {
     return current.absolutePath.removePrefix(root.absolutePath).trimStart('/')
 }
 
-private fun copyToClipboard(context: Context, text: String) {
+private fun copyToClipboard(context: Context, text: String): Boolean =
     runCatching {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Suixing", text))
-    }
-}
+    }.isSuccess
 
 private fun readPreview(file: File): String {
     if (file.length() > MAX_PREVIEW_BYTES) return "（文件超过 ${humanSize(MAX_PREVIEW_BYTES)}，不在预览范围内）"

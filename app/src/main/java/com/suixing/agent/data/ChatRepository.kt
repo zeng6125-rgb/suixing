@@ -44,6 +44,9 @@ class ChatRepository(private val context: Context) {
                 ?.sortedByDescending { it.updatedAt }
                 ?: emptyList()
             _conversations.value = all
+            // Same pass, same thread: quarantined files are never read again, so without this
+            // they would sit in filesDir for ever.
+            pruneQuarantine()
         }
     }
 
@@ -188,7 +191,30 @@ class ChatRepository(private val context: Context) {
      * by hand, and the file no longer shows up in [load]'s listing.
      */
     private fun quarantine(file: File) {
-        runCatching { file.renameTo(File(dir, "${file.name}.corrupt")) }
+        runCatching { file.renameTo(File(dir, "${file.name}$CORRUPT_SUFFIX")) }
+    }
+
+    /**
+     * Quarantined transcripts older than [CORRUPT_KEEP_MS] go for good: they are kept so a broken
+     * file can still be rescued by hand, and a month is long past the point where anyone would.
+     *
+     * Best effort on purpose — a sweep that fails (a locked file, a directory that vanished) must
+     * never be a reason for a load to fail.
+     */
+    private fun pruneQuarantine() {
+        runCatching {
+            val cutoff = System.currentTimeMillis() - CORRUPT_KEEP_MS
+            dir.listFiles { file -> file.name.endsWith(CORRUPT_SUFFIX) }
+                ?.filter { it.lastModified() < cutoff }
+                ?.forEach { it.delete() }
+        }
+    }
+
+    private companion object {
+        /** How long a quarantined transcript is kept for hand recovery. */
+        const val CORRUPT_KEEP_MS = 30L * 24 * 60 * 60 * 1000
+
+        const val CORRUPT_SUFFIX = ".corrupt"
     }
 }
 

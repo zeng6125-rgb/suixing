@@ -19,10 +19,28 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.service.FloatConsoleService
 import com.suixing.agent.ui.SuixingApp
 import com.suixing.agent.ui.theme.SuixingTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * 回到前台时补一次悬浮窗。
+     *
+     * 「常驻」的开关可能比服务活得久：服务被系统回收过之后，设置里那个开关还亮着，而没有任何东西
+     * 在画球 —— 用户看到的就是「明明开着却不显示」。这里是唯一自然的补救点（用户自己把 App 调回
+     * 前台），而且只在服务真的不在时才启动，不打扰一个已经在跑的服务。
+     */
+    override fun onStart() {
+        super.onStart()
+        Core.appScope.launch {
+            if (Core.settings.current().floatingConsole && !FloatConsoleService.isRunning()) {
+                FloatConsoleService.start(this@MainActivity)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // The app draws its own headers and a floating nav bar, so it owns the

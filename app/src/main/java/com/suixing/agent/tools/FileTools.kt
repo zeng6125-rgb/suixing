@@ -422,9 +422,56 @@ internal fun resolveUserPath(context: Context, raw: String?): File {
     val path = raw?.trim().orEmpty()
     return when {
         path.isEmpty() || path == "~" -> workspace
-        path.startsWith("~/") -> File(workspace, path.removePrefix("~/"))
+        path.startsWith("~/") -> File(workspace, checkedRelative(path.removePrefix("~/")))
         File(path).isAbsolute -> File(path)
-        else -> File(workspace, path)
+        else -> File(workspace, checkedRelative(path))
+    }
+}
+
+/**
+ * Refuses a relative path that climbs out of the workspace with `..`.
+ *
+ * Not a fix for an open hole: the workspace is app-private storage, so a `..` could only reach
+ * directories the tools have no business in, and absolute paths stay allowed because the file
+ * tools check those against `PROTECTED_PATHS` by canonical path. This is depth instead — a
+ * relative path is documented as 「工作目录之内」, and quietly honouring `../..` is how a later
+ * change to what the workspace is turns the promise into an escape.
+ */
+private fun checkedRelative(path: String): String {
+    require(path.split('/', '\\').none { it == ".." }) {
+        "路径不能包含 ..（相对路径不能跳出工作目录，要用别处请写绝对路径）"
+    }
+    return path
+}
+
+/** Suffix a download writes to before the finished file is renamed into place. */
+internal const val PART_SUFFIX = ".part"
+
+/** How old a `.part` file has to be before it counts as a leftover. */
+private const val STALE_PART_MS = 24L * 60 * 60 * 1000
+
+/** How deep the leftover sweep walks; the workspace is shallow, and a tidy-up must stay cheap. */
+private const val STALE_PART_MAX_DEPTH = 6
+
+/**
+ * Deletes stale `*.part` leftovers under [root].
+ *
+ * A download that was killed mid-write leaves one, and it is unusable by construction — only a
+ * complete file is ever renamed into place. The download tool already deletes the part file it is
+ * about to write, so this is about the ones whose target is never tried again.
+ *
+ * Best effort on purpose: a tidy-up must never be a reason for a download to fail.
+ */
+internal fun sweepStaleParts(
+    root: File,
+    now: Long = System.currentTimeMillis(),
+    olderThanMs: Long = STALE_PART_MS,
+) {
+    runCatching {
+        root.walkTopDown()
+            .maxDepth(STALE_PART_MAX_DEPTH)
+            .filter { it.isFile && it.name.endsWith(PART_SUFFIX) && now - it.lastModified() > olderThanMs }
+            .forEach { it.delete() }
     }
 }
 

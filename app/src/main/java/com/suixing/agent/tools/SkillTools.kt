@@ -14,11 +14,16 @@ import kotlinx.serialization.json.JsonObject
  * uses for its own skills, and it is why a library of a hundred skills costs a hundred lines
  * instead of a hundred documents. Do not "optimise" it into pasting bodies into the prompt.
  *
- * Everything that lands on disk here arrives switched off on purpose. A skill's text goes into
- * the system prompt, and the toolchain behind that prompt can run shell commands, delete files
- * and tap the screen — so a document the user has not looked at must not be able to steer a
- * run. Both writing tools therefore say so in their own result: a model that believes its new
- * skill is already active would lean on it and then act as if the user had agreed to it.
+ * Who writes a skill decides whether it starts switched on, and that line is the trust boundary.
+ * A skill the model writes here (`skill_save`) arrives **enabled**: the user asked for it in the
+ * conversation they are already having, and making them hunt for a switch to use what they just
+ * dictated only teaches them to ignore switches. Everything fetched from outside
+ * (`skill_download`, 「从链接导入」, a file manager) arrives **disabled**, because that text was
+ * written by someone else: a skill's name and description go into the system prompt, and the
+ * toolchain behind that prompt can run shell commands, delete files and tap the screen. The two
+ * writing tools therefore end on different sentences, and each says which case it is — a model
+ * that believes its new skill is already active would lean on it and then act as if the user had
+ * agreed to it.
  */
 class SkillTools(private val skills: SkillStore) : ToolGroup() {
     override val specs: List<ToolSpec> = listOf(
@@ -37,8 +42,8 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
         ),
         ToolSpec(
             name = "skill_save",
-            description = "把一段可复用的操作流程保存成技能。保存后默认关闭，需要在「设置 → 工具 → 技能」页由用户手动开启；" +
-                "开启前它不会出现在技能目录里，skill_read 也读不到。",
+            description = "把一段可复用的操作流程保存成技能。保存后**立即生效**（默认开启），" +
+                "它会进入技能目录，skill_list 与 skill_read 马上就能看到；用户可以在「设置 → 工具 → 技能」页关掉它。",
             parameters = Schema.objectOf(
                 listOf(
                     "name" to Schema.string("技能 id（建议英文，会用作目录名）"),
@@ -50,7 +55,8 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
         ),
         ToolSpec(
             name = "skill_download",
-            description = "从一个网址下载 SKILL.md 存成本机技能（记为网络下载）。下载后同样默认关闭，要用户在技能页开启。",
+            description = "从一个网址下载 SKILL.md 存成本机技能（记为网络下载）。下载来的内容默认关闭，" +
+                "要用户在技能页看过再开启——它不是这个对话里写出来的东西。",
             parameters = Schema.objectOf(
                 listOf("url" to Schema.string("SKILL.md 的完整地址，以 http:// 或 https:// 开头")),
                 listOf("url"),
@@ -82,7 +88,7 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
             val hint = if (waiting == 0) {
                 ""
             } else {
-                "有 $waiting 个技能已保存但还没开启（默认关闭），请让用户到「设置 → 工具 → 技能」页打开开关。"
+                "有 $waiting 个技能已保存但还没开启，请让用户到「设置 → 工具 → 技能」页打开开关。"
             }
             return ToolResult.success("现在没有可用的技能。$hint 技能放在 ${skills.root.absolutePath}/<名称>/SKILL.md。")
         }
@@ -104,7 +110,7 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
             ToolResult.failure("找不到技能「$wanted」。先用 skill_list 看看有哪些。")
         } else {
             ToolResult.failure(
-                "技能「${off.name}」已保存但还没开启（新技能默认关闭）。" +
+                "技能「${off.name}」已保存但还没开启。" +
                     "请让用户到「设置 → 工具 → 技能」页打开它的开关，之后才能读到。",
             )
         }
@@ -117,8 +123,8 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
         if (id.isEmpty()) return ToolResult.failure("缺少参数 name")
         if (description.isEmpty()) return ToolResult.failure("缺少参数 description")
         if (content.isBlank()) return ToolResult.failure("缺少参数 content")
-        val skill = skills.save(id, skills.compose(id, description, content))
-        return ToolResult.success(saved(skill.name, skill.path, "由你新建"))
+        val skill = skills.save(id, skills.compose(id, description, content), enabled = true)
+        return ToolResult.success(savedActive(skill.name, skill.path, "由你新建"))
     }
 
     private suspend fun downloadSkill(args: JsonObject): ToolResult {
@@ -127,15 +133,26 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
         val skill = runCatching { skills.importUrl(url) }.getOrElse { error ->
             return ToolResult.failure("下载技能失败：${error.message ?: error::class.java.simpleName}")
         }
-        return ToolResult.success(saved(skill.name, skill.path, "从 $url 下载"))
+        return ToolResult.success(savedPending(skill.name, skill.path, "从 $url 下载"))
     }
 
     /**
-     * The one sentence both writing tools end on. It has to say three things: the file is
-     * there, it is not active, and who can make it active — anything shorter and the model
-     * reports success to the user and then tries to use a skill that is not in the catalogue.
+     * What `skill_save` ends on: the file is there **and already in the catalogue**.
+     *
+     * It has to say so, because the opposite sentence used to live here: a model told "saved but
+     * switched off" reports a half-success to the user and then avoids the skill it just wrote.
      */
-    private fun saved(name: String, path: String, how: String): String =
+    private fun savedActive(name: String, path: String, how: String): String =
+        "已保存并已启用技能「$name」（$how）到 $path。它已经进入模型的技能目录：" +
+            "skill_list 与 skill_read 现在都能看到它，可以直接用。用户若想停用，" +
+            "在「设置 → 工具 → 技能」页关掉开关即可。"
+
+    /**
+     * What `skill_download` ends on. It has to say three things: the file is there, it is **not**
+     * active, and who can make it active — anything shorter and the model reports success to the
+     * user and then tries to use a skill that is not in the catalogue.
+     */
+    private fun savedPending(name: String, path: String, how: String): String =
         "已保存技能「$name」（$how）到 $path。它默认处于关闭状态：现在还不在技能目录里，" +
             "skill_list 与 skill_read 都看不到它。请提示用户到「设置 → 工具 → 技能」页打开它，" +
             "开启后才会生效。"

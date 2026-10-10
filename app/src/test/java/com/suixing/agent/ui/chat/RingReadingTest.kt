@@ -9,10 +9,11 @@ import org.junit.Test
  * Which number the ring draws, and whether it says 「约」.
  *
  * The order is the whole point of the function: the endpoint's own count for the round that just
- * reported, then the newest round in the transcript, and only when neither exists the run's own
- * character-based estimate. That last one is what took 「暂无数据」 off the card for the gateways
- * that ignore `stream_options.include_usage` — and it is flagged, because a proportion presented
- * as a count is the one thing this card must not do.
+ * reported, then the newest round in the transcript, then the run's own character-based estimate
+ * of the wire, and last the transcript's own size. The last two are what took 「暂无数据」 off the
+ * card — for the gateways that ignore `stream_options.include_usage` there is no count at all, and
+ * the card used to be empty on a conversation plainly full of text. Both are flagged, because a
+ * proportion presented as a count is the one thing this card must not do.
  */
 class RingReadingTest {
 
@@ -31,8 +32,34 @@ class RingReadingTest {
     }
 
     @Test
-    fun `the estimate is the last resort, and it says so`() {
+    fun `the estimate is the last resort among the live sources, and it says so`() {
         val reading = ringReading(liveReported = 0, newestStored = 0, liveEstimate = 11_000)
+        assertEquals(11_000, reading.tokens)
+        assertTrue(reading.estimated)
+    }
+
+    /**
+     * The case the user reported: nothing was ever priced — a gateway that ignores
+     * `stream_options.include_usage`, or a conversation stored before the counts existed — and no
+     * run is going, so there is no wire to estimate either. The transcript's own size is the
+     * floor that keeps the card from being empty.
+     */
+    @Test
+    fun `the transcript's own size is the floor when nothing was ever priced`() {
+        val reading = ringReading(
+            liveReported = 0,
+            newestStored = 0,
+            liveEstimate = 0,
+            transcriptEstimate = 4_200,
+        )
+        assertEquals(4_200, reading.tokens)
+        assertTrue(reading.estimated)
+    }
+
+    /** A live estimate off the wire beats the transcript floor: it is the same thing, measured. */
+    @Test
+    fun `the live estimate wins over the transcript floor`() {
+        val reading = ringReading(0, 0, liveEstimate = 11_000, transcriptEstimate = 4_200)
         assertEquals(11_000, reading.tokens)
         assertTrue(reading.estimated)
     }

@@ -31,9 +31,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,6 +75,19 @@ data class ChatUiState(
      */
     val loading: Boolean = true,
     val messages: List<StoredMessage> = emptyList(),
+    /**
+     * How many times [messages] has been replaced, as far as the screen is concerned.
+     *
+     * Stamped by the view model's own [state] flow (see its KDoc), never by the callers that
+     * write the list: a number that has to be maintained at twenty sites is a number that will be
+     * wrong at one of them, and the symptom is a bubble that keeps the text the user just edited.
+     *
+     * The screen keys its derivations on this instead of on [messages] itself, because `remember`
+     * compares keys with `equals` — and a message carries its screenshot as base64, so a list
+     * comparison walked the whole transcript on every recomposition, twelve times a second while
+     * an answer streams.
+     */
+    val messagesRevision: Long = 0,
     /** Which run of each turn is on screen; see [Transcript]. */
     val activeRuns: Map<String, String> = emptyMap(),
     /** The persona this conversation speaks as. */
@@ -278,7 +292,36 @@ class ChatViewModel : ViewModel() {
     private val windowsAsked = mutableSetOf<String>()
 
     private val _state = MutableStateFlow(ChatUiState())
-    val state: StateFlow<ChatUiState> = _state.asStateFlow()
+
+    /** The message list the revision below was stamped for; touched only by the collector. */
+    private var lastPublishedMessages: List<StoredMessage>? = null
+    private var messagesRevision = 0L
+
+    /**
+     * What the screen collects.
+     *
+     * [ChatUiState.messagesRevision] is stamped here rather than at the twenty-odd places that
+     * write the state: this is the one point every publish goes through, so no path can forget it
+     * — a `++` at each assignment site is exactly the bookkeeping that leaves one out, and a
+     * missed one shows a bubble that keeps the text the user just edited. The comparison is by
+     * reference, which is exact here: the view model never mutates a list in place (`+`, `map` and
+     * `filter` all build new ones), so a new list IS a changed transcript.
+     *
+     * The screen needs it because `remember` compares its keys with `equals`: keyed on the list
+     * itself, every recomposition walked every message — and a message carries its screenshot as
+     * base64. With this, the drawn rows are rebuilt when the transcript actually changes and at no
+     * other time.
+     */
+    val state: StateFlow<ChatUiState> = _state
+        .map { snapshot ->
+            if (snapshot.messages === lastPublishedMessages) {
+                snapshot
+            } else {
+                lastPublishedMessages = snapshot.messages
+                snapshot.copy(messagesRevision = ++messagesRevision)
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, _state.value)
 
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
 
@@ -291,6 +334,14 @@ class ChatViewModel : ViewModel() {
      * row whose usage was written after it first appeared is still caught.
      */
     private data class StatsKey(
+        /**
+         * Which conversation the tally belongs to.
+         *
+         * In the key because two conversations can otherwise agree on a shape — two empty ones
+         * always do, and a switch between them would then answer the new chat with the old one's
+         * numbers (or with the empty tally a moment before its own rows load).
+         */
+        val chat: String,
         val rows: Int,
         val lastId: String?,
         val lastPrompt: Int,
@@ -324,6 +375,7 @@ class ChatViewModel : ViewModel() {
         val window = settings.contextWindowFor(model)
         val last = snapshot.messages.lastOrNull()
         val key = StatsKey(
+            chat = snapshot.conversationId,
             rows = snapshot.messages.size,
             lastId = last?.id,
             lastPrompt = last?.promptTokens ?: 0,
@@ -909,6 +961,11 @@ class ChatViewModel : ViewModel() {
     /**
      * Rewrites a message in place without asking the model anything. This is how a
      * typo gets fixed, or a long reply gets trimmed down to the part worth keeping.
+     *
+     * The edit lands as a *new* list with a *new* message instance (`map` + `copy`), which is what
+     * makes the screen redraw it: its derivations are keyed on [ChatUiState.messagesRevision], and
+     * the revision moves when the list is replaced — by reference, so an edit that keeps every id
+     * and the same row count still counts as a change. An in-place mutation here would not.
      */
     fun editMessage(id: String, text: String) {
         val body = text.trim()

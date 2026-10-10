@@ -24,8 +24,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -119,9 +121,17 @@ fun AssistantListContent(
     // is the freshly created draft, which is rebuilt from its id and the same defaults.
     // The in-progress edits still live in the editor's own draft.
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
+    // MCP 的工具是运行时才注册的（连上后 replaceDynamic 写进 ToolRegistry），而 ToolRegistry
+    // 本身不可观察：直接 Core.tools.names() 是打开编辑器那一刻的死快照，之后新工具永远不出现，
+    // 「工具还在加载…」也就永远不消失。这里借 MCP 的 StateFlow 当刷新键 —— 它每次变化都对应
+    // 一次 replaceDynamic（与 ToolsScreen 的 ToolsTab 同一套做法），只在 ui/ 内就能修。
+    val servers by Core.mcp.servers.collectAsState()
+    val toolNames = remember(servers) { Core.tools.names() }
     val editing = editingId?.let { id ->
         assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
     }
+    // 两两一行是布局用的中间结果，不是状态：不 remember 就每次重组都重建一层嵌套 List。
+    val rows = remember(assistants) { assistants.chunked(2) }
 
     Column(modifier) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -152,7 +162,7 @@ fun AssistantListContent(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            assistants.chunked(2).forEach { pair ->
+            rows.forEach { pair ->
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     pair.forEach { assistant ->
                         AssistantCard(
@@ -181,7 +191,7 @@ fun AssistantListContent(
         AssistantEditor(
             initial = target,
             settings = settings,
-            toolNames = Core.tools.names(),
+            toolNames = toolNames,
             onSave = {
                 onSave(it)
                 editingId = null

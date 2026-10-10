@@ -110,6 +110,9 @@ class WebTools(
         if (rawPath.isEmpty()) return ToolResult.failure("缺少参数 path")
         return withContext(Dispatchers.IO) {
             runCatching {
+                // Leftovers from a download that was killed mid-write: the part file under this
+                // very target is deleted below, and this clears the ones nobody will retry.
+                sweepStaleParts(workspaceDir(context))
                 val target = resolveUserPath(context, rawPath)
                 target.parentFile?.mkdirs()
                 client.newCall(request(url).build()).execute().use { response ->
@@ -124,7 +127,7 @@ class WebTools(
                     // Written beside the target and renamed only once it is complete: a
                     // half-finished download must never sit under the final name, where the
                     // model would read it as if it were whole.
-                    val part = File("${target.absolutePath}.part")
+                    val part = File(target.absolutePath + PART_SUFFIX)
                     part.delete()
                     try {
                         body.byteStream().use { input ->

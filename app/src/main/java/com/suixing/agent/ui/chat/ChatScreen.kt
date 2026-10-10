@@ -178,6 +178,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
+import com.suixing.agent.agent.estimateTokens
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.voice.Dictation
@@ -337,7 +338,23 @@ fun ChatScreen(
     // in it, and 加载更早 only ever grows it. The count resets with the conversation: the
     // window is a property of the chat being read, not of the screen that reads it.
     var shownTurns by remember(state.conversationId) { mutableIntStateOf(PAGE_TURNS) }
-    val page = remember(state.messages, shownTurns) { turnPage(state.messages, shownTurns) }
+    // What every derivation below is keyed on: which conversation, how many rows it has, and which
+    // row is last.
+    //
+    // Not the list itself. `remember` compares its keys with `equals`, and a message carries its
+    // screenshot as base64 — one picture made each comparison a string compare of hundreds of
+    // kilobytes, on every recomposition, which is once per publish (twelve a second) while an
+    // answer streams. These walks only move when a row lands, the last one is replaced, or the
+    // screen switches conversation; the id is in the key because two conversations can otherwise
+    // agree on a shape (two empty ones always do).
+    val rowsKey = Triple(
+        state.conversationId,
+        state.messages.size,
+        state.messages.lastOrNull()?.id,
+    )
+    // [turnPage] reads nothing but each message's role and steer flag, so this key says everything
+    // its answer can depend on.
+    val page = remember(rowsKey, shownTurns) { turnPage(state.messages, shownTurns) }
     // Tool-only assistant turns carry no text of their own, so their tool calls are
     // folded into the bubble above them instead of standing alone in the transcript.
     // Only the branch the user picked is drawn; the other answers stay on disk.
@@ -346,8 +363,14 @@ fun ChatScreen(
     // the filter groupRows drew them as their own settled bubble beside the live one
     // — the double bubble. The filter is what makes the settle frame atomic: the
     // rounds leave the stored list in the same state update that empties liveParts.
+    // The transcript itself is keyed by [ChatUiState.messagesRevision], not by the list: `remember`
+    // compares keys with `equals`, and a message carries its screenshot as base64 — keyed on the
+    // list, every recomposition walked the whole conversation (twelve times a second while an
+    // answer streams). The revision is stamped by the view model at the one point every publish
+    // goes through, so an edit to a message in the middle of the transcript still lands here.
     val visible = remember(
-        state.messages,
+        state.conversationId,
+        state.messagesRevision,
         page,
         state.activeRuns,
         state.runningHere,
@@ -386,16 +409,22 @@ fun ChatScreen(
     // The cache count is the newest round's too: context is cumulative, so an older round's
     // cache figure says nothing about the window as it stands now.
     val newestUsage = visible.lastOrNull { it.usage != null }?.usage
+    // What the endpoint never priced, sized off the text: the ring's floor for a conversation
+    // whose gateway sends no usage block (or one stored before the counts existed). The
+    // arithmetic is the engine's own ([estimateTokens], shared rather than copied), and the walk
+    // runs on the same key as the sums below — one pass per row that lands, not one per publish.
+    val transcriptEstimate = remember(rowsKey) { state.messages.sumOf { estimateTokens(it) } }
     // The number itself is picked by [ringReading], in the order that keeps it honest: the
-    // endpoint's own count for the round that just reported, else the newest stored round's,
-    // else — only when neither exists — the live run's estimate off the wire's characters.
-    // That last one is what takes 「暂无数据」 off the card: many gateways ignore
+    // endpoint's own count for the round that just reported, else the newest stored round's, else
+    // the live run's estimate off the wire's characters, else the transcript's own size. The last
+    // two are what take 「暂无数据」 off the card: many gateways ignore
     // `stream_options.include_usage` (see LlmClient's own note), and for those the ring had no
     // number for the whole conversation. A proportion labelled 「约」 beats a blank.
     val reading = ringReading(
         liveReported = state.stats?.lastPromptTokens ?: 0,
         newestStored = newestUsage?.prompt ?: 0,
         liveEstimate = state.stats?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
+        transcriptEstimate = transcriptEstimate,
     )
     val contextUsed = reading.tokens
     // The cache figure the ring's card shows is the whole conversation's, summed once in the
@@ -407,13 +436,11 @@ fun ChatScreen(
     val session = viewModel.sessionStats.collectAsState(initial = null).value
     val sessionTokens = session?.tokens ?: 0
     val sessionTurns = session?.turns ?: 0
-    // What the three sums below are keyed on: how many rows there are, and which row is last.
-    //
-    // Not the list itself. `remember` compares its keys by equality, and a list of thousands of
-    // messages compares element by element — on every recomposition, which is once per publish
-    // (twelve a second) while an answer streams. These three walks only move when a row lands or
-    // the last one is replaced, and that pair says exactly that in constant time.
-    val rowsKey = state.messages.size to state.messages.lastOrNull()?.id
+    // The cumulative row's own floor, for the same conversations as above: every turn re-sent the
+    // context it had, so the transcript's size times the turns is the shape of the total. It is a
+    // floor — a tool-heavy run re-sends more often than it has questions — which is why the card
+    // writes 「约」 in front of it and nothing else about the split is invented.
+    val sessionEstimate = if (sessionTokens > 0) 0 else transcriptEstimate * sessionTurns.coerceAtLeast(0)
     // What each run actually took, summed over its own messages. A message's own `elapsedMs`
     // is one round's call — the model thinking, then calling a tool, then thinking again are
     // several messages in one run — while the status line the user watched counted the whole
@@ -502,7 +529,16 @@ fun ChatScreen(
     // The indices are the list's own, [rowOffset] included, because that is what the strip
     // jumps to; the drawn turns are the tail of the conversation, which is why the labels
     // that name them are numbered from [TurnPage.earlier] rather than from one.
-    val turnIndices = remember(visible, rowOffset) {
+    // Keyed on the drawn rows' shape rather than on the rows: this walk reads each row's role and
+    // steer flag and nothing else, while `remember(visible, …)` would compare every row — and a
+    // row carries its message, screenshot and all. The two ids catch a list that was rebuilt with
+    // the same length but different ends (a branch switch, a paged window that moved).
+    val turnIndices = remember(
+        visible.size,
+        visible.firstOrNull()?.message?.id,
+        visible.lastOrNull()?.message?.id,
+        rowOffset,
+    ) {
         visible.indices
             .filter {
                 visible[it].message.role == Roles.USER && !visible[it].message.steer
@@ -1121,7 +1157,13 @@ fun ChatScreen(
                     // Choosing a turn is reading, not following: the stream must not drag
                     // the view back down while the user is somewhere else in the answer.
                     following = false
-                    scope.launch { listState.animateScrollToItem(turnIndices[turn]) }
+                    // `getOrNull`, not `turnIndices[turn]`: the row the finger was on is a row of
+                    // the window the gesture started in, and a window can shrink under it — a
+                    // retracted 插话, a branch switch, another conversation opened by a deep link.
+                    // A jump to a turn that is no longer drawn is a no-op, never a crash.
+                    turnIndices.getOrNull(turn)?.let { index ->
+                        scope.launch { listState.animateScrollToItem(index) }
+                    }
                 },
             )
             // The composer floats over the transcript instead of owning a strip at the bottom:
@@ -1142,6 +1184,7 @@ fun ChatScreen(
                     contextUsed = contextUsed,
                     contextEstimated = reading.estimated,
                     sessionTokens = sessionTokens,
+                    sessionEstimate = sessionEstimate,
                     sessionSplit = sessionSplit,
                     sessionTurns = sessionTurns,
                     sessionPerSecond = session?.perSecond ?: 0.0,
@@ -2133,7 +2176,10 @@ private fun TurnMetrics(
     // What the card last showed: the popup stays composed through its exit animation, and an
     // empty card sliding away is worse than the one the user just closed.
     var shown by remember { mutableStateOf(MetricCard.TIME) }
-    if (open != null) shown = open!!
+    // `open` read once, not asserted: the check and the use are two reads of a state that a
+    // recomposition can move between, and `!!` on the second is the shape that turns that into a
+    // crash. Same fix as the one in Common.kt.
+    open?.let { shown = it }
     val elapsed = remember(elapsedMs) {
         String.format(Locale.getDefault(), "%.1f秒", elapsedMs / 1000.0)
     }
@@ -4217,6 +4263,8 @@ private fun Composer(
     contextEstimated: Boolean = false,
     /** Everything this conversation has ever spent, for the ring's detail card. */
     sessionTokens: Int,
+    /** The text-based floor for the ring's cumulative row, when nothing was ever priced. */
+    sessionEstimate: Int = 0,
     /** That spend in the endpoint's own three parts, for the same card. */
     sessionSplit: SessionSplit,
     /** How many questions that tally was built from. */
@@ -4817,6 +4865,7 @@ private fun Composer(
                         estimated = contextEstimated,
                         window = contextWindow,
                         sessionTokens = sessionTokens,
+                        sessionEstimate = sessionEstimate,
                         sessionSplit = sessionSplit,
                         sessionTurns = sessionTurns,
                         sessionPerSecond = sessionPerSecond,
@@ -4934,18 +4983,18 @@ private fun MenuCard(
     offset: IntOffset,
     modifier: Modifier = Modifier,
     /**
-     * Whether the popup's own window takes focus. True is the platform default, and is only right
-     * for a card whose own subject is the keyboard. False is for the cards that hang off this
-     * screen's bars: a focusable popup window takes the keyboard away from the field, the shell
-     * then drops the whole composer by the keyboard's height, and a card anchored 8dp above a
-     * button of that row is left floating a keyboard above it — the card the user photographed as
-     * 偏上. The same focus is what used to close the input method when the user only wanted to
-     * read a number, which is why the ring's card and the transcript's own metric card are
-     * focus-less too. Focus-less means the card cannot see a tap outside its own bounds and cannot
-     * see BACK, so both live with the caller: see the scrim and BackHandler in [Composer], and the
-     * same pair at the metric card's call site.
+     * Whether the popup's own window takes focus.
+     *
+     * False by default, and every caller in this file passes it explicitly. That default is the
+     * lesson of the 「点圆环把输入法关了」 report: a focusable popup window takes the keyboard away
+     * from the field, the shell then drops the whole composer by the keyboard's height, and a card
+     * anchored 8dp above a button of that row is left floating a keyboard above it — the card the
+     * user photographed as 偏上. Only a card whose own subject *is* the keyboard (a field inside
+     * it) should ask for `true`; everything hanging off this screen's bars is focus-less, which
+     * means it can see neither a tap outside itself nor BACK, so both live with the caller: see the
+     * scrim and BackHandler in [Composer], the ring's card, and the metric card's call site.
      */
-    focusable: Boolean = true,
+    focusable: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -5553,13 +5602,20 @@ private fun VoiceOverlay(
 
     fun finish() {
         if (phase !is VoicePhase.Listening) return
-        val wav = recorder.stop()
-        if (wav == null) {
-            phase = VoicePhase.Failed("没有录到声音", 0)
-            return
-        }
+        // The state moves first, on this thread: the guard above is what stops a second tap (and
+        // the auto-stop that fires at the same moment) from stopping the recorder twice, and it
+        // has to close before any of the work is handed off.
         phase = VoicePhase.Thinking
         scope.launch {
+            // `stop()` writes the wav — up to sixty seconds of 16-bit mono at 16kHz, about 1.9MB —
+            // and this runs from the card's own buttons and from the recorder's auto-stop, all of
+            // them on the main thread. Writing it there is a stall the user sees as a frozen
+            // capsule, so the file is written and the transcription requested off it.
+            val wav = withContext(Dispatchers.IO) { recorder.stop() }
+            if (wav == null) {
+                phase = VoicePhase.Failed("没有录到声音", 0)
+                return@launch
+            }
             val outcome = Dictation.transcribe(settings, wav)
             wav.delete()
             outcome
@@ -5830,14 +5886,24 @@ private fun voiceEngine(context: Context): VoiceEngine {
 private fun voiceTrace(context: Context, line: String) {
     val stamp = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
     val app = context.applicationContext
-    voiceTraceWorker.execute {
-        runCatching {
-            val file = File(app.filesDir, "voice-trace.log")
-            if (file.length() > 32 * 1024) {
-                file.writeText(file.readText().takeLast(16 * 1024))
-            }
-            file.appendText("$stamp $line\n")
+    voiceTraceWorker.execute { appendBoundedLog(app, "voice-trace.log", "$stamp $line") }
+}
+
+/**
+ * One line into a diagnostic file that cannot grow without limit.
+ *
+ * Both logs in this file are read by a human debugging a phone, and neither is worth a byte of
+ * storage that outlives the session that wrote it: past 32KB the file is cut back to its last
+ * 16KB, so the newest history is what survives. Runs on the caller's worker, never on a
+ * composition or a gesture — the append is disk IO.
+ */
+private fun appendBoundedLog(app: Context, name: String, line: String) {
+    runCatching {
+        val file = File(app.filesDir, name)
+        if (file.length() > 32 * 1024) {
+            file.writeText(file.readText().takeLast(16 * 1024))
         }
+        file.appendText("${SystemClock.uptimeMillis()} $line\n")
     }
 }
 
@@ -5916,6 +5982,8 @@ private fun ContextRing(
     window: Int,
     /** Everything this conversation has ever spent, prompt + completion. */
     sessionTokens: Int,
+    /** The text-based floor for the cumulative row, when nothing in the session was priced. */
+    sessionEstimate: Int = 0,
     /** That spend in the endpoint's own three parts. */
     sessionSplit: SessionSplit,
     /** How many questions that tally was built from, so 「累计」 cannot read as 「本轮」. */
@@ -6060,6 +6128,7 @@ private fun ContextRing(
                             estimated = estimated,
                             window = window,
                             sessionTokens = sessionTokens,
+                            sessionEstimate = sessionEstimate,
                             sessionSplit = sessionSplit,
                             sessionTurns = sessionTurns,
                             sessionPerSecond = sessionPerSecond,
@@ -6082,6 +6151,8 @@ private fun ContextRingCard(
     estimated: Boolean = false,
     window: Int,
     sessionTokens: Int,
+    /** The text-based floor for the cumulative row, when nothing in the session was priced. */
+    sessionEstimate: Int = 0,
     sessionSplit: SessionSplit,
     sessionTurns: Int,
     sessionPerSecond: Double,
@@ -6112,8 +6183,12 @@ private fun ContextRingCard(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (used <= 0) {
+            // A brand-new conversation has nothing to report yet, and saying so is not the same
+            // as saying there is no data: 「暂无数据」 on a chat the user has not typed into yet
+            // reads as a fault. Everything else here has been estimated by now, so this branch
+            // means an empty transcript and nothing else.
             Text(
-                text = "暂无数据",
+                text = if (sessionTurns <= 0) "新会话 · 还没有用量" else "暂无数据",
                 style = MaterialTheme.typography.labelMedium,
                 color = scheme.onSurfaceVariant,
             )
@@ -6170,6 +6245,16 @@ private fun ContextRingCard(
                 RingDetail("未缓存输入", "${fullTokens(sessionSplit.uncached)} tok")
                 RingDetail("缓存读取", "${fullTokens(sessionSplit.cached)} tok")
                 RingDetail("输出", "${fullTokens(sessionSplit.output)} tok")
+            } else if (sessionEstimate > 0) {
+                // Nothing was ever priced — a gateway that sends no usage block, or rows written
+                // before the counts existed — so the total is the same text-based floor the line
+                // above uses, times the turns that re-sent it. 「约」 says what it is, and the
+                // split stays out rather than being invented: the cache halves cannot be guessed
+                // from a character count, and a made-up 「缓存读取」 is worse than a missing one.
+                RingDetail(
+                    "累计用量",
+                    "约 ${fullTokens(sessionEstimate.toLong())} tok · $sessionTurns 轮",
+                )
             }
             // 速度与时间 last: they are about the work, not about the window or the bill.
             if (sessionPerSecond > 0) {
@@ -6258,6 +6343,44 @@ private fun shortTokens(tokens: Int): String = when {
  */
 private fun fullTokens(tokens: Long): String = String.format(Locale.US, "%,d", tokens)
 
+/**
+ * 量完删 — an instrument, not a feature (task-9).
+ *
+ * The jump the user reported (a long press moving the transcript) reproduces only on their own
+ * device, after a cold start, and it is a race between a finger landing and a pin already in
+ * flight; adb is out of bounds, so the three moments that decide it are written to
+ * `filesDir/scroll-diag.log`: a conversation's opening pin, a finger landing, and a finger
+ * lifting. `press:up:movedUp=…:scrolled=…:atEnd=…` is the line that settles it —
+ * `movedUp=false scrolled=true` on an upward read means the gesture was a scroll and the follow
+ * must stay released; `scrolled=false` while the list plainly moved means the flag missed its
+ * scroll, and the `press:down` line's `first=`/`itemCount` say where it started.
+ *
+ * Bounded and off the main thread, exactly like [voiceTrace]: the file keeps its last 16KB once
+ * it passes 32KB, and the append runs on the shared diagnostic worker, so the press path never
+ * touches the disk. That bound is the fix for what this was — a log that grew without limit on
+ * the one path that must stay cheap.
+ *
+ * Delete this, its three call sites (all marked 量完删) and the log once the user confirms the
+ * jump is gone; the fix it was measuring shipped in 0.8.77.
+ */
+private fun scrollDiag(
+    context: Context,
+    event: String,
+    state: LazyListState,
+    following: Boolean,
+    itemCount: Int,
+) {
+    val app = context.applicationContext
+    val line = "$event" +
+        " following=$following" +
+        " itemCount=$itemCount" +
+        " first=${state.firstVisibleItemIndex}+${state.firstVisibleItemScrollOffset}" +
+        " scrolling=${state.isScrollInProgress}" +
+        " canBack=${state.canScrollBackward}" +
+        " canForward=${state.canScrollForward}"
+    voiceTraceWorker.execute { appendBoundedLog(app, "scroll-diag.log", line) }
+}
+
 /** The three parts of a conversation's spend, as the endpoint itself reports them. */
 private data class SessionSplit(val uncached: Long, val cached: Long, val output: Long)
 
@@ -6270,41 +6393,6 @@ private fun sessionSplitOf(messages: List<StoredMessage>): SessionSplit = Sessio
     cached = messages.sumOf { it.cachedTokens.toLong() },
     output = messages.sumOf { it.completionTokens.toLong() },
 )
-
-/**
- * 量完删 — an instrument, not a feature (task-9). The jump the user reported reproduces only on
- * their own device, after a cold start, and it is a race between a finger landing and a pin that
- * is already in flight; adb is out of bounds this round, so the readings that race is about are
- * appended to filesDir/scroll-diag.log. Only the three moments that decide it are written now —
- * a conversation's opening pin, a finger landing and a finger lifting — because the scroll path
- * itself must not carry file IO: a line per pin or per watcher emit was on the frame the scroll
- * was already fighting for. In the log, `press:up:movedUp=…:scrolled=…:atEnd=…` is the line that
- * settles the chase-the-bottom report: `movedUp=false scrolled=true` on an upward read (a finger
- * dragging down) means the gesture was a scroll and the follow must stay released; if that line
- * shows `scrolled=false` while the list plainly moved, the flag is missing its scroll and the
- * `press:down` line's `first=`/`itemCount` say where it started.
- * Delete this function and its call sites (all marked 量完删) once the log has answered.
- */
-private fun scrollDiag(
-    context: Context,
-    event: String,
-    state: LazyListState,
-    following: Boolean,
-    itemCount: Int,
-) {
-    runCatching {
-        File(context.filesDir, "scroll-diag.log").appendText(
-            "${SystemClock.uptimeMillis()} $event" +
-                " following=$following" +
-                " itemCount=$itemCount" +
-                " first=${state.firstVisibleItemIndex}+${state.firstVisibleItemScrollOffset}" +
-                " scrolling=${state.isScrollInProgress}" +
-                " canBack=${state.canScrollBackward}" +
-                " canForward=${state.canScrollForward}" +
-                "\n",
-        )
-    }
-}
 
 /**
  * The messages a compression record covers, or null when this transcript no longer holds
@@ -6671,18 +6759,23 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
 /**
  * What the ring draws, and whether the number is the endpoint's own or this app's estimate.
  *
- * Three sources, in one order, and the order is the whole point:
+ * Four sources, in one order, and the order is the whole point:
  *
  * 1. [liveReported] — the count the endpoint itself sent for the round in flight. The only
  *    honest measure of 「上下文用了多少」 (see `StreamStats.lastPromptTokens`).
  * 2. [newestStored] — the newest round in the transcript that carries a count. This is what the
  *    ring reads on a conversation that was just opened, and between the start of a round and
  *    the endpoint's usage block at its end.
- * 3. [liveEstimate] — the run's own character-based estimate, used *only* when neither of the
- *    above exists. Some gateways ignore `stream_options.include_usage`, and for those the ring
- *    had nothing to draw for the whole conversation: it read 「暂无数据」 while the app was
- *    plainly using the window. An estimate is a proportion, not a price, so it is flagged
- *    ([estimated]) and the card says 「约」 — but a proportion that says 6% beats a blank.
+ * 3. [liveEstimate] — the run's own character-based estimate of the wire, used while a round is
+ *    going and before its usage block lands.
+ * 4. [transcriptEstimate] — the transcript's own size, for a conversation that is *not* running
+ *    and whose stored rounds carry no counts at all: a gateway that ignores
+ *    `stream_options.include_usage` (see LlmClient's own note), or rows written before the counts
+ *    existed. Without it the card was empty in exactly that case — every line zero, 「暂无数据」
+ *    on a conversation with plenty of text in it — which is the report this answers.
+ *
+ * The last two are estimates, so [estimated] is set and the card writes 「约」: a proportion is not
+ * a price, but a proportion that says 6% beats a blank.
  */
 internal data class RingReading(val tokens: Int, val estimated: Boolean)
 
@@ -6699,11 +6792,17 @@ private fun approvalIcon(mode: ApprovalMode): Int = when (mode) {
     ApprovalMode.DENY -> R.drawable.ic_shield_alert
 }
 
-/** The reading for the three sources above; 0 means there is nothing to draw at all. */
-internal fun ringReading(liveReported: Int, newestStored: Int, liveEstimate: Int): RingReading = when {
+/** The reading for the four sources above; 0 means there is nothing to draw at all. */
+internal fun ringReading(
+    liveReported: Int,
+    newestStored: Int,
+    liveEstimate: Int,
+    transcriptEstimate: Int = 0,
+): RingReading = when {
     liveReported > 0 -> RingReading(liveReported, estimated = false)
     newestStored > 0 -> RingReading(newestStored, estimated = false)
     liveEstimate > 0 -> RingReading(liveEstimate, estimated = true)
+    transcriptEstimate > 0 -> RingReading(transcriptEstimate, estimated = true)
     else -> RingReading(0, estimated = false)
 }
 

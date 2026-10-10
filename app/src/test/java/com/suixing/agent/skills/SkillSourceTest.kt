@@ -67,6 +67,56 @@ class SkillSourceTest {
         assertEquals(SkillSource.USER, untouched.source)
     }
 
+    // ------------------------------------------------------------------ 默认开启（模型新建）
+
+    @Test
+    fun `a skill the model writes is switched on and usable at once`() {
+        // 用户原话「skill 默认自动打开」：在对话里让模型记下来的东西，不该还要手动去开一次。
+        val state = SkillState().createdByModel("mine", at = 456L)
+
+        assertFalse("mine" in state.disabled)
+        val created = state.of(skill("mine"))
+        assertTrue(created.enabled)
+        assertEquals(SkillSource.USER, created.source)
+        assertEquals(456L, created.sourceAt)
+    }
+
+    @Test
+    fun `the two arrivals differ exactly on the trust boundary`() {
+        // 同一份 state 上比一次：写在这里的进目录，外面来的等着人看一眼。
+        val created = SkillState().createdByModel("written")
+        val fetched = SkillState().admitting("downloaded", SkillSource.DOWNLOADED, url = "https://e.com/a.md")
+
+        val all = listOf(
+            created.of(skill("written", name = "写好的")),
+            fetched.of(skill("downloaded", name = "下载的")),
+        )
+        assertTrue(all[0].enabled)
+        assertFalse(all[1].enabled)
+
+        // 这一步才是要害：目录就是进 system prompt 的那段文字。
+        val catalog = catalogOf(all.filter { it.enabled })
+        assertTrue(catalog.contains("写好的"))
+        assertFalse(catalog.contains("下载的"))
+    }
+
+    @Test
+    fun `re-writing a skill the user had switched off turns it back on`() {
+        // 旧规则下再存一次仍是关的；新规则下「模型新建」就是开 —— 用户让模型重写一遍，
+        // 意思就是他要它生效。要在技能页关掉，关的是这一次之后的它。
+        val state = SkillState(disabled = setOf("mine")).createdByModel("mine")
+        assertTrue(state.of(skill("mine")).enabled)
+    }
+
+    @Test
+    fun `a state file written before this rule existed still reads as switched on`() {
+        // 老的 skill-state.json 里没有这个 id 的禁用记录 ⇒ 读出来仍然是开：升级不改变
+        // 已有技能的状态，只有外面新来的才等着人开。
+        val legacy = SkillState(disabled = setOf("off-one"), origins = mapOf("off-one" to SkillOrigin("user")))
+        assertTrue(legacy.of(skill("legacy")).enabled)
+        assertFalse(legacy.of(skill("off-one")).enabled)
+    }
+
     @Test
     fun `the tables forget a deleted skill and prune the ones whose folder is gone`() {
         val state = SkillState(

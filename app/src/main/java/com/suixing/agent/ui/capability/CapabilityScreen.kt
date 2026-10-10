@@ -70,7 +70,9 @@ import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.theme.Tone
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun CapabilityScreen(onBack: () -> Unit) {
@@ -101,7 +103,9 @@ fun CapabilityScreen(onBack: () -> Unit) {
         ActivityResultContracts.StartActivityForResult(),
     ) { allFilesGranted = supportsAllFiles && Environment.isExternalStorageManager() }
 
-    LaunchedEffect(Unit) { Core.capabilities.refresh() }
+    // refresh() 不是 suspend，里面是同步的 PackageManager 查询加两次 binder 调用：直接在这里
+    // 调用就是主线程等 IPC，冷启动进这一页会顿一下。它没有回调可等，所以只是挪走，不改成异步。
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { Core.capabilities.refresh() } }
 
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         PageTopBar(title = "能力", subtitle = "随行能碰到什么，取决于这里", onBack = onBack)
@@ -204,16 +208,31 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
                 summary = "最高权限，可直接读写系统文件",
                 granted = state.rootReady,
-                lines = tierLines(TIER_ROOT, state, settings),
+                lines = if (settings.enableRoot) {
+                    tierLines(TIER_ROOT, state, settings)
+                } else {
+                    // 关着的时候不报探测结果：那些行说的是「检测到 su 可用」，而这个开关的承诺
+                    // 正是不去检测、也不会用。
+                    listOf("已关闭：不会检测 root，也不会走 root 通道")
+                },
                 actionLabel = if (probing) "检测中…" else "检测",
                 // 探测要跑几秒，期间按钮必须点不动：否则连点会叠起多次 probeRoot()。
-                actionEnabled = !probing,
+                // 开关关掉时同样点不动：那个按钮的全部作用就是弹一次 superuser 授权框。
+                actionEnabled = !probing && settings.enableRoot,
                 onAction = {
                     scope.launch {
                         probing = true
                         Core.capabilities.probeRoot()
                         probing = false
                     }
+                },
+                footer = {
+                    RootSwitch(
+                        checked = settings.enableRoot,
+                        onChange = { on ->
+                            scope.launch { Core.settings.update { it.copy(enableRoot = on) } }
+                        },
+                    )
                 },
             )
 
@@ -286,7 +305,9 @@ fun CapabilityScreen(onBack: () -> Unit) {
                             }
                         },
                     ) { Text("打开设置") }
-                    TextButton(onClick = { Core.capabilities.refresh() }) {
+                    TextButton(
+                        onClick = { scope.launch { withContext(Dispatchers.IO) { Core.capabilities.refresh() } } },
+                    ) {
                         Icon(
                             ImageVector.vectorResource(R.drawable.ic_rotate_cw),
                             contentDescription = null,
@@ -699,6 +720,29 @@ private fun CapabilityCard(
             Spacer(Modifier.height(10.dp))
             it()
         }
+    }
+}
+
+/**
+ * 「允许使用 Root」：整页唯一一个会决定「要不要去碰 root」的开关。
+ *
+ * 两态必须一次说全，否则很容易被读成「关掉只是不显示」：关掉是不探测（冷启动不会弹 superuser
+ * 授权框）、也不会用 root 通道；打开才恢复探测与使用。默认开＝维持既有行为，升级不降级。
+ */
+@Composable
+private fun RootSwitch(checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("允许使用 Root", style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = "关＝不检测 root，也不会走 root 通道（冷启动不会弹 superuser 授权框）；" +
+                    "开＝可以检测并使用 root。默认开启，关掉后 Shizuku / 无障碍 / 标准档照常工作。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 

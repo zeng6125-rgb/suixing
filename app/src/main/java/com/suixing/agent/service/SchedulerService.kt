@@ -207,7 +207,11 @@ class SchedulerService : Service() {
         fun arm(context: Context) {
             val alarm = context.getSystemService(AlarmManager::class.java) ?: return
             val now = System.currentTimeMillis()
-            val next = Core.schedules.read()
+            // Swept before the alarm is aimed, and in the one place every path already goes
+            // through (boot, clock change, reinstall, every edit, and after each fire): a one-shot
+            // whose moment passed while the phone was off stops claiming to be armed, and no
+            // separate cleanup pass has to remember to look for it.
+            val next = Core.schedules.expireMissed(now)
                 .filter { it.enabled }
                 .mapNotNull { schedule -> schedule.nextTriggerAfter(now)?.let { it to schedule } }
                 .minByOrNull { it.first }

@@ -148,7 +148,16 @@ class UsageStore(private val context: Context) {
     }
 
     private fun writeCache(next: UsageSnapshot) {
-        cacheFile.writeText(json.encodeToString(UsageSnapshot.serializer(), next))
+        val text = json.encodeToString(UsageSnapshot.serializer(), next)
+        // Same temp+rename as every other store: a kill mid-write must not leave a cache that no
+        // longer parses. (It would only cost a full rescan of the transcripts, but there is no
+        // reason to allow the window at all.)
+        val temp = File(cacheFile.parentFile, "${cacheFile.name}.tmp")
+        temp.writeText(text)
+        if (!temp.renameTo(cacheFile)) {
+            runCatching { temp.delete() }
+            cacheFile.writeText(text)
+        }
     }
 
     private companion object {

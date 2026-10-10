@@ -105,8 +105,10 @@ fun ProfileScreen(onBack: () -> Unit) {
                 } else {
                     TextButton(
                         onClick = {
+                            // 先置位再 launch：这一位决定按钮换成转圈，置在协程里会留出一帧
+                            // 连点窗口，两次 summarizeProfileNow 并发写同一份画像。
+                            summarizing = true
                             scope.launch {
-                                summarizing = true
                                 // 画像页可能先于会话页被打开：chats 还没 load 过就没有对话可总结。
                                 if (Core.chats.conversations.value.isEmpty()) Core.chats.load()
                                 val messages = Core.chats.conversations.value

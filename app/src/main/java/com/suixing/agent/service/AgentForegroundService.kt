@@ -88,16 +88,23 @@ class AgentForegroundService : Service() {
     }
 
     /**
-     * The console lives exactly as long as the run does.
+     * The run is over; the console follows only when it was there for the run.
      *
-     * A run is the only thing it can control, so it appears when one starts and goes
-     * away with it — the user never has to remember to close it. [FloatConsoleService.start]
-     * declines when the overlay permission has not been granted, and then there is
-     * simply no console.
+     * This is where 「常驻」 used to die: a run ending took the console service down with it, so a
+     * switch that says ON kept its setting while there was nothing left to draw the ball — and
+     * nothing started it again until the next run. 常驻 means the service outlives every run, so
+     * the stop now happens only when the drawer's switch is off.
+     *
+     * The settings are read on [Core.appScope] because DataStore only reads suspendingly and
+     * `onDestroy` is a synchronous callback; the value is the one this run ended under.
      */
     override fun onDestroy() {
         scope.cancel()
-        FloatConsoleService.stop(this)
+        Core.appScope.launch {
+            if (!Core.settings.current().floatingConsole) {
+                FloatConsoleService.stop(this@AgentForegroundService)
+            }
+        }
         super.onDestroy()
     }
 

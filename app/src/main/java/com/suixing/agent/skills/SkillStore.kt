@@ -110,13 +110,12 @@ internal data class SkillState(
     }
 
     /**
-     * A skill that has just landed.
+     * A skill that arrived from outside: a URL, a file manager, another app's share sheet.
      *
-     * It arrives switched off, always. The catalogue is injected into the system prompt
-     * and the toolchain behind it can run shell commands, delete files and tap the screen,
-     * so anything a URL or a model can put on disk would otherwise become instructions the
-     * user never agreed to. Switching it on is a tap on the skills page, and that tap is
-     * the only way a new skill reaches the prompt.
+     * It arrives switched off, always. The catalogue is injected into the system prompt and the
+     * toolchain behind it can run shell commands, delete files and tap the screen, so text someone
+     * else wrote would otherwise become instructions the user never agreed to. Switching it on is
+     * a tap on the skills page, and that tap is the only way such a skill reaches the prompt.
      */
     fun admitting(
         id: String,
@@ -126,6 +125,20 @@ internal data class SkillState(
     ): SkillState = copy(
         disabled = disabled + id,
         origins = origins + (id to SkillOrigin(source = source.key, url = url, at = at)),
+    )
+
+    /**
+     * A skill written here, by the model, in the conversation the user is already having.
+     *
+     * It arrives switched **on**, and the difference from [admitting] is the whole trust boundary:
+     * this text was not fetched from anywhere — the user asked for it, the model they are talking to
+     * wrote it, and making them hunt for a switch to use what they just dictated is the kind of
+     * ceremony that teaches people to ignore the switch. Everything that came from outside still
+     * goes through [admitting].
+     */
+    fun createdByModel(id: String, at: Long = System.currentTimeMillis()): SkillState = copy(
+        disabled = disabled - id,
+        origins = origins + (id to SkillOrigin(source = SkillSource.USER.key, at = at)),
     )
 
     /** Forgets one skill entirely: used when its folder is deleted. */
@@ -210,14 +223,16 @@ class SkillStore(private val context: Context) {
     /**
      * Writes a skill file and records where it came from.
      *
-     * The skill arrives switched off — see [SkillState.admitting] for why — so the caller
-     * must tell the user (and the model) that it is saved but not yet in effect.
+     * [enabled] is the trust boundary, not a preference: true only for a skill the model just wrote
+     * at the user's request ([SkillState.createdByModel]), false for every path that carried text
+     * in from outside ([SkillState.admitting]).
      */
     suspend fun save(
         id: String,
         content: String,
         source: SkillSource = SkillSource.USER,
         url: String = "",
+        enabled: Boolean = false,
     ): Skill = withContext(Dispatchers.IO) {
         val clean = sanitizeSkillId(id)
         val folder = File(root, clean)
@@ -226,7 +241,7 @@ class SkillStore(private val context: Context) {
         }
         val file = File(folder, SKILL_FILE_NAME)
         file.writeText(content)
-        val state = readState().admitting(clean, source, url)
+        val state = if (enabled) readState().createdByModel(clean) else readState().admitting(clean, source, url)
         writeState(state)
         state.of(parseSkill(folder, file))
     }

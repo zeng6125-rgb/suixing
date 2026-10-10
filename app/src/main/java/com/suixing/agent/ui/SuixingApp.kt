@@ -7,6 +7,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -227,10 +228,41 @@ fun SuixingApp() {
     // A row inside the settings page pushes, so back returns to the list it came from.
     val push: (String) -> Unit = { target -> navController.navigate(target) }
 
-    // 用户自己收起抽屉（遮罩、返回键）。抽屉只在用户自己拉开时打开：返回上一页不会把它
-    // 重新打开（用户看过 ChatGPT 之后明确说的：「也不会说把侧边栏重新打开」），所以这里
-    // 不需要记「从哪一页走的」。
-    val closeDrawer: () -> Unit = { drawerOpen = false }
+    // 从抽屉里点走一行时，记下出发的是哪一页：用户按返回回到那一页，抽屉应该还是开着的。
+    // 这件事用户改口过三次（「每次回来侧边栏都会被关掉」→「也不要重放抽屉的动画」→
+    // 「退出页面的动画加回来」→ 最后一句「我跟你说了在侧边栏打开界面返回时，不要把侧边栏
+    // 关闭」），最终口径就是最后那一句：**状态要恢复，动画不要**。所以恢复时置 drawerInstant。
+    // 只由抽屉自己的入口置位——聊天页那个「打开设置」不是从抽屉走的，不该把抽屉带回来。
+    // remember 而不是 rememberSaveable：存下来的 "chat" 会在冷启动那一帧（起始页正是 chat）
+    // 把抽屉弹开；rotation 不走这条路（manifest 里 configChanges 已含 orientation）。
+    var drawerReturnTo by remember { mutableStateOf<String?>(null) }
+    // 恢复只恢复状态，不重放动画：用户明确反对过「回来的时候那个侧边栏的动画再来一遍」，
+    // 他要的是「已经在那儿」。这一位只由下面的恢复路径置起，由「用户自己拉开抽屉」那条唯一
+    // 路径清掉——清的那一刻抽屉是关着的，换 spec 不会打断任何正在跑的动画。于是恢复那一次
+    // 是瞬时出现，之后每次手动打开照常演 240ms 左滑。
+    var drawerInstant by remember { mutableStateOf(false) }
+    // 用户自己收起抽屉（遮罩、返回键）：记下的出发页一起清掉，回来时不该再弹出来。
+    val closeDrawer: () -> Unit = {
+        drawerOpen = false
+        drawerReturnTo = null
+    }
+    // 抽屉里的一行：比 open 多记一件事。目标是当前页时（点会话、点新对话）不记——那不是
+    // 「去了别的页」，记下来会当场被判成「回到出发页」而把抽屉又弹开。
+    val openFromDrawer: (String) -> Unit = { target ->
+        if (target != route) drawerReturnTo = route
+        open(target)
+    }
+    // 回到出发的那一页就把抽屉放回去：状态要，动画不要（见 drawerInstant）。这个 effect 只挂
+    // 在 route 上、不挂 drawerReturnTo：点走的那一帧，抽屉的关闭和导航都还没生效，两个键都挂
+    // 着会在那一帧就把抽屉判成「该开着」又弹回来；只认路由变化，就只在真的回到那一页时触发。
+    LaunchedEffect(route) {
+        val from = drawerReturnTo
+        if (from != null && route == from) {
+            drawerReturnTo = null
+            drawerInstant = true
+            drawerOpen = true
+        }
+    }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
     // IME inset frame by frame. The shell lays itself out by a *clamped* copy of that inset:
@@ -257,7 +289,12 @@ fun SuixingApp() {
         imeDir = 0
     }
     CompositionLocalProvider(
-        LocalOpenSidebar provides { drawerOpen = true },
+        // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：把「恢复不重放
+        // 动画」那一位还回去，下一次开合照常演左滑。
+        LocalOpenSidebar provides {
+            drawerInstant = false
+            drawerOpen = true
+        },
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
@@ -436,6 +473,8 @@ fun SuixingApp() {
             }
             Drawer(
                 open = drawerOpen,
+                // 恢复那一次瞬时出现（见 drawerInstant），不重放滑入。
+                instant = drawerInstant,
                 route = route,
                 conversations = conversations,
                 activeId = activeConversationId,
@@ -443,14 +482,14 @@ fun SuixingApp() {
                 onClose = closeDrawer,
                 onNew = {
                     chat.newConversation()
-                    open("chat")
+                    openFromDrawer("chat")
                 },
                 onOpenConversation = { conversation ->
                     chat.openConversation(conversation)
-                    open("chat")
+                    openFromDrawer("chat")
                 },
                 onDeleteConversation = { chat.deleteConversation(it) },
-                onNavigate = open,
+                onNavigate = openFromDrawer,
                 onAssistants = {
                     // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
                     drawerOpen = false
@@ -516,6 +555,8 @@ fun SuixingApp() {
 @Composable
 private fun BoxScope.Drawer(
     open: Boolean,
+    /** 恢复（回到出发页）那一次：立即出现，不重放滑入动画——用户明确要的。 */
+    instant: Boolean,
     route: String,
     conversations: List<Conversation>,
     activeId: String,
@@ -548,9 +589,11 @@ private fun BoxScope.Drawer(
     // 当场发出的，面板若还按 200/160ms 慢慢退，就会和新页面的入场（280ms）同帧叠着演，
     // 屏幕上同时有两条滑动（用户说「动画有点奇怪」）。缩到 120ms 让面板先退干净、页面再
     // 到位；入场保持原样（240/180），那是用户已经接受的一半。
+    // instant（从别的页面返回、抽屉本来就该在那儿）连这一半都不演：遮罩与面板走同一条路，
+    // 否则会出现「面板已经在了、遮罩还在淡入」的错位。
     AnimatedVisibility(
         visible = open,
-        enter = fadeIn(tween(180)),
+        enter = if (instant) EnterTransition.None else fadeIn(tween(180)),
         exit = fadeOut(tween(120)),
     ) {
         Box(
@@ -568,7 +611,7 @@ private fun BoxScope.Drawer(
     AnimatedVisibility(
         visible = open,
         modifier = Modifier.align(Alignment.CenterStart),
-        enter = slideInHorizontally(tween(240)) { -it },
+        enter = if (instant) EnterTransition.None else slideInHorizontally(tween(240)) { -it },
         exit = slideOutHorizontally(tween(120)) { -it },
     ) {
         Surface(

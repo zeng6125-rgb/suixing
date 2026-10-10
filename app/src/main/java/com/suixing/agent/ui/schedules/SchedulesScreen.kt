@@ -20,12 +20,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -72,6 +75,9 @@ fun SchedulesScreen(onBack: () -> Unit) {
     var schedules by remember { mutableStateOf<List<Schedule>>(emptyList()) }
     // 空态要等读完再画，否则冷启动那一帧会先说「还没有定时任务」再冒出列表。
     var loaded by remember { mutableStateOf(false) }
+    // 待确认的删除：点垃圾桶只记下目标，真正写回要等用户在弹窗里再点一次。id 是随机 UUID，
+    // 删掉就再也重建不出同一条，而垃圾桶紧贴开关——单击即删的代价不对等。
+    var pendingDelete by remember { mutableStateOf<Schedule?>(null) }
     LaunchedEffect(Unit) {
         schedules = withContext(Dispatchers.IO) { Core.schedules.read() }
         loaded = true
@@ -115,10 +121,26 @@ fun SchedulesScreen(onBack: () -> Unit) {
                     onToggle = { on ->
                         apply(schedules.map { if (it.id == schedule.id) it.copy(enabled = on) else it })
                     },
-                    onDelete = { apply(schedules.filterNot { it.id == schedule.id }) },
+                    onDelete = { pendingDelete = schedule },
                 )
             }
         }
+    }
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除定时任务") },
+            text = { Text("确定要删除「${target.title}」吗？删除后无法恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDelete = null
+                    apply(schedules.filterNot { it.id == target.id })
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -166,7 +188,11 @@ private fun ScheduleRow(
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Switch(checked = schedule.enabled, onCheckedChange = onToggle)
+            // 已过期的不给开关：这类行是 one-shot 错过了触发时间，下一次 arm 一定会把它重新
+            // 关掉——用户打开又被关掉，看起来就是开关失灵。要恢复只能重新建一条。
+            if (schedule.missedAt <= 0L) {
+                Switch(checked = schedule.enabled, onCheckedChange = onToggle)
+            }
             RowAction(icon = R.drawable.ic_trash, label = "删除", onClick = onDelete)
         }
     }
@@ -177,9 +203,13 @@ private fun ScheduleRow(
  *
  * 暂停的那条不写「下一次」：`nextAt` 是上次上闹钟时算的，暂停之后它就不再有意义，照抄会
  * 让用户以为它还排着队。
+ *
+ * 过期（[Schedule.missedAt] > 0）不能只说「已暂停」：那是用户自己关的，这是手机没开机错过了
+ * 触发时间，两者能做的事不一样——前者再打开就行，后者只能重建，所以要把「怎么办」一起说出来。
  */
 private fun scheduleLine(schedule: Schedule): String {
     val timing = describeSchedule(schedule)
+    if (schedule.missedAt > 0L) return "$timing · 已过期（错过了触发时间，需要的话重新建一条）"
     if (!schedule.enabled) return "$timing · 已暂停"
     val next = schedule.nextAt.takeIf { it > 0L }?.let { formatScheduleMoment(it) }
     return if (next == null) "$timing · 不会触发" else "$timing · 下一次 $next"
@@ -188,13 +218,15 @@ private fun scheduleLine(schedule: Schedule): String {
 /**
  * One icon action of a row.
  *
- * 40dp 的触区：这是行尾的动作，和聊天页插话条那三个按钮同一尺寸（统一规格里 48dp 那条是给
- * 独立的纯图标盒的，行内动作跟着行高走）。[label] 是读屏名字，也是搜索用的锚点。
+ * 画出来 40dp，但触区补到 48dp：删本身有二次确认，误触不会丢数据，代价是弹一个本来不想看的
+ * 确认框、打断手上的操作——而它紧贴开关，这种误触很容易发生，所以盒子不跟着行高缩。
+ * 视觉尺寸仍与聊天页插话条那三个按钮一致。[label] 是读屏名字，也是搜索用的锚点。
  */
 @Composable
 private fun RowAction(icon: Int, label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
+            .minimumInteractiveComponentSize()
             .size(40.dp)
             .clip(CircleShape)
             .clickable(

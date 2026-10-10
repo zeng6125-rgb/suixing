@@ -118,7 +118,16 @@ class ScheduleTools(
         if (all.isEmpty()) return@withContext ToolResult.success("还没有定时提醒。")
         val text = all.joinToString("\n") { schedule ->
             val next = schedule.nextAt.takeIf { it > 0L }?.let { format(it) } ?: "不会触发"
-            "- ${schedule.id}「${schedule.title}」${describe(schedule)} · 下一次 $next · 到点执行：${schedule.prompt}"
+            // 一条错过触发时间的一次性提醒会被 ScheduleStore.expireMissed 关掉：只说「不会触发」
+            // 会让模型分不清是用户暂停了还是已经过期，所以这里把状态说全。
+            val state = when {
+                schedule.missedAt > 0L && !schedule.enabled ->
+                    " · 已过期（错过了触发时间，需要的话重新建一条）"
+
+                !schedule.enabled -> " · 已暂停"
+                else -> " · 下一次 $next"
+            }
+            "- ${schedule.id}「${schedule.title}」${describe(schedule)}$state · 到点执行：${schedule.prompt}"
         }
         ToolResult.success("共 ${all.size} 个定时提醒：\n$text")
     }
@@ -149,7 +158,13 @@ class ScheduleTools(
             )
         }
         val now = System.currentTimeMillis()
-        val armed = updated.copy(nextAt = updated.nextTriggerAfter(now, zone) ?: 0L)
+        val armed = updated.copy(
+            nextAt = updated.nextTriggerAfter(now, zone) ?: 0L,
+            // 给新时间 = 重新排上：一条因为错过触发时间而被关掉的提醒，改到未来某点后必须重新生效，
+            // 否则回执里的「下一次」是句谎话——它算出了时间却仍然不会响。用户自己暂停的不动。
+            enabled = if (timing != null && updated.missedAt > 0L) true else updated.enabled,
+            missedAt = if (timing != null && updated.missedAt > 0L) 0L else updated.missedAt,
+        )
         if (timing != null && armed.nextAt == 0L) {
             return@withContext ToolResult.failure("这个时间已经过去了，提醒没有改动。")
         }

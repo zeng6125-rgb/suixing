@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -83,6 +84,8 @@ fun AssistantEditor(
     val scope = rememberCoroutineScope()
     /** Set when picking a picture fails; cleared on the next successful pick. */
     var notice by remember { mutableStateOf<String?>(null) }
+    // 删除是不可撤销的：它会把助手连同提示词和头像 PNG 一起从设置里抹掉，所以先问一次。
+    var confirmingDelete by remember { mutableStateOf(false) }
     // The picture is written the moment it is picked, not on save: the pick arrives as a
     // content:// uri that is only readable while the picker's grant lasts, and the draft holds
     // the path to the file we made out of it. A pick that fails leaves the old picture alone.
@@ -186,7 +189,7 @@ fun AssistantEditor(
                     }
                     if (onDelete != null) {
                         OutlinedButton(
-                            onClick = onDelete,
+                            onClick = { confirmingDelete = true },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text("删除这个助手", color = MaterialTheme.colorScheme.error)
@@ -208,6 +211,24 @@ fun AssistantEditor(
                 }
             }
         }
+    }
+
+    // 名字用 label：空名字的助手在卡片上显示的就是它，弹窗里报一个空引号等于没说是谁。
+    if (confirmingDelete && onDelete != null) {
+        AlertDialog(
+            onDismissRequest = { confirmingDelete = false },
+            title = { Text("删除这个助手") },
+            text = { Text("确定要删除「${draft.label}」吗？它的提示词和头像会一起删除，无法恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmingDelete = false
+                    onDelete()
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingDelete = false }) { Text("取消") }
+            },
+        )
     }
 }
 

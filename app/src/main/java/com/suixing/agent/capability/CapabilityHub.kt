@@ -92,8 +92,15 @@ data class CapabilityState(
      *
      * Root counts as ready only once it has been probed ([rootProbed]): resolving never triggers the
      * superuser prompt, which the 能力 page asks for explicitly (see [CapabilityHub.restoreRoot]).
+     *
+     * @param rootAllowed the 「允许使用 Root」 switch. With it off, root is not a reachable channel
+     *   at all — whatever the device is rooted with, and whatever [rootProbed] says. That is where
+     *   the switch's promise ("不探测、也不会用 root") gets its second half: the first half is
+     *   [CapabilityHub.applyRootSwitch] clearing the probed answer. The default of true only makes
+     *   a bare call agree with the switch being on; what the app passes is decided by
+     *   [CapabilityHub.shellTier].
      */
-    fun shellTier(preferred: String): ShellTier {
+    fun shellTier(preferred: String, rootAllowed: Boolean = true): ShellTier {
         // What the tier the user fixed asks for; nothing fixed (自动) and 无障碍 ask for the top.
         val fixed = when (preferred) {
             CapabilityTiers.ROOT -> ShellTier.ROOT
@@ -105,7 +112,10 @@ data class CapabilityState(
         // always reachable, so this never comes back empty — and it never goes above [fixed].
         return when (fixed) {
             ShellTier.ROOT -> when {
-                rootReady -> ShellTier.ROOT
+                // The switch is asked here rather than folded into [rootReady]: the switch is a
+                // decision, rootReady is an observation, and keeping them apart is what lets the
+                // 能力 page still report what it found while root stays off-limits.
+                rootAllowed && rootReady -> ShellTier.ROOT
                 shellReady -> ShellTier.SHIZUKU
                 else -> ShellTier.LOCAL
             }
@@ -125,6 +135,15 @@ class CapabilityHub(
     private val _preferred = MutableStateFlow("")
 
     /**
+     * 「允许使用 Root」, mirrored from settings.
+     *
+     * Starts true so the hub behaves like the app did before the switch existed until the first
+     * settings emission arrives — and, more importantly, so that a device whose settings file has
+     * no such key is never treated as if the user had turned root off.
+     */
+    private val _rootAllowed = MutableStateFlow(true)
+
+    /**
      * The 执行档次 the user fixed, mirrored from settings; empty means 自动. Read through
      * [shellTier] rather than directly, so nothing decides a channel on its own.
      *
@@ -132,6 +151,9 @@ class CapabilityHub(
      * next one should already obey the new tier.
      */
     val preferred: StateFlow<String> = _preferred.asStateFlow()
+
+    /** Whether root may be used at all; see [com.suixing.agent.data.AppSettings.enableRoot]. */
+    val rootAllowed: StateFlow<Boolean> = _rootAllowed.asStateFlow()
 
     /** Outlives any screen: probing must not be tied to a composable's lifetime. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -141,8 +163,38 @@ class CapabilityHub(
         ShizukuManager.addBinderDeadListener { refresh() }
         ShizukuManager.addPermissionResultListener { _, _ -> refresh() }
         refresh()
-        scope.launch { settings.flow.collect { _preferred.value = it.preferredCapability } }
-        scope.launch { restoreRoot() }
+        scope.launch {
+            settings.flow.collect { saved ->
+                _preferred.value = saved.preferredCapability
+                applyRootSwitch(saved.enableRoot)
+            }
+        }
+    }
+
+    /**
+     * Lands the 「允许使用 Root」 switch. The only writer of [_rootAllowed], so the state and the
+     * setting cannot drift apart.
+     *
+     * Off: the probed answer is thrown away, because a remembered "root works" that nobody is
+     * allowed to use is exactly the 关了还在用 this prevents — [probeRoot] refuses to look again
+     * until the switch is back on, so the superuser prompt cannot reappear behind the user's back.
+     * On: the remembered answer comes back, or a first-ever probe runs if this device has never
+     * been asked (see [restoreRoot]).
+     *
+     * Reached from the settings collector, which also runs once on the first emission: that is what
+     * replaced the unconditional `restoreRoot()` in `init`, so a device with the switch off is
+     * never probed at a cold start.
+     */
+    private suspend fun applyRootSwitch(enabled: Boolean) {
+        val was = _rootAllowed.value
+        _rootAllowed.value = enabled
+        if (!enabled) {
+            if (was || _state.value.rootProbed || _state.value.root) {
+                _state.value = _state.value.copy(root = false, rootProbed = false)
+            }
+            return
+        }
+        if (!was || !_state.value.rootProbed) restoreRoot()
     }
 
     /**
@@ -150,7 +202,7 @@ class CapabilityHub(
      * live state and the fixed tier. Everything that used to pick root-or-Shizuku for itself asks
      * this instead.
      */
-    fun shellTier(): ShellTier = state.value.shellTier(preferred.value)
+    fun shellTier(): ShellTier = state.value.shellTier(preferred.value, _rootAllowed.value)
 
     /**
      * Puts the remembered root answer on screen without asking for it again.
@@ -162,6 +214,7 @@ class CapabilityHub(
      * even then only after the cached cards are already on screen.
      */
     private suspend fun restoreRoot() {
+        if (!_rootAllowed.value) return
         val saved = runCatching { settings.current() }.getOrNull() ?: return
         if (saved.rootCheckedAt > 0L) {
             _state.value = _state.value.copy(root = saved.rootAvailable, rootProbed = true)
@@ -184,6 +237,11 @@ class CapabilityHub(
     }
 
     suspend fun probeRoot(): Boolean = withContext(Dispatchers.IO) {
+        // The one gate every probe goes through. A caller that asks anyway — a tool invoked with
+        // mode="root", the 能力 page's 检测 button — gets a refusal instead of a superuser prompt,
+        // which is what the switch promises. Returning false rather than throwing keeps those
+        // callers' existing "no root" paths working.
+        if (!_rootAllowed.value) return@withContext false
         val available = Shell.rootAvailable()
         _state.value = _state.value.copy(root = available, rootProbed = true)
         runCatching {

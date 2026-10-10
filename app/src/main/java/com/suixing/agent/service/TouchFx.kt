@@ -175,8 +175,22 @@ private const val FX_DRIVING_GRACE_MS = 5_000L
  * a log to grow forever — past the cap the oldest part is dropped.
  */
 private const val FX_TRACE_FILE = "fx-trace.log"
-private const val FX_TRACE_MAX_BYTES = 48 * 1024
-private const val FX_TRACE_KEEP_BYTES = 24 * 1024
+
+/**
+ * The trace is bounded: past [FX_TRACE_MAX_BYTES] it is rewritten with its last [FX_TRACE_KEEP_BYTES].
+ *
+ * Both numbers are bytes. The tail is cut in bytes and then decoded, because the two units used to be
+ * mixed: `takeLast` on a String counts *characters*, so a log with Chinese in it kept up to three
+ * times what the name promised.
+ *
+ * A quarter of a megabyte, where it was 48/24KB: the light's own `light=` heartbeat (every
+ * [FX_LIGHT_TRACE_MS]) writes ~6 lines a minute while the edge is lit, which filled the old window in
+ * well under an hour of use. This file has exactly one job — still holding the beginning of a session
+ * after the user reproduces something at its end — and 128KB of tail is what that job costs. Nothing
+ * here is unbounded: the rewrite happens once per [FX_TRACE_KEEP_BYTES] written, not per line.
+ */
+private const val FX_TRACE_MAX_BYTES = 256 * 1024
+private const val FX_TRACE_KEEP_BYTES = 128 * 1024
 
 /**
  * How often the light's own state is written while it does not change.
@@ -225,6 +239,16 @@ object TouchFx {
     private var view: FxView? = null
     private var manager: WindowManager? = null
     private var lastEdgeFlashAt = 0L
+
+    /**
+     * The application context every effect is built from — and the one [returnToApp] starts from.
+     *
+     * Volatile because [noteDriving] writes it on the tool dispatcher while [apply] and [returnToApp]
+     * read it on the main thread. Without it a tick can read null and skip the light — or skip the
+     * trip home — for one action, which is exactly the kind of one-in-a-hundred report nobody can
+     * reproduce. A single reference, so volatile is enough; no lock is needed.
+     */
+    @Volatile
     private var appContext: Context? = null
 
     /**
@@ -248,9 +272,18 @@ object TouchFx {
      *
      * Volatile because it is written from the tool dispatcher and read from the ticker on the
      * main thread; a tick that misses an update simply lights the edge a second later.
+     *
+     * Volatile alone is not enough for the two *writers*, though: both do a read-modify-write
+     * ([noteDriving] adds the ids of the runs it just saw, the ticker drops the ones that ended),
+     * and two of those interleaved lose one update — an id that never arrives means the light never
+     * comes on for that run, and [returnToApp] never fires for it either. Hence [drivingLock], held
+     * for exactly those two assignments and nothing else.
      */
     @Volatile
     private var drivingIds: Set<String> = emptySet()
+
+    /** Guards the read-modify-write of [drivingIds] against its two writers. See there. */
+    private val drivingLock = Any()
 
     /** When the last driving action happened, for the grace window. Volatile as above. */
     @Volatile
@@ -281,8 +314,18 @@ object TouchFx {
     /**
      * One thread for the trace file, so the lines stay in the order the effects happened and no
      * caller — including the accessibility service, on the main thread — ever waits on the disk.
+     *
+     * Named, daemon and low priority: the thread exists for the life of the process (the executor is
+     * deliberately never shut down — a trace that silently stops being written is worse than one
+     * idle thread), so it must not be the thing that keeps the process alive, and writing a
+     * diagnostic must never compete with the UI thread for the CPU.
      */
-    private val traceWorker = Executors.newSingleThreadExecutor()
+    private val traceWorker = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "fx-trace").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }
+    }
     private var traceFile: File? = null
     private var lastOverlayNote: String? = null
 
@@ -404,7 +447,7 @@ object TouchFx {
         val running = Core.engine.runsFlow.value.keys
         lastDrivingAt = SystemClock.uptimeMillis()
         trace(context, "entry=noteDriving runs=${running.size} ids=${running.joinToString(",")}")
-        drivingIds = drivingIds + running
+        synchronized(drivingLock) { drivingIds = drivingIds + running }
         // 一次驱动动作开一段新的亮灯：上一段的收尾淡出到此为止。
         drivingLeftAt = 0L
         // Also (re)starts the ticker: the first tick is immediate, so the light comes on with the
@@ -580,7 +623,7 @@ object TouchFx {
             // any more cannot light anything either: what stays is exactly 「still alive and drove」.
             // The trim happens here rather than in [apply] on purpose — the departure above needs
             // the id to still be in the set on the tick that sees it.
-            drivingIds = drivingIds.intersect(running)
+            synchronized(drivingLock) { drivingIds = drivingIds.intersect(running) }
             val lit = apply("tick")
             // 亮着就还要人熄灯（收尾那几秒），前台里虽然不亮、但活着的驱动 run 还等着离场（自动
             // 返回就靠这一 tick 发现），所以两种都要继续；只有「不亮 + 没有活着的驱动 run」才停表。
@@ -684,8 +727,14 @@ object TouchFx {
             runCatching {
                 val file = traceFile ?: File(app.filesDir, FX_TRACE_FILE).also { traceFile = it }
                 if (file.length() > FX_TRACE_MAX_BYTES) {
-                    val tail = file.readText().takeLast(FX_TRACE_KEEP_BYTES)
-                    file.writeText("— 已截断，仅保留最近一段 —\n$tail")
+                    // Bytes, not characters, and the first (partial) line of the tail is dropped:
+                    // cutting a UTF-8 log at a byte offset lands mid-character, and a line starting
+                    // mid-word is worse than no line. One rewrite per [FX_TRACE_KEEP_BYTES] written.
+                    val bytes = file.readBytes()
+                    val from = (bytes.size - FX_TRACE_KEEP_BYTES).coerceAtLeast(0)
+                    val tail = String(bytes, from, bytes.size - from, Charsets.UTF_8)
+                        .substringAfter('\n', "")
+                    file.writeText("— 已截断，仅保留最近一段 —\n$tail\n")
                 }
                 file.appendText("$entry\n")
             }

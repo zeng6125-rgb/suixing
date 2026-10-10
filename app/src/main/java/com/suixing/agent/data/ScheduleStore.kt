@@ -46,6 +46,14 @@ data class Schedule(
     val timeOfDay: String = "",
     val nextAt: Long = 0L,
     val enabled: Boolean = true,
+    /**
+     * When a one-shot was found to have missed its moment (0 = never missed).
+     *
+     * A phone that was off at the trigger time cannot fire it late without startling the user,
+     * so [nextTriggerAfter] correctly refuses — but the board must not keep saying 「已启用」for
+     * a reminder that will never ring again. See [ScheduleStore.expireMissed].
+     */
+    val missedAt: Long = 0L,
 )
 
 /**
@@ -139,6 +147,30 @@ class ScheduleStore(private val file: File) {
     }
 
     fun find(id: String): Schedule? = read().firstOrNull { it.id == id }
+
+    /**
+     * Switches off one-shots whose moment passed while nobody was looking, stamping [Schedule.missedAt].
+     *
+     * They are the one case where `enabled = true` is a lie: the alarm never fired (the phone was
+     * off, or the app was force-stopped) and [nextTriggerAfter] will not fire it now, so without
+     * this the list would show a reminder that is permanently "已启用" and never rings. Firing it
+     * late is deliberately not an option — a reminder that pops up hours after its moment is worse
+     * than one that admits it was missed. Repeating kinds are untouched: they always have a next
+     * moment, so they simply roll forward.
+     */
+    fun expireMissed(now: Long): List<Schedule> = synchronized(lock) {
+        val board = read()
+        var changed = false
+        val next = board.map { schedule ->
+            if (schedule.enabled && schedule.kind == SCHEDULE_AT && schedule.atMillis <= now) {
+                changed = true
+                schedule.copy(enabled = false, missedAt = now)
+            } else {
+                schedule
+            }
+        }
+        if (changed) write(next) else board
+    }
 
     /** Adds or replaces [schedule] by id, and returns the whole board. */
     fun upsert(schedule: Schedule): List<Schedule> = synchronized(lock) {

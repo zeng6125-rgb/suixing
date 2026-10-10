@@ -300,8 +300,9 @@ fun ToolsScreen(onBack: () -> Unit) {
                     }
                 },
             )
+            // 这里不再加 12dp：PageTopBar 自己以 Spacer(12.dp) 收尾（Common.kt:532），
+            // 本页把 PageTopBar 放在 Column 里，那一份是生效的，再加就是 24dp。
             Column(Modifier.padding(horizontal = 16.dp)) {
-                Spacer(Modifier.height(12.dp))
                 SegmentedPill(options = TABS, selectedIndex = tab, onSelect = { tab = it })
             }
             Spacer(Modifier.height(4.dp))
@@ -349,9 +350,14 @@ fun ToolsScreen(onBack: () -> Unit) {
             onSave = { config ->
                 mcpEditorOpen = false
                 scope.launch {
-                    Core.mcp.upsert(config)
-                    if (config.enabled) Core.mcp.connect(config.name)
-                    notify("已保存 ${config.name}")
+                    // 落盘失败（磁盘满/权限）以前会把协程炸掉，而对话框在 launch 之前就关了：
+                    // 用户既看不到「已保存」也看不到失败原因，只能对着没生效的列表猜。
+                    runCatching {
+                        Core.mcp.upsert(config)
+                        if (config.enabled) Core.mcp.connect(config.name)
+                    }
+                        .onSuccess { notify("已保存 ${config.name}") }
+                        .onFailure { notify("保存失败：${it.message ?: "未知错误"}") }
                 }
             },
         )
@@ -366,8 +372,9 @@ fun ToolsScreen(onBack: () -> Unit) {
                 TextButton(onClick = {
                     mcpDeleting = null
                     scope.launch {
-                        Core.mcp.remove(target.name)
-                        notify("已删除 ${target.name}")
+                        runCatching { Core.mcp.remove(target.name) }
+                            .onSuccess { notify("已删除 ${target.name}") }
+                            .onFailure { notify("删除失败：${it.message ?: "未知错误"}") }
                     }
                 }) { Text("删除") }
             },
@@ -390,9 +397,14 @@ fun ToolsScreen(onBack: () -> Unit) {
                 TextButton(onClick = {
                     skillDeleting = null
                     scope.launch {
-                        Core.skills.delete(target.id)
-                        skillRefresh++
-                        notify("已删除 ${target.name}")
+                        // delete 写 state 文件时会抛 IOException：不接住就是协程炸掉 + 没有提示，
+                        // 用户以为删掉了（列表也刷新了），其实磁盘上还在。
+                        runCatching { Core.skills.delete(target.id) }
+                            .onSuccess {
+                                skillRefresh++
+                                notify("已删除 ${target.name}")
+                            }
+                            .onFailure { notify("删除失败：${it.message ?: "未知错误"}") }
                     }
                 }) { Text("删除") }
             },
@@ -542,7 +554,7 @@ private fun ToolsTab() {
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 grouped.forEach { (group, groupTools) ->

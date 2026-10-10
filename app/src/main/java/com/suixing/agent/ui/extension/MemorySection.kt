@@ -154,20 +154,20 @@ fun MemorySection(
             draft = draft,
             onDismiss = { editing = null },
             onSave = { saved ->
-                editing = null
-                scope.launch {
-                    val ok = Core.memory.put(saved.key, saved.value)
-                    // A note the store refused for length alone is not a mystery failure:
-                    // saying how far over the cap it is tells the user what to cut.
-                    val overLength = saved.value.length > MemoryStore.MAX_VALUE_LENGTH
-                    onNotify(
-                        when {
-                            ok -> "已保存「${saved.key}」"
-                            overLength ->
-                                "内容过长（${saved.value.length}/${MemoryStore.MAX_VALUE_LENGTH} 字），请精简后再记"
-                            else -> "保存失败"
-                        },
-                    )
+                // 先把结果问清楚再决定关不关窗：写失败（含超长被拒）时用户刚打的整段
+                // 内容还在对话框里，关掉就等于让他重打。
+                val ok = runCatching { Core.memory.put(saved.key, saved.value) }.getOrDefault(false)
+                // A note the store refused for length alone is not a mystery failure:
+                // saying how far over the cap it is tells the user what to cut.
+                val overLength = saved.value.length > MemoryStore.MAX_VALUE_LENGTH
+                if (ok) {
+                    editing = null
+                    onNotify("已保存「${saved.key}」")
+                    null
+                } else if (overLength) {
+                    "内容过长（${saved.value.length}/${MemoryStore.MAX_VALUE_LENGTH} 字），请精简后再记"
+                } else {
+                    "保存失败，内容没能写入，请重试"
                 }
             },
         )
@@ -198,10 +198,14 @@ fun MemorySection(
 private fun MemoryEditorDialog(
     draft: MemoryDraft,
     onDismiss: () -> Unit,
-    onSave: (MemoryDraft) -> Unit,
+    // suspend 返回 null 表示写成功、对话框可以关；非 null 是要就地显示的失败原因。
+    onSave: suspend (MemoryDraft) -> String?,
 ) {
     var key by remember { mutableStateOf(draft.key) }
     var value by remember { mutableStateOf(draft.value) }
+    var failure by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -225,12 +229,26 @@ private fun MemoryEditorDialog(
                         .fillMaxWidth()
                         .heightIn(min = 120.dp, max = 260.dp),
                 )
+                failure?.let { message ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = key.isNotBlank(),
-                onClick = { onSave(draft.copy(key = key.trim(), value = value)) },
+                enabled = key.isNotBlank() && !saving,
+                onClick = {
+                    saving = true
+                    scope.launch {
+                        failure = onSave(draft.copy(key = key.trim(), value = value))
+                        saving = false
+                    }
+                },
             ) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },

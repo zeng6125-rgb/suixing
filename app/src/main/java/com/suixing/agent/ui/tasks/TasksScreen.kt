@@ -2,6 +2,7 @@
 
 package com.suixing.agent.ui.tasks
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -21,12 +22,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.TODO_COMPLETED
@@ -57,17 +61,41 @@ import kotlinx.coroutines.withContext
  */
 @Composable
 fun TasksScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var items by remember { mutableStateOf<List<TodoItem>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
+    // 长按不再直接删：先记下目标，确认弹窗点「删除」才真的写回。
+    var pendingDelete by remember { mutableStateOf<TodoItem?>(null) }
     LaunchedEffect(Unit) {
         items = withContext(Dispatchers.IO) { Core.todos.read() }
         loaded = true
     }
     val save: (List<TodoItem>) -> Unit = { next ->
+        val previous = items
         items = next
-        scope.launch { withContext(Dispatchers.IO) { Core.todos.write(next) } }
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { Core.todos.write(next) } }
+                .onFailure {
+                    // 回滚 + 说出来：以前界面已经改成新样子、磁盘没改，用户以为存上了。
+                    items = previous
+                    Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_SHORT).show()
+                }
+        }
     }
+    // 分组只算一次：todoGroup 是 LazyListScope 扩展，它的内容 lambda 不是 @Composable，
+    // 放不进 remember —— 而它以前每次重组都对全表 filter 三遍。
+    val grouped = remember(items) { items.groupBy { it.status } }
+    val onToggle: (TodoItem) -> Unit = { row ->
+        // A tap walks the line on: 待办 → 进行中 → 已完成 → 待办.
+        val next = when (row.status) {
+            TODO_PENDING -> TODO_IN_PROGRESS
+            TODO_IN_PROGRESS -> TODO_COMPLETED
+            else -> TODO_PENDING
+        }
+        save(items.map { if (it.id == row.id) it.copy(status = next) else it })
+    }
+    val onAskDelete: (TodoItem) -> Unit = { pendingDelete = it }
     val scheme = MaterialTheme.colorScheme
     Scaffold(
         containerColor = scheme.background,
@@ -93,10 +121,26 @@ fun TasksScreen(onBack: () -> Unit) {
                     )
                 }
             }
-            todoGroup("进行中", TODO_IN_PROGRESS, scheme.primary, items, save)
-            todoGroup("待办", TODO_PENDING, scheme.onSurfaceVariant, items, save)
-            todoGroup("已完成", TODO_COMPLETED, scheme.tertiary, items, save)
+            todoGroup("进行中", TODO_IN_PROGRESS, scheme.primary, grouped[TODO_IN_PROGRESS].orEmpty(), onToggle, onAskDelete)
+            todoGroup("待办", TODO_PENDING, scheme.onSurfaceVariant, grouped[TODO_PENDING].orEmpty(), onToggle, onAskDelete)
+            todoGroup("已完成", TODO_COMPLETED, scheme.tertiary, grouped[TODO_COMPLETED].orEmpty(), onToggle, onAskDelete)
         }
+    }
+
+    // 长按删除要过一道确认：整表覆盖写回，误触就永久丢一条。
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除任务") },
+            text = { Text("确定要删除「${target.subject}」吗？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDelete = null
+                    save(items.filterNot { it.id == target.id })
+                }) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+        )
     }
 }
 
@@ -105,10 +149,10 @@ private fun LazyListScope.todoGroup(
     title: String,
     status: String,
     dot: Color,
-    board: List<TodoItem>,
-    save: (List<TodoItem>) -> Unit,
+    rows: List<TodoItem>,
+    onToggle: (TodoItem) -> Unit,
+    onDelete: (TodoItem) -> Unit,
 ) {
-    val rows = board.filter { it.status == status }
     item(key = "head-$status") {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -129,7 +173,10 @@ private fun LazyListScope.todoGroup(
             Spacer(Modifier.height(6.dp))
         }
     }
-    items(rows, key = { it.id }) { row ->
+    // key 里必须带位置：id 由模型自报（TodoTools.kt:79），而 TodoStore 只补空 id、不去重
+    // （TodoStore.kt:61 `item.id.ifBlank { "t${index + 1}" }`）——同一个 id 出现两次时
+    // LazyColumn 会抛 `Key "t1" was already used`，打开任务页即崩。
+    itemsIndexed(rows, key = { index, row -> "$status#$index#${row.id}" }) { _, row ->
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
@@ -140,16 +187,9 @@ private fun LazyListScope.todoGroup(
                 modifier = Modifier
                     .fillMaxWidth()
                     .combinedClickable(
-                        // A tap walks the line on: 待办 → 进行中 → 已完成 → 待办.
-                        onClick = {
-                            val next = when (row.status) {
-                                TODO_PENDING -> TODO_IN_PROGRESS
-                                TODO_IN_PROGRESS -> TODO_COMPLETED
-                                else -> TODO_PENDING
-                            }
-                            save(board.map { if (it.id == row.id) it.copy(status = next) else it })
-                        },
-                        onLongClick = { save(board.filterNot { it.id == row.id }) },
+                        onClick = { onToggle(row) },
+                        // 长按只发请求，真正写回要等确认弹窗点「删除」。
+                        onLongClick = { onDelete(row) },
                     )
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,

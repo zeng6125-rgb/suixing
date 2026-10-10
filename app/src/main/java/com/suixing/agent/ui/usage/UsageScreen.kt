@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.usage
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,6 +56,8 @@ fun UsageScreen(onBack: () -> Unit) {
     var totals by remember { mutableStateOf(TokenTally()) }
     var longestTurn by remember { mutableStateOf(0L) }
     var conversations by remember { mutableStateOf(0) }
+    // 首帧 days/models 还是空表：没有这一位就会先说「还没有用量记录」再冒数据。
+    var loaded by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         val snapshot = withContext(Dispatchers.IO) { store.refresh() }
         days = store.byDay(30)
@@ -82,6 +85,7 @@ fun UsageScreen(onBack: () -> Unit) {
                     } ?: 0L
             } ?: 0L
         }
+        loaded = true
     }
     val scheme = MaterialTheme.colorScheme
     Scaffold(
@@ -110,9 +114,11 @@ fun UsageScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.large,
                     color = scheme.surfaceContainer,
+                    // 与 SuixingCard / 任务行 / 定时页同一张卡：shapes.large + 1dp outlineVariant。
+                    border = BorderStroke(1.dp, scheme.outlineVariant),
                 ) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (days.isEmpty()) {
+                        if (loaded && days.isEmpty()) {
                             Text(
                                 text = "还没有用量记录",
                                 style = MaterialTheme.typography.bodySmall,
@@ -123,7 +129,9 @@ fun UsageScreen(onBack: () -> Unit) {
                         days.forEach { day ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    text = day.date.substring(5),
+                                    // drop 而不是 substring(5)：date 是磁盘缓存 usage.json 的 map key，
+                                    // 解码时不校验格式，短于 6 字符的 key 会让 substring 在组合期抛。
+                                    text = day.date.drop(5),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = scheme.onSurfaceVariant,
                                     modifier = Modifier.width(44.dp),
@@ -159,9 +167,11 @@ fun UsageScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.large,
                     color = scheme.surfaceContainer,
+                    // 与 SuixingCard / 任务行 / 定时页同一张卡：shapes.large + 1dp outlineVariant。
+                    border = BorderStroke(1.dp, scheme.outlineVariant),
                 ) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (models.isEmpty()) {
+                        if (loaded && models.isEmpty()) {
                             Text(
                                 text = "还没有用量记录",
                                 style = MaterialTheme.typography.bodySmall,
@@ -204,6 +214,7 @@ private fun StatCard(title: String, value: String, modifier: Modifier = Modifier
         modifier = modifier,
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.padding(16.dp)) {
             Text(

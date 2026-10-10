@@ -396,7 +396,7 @@ fun SuixingTopBar(
                                         onSubtitleClick?.let { tap ->
                                             Modifier
                                                 .heightIn(min = 48.dp)
-                                                .clip(RoundedCornerShape(12.dp))
+                                                .clip(MaterialTheme.shapes.small)
                                                 .clickable(onClick = tap)
                                                 .padding(horizontal = 6.dp)
                                         } ?: Modifier,
@@ -524,12 +524,16 @@ fun PageTopBar(
                 }
                 actions()
             }
+            // The gap every page's first control keeps from the bar — and why it sits *inside*
+            // this Surface instead of beside it: Scaffold's topBar slot only takes the tallest
+            // child (M3 1.3.1's ScaffoldLayout uses maxByOrNull { it.height }, every child
+            // placed at (0,0)), so a Spacer emitted as a sibling adds no height in a Scaffold
+            // host — only a Column host (tools, extension) ever saw it. This bar's colour is the
+            // page background, so carrying the gap inside is invisible, and now every host gets
+            // the same 12dp. 12dp reads as deliberate without wasting a row of content.
+            Spacer(Modifier.height(12.dp))
         }
     }
-    // The gap every page's first control keeps from the bar. It lives here rather than in the
-    // twelve call sites: the bar owns its own breathing room, so a page cannot forget it and
-    // look cramped. 12dp reads as deliberate without wasting a row of content.
-    Spacer(Modifier.height(12.dp))
 }
 
 /**
