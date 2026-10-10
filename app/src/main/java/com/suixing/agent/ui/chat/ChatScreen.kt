@@ -1709,9 +1709,12 @@ private fun MessageRow(
             onEdit = onEdit,
         )
 
-        // A tool result with no bubble above it still renders as one, card only.
+        // A tool result with no bubble above it still renders as one, card only. It is
+        // `row.parts` rather than the row's own message: once this card is the run's open
+        // bubble, the calls that followed it — and a 插话 typed while they ran — live in the
+        // parts, and rebuilding from the message alone would draw only the first of them.
         else -> AssistantRow(
-            parts = listOf(Part.Tools(listOf(ToolLine.of(row.message)))),
+            parts = row.parts,
             streaming = false,
             face = assistantFace,
             bubbleMaxWidth = bubbleMaxWidth,
