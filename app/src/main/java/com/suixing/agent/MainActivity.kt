@@ -96,9 +96,5 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val REQUEST_NOTIFICATIONS = 1001
-
-        /** The two schemes' own background colours; see Color.kt and the window background. */
-        const val LIGHT_BACKGROUND = 0xFFFFFFFF.toInt()
-        const val DARK_BACKGROUND = 0xFF0F1412.toInt()
     }
 }

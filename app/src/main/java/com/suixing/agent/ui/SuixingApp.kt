@@ -70,7 +70,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.painter.Painter
@@ -109,6 +111,7 @@ import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
+import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -209,7 +212,24 @@ fun SuixingApp() {
         // show the wallpaper there, and ours showed our own canvas because the root painted the
         // whole window. Insetting the painted layer by the IME (and making the window background
         // transparent in MainActivity) is the adaptation they have and we were missing.
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+        Box(
+            Modifier.fillMaxSize().background(
+                if (LocalDarkTheme.current) {
+                    SolidColor(MaterialTheme.colorScheme.surface)
+                } else {
+                    // The same brush the chat canvas uses, over the whole window: the adapted
+                    // apps show their own canvas colour through the keyboard's rounded corners,
+                    // and ours showed the root layer's flat white because the canvas is a
+                    // gradient and the two never matched.
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
+                        ),
+                    )
+                },
+            ),
+        ) {
             Box(Modifier.fillMaxSize())
             Scaffold(
                 modifier = Modifier.imePadding(),
