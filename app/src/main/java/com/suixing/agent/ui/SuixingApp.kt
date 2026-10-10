@@ -76,7 +76,9 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.vectorResource
@@ -218,26 +220,35 @@ fun SuixingApp() {
         // apps have. Painting the whole window instead put our gradient's own colour in those
         // corners, and a gradient can never match itself at two different heights, which is
         // why every full-window attempt read as "lighter but not the same".
-        // Painted over the whole window, not inset by the keyboard: the keyboard's rounded
-        // corners reveal whatever this layer draws there, and leaving the strip unpainted put
-        // the window's own white behind them. The gradient here is the window-level canvas;
-        // matching the chat canvas's own gradient exactly still needs the two unified (next
-        // change), which is why the corners read a shade lighter than the canvas for now.
-        Box(Modifier.fillMaxSize()) {
-            Box(
-                Modifier.fillMaxSize().background(
-                    if (LocalDarkTheme.current) {
-                        SolidColor(MaterialTheme.colorScheme.surface)
-                    } else {
-                        Brush.verticalGradient(
-                            listOf(
-                                MaterialTheme.colorScheme.surface,
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
-                            ),
-                        )
-                    },
-                ),
-            )
+        // Painted over the whole window, and the gradient's end is pinned to the canvas's own
+        // bottom edge (window height minus the keyboard). Two gradients over two different
+        // spans can never agree where they meet: with the root running 0..window and the canvas
+        // 0..canvasBottom, the strip behind the keyboard showed the root at 62% of its ramp
+        // while the canvas just above it sat at 100% — the colour mismatch at the keyboard's
+        // rounded corners. Ending the root's ramp where the canvas ends (and clamping past it,
+        // which is the ramp's own last colour) makes the corners exactly the canvas's bottom
+        // colour, continuous with the pixel row above the keyboard.
+        val rootDensity = LocalDensity.current
+        val gradientEndPx = with(rootDensity) {
+            (LocalConfiguration.current.screenHeightDp.dp.toPx() -
+                WindowInsets.ime.getBottom(rootDensity)).coerceAtLeast(1f)
+        }
+        Box(
+            Modifier.fillMaxSize().background(
+                if (LocalDarkTheme.current) {
+                    SolidColor(MaterialTheme.colorScheme.surface)
+                } else {
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
+                        ),
+                        startY = 0f,
+                        endY = gradientEndPx,
+                    )
+                },
+            ),
+        ) {
             Box(Modifier.fillMaxSize())
             Scaffold(
                 modifier = Modifier.imePadding(),
