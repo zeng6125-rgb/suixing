@@ -577,13 +577,29 @@ fun ChatScreen(
         // on top of that clamp is what froze the offset for 17 frames and then jumped it. Only
         // opening (inset growing) leaves the end below the fold and needs the pin.
         if (dir < 0) return@LaunchedEffect
-        if (itemCount <= 0 || !following || !settings.autoFollow) return@LaunchedEffect
-        withFrameNanos { }
+        // The keyboard lift is not 「自动跟随新消息」: that setting decides whether new content
+        // pulls the view down, while this keeps the card the user was reading glued above the
+        // composer as the keyboard takes the viewport away. Gating it on autoFollow left the
+        // card frozen for the whole open whenever the setting was off — the stiffness reported
+        // since 0.8.15 — while the close looked fine because the list's own clamp does that side
+        // for free.
+        if (itemCount <= 0 || !following) return@LaunchedEffect
+        // No suspension between here and the pin. This effect restarts on every frame the
+        // inset changes, and a suspended coroutine is cancelled by the next restart: with a
+        // withFrameNanos() here the pin never ran during an open at all (the offset log froze
+        // for the whole transition), and in 0.8.15 it ran only on the last frame — the instant
+        // jump that read as stiffness.
+        //
+        // The pin itself must not suspend either: this effect restarts on every frame the inset
+        // changes and a restart cancels the previous run, so scrollToItem/scrollBy — both
+        // suspend — were cancelled mid-scroll every frame and the offset never moved (measured:
+        // PIN logged on all 28 frames of an open, off frozen at 43). dispatchRawDelta is not
+        // suspend: it consumes what it can toward the end and the list clamps at its bound, so
+        // one call per frame is the whole follow.
         programmatic = true
         lastPinAt = SystemClock.uptimeMillis()
         try {
-            listState.scrollToItem(itemCount - 1)
-            listState.scrollBy(FOLLOW_SCROLL_PX)
+            listState.dispatchRawDelta(FOLLOW_SCROLL_PX)
         } finally {
             programmatic = false
         }
