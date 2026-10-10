@@ -254,8 +254,12 @@ fun ChatScreen(
     // bottom edge. Falls back to the composer's own height until both edges have been measured,
     // which is the same number the two agreed on before the keyboard was ever opened.
     val stackFootprint = with(LocalDensity.current) {
-        val measured = (transcriptBottomY.roundToInt() - composerTopY.roundToInt()).coerceAtLeast(0)
-        if (measured > 0) measured.toDp() else composerH
+        // Subtract first, convert once: rounding each endpoint to whole pixels before
+        // subtracting left the two keyboard states 1-2px apart, because the endpoints'
+        // fractional parts differ between them. The float difference converted once keeps the
+        // algebraic gap identical in both states (error at most half a pixel, invisible).
+        val measured = (transcriptBottomY - composerTopY).coerceAtLeast(0f)
+        if (measured > 0f) with(LocalDensity.current) { measured.toDp() } else composerH
     }
 
     var voiceOpen by remember { mutableStateOf(false) }

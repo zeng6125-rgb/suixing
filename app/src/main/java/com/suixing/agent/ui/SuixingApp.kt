@@ -212,24 +212,32 @@ fun SuixingApp() {
         // show the wallpaper there, and ours showed our own canvas because the root painted the
         // whole window. Insetting the painted layer by the IME (and making the window background
         // transparent in MainActivity) is the adaptation they have and we were missing.
-        Box(
-            Modifier.fillMaxSize().background(
-                if (LocalDarkTheme.current) {
-                    SolidColor(MaterialTheme.colorScheme.surface)
-                } else {
-                    // The same brush the chat canvas uses, over the whole window: the adapted
-                    // apps show their own canvas colour through the keyboard's rounded corners,
-                    // and ours showed the root layer's flat white because the canvas is a
-                    // gradient and the two never matched.
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.surface,
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
-                        ),
-                    )
-                },
-            ),
-        ) {
+        // Two siblings, each inset once: the painted layer stops at the keyboard's top edge so
+        // the strip behind it — and the keyboard's rounded corners — stay unpainted and show
+        // whatever is behind the (transparent) window, which is the see-through the adapted
+        // apps have. Painting the whole window instead put our gradient's own colour in those
+        // corners, and a gradient can never match itself at two different heights, which is
+        // why every full-window attempt read as "lighter but not the same".
+        // Painted over the whole window, not inset by the keyboard: the keyboard's rounded
+        // corners reveal whatever this layer draws there, and leaving the strip unpainted put
+        // the window's own white behind them. The gradient here is the window-level canvas;
+        // matching the chat canvas's own gradient exactly still needs the two unified (next
+        // change), which is why the corners read a shade lighter than the canvas for now.
+        Box(Modifier.fillMaxSize()) {
+            Box(
+                Modifier.fillMaxSize().background(
+                    if (LocalDarkTheme.current) {
+                        SolidColor(MaterialTheme.colorScheme.surface)
+                    } else {
+                        Brush.verticalGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.surface,
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
+                            ),
+                        )
+                    },
+                ),
+            )
             Box(Modifier.fillMaxSize())
             Scaffold(
                 modifier = Modifier.imePadding(),
