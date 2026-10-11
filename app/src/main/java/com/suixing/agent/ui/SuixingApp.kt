@@ -1,13 +1,8 @@
 package com.suixing.agent.ui
 
-import android.app.Activity
-import android.graphics.drawable.ColorDrawable
-import androidx.compose.ui.graphics.toArgb
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -19,7 +14,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,7 +59,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import androidx.compose.runtime.mutableIntStateOf
@@ -82,6 +76,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -154,20 +149,9 @@ import kotlinx.coroutines.launch
  * containerColor = surface，与页面底色同色，等于没缩还多一条缝），位移是唯一对着静止的屏幕
  * 边框也看得见的通道。
  */
-private const val NAV_FADE_MS = 240
 private const val NAV_ENTER_MS = 280
 private const val NAV_EXIT_MS = 200
 private val NAV_EASING = FastOutSlowInEasing
-
-/**
- * 「这一趟返回」的标志要活多久：转场 lambda 是在转场开始那一刻才求值的，判据必须活过整趟转场
- * （最长的是进页 280ms），否则它读到 null/false，这一趟又走回带滑动的常规规格 —— 用户看到的
- * 「点返回按钮时主页面还是在滑动」就是这个。400ms 比 280 长一截，又短到不会影响下一次导航。
- *
- * Long 而不是 Int：它唯一的用处是 `delay(...)`，而 delay 只收 Long/Duration（上面那三个
- * `NAV_*_MS` 是 Int，因为它们只喂给 `tween(...)`，那边收 Int）。
- */
-private const val NAV_RETURN_FLAG_MS = 400L
 
 /**
  * 横向位移的除数：屏宽 / 12 ≈ 8% 屏宽（1080p 面板上 ≈ 90px）。够看得见，又短到不会和
@@ -189,7 +173,8 @@ private const val NAV_SHIFT_DIVISOR = 12
 fun SuixingApp() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
-    val route = backStackEntry?.destination?.route?.substringBefore('?') ?: "chat"
+    // 当前**覆盖层**的路由；"empty" 是栈底那层透明的占位 —— 也就是"chat 露着"。
+    val route = backStackEntry?.destination?.route?.substringBefore('?') ?: "empty"
     val pending by Core.gate.pending.collectAsState()
 
     // Owned here rather than inside the chat screen: the drawer lists and switches the
@@ -233,15 +218,12 @@ fun SuixingApp() {
 
     // Top-level destinations replace each other: the drawer is a switch, not a stack.
     val open: (String) -> Unit = { target ->
-        // 离开抽屉这一趟**不播关闭动画**：用户两次抱怨的都是「能看见抽屉动」——先是「两层各动
-        // 一半」，后来是「我已经完全看到他被关掉的残影」。所以这里直接 snapTo(Closed)：同帧、
-        // 零动画，新页干净地入场。UNDISPATCHED 让状态写在导航之前当场落地，否则它会被排到下一个
-        // 主线程消息、那一帧就晚了（与返回时 snapTo(Open) 同一套做法，两条路观感对称，也就不像
-        // 「硬做」）。抽屉本来就关着时这一句是空操作（聊天页顶栏那个「打开设置」走的就是这条路）。
-        // 用户**主动**开合（汉堡键 LocalOpenSidebar、手势拖动、遮罩点击）仍走库的动画。
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            drawerState.snapTo(DrawerValue.Closed)
-        }
+        // 抽屉**用自己的动画滑出**，与新页的入场同帧起跑、时长接近（库 ~256ms vs 新页 280ms）——
+        // 这就是用户点名要的 ChatGPT 观感：「你做的和 chatgpt 那样侧边栏进去设置的动画不行吗」。
+        // 上一版为了去残影把它 snap 成零动画，反而"啪"地消失更像跳变，用户否了：
+        // 「侧边栏你不要关掉啊，现在明显能看到被关掉或者主页面的残影」。两条横向运动同向、
+        // 同帧、同时长，读起来才是一件事。
+        scope.launch { drawerState.close() }
         navController.navigate(target) {
             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
             launchSingleTop = true
@@ -250,70 +232,71 @@ fun SuixingApp() {
     }
     // A row inside the settings page pushes, so back returns to the list it came from.
     val push: (String) -> Unit = { target -> navController.navigate(target) }
+    // chat 常驻（见下面 NavHost 那段），所以"回聊天"不是导航到某个目的地，而是**把覆盖层收掉**：
+    // pop 到透明的 "empty" 就等于"什么都没有在盖着 chat"。
+    val showChat: () -> Unit = { navController.popBackStack("empty", inclusive = false) }
 
     // 从抽屉里点走一行时，记下出发的是哪一页：用户按返回回到那一页，抽屉应该还是开着的。
-    // 这件事用户改口过三次（「每次回来侧边栏都会被关掉」→「也不要重放抽屉的动画」→
-    // 「退出页面的动画加回来」→ 最后一句「我跟你说了在侧边栏打开界面返回时，不要把侧边栏
-    // 关闭」），最终口径就是最后那一句：**状态要恢复，动画不要**——所以恢复走 snapTo，
-    // 那一段滑入一次都不演。只由抽屉自己的入口置位——聊天页那个「打开设置」不是从抽屉走的，
-    // 不该把抽屉带回来。
-    // remember 而不是 rememberSaveable：存下来的 "chat" 会在冷启动那一帧（起始页正是 chat）
+    // 这件事用户改口过多次（「每次回来侧边栏都会被关掉」→「也不要重放抽屉的动画」→
+    // 「退出页面的动画加回来」→「我跟你说了在侧边栏打开界面返回时，不要把侧边栏关闭」→
+    // 最后「你做的和 chatgpt 那样侧边栏进去设置的动画不行吗」），最终口径是：**返回时抽屉是
+    // 开着的，而且是用它自己的动画滑回来的**（与页面退出同帧，两边一起动）。只由抽屉自己的
+    // 入口置位——聊天页那个「打开设置」不是从抽屉走的，不该把抽屉带回来。
+    // remember 而不是 rememberSaveable：存下来的 "empty" 会在冷启动那一帧（起始页正是 chat）
     // 把抽屉弹开；rotation 不走这条路（manifest 里 configChanges 已含 orientation）。
     var drawerReturnTo by remember { mutableStateOf<String?>(null) }
-    // 「这一趟就是那次返回」：从 route 变回来源页的那一帧起为真，并**活过整趟转场**。
-    // 为什么不能直接用 drawerReturnTo 当判据、还要多这一位：转场 lambda 是在转场开始那一刻
-    // 求值的，而摆位（snapTo）与清标志发生在同一帧的组合末尾 —— 两种时序都可能发生，所以两条
-    // 判据取「或」：同一帧求值时有 drawerReturnTo，晚一帧求值时有这一位。只留一条就会漏，
-    // 用户看到的「点返回按钮时主页面还是在滑动」正是漏掉的那半。
-    var drawerReturning by remember { mutableStateOf(false) }
+    // 抽屉里点走的那一页：标记只在「还停在这一页」的期间有效。没有它，一个陈旧的名字会留到
+    // 下一次无关的导航上——从覆盖层页开抽屉去别页、返回落到 chat 之后，再从聊天页顶栏点设置，
+    // route 恰好等于那个陈旧名字，抽屉就会自己弹出来。
+    var drawerTarget by remember { mutableStateOf<String?>(null) }
     // 用户自己收起抽屉（遮罩、返回键）：记下的出发页一起清掉，回来时不该再弹出来。
     val closeDrawer: () -> Unit = {
         scope.launch { drawerState.close() }
         drawerReturnTo = null
+        drawerTarget = null
     }
-    // 抽屉里的一行：比 open 多记一件事。目标是当前页时（点会话、点新对话）不记——那不是
-    // 「去了别的页」，记下来会当场被判成「回到出发页」而把抽屉又弹开。
+    // 抽屉里的一行：比 open 多记一件事。目标是当前页时不记，而且连导航都不走——`open` 的
+    // popUpTo 会先把这一页弹掉再建一份（整页重建、转场重放），点自己这一行只该收起抽屉。
     val openFromDrawer: (String) -> Unit = { target ->
-        if (target != route) drawerReturnTo = route
-        open(target)
+        if (target == route) {
+            scope.launch { drawerState.close() }
+        } else {
+            drawerReturnTo = route
+            drawerTarget = target
+            open(target)
+        }
+    }
+    // 点会话 / 新对话：chat 常驻，所以这是"把覆盖层收掉 + 收起抽屉"，不是一次导航。
+    // 这里**清掉**出发页：用户是在主动挑一个会话读，不该回头又把抽屉弹回来。
+    val chatFromDrawer: () -> Unit = {
+        drawerReturnTo = null
+        drawerTarget = null
+        scope.launch { drawerState.close() }
+        showChat()
     }
     // 返回上一页：抽屉的恢复**不挂在这条路上**（见下面的 SideEffect）——顶栏按钮、系统返回键、
     // 手势返回、以及 NavHost 自己处理的 pop，四条路都从 route 变化上恢复，谁 pop 都一样。
-    // 但「这一趟零动画」的标志在这里就先立起来（pop 之前），这样即使转场 lambda 在 pop 的同一帧
-    // 就被求值，它也已经看得到 —— 系统返回那条路没有这个先手，靠下面的 SideEffect 补。
-    val goBack: () -> Unit = {
-        if (navController.previousBackStackEntry?.destination?.route == drawerReturnTo) {
-            drawerReturning = true
-        }
-        navController.popBackStack()
-    }
-    // 回到「抽屉的来源页」的那一帧，把抽屉摆成开着：route 变回来源页 ⇒ 抽屉本来就该在那儿。
+    val goBack: () -> Unit = { navController.popBackStack() }
+    // 回到「抽屉的来源页」的那一帧，让抽屉用**自己的动画**滑回来：route 变回来源页 ⇒ 抽屉本来
+    // 就该在那儿。与页面退出同帧起跑，两边一起动（ChatGPT 观感）；这里不再有"零动画"那一档——
+    // 上一版 snapTo 是错的，抽屉"啪"地出现同样被读成残影。
     //
-    // 用 SideEffect 而不是 LaunchedEffect：SideEffect 在组合完成后、**布局之前**跑，同一帧画出来
-    // 就是「目标页 + 已经开着的抽屉」；LaunchedEffect 要等下一帧，用户看到的就是「先闪一下主页面
-    // 才出现侧边栏」（他两轮都在说这条）。snapTo 不播动画，正是他要的「已经在那儿」。
-    // UNDISPATCHED：snapTo 是挂起函数，普通 launch 会把写入排到下一个主线程消息，那一帧就晚了。
+    // 用 SideEffect 而不是 LaunchedEffect：SideEffect 在组合完成后、**布局之前**跑，动画与这一帧
+    // 的目标页一起开始；LaunchedEffect 要等下一帧，用户看到的就是「先闪一下主页面才出现侧边栏」。
     //
-    // 为什么按 route 派生、而不是让每条 pop 路径自己先 snapTo 再 pop：早先那版就是后者
-    // （goBack 里 snapTo + 一个 BackHandler 分支），结果系统返回走的是 NavHost 自己注册的回调
-    // （它比外壳里的 BackHandler 后注册、优先级更高），根本不经过我们——于是只有点顶栏返回按钮
-    // 才不闪，用户原话：「只有点返回按钮才有那套返回处理，系统返回（手势/返回键）没有」。
-    // 从 route 派生之后，恢复与「谁触发的 pop」无关，四条路完全一致。
-    if (route == drawerReturnTo) {
+    // 为什么按 route 派生、而不是让每条 pop 路径自己先摆好再 pop：早先那版就是后者，结果系统返回
+    // 走的是 NavHost 自己注册的回调（抽屉关着时外壳那个 BackHandler 是 disabled 的，根本不参与），
+    // 不经过我们——于是只有点顶栏返回按钮才生效，用户原话：「只有点返回按钮才有那套返回处理，
+    // 系统返回（手势/返回键）没有」。从 route 派生之后，恢复与「谁触发的 pop」无关，四条路完全一致。
+    // 结算的时机是「离开抽屉点走的那一页」，而不是「回到来源页」：落到来源页 ⇒ 抽屉用它自己的
+    // 动画滑回来；落到别处（同级替换之后返回只回到 chat）⇒ 标记就地作废。两条路都会清掉标记，
+    // 所以它永远不会留到下一次无关的导航上。
+    if (drawerTarget != null && route != drawerTarget) {
+        val origin = drawerReturnTo
         SideEffect {
             drawerReturnTo = null
-            drawerReturning = true
-            scope.launch(start = CoroutineStart.UNDISPATCHED) {
-                drawerState.snapTo(DrawerValue.Open)
-            }
-        }
-    }
-    // 转场跑完再把「这一趟」的标志放下：早于转场清掉，两条 pop 转场就会读到 false，这一趟又变成
-    // 带滑动的常规规格。只由 drawerReturning 驱动，不挂 route —— 挂 route 会在每次导航都重置计时。
-    LaunchedEffect(drawerReturning) {
-        if (drawerReturning) {
-            delay(NAV_RETURN_FLAG_MS)
-            drawerReturning = false
+            drawerTarget = null
+            if (route == origin) scope.launch { drawerState.open() }
         }
     }
 
@@ -350,25 +333,12 @@ fun SuixingApp() {
         // gesture bar that padding is dead space, which is the band the user photographed).
         LocalHeldImePx provides heldImePx,
     ) {
-        // 抽屉开着时 BACK 先关抽屉：ModalNavigationDrawer 只接管预测性返回的手势，普通 BACK
-        // 仍会交给 Activity，不收这一句就会退出应用。助手那张半屏表自己吞 BACK，审批卡是
-        // dialog 也吞，所以这里只剩抽屉这一种。
-        // 「返回抽屉来源页」那一趟**不需要**在这里拦：抽屉的恢复是从 route 派生的一帧内动作
-        // （见上面的 SideEffect），系统返回走 NavHost 自己的回调也一样会恢复——拦下来反而会
-        // 把 NavHost 的预测性返回动画弄没。
-        BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
         // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
         // the strip behind the keyboard was left unpainted and the window's own white showed
         // through the keyboard's rounded corners as a pale seam. This box is not inset, so
         // everything the keyboard covers is already the app's own background.
-        // The keyboard's rounded corners reveal whatever the WINDOW paints, and the window's
-        // static background resource can never match a theme whose surface changes with palette
-        // and dark mode — that mismatch was the pale seam. Sync the window to the live surface.
-        val activity = (LocalContext.current as? Activity)
-        val surfaceArgb = MaterialTheme.colorScheme.surface.toArgb()
-        LaunchedEffect(surfaceArgb) {
-            activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
-        }
+        // 窗口底色不在这里管：MainActivity 明确把它设成透明（MainActivity.kt:94-100，键盘圆角要
+        // 露后面那层，不该由窗口去画），这里再按 surface 画一遍就是把那条接缝换了个颜色而已。
         // The strip behind the keyboard stays unpainted: other apps' rounded keyboard corners
         // show the wallpaper there, and ours showed our own canvas because the root painted the
         // whole window. Insetting the painted layer by the IME (and making the window background
@@ -421,11 +391,11 @@ fun SuixingApp() {
                         runningId = runningIds,
                         onNew = {
                             chat.newConversation()
-                            openFromDrawer("chat")
+                            chatFromDrawer()
                         },
                         onOpenConversation = { conversation ->
                             chat.openConversation(conversation)
-                            openFromDrawer("chat")
+                            chatFromDrawer()
                         },
                         onDeleteConversation = { chat.deleteConversation(it) },
                         onNavigate = openFromDrawer,
@@ -467,130 +437,140 @@ fun SuixingApp() {
                     // nothing for itself.
                     contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 ) { padding ->
-                    NavHost(
-                        navController = navController,
-                        startDestination = "chat",
-                        modifier = Modifier.padding(padding),
-                        // Every destination enters and leaves with the same three channels — a
-                        // fade, a short horizontal push and a depth change — so a push and a pop
-                        // read as one gesture played backwards. The push is deliberately short
-                        // (1/12 screen width): the drawer already owns the long leftward slide,
-                        // and a second full-width sweep under it would read as two panels
-                        // fighting, while a small one only says "this page moved".
-                        // 位移只有屏宽/12（NAV_SHIFT_DIVISOR）：新页从右侧挪一小步、旧页向左让
-                        // 一小步，返回时这两步原样倒放。整幅横移那一版（新页整幅滑入、旧页 1/3
-                        // 幅视差）在用户看过 ChatGPT 之后仍嫌「不够连贯」——小位移 + 淡入淡出
-                        // 才是那一段观感的来源。抽屉仍是它自己的 300dp 左滑，与页面这一小步
-                        // 方向不同，不会混。
-                        // 四套转场全在这一个地方配：进/出/返回进/返回出都是同一组 NAV_* 常量、
-                        // 同一个位移除数，方向互为镜像（见文件顶部那段）。返回的动画上一版被砍
-                        // 成瞬时，用户否了：「退出页面的动画加回来吧……退出也有动画，连贯虽然不
-                        // 易察觉」。唯一的例外在下面那两条 pop 转场里（回到抽屉来源页的那一趟），
-                        // 除此之外没有任何按目的地分叉的条件。
-                        // 进页**不淡入**：新页从第一帧就是不透明的，只做位移。用户原话「感觉会
-                        // 残留上一页面的残影，才进入到」——新页 alpha 0→1 的这 240ms 里旧页正在
-                        // 它后面淡出，旧页就"透"过来了。离场那页照旧淡出+滑出。
-                        enterTransition = {
-                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
-                                it / NAV_SHIFT_DIVISOR
-                            }
-                        },
-                        exitTransition = {
-                            fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                                slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
-                                    -it / NAV_SHIFT_DIVISOR
+                    // chat 常驻：NavHost 在离开一个目的地之后会把它**销毁**，pop 回来时是从零
+                    // 重新组合的（长列表重建、markdown 重解析）——那正是用户说的「返回像重新加载」，
+                    // 三处 rememberSaveable 只救了状态、救不了重建。所以 chat 移出 NavHost、永远
+                    // 留在组合里，其余页面改成**盖在它上面的覆盖层**：进设置是往覆盖层 push，
+                    // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
+                    Box(Modifier.fillMaxSize().padding(padding)) {
+                        ChatScreen(viewModel = chat, onOpenSettings = { open("settings") })
+                        NavHost(
+                            navController = navController,
+                            // 覆盖层的栈底：什么都不画（透明），所以"当前是 empty"就等于"chat 露着"。
+                            startDestination = "empty",
+                            modifier = Modifier
+                                .fillMaxSize()
+                                // 覆盖层盖住了 chat，但页面自己的根只画底色、不消费触摸：点在页面
+                                // 空白处（不是按钮/列表的地方）会"穿透"到下面仍在组合里的聊天页，
+                                // 打到输入框、消息行、麦克风上。这一层只在真有覆盖层时才加（route
+                                // 是 "empty" 时一个 pointerInput 节点都不加，否则 chat 自己也收不到
+                                // 触摸），它把落在空白处的**点**吃掉。
+                                // 只吃"点"：拖动不消费，左缘拖出抽屉仍归 ModalNavigationDrawer；
+                                // 而它一旦被命中，下面的 chat 就整个不在命中路径里，滚动也透不过去。
+                                .then(
+                                    if (route == "empty") {
+                                        Modifier
+                                    } else {
+                                        Modifier.pointerInput(route) { detectTapGestures { } }
+                                    },
+                                ),
+                            // Every destination enters and leaves with the same three channels — a
+                            // fade, a short horizontal push and a depth change — so a push and a pop
+                            // read as one gesture played backwards. The push is deliberately short
+                            // (1/12 screen width): the drawer already owns the long leftward slide,
+                            // and a second full-width sweep under it would read as two panels
+                            // fighting, while a small one only says "this page moved".
+                            // 位移只有屏宽/12（NAV_SHIFT_DIVISOR）：新页从右侧挪一小步、旧页向左让
+                            // 一小步，返回时这两步原样倒放。
+                            // 四套转场全在这一个地方配：进/出/返回进/返回出都是同一组 NAV_* 常量、
+                            // 同一个位移除数，方向互为镜像（见文件顶部那段）。**没有任何按目的地
+                            // 分叉的条件**——上一版为"回到抽屉来源页"加过一条零动画例外，随抽屉改成
+                            // "两边同时动"整条作废（用户：「你做的和 chatgpt 那样侧边栏进去设置的
+                            // 动画不行吗」）。
+                            // 进页**不淡入**：新页从第一帧就是不透明的，只做位移。用户原话「感觉会
+                            // 残留上一页面的残影，才进入到」——新页 alpha 0→1 的这 240ms 里旧页正在
+                            // 它后面淡出，旧页就"透"过来了。离场那页照旧淡出+滑出。
+                            enterTransition = {
+                                slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
+                                    it / NAV_SHIFT_DIVISOR
                                 }
-                        },
-                        // 唯一的例外：这一趟 pop 的目的地正是「抽屉的来源页」——也就是抽屉被摆回
-                        // 打开的那一次。用户对这条路径改口过三次（「主页面为什么也有动画」→「返回
-                        // 时的动画可以轻一点的淡淡的」→ 看到实物后「返回时页面动就是不对」），最终
-                        // 口径是**两侧都零动画**：页面直接是那一帧、抽屉已经在（恢复走 snapTo，不重放
-                        // 滑入），屏幕上没有任何可见运动。其余每一次返回照常走上面那套统一规格；两边
-                        // 共用同一个判断，只关一边会露出半截动画。
-                        // 判据是「或」：drawerReturning 是这一趟的标志（活过整趟转场），
-                        // drawerReturnTo 兜住"转场 lambda 在标志立起来之前就被求值"那种时序。
-                        popEnterTransition = {
-                            if (drawerReturning ||
-                                targetState.destination.route == drawerReturnTo
-                            ) {
-                                EnterTransition.None
-                            } else {
+                            },
+                            exitTransition = {
+                                fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                                    slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
+                                        -it / NAV_SHIFT_DIVISOR
+                                    }
+                            },
+                            popEnterTransition = {
                                 slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
                                     -it / NAV_SHIFT_DIVISOR
                                 }
-                            }
-                        },
-                        popExitTransition = {
-                            if (drawerReturning ||
-                                targetState.destination.route == drawerReturnTo
-                            ) {
-                                ExitTransition.None
-                            } else {
+                            },
+                            popExitTransition = {
                                 fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
                                     slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
                                         it / NAV_SHIFT_DIVISOR
                                     }
-                            }
-                        },
-                    ) {
-                        composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
-                        composable("files") { FilesScreen(onBack = goBack) }
-                        composable("tasks") { TasksScreen(onBack = goBack) }
-                        // 定时任务是「到点自己跑」的那一份，与 agent 的 todo 看板（"tasks"）是两件
-                        // 事：抽屉那行说的「任务」一直指的是后者，用户以为是摆设，才有了这一页。
-                        composable("schedules") { SchedulesScreen(onBack = goBack) }
-                        composable("settings") {
-                            SettingsScreen(
-                                onOpen = push,
-                                onBack = goBack,
-                            )
-                        }
-                        // 设置里的六个子页各是一条真路由，而不是设置页内部的 when 分支：同一
-                        // 个目的地里换内容，NavHost 不参与，于是进出完全没有转场——用户说的
-                        // 「就是复用的，根本没有切换动画」正是这个。走 push 而不是 open：抽屉
-                        // 是同级切换，设置子页是往下一层，返回要回到那份列表。
-                        listOf(
-                            "settings/model",
-                            "settings/steer",
-                            "settings/appearance",
-                            "settings/network",
-                            "settings/data",
-                            "settings/usage",
-                        ).forEach { route ->
-                            composable(route) {
-                                SettingsPageRoute(
-                                    route = route,
+                            },
+                        ) {
+                            // 栈底那一层：透明，什么都不画（chat 就在它下面）。
+                                composable("empty") { }
+                                composable("files") { FilesScreen(onBack = goBack) }
+                            composable("tasks") { TasksScreen(onBack = goBack) }
+                            // 定时任务是「到点自己跑」的那一份，与 agent 的 todo 看板（"tasks"）是两件
+                            // 事：抽屉那行说的「任务」一直指的是后者，用户以为是摆设，才有了这一页。
+                            composable("schedules") { SchedulesScreen(onBack = goBack) }
+                            composable("settings") {
+                                SettingsScreen(
                                     onOpen = push,
                                     onBack = goBack,
                                 )
                             }
+                            // 设置里的六个子页各是一条真路由，而不是设置页内部的 when 分支：同一
+                            // 个目的地里换内容，NavHost 不参与，于是进出完全没有转场——用户说的
+                            // 「就是复用的，根本没有切换动画」正是这个。走 push 而不是 open：抽屉
+                            // 是同级切换，设置子页是往下一层，返回要回到那份列表。
+                            listOf(
+                                "settings/model",
+                                "settings/conversation",
+                                "settings/appearance",
+                                "settings/network",
+                                "settings/data",
+                                "settings/usage",
+                            ).forEach { route ->
+                                composable(route) {
+                                    SettingsPageRoute(
+                                        route = route,
+                                        onOpen = push,
+                                        onBack = goBack,
+                                    )
+                                }
+                            }
+                            composable("capability") { CapabilityScreen(onBack = goBack) }
+                            composable("tools") { ToolsScreen(onBack = goBack) }
+                            composable("about") { AboutScreen(onBack = goBack) }
+                            // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
+                            composable("extension") {
+                                ExtensionScreen(onBack = goBack)
+                            }
+                            // 用户画像：一份纯文本自述（filesDir/profile.md），随每次请求注入提示词。
+                            composable("profile") {
+                                ProfileScreen(onBack = goBack)
+                            }
+                            // 助手设置：一整页，不是半屏的表。抽屉那一行和设置页那一行都推这一页，
+                            // 于是「编辑助手」只有一条路、一个实现；半屏的表只剩聊天页那个随手
+                            // 切换助手的窗口。
+                            composable("assistants") {
+                                AssistantScreen(
+                                    assistants = settings.assistants,
+                                    activeId = assistantId.ifBlank { settings.activeAssistantId },
+                                    settings = settings,
+                                    onUse = { chat.useAssistant(it) },
+                                    onSetDefault = { chat.setDefaultAssistant(it) },
+                                    onSave = { chat.saveAssistant(it) },
+                                    onDelete = { chat.deleteAssistant(it) },
+                                    onBack = goBack,
+                                )
+                            }
                         }
-                        composable("capability") { CapabilityScreen(onBack = goBack) }
-                        composable("tools") { ToolsScreen(onBack = goBack) }
-                        composable("about") { AboutScreen(onBack = goBack) }
-                        // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
-                        composable("extension") {
-                            ExtensionScreen(onBack = goBack)
-                        }
-                        // 用户画像：一份纯文本自述（filesDir/profile.md），随每次请求注入提示词。
-                        composable("profile") {
-                            ProfileScreen(onBack = goBack)
-                        }
-                        // 助手设置：一整页，不是半屏的表。抽屉那一行和设置页那一行都推这一页，
-                        // 于是「编辑助手」只有一条路、一个实现；半屏的表只剩聊天页那个随手
-                        // 切换助手的窗口。
-                        composable("assistants") {
-                            AssistantScreen(
-                                assistants = settings.assistants,
-                                activeId = assistantId.ifBlank { settings.activeAssistantId },
-                                settings = settings,
-                                onUse = { chat.useAssistant(it) },
-                                onSetDefault = { chat.setDefaultAssistant(it) },
-                                onSave = { chat.saveAssistant(it) },
-                                onDelete = { chat.deleteAssistant(it) },
-                                onBack = goBack,
-                            )
-                        }
+                        // 抽屉开着时 BACK 先关抽屉：ModalNavigationDrawer 只接管预测性返回的手势，
+                        // 普通 BACK 会交给 Activity，不收这一句就会退出应用。位置必须在 NavHost
+                        // **之后**：OnBackPressedDispatcher 是后注册者优先（LIFO），注册在 NavHost
+                        // 之前时，覆盖层页上按 BACK 会先被 NavHost 的回调 pop 掉、抽屉反而留着——
+                        // 而这里的意图是"抽屉先关"。助手那张半屏表自己吞 BACK，审批卡是 dialog 也吞，
+                        // 所以只剩抽屉这一种。chat 上（route == "empty"）NavHost 的回调不消费，
+                        // BACK 仍落到 Activity ⇒ 退出应用，不会多出一层空页。
+                        BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
                     }
                 }
             }
@@ -926,7 +906,6 @@ private fun DrawerAction(
     icon: Painter,
     selected: Boolean,
     onClick: () -> Unit,
-    badge: String? = null,
     /** A control on the row's end instead of the chevron-less plain row. */
     trailing: (@Composable () -> Unit)? = null,
 ) {
@@ -961,13 +940,6 @@ private fun DrawerAction(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            if (badge != null) {
-                Text(
-                    text = badge,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = scheme.primary,
-                )
-            }
             trailing?.invoke()
         }
     }

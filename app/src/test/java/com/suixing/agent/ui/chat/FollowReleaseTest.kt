@@ -40,10 +40,15 @@ class FollowReleaseTest {
         assertFalse(restoresFollow(movedUp = true, scrolled = true, atEnd = false, heldMs = 100))
     }
 
-    /** The long press that starts a selection is the user reaching into the content. */
+    /**
+     * The long press that starts a selection is the user reaching into the content. The figure is
+     * the platform's own 500ms, which is when the gesture system starts a selection — the fix that
+     * moved this boundary up from 450, a value *below* the platform's that left a 50ms window in
+     * which a real selection press was still counted as a tap and handed the follow back.
+     */
     @Test
     fun `a long press does not hand it back`() {
-        assertFalse(restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 460))
+        assertFalse(restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 520))
     }
 
     /** A tap that ends anywhere but the end cannot re-arm a follow the reader deliberately left. */
@@ -55,7 +60,22 @@ class FollowReleaseTest {
     /** The boundary is exactly the long press threshold, so a tap just under it still counts. */
     @Test
     fun `the long press threshold is the boundary`() {
-        assertTrue(restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 449))
-        assertFalse(restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 450))
+        assertTrue(restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 499))
+        assertFalse(restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 500))
+    }
+
+    /**
+     * The threshold is a parameter because the caller passes the platform's live value rather than
+     * this file's constant: a device (or an accessibility setting) whose long press is shorter must
+     * not have that window treated as a tap.
+     */
+    @Test
+    fun `the caller's own threshold decides`() {
+        assertFalse(
+            restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 300, holdMs = 250),
+        )
+        assertTrue(
+            restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 200, holdMs = 250),
+        )
     }
 }

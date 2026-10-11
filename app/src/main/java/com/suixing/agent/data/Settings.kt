@@ -412,6 +412,16 @@ const val PROFILE_MAX_TURNS = 40
 const val PROFILE_STEP_TURNS = 2
 const val DEFAULT_PROFILE_EVERY_TURNS = 8
 
+/**
+ * The values [AppSettings.steerMode] holds: what a line typed while a run is going does.
+ *
+ * Public because the decision is made in two places that must agree — the engine (where the line
+ * would land in the wire) and the chat screen (where it decides whether to queue a new turn
+ * instead). A literal `1` in either one is how they drift apart.
+ */
+const val STEER_QUEUE = 0
+const val STEER_IMMEDIATE = 1
+
 const val DEFAULT_SYSTEM_PROMPT = """你是随行，运行在用户安卓手机上的智能体。
 
 你可以通过工具真实地操作这台手机：读取与写入文件、执行 shell 命令、查看屏幕、点击与滑动、打开应用。

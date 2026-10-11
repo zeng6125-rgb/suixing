@@ -122,28 +122,36 @@ private const val FX_BREATH_MIN_ALPHA = 0.22f
 private const val FX_BREATH_MAX_ALPHA = 0.55f
 
 /**
- * 边缘光的档位：亮 = 它正在 / 刚刚在操作你的手机，其余一律不亮。
+ * 边缘光的语义（spec v2 §1）：**亮 = 一次 UI 自动化回合正在进行**。
  *
- * 只有两个值，而且**故意保留枚举而不是换回 Boolean**：档位名要进 `fx-trace.log`（`light=active|off`），
- * 而这个判定已经被用户口径改过两次（两档 → 三档 → 两档）—— 下次再要一档，改的是这个枚举与
- * [lightFor]，而不是 `setBreath` / `traceLight` / `FxView` 里一路传下来的 Boolean。成本是零。
+ * 回合由任意 UI 操作开启/续期 —— **含读屏**（`ui_dump`/`ui_screenshot` 走无障碍读屏，用户确认
+ * 「读屏就是 UI 操作」）；静默超时（[EPISODE_QUIET_MS]）或整轮 run 结束即灭。非 UI 工具（read_file /
+ * web_search / 只读 `run_shell` …）是**中性**的：不点亮、不熄灭、不续期。
  *
- * 第三档（「任务还在跑但没碰手机」的暗光）被用户明确否掉：「边缘光是在其它软件显示的，正常应该不
- * 显示吧？而且也没有 ui 操作指令什么的」—— 一个跑十几分钟的任务在模型思考期间亮着，无论多暗，用户
- * 读到的都是「明明没在操作手机，灯却亮着」。所以现在的规则是**没有动作就不亮**。
+ * 这一版取代了「距上次驱动动作 < 5s」那套按时间的判定：那时每个工具各自亮灭，序列中途会闪断，而
+ * 观察类工具又不在触发集里 —— 用户看到的「一直不灭」与「该亮不亮」都是同一个根因：**缺少回合概念**。
  */
-private enum class Light { OFF, ACTIVE }
+private const val EPISODE_QUIET_MS = 3000L
+
+/** 开启/续期回合的工具（读屏也是 UI 操作）。 */
+private val FX_UI_EPISODE_TOOLS = setOf(
+    "ui_dump", "ui_screenshot",
+    "ui_tap", "ui_long_press", "ui_swipe", "ui_click_text",
+    "ui_type", "ui_type_into", "ui_key",
+    "open_app", "app_action",
+)
+
+/** `run_shell` 里真正碰 UI 的命令才触发：只读命令（ls/cat/dumpsys 读）一律中性。 */
+private val FX_SHELL_UI_RE = Regex(
+    """\binput\s+(tap|swipe|text|keyevent|drag|roll)|\bam\s+start\b""",
+)
 
 /**
- * 「正在操作手机」在最后一次驱动动作之后还持续多久 —— 这是**操作窗口，不是任务窗口**。
+ * 熄灭时的淡出步长，每帧一次（25fps ⇒ 从最亮的 0.55 走到 0 约 0.44 秒）。
  *
- * 任务还在跑、但没在操作手机（模型在思考、写答案、读屏）时**不亮**，这是用户口径；这个窗口只回答
- * 「它刚刚碰过你的手机吗」。取 5 秒，是因为它必须盖住最长的一次驱动动作：本 App 能发出的最长动作是
- * 5 秒的滑动（`SuixingAccessibilityService` 把 durationMs 收在 60..5000ms），而窗口从动作**开始**
- * 算起 —— 窗口更短，就会在一次长滑动还没松手时把光熄掉，看起来像效果中途坏了。点击（60ms）与长按
- * （700ms）远早于此，所以两次动作之间的空档一定灭，这正是用户要的。
+ * 一帧消失会被读成「坏了」；[FX_BREATH_MIN_ALPHA] 是波谷，所以实际从 0.22~0.55 之间开始淡出。
  */
-private const val FX_ACTIVE_HOLD_MS = 5_000L
+private const val FX_FADE_STEP = 0.05f
 
 /**
  * The screen's own shape: a radius the size of a modern panel's corners.
@@ -228,9 +236,9 @@ private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
  * their phone being operated, not to be told that someone is looking at it. 随行自己在前台时也
  * 不亮（用户口径：在前台一律不显示）—— 用户正看着 App 的时候，光没有要传达的信息。
  *
- * 光只有两档（[Light]）：它正在 / 刚刚在操作你的手机时亮，其余一律不亮 —— **任务还在跑但没在操作
- * 手机时不亮**（模型在思考、写答案、读屏都算「没在操作」）。用户口径：「边缘光是在其它软件显示的，
- * 正常应该不显示吧？而且也没有 ui 操作指令什么的」。
+ * 亮的语义是**一次 UI 自动化回合正在进行**（spec v2 §1）：任意 UI 操作（含读屏）开启/续期它，静默
+ * [EPISODE_QUIET_MS] 或整轮 run 结束就灭，非 UI 工具是中性的。回合的判定见 [armEpisode] /
+ * [episodeEnd] / [apply]。
  *
  * Nothing here steers anything: the accessibility service calls it after it has decided
  * to dispatch a gesture, so the drawing can never claim something the phone did not do.
@@ -299,12 +307,29 @@ object TouchFx {
     /** Guards the read-modify-write of [drivingIds] against its two writers. See there. */
     private val drivingLock = Any()
 
-    /** When the last driving action happened, for the grace window. Volatile as above. */
+    /**
+     * 最近一次 UI 操作（含读屏）的时刻，回合的续期基准：距它超过 [EPISODE_QUIET_MS] ⇒ 回合结束。
+     *
+     * Volatile：工具派发线程写（[armEpisode] 在调用线程上写），主线程读（ticker、[apply]）。
+     */
     @Volatile
-    private var lastDrivingAt = 0L
+    private var lastUiAt = 0L
 
-    /** The last tier handed to the view, so the trace writes a line when it changes. Main thread. */
-    private var lastLevel: Light? = null
+    /** 最近一次已知的前台状态，只服务日志里的 `fg=self|other` —— 见 [trace]。主线程写。 */
+    @Volatile
+    private var lastForeground = false
+
+    /** The last answer handed to the view, so the trace writes a line when it flips. Main thread. */
+    private var lastLit = false
+
+    /**
+     * 这一回合是否已经写过 `episode=` 的转折行 —— 收尾时据此决定要不要写 `end`。Main thread only.
+     *
+     * 判据必须是它，不能是「灯亮没亮」：前台抑制期间灯全程灭着，而回合确实开了又收，按灯判定
+     * 就会在日志里留下一串没有 `end` 的 `start`（[endEpisode] 每秒都会被 ticker 问一次，所以
+     * 用一位标记，问一百次也只写一行）。
+     */
+    private var episodeTraced = false
 
     /** When the trace last wrote a `light=` line, so a long run still shows as a heartbeat. */
     private var lastLightTraceAt = 0L
@@ -365,10 +390,9 @@ object TouchFx {
     /**
      * Takes the window down and forgets it.
      *
-     * Distinct from [detach]: this runs even while the light is breathing, because a window whose
-     * host service has gone away has to come down whatever state the effect is in. Runs on the main
-     * thread only, and a removal the system refuses is ignored — there is nothing to do about a
-     * window that is already gone.
+     * The window is otherwise permanent（spec v2 改动四：一次 addView 常驻，亮灭靠 alpha），所以这里是
+     * 它唯一被摘掉的地方：宿主服务没了，或者一块陈旧的窗口必须换掉。Runs on the main thread only, and a
+     * removal the system refuses is ignored — there is nothing to do about a window that is already gone.
      */
     private fun release(reason: String) {
         val fx = view ?: return
@@ -432,8 +456,8 @@ object TouchFx {
      *
      * The breathing edge is not "a run is going", it is "this run is operating the phone", and
      * this is where that difference is recorded. Every entry point above calls it, so anything
-     * that draws a ring or a flash counts as driving, while reading the screen — `ui_dump`, a
-     * screenshot, a file read — deliberately does not, and neither does a run that only talks.
+     * that draws a ring or a flash counts as driving. 读屏（`ui_dump` / `ui_screenshot`）走的是另一条
+     * 入口 [noteToolActivity]：spec v2 里它同样是 UI 操作，只是不画环。
      * The run ids are captured here rather than passed in from the tools: the run that drove is
      * the one whose ending has to put the light out, and the engine already knows which those are.
      *
@@ -449,9 +473,10 @@ object TouchFx {
     fun noteDriving(context: Context) {
         appContext = context.applicationContext
         val running = Core.engine.runsFlow.value.keys
-        lastDrivingAt = SystemClock.uptimeMillis()
         trace(context, "entry=noteDriving runs=${running.size} ids=${running.joinToString(",")}")
         synchronized(drivingLock) { drivingIds = drivingIds + running }
+        // 一次驱动动作就是一次 UI 操作：开启/续期回合。
+        armEpisode(context, "driving")
         // Also (re)starts the ticker: the first tick is immediate, so the light comes on with the
         // action instead of up to a second after it.
         main.removeCallbacks(ticker)
@@ -459,8 +484,109 @@ object TouchFx {
     }
 
     /**
+     * 工具层的一次调用：命中触发集就开启/续期回合，否则**什么都不做**（中性）。
+     *
+     * 中性是关键：read_file / web_search / 只读 `run_shell` / list_dir 既不点亮也不熄灭 —— 它们只是
+     * 「不是 UI 操作」。回合的结束由静默超时或整轮 run 结束决定，不由某个工具决定（v1「每个工具各自
+     * 亮灭」正是语义错乱的来源）。任何线程可调；碰 view 的部分由 [armEpisode] 投到主线程。
+     *
+     * 触发集的判定放在这里而不是各工具里，是因为 [traceCall] 已经拿到了工具名与命令原文（含被掩码的
+     * 输入文本，掩码只影响日志，不影响这里的正则）。读屏那两个工具不走 [traceCall]，而是在
+     * `tools/UiTools.kt` 各自的入口直接调这里（`dump()` 传 `"ui_dump"`、`screenshot()` 传
+     * `"ui_screenshot"`）。
+     */
+    fun noteToolActivity(context: Context, tool: String, detail: String? = null) {
+        val triggers = tool in FX_UI_EPISODE_TOOLS ||
+            (tool == "run_shell" && detail?.let { FX_SHELL_UI_RE.containsMatchIn(it) } == true)
+        if (!triggers) return
+        armEpisode(context, "tool=$tool")
+    }
+
+    /**
+     * steer / 排队消息被发出时调这个（spec v2 改动六）：与一次工具调用等价 —— 刷新回合时刻并续期，
+     * 修掉排队态「该灭不灭 / 该亮不亮」。
+     */
+    fun noteActivity(context: Context) = armEpisode(context, "steer")
+
+    /**
+     * 开启或续期回合：刷新 [lastUiAt]、点亮（幂等）、把静默定时器推后 [EPISODE_QUIET_MS]。
+     *
+     * [lastUiAt] 在调用线程上写（工具派发线程是常态），其余在主线程做 —— view 只能在主线程碰。
+     */
+    private fun armEpisode(context: Context, source: String) {
+        appContext = context.applicationContext
+        // 「这一次是开启还是续期」必须在刷新 [lastUiAt] **之前**问：刷新之后答案永远是「活着」。
+        // 判据是回合 latch（[episodeLive]），不是 `view.lit` —— 前台抑制期间灯是灭的、回合却是活的，
+        // 按灯判定会把同一段回合里的每次动作都写成 `start`，日志于是出现一串没有 `end` 的 start。
+        val wasLive = episodeLive(SystemClock.uptimeMillis())
+        lastUiAt = SystemClock.uptimeMillis()
+        main.post {
+            val app = appContext ?: return@post
+            watchForeground()
+            val inForeground = foreground()
+            lastForeground = inForeground
+            // 用户正盯着随行时不亮（spec v2 改动二）：回合照记（lastUiAt 已刷新），只是不显示。
+            val lit = !inForeground
+            episodeTraced = true
+            traceEpisode(app, if (wasLive) "extend" else "start", source)
+            if (lit) overlay(app)?.setLit(true) else view?.setLit(false)
+            main.removeCallbacks(episodeEnd)
+            // 亮着才需要静默收尾；前台抑制期间不必排表（退出前台时 [apply] 会按状态补上）。
+            if (lit) main.postDelayed(episodeEnd, EPISODE_QUIET_MS)
+        }
+    }
+
+    /**
+     * 回合的静默收尾：最后一次 UI 操作之后 [EPISODE_QUIET_MS] 内没有新的 UI 操作 ⇒ 灭。
+     *
+     * 每次 [armEpisode] 都会重排它，所以这里只需回答「真的静默够久了吗」；不够就按剩余时间再排一次，
+     * 而不是重新数满 3 秒。Main thread only.
+     */
+    private val episodeEnd = object : Runnable {
+        override fun run() {
+            val quiet = SystemClock.uptimeMillis() - lastUiAt
+            if (quiet < EPISODE_QUIET_MS) {
+                main.postDelayed(this, EPISODE_QUIET_MS - quiet)
+                return
+            }
+            endEpisode("quiet")
+        }
+    }
+
+    /**
+     * 回合收尾：灭灯（view 自己淡出）+ 停表。整轮 run 结束与静默超时都走这里。
+     *
+     * Main thread only. 已经灭着就不重复写日志 —— 这个函数会被 ticker 每秒问一次。
+     */
+    private fun endEpisode(reason: String) {
+        main.removeCallbacks(episodeEnd)
+        val app = appContext ?: return
+        // 判据是「这一回合有没有被记过」，不是「灯亮没亮」：前台抑制期间灯全程灭着而回合确实开了又收，
+        // 按灯判定就永远不写 `end`（见 [episodeTraced]）。已经收过尾的回合不重复写 —— 这个函数每秒
+        // 都会被 ticker 问一次。
+        if (!episodeTraced) return
+        episodeTraced = false
+        traceEpisode(app, "end", reason)
+        view?.setLit(false)
+    }
+
+    /**
+     * 回合还活着吗：最后一次 UI 操作在 [EPISODE_QUIET_MS] 之内。
+     *
+     * 纯判断，不看 view、不看 run、不看窗口 —— 每个会改变输入的路径（[apply]）都重问一遍，
+     * 窗口被重建也不会留下一块暗着的画布。
+     */
+    private fun episodeLive(now: Long): Boolean =
+        lastUiAt != 0L && now - lastUiAt < EPISODE_QUIET_MS
+
+    /** 回合的转折点（spec v2 改动七）：`episode=start|extend|end` 由这一行写进日志。 */
+    private fun traceEpisode(app: Context, kind: String, reason: String) {
+        trace(app, "episode=$kind reason=$reason", episode = kind)
+    }
+
+    /**
      * The light mirrors a state that lives in the engine, so it is polled rather than pushed — and
-     * every path that changes one of its inputs re-asks [lightFor] through [apply] instead of
+     * every path that changes one of its inputs re-asks [episodeLive] through [apply] instead of
      * waiting for the next tick.
      *
      * Nothing has to switch it off, which is the point: a run that dies without telling anyone
@@ -469,7 +595,7 @@ object TouchFx {
      * the agent is idle — a dark ticker with a run still in flight is the one that watches for
      * the departure that brings the user back to the app.
      *
-     * 亮不亮（以及亮哪一档）由 [lightFor] 回答，而那个答案是状态推出来的：所以每一 tick 都重新问
+     * 亮不亮由 [episodeLive] 回答，而那个答案是回合状态推出来的：所以每一 tick 都重新问
      * 一遍，窗口中途被重建（跳转 / 服务重连）也不会留下一块暗着的画布。
      */
     /**
@@ -498,61 +624,33 @@ object TouchFx {
     }
 
     /**
-     * 落在哪一档：只从状态推，不看任何 view。
+     * 重新按当前状态对一次灯，并返回这一次是否显示（回合还活着且不在前台）。
      *
-     * 两步（两档见 [Light]）：
-     * 1. `foreground` → [Light.OFF]：进前台不留尾巴（用户口径：在前台一律不显示）。
-     * 2. 距上次驱动动作不足 [FX_ACTIVE_HOLD_MS] → [Light.ACTIVE]：它正在 / 刚刚在操作你的手机。
-     * 其余一律 [Light.OFF]。
-     *
-     * **任务状态不参与这个判断**：驱动过的 run 还活着（在思考、在写答案、在读屏）不亮，run 离场也
-     * 不亮 —— 用户的第四次反馈就是这么定的（随行在后台、没有任何 UI 操作，灯却一直亮）。所以这里只看
-     * [lastDrivingAt] 与前台门；[drivingIds] 仍然存在，但只服务于自动返回那条链与日志。
-     *
-     * 「动作在飞」没有独立的结束信号，只能由「动作刚开始过」推出来（每个驱动入口都在动作开始时调
-     * [noteDriving]，而动作本身最长 5 秒），所以第 2 步用的就是这个窗口。
-     *
-     * 抽成一道纯判断，是因为每个会改变输入的路径都要重问一遍（[apply]）：窗口重建、进出前台、
-     * 驱动动作。窗口被系统收走、无障碍服务重连、跳转之后新建的 view 都是「关着」的 —— 「点击
-     * 跳转后直接没了」就是新画布没有继承状态。
+     * 每个会改变输入的路径都走这里，而不是只等一秒一次的 ticker：进出前台（[watchForeground]）、
+     * 窗口重建（[overlay]）、回合的开关（[armEpisode]/[endEpisode]）。Main thread only.
      */
-    private fun lightFor(now: Long, foreground: Boolean): Light {
-        if (foreground) return Light.OFF
-        // `lastDrivingAt != 0` 不是多余的：设备刚开机时 uptimeMillis 还小于窗口长度，没有它会把
-        // 「从未驱动过」读成「刚刚驱动过」。
-        if (lastDrivingAt != 0L && now - lastDrivingAt < FX_ACTIVE_HOLD_MS) return Light.ACTIVE
-        return Light.OFF
-    }
-
-    /**
-     * 重新算一次档位，并立刻落到 view 上；返回这一档（[Light.OFF] 表示不亮）。
-     *
-     * 每个会改变输入的路径都走这里，而不是只等一秒一次的 ticker —— ticker、窗口重建
-     * （[overlay]）、进出前台（[watchForeground]）、驱动动作（[noteDriving]，它立刻 post 一次
-     * ticker）。跳转和切前后台都是一瞬间的事，一秒就是「光没回来」和「光马上回来」的差别。
-     *
-     * Main thread only, like every other window operation here.
-     */
-    private fun apply(reason: String, context: Context? = null): Light {
-        val app = appContext ?: context ?: return Light.OFF
+    private fun apply(reason: String, context: Context? = null): Boolean {
+        val app = appContext ?: context ?: return false
         watchForeground()
         val now = SystemClock.uptimeMillis()
         val running = Core.engine.runsFlow.value.keys
         val inForeground = foreground()
-        val level = lightFor(now, inForeground)
-        traceLight(app, reason, level, running, now, inForeground)
-        if (level == Light.OFF) view?.setBreath(Light.OFF) else overlay(app)?.setBreath(level)
-        return level
+        lastForeground = inForeground
+        val live = episodeLive(now)
+        val lit = live && !inForeground
+        traceLight(app, reason, lit, live, running, now, inForeground)
+        if (lit) overlay(app)?.setLit(true) else view?.setLit(false)
+        return lit
     }
 
     /**
-     * 判死用的一行：两个输入 + 落在哪一档 + 是谁问的。
+     * 判死用的一行：回合的输入 + 结论 + 是谁问的。
      *
-     * `inFlight` 就是 ACTIVE 那一条判据（距上次驱动动作不足 [FX_ACTIVE_HOLD_MS]），和
-     * `sinceAction` 一起把「是否有驱动动作在飞」摊开写；用户再报「判定错误」时，对着这一行就能
-     * 分辨是哪个输入不对（`inFlight` 该 false 却 true ⇒ 窗口太长；`foreground` 该 true 却亮 ⇒
-     * 前台门失效）。`drivingAlive` 保留下来只做对照：它 true 而 `light=off` 是**正常**的
-     * （任务还在跑，但没在操作手机）。
+     * `live` 是回合 latch（[episodeLive]），`lit` 是最终显示与否（还要过前台门）；`sinceUi` 是距上次
+     * UI 操作的毫秒数，`quiet=3000ms` 是同一行的对照值 —— 用户再报「判定错误」时，对着这一行就能分辨
+     * 是哪个输入不对（`live=true` 而 `sinceUi` 远超 `quiet` ⇒ 定时器没排上；`fg=self` 却 `light=on`
+     * ⇒ 前台门失效）。`drivingAlive` 只为对照：它 true 而 `light=off` 是**正常**的（任务在跑，但此刻
+     * 没在操作手机）。
      *
      * 变化时必写，另外每 [FX_LIGHT_TRACE_MS] 写一次心跳 —— 一次复现就能看出「谁把灯点亮的」和
      * 「谁没把它熄掉」。Main thread only, like [apply].
@@ -560,20 +658,19 @@ object TouchFx {
     private fun traceLight(
         app: Context,
         reason: String,
-        level: Light,
+        lit: Boolean,
+        live: Boolean,
         running: Set<String>,
         now: Long,
         foreground: Boolean,
     ) {
-        if (level == lastLevel && now - lastLightTraceAt < FX_LIGHT_TRACE_MS) return
-        lastLevel = level
+        if (lit == lastLit && now - lastLightTraceAt < FX_LIGHT_TRACE_MS) return
+        lastLit = lit
         lastLightTraceAt = now
         trace(
             app,
-            "light=${level.name.lowercase()} reason=$reason foreground=$foreground " +
-                "inFlight=${lastDrivingAt != 0L && now - lastDrivingAt < FX_ACTIVE_HOLD_MS} " +
-                "sinceAction=${if (lastDrivingAt == 0L) "-" else "${now - lastDrivingAt}ms"} " +
-                "activeWindow=${FX_ACTIVE_HOLD_MS}ms " +
+            "light=${if (lit) "on" else "off"} live=$live reason=$reason foreground=$foreground " +
+                "sinceUi=${if (lastUiAt == 0L) "-" else "${now - lastUiAt}ms"} quiet=${EPISODE_QUIET_MS}ms " +
                 "drivingAlive=${drivingIds.any { it in running }} running=${running.size} " +
                 "drivingIds=${drivingIds.size}",
         )
@@ -633,10 +730,13 @@ object TouchFx {
             // The trim happens here rather than in [apply] on purpose — the departure above needs
             // the id to still be in the set on the tick that sees it.
             synchronized(drivingLock) { drivingIds = drivingIds.intersect(running) }
-            val level = apply("tick")
-            // 亮着就还要人熄灯（5 秒操作窗口），前台里虽然不亮、但活着的驱动 run 还等着离场（自动
-            // 返回就靠这一 tick 发现），所以两种都要继续；只有「灭 + 没有活着的驱动 run」才停表。
-            if (level != Light.OFF || drivingIds.any { it in running }) {
+            // 整轮结束 ⇒ 立刻收尾，不等 3 秒静默（spec v2 用例 ⑦）。ticker 一秒一跳，所以最坏一秒内
+            // 灭到 0 —— 这比让引擎反向回调进来少一条依赖。
+            if (running.isEmpty()) endEpisode("run-idle")
+            val lit = apply("tick")
+            // 亮着就还要人熄灯（静默 3 秒），前台里虽然不亮、但活着的驱动 run 还等着离场（自动返回
+            // 就靠这一 tick 发现），所以两种都要继续；只有「灭 + 没有活着的驱动 run」才停表。
+            if (lit || drivingIds.any { it in running }) {
                 main.postDelayed(this, FX_BREATH_TICK_MS)
             } else {
                 main.removeCallbacks(this)
@@ -716,6 +816,9 @@ object TouchFx {
             context,
             "entry=call tool=$tool matched=${matched.joinToString("+").ifEmpty { "无" }} detail=$masked",
         )
+        // 同一份工具名 + 命令原文就是回合的触发判据（spec v2 §2）：命中才开启/续期，否则中性。
+        // 用未掩码的原文判定：掩码只该影响日志，不该让 `input text` 这类命令漏判。
+        noteToolActivity(context, tool, detail)
     }
 
     /**
@@ -726,11 +829,15 @@ object TouchFx {
      * write happens on [traceWorker] and every failure is swallowed — a trace must never be the
      * reason an effect does not happen.
      */
-    private fun trace(context: Context, line: String) {
+    private fun trace(context: Context, line: String, episode: String? = null) {
         val app = context.applicationContext
         val overlay = view?.let { "up" } ?: lastOverlayNote ?: "none"
+        // episode 只在转折点上给（start/extend/end）；其它行写的是此刻的 latch 状态。
+        val edge = episode ?: if (view?.lit == true) "live" else "off"
         val entry = "${stamp()} $line source=${caller()} overlay=$overlay " +
-            "breath=${breathName()} runs=${Core.engine.runsFlow.value.size}"
+            "episode=$edge fg=${if (lastForeground) "self" else "other"} " +
+            "alpha=${String.format(Locale.US, "%.2f", view?.edgeAlpha ?: 0f)} " +
+            "runs=${Core.engine.runsFlow.value.size}"
         traceWorker.execute {
             runCatching {
                 val file = traceFile ?: File(app.filesDir, FX_TRACE_FILE).also { traceFile = it }
@@ -750,12 +857,6 @@ object TouchFx {
     }
 
     private fun stamp(): String = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
-
-    /** The edge's tier as a word for the log: `off` also covers 「窗口不在」. */
-    private fun breathName(): String = when (view?.light) {
-        Light.ACTIVE -> "active"
-        else -> "off"
-    }
 
     /** The first frame outside this file: which tool asked for the effect, and where. */
     private fun caller(): String {
@@ -826,7 +927,7 @@ object TouchFx {
             return null
         }
         val bounds = displayBounds(host)
-        val fx = FxView(host, bounds, screenCornerRadius(host)) { detach() }
+        val fx = FxView(host, bounds, screenCornerRadius(host))
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -894,16 +995,20 @@ object TouchFx {
         }
         manager = windowManager
         view = fx
-        // 画布是新的，「该不该亮」不是：跳转、服务重连、窗口重建之后新 view 的呼吸是关的，只有
-        // 按当前状态立刻对一遍，光才不会跟着旧画布一起消失 —— 「跳转后不显示」一半是旧的亮灯
-        // 规则，另一半就是这里从来没有人把状态补回来。这里直接算、直接点亮（不经过 [apply]，
+        // 新画布，「该不该亮」不是：窗口被收走 / 服务重连 / 跳转重建之后新 view 的灯是关的，只有按
+        // 当前回合状态立刻对一遍，光才不会跟着旧画布一起消失。这里直接算、直接点亮（不经过 [apply]，
         // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
         val now = SystemClock.uptimeMillis()
         val running = Core.engine.runsFlow.value.keys
         val inForeground = foreground()
-        val level = lightFor(now, inForeground)
-        traceLight(context, "overlay", level, running, now, inForeground)
-        if (level != Light.OFF) fx.setBreath(level)
+        lastForeground = inForeground
+        // 新画布，「该不该亮」不是：窗口被收走 / 服务重连 / 跳转重建之后新 view 的灯是关的，只有按
+        // 当前回合状态立刻对一遍，光才不会跟着旧画布一起消失。这里直接算、直接点亮（不经过 [apply]，
+        // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
+        val live = episodeLive(now)
+        val lit = live && !inForeground
+        traceLight(context, "overlay", lit, live, running, now, inForeground)
+        if (lit) fx.setLit(true)
         return fx
     }
 
@@ -961,30 +1066,13 @@ object TouchFx {
         return if (radius > 0) radius.toFloat() else FX_EDGE_RADIUS_PX
     }
 
-    /** Added per gesture and removed when the last effect ends, so nothing is left over. */
-    private fun detach() {
-        val fx = view ?: return
-        // The breathing light outlives any single effect, so the window stays while it is on:
-        // taking it down here would cut the glow off mid-breath and force a rebuild a second
-        // later. It is not a leak — the ticker switches the light off, this runs again, and
-        // then the window goes.
-        if (fx.isBreathing) return
-        view = null
-        runCatching { manager?.removeView(fx) }
-        manager = null
-        // The log has to say what is true now, not what was true when the window was built:
-        // leaving the old "created" note behind made a taken-down window look alive, which is
-        // the kind of lie that costs an hour of guessing.
-        fx.context.applicationContext?.let { noteOverlay(it, "detached（空闲）") }
-    }
 }
 
 /**
  * The full-screen, untouchable canvas the effects are drawn on.
  *
- * It redraws itself while something is animating, or while the breathing edge is on — the latter
- * at a fraction of the frame rate, since a glow that moves this slowly does not need one — and
- * reports idle the moment there is nothing left, which is what lets the window be taken down.
+ * 它常驻（spec v2 改动四）：一次 addView 之后不再随效果挂卸，亮灭全靠 alpha —— 亮着 25fps 呼吸，灭时
+ * 逐帧淡出，淡尽后既不排帧也不绘制。窗口的生死只由 [TouchFx.release] 决定。
  *
  * [screenBounds] is the display's real extent, captured by [TouchFx.overlay] when the window was
  * created, and is what the edge light is drawn on rather than this view's own measured size — see
@@ -995,7 +1083,6 @@ private class FxView(
     context: Context,
     private val screenBounds: Rect,
     private val cornerPx: Float,
-    private val onIdle: () -> Unit,
 ) : View(context) {
 
     private class Ring(val x: Float, val y: Float, val startAt: Long, val holdMs: Long, val delayMs: Long)
@@ -1032,58 +1119,65 @@ private class FxView(
     private val haloBand = Path()
     private val haloInner = Path()
     private var edgeStart = 0L
-    private var idleReported = false
 
     /** The ring's shader, rebuilt only when the screen's shape changes — see [rainbow]. */
     private var rainbowShader: SweepGradient? = null
     private val rainbowRect = RectF()
     private val rainbowMatrix = Matrix()
 
-    /** The light's tier, which is a state rather than an effect with a duration. */
-    private var breathLevel = Light.OFF
-    private var breathStart = 0L
-
-    val isBreathing: Boolean get() = breathLevel != Light.OFF
-
-    /** Which tier the edge is in, for the log line — see [TouchFx.trace]. */
-    val light: Light get() = breathLevel
+    /** 回合是否亮着，由 [TouchFx] 的回合状态机开关 —— 是状态，不是有固定时长的动画。 */
+    private var isLit = false
+    private var litStart = 0L
 
     /**
-     * Switched by the ticker in [TouchFx], not by a gesture: the light belongs to the action window,
-     * and gestures only come and go inside it. Turning it on does not restart the wave from the
-     * top — it starts at its dimmest either way — so a burst of taps does not make it flicker.
-     *
-     * [Light.ACTIVE] is the 25fps wave, and it ends the moment the level goes back to [Light.OFF].
+     * 当前实际亮度（0 = 全灭）。onDraw 写、日志从别的线程读，所以 volatile。名字不叫 `alpha`：
+     * `View.alpha` 是平台自己的属性，占了会改掉窗口的合成语义。
      */
-    fun setBreath(level: Light) {
-        if (breathLevel == level) return
-        breathLevel = level
-        breathStart = SystemClock.uptimeMillis()
-        idleReported = false
+    @Volatile
+    private var drawnAlpha = 0f
+
+    val lit: Boolean get() = isLit
+
+    /** 实际亮度，供 trace 的 `alpha=` 读 —— 见 [TouchFx.trace]。 */
+    val edgeAlpha: Float get() = drawnAlpha
+
+    /**
+     * 回合的开关，由 [TouchFx] 调（不是手势）：开 = 从波谷起呼吸；关 = 交给 onDraw 淡出，淡尽后
+     * 不再排帧。幂等，续期不会重启动画 —— 一串动作因此不会闪。
+     */
+    fun setLit(on: Boolean) {
+        if (isLit == on) return
+        isLit = on
+        if (on) litStart = SystemClock.uptimeMillis()
         invalidate()
     }
 
     fun addRing(x: Float, y: Float, holdMs: Long, delayMs: Long) {
-        idleReported = false
         rings += Ring(x, y, SystemClock.uptimeMillis(), holdMs, delayMs)
         invalidate()
     }
 
     fun addTrail(x1: Float, y1: Float, x2: Float, y2: Float) {
-        idleReported = false
         trails += Trail(x1, y1, x2, y2, SystemClock.uptimeMillis())
         invalidate()
     }
 
     fun flashEdge() {
-        idleReported = false
         edgeStart = SystemClock.uptimeMillis()
         invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
         val now = SystemClock.uptimeMillis()
+        val edgeElapsed = now - edgeStart
+        // 零绘制早退（spec v2 改动四）：不亮、已淡尽、也没有手势动画时，一帧都不画。窗口常驻着空转，
+        // 代价只是一次什么都不画的回调，比反复 addView/removeView 便宜得多。
+        if (!isLit && drawnAlpha <= 0f && rings.isEmpty() && trails.isEmpty() &&
+            edgeElapsed >= FX_EDGE_DURATION_MS
+        ) {
+            return
+        }
+        super.onDraw(canvas)
 
         rings.removeAll { now - it.startAt > it.delayMs + it.holdMs + FX_RING_DURATION_MS }
         for (ring in rings) drawRing(canvas, ring, now)
@@ -1091,9 +1185,16 @@ private class FxView(
         trails.removeAll { now - it.startAt > FX_SWIPE_DURATION_MS }
         for (trail in trails) drawTrail(canvas, trail, now)
 
-        val edgeElapsed = now - edgeStart
+        // 灯的亮度：亮着走呼吸波（从波谷起，不重启）；刚灭则逐帧淡出到 0 —— 一帧消失会被读成「坏了」。
+        if (isLit) {
+            val phase = ((now - litStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
+            val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
+            drawnAlpha = FX_BREATH_MIN_ALPHA + (FX_BREATH_MAX_ALPHA - FX_BREATH_MIN_ALPHA) * wave
+        } else if (drawnAlpha > 0f) {
+            drawnAlpha = (drawnAlpha - FX_FADE_STEP).coerceAtLeast(0f)
+        }
         // Under the flash, so an action still reads as brighter than the state it happened in.
-        if (breathLevel != Light.OFF) drawBreath(canvas, now)
+        if (drawnAlpha > 0f) drawGlow(canvas, drawnAlpha, now)
         if (edgeElapsed < FX_EDGE_DURATION_MS) drawEdge(canvas, edgeElapsed, now)
 
         val animating = rings.isNotEmpty() || trails.isNotEmpty() || edgeElapsed < FX_EDGE_DURATION_MS
@@ -1101,11 +1202,8 @@ private class FxView(
             // A gesture is a burst of frames; the breath is a slow glow and 25fps is plenty for
             // it, so the two run at their own rates instead of the window spinning at 60fps.
             animating -> postInvalidateOnAnimation()
-            breathLevel != Light.OFF -> postInvalidateDelayed(FX_BREATH_FRAME_MS)
-            !idleReported -> {
-                idleReported = true
-                onIdle()
-            }
+            // 亮着或还在淡出 ⇒ 继续排帧；淡尽之后这里什么也不排，窗口就安静下来了。
+            isLit || drawnAlpha > 0f -> postInvalidateDelayed(FX_BREATH_FRAME_MS)
         }
     }
 
@@ -1159,20 +1257,6 @@ private class FxView(
     private fun drawEdge(canvas: Canvas, elapsed: Long, now: Long) {
         val progress = (elapsed.toFloat() / FX_EDGE_DURATION_MS).coerceIn(0f, 1f)
         drawGlow(canvas, 0.7f * (1f - progress), now)
-    }
-
-    /**
-     * The same edge as [drawEdge], held at a whisper: the phone is being operated right now, and
-     * that is worth saying continuously rather than only at the moment of each touch.
-     *
-     * A cosine rather than a sawtooth, so the turnarounds are soft and the wave starts at its
-     * dimmest — switching the light on never jumps the edge brighter than the flash beside it.
-     */
-    private fun drawBreath(canvas: Canvas, now: Long) {
-        val phase = ((now - breathStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
-        val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
-        val alpha = FX_BREATH_MIN_ALPHA + (FX_BREATH_MAX_ALPHA - FX_BREATH_MIN_ALPHA) * wave
-        drawGlow(canvas, alpha, now)
     }
 
     /**

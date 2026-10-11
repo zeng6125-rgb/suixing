@@ -3,6 +3,7 @@ package com.suixing.agent.agent
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.STEER_IMMEDIATE
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.MemoryEntry
@@ -72,7 +73,18 @@ sealed interface AgentEvent {
      * The UI needs this to know a queued line was actually read: until it lands the line is still
      * retractable and belongs nowhere in the transcript, and after it the bubble is history.
      */
-    data class Steered(val id: String, val text: String) : AgentEvent
+    data class Steered(
+        val id: String,
+        val text: String,
+        /**
+         * The picture that came with the line, when there was one.
+         *
+         * It travels because the bubble the user sees is built from this event: without it the
+         * transcript would show a steer that silently lost its attachment, while the model had
+         * been sent it.
+         */
+        val imageBase64: String? = null,
+    ) : AgentEvent
 }
 
 /**
@@ -82,7 +94,7 @@ sealed interface AgentEvent {
  * inside an `inner class` (`'Class' is prohibited here`), and both this and [WireSpan] are only
  * names for the run's own bookkeeping.
  */
-private data class Steer(val id: String, val text: String)
+private data class Steer(val id: String, val text: String, val imageBase64: String? = null)
 
 /**
  * Which stored message a stretch of the wire came from: [from] is where it starts and [to] is one
@@ -369,7 +381,20 @@ class AgentEngine(
         id: String,
         text: String,
         immediate: Boolean = runs.value[chatId]?.steerMode == STEER_IMMEDIATE,
-    ): Boolean = runs.value[chatId]?.steer(id, text, immediate) ?: false
+        imageBase64: String? = null,
+    ): Boolean = runs.value[chatId]?.steer(id, text, immediate, imageBase64) ?: false
+
+    /**
+     * Whether the run in [chatId] takes a line as an interruption (立即) rather than as something
+     * that waits.
+     *
+     * The chat screen asks this before it decides *where* a typed line goes: in 排队 mode it is not
+     * a steer at all, it is the next turn, and it must not be pushed into the run that is going.
+     * Reading the run's own snapshot rather than the live setting is the point — a run started in
+     * 排队 stays 排队 for its whole life, so the screen and the engine answer the same way.
+     * False when nothing is running, which sends the caller down its ordinary send path.
+     */
+    fun steersImmediately(chatId: String): Boolean = runs.value[chatId]?.steerMode == STEER_IMMEDIATE
 
     /**
      * Takes a line back before the model has read it.
@@ -717,13 +742,14 @@ class AgentEngine(
      * Queues a line for this run.
      *
      * @return whether the text was taken; false when this run is no longer live or the line is
-     *   blank. A line the user says twice keeps both, because each one has its own [id].
+     *   blank. A line the user says twice keeps both, because each one has its own [id]. A line
+     *   that is only a picture is taken too — that is still something the user sent.
      */
-    fun steer(id: String, text: String, immediate: Boolean): Boolean {
+    fun steer(id: String, text: String, immediate: Boolean, imageBase64: String? = null): Boolean {
         if (!isLive()) return false
         val body = text.trim()
-        if (body.isEmpty()) return false
-        val line = Steer(id, body)
+        if (body.isEmpty() && imageBase64 == null) return false
+        val line = Steer(id, body, imageBase64)
         synchronized(steeringLock) {
             if (immediate) urgent[id] = line else steering[id] = line
         }
@@ -989,7 +1015,7 @@ class AgentEngine(
                 // Steering lands here, on the boundary between two model turns: the
                 // model has finished the previous turn and has not been asked for the
                 // next one, which is the only moment the wire can be edited safely.
-                drainSteering(wire, onEvent)
+                drainSteering(wire, onEvent, settings)
                 // A manual 「压缩」 is spent here, on the boundary: the user asked for the oldest
                 // context to be folded away, not for the answer in flight to be cut short.
                 val asked = compressNow
@@ -1111,7 +1137,7 @@ class AgentEngine(
                     // the last one, so the run takes one more pass to read it. Finishing here
                     // instead would leave a steer bubble on screen that the model never saw, with
                     // nothing telling the user it went nowhere.
-                    if (drainSteering(wire, onEvent) > 0) continue
+                    if (drainSteering(wire, onEvent, settings) > 0) continue
                     onEvent(AgentEvent.Finished(turn.text))
                     publish(RunState.Done(stats()))
                     return produced
@@ -1347,7 +1373,14 @@ class AgentEngine(
      * Returns how many lines landed, so the caller can tell "nothing was said" from "the
      * user just spoke, this round is not the last one".
      */
-    private fun drainSteering(wire: MutableList<ChatMessage>, onEvent: (AgentEvent) -> Unit): Int {
+    private fun drainSteering(
+        wire: MutableList<ChatMessage>,
+        onEvent: (AgentEvent) -> Unit,
+        // The run's own snapshot, passed in rather than read off the class: the constructor
+        // parameter is not a property, and `execute`'s own `settings` is the one the round is
+        // actually running with.
+        settings: AppSettings,
+    ): Int {
         // Pushed-to-the-front lines go first, and go alone: the rest were queued, and queued means
         // the boundary after this one. Draining everything here is what would turn one person's
         // urgency into every waiting line landing at once.
@@ -1359,10 +1392,19 @@ class AgentEngine(
             }
         }
         batch.forEach { line ->
-            wire += ChatMessage.user("（用户在任务进行中说：${line.text}）")
+            // The same construction an ordinary user message gets, picture included: a steer with
+            // an attachment is still a message the user sent, and the gate is the same one
+            // (`imageInput`), with the same sentence when the model cannot be shown the image.
+            val image = line.imageBase64.takeIf { settings.imageInput }
+            val note = if (line.imageBase64 != null && image == null) {
+                "（图片已省略：当前未开启「模型支持图片输入」）"
+            } else {
+                ""
+            }
+            wire += ChatMessage.user("（用户在任务进行中说：${line.text}）$note", image)
             // Announced after the wire, never before: a caller told about a line and then shown a
             // prompt without it would have written a bubble the model never saw.
-            onEvent(AgentEvent.Steered(line.id, line.text))
+            onEvent(AgentEvent.Steered(line.id, line.text, line.imageBase64))
         }
         return batch.size
     }
@@ -1679,7 +1721,11 @@ class AgentEngine(
             // what tells the model this was said mid-task rather than asked as a new question.
             Roles.USER ->
                 if (message.steer) {
-                    wire += ChatMessage.user("（用户在任务进行中说：${message.text}）")
+                    // Replayed from a stored steer: same wrapper, and now the same picture and the
+                    // same omitted-image note as the live path. Leaving the image out here is what
+                    // would make a steer with a photo work in the run it was sent in and silently
+                    // lose it in every run that rebuilds this history afterwards.
+                    wire += ChatMessage.user("（用户在任务进行中说：${message.text}）$note", image)
                 } else {
                     wire += ChatMessage.user(message.text + note, image)
                 }
@@ -1817,9 +1863,6 @@ class AgentEngine(
 
         /** 120 ms is faster than the eye and slower than the stream. */
         private const val STATS_TICK_MS = 120L
-
-        /** 1 = 立即插话 in [AppSettings.steerMode]. */
-        private const val STEER_IMMEDIATE = 1
 
         /**
          * How many of the newest messages a compression always keeps verbatim.

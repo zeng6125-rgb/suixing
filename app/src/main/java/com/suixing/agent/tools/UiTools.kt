@@ -281,6 +281,8 @@ class UiTools(
     // ---------------------------------------------------------------- 读屏
 
     private suspend fun dump(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+        // 读屏也是一次 UI 操作（spec v2 §2）：回合照常开启/续期，边缘光因此亮 ~3s 后淡出。
+        TouchFx.noteToolActivity(context, "ui_dump")
         val maxNodes = args.int("max_nodes", 140).coerceIn(10, 500)
         if (service != null) {
             return withContext(Dispatchers.Default) {
@@ -317,6 +319,8 @@ class UiTools(
     }
 
     private suspend fun screenshot(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+        // 同上：截图也是 UI 操作（spec v2 §2）。
+        TouchFx.noteToolActivity(context, "ui_screenshot")
         val maxWidth = args.int("max_width", 1080).coerceIn(320, 2160)
         val quality = args.int("quality", 72).coerceIn(1, 100)
 

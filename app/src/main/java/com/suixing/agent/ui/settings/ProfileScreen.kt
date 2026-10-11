@@ -10,15 +10,19 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -31,11 +35,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.agent.ProfileSummary
 import com.suixing.agent.core.Core
+import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.PROFILE_MAX_TURNS
+import com.suixing.agent.data.PROFILE_MIN_TURNS
+import com.suixing.agent.data.PROFILE_STEP_TURNS
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.SettingRow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -56,6 +67,8 @@ fun ProfileScreen(onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val stored by Core.profile.text.collectAsState()
     val summary by Core.profile.summary.collectAsState()
+    // 这两行「自动整理」的开关原来在「插话与运行」页，现在跟着画像本身走（字段与存储没动）。
+    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     // null = 输入框还没被碰过，显示 store 里的值；一旦开始输入就以草稿为准，免得后台的
     // 一次 load 把用户正在写的东西冲掉。
     var draft by remember { mutableStateOf<String?>(null) }
@@ -184,6 +197,72 @@ fun ProfileScreen(onBack: () -> Unit) {
                     },
                 ) { Text("保存") }
             }
+            // 「自动整理」原来在设置→插话与运行页。它管的是这一篇画像怎么维护（每几轮重跑一次
+            // 总结），放在画像页比放在「数据」页合适：那一页是纯入口列表，一行一个跳转，
+            // 塞开关会破坏它的形态。
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Text(
+                text = "自动整理",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
+            )
+            SettingRow(
+                title = "自动整理用户画像",
+                subtitle = "每几轮之后，用这个会话的端点单独跑一次总结，把关于用户这个人的长期信息" +
+                    "写进画像。与记忆不同：记忆是模型在任务里主动记下的键值，画像是它定期从对话里" +
+                    "读出来的滚动摘要。总结失败不打扰你，也不改动已有画像。",
+                control = {
+                    Switch(
+                        checked = settings.autoProfile,
+                        onCheckedChange = { on -> scope.persist { it.copy(autoProfile = on) } },
+                    )
+                },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            SettingRow(
+                title = "画像整理间隔",
+                subtitle = "每这么多轮整理一次；一轮 = 一次跑完的运行，跨会话累计。" +
+                    (if (settings.autoProfile) "" else "（自动整理已关闭，这一项暂不生效。）"),
+                control = {
+                    // 与压缩阈值同款的 −/+ 步进：关掉开关也留着这一行，只是置灰。
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.alpha(if (settings.autoProfile) 1f else 0.38f),
+                    ) {
+                        IconButton(
+                            enabled = settings.autoProfile,
+                            onClick = {
+                                scope.persist { s ->
+                                    s.copy(
+                                        profileEveryTurns =
+                                            (s.profileTurnThreshold - PROFILE_STEP_TURNS)
+                                                .coerceIn(PROFILE_MIN_TURNS, PROFILE_MAX_TURNS),
+                                    )
+                                }
+                            },
+                        ) { Text("−", style = MaterialTheme.typography.titleLarge) }
+                        Text(
+                            text = "${settings.profileTurnThreshold} 轮",
+                            style = MaterialTheme.typography.bodyLarge,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.widthIn(min = 44.dp),
+                        )
+                        IconButton(
+                            enabled = settings.autoProfile,
+                            onClick = {
+                                scope.persist { s ->
+                                    s.copy(
+                                        profileEveryTurns =
+                                            (s.profileTurnThreshold + PROFILE_STEP_TURNS)
+                                                .coerceIn(PROFILE_MIN_TURNS, PROFILE_MAX_TURNS),
+                                    )
+                                }
+                            },
+                        ) { Text("+", style = MaterialTheme.typography.titleLarge) }
+                    }
+                },
+            )
         }
     }
 }

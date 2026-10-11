@@ -63,7 +63,22 @@ data class Draft(
  * edit or delete it. The queue is deliberately never written to disk — it is the state of
  * a run that is still going, and a restarted process has no such run.
  */
-data class PendingSteer(val id: String, val text: String)
+data class PendingSteer(val id: String, val text: String, val imageBase64: String? = null)
+
+/**
+ * A whole turn the user sent while a run was going, in 排队 mode.
+ *
+ * Deliberately not a steer: nothing about it interrupts the run that is going. It waits, and starts
+ * a run of its own once the current one is over — the same path the send button takes, so it lands
+ * in the transcript as an ordinary user message rather than as a bubble hanging above the composer.
+ * The image travels with it because the composer can hold one, and a queued turn that quietly
+ * dropped its picture would be a message the user never wrote.
+ *
+ * Memory only, like [PendingSteer] and for a stronger reason: this queue is about the run that is
+ * going right now. If the process dies, that run dies with it, so there is no "afterwards" left to
+ * send into — and a copy on disk would come back as the app talking to itself.
+ */
+data class PendingTurn(val text: String, val imageBase64: String? = null)
 
 data class ChatUiState(
     val conversationId: String = "",
@@ -435,6 +450,16 @@ class ChatViewModel : ViewModel() {
     private val steers = mutableMapOf<String, List<PendingSteer>>()
 
     /**
+     * Turns typed while a run was going in 排队 mode, waiting for it to finish.
+     *
+     * The other half of the same question — see [PendingTurn]: a line is either an interruption or
+     * the next turn, and this is where the next turn waits. Keyed by conversation so a turn queued
+     * in one chat cannot be sent into another, and drained when that chat's run reports itself
+     * finished.
+     */
+    private val pendingTurns = mutableMapOf<String, List<PendingTurn>>()
+
+    /**
      * The board the last `todo_write` left behind, held so it can be republished.
      *
      * One copy, not one per conversation: the board is app-wide — the file is shared, and two
@@ -537,6 +562,10 @@ class ChatViewModel : ViewModel() {
 
                         else -> _state.update { it.copy(runningHere = false) }
                     }
+                    // 排队 mode: the turn the user typed during that run is the *next* turn, and
+                    // this is the first moment it can be one. StateFlow drops repeats, so this
+                    // fires once per real transition rather than on every publish.
+                    if (run !is RunState.Running) drainPendingTurns(chatId)
                 }
                 }
             }
@@ -1041,25 +1070,70 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
-     * Queues a line for the run that is going instead of waiting for it to end.
+     * Takes a line typed while a run is going, and routes it by the mode the run was started with.
      *
-     * The line is not written into the transcript here: it waits above the composer, and
-     * becomes a message only when the engine says it was handed over — which is what lets
-     * the user promote, edit or delete it in the meantime. False means nothing was
-     * running, so the caller keeps the text.
+     * 立即 (`steerMode == 1`): the line interrupts the round in flight — the original behaviour.
+     * 排队 (the default): the line is **not** an interruption at all. It is the next turn, so it
+     * waits in [pendingTurns] and goes out through [send] once this run is over; nothing about it
+     * appears above the composer, because nothing about it is queued *for the model to read
+     * mid-run*. The user asked for exactly this: 「排队发送时…作为新的用户一轮对话发送」.
+     *
+     * The mode is read off the run rather than off the live setting: a run started in 排队 stays
+     * 排队 for its whole life, which is the same answer the engine gives when it decides where a
+     * line lands. False means "nothing is running, handle this yourself" — the composer falls back
+     * to sending it as an ordinary turn.
      */
-    fun steer(text: String): Boolean {
+    fun steer(text: String, imageBase64: String? = null): Boolean {
         val body = text.trim()
         val chatId = _state.value.conversationId
-        if (body.isEmpty()) return false
+        if (body.isEmpty() && imageBase64 == null) return false
+        if (!Core.engine.isRunning(chatId)) return false
+        if (!Core.engine.steersImmediately(chatId)) {
+            // 排队: a new turn, not a steer. The draft is left alone on purpose — the composer
+            // clears its own input and attachment from the true return of this call, and a second
+            // writer here would race that.
+            pendingTurns[chatId] = pendingTurns[chatId].orEmpty() + PendingTurn(body, imageBase64)
+            return true
+        }
         val id = UUID.randomUUID().toString().take(8)
-        // 排队 or 立即 comes from the run's own settings — the engine reads steerMode off
-        // the live run — so this stays a plain call whose boolean the composer can await.
-        if (!Core.engine.steer(chatId, id, body)) return false
-        steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, body)
+        if (!Core.engine.steer(chatId, id, body, imageBase64 = imageBase64)) return false
+        // No TouchFx.noteActivity here on purpose. The edge light means "the agent is operating the
+        // phone right now" — UI automation — and a line the user typed is not that. A steer that
+        // kept the light alive would say the phone is being driven while nothing is driving it. The
+        // round's own model/tool activity already lights it and the round's end already puts it out.
+        steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, body, imageBase64)
         publishSteers(chatId)
         clearDraft(chatId)
         return true
+    }
+
+    /**
+     * Starts the next queued turn, if the run that was blocking it has really finished.
+     *
+     * **Two callers, and both are needed — do not delete one as redundant.** The engine publishes
+     * its terminal state from *inside* the run and unregisters the run in the caller's `finally`,
+     * so there is a real window where the state already says Done while a start is still refused as
+     * 「already running」. A drain that ran only on the state would drop the turn in exactly that
+     * window and never retry — a terminal StateFlow does not re-emit, so nothing would come along
+     * later to try again. The run-finally is the one moment that is certainly *after* the engine
+     * let go (this view model is the caller that went into the engine), so it is the safety net.
+     *
+     * The head is only dropped once [send] actually took it, so a refusal leaves the turn queued
+     * for the next drain instead of losing it — that is also what makes two callers safe rather
+     * than double-sending. One turn per call: each one is a run of its own, and the next drain
+     * happens when that run ends.
+     *
+     * **Only the conversation on screen is drained.** [send] acts on the displayed conversation and
+     * on nothing else, so a turn queued in a chat the user has since left waits — and goes out when
+     * they come back, because the state watcher re-subscribes and a StateFlow hands it the current
+     * value at once. Sending it from here instead would mean pushing a message into a conversation
+     * nobody is looking at, which is a worse surprise than a turn that waits its turn.
+     */
+    private fun drainPendingTurns(chatId: String) {
+        val next = pendingTurns[chatId].orEmpty().firstOrNull() ?: return
+        if (_state.value.conversationId != chatId) return
+        if (!send(next.text, next.imageBase64)) return
+        pendingTurns[chatId] = pendingTurns[chatId].orEmpty().drop(1)
     }
 
     /** Sends a queued line now, cutting the round in flight so the model sees it at once. */
@@ -1070,7 +1144,12 @@ class ChatViewModel : ViewModel() {
         // No round left to interrupt: the line goes out as an ordinary message instead of
         // being silently dropped — but only because the user asked for it now.
         retractSteer(id)
-        send(queued.text)
+        if (send(queued.text, queued.imageBase64)) return
+        // The send was refused after all — another run in this conversation got there first. The
+        // line has already been taken off the board, so putting it back is the only way it is not
+        // lost without a word: the row returns and the user can send it again.
+        steers[chatId] = steers[chatId].orEmpty() + queued
+        publishSteers(chatId)
     }
 
     /** Drops a queued line before the model ever reads it. */
@@ -1165,7 +1244,15 @@ class ChatViewModel : ViewModel() {
                     // gone from the table, and gone from the UI, so it must not go out here.
                     carried.filter { queued -> steers[chatId]?.any { it.id == queued.id } == true }
                         .forEach { queued ->
-                            Core.engine.steer(chatId, queued.id, queued.text, immediate = false)
+                            // The picture rides along: a steer carries text *and* image, and
+                            // re-sending only the text dropped the screenshot without a word.
+                            Core.engine.steer(
+                                chatId,
+                                queued.id,
+                                queued.text,
+                                immediate = false,
+                                imageBase64 = queued.imageBase64,
+                            )
                         }
                 }
             }
@@ -1269,6 +1356,11 @@ class ChatViewModel : ViewModel() {
                     flushDeltas(chatId)
                     sessions[chatId]?.let { saveSession(it) }
                     endSession(chatId, status, failure)
+                    // The run is over for certain here — this coroutine is the one that called
+                    // into the engine, so it has already returned and unregistered. A turn queued
+                    // in 排队 mode that the state observer could not start (its Done arrives while
+                    // the run is still registered) is started now.
+                    drainPendingTurns(chatId)
                     // The answer is in the transcript now, whatever way the run ended: a
                     // draft left behind would come back on the next launch as a second
                     // bubble saying the same thing.
@@ -1368,6 +1460,10 @@ class ChatViewModel : ViewModel() {
                     id = event.id,
                     role = Roles.USER,
                     text = event.text,
+                    // The picture travels with the event, so the bubble the user sees is the
+                    // message the model was given — and it is stored, so a later run replaying
+                    // this history still sends it.
+                    imageBase64 = event.imageBase64,
                     steer = true,
                     // This run's id, like every other message it writes. The screen hides the
                     // live run's stored rows while the bubble draws them; a steer without the

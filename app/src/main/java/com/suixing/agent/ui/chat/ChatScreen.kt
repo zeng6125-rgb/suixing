@@ -157,6 +157,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
@@ -250,7 +251,11 @@ fun ChatScreen(
     // across the switch.
     val draft = state.draft
     val input = draft.text
-    val attachment = remember(draft.attachmentUri, draft.attachmentName) {
+    // The conversation is a key as well: the cache is per conversation, and two chats that both
+    // hold a 「修改」-restored picture carry the *same* marker uri and label — without this, coming
+    // back from one to the other kept the previous chat's decoded bitmap (the chip would show, and
+    // send, the wrong picture).
+    val attachment = remember(state.conversationId, draft.attachmentUri, draft.attachmentName) {
         viewModel.attachmentFor(state.conversationId)
     }
     fun setDraft(
@@ -259,6 +264,39 @@ fun ChatScreen(
         name: String? = draft.attachmentName,
     ) {
         viewModel.onDraftChange(state.conversationId, Draft(text, uri, name))
+    }
+
+    /**
+     * 「修改」 on a queued line: the line comes back to the composer, text **and picture**.
+     *
+     * The text is appended rather than substituted — the field may hold something the user is in
+     * the middle of typing, and taking a queued line back must not throw that away without a word.
+     *
+     * The picture needs three things, which is why this is not a one-liner: the bytes have to be
+     * decoded off the main thread, they have to go into the view model's attachment cache (that is
+     * what the chip and the send path read), and the draft's `attachmentUri`/`attachmentName` have
+     * to change so the composer's `remember` re-reads that cache. [QUEUED_ATTACHMENT_URI] is a
+     * marker, not a real uri: this picture exists only in memory, so after a restart the chip is
+     * simply absent (the cache is gone) while the text survives. That is the honest outcome — the
+     * alternative would be a draft pointing at a uri that cannot be read.
+     *
+     * A decode that fails still returns the text: losing the picture is a smaller loss than losing
+     * the sentence the user typed.
+     */
+    suspend fun restoreQueuedSteer(steer: PendingSteer) {
+        val text = if (input.isBlank()) steer.text else "${input.trimEnd()} ${steer.text}"
+        val base64 = steer.imageBase64
+        if (base64 == null) {
+            setDraft(text = text)
+            return
+        }
+        val bitmap = decodeAttachment(base64)
+        if (bitmap == null) {
+            setDraft(text = text)
+            return
+        }
+        viewModel.cacheAttachment(state.conversationId, bitmapAttachment(bitmap, QUEUED_IMAGE_LABEL))
+        setDraft(text = text, uri = QUEUED_ATTACHMENT_URI, name = QUEUED_IMAGE_LABEL)
     }
     var editing by remember { mutableStateOf<StoredMessage?>(null) }
     // The composer stack's own measured height: the node inside all of its paddings, so the
@@ -562,6 +600,11 @@ fun ChatScreen(
     // moment the next token landed. The position is restored by the list's own saver; this is the
     // other half of that state, and the two have to agree or the transcript drifts.
     var following by rememberSaveable { mutableStateOf(true) }
+    // A finger is on the transcript right now. Its one job is to stop the watcher below from
+    // handing the follow back while the press is still going: the press took it away on purpose,
+    // and a re-arm mid-press is what let the next streamed frame pin the list to its end under the
+    // hand. Transient by nature — a rotation mid-press is not a state worth restoring.
+    var pressed by remember { mutableStateOf(false) }
     // Set while the list is being scrolled by us. Without it the follow scroll itself trips
     // the "user scrolled away" branch below, following goes false, and the run stops
     // following its own output — which is exactly what it used to do.
@@ -576,6 +619,7 @@ fun ChatScreen(
         // stream kept the list pinned while the user dragged, and they had to fight it.
         snapshotFlow { listState.isScrollInProgress to listState.canScrollBackward }
             .collect { (scrolling, canScrollBack) ->
+                scrollDiag(context, "watch:emit", listState, following, itemCount, ime = heldIme) // 量完删
                 // Our own pin scrolls synchronously; by the time this collector sees the
                 // scrolling flag the programmatic guard is already down, and it read the pin as
                 // a user drag and killed following mid-transition — the card then froze while
@@ -585,9 +629,17 @@ fun ChatScreen(
                     SystemClock.uptimeMillis() - lastPinAt > 120
                 ) {
                     following = false
-                } else if (!scrolling && listState.atEnd(slack = 8)) {
+                } else if (!scrolling && !pressed && listState.atEnd(slack = 8)) {
                     // Released at the end again — or the user tapped 跳最新, which sets
                     // following itself: either way the run may follow its output again.
+                    //
+                    // `!pressed` is the whole guard: without it this branch also fired while a
+                    // finger was *down* on a bubble, re-arming the follow the press had just taken
+                    // away — and the next streamed frame pinned the list to its end under the
+                    // finger. That is the jump the user reports on pressing to select text, and it
+                    // needs no keyboard: the press only has to happen while the list is at its end.
+                    // A press that ends without moving (a tap) still re-arms, through the release
+                    // path, which is where that decision belongs.
                     following = true
                 }
             }
@@ -641,6 +693,12 @@ fun ChatScreen(
         state.liveParts,
         state.status,
         settings.autoFollow,
+        // `following` is a key, not only a check, and that is what makes a press stop a pin that is
+        // already on its way: `scrollToItem` and `scrollBy` are suspending, so a gate re-checked
+        // between them cannot stop the scroll they have already asked for — the press lands in that
+        // suspension and the list moves under the finger anyway. Keying the effect on the flag makes
+        // the press cancel the coroutine, and a cancelled scroll stops where it is.
+        following,
     ) {
         // Re-taken before every scroll below, not just at the top. `following` is not a key of
         // this effect, so a finger that lands while a pin is in flight used to be dragged to the
@@ -847,6 +905,12 @@ fun ChatScreen(
                     // In px, converted once: a raw pixel threshold would be a couple of
                     // millimetres on a dense screen and a centimetre on a sparse one.
                     val releaseDragPx = with(LocalDensity.current) { RELEASE_DRAG_DP.toPx() }
+                    // The gesture system's own long-press timeout, read rather than assumed: our
+                    // constant sat below it (450 against the platform's 500), so a press in that
+                    // window started a selection — the IME collapsing with it — while the release
+                    // below still counted as a tap and handed the follow back, and the follow is
+                    // what moves the list when the keyboard goes. One clock, not two.
+                    val holdToSelectMs = LocalViewConfiguration.current.longPressTimeoutMillis
                     LazyColumn(
                         state = listState,
                         modifier = Modifier
@@ -869,7 +933,8 @@ fun ChatScreen(
                                         val downY = down.changes.first().position.y
                                         val wasFollowing = following
                                         following = false
-                                        scrollDiag(context, "press:down", listState, wasFollowing, itemCount) // 量完删
+                                        pressed = true
+                                        scrollDiag(context, "press:down", listState, wasFollowing, itemCount, ime = heldIme) // 量完删
                                         var movedUp = false
                                         // Whether the list itself moved. A hand can travel less than
                                         // the 12dp above and still send the list a long way: a fling,
@@ -898,8 +963,12 @@ fun ChatScreen(
                                         // anything the list itself scrolled leave the follow released
                                         // until the scroll watcher re-arms it at the end.
                                         val atEndNow = listState.atEnd(slack = 8)
-                                        scrollDiag(context, "press:up:movedUp=$movedUp:scrolled=$scrolled:atEnd=$atEndNow", listState, following, itemCount) // 量完删
-                                        if (restoresFollow(movedUp, scrolled, atEndNow, SystemClock.uptimeMillis() - pressedAt)) {
+                                        // The finger is up: from here the watcher may hand the
+                                        // follow back, and the release rule below decides whether it
+                                        // should.
+                                        pressed = false
+                                        scrollDiag(context, "press:up:movedUp=$movedUp:scrolled=$scrolled:atEnd=$atEndNow", listState, following, itemCount, ime = heldIme) // 量完删
+                                        if (restoresFollow(movedUp, scrolled, atEndNow, SystemClock.uptimeMillis() - pressedAt, holdToSelectMs)) {
                                             following = wasFollowing
                                         }
                                     }
@@ -1197,6 +1266,7 @@ fun ChatScreen(
                 Composer(
                     input = input,
                     onInput = { setDraft(text = it) },
+                    onRestoreSteer = { steer -> scope.launch { restoreQueuedSteer(steer) } },
                     running = state.runningHere,
                     stats = state.stats,
                     settings = settings,
@@ -1242,7 +1312,7 @@ fun ChatScreen(
                         viewModel.send(input, attachment?.base64)
                     },
                     onStop = { viewModel.stop() },
-                    onSteer = { viewModel.steer(it) },
+                    onSteer = { text, image -> viewModel.steer(text, image) },
                     onRequestCompress = { viewModel.requestCompress() },
                     onFocused = {
                         // Only a transcript that was already at its end follows the
@@ -4280,6 +4350,12 @@ private fun TimeLabel(timestamp: Long) {
 private fun Composer(
     input: String,
     onInput: (String) -> Unit,
+    /**
+     * Takes a queued line back out of the queue and into the composer — its text **and its
+     * picture**. A callback of its own rather than `onInput(text)`: the attachment lives in the
+     * view model's cache, not in this composable, so only the caller can put both halves back.
+     */
+    onRestoreSteer: (PendingSteer) -> Unit,
     running: Boolean,
     /** The live run's stats; the context ring reads its note. */
     stats: StreamStats?,
@@ -4322,7 +4398,7 @@ private fun Composer(
     onSend: () -> Unit,
     onStop: () -> Unit,
     /** Queues a line for the running model; false means it was dropped. */
-    onSteer: (String) -> Boolean,
+    onSteer: (String, String?) -> Boolean,
     /** Asks the live run to fold the conversation at its next turn boundary. */
     onRequestCompress: () -> Boolean,
     /** Lines queued for the run that is going, oldest first. */
@@ -4534,16 +4610,9 @@ private fun Composer(
                             undelivered = !running,
                             onPromote = { onPromoteSteer(queued.id) },
                             onEdit = {
-                                // Appended, not substituted: the field may hold something the
-                                // user is in the middle of typing, and taking a queued line back
-                                // must not throw that away without a word.
-                                onInput(
-                                    if (input.isBlank()) {
-                                        queued.text
-                                    } else {
-                                        "${input.trimEnd()} ${queued.text}"
-                                    },
-                                )
+                                // Both halves go back, text and picture — see restoreQueuedSteer.
+                                // The line is then retracted, so nothing is sent twice.
+                                onRestoreSteer(queued)
                                 onRetractSteer(queued.id)
                             },
                             onDelete = { onRetractSteer(queued.id) },
@@ -4615,9 +4684,18 @@ private fun Composer(
                         keyboardActions = KeyboardActions(
                             onSend = {
                                 val text = input.trim()
-                                if (text.isEmpty()) return@KeyboardActions
+                                // A picture with no caption is still something to send: only an
+                                // entirely empty composer does nothing here.
+                                if (text.isEmpty() && attachment == null) return@KeyboardActions
                                 if (running) {
-                                    if (onSteer(text)) onInput("")
+                                    // The attachment rides along: 排队 mode turns this into the next
+                                    // turn, 立即 mode into a steer, and either way a picture the user
+                                    // attached belongs to the line. Both are cleared only once the
+                                    // view model says it took them.
+                                    if (onSteer(text, attachment?.base64)) {
+                                        onInput("")
+                                        onClearAttachment()
+                                    }
                                 } else {
                                     onSend()
                                 }
@@ -4648,11 +4726,11 @@ private fun Composer(
                     // ellipses with the circle clipped to a 40x36 box.
                     Row(
                         modifier = Modifier
-                            // 4dp rather than 12: the two buttons on the left are now discs inside
-                            // their 48dp touch boxes, so the box already contributes 8dp of air on
-                            // each side of the disc. Twelve here put the 「+」 16dp from the
-                            // capsule's edge and read as a gap the user asked to close.
-                            .padding(start = 0.dp, end = 12.dp, bottom = 8.dp)
+                            // 10dp, and the box beside it adds 7dp more (a 36dp box around a 22dp
+                            // glyph): the 「+」 sits 17dp from the capsule's edge, which is the
+                            // 16–18dp the user asked for. The row's own padding is the only lever
+                            // that moves that edge without moving the gap between the two buttons.
+                            .padding(start = 10.dp, end = 12.dp, bottom = 8.dp)
                             .height(48.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         // Zero: the two buttons' own boxes supply the only gap between their glyphs,
@@ -4667,15 +4745,14 @@ private fun Composer(
                     Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
                         IconButton(
                             onClick = { menuOpen = true },
-                            // 44dp, and the glyph fills more of it than before: the number the user
-                            // reads is the distance between the two glyphs and from them to the
-                            // capsule's edge, and that distance is the box minus the glyph plus the
-                            // row's own padding. A 48dp box with an 18dp glyph in it measured 30dp
-                            // between the icons — wider than the 40dp button it replaced — which is
-                            // why the first pass "made no difference" on screen. 44dp is the floor
-                            // the touch target was allowed to come down to; the glyphs are back at
-                            // their original sizes so the boxes read as tight, not as empty.
-                            modifier = Modifier.size(44.dp),
+                            // 36dp around the glyph's original 22dp. What the eye measures is the
+                            // glyph's distance to the capsule's edge (the row's 10dp plus this box's
+                            // 7dp) and to the glyph beside it (7 + 0 + 8 = 15dp), and both are set by
+                            // this one number — so it is chosen once rather than tuned twice: at
+                            // 40dp the pair would sit 19dp apart, outside the 14–16dp asked for. The
+                            // 「不要浪费空间」 the user pointed at was the 11dp a side that the 44dp
+                            // box carried; this one carries 7dp.
+                            modifier = Modifier.size(36.dp),
                         ) {
                             Icon(
                                 imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
@@ -4691,7 +4768,7 @@ private fun Composer(
                             onDismiss = { menuOpen = false },
                             // Opens upward from the button it belongs to. BottomStart puts the
                             // popup's bottom edge on the anchor's bottom edge, and the anchor is the
-                            // button's own 44dp box — so the offset clears that box plus the 8dp of
+                            // button's own 36dp box — so the offset clears that box plus the 8dp of
                             // air the card is meant to leave above it (-8dp alone left the card
                             // sitting on the button).
                             alignment = Alignment.BottomStart,
@@ -4703,7 +4780,7 @@ private fun Composer(
                                         windowPx = screenWidthPx,
                                         edgePx = popupEdgePx,
                                     ).roundToInt(),
-                                    -52.dp.roundToPx(),
+                                    -44.dp.roundToPx(),
                                 )
                             },
                             // Same reason as the model sheet: this card hangs off a button of
@@ -4775,9 +4852,9 @@ private fun Composer(
                     ) {
                         IconButton(
                             onClick = { approvalOpen = true },
-                            // Same 44dp box and the same glyph size as the 「+」 beside it: the two are
+                            // Same 36dp box and the same glyph size as the 「+」 beside it: the two are
                             // one visual group on the row's left, so they are measured together.
-                            modifier = Modifier.size(44.dp),
+                            modifier = Modifier.size(36.dp),
                         ) {
                             Icon(
                                 imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
@@ -4802,7 +4879,7 @@ private fun Composer(
                                         windowPx = screenWidthPx,
                                         edgePx = popupEdgePx,
                                     ).roundToInt(),
-                                    -52.dp.roundToPx(),
+                                    -44.dp.roundToPx(),
                                 )
                             },
                             focusable = false,
@@ -4921,6 +4998,11 @@ private fun Composer(
                         sessionElapsedMs = sessionElapsedMs,
                         live = stats,
                     )
+                    // The ring's own right margin: the row packs its children edge to edge, and the
+                    // gauge sat hard against whatever follows it — the mic when 语音输入 is on, the
+                    // send button when it is not. Four dp, and nothing else in the row moves: the
+                    // model capsule to its left takes the free space either way.
+                    Spacer(Modifier.width(4.dp))
                     // 设置里的「语音输入」是唯一的开关，默认关：关着时这里什么都不画，连占位都不留。
                     // 开着也不需要系统识别器了——我们自己的录音链路走 AudioRecord，不会再弹系统面板。
                     if (voiceInput) {
@@ -4942,7 +5024,12 @@ private fun Composer(
                     // run; an empty field stops it. One button, and what it does is what the
                     // field in front of the user says — the separate 插话 button only ever made
                     // the user wonder which of the two they wanted.
-                    val steers = running && input.isNotBlank()
+                    //
+                    // "Something" is text **or** a picture: a screenshot with no caption is still a
+                    // turn the user wants to send, and judging by text alone left that case with no
+                    // way out at all — the button stayed on 停止 and the attachment could not go
+                    // anywhere until the run ended. 停止 is for an empty field, nothing else.
+                    val steers = running && hasSomething
                     val sendable = running || hasSomething
                     CircleActionButton(
                         icon = if (running && !steers) {
@@ -4957,7 +5044,10 @@ private fun Composer(
                         },
                         onClick = {
                             when {
-                                steers -> if (onSteer(input.trim())) onInput("")
+                                steers -> if (onSteer(input.trim(), attachment?.base64)) {
+                                    onInput("")
+                                    onClearAttachment()
+                                }
                                 running -> onStop()
                                 else -> onSend()
                             }
@@ -6417,6 +6507,12 @@ private fun scrollDiag(
     state: LazyListState,
     following: Boolean,
     itemCount: Int,
+    /**
+     * The keyboard inset at the moment of the line, when the caller knows it. A long press that
+     * ends with the IME gone is the signature of the selection path (the field lost focus); a
+     * press that ends with the same inset as it started is not.
+     */
+    ime: Int = -1,
 ) {
     val app = context.applicationContext
     val line = "$event" +
@@ -6425,7 +6521,8 @@ private fun scrollDiag(
         " first=${state.firstVisibleItemIndex}+${state.firstVisibleItemScrollOffset}" +
         " scrolling=${state.isScrollInProgress}" +
         " canBack=${state.canScrollBackward}" +
-        " canForward=${state.canScrollForward}"
+        " canForward=${state.canScrollForward}" +
+        (if (ime >= 0) " ime=$ime" else "")
     voiceTraceWorker.execute { appendBoundedLog(app, "scroll-diag.log", line) }
 }
 
@@ -6621,8 +6718,29 @@ private fun SteerQueueRow(
                 modifier = Modifier.size(15.dp),
             )
             Spacer(Modifier.width(8.dp))
+            // A line that is only a picture has no text to show, and an empty bar leaves the user
+            // unable to tell what is waiting — so it says what it is.
+            val label = steer.text.ifBlank { if (steer.imageBase64 != null) "（图片）" else steer.text }
+            // The picture itself, at the size this 36dp bar can hold. Decoded here rather than
+            // through ImageBlock: that one is built for a bubble (its own size plus the full-screen
+            // preview dialog), so it would be a second layout path, not a reuse.
+            var thumb by remember(steer.imageBase64) { mutableStateOf<ImageBitmap?>(null) }
+            LaunchedEffect(steer.imageBase64) {
+                thumb = steer.imageBase64?.let { decodeAttachment(it, target = THUMB_PX)?.asImageBitmap() }
+            }
+            thumb?.let { picture ->
+                Image(
+                    bitmap = picture,
+                    contentDescription = "这条带图片",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(RoundedCornerShape(6.dp)),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             Text(
-                text = if (undelivered) "${steer.text}（未送达）" else steer.text,
+                text = if (undelivered) "$label（未送达）" else label,
                 style = MaterialTheme.typography.labelMedium,
                 color = scheme.onSurfaceVariant,
                 maxLines = 1,
@@ -6754,7 +6872,10 @@ private fun QueueAction(icon: Int, label: String, onClick: () -> Unit) {
 @Composable
 private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    Row(modifier = Modifier.padding(start = 10.dp)) {
+    // The same inset the queue rows and the board above use: the strip and the rows under it are
+    // one column of things belonging to the field, and 10dp against their 12dp put the picture two
+    // pixels left of the bars below it — the misalignment the user pointed at.
+    Row(modifier = Modifier.padding(start = STEER_QUEUE_INSET)) {
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = scheme.surfaceContainerHigh,
@@ -6873,13 +6994,18 @@ private fun LazyListState.atEnd(slack: Int = 24): Boolean {
  *
  * `atEnd` is the second half of the same idea: the follow may only be re-armed while the list is
  * still where the follow wants it, so a tap that ends anywhere else cannot restore it either.
+ *
+ * [holdMs] is the caller's own long-press timeout, and the caller passes the platform's rather than
+ * this file's constant — see the constant's own note for the window that made a selection long
+ * press look like a tap.
  */
 internal fun restoresFollow(
     movedUp: Boolean,
     scrolled: Boolean,
     atEnd: Boolean,
     heldMs: Long,
-): Boolean = !movedUp && !scrolled && atEnd && heldMs < HOLD_TO_SELECT_MS
+    holdMs: Long = HOLD_TO_SELECT_MS,
+): Boolean = !movedUp && !scrolled && atEnd && heldMs < holdMs
 
 /** Far more than any transcript: the list clamps this to its own end. */
 private const val FOLLOW_SCROLL_PX = 200_000f
@@ -6890,8 +7016,17 @@ private const val FOLLOW_SCROLL_PX = 200_000f
  * The platform's own long-press threshold is 500ms and text selection starts there; a shorter
  * window here would drop the follow scroll on an ordinary tap, which is not an interaction with
  * the position at all.
+ *
+ * This is the **fallback**, and the value used to be 450 — *below* the platform's own 500, which is
+ * the window this constant's own reasoning warned about: a press of 450–500ms is a selection long
+ * press to the system (the IME starts collapsing under it) while `restoresFollow` still called it a
+ * tap and handed the follow back, after which the keyboard-inset follow and the composer's pin
+ * moved the list — the long-press jump, still there after every other fix. The caller now passes
+ * the platform's live value (`LocalViewConfiguration.longPressTimeoutMillis`), which is 500 unless
+ * the device or an accessibility setting says otherwise; this constant only covers a caller that
+ * has none.
  */
-private const val HOLD_TO_SELECT_MS = 450L
+private const val HOLD_TO_SELECT_MS = 500L
 
 /** How far an upward drag has to travel to release the follow, in dp (converted per density). */
 private val RELEASE_DRAG_DP = 12.dp
@@ -6923,6 +7058,22 @@ private const val KEYBOARD_ANIM_MS = 220
 
 /** How many queued lines are drawn before the rest collapse into one count. */
 private const val STEER_ROWS_SHOWN = 3
+
+/**
+ * The draft's `attachmentUri` for a picture taken back out of the queue by 「修改」.
+ *
+ * A marker, not a uri: the picture lives in the view model's attachment cache and nowhere else, so
+ * this exists only to make the composer re-read that cache (its `remember` is keyed on the draft's
+ * uri and name). After a restart the cache is empty and the chip is simply absent, which is the
+ * honest outcome — the alternative is a draft pointing at a uri that cannot be read.
+ */
+private const val QUEUED_ATTACHMENT_URI = "queued://steer-image"
+
+/** What the restored picture is called in the composer's chip. */
+private const val QUEUED_IMAGE_LABEL = "图片"
+
+/** Target width of a queue row's thumbnail, in pixels: the row draws it at 24dp. */
+private const val THUMB_PX = 96
 
 /**
  * How many board rows are drawn above the queue — the same three as the queue, for the same
@@ -6975,6 +7126,33 @@ private fun bitmapAttachment(bitmap: Bitmap, label: String = "照片"): Attachme
         preview = scaled.asImageBitmap(),
     )
 }
+
+/**
+ * Decodes stored base64 back into a bitmap, off the main thread.
+ *
+ * Used by the queue row's 24dp thumbnail and by 「修改」, which puts the picture back into the
+ * composer: both hold bytes, not a uri, so neither can go through [readAttachment]. Downsampled to
+ * about [target] pixels wide, because the callers draw it small and the full JPEG would cost
+ * megabytes per row. Null when the bytes are not an image, which every caller treats as "no
+ * picture" rather than as an error worth showing.
+ */
+private suspend fun decodeAttachment(base64: String, target: Int = 512): Bitmap? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val bytes = Base64.decode(base64, Base64.DEFAULT)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0) return@runCatching null
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= target) sample *= 2
+            BitmapFactory.decodeByteArray(
+                bytes,
+                0,
+                bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sample },
+            )
+        }.getOrNull()
+    }
 
 /**
  * A picked file is copied into the app's own folder, because the agent reads absolute

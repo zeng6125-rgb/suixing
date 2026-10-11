@@ -82,9 +82,9 @@ import com.suixing.agent.data.label
 import com.suixing.agent.data.COMPRESS_MAX_PERCENT
 import com.suixing.agent.data.COMPRESS_MIN_PERCENT
 import com.suixing.agent.data.COMPRESS_STEP_PERCENT
-import com.suixing.agent.data.PROFILE_MAX_TURNS
-import com.suixing.agent.data.PROFILE_MIN_TURNS
-import com.suixing.agent.data.PROFILE_STEP_TURNS
+import com.suixing.agent.llm.MAX_RETRY_ATTEMPTS
+import com.suixing.agent.llm.MAX_RETRY_DELAY_SECONDS
+import com.suixing.agent.llm.MIN_RETRY_DELAY_SECONDS
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
@@ -137,7 +137,7 @@ private const val NAME_WRITE_DEBOUNCE_MS = 400L
  */
 private enum class SettingsPage(val title: String, val route: String) {
     MODEL("模型与生成", "settings/model"),
-    STEER("插话与运行", "settings/steer"),
+    CONVERSATION("对话配置", "settings/conversation"),
     APPEARANCE("外观", "settings/appearance"),
     NETWORK("网络与语音", "settings/network"),
     DATA("数据", "settings/data"),
@@ -175,7 +175,7 @@ fun SettingsScreen(onOpen: (String) -> Unit, onBack: () -> Unit) {
 internal fun SettingsPageRoute(route: String, onOpen: (String) -> Unit, onBack: () -> Unit) {
     when (SettingsPage.entries.firstOrNull { it.route == route }) {
         SettingsPage.MODEL -> ModelSettingsPage(onBack = onBack)
-        SettingsPage.STEER -> SteerSettingsPage(onBack = onBack)
+        SettingsPage.CONVERSATION -> ConversationSettingsPage(onBack = onBack)
         SettingsPage.APPEARANCE -> AppearanceSettingsPage(onBack = onBack)
         SettingsPage.NETWORK -> NetworkVoiceSettingsPage(onBack = onBack)
         SettingsPage.DATA -> DataSettingsPage(onBack = onBack, onOpen = onOpen)
@@ -224,8 +224,8 @@ private fun SettingsRoot(
                         SettingsGroupRow("模型与生成", "接口、模型与采样") {
                             onOpenPage(SettingsPage.MODEL)
                         },
-                        SettingsGroupRow("插话与运行", "插话落点、压缩与工具审批") {
-                            onOpenPage(SettingsPage.STEER)
+                        SettingsGroupRow("对话配置", "输入、运行、失败重试与显示") {
+                            onOpenPage(SettingsPage.CONVERSATION)
                         },
                         SettingsGroupRow("外观", "主题、配色与排版") {
                             onOpenPage(SettingsPage.APPEARANCE)
@@ -369,7 +369,7 @@ private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
  * already saved when the process dies. 模型与生成 keeps a draft instead, because a
  * half-typed endpoint is not a setting yet.
  */
-private fun CoroutineScope.persist(block: (AppSettings) -> AppSettings) {
+internal fun CoroutineScope.persist(block: (AppSettings) -> AppSettings) {
     launch { Core.settings.update(block) }
 }
 
@@ -953,37 +953,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     shape = MaterialTheme.shapes.small,
                 )
             }
-            item {
-                // 0 是「不限制」，但把 0 直接摆在标签上读起来像个没配好的空值——用户原话
-                // 「把 0 字样改成无限」。存储值不变（仍是 0），引擎那侧 `roundLimit <= 0`
-                // 就是不限（AgentEngine.kt:975），所以这里只改给人看的那个词。
-                LabeledSlider(
-                    label = if (form.maxToolRounds <= 0) {
-                        "最大工具轮数 无限"
-                    } else {
-                        "最大工具轮数 ${form.maxToolRounds}"
-                    },
-                    hint = "一次任务里最多连续调用多少次工具；0＝不限轮数（显示为「无限」），" +
-                        "拖到最左就是不限制。",
-                    value = form.maxToolRounds.toFloat(),
-                    range = 0f..40f,
-                    steps = 39,
-                    onValueChange = { form = form.copy(maxToolRounds = it.toInt()) },
-                )
-            }
-            item {
-                SettingRow(
-                    title = "显示思考过程",
-                    subtitle = "把模型的思考流式画在回复上方。关掉只是不显示，思考强度照旧生效。",
-                    control = {
-                        Switch(
-                            checked = form.showReasoning,
-                            onCheckedChange = { form = form.copy(showReasoning = it) },
-                        )
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
+            // 「最大工具轮数」与「显示思考过程」搬到了「对话配置」页：一个是它一次任务能跑几轮、
+            // 一个是对话里显示什么，都不属于模型端点本身。字段与存储没动。
             item {
                 LabeledBlock(
                     label = "系统提示词",
@@ -1161,9 +1132,20 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     }
 }
 
-/** 插话与运行: steering, auto-compression, and what the agent may do without asking. */
+/**
+ * 对话配置: 一次对话从输入到显示的全部行为开关，四段按时间线排——输入（你敲下去之后发生
+ * 什么）、运行（它怎么跑、能不能动手、上下文满了怎么办）、失败处理（网络/超时/5xx 怎么办）、
+ * 显示（跑完之后你看到什么）。
+ *
+ * 这些开关从四个页里搬过来（模型与生成、插话与运行、外观，以及新加的三项重试），**字段名与
+ * 存储一个都没动**：只换 UI 位置，老配置照旧生效。搬走的行在原页删掉了——同一个字段留两份
+ * 草稿会互相覆盖。
+ *
+ * 本页用「即改即存」（[persist]），与外观/网络/数据三页一致；整页只有模型与生成那页是
+ * 「草稿 + 保存」，因为它的字段要跟端点一起做整体校验，这些开关不需要。
+ */
 @Composable
-private fun SteerSettingsPage(onBack: () -> Unit) {
+private fun ConversationSettingsPage(onBack: () -> Unit) {
     val stored by Core.settings.flow.collectAsState(initial = AppSettings())
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -1173,7 +1155,7 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { PageTopBar(title = SettingsPage.STEER.title, onBack = onBack) },
+        topBar = { PageTopBar(title = SettingsPage.CONVERSATION.title, onBack = onBack) },
         snackbarHost = {
             SnackbarHost(snackbar, modifier = Modifier.navigationBarsPadding())
         },
@@ -1186,6 +1168,21 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            item { SectionHeader("输入") }
+            item {
+                SettingRow(
+                    title = "回车键发送",
+                    subtitle = "开：按回车直接发送（运行中则当作插话送进去）；关：回车换行，" +
+                        "用发送键提交。",
+                    control = {
+                        Switch(
+                            checked = stored.enterKeySends,
+                            onCheckedChange = { on -> scope.persist { it.copy(enterKeySends = on) } },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             item {
                 // 0 排队 / 1 立即，见 AppSettings.steerMode：打断在途的回复是有损的，
                 // 所以默认排队，只有用户主动选「立即」才掐断。
@@ -1202,146 +1199,28 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                 }
             }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
+            item { SectionHeader("运行") }
             item {
-                // 与「插话方式」挨着：两行都是「你在输入框里敲下去之后会发生什么」。
-                SettingRow(
-                    title = "回车键发送",
-                    subtitle = "开：按回车直接发送（运行中则当作插话送进去）；关：回车换行，" +
-                        "用发送键提交。",
-                    control = {
-                        Switch(
-                            checked = stored.enterKeySends,
-                            onCheckedChange = { on -> scope.persist { it.copy(enterKeySends = on) } },
-                        )
+                // 0 是「不限制」，但把 0 直接摆在标签上读起来像个没配好的空值——用户原话
+                // 「把 0 字样改成无限」。存储值不变（仍是 0），引擎那侧 `roundLimit <= 0`
+                // 就是不限（AgentEngine.kt:975），所以这里只改给人看的那个词。
+                LabeledSlider(
+                    label = if (stored.maxToolRounds <= 0) {
+                        "最大工具轮数 无限"
+                    } else {
+                        "最大工具轮数 ${stored.maxToolRounds}"
                     },
+                    hint = "一次任务里最多连续调用多少次工具；0＝不限轮数（显示为「无限」），" +
+                        "拖到最左就是不限制。",
+                    value = stored.maxToolRounds.toFloat(),
+                    range = 0f..40f,
+                    steps = 39,
+                    onValueChange = { turns -> scope.persist { it.copy(maxToolRounds = turns.toInt()) } },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
-            item {
-                SettingRow(
-                    title = "自动压缩上下文",
-                    subtitle = "上下文接近窗口上限时把旧消息压成摘要。超窗是接口直接报错，" +
-                        "压缩最坏只是丢些细节；只在「模型与生成」里设了上下文条数时才可能触发。",
-                    control = {
-                        Switch(
-                            checked = stored.autoCompress,
-                            onCheckedChange = { on -> scope.persist { it.copy(autoCompress = on) } },
-                        )
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
-            item {
-                SettingRow(
-                    title = "自动压缩阈值",
-                    subtitle = "上下文用到窗口的这个比例时，自动把较早的对话压成摘要；" +
-                        "调高更省钱但更容易触顶，调低更保险但会提前丢细节。" +
-                        (if (stored.autoCompress) "" else "（自动压缩已关闭，这一项暂不生效。）"),
-                    control = {
-                        // 关掉开关也留着这一行，只是置灰：藏起来用户就找不到它了。
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.alpha(if (stored.autoCompress) 1f else 0.38f),
-                        ) {
-                            IconButton(
-                                enabled = stored.autoCompress,
-                                onClick = {
-                                    scope.persist { s ->
-                                        s.copy(
-                                            compressAtPercent =
-                                                (s.compressAtPercent - COMPRESS_STEP_PERCENT)
-                                                    .coerceIn(COMPRESS_MIN_PERCENT, COMPRESS_MAX_PERCENT),
-                                        )
-                                    }
-                                },
-                            ) { Text("−", style = MaterialTheme.typography.titleLarge) }
-                            Text(
-                                text = "${stored.compressAtPercent.coerceIn(
-                                    COMPRESS_MIN_PERCENT,
-                                    COMPRESS_MAX_PERCENT,
-                                )}%",
-                                style = MaterialTheme.typography.bodyLarge,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.widthIn(min = 44.dp),
-                            )
-                            IconButton(
-                                enabled = stored.autoCompress,
-                                onClick = {
-                                    scope.persist { s ->
-                                        s.copy(
-                                            compressAtPercent =
-                                                (s.compressAtPercent + COMPRESS_STEP_PERCENT)
-                                                    .coerceIn(COMPRESS_MIN_PERCENT, COMPRESS_MAX_PERCENT),
-                                        )
-                                    }
-                                },
-                            ) { Text("+", style = MaterialTheme.typography.titleLarge) }
-                        }
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
-            item {
-                SettingRow(
-                    title = "自动整理用户画像",
-                    subtitle = "每几轮之后，用这个会话的端点单独跑一次总结，把关于用户这个人的长期信息" +
-                        "写进画像。与记忆不同：记忆是模型在任务里主动记下的键值，画像是它定期从对话里" +
-                        "读出来的滚动摘要。总结失败不打扰你，也不改动已有画像。",
-                    control = {
-                        Switch(
-                            checked = stored.autoProfile,
-                            onCheckedChange = { on -> scope.persist { it.copy(autoProfile = on) } },
-                        )
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
-            item {
-                SettingRow(
-                    title = "画像整理间隔",
-                    subtitle = "每这么多轮整理一次；一轮 = 一次跑完的运行，跨会话累计。" +
-                        (if (stored.autoProfile) "" else "（自动整理已关闭，这一项暂不生效。）"),
-                    control = {
-                        // 与压缩阈值同款的 −/+ 步进：关掉开关也留着这一行，只是置灰。
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.alpha(if (stored.autoProfile) 1f else 0.38f),
-                        ) {
-                            IconButton(
-                                enabled = stored.autoProfile,
-                                onClick = {
-                                    scope.persist { s ->
-                                        s.copy(
-                                            profileEveryTurns =
-                                                (s.profileTurnThreshold - PROFILE_STEP_TURNS)
-                                                    .coerceIn(PROFILE_MIN_TURNS, PROFILE_MAX_TURNS),
-                                        )
-                                    }
-                                },
-                            ) { Text("−", style = MaterialTheme.typography.titleLarge) }
-                            Text(
-                                text = "${stored.profileTurnThreshold} 轮",
-                                style = MaterialTheme.typography.bodyLarge,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.widthIn(min = 44.dp),
-                            )
-                            IconButton(
-                                enabled = stored.autoProfile,
-                                onClick = {
-                                    scope.persist { s ->
-                                        s.copy(
-                                            profileEveryTurns =
-                                                (s.profileTurnThreshold + PROFILE_STEP_TURNS)
-                                                    .coerceIn(PROFILE_MIN_TURNS, PROFILE_MAX_TURNS),
-                                        )
-                                    }
-                                },
-                            ) { Text("+", style = MaterialTheme.typography.titleLarge) }
-                        }
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
+            // 「自动整理用户画像」与「画像整理间隔」搬到了用户画像页（ProfileScreen）：它们管的是
+            // 那份画像本身怎么维护，与这一页的对话行为不是一回事，而「数据」页是纯入口列表、
+            // 放开关会破坏它的形态。字段与存储没动。
             item {
                 LabeledBlock(label = "工具审批", hint = "模型每次动手前要不要问你。") {
                     SegmentedPill(
@@ -1459,77 +1338,125 @@ private fun SteerSettingsPage(onBack: () -> Unit) {
                     }
                 }
             }
-        }
-    }
-}
-
-/** 外观: theme, palette, type scale and what the transcript shows by default. */
-@Composable
-private fun AppearanceSettingsPage(onBack: () -> Unit) {
-    val stored by Core.settings.flow.collectAsState(initial = AppSettings())
-    val scope = rememberCoroutineScope()
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { PageTopBar(title = SettingsPage.APPEARANCE.title, onBack = onBack) },
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             item {
-                LabeledBlock(label = "主题") {
-                    SegmentedPill(
-                        options = listOf("跟随系统", "浅色", "深色"),
-                        selectedIndex = stored.themeMode.coerceIn(0, 2),
-                        onSelect = { index -> scope.persist { it.copy(themeMode = index) } },
-                    )
-                }
-            }
-            item {
-                LabeledBlock(
-                    label = "配色",
-                    hint = "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色。",
-                ) {
-                    SegmentedPill(
-                        options = listOf("随行配色", "跟随壁纸"),
-                        selectedIndex = stored.paletteMode.coerceIn(0, 1),
-                        onSelect = { index -> scope.persist { it.copy(paletteMode = index) } },
-                    )
-                }
+                SettingRow(
+                    title = "自动压缩上下文",
+                    subtitle = "上下文接近窗口上限时把旧消息压成摘要。超窗是接口直接报错，" +
+                        "压缩最坏只是丢些细节；只在「模型与生成」里设了上下文条数时才可能触发。",
+                    control = {
+                        Switch(
+                            checked = stored.autoCompress,
+                            onCheckedChange = { on -> scope.persist { it.copy(autoCompress = on) } },
+                        )
+                    },
+                )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
-                LabeledBlock(label = "字号", hint = "正文字号，立即生效。") {
-                    SegmentedPill(
-                        options = listOf("小", "标准", "大", "特大"),
-                        selectedIndex = stored.fontScale.coerceIn(0, 3),
-                        onSelect = { index -> scope.persist { it.copy(fontScale = index) } },
-                    )
-                }
+                SettingRow(
+                    title = "自动压缩阈值",
+                    subtitle = "上下文用到窗口的这个比例时，自动把较早的对话压成摘要；" +
+                        "调高更省钱但更容易触顶，调低更保险但会提前丢细节。" +
+                        (if (stored.autoCompress) "" else "（自动压缩已关闭，这一项暂不生效。）"),
+                    control = {
+                        // 关掉开关也留着这一行，只是置灰：藏起来用户就找不到它了。
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.alpha(if (stored.autoCompress) 1f else 0.38f),
+                        ) {
+                            IconButton(
+                                enabled = stored.autoCompress,
+                                onClick = {
+                                    scope.persist { s ->
+                                        s.copy(
+                                            compressAtPercent =
+                                                (s.compressAtPercent - COMPRESS_STEP_PERCENT)
+                                                    .coerceIn(COMPRESS_MIN_PERCENT, COMPRESS_MAX_PERCENT),
+                                        )
+                                    }
+                                },
+                            ) { Text("−", style = MaterialTheme.typography.titleLarge) }
+                            Text(
+                                text = "${stored.compressAtPercent.coerceIn(
+                                    COMPRESS_MIN_PERCENT,
+                                    COMPRESS_MAX_PERCENT,
+                                )}%",
+                                style = MaterialTheme.typography.bodyLarge,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.widthIn(min = 44.dp),
+                            )
+                            IconButton(
+                                enabled = stored.autoCompress,
+                                onClick = {
+                                    scope.persist { s ->
+                                        s.copy(
+                                            compressAtPercent =
+                                                (s.compressAtPercent + COMPRESS_STEP_PERCENT)
+                                                    .coerceIn(COMPRESS_MIN_PERCENT, COMPRESS_MAX_PERCENT),
+                                        )
+                                    }
+                                },
+                            ) { Text("+", style = MaterialTheme.typography.titleLarge) }
+                        }
+                    },
+                )
+            }
+            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
+            item { SectionHeader("失败处理") }
+            item {
+                SettingRow(
+                    title = "失败自动重试",
+                    subtitle = "只对网络中断、超时、5xx 与 429 重试；已经开始回答则不重试——那会把" +
+                        "半截回答重来一遍，比重试更糟。",
+                    control = {
+                        Switch(
+                            checked = stored.retryOnFailure,
+                            onCheckedChange = { on -> scope.persist { it.copy(retryOnFailure = on) } },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
-                LabeledBlock(label = "圆角", hint = "卡片、按钮与输入框的圆角大小。") {
-                    SegmentedPill(
-                        options = listOf("方正", "标准", "圆润"),
-                        selectedIndex = stored.cornerScale.coerceIn(0, 2),
-                        onSelect = { index -> scope.persist { it.copy(cornerScale = index) } },
-                    )
-                }
+                LabeledSlider(
+                    label = if (stored.retryMaxAttempts <= 0) {
+                        "最多重试次数 不重试"
+                    } else {
+                        "最多重试次数 ${stored.retryMaxAttempts.coerceIn(0, MAX_RETRY_ATTEMPTS)}"
+                    },
+                    hint = "一次请求最多重试几次；0＝不重试。只在上面那个开关打开时生效。",
+                    value = stored.retryMaxAttempts.coerceIn(0, MAX_RETRY_ATTEMPTS).toFloat(),
+                    range = 0f..MAX_RETRY_ATTEMPTS.toFloat(),
+                    steps = MAX_RETRY_ATTEMPTS - 1,
+                    onValueChange = { n -> scope.persist { it.copy(retryMaxAttempts = n.toInt()) } },
+                )
             }
             item {
-                LabeledBlock(label = "气泡宽度", hint = "助手回复最多占屏幕的宽度比例。") {
-                    SegmentedPill(
-                        options = listOf("窄", "标准", "宽"),
-                        selectedIndex = stored.bubbleWidth.coerceIn(0, 2),
-                        onSelect = { index -> scope.persist { it.copy(bubbleWidth = index) } },
-                    )
-                }
+                LabeledSlider(
+                    label = "重试间隔 ${stored.retryDelaySeconds} 秒",
+                    hint = "两次重试之间等多久。等得久一点更可能躲过对方的限流。",
+                    value = stored.retryDelaySeconds
+                        .coerceIn(MIN_RETRY_DELAY_SECONDS, MAX_RETRY_DELAY_SECONDS)
+                        .toFloat(),
+                    range = MIN_RETRY_DELAY_SECONDS.toFloat()..MAX_RETRY_DELAY_SECONDS.toFloat(),
+                    steps = MAX_RETRY_DELAY_SECONDS - MIN_RETRY_DELAY_SECONDS - 1,
+                    onValueChange = { s -> scope.persist { it.copy(retryDelaySeconds = s.toInt()) } },
+                )
+            }
+            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
+            item { SectionHeader("显示") }
+            item {
+                SettingRow(
+                    title = "显示思考过程",
+                    subtitle = "把模型的思考流式画在回复上方。关掉只是不显示，思考强度照旧生效。",
+                    control = {
+                        Switch(
+                            checked = stored.showReasoning,
+                            onCheckedChange = { on -> scope.persist { it.copy(showReasoning = on) } },
+                        )
+                    },
+                )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
@@ -1616,8 +1543,82 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                         )
                     },
                 )
+            }
+        }
+    }
+}
+
+/** 外观: theme, palette, type scale and what the transcript shows by default. */
+@Composable
+private fun AppearanceSettingsPage(onBack: () -> Unit) {
+    val stored by Core.settings.flow.collectAsState(initial = AppSettings())
+    val scope = rememberCoroutineScope()
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = { PageTopBar(title = SettingsPage.APPEARANCE.title, onBack = onBack) },
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .navigationBarsPadding(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            item {
+                LabeledBlock(label = "主题") {
+                    SegmentedPill(
+                        options = listOf("跟随系统", "浅色", "深色"),
+                        selectedIndex = stored.themeMode.coerceIn(0, 2),
+                        onSelect = { index -> scope.persist { it.copy(themeMode = index) } },
+                    )
+                }
+            }
+            item {
+                LabeledBlock(
+                    label = "配色",
+                    hint = "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("随行配色", "跟随壁纸"),
+                        selectedIndex = stored.paletteMode.coerceIn(0, 1),
+                        onSelect = { index -> scope.persist { it.copy(paletteMode = index) } },
+                    )
+                }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
+            item {
+                LabeledBlock(label = "字号", hint = "正文字号，立即生效。") {
+                    SegmentedPill(
+                        options = listOf("小", "标准", "大", "特大"),
+                        selectedIndex = stored.fontScale.coerceIn(0, 3),
+                        onSelect = { index -> scope.persist { it.copy(fontScale = index) } },
+                    )
+                }
+            }
+            item {
+                LabeledBlock(label = "圆角", hint = "卡片、按钮与输入框的圆角大小。") {
+                    SegmentedPill(
+                        options = listOf("方正", "标准", "圆润"),
+                        selectedIndex = stored.cornerScale.coerceIn(0, 2),
+                        onSelect = { index -> scope.persist { it.copy(cornerScale = index) } },
+                    )
+                }
+            }
+            item {
+                LabeledBlock(label = "气泡宽度", hint = "助手回复最多占屏幕的宽度比例。") {
+                    SegmentedPill(
+                        options = listOf("窄", "标准", "宽"),
+                        selectedIndex = stored.bubbleWidth.coerceIn(0, 2),
+                        onSelect = { index -> scope.persist { it.copy(bubbleWidth = index) } },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            // 思考块与「看到什么」的六项搬到了「对话配置」页：它们是对话内容的显示方式，不是
+            // 主题/排版。字段与存储没动。
             item {
                 TextButton(
                     onClick = {
@@ -1628,13 +1629,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 paletteMode = defaults.paletteMode,
                                 fontScale = defaults.fontScale,
                                 bubbleWidth = defaults.bubbleWidth,
-                                reasoningHeight = defaults.reasoningHeight,
                                 cornerScale = defaults.cornerScale,
-                                showTimestamps = defaults.showTimestamps,
-                                expandTools = defaults.expandTools,
-                                expandReasoning = defaults.expandReasoning,
-                                autoFollow = defaults.autoFollow,
-                                followReasoning = defaults.followReasoning,
                             )
                         }
                     },
@@ -2270,6 +2265,17 @@ private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
         subtitle = subtitle,
         onClick = onClick,
         control = { RowChevron() },
+    )
+}
+
+/** 一页里的小节标题：四段之间的分界，靠字号与颜色分层，不加卡片。 */
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
     )
 }
 
