@@ -43,6 +43,8 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import android.app.Activity
+import android.graphics.drawable.ColorDrawable
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -75,6 +77,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -333,6 +336,14 @@ fun SuixingApp() {
         // gesture bar that padding is dead space, which is the band the user photographed).
         LocalHeldImePx provides heldImePx,
     ) {
+        // 用户明确要求保留这一段（2026-10-11：先被自审删掉，用户看到键盘后面那块颜色变了，要求回退）。
+        // 把窗口底色刷成主题 surface：键盘圆角/键盘后面那条缝露的就是这个颜色；删掉之后窗口是透明的，
+        // 缝里露的是壁纸 —— 用户不要那个效果。
+        val activity = LocalContext.current as? Activity
+        val surfaceArgb = MaterialTheme.colorScheme.surface.toArgb()
+        LaunchedEffect(surfaceArgb) {
+            activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
+        }
         // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
         // the strip behind the keyboard was left unpainted and the window's own white showed
         // through the keyboard's rounded corners as a pale seam. This box is not inset, so

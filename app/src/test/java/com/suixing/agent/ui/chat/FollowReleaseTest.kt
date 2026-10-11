@@ -78,4 +78,82 @@ class FollowReleaseTest {
             restoresFollow(movedUp = false, scrolled = false, atEnd = true, heldMs = 200, holdMs = 250),
         )
     }
+
+    // --------------------------------------------------- 「往上滑一点点，又追底」 (0.8.86 回归)
+
+    /**
+     * The regression, at the level the release decision can see it: a drag of a few pixels — past
+     * the touch slop, under the 12dp travel threshold — moves the list, and a moved list must not
+     * get the follow back. The scroll-progress flag may never have been sampled; the position pair
+     * cannot miss it.
+     */
+    @Test
+    fun `a drag too small for the travel threshold still counts as a scroll`() {
+        assertFalse(
+            restoresFollowAfterPress(
+                movedUp = false,
+                scrolledDuringPress = false,
+                downIndex = 7,
+                downOffset = 0,
+                nowIndex = 7,
+                nowOffset = 6,
+                atVeryEnd = false,
+                heldMs = 90,
+            ),
+        )
+    }
+
+    /**
+     * The tolerance that caused it: a few pixels off the end is *not* the end. Read as "still at
+     * the end" it re-armed the follow, and the next streamed frame hauled the reader back down.
+     */
+    @Test
+    fun `a few pixels off the end is not the end`() {
+        assertFalse(
+            restoresFollowAfterPress(
+                movedUp = false,
+                scrolledDuringPress = false,
+                downIndex = 7,
+                downOffset = 0,
+                nowIndex = 7,
+                nowOffset = 0,
+                atVeryEnd = false,
+                heldMs = 80,
+            ),
+        )
+    }
+
+    /** The tap that must keep working: nothing moved, and the list really is at its end. */
+    @Test
+    fun `a tap that moved nothing at the absolute end still hands it back`() {
+        assertTrue(
+            restoresFollowAfterPress(
+                movedUp = false,
+                scrolledDuringPress = false,
+                downIndex = 7,
+                downOffset = 0,
+                nowIndex = 7,
+                nowOffset = 0,
+                atVeryEnd = true,
+                heldMs = 120,
+            ),
+        )
+    }
+
+    /** Reading in the middle of the history: no restore, whatever the gesture looked like. */
+    @Test
+    fun `a press while reading in the middle of the history never hands it back`() {
+        assertFalse(
+            restoresFollowAfterPress(
+                movedUp = false,
+                scrolledDuringPress = false,
+                downIndex = 3,
+                downOffset = 240,
+                nowIndex = 3,
+                nowOffset = 240,
+                atVeryEnd = false,
+                heldMs = 90,
+            ),
+        )
+    }
 }

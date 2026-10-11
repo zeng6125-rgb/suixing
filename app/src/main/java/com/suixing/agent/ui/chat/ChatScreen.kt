@@ -629,7 +629,7 @@ fun ChatScreen(
                     SystemClock.uptimeMillis() - lastPinAt > 120
                 ) {
                     following = false
-                } else if (!scrolling && !pressed && listState.atEnd(slack = 8)) {
+                } else if (!scrolling && !pressed && listState.atVeryEnd()) {
                     // Released at the end again — or the user tapped 跳最新, which sets
                     // following itself: either way the run may follow its output again.
                     //
@@ -931,6 +931,12 @@ fun ChatScreen(
                                         if (down.changes.none { it.pressed }) continue
                                         val pressedAt = SystemClock.uptimeMillis()
                                         val downY = down.changes.first().position.y
+                                        // Where the transcript stood when the finger landed. Compared
+                                        // with the same pair at release: any difference means the
+                                        // list moved, which is the one fact that must keep the follow
+                                        // released (see restoresFollowAfterPress).
+                                        val downIndex = listState.firstVisibleItemIndex
+                                        val downOffset = listState.firstVisibleItemScrollOffset
                                         val wasFollowing = following
                                         following = false
                                         pressed = true
@@ -962,13 +968,31 @@ fun ChatScreen(
                                         // starts a selection, any drag — in either direction — and
                                         // anything the list itself scrolled leave the follow released
                                         // until the scroll watcher re-arms it at the end.
-                                        val atEndNow = listState.atEnd(slack = 8)
+                                        //
+                                        // 「Never moved」 is the position pair, not the finger: a drag of
+                                        // a few pixels, or one that ends before the scroll-progress flag
+                                        // is ever sampled, still moved the list. And the end is the
+                                        // absolute end — a few pixels short of it is where the reader
+                                        // was, not where the follow wants to be.
+                                        val atEndNow = listState.atVeryEnd()
                                         // The finger is up: from here the watcher may hand the
                                         // follow back, and the release rule below decides whether it
                                         // should.
                                         pressed = false
                                         scrollDiag(context, "press:up:movedUp=$movedUp:scrolled=$scrolled:atEnd=$atEndNow", listState, following, itemCount, ime = heldIme) // 量完删
-                                        if (restoresFollow(movedUp, scrolled, atEndNow, SystemClock.uptimeMillis() - pressedAt, holdToSelectMs)) {
+                                        val held = SystemClock.uptimeMillis() - pressedAt
+                                        if (restoresFollowAfterPress(
+                                                movedUp = movedUp,
+                                                scrolledDuringPress = scrolled,
+                                                downIndex = downIndex,
+                                                downOffset = downOffset,
+                                                nowIndex = listState.firstVisibleItemIndex,
+                                                nowOffset = listState.firstVisibleItemScrollOffset,
+                                                atVeryEnd = atEndNow,
+                                                heldMs = held,
+                                                holdMs = holdToSelectMs,
+                                            )
+                                        ) {
                                             following = wasFollowing
                                         }
                                     }
@@ -3072,9 +3096,15 @@ private fun ReasoningBlock(
                             // The hand wins the moment it lifts the chain off its tail; the
                             // next frame of the stream must not yank it back down.
                             follow = false
-                        } else if (!scrolling && inner.atEnd(slack = 8)) {
+                        } else if (!scrolling && inner.atVeryEnd()) {
                             // Released at the bottom again: the chain may chase its tail once
                             // more. A chain that never left its end keeps following anyway.
+                            //
+                            // 与正文同一条规则：判「到底」只能用 [atVeryEnd]，**不要再回到容差**
+                            // （原来的 `atEnd(slack = 8)`）。思维链是 px 级的滚动，滚几个像素就落在
+                            // 8px 容差里 ⇒ 手指一松就重新追尾，和用户报的「往上滑一点点，又追底」
+                            // 是同一个形态；这个内层列表有自己的一套 follow/autoScrolled，所以它
+                            // 不会因为正文修好了而跟着好。
                             follow = true
                         }
                         autoScrolled = false
@@ -6984,6 +7014,19 @@ private fun LazyListState.atEnd(slack: Int = 24): Boolean {
 }
 
 /**
+ * True only at the very end of the transcript: there is nothing left to scroll toward.
+ *
+ * Deliberately **not** [atEnd] with a small slack, which is the shape that produced 「往上滑一点点，
+ * 又追底」. The slack is pixels, so a drag of a few pixels — just past the touch slop, under the
+ * 12dp travel threshold — left the list inside the tolerance: the watcher read that as "released at
+ * the end again" and re-armed the follow, and the next streamed frame pulled the transcript to the
+ * bottom. The reader had moved the list; they had just not moved it far. `canScrollForward` is the
+ * list's own answer to "is anything below", so it cannot disagree with the real position the way an
+ * arithmetic tolerance can.
+ */
+private fun LazyListState.atVeryEnd(): Boolean = !canScrollForward
+
+/**
  * Whether a gesture that has just ended may hand the follow back to the transcript.
  *
  * Only a tap does, and a tap is all three of these: it was short, it never dragged upward, and the
@@ -6998,6 +7041,15 @@ private fun LazyListState.atEnd(slack: Int = 24): Boolean {
  * [holdMs] is the caller's own long-press timeout, and the caller passes the platform's rather than
  * this file's constant — see the constant's own note for the window that made a selection long
  * press look like a tap.
+ *
+ * **What the caller owes this function.** [scrolled] has to mean "the transcript moved", and it
+ * cannot be derived from `isScrollInProgress` sampling alone: that flag is read on pointer events,
+ * so a short drag can end before it is ever seen, and it is suppressed entirely while our own pin
+ * runs. The caller therefore passes the **visible position at press-down and at release**
+ * ([restoresFollowAfterPress] does the comparison) — a difference of one pixel is a moved list. And
+ * [atEnd] has to mean the **absolute** end, not "within a tolerance of it": a reader a few pixels
+ * off the end is where the follow must not return to, which is the whole shape of 「往上滑一点点，
+ * 又追底」.
  */
 internal fun restoresFollow(
     movedUp: Boolean,
@@ -7006,6 +7058,44 @@ internal fun restoresFollow(
     heldMs: Long,
     holdMs: Long = HOLD_TO_SELECT_MS,
 ): Boolean = !movedUp && !scrolled && atEnd && heldMs < holdMs
+
+/**
+ * The release decision as the list actually sees it, which is the half [restoresFollow] cannot
+ * answer on its own.
+ *
+ * Two inputs are computed here rather than at the call site, because both were wrong in the same
+ * way — they asked "did the finger travel?" instead of "did the transcript move?":
+ *
+ *  - **the position comparison**: [downIndex]/[downOffset] are the first visible item at press-down
+ *    and [nowIndex]/[nowOffset] at release. Any difference at all means the list moved, however
+ *    small the gesture was and however briefly it lasted — and a moved list must never have the
+ *    follow handed back, or the next publish hauls the reader back to the bottom. This is the
+ *    signal the scroll-progress sampling misses: a short drag can end before the flag is ever read,
+ *    and a drag that only just passed the touch slop moves the list by a few pixels.
+ *  - **[atVeryEnd]**: the caller passes whether the list is at its absolute end, not "within a
+ *    tolerance of it". A reader who scrolled up by a few pixels is not at the end, and must not be
+ *    treated as one.
+ *
+ * A tap that moved nothing and ended at the absolute end still restores: tapping a card to open it
+ * is not an interaction with the position.
+ */
+internal fun restoresFollowAfterPress(
+    movedUp: Boolean,
+    scrolledDuringPress: Boolean,
+    downIndex: Int,
+    downOffset: Int,
+    nowIndex: Int,
+    nowOffset: Int,
+    atVeryEnd: Boolean,
+    heldMs: Long,
+    holdMs: Long = HOLD_TO_SELECT_MS,
+): Boolean = restoresFollow(
+    movedUp = movedUp,
+    scrolled = scrolledDuringPress || downIndex != nowIndex || downOffset != nowOffset,
+    atEnd = atVeryEnd,
+    heldMs = heldMs,
+    holdMs = holdMs,
+)
 
 /** Far more than any transcript: the list clamps this to its own end. */
 private const val FOLLOW_SCROLL_PX = 200_000f
