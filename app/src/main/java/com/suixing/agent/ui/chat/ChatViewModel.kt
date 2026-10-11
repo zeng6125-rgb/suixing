@@ -527,6 +527,12 @@ class ChatViewModel : ViewModel() {
     fun clearDraft(chatId: String) {
         _drafts.value = _drafts.value + (chatId to Draft())
         attachmentCache.remove(chatId)
+        // And straight onto the screen when that chat is the one being shown. The collector above
+        // would do it a hop later, and a field that keeps its text for even one frame after the user
+        // pressed send reads as "it did not send" — which is how the queue was reported twice.
+        if (_state.value.conversationId == chatId && _state.value.draft != Draft()) {
+            _state.update { it.copy(draft = Draft()) }
+        }
     }
 
     init {

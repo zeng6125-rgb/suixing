@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -30,7 +31,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.DayUsage
 import com.suixing.agent.data.ModelUsage
@@ -102,11 +108,10 @@ fun UsageScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatCard("累计 tokens", compact(totals.total), Modifier.weight(1f))
-                    StatCard("会话数", "$conversations", Modifier.weight(1f))
-                    StatCard("最长单轮", compact(longestTurn), Modifier.weight(1f))
-                }
+                StatCards(
+                    titles = listOf("累计 tokens", "会话数", "最长单轮"),
+                    values = listOf(compact(totals.total), "$conversations", compact(longestTurn)),
+                )
             }
             item {
                 SectionTitle("近 30 天")
@@ -208,22 +213,78 @@ private fun SectionTitle(text: String) {
     )
 }
 
+/** 数值字号的下限：再小就不如让用户去别处看完整数字，但三张卡的数值都必须单行放下。 */
+private const val MIN_STAT_VALUE_SP = 13f
+
+/**
+ * 三张指标卡：**等宽、等高、同一个字号**。
+ *
+ * 上一版把三张卡各自交给 [StatCard]，谁的字放不下谁就自己折行——「256.5M」在 24sp 下比卡片
+ * 内宽还宽（360dp 屏上内宽约 72dp，这个串要 80dp），于是它被拆成「256.5」+「M」两行：第一张
+ * 卡因此比旁边两张高出一截，看起来"大小各不相同、不和谐"。
+ *
+ * 这里把两件事一次性定下来：① 字号由**三张卡共用一个**，取"最长的那条数值也能单行放下"的
+ * 那一档（谁都不许比谁小）；② 卡片内边距收窄到 12dp，让设计字号在常见屏宽下本来就放得下，
+ * 缩小只在大字体/窄屏时才发生。
+ */
 @Composable
-private fun StatCard(title: String, value: String, modifier: Modifier = Modifier) {
+private fun StatCards(titles: List<String>, values: List<String>) {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val base = MaterialTheme.typography.titleLarge
+    BoxWithConstraints {
+        // 卡片内宽 = 行宽 − 两个 8dp 间距，三等分，再扣掉卡片自己的左右 12dp 内边距。
+        val inner = (maxWidth - 16.dp) / 3 - 24.dp
+        val room = with(density) { inner.toPx() }
+        val fontSize = remember(inner, values) {
+            var size = base.fontSize
+            while (size.value > MIN_STAT_VALUE_SP &&
+                values.any { measurer.measure(it, style = base.copy(fontSize = size)).size.width > room }
+            ) {
+                size = (size.value - 0.5f).sp
+            }
+            size
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            titles.forEachIndexed { index, title ->
+                StatCard(title, values[index], base.copy(fontSize = fontSize), Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatCard(
+    title: String,
+    value: String,
+    valueStyle: TextStyle,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         modifier = modifier,
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(16.dp)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                // 标签也必须单行：它一折行，这一张卡就比旁边两张高，三张卡又回到"不齐"。
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(4.dp))
-            Text(text = value, style = MaterialTheme.typography.headlineSmall)
+            Text(
+                text = value,
+                style = valueStyle,
+                // 数值永远单行：断行会把「256.5M」拆成「256.5」+「M」。字号已由 [StatCards]
+                // 统一挑好，这里的 Ellipsis 只是极端字体缩放下的兜底，正常情况下用不到。
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

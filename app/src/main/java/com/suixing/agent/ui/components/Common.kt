@@ -56,6 +56,57 @@ import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
 
 /**
+ * 全站统一的可点块：形状、涟漪、按下反馈都从这一处来。
+ *
+ * 为什么要有它：`ripple()` 是 **bounded** 的——它按**这个节点自己的**尺寸画。顺序或挂载点写错，
+ * 就正好是用户报的那两类毛病：
+ *  - `.padding(...)` 写在 `.clickable(...)` **前面** ⇒ 节点比可见的行小一圈，涟漪四周差一截
+ *    （「没有填充满」）；
+ *  - `.clickable(...)` 挂在内层内容块上（只有图标、或只有一行字）⇒ 可见的是一整行，涟漪却是
+ *    中间一个小圆点。
+ * 这里把顺序钉死：**clip(shape) → clickable → 调用方自己的 padding**。clip 在 clickable 之前，
+ * 涟漪就跟着各自形状的圆角/圆形走，既不会溢成方角，也不会被 padding 裁掉。
+ *
+ * 关于 `remember`：`MutableInteractionSource` 必须 `remember`，而 `remember` 是组合函数，写不进
+ * 普通的 `Modifier` 扩展。两种解法：
+ *  1. **把这个工厂本身声明成 `@Composable`**（本文件采用）——调用点本来就在组合里，没有额外节点、
+ *     没有额外开销；代价是它只能在组合中调用，而这恰好是我们要的约束。
+ *  2. `Modifier.composed { remember { ... } }`——它是为「必须在非组合上下文里构造修饰符」准备的，
+ *     会多一层 node，在布局/绘制阶段调用还有额外开销。这里不需要，所以不用。
+ * 需要自己读按下状态（做整块高亮之类）的调用方，用下面那个带 [interactionSource] 的重载。
+ */
+@Composable
+fun Modifier.suixingClickable(
+    shape: Shape,
+    enabled: Boolean = true,
+    role: Role? = null,
+    onClick: () -> Unit,
+): Modifier = suixingClickable(
+    shape = shape,
+    interactionSource = remember { MutableInteractionSource() },
+    enabled = enabled,
+    role = role,
+    onClick = onClick,
+)
+
+/** 同上，但交互源由调用方持有（例如还要 `collectIsPressedAsState` 做按下反馈）。 */
+fun Modifier.suixingClickable(
+    shape: Shape,
+    interactionSource: MutableInteractionSource,
+    enabled: Boolean = true,
+    role: Role? = null,
+    onClick: () -> Unit,
+): Modifier = this
+    .clip(shape)
+    .clickable(
+        interactionSource = interactionSource,
+        indication = ripple(),
+        enabled = enabled,
+        role = role,
+        onClick = onClick,
+    )
+
+/**
  * The values the OpenAI-compatible `reasoning_effort` field accepts, wire value to
  * 档位名. The settings slider and the chat's 思考 pill menu read the same list, so the
  * two can never disagree about what a level is called.
@@ -221,7 +272,9 @@ fun SettingRow(
                     Modifier
                 } else {
                     // 行自带圆角点击区：水波纹跟着圆角走，而不是溢成一个方角。
-                    Modifier.clip(MaterialTheme.shapes.small).clickable(onClick = onClick)
+                    // 走共享修饰符：clip → clickable → 上面的 padding，涟漪就等于整行（含 12dp 行高
+                    // 内边距），不再只盖住文字那一块。
+                    Modifier.suixingClickable(MaterialTheme.shapes.small, onClick = onClick)
                 },
             )
             .padding(vertical = 12.dp),
@@ -396,8 +449,7 @@ fun SuixingTopBar(
                                         onSubtitleClick?.let { tap ->
                                             Modifier
                                                 .heightIn(min = 48.dp)
-                                                .clip(MaterialTheme.shapes.small)
-                                                .clickable(onClick = tap)
+                                                .suixingClickable(MaterialTheme.shapes.small, onClick = tap)
                                                 .padding(horizontal = 6.dp)
                                         } ?: Modifier,
                                     ),
@@ -490,7 +542,13 @@ fun PageTopBar(
                     .heightIn(min = 64.dp)
                     // 12dp 是这一栏自己的「栏内 inset」，不是页面 gutter——页面横向留白全站
                     // 统一 16dp，两者不是同一层，所以这里故意不跟 16dp 走。别当违规改掉。
-                    .padding(horizontal = 12.dp),
+                    .padding(horizontal = 12.dp)
+                    // 内容整体下移：用户原话「顶栏高度保持不变，icon 和标题向下移一点」。
+                    // 用 top-only padding 而不是 offset——padding 在 heightIn(min = 64dp) 之内，
+                    // 栏高一点没变；它把居中盒子压到 54dp，于是内容的视觉中心从 32dp 落到
+                    // 10 + 27 = 37dp，**净下移 5dp**（右侧 actions 与返回键都在这一个 Row 里，
+                    // 跟着同一条基线走，不会出现"标题低了、按钮还在上面"）。
+                    .padding(top = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // No disc behind the glyph on purpose: this bar is a filled surface of its
@@ -706,7 +764,9 @@ fun PressPill(
         spotColor = Color.Black.copy(alpha = 0.12f),
     )
     Surface(
-        modifier = if (onClick == null) shadowed else shadowed.clickable(onClick = onClick),
+        // 胶囊形状要跟着涟漪走：原来 clickable 挂在 Surface 外面、没有 clip，涟漪是一个**方角矩形**
+        // 盖在一颗胶囊上（用户看到的「没填充满/形状不对」）。suixingClickable 自带 clip(shape)。
+        modifier = if (onClick == null) shadowed else shadowed.suixingClickable(shape, onClick = onClick),
         shape = shape,
         color = color,
         contentColor = contentColor,

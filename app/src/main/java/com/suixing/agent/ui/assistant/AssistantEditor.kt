@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.assistant
 
+import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,6 +28,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -84,25 +87,30 @@ fun AssistantEditor(
     val scope = rememberCoroutineScope()
     /** Set when picking a picture fails; cleared on the next successful pick. */
     var notice by remember { mutableStateOf<String?>(null) }
+    /** The decoded picture waiting to be framed; null when the crop screen is not up. */
+    var cropping by remember { mutableStateOf<Bitmap?>(null) }
     // 删除是不可撤销的：它会把助手连同提示词和头像 PNG 一起从设置里抹掉，所以先问一次。
     var confirmingDelete by remember { mutableStateOf(false) }
-    // The picture is written the moment it is picked, not on save: the pick arrives as a
-    // content:// uri that is only readable while the picker's grant lasts, and the draft holds
-    // the path to the file we made out of it. A pick that fails leaves the old picture alone.
+    // The picture is written the moment the crop is confirmed, not on save: the pick arrives as a
+    // content:// uri that is only readable while the picker's grant lasts, and the draft holds the
+    // path to the file we made out of it. A pick that fails leaves the old picture alone.
+    //
+    // 「换一张」 goes through the crop screen first: the pick is decoded (sampled, never the whole
+    // camera roll), the user frames it in the circle, and only 「确定」 writes a file. 「取消」
+    // writes nothing at all — the decoded bitmap is the only thing this step holds.
     val pickPicture = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
         if (uri != null) {
-            val previous = draft.avatarPath
             scope.launch {
-                val path = AssistantAvatarStore.save(context, draft.id, uri, previous)
-                if (path != null) {
-                    notice = null
-                    draft = draft.copy(avatarPath = path)
-                } else {
+                val source = AssistantAvatarStore.decodeForCrop(context, uri)
+                if (source == null) {
                     // A pick can fail (huge picture, revoked grant, file already gone). The old
                     // picture is left alone, so without this line the tap would look ignored.
-                    notice = "这张图没能保存下来，头像保持原样。可以换一张，或直接用下面的表情。"
+                    notice = "这张图没能打开，头像保持原样。可以换一张，或直接用下面的表情。"
+                } else {
+                    notice = null
+                    cropping = source
                 }
             }
         }
@@ -110,7 +118,14 @@ fun AssistantEditor(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        // decorFitsSystemWindows = false：默认值 true 会让这个**对话框窗口**自己躲开系统栏，
+        // 于是这一页既不画状态栏那一条、也不给顶栏留内边距——状态栏区域露出的是后面被压暗的
+        // 聊天页，用户看到的就是「这一页状态栏没有」。铺到状态栏之后，本页的 Surface 盖住整窗，
+        // 顶栏那句 statusBarsPadding()（Common.kt:353）再把内容推到状态栏下面，与其它页一致。
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
     ) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Scaffold(
@@ -230,6 +245,35 @@ fun AssistantEditor(
             },
         )
     }
+
+    // 裁剪是选图与保存之间的一步，自己一个全屏对话框：它要占满屏幕才拖得动，而编辑页还开着，
+    // 取消回来时用户看到的正是他离开时的那个编辑页。
+    cropping?.let { source ->
+        AvatarCropper(
+            source = source,
+            onCancel = {
+                // 取消：什么都没写，头像仍是原来那张。把解码出来的位图还给系统。
+                cropping = null
+                source.recycle()
+            },
+            onConfirm = { rect ->
+                val previous = draft.avatarPath
+                scope.launch {
+                    val path = AssistantAvatarStore.saveCropped(context, draft.id, source, rect, previous)
+                    cropping = null
+                    source.recycle()
+                    if (path != null) {
+                        notice = null
+                        draft = draft.copy(avatarPath = path)
+                    } else {
+                        // 写盘失败（空间、权限、位图已经回收）：旧头像原样留着，并说清是保存失败，
+                        // 与「打开失败」分开——用户下一步该做的事不一样。
+                        notice = "这张图没能保存下来，头像保持原样。可以换一张，或直接用下面的表情。"
+                    }
+                }
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -251,13 +295,26 @@ private fun IdentitySection(
                 avatarPath = draft.avatarPath,
                 size = 64.dp,
             )
-            Spacer(Modifier.width(12.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                TextButton(onClick = onPickPicture) {
+            Spacer(Modifier.width(8.dp))
+            // 两个入口并排成一组：竖排时它们各自占满一个 40dp 的按钮框，读起来是「一个在顶、
+            // 一个在底」，中间那一大段空白其实是按钮的触控框。并排之后竖向只剩一行，头像右侧的
+            // 空档也从 24dp（12dp 间隔 + 12dp 按钮内边距）收到 16dp。
+            // FlowRow 而不是 Row：字号放大到一行放不下时它会自己折行，不会把「恢复默认图标」挤出去。
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
+            ) {
+                TextButton(
+                    onClick = onPickPicture,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                ) {
                     Text(if (draft.avatarPath.isBlank()) "上传图片" else "换一张")
                 }
                 if (draft.avatarPath.isNotBlank()) {
-                    TextButton(onClick = onClearPicture) { Text("恢复默认图标") }
+                    TextButton(
+                        onClick = onClearPicture,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) { Text("恢复默认图标") }
                 }
             }
         }
@@ -297,17 +354,24 @@ private fun IdentitySection(
         }
         Spacer(Modifier.height(14.dp))
         OutlinedTextField(
+            // bodySmall(12sp/16dp) 与浮动标签同号：标签行 + 输入行 + 上下 8dp ≈ 48dp，正好落在
+            // 下面的下限上，于是这个框真的比 M3 默认的 56dp 矮一档。
+            textStyle = MaterialTheme.typography.bodySmall,
             value = draft.name,
             onValueChange = { onDraft(draft.copy(name = it)) },
-            modifier = Modifier.fillMaxWidth(),
+            // **下限**而不是固定高度：M3 的 OutlinedTextField 内容（浮动标签 + 文字行盒 + 留白）
+            // 有自己的最小高度，写死高度就会在字号放大时把字的下缘裁掉——工具页搜索框踩过这个坑
+            // （见 ToolsScreen.kt:521-524）。heightIn 只会给一个地板，内容需要时它自己长高。
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             label = { Text("名字") },
             singleLine = true,
         )
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(
+            textStyle = MaterialTheme.typography.bodySmall,
             value = draft.description,
             onValueChange = { onDraft(draft.copy(description = it)) },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             label = { Text("一句话说明") },
             placeholder = { Text("例如：只读代码、不改文件") },
             singleLine = true,
@@ -330,9 +394,12 @@ private fun PromptSection(draft: Assistant, onDraft: (Assistant) -> Unit) {
         },
     ) {
         OutlinedTextField(
+            textStyle = MaterialTheme.typography.bodyMedium,
             value = draft.systemPrompt,
             onValueChange = { onDraft(draft.copy(systemPrompt = it)) },
-            modifier = Modifier.fillMaxWidth().heightIn(min = 150.dp),
+            // 150 → 120：提示词框也是"太高"被点名的之一，而这里同样用**下限**——写多长它长多高，
+            // 永远不会因为框小而把字裁掉。
+            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
             placeholder = { Text("留空则沿用「设置」里的系统提示词") },
         )
     }
@@ -433,6 +500,9 @@ private fun ModelSection(
 }
 
 @OptIn(ExperimentalLayoutApi::class)
+// M3 1.3 把 LocalMinimumInteractiveComponentSize 标成了废弃（替代做法是整组关掉触控框
+// enforcement），但关掉会让 pill 掉到 32dp；这里要的是 40dp 这个折中，所以显式压掉那条告警。
+@Suppress("DEPRECATION")
 @Composable
 private fun ToolSection(
     draft: Assistant,
@@ -450,28 +520,35 @@ private fun ToolSection(
             }
         },
     ) {
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            toolNames.forEach { name ->
-                val enabled = name !in off
-                FilterChip(
-                    selected = enabled,
-                    onClick = {
-                        onDraft(
-                            draft.copy(
-                                disabledTools = if (enabled) {
-                                    draft.disabledTools + name
-                                } else {
-                                    draft.disabledTools - name
-                                },
-                            ),
-                        )
-                    },
-                    label = { Text(name, style = MaterialTheme.typography.labelSmall) },
-                )
+        // 7dp → 4dp：pill 之间的空白由两段组成——这段间距，加上 M3 给每个 chip 的隐形触控框
+        // （可见 pill 只有 FilterChipDefaults.Height = 32dp，外面被 minimumInteractiveComponentSize
+        // 撑到 48dp）。间距那段收紧了，隐形那段在这里收到 40dp：视觉间距 ~23dp → ~14dp，触控仍
+        // 有 40dp。**只作用于这一组 chip**（provider 只包这个 FlowRow），别把它提到页面或主题上——
+        // 全站的 48dp 触控下限是刻意的，只有这一屏的 chip 密度值得让 8dp。
+        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 40.dp) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                toolNames.forEach { name ->
+                    val enabled = name !in off
+                    FilterChip(
+                        selected = enabled,
+                        onClick = {
+                            onDraft(
+                                draft.copy(
+                                    disabledTools = if (enabled) {
+                                        draft.disabledTools + name
+                                    } else {
+                                        draft.disabledTools - name
+                                    },
+                                ),
+                            )
+                        },
+                        label = { Text(name, style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
             }
         }
         if (toolNames.isEmpty()) {

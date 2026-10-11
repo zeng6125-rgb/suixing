@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -463,13 +464,14 @@ private fun SkillUrlImportDialog(
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = url,
                     onValueChange = { url = it },
                     label = { Text("技能文件地址") },
                     placeholder = { Text("https://example.com/SKILL.md") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
                 if (url.isNotBlank() && !usable) {
                     Spacer(Modifier.height(6.dp))
@@ -516,13 +518,14 @@ private fun ToolsTab() {
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp)) {
             OutlinedTextField(
+                textStyle = MaterialTheme.typography.bodySmall,
                 value = query,
                 onValueChange = { query = it },
                 // 不要给这个框写死高度：OutlinedTextField 的内容（浮动标签 + 文字行盒 + 上下留白）
                 // 有自己的最小高度，把外层约束压到 44dp 之后放不下，字的下缘（带降部的汉字/字母）
                 // 就被裁掉 —— 0.8.76 收紧密度时压的就是这一处，用户看到的截断即它。
                 // 密度靠下面那些行内边距与间距拿，不靠裁这一个唯一有输入文字的控件。
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 singleLine = true,
                 label = { Text("搜索工具名") },
             )
@@ -933,17 +936,19 @@ private fun McpEditorDialog(
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("名称（会进工具名，建议用英文）") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
                 Spacer(Modifier.height(10.dp))
 
                 if (stdio) {
                     OutlinedTextField(
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         value = command,
                         onValueChange = { command = it },
                         label = { Text("启动命令") },
@@ -954,6 +959,7 @@ private fun McpEditorDialog(
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         value = env,
                         onValueChange = { env = it },
                         label = { Text("环境变量（每行 KEY=VALUE，可空）") },
@@ -963,16 +969,18 @@ private fun McpEditorDialog(
                     )
                 } else {
                     OutlinedTextField(
+                        textStyle = MaterialTheme.typography.bodySmall,
                         value = url,
                         onValueChange = { url = it },
                         label = { Text("服务器地址") },
                         placeholder = { Text("http://127.0.0.1:3000/mcp") },
                         singleLine = true,
                         shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         value = headers,
                         onValueChange = { headers = it },
                         label = { Text("请求头（每行 Name: value，可空）") },

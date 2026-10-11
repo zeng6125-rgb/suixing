@@ -14,6 +14,58 @@ import kotlin.math.roundToInt
 internal const val AVATAR_MAX_PX = 256
 
 /**
+ * The longest side the picture is decoded at before it is cropped.
+ *
+ * The crop screen needs real pixels to drag around, but it draws them at a few hundred dp: decoding
+ * a 4000px camera roll at full size would cost tens of megabytes for a picture nobody can see at
+ * that detail. 1080 keeps a 4× zoom inside the frame sharp on any phone this app runs on.
+ */
+internal const val AVATAR_CROP_WORK_PX = 1080
+
+/**
+ * The square a crop takes out of the decoded picture, in that picture's own pixels.
+ *
+ * [left] and [top] are the top-left corner, [size] the side of the square — always a square,
+ * because the frame is one and an avatar is drawn in a circle.
+ *
+ * Public because the crop screen hands one back through a callback: a public composable cannot
+ * expose an `internal` type, and this is the shape the two sides have to agree on.
+ */
+data class AvatarCropRect(val left: Int, val top: Int, val size: Int)
+
+/**
+ * The square the crop frame is showing, in the source picture's own pixels.
+ *
+ * [framePx] is the frame's side on screen, [scale] the factor the picture is drawn at (screen pixels
+ * per picture pixel; the frame is exactly covered when `scale * min(width, height) == framePx`), and
+ * [offsetXPx]/[offsetYPx] how far the picture's centre has been dragged away from the frame's
+ * centre. Those three are what the gesture writes, and the picture's own size is what turns them
+ * back into a pixel rectangle.
+ *
+ * The result is clamped into the picture: the gesture is not allowed to drag the frame off the
+ * image, and this is the second pair of braces that keeps a rounding error from asking for a
+ * rectangle `Bitmap.createBitmap` would refuse.
+ */
+internal fun avatarCropRect(
+    imageWidth: Int,
+    imageHeight: Int,
+    framePx: Float,
+    scale: Float,
+    offsetXPx: Float,
+    offsetYPx: Float,
+): AvatarCropRect {
+    if (imageWidth <= 0 || imageHeight <= 0 || framePx <= 0f || scale <= 0f) {
+        return AvatarCropRect(0, 0, 1)
+    }
+    val side = (framePx / scale).roundToInt().coerceIn(1, minOf(imageWidth, imageHeight))
+    val centreX = imageWidth / 2f - offsetXPx / scale
+    val centreY = imageHeight / 2f - offsetYPx / scale
+    val left = (centreX - side / 2f).roundToInt().coerceIn(0, imageWidth - side)
+    val top = (centreY - side / 2f).roundToInt().coerceIn(0, imageHeight - side)
+    return AvatarCropRect(left, top, side)
+}
+
+/**
  * The assistant pictures the user picked, as PNGs in the app's own private directory.
  *
  * The gallery's original is never what is stored. A photo from the camera roll is several
@@ -36,43 +88,72 @@ object AssistantAvatarStore {
     fun pathFor(id: String, stamp: Long): String = "$DIR/$id-$stamp.png"
 
     /**
-     * Decodes [uri], shrinks it to [AVATAR_MAX_PX] and writes it as this assistant's picture,
-     * returning the path to store in [Assistant.avatarPath] — or null when the pick could not
-     * be read or decoded, in which case nothing was written and [previous] is untouched.
+     * Decodes [uri] for the crop screen: sampled down to [cap] on its longest side, never the whole
+     * camera roll.
+     *
+     * Two passes, and the first one allocates nothing but the bounds: a photo's size is what decides
+     * the sample, and asking for the pixels first is exactly the out-of-memory this exists to avoid.
+     * Null when the pick cannot be read or is not a picture — the caller keeps the old avatar and
+     * says so.
      */
-    suspend fun save(
+    suspend fun decodeForCrop(
         context: Context,
-        id: String,
         uri: Uri,
-        previous: String = "",
-    ): String? = withContext(Dispatchers.IO) {
+        cap: Int = AVATAR_CROP_WORK_PX,
+    ): Bitmap? = withContext(Dispatchers.IO) {
         runCatching {
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: return@runCatching null
             // Bounds only: the point is to learn the size before allocating the pixels.
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            val decoded = BitmapFactory.decodeByteArray(
+            BitmapFactory.decodeByteArray(
                 bytes,
                 0,
                 bytes.size,
                 BitmapFactory.Options().apply {
-                    inSampleSize = avatarSampleSize(bounds.outWidth, bounds.outHeight)
+                    inSampleSize = avatarSampleSize(bounds.outWidth, bounds.outHeight, cap)
                 },
-            ) ?: return@runCatching null
-            val (width, height) = avatarSize(decoded.width, decoded.height)
-            val scaled = if (width == decoded.width && height == decoded.height) {
-                decoded
+            )
+        }.getOrNull()
+    }
+
+    /**
+     * Crops [source] to [rect], shrinks the square to [AVATAR_MAX_PX] and writes it as this
+     * assistant's picture, returning the path for [Assistant.avatarPath] — or null when nothing
+     * could be written, in which case [previous] is untouched.
+     *
+     * The crop is what the user framed on screen; the shrink and the encode are the same ones a
+     * direct pick always went through, so there is still exactly one format and one size on disk.
+     */
+    suspend fun saveCropped(
+        context: Context,
+        id: String,
+        source: Bitmap,
+        rect: AvatarCropRect,
+        previous: String = "",
+    ): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val side = rect.size.coerceIn(1, minOf(source.width, source.height))
+            val left = rect.left.coerceIn(0, source.width - side)
+            val top = rect.top.coerceIn(0, source.height - side)
+            val cropped = Bitmap.createBitmap(source, left, top, side, side)
+            val (width, height) = avatarSize(cropped.width, cropped.height)
+            val scaled = if (width == cropped.width && height == cropped.height) {
+                cropped
             } else {
-                Bitmap.createScaledBitmap(decoded, width, height, true)
+                Bitmap.createScaledBitmap(cropped, width, height, true)
             }
             val path = pathFor(id, System.currentTimeMillis())
             val target = File(context.filesDir, path)
             target.parentFile?.mkdirs()
-            target.outputStream().use { scaled.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            if (scaled !== decoded) scaled.recycle()
-            decoded.recycle()
-            // Only once the new file is on disk: a failed pick must not cost the old picture.
+            val written = runCatching {
+                target.outputStream().use { scaled.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            }.isSuccess
+            if (scaled !== cropped) scaled.recycle()
+            if (cropped !== source) cropped.recycle()
+            if (!written) return@runCatching null
+            // Only once the new file is on disk: a failed crop must not cost the old picture.
             if (previous.isNotBlank() && previous != path) {
                 runCatching { File(context.filesDir, previous).delete() }
             }

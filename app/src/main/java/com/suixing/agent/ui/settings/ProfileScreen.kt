@@ -152,6 +152,7 @@ fun ProfileScreen(onBack: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             OutlinedTextField(
+                textStyle = MaterialTheme.typography.bodyMedium,
                 value = text,
                 onValueChange = { draft = it },
                 label = { Text("画像") },

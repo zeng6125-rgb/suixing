@@ -43,7 +43,7 @@ import kotlinx.coroutines.withContext
  * a persona that has a picture from showing its emoji on one screen and its photo on another.
  *
  * The picture is decoded off the main thread and remembered per path. The path is unique per
- * save ([AssistantAvatarStore.save] stamps it), which is what makes that remembering safe: a
+ * save ([AssistantAvatarStore.saveCropped] stamps it), which is what makes that remembering safe: a
  * picture the user replaces arrives as a new path, so every surface drawing it reloads instead
  * of holding a decode of the file that used to be there.
  */

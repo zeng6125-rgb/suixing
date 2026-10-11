@@ -3,6 +3,8 @@ package com.suixing.agent.ui.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -71,6 +73,7 @@ internal fun ContextWindowDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = text,
                     onValueChange = { value -> text = value.filter { it.isDigit() || it == '.' } },
                     label = { Text("k tokens") },
@@ -79,7 +82,7 @@ internal fun ContextWindowDialog(
                     // 打不出「.」的话，1.5k 这种值就只有建议按钮写得进去。
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     isError = invalid,
                     supportingText = supporting,
                 )

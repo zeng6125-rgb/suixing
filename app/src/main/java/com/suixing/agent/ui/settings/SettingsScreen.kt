@@ -2,11 +2,13 @@
 
 package com.suixing.agent.ui.settings
 
+import android.text.format.DateUtils
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -67,6 +69,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -78,6 +81,7 @@ import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
+import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.label
 import com.suixing.agent.data.COMPRESS_MAX_PERCENT
 import com.suixing.agent.data.COMPRESS_MIN_PERCENT
@@ -90,6 +94,7 @@ import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.describeError
+import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.RowChevron
@@ -98,13 +103,17 @@ import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
 import com.suixing.agent.ui.usage.UsageScreen
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
@@ -141,6 +150,7 @@ private enum class SettingsPage(val title: String, val route: String) {
     APPEARANCE("外观", "settings/appearance"),
     NETWORK("网络与语音", "settings/network"),
     DATA("数据", "settings/data"),
+    CHATS("会话管理", "settings/chats"),
     USAGE("用量", "settings/usage"),
 }
 
@@ -172,13 +182,22 @@ fun SettingsScreen(onOpen: (String) -> Unit, onBack: () -> Unit) {
  * these six, and a blank frame beats crashing a released app over a typo.
  */
 @Composable
-internal fun SettingsPageRoute(route: String, onOpen: (String) -> Unit, onBack: () -> Unit) {
+internal fun SettingsPageRoute(
+    route: String,
+    onOpen: (String) -> Unit,
+    onBack: () -> Unit,
+    onOpenConversation: (String) -> Unit = {},
+) {
     when (SettingsPage.entries.firstOrNull { it.route == route }) {
         SettingsPage.MODEL -> ModelSettingsPage(onBack = onBack)
         SettingsPage.CONVERSATION -> ConversationSettingsPage(onBack = onBack)
         SettingsPage.APPEARANCE -> AppearanceSettingsPage(onBack = onBack)
         SettingsPage.NETWORK -> NetworkVoiceSettingsPage(onBack = onBack)
         SettingsPage.DATA -> DataSettingsPage(onBack = onBack, onOpen = onOpen)
+        SettingsPage.CHATS -> ConversationManagerScreen(
+            onBack = onBack,
+            onOpenConversation = onOpenConversation,
+        )
         SettingsPage.USAGE -> UsageScreen(onBack = onBack)
         null -> Unit
     }
@@ -592,11 +611,16 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         ) {
             item {
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = form.baseUrl,
                     onValueChange = { value ->
                         form = form.copy(baseUrl = value)
                             .mapProvider(selected?.id) { it.copy(baseUrl = value) }
                     },
+                    // 设置页输入框的统一规格（本文件其余十几处同此，不重复注释）：bodySmall
+                    // （12sp）+ `heightIn(min = 48.dp)`。**别再压死高度**——写死 height(48.dp)
+                    // 会在「外观 → 字号」放大时裁掉汉字下缘（工具页搜索框就是这么出事的，那段
+                    // 注释在 ToolsScreen.kt:521-524）；矮是字号给的，不是把盒子压扁来的。
                     label = { Text("接口地址") },
                     // 明文 http 是刻意留着的（局域网里的 Ollama / LM Studio 就只有 http），但
                     // key 会跟着明文走——这一句是用户敲下那个地址之前唯一的提醒。
@@ -608,13 +632,14 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
             }
             item {
                 // The provider's own name, editable in place: the chip row's long-press
                 // rename stays, but the name is read every day and typed once a month.
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = selected?.name.orEmpty(),
                     onValueChange = { value ->
                         form = form.mapProvider(selected?.id) { it.copy(name = value) }
@@ -625,7 +650,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     label = { Text("提供方名称") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
             }
             item {
@@ -644,6 +669,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             }
             item {
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = form.apiKey,
                     onValueChange = { value ->
                         form = form.copy(apiKey = value)
@@ -653,7 +679,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
                     visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
             }
             item {
@@ -662,6 +688,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // alias stays read-only, under the field and on the picker's chips.
                 val alias = selected?.aliases?.get(form.model)
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = form.model,
                     onValueChange = { form = form.copy(model = it) },
                     label = { Text("当前模型") },
@@ -672,7 +699,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
             }
             item {
@@ -940,6 +967,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // writes the provider's nullable field, where an empty box is null.
                 val ownMax = selected?.takeIf { it.ownSampling }?.maxTokens
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = if (selected?.ownSampling == true) {
                         if (ownMax == null || ownMax <= 0) "" else ownMax.toString()
                     } else {
@@ -954,7 +982,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             form.copy(maxTokens = parsed)
                         }
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     label = { Text("最大输出 tokens（留空 = 不限）") },
                     placeholder = { Text("例如 4096") },
                     singleLine = true,
@@ -970,6 +998,9 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     hint = "模型的人设与工作方式，每次请求都会带上。",
                 ) {
                     OutlinedTextField(
+                        // 多行编辑器（内容区）不在"文本框收紧"的范围里：字号保持 bodyMedium，
+                        // 高度也不加约束——用户说的是「文本框不用那么高那么大」。
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         value = form.systemPrompt,
                         onValueChange = { form = form.copy(systemPrompt = it) },
                         minLines = 6,
@@ -1669,9 +1700,10 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
         ) {
             item {
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = stored.searchEndpoint,
                     onValueChange = { value -> scope.persist { it.copy(searchEndpoint = value) } },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     label = { Text("搜索接口（可留空）") },
                     placeholder = { Text("https://api.tavily.com/search") },
                     singleLine = true,
@@ -1683,9 +1715,10 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             }
             item {
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = stored.searchApiKey,
                     onValueChange = { value -> scope.persist { it.copy(searchApiKey = value) } },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     label = { Text("搜索接口 Key（可留空）") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
@@ -1733,9 +1766,10 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             if (stored.voiceInput) {
                 item {
                     OutlinedTextField(
+                        textStyle = MaterialTheme.typography.bodySmall,
                         value = stored.asrModel,
                         onValueChange = { value -> scope.persist { it.copy(asrModel = value) } },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         label = { Text("语音转写模型") },
                         placeholder = { Text("whisper-1") },
                         singleLine = true,
@@ -1792,7 +1826,12 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                         SettingsGroupRow("助手设置", "每个助手的名字、提示词、模型与工具") {
                             onOpen("assistants")
                         },
-                        SettingsGroupRow("会话文件", "agent 在会话里读写的工作区文件") {
+                        // 会话记录本身的管理：打开 / 导出 / 删除。与下面那行区分开——那行是
+                        // agent 读写的工作区文件，不是聊天记录。
+                        SettingsGroupRow("会话管理", "打开、导出或删除聊天记录（不是工作区文件）") {
+                            onOpen(SettingsPage.CHATS.route)
+                        },
+                        SettingsGroupRow("工作区文件", "agent 在会话里读写的工作区文件，与聊天记录无关") {
                             onOpen("files")
                         },
                     ),
@@ -1800,6 +1839,189 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
             }
         }
     }
+}
+
+/**
+ * 会话管理：聊天记录本身的管理界面。
+ *
+ * 为什么是**一页**而不是数据页里的一块：数据页是纯入口列表（SettingsGroup + SettingsGroupRow），
+ * 塞进一个可滚动列表加三种操作会把它变成另一种页面；而设置体系里没有 TabRow 这种形态，所以
+ * 用户说的「作为新 tab」在这里的等价物就是一个同级子页——数据页那行「会话管理」指过来。
+ *
+ * 只做三件事，且都不碰存储格式（ChatRepository 的 JSON 与 Conversation 字段一个字节不改）：
+ *  · 打开 —— 走既有导航（和抽屉里点会话是同一条路：切到那个会话、收掉覆盖层）；
+ *  · 导出 —— 把 filesDir/chats/<id>.json **原样**复制到用户用系统选择器指定的位置（不重新
+ *    序列化，导出的字节和磁盘上那份完全一致）；
+ *  · 删除 —— Core.chats.delete(id)，它删的就是那份 JSON（外加草稿与可能指向它的 last-opened 标记）。
+ * 没有重命名：那会引入一个新字段与新概念，用户明确说不要。
+ */
+@Composable
+internal fun ConversationManagerScreen(
+    onBack: () -> Unit,
+    onOpenConversation: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val conversations by Core.chats.conversations.collectAsState()
+    val snackbar = remember { SnackbarHostState() }
+    var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
+    var pendingExport by remember { mutableStateOf<Conversation?>(null) }
+    // 系统选择器（SAF）：不需要 FileProvider、不改 manifest，用户自己决定存到哪。
+    val exporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        val chat = pendingExport
+        pendingExport = null
+        if (uri == null || chat == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val source = File(context.filesDir, "chats/${chat.id}.json")
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        source.inputStream().use { it.copyTo(out) }
+                    } ?: error("打不开目标文件")
+                }.isSuccess
+            }
+            snackbar.showSnackbar(if (ok) "已导出「${chat.title}」" else "导出失败，换个位置再试")
+        }
+    }
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = { PageTopBar(title = SettingsPage.CHATS.title, onBack = onBack) },
+        snackbarHost = { SnackbarHost(snackbar) },
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .navigationBarsPadding(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            val ordered = conversations.sortedByDescending { it.updatedAt }
+            if (ordered.isEmpty()) {
+                item {
+                    EmptyState(
+                        title = "还没有会话",
+                        subtitle = "聊过一次之后，会话会出现在这里，可以打开、导出或删除。",
+                        modifier = Modifier.padding(top = 56.dp),
+                    )
+                }
+            } else {
+                items(ordered, key = { it.id }) { conversation ->
+                    ConversationRow(
+                        title = conversation.title,
+                        subtitle = "${lastUpdated(conversation.updatedAt)} · " +
+                            "${conversation.messages.size} 条消息",
+                        onOpen = { onOpenConversation(conversation.id) },
+                        onExport = {
+                            pendingExport = conversation
+                            exporter.launch(exportFileName(conversation.title))
+                        },
+                        onDelete = { pendingDelete = conversation },
+                    )
+                }
+            }
+        }
+    }
+    pendingDelete?.let { chat ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除这个会话？") },
+            text = {
+                Text(
+                    "「${chat.title}」的聊天记录（${chat.messages.size} 条消息）会被永久删除，" +
+                        "不能撤销。工作区里的文件不受影响。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDelete = null
+                        scope.launch {
+                            Core.chats.delete(chat.id)
+                            snackbar.showSnackbar("已删除「${chat.title}」")
+                        }
+                    },
+                ) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+        )
+    }
+}
+
+/** 一行会话：点行打开，右侧两枚动作（导出、删除）。 */
+@Composable
+private fun ConversationRow(
+    title: String,
+    subtitle: String,
+    onOpen: () -> Unit,
+    onExport: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            // 整行可点、涟漪按卡片自己的圆角铺满：原来 clickable 挂在内容 Row 上、
+            // 外层 Surface 才是可见形状 ⇒ 涟漪只在内容块里画一小块。
+            modifier = Modifier.suixingClickable(MaterialTheme.shapes.medium) { onOpen() },
+        ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 14.dp, top = 12.dp, bottom = 12.dp),
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onExport) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_download),
+                    contentDescription = "导出",
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_trash),
+                    contentDescription = "删除",
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 「最后更新」用人话（系统本地化）：3 分钟前 / 昨天 / 2026年10月12日。 */
+private fun lastUpdated(millis: Long): String = DateUtils.getRelativeTimeSpanString(
+    millis,
+    System.currentTimeMillis(),
+    DateUtils.MINUTE_IN_MILLIS,
+).toString()
+
+/** 导出文件名：标题里的路径分隔符与空白换成下划线，空标题兜底。 */
+private fun exportFileName(title: String): String {
+    val base = title.trim()
+        .replace(Regex("""[\\/:*?"<>|\s]+"""), "_")
+        .trim('_')
+        .take(40)
+    return "${base.ifBlank { "会话" }}.json"
 }
 
 /** A labelled control: the label and the why-line above it, the way the cards stacked them. */
@@ -1822,7 +2044,9 @@ private fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 44.dp)
-                    .clickable { expanded = !expanded }
+                    // clip(圆角) 在 clickable 之前：原来是裸 .clickable，涟漪是方角矩形压在
+                    // 圆角 Surface 上（用户说"没有填充满"）。顺序必须是 clip → clickable → padding。
+                    .suixingClickable(MaterialTheme.shapes.medium) { expanded = !expanded }
                     .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1871,11 +2095,12 @@ private fun RenameDialog(
         title = { Text("重命名提供方") },
         text = {
             OutlinedTextField(
+                textStyle = MaterialTheme.typography.bodySmall,
                 value = name,
                 onValueChange = { name = it },
                 singleLine = true,
                 shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             )
         },
         confirmButton = {
@@ -1990,12 +2215,13 @@ private fun ModelPickerDialog(
                 Spacer(Modifier.height(4.dp))
                 if (models.size > 8) {
                     OutlinedTextField(
+                        textStyle = MaterialTheme.typography.bodySmall,
                         value = query,
                         onValueChange = { query = it },
                         label = { Text("筛选") },
                         singleLine = true,
                         shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     )
                     Spacer(Modifier.height(8.dp))
                 }
@@ -2153,12 +2379,12 @@ private fun ModelCheckRow(
                 contentDescription = "改别名",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
-                    .size(16.dp)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = ripple(),
-                        onClick = onAlias,
-                    ),
+                    .suixingClickable(CircleShape) { onAlias() }
+                    // 触控范围从 16dp 提到 28dp：原来是图标自己 .clickable，涟漪就是一个
+                    // 16dp 的圆点（用户说的"圆点"）。clip(CircleShape) + clickable 在外层、
+                    // padding 在内层 ⇒ 涟漪铺满这个圆、命中区也跟着变大。
+                    .padding(6.dp)
+                    .size(16.dp),
             )
             Spacer(Modifier.width(8.dp))
             // The chip is the way in, so tapping the name still only picks the model.
@@ -2187,6 +2413,7 @@ private fun ModelCheckRow(
         }
         if (editing) {
             OutlinedTextField(
+                textStyle = MaterialTheme.typography.bodySmall,
                 value = draft,
                 onValueChange = { raw -> draft = raw.filter { it.isDigit() }.take(7) },
                 label = { Text("上下文窗口（tokens，留空 = 不限）") },
@@ -2200,7 +2427,8 @@ private fun ModelCheckRow(
                         editing = false
                     }) { Text("保存") }
                 },
-                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, bottom = 6.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .padding(start = 12.dp, end = 8.dp, bottom = 6.dp),
             )
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -2224,12 +2452,13 @@ private fun AliasDialog(initial: String, onDismiss: () -> Unit, onConfirm: (Stri
         title = { Text("模型别名") },
         text = {
             OutlinedTextField(
+                textStyle = MaterialTheme.typography.bodySmall,
                 value = value,
                 onValueChange = { value = it },
                 label = { Text("显示名（留空 = 用回原 id）") },
                 singleLine = true,
                 shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             )
         },
         confirmButton = { TextButton(onClick = { onConfirm(value.trim()) }) { Text("保存") } },
@@ -2246,12 +2475,13 @@ private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
         title = { Text("自定义模型") },
         text = {
             OutlinedTextField(
+                textStyle = MaterialTheme.typography.bodySmall,
                 value = value,
                 onValueChange = { value = it },
                 label = { Text("模型 id") },
                 singleLine = true,
                 shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             )
         },
         confirmButton = {

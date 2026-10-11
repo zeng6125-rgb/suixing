@@ -213,15 +213,17 @@ private fun MemoryEditorDialog(
         text = {
             Column {
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodySmall,
                     value = key,
                     onValueChange = { key = it },
                     label = { Text("名称") },
                     singleLine = true,
                     enabled = draft.isNew,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = value,
                     onValueChange = { value = it },
                     label = { Text("内容") },

@@ -212,6 +212,7 @@ import com.suixing.agent.ui.components.PressPill
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
+import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -2840,17 +2841,15 @@ private fun ProcessCard(
                     // card's height down, so it is a fixed height, not a minimum —
                     // nothing in the row wraps (every text is maxLines 1).
                     .height(36.dp)
-                    .clip(
+                    // 走共享修饰符：clip(整行形状) → clickable → padding。顺序钉死在这里，涟漪就
+                    // 等于这一行的可见形状（含左右 12dp 内边距），不会缩成中间一个圆点。
+                    .suixingClickable(
                         RoundedCornerShape(
                             topStart = 16.dp,
                             topEnd = 16.dp,
                             bottomStart = if (expanded) 0.dp else 16.dp,
                             bottomEnd = if (expanded) 0.dp else 16.dp,
                         ),
-                    )
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = ripple(),
                         onClick = onToggle,
                     )
                     .padding(horizontal = 12.dp),
@@ -3189,12 +3188,8 @@ private fun ReasoningBlock(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(MaterialTheme.shapes.small)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = ripple(),
-                        onClick = toggle,
-                    ),
+                    // 走共享修饰符：涟漪按整行形状画，也不被 padding 裁掉。
+                    .suixingClickable(MaterialTheme.shapes.small, onClick = toggle),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
@@ -6812,16 +6807,44 @@ private fun SteerQueueRow(
             LaunchedEffect(steer.imageBase64) {
                 thumb = steer.imageBase64?.let { decodeAttachment(it, target = THUMB_PX)?.asImageBitmap() }
             }
+            // Tapping the thumbnail opens the picture at full size. The decode happens on the tap,
+            // not in the row: the 24dp copy above is downsampled to [THUMB_PX] and blowing it up
+            // would show exactly the blur the user is trying to avoid, so the base64 is decoded
+            // again — on IO — at a size worth looking at.
+            val rowScope = rememberCoroutineScope()
+            val rowContext = LocalContext.current
+            var fullPicture by remember(steer.imageBase64) { mutableStateOf<ImageBitmap?>(null) }
             thumb?.let { picture ->
                 Image(
                     bitmap = picture,
-                    contentDescription = "这条带图片",
+                    contentDescription = "查看图片",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .size(24.dp)
-                        .clip(RoundedCornerShape(6.dp)),
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = ripple(),
+                        ) {
+                            val base64 = steer.imageBase64 ?: return@clickable
+                            rowScope.launch {
+                                val decoded = decodeAttachment(base64, target = FULL_PREVIEW_PX)
+                                if (decoded == null) {
+                                    Toast.makeText(rowContext, "这张图片打不开", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    fullPicture = decoded.asImageBitmap()
+                                }
+                            }
+                        },
                 )
                 Spacer(Modifier.width(8.dp))
+            }
+            fullPicture?.let { picture ->
+                ImagePreviewDialog(
+                    bitmap = picture,
+                    contentDescription = "排队中的图片",
+                    keepKeyboard = true,
+                ) { fullPicture = null }
             }
             Text(
                 text = if (undelivered) "$label（未送达）" else label,
@@ -6976,10 +6999,28 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val preview = attachment.preview
+                var full by remember { mutableStateOf(false) }
+                // The picture and its name are one tap target; 移除 stays its own button beside
+                // them. Making the whole chip clickable would put "preview" and "delete" on the
+                // same 26dp of glass, which is how a user deletes what they meant to look at.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = if (preview != null) {
+                        Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = ripple(),
+                                onClick = { full = true },
+                            )
+                    } else {
+                        Modifier
+                    },
+                ) {
                 if (preview != null) {
                     Image(
                         bitmap = preview,
-                        contentDescription = null,
+                        contentDescription = "查看图片",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .size(26.dp)
@@ -7002,6 +7043,16 @@ private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 190.dp),
                 )
+                }
+                // The attachment's own bitmap, not a scaled-down copy: this is the picture the user
+                // picked, at the size it was stored, so opening it shows what will be sent.
+                if (full && preview != null) {
+                    ImagePreviewDialog(
+                        bitmap = preview,
+                        contentDescription = attachment.label,
+                        keepKeyboard = true,
+                    ) { full = false }
+                }
                 IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
                     Icon(
                         imageVector = ImageVector.vectorResource(R.drawable.ic_x),
@@ -7226,6 +7277,14 @@ private const val QUEUED_IMAGE_LABEL = "图片"
 private const val THUMB_PX = 96
 
 /**
+ * Target width for a picture opened from a queue row, in pixels.
+ *
+ * Larger than any phone's screen is tall, so nothing is lost on the way in, while still leaving the
+ * decoder a bound: a 12-megapixel photo decoded at full size is ~48 MB and an OOM on a cheap device.
+ */
+private const val FULL_PREVIEW_PX = 2160
+
+/**
  * How many board rows are drawn above the queue — the same three as the queue, for the same
  * reason: this stack sits over the field the user is typing into, and a long plan must not
  * push that field off the screen. The tally covers the items that do not fit.
@@ -7387,6 +7446,71 @@ private fun EditDialog(
     )
 }
 
+/**
+ * The one full-screen picture viewer: a bubble's screenshot, the attachment chip above the field and
+ * a queued line's thumbnail all open this.
+ *
+ * Shared rather than copied because it is not merely a Dialog: the black scrim, the pinch-and-pan
+ * transform and tap-anywhere-to-close are the behaviour the user already knows from the transcript,
+ * and a second implementation would drift from it. A `Dialog` and not a focusable overlay, so it
+ * cannot take the keyboard away from the field — the same rule the composer's own cards follow.
+ */
+@Composable
+private fun ImagePreviewDialog(
+    bitmap: ImageBitmap,
+    contentDescription: String,
+    /**
+     * Draw it without taking window focus, for the two callers that sit right above the field the
+     * user is typing in — the attachment chip and the queued rows. A focusable window takes the
+     * keyboard away, and the composer would jump under the user's hands for a tap meant to look at a
+     * picture. The transcript's own screenshots keep the ordinary dialog.
+     */
+    keepKeyboard: Boolean = false,
+    onDismiss: () -> Unit,
+) {
+    // Reading a shot needs the whole screen and a pinch.
+    var scale by remember { mutableStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    val transformable = rememberTransformableState { zoom, pan, _ ->
+        scale = (scale * zoom).coerceIn(1f, 4f)
+        offset = if (scale > 1f) offset + pan else Offset.Zero
+    }
+    val viewer: @Composable () -> Unit = {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.9f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = contentDescription,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .transformable(transformable)
+                    .graphicsLayer(
+                        scaleX = scale,
+                        scaleY = scale,
+                        translationX = offset.x,
+                        translationY = offset.y,
+                    ),
+            )
+        }
+    }
+    if (keepKeyboard) {
+        // Focus-less, like the composer's own cards: it cannot see BACK, which is why the scrim
+        // above closes on a tap anywhere — the same trade the model sheet makes.
+        Popup(properties = PopupProperties(focusable = false)) { viewer() }
+    } else {
+        Dialog(onDismissRequest = onDismiss) { viewer() }
+    }
+}
+
 @Composable
 private fun ImageBlock(base64: String) {
     // Decoding a 1080p screenshot costs tens of milliseconds; doing it inside
@@ -7417,43 +7541,7 @@ private fun ImageBlock(base64: String) {
                     onClick = { full = true },
                 ),
         )
-        if (full) {
-            // The thumbnail is for recognising the shot; reading it needs the whole
-            // screen and a pinch.
-            var scale by remember { mutableStateOf(1f) }
-            var offset by remember { mutableStateOf(Offset.Zero) }
-            val transformable = rememberTransformableState { zoom, pan, _ ->
-                scale = (scale * zoom).coerceIn(1f, 4f)
-                offset = if (scale > 1f) offset + pan else Offset.Zero
-            }
-            Dialog(onDismissRequest = { full = false }) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.9f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { full = false },
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Image(
-                        bitmap = decoded,
-                        contentDescription = "工具截图",
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .transformable(transformable)
-                            .graphicsLayer(
-                                scaleX = scale,
-                                scaleY = scale,
-                                translationX = offset.x,
-                                translationY = offset.y,
-                            ),
-                    )
-                }
-            }
-        }
+        if (full) ImagePreviewDialog(decoded, contentDescription = "工具截图") { full = false }
     }
 }
 

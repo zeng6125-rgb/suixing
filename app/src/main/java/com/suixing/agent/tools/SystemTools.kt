@@ -94,8 +94,9 @@ class SystemTools(
         ),
         ToolSpec(
             "profile_write",
-            "整篇覆盖写入用户画像：这是关于用户的长期画像（称呼/偏好/习惯/环境），" +
-                "不要写一次性任务信息。先 profile_read 看现有内容，避免覆盖掉还成立的旧内容。",
+            "整篇覆盖写入用户画像：这是关于用户的长期画像 —— 沟通风格与语气偏好、性格、" +
+                "长期目标、兴趣、工作与生活背景、明确的偏好与禁忌；不写一次性任务细节。" +
+                "先 profile_read 看现有内容，避免覆盖掉还成立的旧内容。",
             Schema.objectOf(
                 properties = listOf("text" to Schema.string("画像全文，会覆盖旧内容")),
                 required = listOf("text"),

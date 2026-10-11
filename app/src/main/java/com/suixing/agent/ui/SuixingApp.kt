@@ -3,14 +3,13 @@ package com.suixing.agent.ui
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -127,27 +126,24 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * 全站唯一的转场规格：**纯淡，无位移**。进（enter）、出（exit）、返回进（popEnter）、返回出
- * （popExit）四条只由下面两个时长决定；NavHost 上一次配好，任何目的地都不再单独覆盖，也没有
- * 任何按目的地分叉的分支。
+ * 全站唯一的转场规格：**瞬时切换，零动画**。进（enter）、出（exit）、返回进（popEnter）、返回出
+ * （popExit）四条都是 [androidx.compose.animation.EnterTransition.None] /
+ * [androidx.compose.animation.ExitTransition.None]，配置点在 NavHost 上（搜 `enterTransition`），
+ * 任何目的地都不再单独覆盖，也没有任何按目的地分叉的分支。
  *
- * 用户原话：「**我有说让后面的页面换吗？你淡入新页面不就行了？返回之后淡出啊**」＋
- * 「GPT 的抽屉根本就不动」。⇒ 进页淡入、旧页淡出，位移这条通道整条去掉；点抽屉里一行时抽屉
- * **瞬间消失**（见 [open] 的 snapTo，不播滑出），页面上只发生一次淡入。此前几版的位移
- * （整幅横移 → 屏宽 1/12）、"点行时抽屉滑出"，全部被这一句作废。
+ * 为什么连淡化都不要：**任何淡化都必然有"两页同时可见"的中间帧**——新页 alpha 从 0 涨到 1 的
+ * 那段时间里，旧页还在它后面（或反过来），叠出来的就是用户说的**残影**。用户原话：
+ * 「我都录视频给你了，还做成这吊样？**这动画，我不要残影的动画**」。他给的录屏实测数字是
+ * 「切换在 1–2 帧（≈40–80ms）内完成」——那本质上就是瞬切，不是可感知的淡化。
  *
- * 两个时长不是拍脑袋：**参考 ChatGPT 录屏逐帧实测**（把录屏解码后按左右两条带统计平均亮度，
- * 定位到 1.44–1.69s 那次切换）——旧页内容区**一两帧内（40–80ms）就掉下来了**，随后新页面用
- * 约 150ms 轻轻浮现收尾。所以：出 80（几乎是瞬间让位，用户看到的是"换掉了"而不是"两页互透"）、
- * 进 120（快速浮现，收尾感来自这一档）。此前 180/150 那种整页交叉淡化会让两页在 50% 处互相
- * 透，读起来就是"发虚/浑浊"——这正是用户说"不满意"的地方。
+ * 历史（别再加回来）：位移（整幅横移 → 屏宽 1/12）、交叉淡化 180/150、快速淡化 120/80，全部被
+ * 用户否掉；`scaleIn(0.96)` 那版还会在页边露缝（露出来的是外壳 Scaffold 的 containerColor =
+ * surface，与页面底色同色，等于没缩还多一条缝）。**要"没有残影"，新页必须从第一帧就是不透明的
+ * ——只有瞬切做得到。**
  *
- * 缩放不再参与：0.8.67 修过 scaleIn(0.96) 在页边露缝（露出来的是外壳 Scaffold 的
- * containerColor = surface，与页面底色同色，等于没缩还多一条缝）。
+ * 抽屉不在此列：点行时它 `snapTo(Closed)`、返回来源页时 `snapTo(Open)`（同样瞬时、无叠加），
+ * 用户自己开合（汉堡键 / 左缘拖动 / 点遮罩 / 返回键）仍走库的滑入滑出动画。
  */
-private const val NAV_FADE_IN_MS = 120
-private const val NAV_FADE_OUT_MS = 80
-private val NAV_EASING = FastOutSlowInEasing
 
 /**
  * The app shell.
@@ -303,7 +299,11 @@ fun SuixingApp() {
     CompositionLocalProvider(
         // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：演库自己那
         // 一段滑入——用户反对的从来是「返回时把它重放一遍」，不是手动打开时的动画。
-        LocalOpenSidebar provides { scope.launch { drawerState.open() } },
+        // 只在会话页可用（抽屉只属于会话页，见 ModalNavigationDrawer）：子页没有汉堡入口，
+        // 这一层判断是防止以后有人把汉堡画到子页上时它还能把抽屉拉出来。
+        LocalOpenSidebar provides {
+            if (route == "empty") scope.launch { drawerState.open() }
+        },
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
@@ -363,7 +363,11 @@ fun SuixingApp() {
             ModalNavigationDrawer(
                 drawerState = drawerState,
                 // 边缘拖动跟手（拖到一半松手会回弹）、遮罩与面板位移全归库——用户点名的「不要自绘」。
-                gesturesEnabled = true,
+                // 但**只在会话页开着**：子页（设置主页 + 六个设置子页 + 会话管理 + 权限/工具/
+                // 文件/任务/定时任务/用量/关于/扩展/画像/助手）都是 push 上去的独立页面，各有返回
+                // 箭头，从屏幕左缘还能拉出抽屉是错的——用户原话「设置页到底是不是单独页？为什么在
+                // 设置页里面还能侧滑出侧边栏？」。只有 chat 那一层（route == "empty"）为 true。
+                gesturesEnabled = route == "empty",
                 // 遮罩浓度照搬自绘那版：M3 默认 scrim 是 32%，这块面板从第一天起是 45% 的黑。
                 scrimColor = Color.Black.copy(alpha = 0.45f),
                 drawerContent = {
@@ -448,21 +452,13 @@ fun SuixingApp() {
                                         Modifier.pointerInput(route) { detectTapGestures { } }
                                     },
                                 ),
-                            // 纯淡，无位移 —— 四条转场全在这一个地方配，没有按目的地分叉的条件。
-                            // 用户原话：「我有说让后面的页面换吗？你淡入新页面不就行了？返回之后
-                            // 淡出啊」。进页淡入、旧页淡出，出场略快一点，免得两页在中间帧互相透。
-                            enterTransition = {
-                                fadeIn(tween(NAV_FADE_IN_MS, easing = NAV_EASING))
-                            },
-                            exitTransition = {
-                                fadeOut(tween(NAV_FADE_OUT_MS, easing = NAV_EASING))
-                            },
-                            popEnterTransition = {
-                                fadeIn(tween(NAV_FADE_IN_MS, easing = NAV_EASING))
-                            },
-                            popExitTransition = {
-                                fadeOut(tween(NAV_FADE_OUT_MS, easing = NAV_EASING))
-                            },
+                            // 瞬时切换：四条全是 None，一帧都不演 —— 结构上不可能出现"两页同时
+                            // 可见"的中间帧，也就没有残影（用户原话：「这动画，我不要残影的动画」，
+                            // 他给的录屏实测也是 1–2 帧内完成 ⇒ 那就是瞬切）。详见文件顶部那段规格。
+                            enterTransition = { EnterTransition.None },
+                            exitTransition = { ExitTransition.None },
+                            popEnterTransition = { EnterTransition.None },
+                            popExitTransition = { ExitTransition.None },
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
                                 composable("empty") { }
@@ -477,7 +473,7 @@ fun SuixingApp() {
                                     onBack = goBack,
                                 )
                             }
-                            // 设置里的六个子页各是一条真路由，而不是设置页内部的 when 分支：同一
+                            // 设置里的七个子页各是一条真路由，而不是设置页内部的 when 分支：同一
                             // 个目的地里换内容，NavHost 不参与，于是进出完全没有转场——用户说的
                             // 「就是复用的，根本没有切换动画」正是这个。走 push 而不是 open：抽屉
                             // 是同级切换，设置子页是往下一层，返回要回到那份列表。
@@ -487,6 +483,8 @@ fun SuixingApp() {
                                 "settings/appearance",
                                 "settings/network",
                                 "settings/data",
+                                // 会话管理：数据页那行「会话管理」指过来（打开/导出/删除聊天记录）。
+                                "settings/chats",
                                 "settings/usage",
                             ).forEach { route ->
                                 composable(route) {
@@ -494,6 +492,13 @@ fun SuixingApp() {
                                         route = route,
                                         onOpen = push,
                                         onBack = goBack,
+                                        // 「打开」一个会话 = 切到它 + 收掉覆盖层，与抽屉里点会话
+                                        // 完全同一条路（chat 常驻，所以这不是一次导航）。
+                                        onOpenConversation = { id ->
+                                            conversations.firstOrNull { it.id == id }
+                                                ?.let { chat.openConversation(it) }
+                                            showChat()
+                                        },
                                     )
                                 }
                             }
