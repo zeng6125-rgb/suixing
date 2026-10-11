@@ -148,10 +148,12 @@ fun AvatarCropper(
                         },
                 )
                 // 5) 顶部：左上角一个返回键（与「取消」同一个动作），中间一句提示。
+                //    inset 用 dialogSystemBarPad()：这个对话框窗口不一定会把系统栏 inset 送进来
+                //    （见它的注释），报 0 时退回平台自己的状态栏高度，否则返回键会压在状态栏上。
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .statusBarsPadding()
+                        .padding(top = dialogSystemBarPad())
                         .padding(start = 4.dp, top = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -169,14 +171,16 @@ fun AvatarCropper(
                     color = Color.White.copy(alpha = 0.85f),
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .statusBarsPadding()
+                        .padding(top = dialogSystemBarPad())
                         .padding(top = 16.dp),
                 )
                 // 6) 底部按钮：绝对定位在屏幕底部（不是放在会被内容挤走的 Column 里），并让开手势条。
+                //    同样是 dialogSystemBarPad(bottom)：窗口不给 inset 时退回平台的手势条高度，
+                //    否则这一行会被手势条盖掉一半（截图里那半截绿色按钮）。
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
+                        .padding(bottom = dialogSystemBarPad(bottom = true))
                         .fillMaxWidth()
                         .padding(horizontal = 24.dp, vertical = 18.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),

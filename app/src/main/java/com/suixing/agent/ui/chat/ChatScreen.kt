@@ -3009,9 +3009,9 @@ private fun ProcessCard(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.labelLarge.copy(
-                        fontSize = MaterialTheme.typography.labelLarge.fontSize * (13f / 14f),
-                    ),
+                    // 折叠块统一：标题一律 labelMedium（原来这里是 labelLarge×13/14）。三处
+                    // （思考块 / 工具行 / 本轮用量）的表头现在同一行高、同一字号、同一内边距。
+                    style = MaterialTheme.typography.labelMedium,
                     color = scheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -3325,6 +3325,10 @@ private fun ReasoningBlock(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // 折叠块统一（与 ProcessCard 表头、ToolRow 同一套）：固定 36dp 行高 + 12dp
+                    // 水平内边距 + labelMedium 标题。折叠态每行都是 maxLines=1，固定高度不会裁字。
+                    .height(36.dp)
+                    .padding(horizontal = 12.dp)
                     // 整块按下反馈（见 blockPress）：这一行铺满整条卡片的宽度，涟漪在这么宽的行上
                     // 是一大片弧形，不是「按下这一行」。
                     .blockPress(MaterialTheme.shapes.small, onClick = toggle),
@@ -3341,9 +3345,7 @@ private fun ReasoningBlock(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = "思考过程",
-                    style = MaterialTheme.typography.labelLarge.copy(
-                        fontSize = MaterialTheme.typography.labelLarge.fontSize * (13f / 14f),
-                    ),
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -3581,9 +3583,14 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
             // 的节点 —— 涟漪的半径按「到最远角的距离」算，于是画出来正是一个大圆，也就是用户
             // 截图里那个「为什么是个圆形」。
             .blockPress(MaterialTheme.shapes.small, onClick = onToggle)
-            .padding(vertical = 4.dp),
+            // 折叠块统一：水平 12dp 内边距与另外两处表头一致；行高加在**表头那一行**上（这一列
+            // 展开后还有内容，给 Column 定高会把详情裁掉）。
+            .padding(horizontal = 12.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(36.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             // Same 24dp slot the thinking rows use, so both icon columns share one
             // left edge inside the expanded card.
             Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
@@ -3607,7 +3614,7 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
             Spacer(Modifier.width(8.dp))
             Text(
                 text = line.name,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                style = MaterialTheme.typography.labelMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 // The name is short and fixed — it takes what it needs and yields the rest to

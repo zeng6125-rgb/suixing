@@ -246,11 +246,14 @@ private fun AssistantCard(
                     shape = MaterialTheme.shapes.small,
                     containerColor = scheme.surfaceContainerHigh,
                 )
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
                 // One slot for "this is the app-wide default" and "make it one": the star is
                 // the action, and once taken it greys out rather than disappearing, so cards
                 // keep the same geometry in both states. The state itself is spelled out on
                 // the model line, where there is room for words.
+                //
+                // 紧挨头像，不再被 weight 推到最右：它是这张脸的状态标记（用户：「星号离头像太远」），
+                // 右边留一个 weight 把编辑图标推到卡片的另一头。
                 IconButton(
                     onClick = onSetDefault,
                     enabled = !isDefault,
@@ -269,6 +272,7 @@ private fun AssistantCard(
                         modifier = Modifier.size(15.dp),
                     )
                 }
+                Spacer(Modifier.weight(1f))
                 // The 30dp disc stays the visual; the 48dp minimum sits outside it so the
                 // card's spacing does not change and the ripple stays on the disc.
                 IconButton(

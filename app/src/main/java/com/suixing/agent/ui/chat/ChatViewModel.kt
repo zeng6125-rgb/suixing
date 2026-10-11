@@ -1589,12 +1589,16 @@ class ChatViewModel : ViewModel() {
             // The error rides with the run: it shows on the error card only while that
             // conversation is the one on screen, and travels with it otherwise.
             is AgentEvent.Failed -> {
-                // 用尽次数后的最终失败：把"试过几次"和原因一起落到诊断文件里。这一行由 [Retrying]
-                // 设下的计数驱动，不去解析文案 —— 文案会改，计数器不会。
-                if (retriesThisRun > 0) {
-                    retryTrace("retry-giveup attempts=$retriesThisRun message=${event.message}")
-                    retriesThisRun = 0
-                }
+                // 每一次终止性失败都落盘，**不只是重试用尽的那种**：用户报「为什么写文件就触发」时，
+                // 需要看的是网关实际回了什么 —— 而这条消息里现在带着 finish_reason 的**原文**与
+                // 它自己报的 completion_tokens（见 AgentEngine 的 length 分支），所以这一行就是那次
+                // 复现的原始证据，不必再靠推测。重试次数由 [Retrying] 设下的计数器给出，不解析文案。
+                val attempts = retriesThisRun
+                retriesThisRun = 0
+                retryTrace(
+                    "turn-failed" + (if (attempts > 0) " attempts=$attempts" else "") +
+                        " message=${event.message}",
+                )
                 base.copy(error = event.message)
             }
 

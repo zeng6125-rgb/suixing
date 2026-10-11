@@ -17,6 +17,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -166,6 +167,23 @@ private const val NAV_SLIDE_MS = 200
 
 /** 新页滑入的幅度：屏宽 ÷ 这个数（12 ⇒ 约 8% 屏宽）。见上面那段规格。 */
 private const val NAV_SHIFT_DIVISOR = 12
+
+/**
+ * 从抽屉进入的四个顶层目的地。
+ *
+ * 它们之间是**同级切换**（抽屉是开关，不是栈），所以返回时不该有位移 —— 有位移会让「返回」
+ * 看起来像「又进了一页」。见 [NAV_FADE_MS]。
+ */
+private val DRAWER_ROUTES = setOf("files", "tasks", "schedules", "settings")
+
+/**
+ * 抽屉路线上的淡入淡出时长。用户拿 GPT 录屏对比的原话是「有一点点动画，但是很淡，就是相当于
+ * 蒙版由深到没有」⇒ 只有透明度、没有位移，90–120ms 之间取 110。
+ *
+ * 淡入**不会**露出下面的聊天页：覆盖层自己那层不透明底（见 NavHost 的 background）挡着，
+ * 淡出来的是底色而不是 chat —— 否则这就会变成用户最讨厌的那种残影。
+ */
+private const val NAV_FADE_MS = 110
 
 /**
  * The app shell.
@@ -507,23 +525,34 @@ fun SuixingApp() {
                             // 当帧让位、不与新页叠加；enter 只走位移、没有淡入 ⇒ 新页从第一帧就是
                             // 不透明的，所以任何一帧都只有一个页面，结构上不可能有残影。
                             enterTransition = {
-                                slideInHorizontally(
-                                    animationSpec = tween(
-                                        durationMillis = NAV_SLIDE_MS,
-                                        easing = FastOutSlowInEasing,
-                                    ),
-                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
+                                if (targetState.destination.route in DRAWER_ROUTES) {
+                                    // 抽屉 → 页面：同级切换，只淡不滑。
+                                    fadeIn(tween(NAV_FADE_MS))
+                                } else {
+                                    slideInHorizontally(
+                                        animationSpec = tween(
+                                            durationMillis = NAV_SLIDE_MS,
+                                            easing = FastOutSlowInEasing,
+                                        ),
+                                    ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
+                                }
                             },
                             exitTransition = { ExitTransition.None },
-                            // 返回进也用同一个方向（用户要的是「顺滑」而不是「方向正确」）；若要
-                            // 返回时从左侧回来，把这里的 fullWidth 取负即可，一个字的事。
                             popEnterTransition = {
-                                slideInHorizontally(
-                                    animationSpec = tween(
-                                        durationMillis = NAV_SLIDE_MS,
-                                        easing = FastOutSlowInEasing,
-                                    ),
-                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
+                                // 判据是**被弹掉的那一页**（initialState）：弹掉的是抽屉路线（设置 →
+                                // chat）就只淡不滑；弹掉的是设置子页（模型 → 设置）就走位移 —— 用户
+                                // 要的「各页返回要有动画」正是后者，之前 popEnter 与 enter 同向，
+                                // 返回看起来只是「又进了一页」。
+                                if (initialState.destination.route in DRAWER_ROUTES) {
+                                    fadeIn(tween(NAV_FADE_MS))
+                                } else {
+                                    slideInHorizontally(
+                                        animationSpec = tween(
+                                            durationMillis = NAV_SLIDE_MS,
+                                            easing = FastOutSlowInEasing,
+                                        ),
+                                    ) { fullWidth -> -fullWidth / NAV_SHIFT_DIVISOR }
+                                }
                             },
                             popExitTransition = { ExitTransition.None },
                         ) {
@@ -989,6 +1018,17 @@ private fun ConversationRow(
                     // 14dp 的环比原来的 7dp 点宽，间距收窄到 2dp，标题的左缘不动。
                     RunningSpinner(Modifier.size(14.dp))
                     Spacer(Modifier.width(2.dp))
+                }
+                // 置顶标记：仓库里**没有** ic_pin，按约定复用既有的 ic_star（不新造 drawable）。
+                // 放标题**左边**：右边是删除按钮，夹在中间会被读成「点了会取消置顶」。
+                if (conversation.pinned) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_star),
+                        contentDescription = "已置顶",
+                        tint = scheme.primary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
                 }
                 Text(
                     text = conversation.title,

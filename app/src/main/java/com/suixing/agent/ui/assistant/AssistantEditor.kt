@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -50,8 +52,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -67,6 +71,34 @@ import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SettingRow
 import kotlinx.coroutines.launch
+
+/**
+ * 对话框窗口里「系统栏到底占多高」。
+ *
+ * `decorFitsSystemWindows = false` 让窗口铺满屏幕，inset 就该由内容自己吃 —— 但 **Dialog 自己的
+ * 窗口**在不少 ROM 上并不把 inset 分发给 Compose：`WindowInsets.statusBars` 读出来是 0，于是顶栏
+ * 里那句 `statusBarsPadding()`（Common.kt:415）等于没加，内容就压到状态栏底下 —— 三层里**吃掉的
+ * 是第三层**（窗口没把 inset 送到内容，而不是 Scaffold 或 DialogProperties 的错，那两处都已到位）。
+ * 这里在 inset 报 0 时退回平台自己的 `status_bar_height` / `navigation_bar_height`：inset 可用的
+ * ROM 走 inset（不重复加），不可用的 ROM 也能对齐。
+ */
+@Composable
+internal fun dialogSystemBarPad(bottom: Boolean = false): Dp {
+    val density = LocalDensity.current
+    val context = LocalContext.current
+    val insetPx = if (bottom) {
+        WindowInsets.navigationBars.getBottom(density)
+    } else {
+        WindowInsets.statusBars.getTop(density)
+    }
+    if (insetPx > 0) return with(density) { insetPx.toDp() }
+    val name = if (bottom) "navigation_bar_height" else "status_bar_height"
+    val fallbackPx = remember(context, name) {
+        val id = context.resources.getIdentifier(name, "dimen", "android")
+        if (id > 0) context.resources.getDimensionPixelSize(id) else 0
+    }
+    return with(density) { fallbackPx.toDp() }
+}
 
 /**
  * Create or edit one persona.
@@ -144,22 +176,27 @@ fun AssistantEditor(
                     // tap. A dialog is a place with no sidebar: a null local says exactly
                     // that.
                     CompositionLocalProvider(LocalOpenSidebar provides null) {
-                        SuixingTopBar(
-                            title = if (isNew) "新建助手" else "编辑助手",
-                            subtitle = draft.label,
-                            leading = {
-                                AssistantAvatar(
-                                    face = draft.face,
-                                    avatarPath = draft.avatarPath,
-                                    size = 38.dp,
-                                    shape = MaterialTheme.shapes.medium,
-                                    containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                                )
-                            },
-                            actions = {
-                                TextButton(onClick = { onSave(draft) }) { Text("保存") }
-                            },
-                        )
+                        // 顶栏内部本来就有 statusBarsPadding()，但这个**对话框窗口**不一定把 inset
+                        // 送进来（见 dialogSystemBarPad）：inset 可用时它是 0，不会重复加；不可用时
+                        // 用它退回平台自己的状态栏高度，于是顶栏不会再压在状态栏上。
+                        Box(Modifier.padding(top = dialogSystemBarPad())) {
+                            SuixingTopBar(
+                                title = if (isNew) "新建助手" else "编辑助手",
+                                subtitle = draft.label,
+                                leading = {
+                                    AssistantAvatar(
+                                        face = draft.face,
+                                        avatarPath = draft.avatarPath,
+                                        size = 38.dp,
+                                        shape = MaterialTheme.shapes.medium,
+                                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                    )
+                                },
+                                actions = {
+                                    TextButton(onClick = { onSave(draft) }) { Text("保存") }
+                                },
+                            )
+                        }
                     }
                 },
             ) { padding ->

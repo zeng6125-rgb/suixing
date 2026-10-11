@@ -575,7 +575,18 @@ fun PageTopBar(
                     shadowElevation = 0.dp,
                 )
                 Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
+                // 图标与标题同一条基线（用户：「icon 和标题没对齐」）。这一列是「标题 + 副标题」，
+                // 整列在行内垂直居中 ⇒ 标题在上、副标题在下，**标题的视觉中心比列中心高半个副标题
+                // 行高**（bodySmall 行高 18dp ÷ 2 = 9dp），而返回键那枚 disc 的中心正落在列中心上
+                // ⇒ 看起来就是图标比标题低 9dp。把这一列上移 9dp，标题中心与 disc 中心重合；
+                // 没有副标题时不动（那时标题本来就居中）。
+                // 9dp 按标准字号档算：特大档（1.26×）副标题行高 ≈23dp ⇒ 残差约 2dp（可接受，
+                // 要完全跟随得把行高换算成 dp，代价是这里多两行 density 代码）。
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .offset(y = if (subtitle != null) (-9).dp else 0.dp),
+                ) {
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,

@@ -1147,23 +1147,22 @@ class AgentEngine(
                 // A truncated turn can end mid-tool-call, so say so instead of silently
                 // presenting half an answer as a finished one.
                 if (turn.finishReason == "length") {
-                    // 说清是**谁**截断的。留空 = 0 ⇒ `max_tokens` 根本不发（LlmClient.kt:287），所以
-                    // 这个 length 只可能来自上游：它自己的输出上限，或者上下文窗口被填满。原来的
-                    // 「模型输出达到长度上限」会让人以为是自己设的那个值 —— 而那个值没有发出去。
+                    // **不归因**，只报事实。用户明确说过：他没设上限、上游上下文是 131K，所以
+                    // 「达到长度上限」这种说法在他那里是错的 —— 我们并不知道上游的输出上限是多少，
+                    // 也就没有资格说"是它撞了上限"。这里只把可观察的事实写清楚：网关给的
+                    // finish_reason 原文、以及它自己报的 completion_tokens；有设置上限时才顺带提一句
+                    // （是陈述，不是归责）。
                     val produced = turn.usage?.completionTokens?.takeIf { it > 0 }
                     val ours = settings.maxTokens
-                    val who = if (ours > 0) {
-                        "本轮设的上限 $ours tokens"
-                    } else {
-                        "本地没有设置上限（max_tokens 未发送）"
-                    }
                     onEvent(
                         AgentEvent.Failed(
-                            "上游把这一轮截断了（$who" +
-                                (produced?.let { "，已输出约 $it tokens" } ?: "") +
-                                "）。可能是上游模型自己的输出上限，也可能是上下文窗口已满：" +
-                                "把要求拆小一点再试，或在「设置」里填一个明确的最大输出。" +
-                                "若刚才是用 write_file 写大文件，请让它分几次写（先写头部，再 append 追加）。",
+                            "上游结束了这一轮（finish_reason=${turn.finishReason}" +
+                                (produced?.let { "，它报的 completion_tokens=$it" } ?: "") +
+                                (if (ours > 0) "；本轮设置的最大输出是 $ours" else "") +
+                                "）。若你并没有设置输出上限，那这是上游模型自己的结束条件" +
+                                "（与 131K 那样的上下文窗口是两件事，我们看不到它的输出上限）：" +
+                                "把要求拆小一点再试；若是用 write_file 写大文件，让它分几次写" +
+                                "（先写头部，再用 `append: true` 追加）。",
                         ),
                     )
                 }
