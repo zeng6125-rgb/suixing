@@ -1255,18 +1255,22 @@ fun ChatScreen(
                                         bubbleMaxWidth = bubbleMaxWidth,
                                         reasoningExpansion = reasoningExpansion,
                                     )
-                                    // 8dp under the card: the run's progress belongs to the
-                                    // bubble it describes, and 3dp read as cramped against it.
-                                    // 16dp above, none below: the card's own bottom padding and
-                                    // the list's spacing already supply the air underneath, so an
-                                    // equal padding here left the line sitting high between the
-                                    // card above it and the gap below.
+                                    // 上下对齐（用户给的数：start 4dp、top 8dp、bottom 0）：卡片自己的
+                                    // 下内边距是 10dp（AssistantRow 的 Column，ChatScreen.kt:2645），
+                                    // 所以「卡片底 → 文字」＝10+8＝18dp；文字下面到下一项是
+                                    // bottom + 列表的 spacedBy(16dp)，取 bottom = 2dp 正好也是 18dp。
+                                    // 用户说的 bottom 0 差 2dp（16 vs 18），这里补平；要严格照 0 就
+                                    // 把这一行改回 0.dp。
                                     if (state.runningHere) {
                                         RunStatusLine(
                                             text = liveStatusText,
                                             startedAt = runStartedAt[runKey] ?: 0L,
                                             timed = statsNote.isEmpty(),
-                                            modifier = Modifier.padding(start = 4.dp, top = 16.dp),
+                                            modifier = Modifier.padding(
+                                                start = 4.dp,
+                                                top = 8.dp,
+                                                bottom = 2.dp,
+                                            ),
                                         )
                                     }
                                 }
@@ -1282,12 +1286,14 @@ fun ChatScreen(
                                     text = liveStatusText,
                                     startedAt = runStartedAt[runKey] ?: 0L,
                                     timed = statsNote.isEmpty(),
-                                    // 8dp above and below, on top of the list's own 16dp: the
-                                    // caption read as cramped against the cards on both sides.
+                                    // 用户给的数：start 4dp、top 8dp、bottom 0dp。这一行是「已发送
+                                    // 还没回答」时的**最后一项**，下面没有卡片，bottom 只决定列表末尾
+                                    // 的余白，所以 0 就是「不多留一段」；上面 16dp 是列表间距，加 8dp
+                                    // 与卡片之间的气口。
                                     modifier = Modifier.padding(
                                         start = 4.dp,
                                         top = 8.dp,
-                                        bottom = 8.dp,
+                                        bottom = 0.dp,
                                     ),
                                 )
                             }
