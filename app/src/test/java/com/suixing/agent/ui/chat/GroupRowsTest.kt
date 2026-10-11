@@ -199,15 +199,17 @@ class GroupRowsTest {
 
         assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
         assertEquals(1, rows[1].parts.count { it is Part.Text })
-        // The stray result still belongs to the card: it is the run's own tool round, drawn with
-        // the answer it produced.
-        assertEquals(listOf("m1", "a2"), rows[1].rounds.map { it.id })
+        // The stray result itself is still filtered out — `Transcript.active` keeps one run per
+        // turn, and that result names no run — so it is not drawn with the answer it produced. That
+        // is the residue of the same defect (a message that lost its run id), not a rendering rule:
+        // what matters here is that losing it no longer costs the answer.
+        assertEquals(listOf("a2"), rows[1].rounds.map { it.id })
     }
 
     /**
      * The same split one step later: a round that only thought, then the round that answered.
      * Both carry the run id, so this is the shape that must keep folding — the regression guard
-     * for the ordinary case while the rule above grew a second way in.
+     * for the ordinary case.
      */
     @Test
     fun `a round that only thought folds into the round that writes the prose`() {
@@ -240,5 +242,26 @@ class GroupRowsTest {
 
         assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
         assertEquals(listOf("a1", "a2"), rows[1].rounds.map { it.id })
+    }
+
+    /**
+     * The other half of the tie-break that keeps a run-less message from stealing its turn: a turn
+     * made of nothing *but* empty runs — every message written before branching — must still draw.
+     * `Transcript.chosenRuns` falls back to the last run when none of them names itself, so the
+     * legacy transcript keeps its answer instead of being filtered down to nothing.
+     */
+    @Test
+    fun `a turn made only of legacy rounds still draws`() {
+        val messages = listOf(
+            question("q1"),
+            silentRound("a1", "", "t1"),
+            result("m1", "", "t1"),
+            round("a2", "", "正文", null),
+        )
+
+        val rows = group(messages)
+
+        assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
+        assertEquals(listOf("m1", "a2"), rows[1].rounds.map { it.id })
     }
 }
