@@ -57,6 +57,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import kotlinx.coroutines.CoroutineStart
@@ -130,19 +131,22 @@ import kotlinx.coroutines.launch
  * （popExit）四条只由下面两个时长决定；NavHost 上一次配好，任何目的地都不再单独覆盖，也没有
  * 任何按目的地分叉的分支。
  *
- * 用户最终原话：「**我有说让后面的页面换吗？你淡入新页面不就行了？返回之后淡出啊**」＋
+ * 用户原话：「**我有说让后面的页面换吗？你淡入新页面不就行了？返回之后淡出啊**」＋
  * 「GPT 的抽屉根本就不动」。⇒ 进页淡入、旧页淡出，位移这条通道整条去掉；点抽屉里一行时抽屉
  * **瞬间消失**（见 [open] 的 snapTo，不播滑出），页面上只发生一次淡入。此前几版的位移
- * （整幅横移 → 屏宽 1/12）、"点行时抽屉滑出"、"回到来源页把抽屉恢复成开着"，全部被这一句作废。
+ * （整幅横移 → 屏宽 1/12）、"点行时抽屉滑出"，全部被这一句作废。
  *
- * 出场比入场略快（150 vs 180）：交叉淡化的中间帧两页会互相透，出场早一点收干净，新页就能在
- * 自己那一半时间里独立亮起来——用户抱怨过"残影"。
+ * 两个时长不是拍脑袋：**参考 ChatGPT 录屏逐帧实测**（把录屏解码后按左右两条带统计平均亮度，
+ * 定位到 1.44–1.69s 那次切换）——旧页内容区**一两帧内（40–80ms）就掉下来了**，随后新页面用
+ * 约 150ms 轻轻浮现收尾。所以：出 80（几乎是瞬间让位，用户看到的是"换掉了"而不是"两页互透"）、
+ * 进 120（快速浮现，收尾感来自这一档）。此前 180/150 那种整页交叉淡化会让两页在 50% 处互相
+ * 透，读起来就是"发虚/浑浊"——这正是用户说"不满意"的地方。
  *
  * 缩放不再参与：0.8.67 修过 scaleIn(0.96) 在页边露缝（露出来的是外壳 Scaffold 的
  * containerColor = surface，与页面底色同色，等于没缩还多一条缝）。
  */
-private const val NAV_FADE_IN_MS = 180
-private const val NAV_FADE_OUT_MS = 150
+private const val NAV_FADE_IN_MS = 120
+private const val NAV_FADE_OUT_MS = 80
 private val NAV_EASING = FastOutSlowInEasing
 
 /**
@@ -203,16 +207,27 @@ fun SuixingApp() {
 
     // Top-level destinations replace each other: the drawer is a switch, not a stack.
     //
-    // 点抽屉里的一行：抽屉**瞬间消失**，不播滑出（用户最终口径：「GPT 的抽屉根本就不动」——
-    // 他要的是"它不在那儿了"，不是"它滑走了"），页面上只发生一次淡入（见文件顶部那组 NAV_FADE_*）。
+    // 点抽屉里的一行：抽屉**瞬间消失**，不播滑出（用户原话：「GPT 的抽屉根本就不动」——他要的是
+    // "它不在那儿了"，不是"它滑走了"），页面上只发生一次淡入（见文件顶部那组 NAV_FADE_*）。
     // snapTo 而不是 close()：close 是库那条 ~256ms 的左滑；UNDISPATCHED 让这次状态写入不排到
     // 下一个主线程消息，与导航同一帧落地，否则会先看见抽屉还盖着、页面已经在后面淡入。
     // 点**当前页那一行**同样只收抽屉、不导航：`popUpTo` 会把这一页弹掉再建一份，等于整页重建。
+    //
+    // 同时记下"从哪一页走的、去了哪一页"：用户要**保留离开时的状态**——从抽屉点走的那一页，
+    // 返回落到它时抽屉要**还是开着的**（见下面的结算块）。用户对这件事改口过很多次，最终两句
+    // 合起来才是完整规格：点行时抽屉不动地消失（这句）、返回时它又在那儿（那句）。
+    var drawerReturnTo by remember { mutableStateOf<String?>(null) }
+    // 抽屉里点走的那一页：标记只在「还停在这一页」的期间有效。没有它，一个陈旧的名字会留到
+    // 下一次无关的导航上——从覆盖层页开抽屉去别页、返回落到 chat 之后，再从聊天页顶栏点设置，
+    // route 恰好等于那个陈旧名字，抽屉就会自己弹出来。
+    var drawerTarget by remember { mutableStateOf<String?>(null) }
     val open: (String) -> Unit = { target ->
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             drawerState.snapTo(DrawerValue.Closed)
         }
         if (target != route) {
+            drawerReturnTo = route
+            drawerTarget = target
             navController.navigate(target) {
                 popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
@@ -226,16 +241,40 @@ fun SuixingApp() {
     // pop 到透明的 "empty" 就等于"什么都没有在盖着 chat"。
     val showChat: () -> Unit = { navController.popBackStack("empty", inclusive = false) }
 
-    // 用户自己收起抽屉（遮罩、返回键、左缘拖动）：这是用户自己的动作，走库的动画。
-    val closeDrawer: () -> Unit = { scope.launch { drawerState.close() } }
+    // 用户自己收起抽屉（遮罩、返回键、左缘拖动）：这是用户自己的动作，走库的动画。同时清掉
+    // 出发页标记——用户手动把抽屉收了，返回时就不该再自己弹出来（"状态"是他刚亲手关掉的这个）。
+    val closeDrawer: () -> Unit = {
+        scope.launch { drawerState.close() }
+        drawerReturnTo = null
+        drawerTarget = null
+    }
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
-    // 用户直接落在会话里（ChatGPT 的抽屉在这里同样会关）。
+    // 用户直接落在会话里（ChatGPT 的抽屉在这里同样会关）。这里一并清掉出发页标记。
     val chatFromDrawer: () -> Unit = {
+        drawerReturnTo = null
+        drawerTarget = null
         scope.launch { drawerState.close() }
         showChat()
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
     val goBack: () -> Unit = { navController.popBackStack() }
+
+    // 结算：离开抽屉点走的那一页时清标记；如果落点正是出发页，把抽屉**瞬时**摆回开着
+    // （snapTo，不播滑入——用户要的是"状态被保留"，不是"再看一遍它滑进来"）。
+    // 用 SideEffect 而不是 LaunchedEffect：它在组合完成后、布局之前跑，抽屉与目标页同一帧就位。
+    // 从 route 派生（而不是让每条 pop 路径自己摆）是为了让系统返回键/手势与顶栏按钮完全一致。
+    if (drawerTarget != null && route != drawerTarget) {
+        val origin = drawerReturnTo
+        SideEffect {
+            drawerReturnTo = null
+            drawerTarget = null
+            if (route == origin) {
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    drawerState.snapTo(DrawerValue.Open)
+                }
+            }
+        }
+    }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
     // IME inset frame by frame. The shell lays itself out by a *clamped* copy of that inset:

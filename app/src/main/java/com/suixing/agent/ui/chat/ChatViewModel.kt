@@ -1122,6 +1122,13 @@ class ChatViewModel : ViewModel() {
             pendingTurns[chatId] = pendingTurns[chatId].orEmpty() +
                 PendingTurn(UUID.randomUUID().toString().take(8), body, imageBase64)
             publishPendingTurns(chatId)
+            // The field is cleared here rather than left to the caller. The composer does clear on
+            // a true return, but the device is the verdict on trusting that: the line appeared in
+            // the queue and the text stayed in the box, so from where the user sat nothing had been
+            // sent at all. Queuing is an acceptance, and an acceptance owns the field it took the
+            // line from — the 立即 branch below does the same, for the same reason. Writing Draft()
+            // twice is harmless: the composer's own clear is idempotent.
+            clearDraft(chatId)
             return true
         }
         val id = UUID.randomUUID().toString().take(8)
@@ -1521,6 +1528,14 @@ class ChatViewModel : ViewModel() {
             // The error rides with the run: it shows on the error card only while that
             // conversation is the one on screen, and travels with it otherwise.
             is AgentEvent.Failed -> base.copy(error = event.message)
+
+            // A failed attempt that is being repeated. The run is still going — it is waiting — and
+            // without this the screen says nothing at all for the length of the delay, which is
+            // exactly how a retrying run got read as one that had stopped. Whatever event comes next
+            // overwrites the line.
+            is AgentEvent.Retrying -> base.copy(
+                status = "连接失败，${event.delayMs / 1000} 秒后重试（第 ${event.attempt} 次）· ${event.reason}",
+            )
 
             is AgentEvent.Finished -> live
 

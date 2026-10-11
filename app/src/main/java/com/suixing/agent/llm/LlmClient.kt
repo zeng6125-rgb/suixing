@@ -159,6 +159,14 @@ internal fun parseRetryAfter(header: String?): Int? = header
     ?.takeIf { it >= 0 }
     ?.coerceIn(MIN_RETRY_DELAY_SECONDS, MAX_RETRY_DELAY_SECONDS)
 
+/**
+ * The finish reason of a round that delivered output and then had its stream cut short.
+ *
+ * Not `length` (which would claim a token limit was hit) and not a failure: the content is real and
+ * is kept, the round counts as finished, and the caller may say the answer looks unfinished.
+ */
+internal const val FINISH_CUT = "cut"
+
 /** Handed to [LlmClient.complete]'s `onRetry` just before it waits. */
 data class RetryNotice(
     /** Which attempt just failed (1 = the first try). */
@@ -309,6 +317,9 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             var received = false
             val call = clientFor(settings).newCall(request)
             onCall(call)
+            // The turn this attempt has assembled so far, kept outside the block below: a stream
+            // that breaks after delivering text still has to hand that text back — see `received`.
+            var partial: StreamTurn? = null
             val outcome = runCatching {
                 call.execute().use { response ->
                     val body = response.body
@@ -321,7 +332,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                             failure = LlmException(friendlyHttp(response.code, body?.string().orEmpty())),
                         )
                     }
-                    val stream = StreamTurn()
+                    val stream = StreamTurn().also { partial = it }
                     val source = body.source()
                     while (true) {
                         val line = source.readUtf8Line() ?: break
@@ -343,12 +354,26 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                             { piece -> received = true; onDelta(piece) },
                             { piece -> received = true; onReasoning(piece) },
                         )
+                        // Tool-call deltas do not travel through the two callbacks above, so a round
+                        // that only asked for a tool would look like "nothing arrived" — and be
+                        // retried, which is a second request for a turn the endpoint already
+                        // answered, and a second round of tool calls on top of it.
+                        if (stream.hasToolCalls()) received = true
                     }
                     stream.toTurn()
                 }
             }
             outcome.getOrNull()?.let { return@withContext it }
             val failure = outcome.exceptionOrNull() ?: error("runCatching without a value")
+            // Output already arrived, so this round ends as **success with what came in** — never as
+            // a failure, and never as a retry. The endpoint has been paid for those tokens and the
+            // user is already reading them: reporting a failure would end the run on an answer that
+            // is on screen, and resending would print it twice. A stream that stops early is marked
+            // with [FINISH_CUT] so the caller can say the answer looks unfinished without calling
+            // the whole round a failure.
+            if (received) {
+                partial?.toTurn()?.let { return@withContext it.copy(finishReason = FINISH_CUT) }
+            }
             val code = (failure as? AttemptFailure)?.code
             // OkHttp reports a cancelled call as an IOException, so the call's own flag is the
             // reliable way to tell "the user stopped this" from "the network broke".
@@ -453,6 +478,9 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                 function["arguments"]?.let { if (it !is JsonNull) call.arguments.append(it.jsonPrimitive.content) }
             }
         }
+
+        /** Whether this attempt has asked for a tool yet — output the retry decision must count. */
+        fun hasToolCalls(): Boolean = calls.values.any { it.name.isNotBlank() }
 
         fun toTurn(): AssistantTurn {
             val requests = calls.toSortedMap().values

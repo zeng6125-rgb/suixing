@@ -14,6 +14,7 @@ import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.llm.ChatMessage
+import com.suixing.agent.llm.FINISH_CUT
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.ToolCallRequest
@@ -84,6 +85,23 @@ sealed interface AgentEvent {
          * been sent it.
          */
         val imageBase64: String? = null,
+    ) : AgentEvent
+
+    /**
+     * An attempt failed and the same request is going out again in [delayMs].
+     *
+     * The run is still Running — it has not stopped, it is waiting — so the screen needs to say so:
+     * a run that goes quiet for the length of a retry delay reads as one that ended, which is how
+     * 「发出去，几秒之后就停止」 was reported while the requests were in fact being retried.
+     */
+    data class Retrying(
+        /** Which attempt failed (1 = the first try). */
+        val attempt: Int,
+        /** How many retries the settings allow. */
+        val maxAttempts: Int,
+        val delayMs: Long,
+        /** Short and user-facing: why the attempt is being repeated. */
+        val reason: String,
     ) : AgentEvent
 }
 
@@ -1073,6 +1091,17 @@ class AgentEngine(
                         onRetry = { notice ->
                             retriesThisRound = notice.attempt
                             liveLine = "第 ${notice.attempt} 次重试（${notice.delayMs / 1000}s 后）· ${notice.reason}"
+                            // And out to the screen: the console's live line is not where the user
+                            // is looking. Without this, a retrying run looks like one that simply
+                            // stopped — which is exactly how 「发出去几秒之后就停止」 was reported.
+                            onEvent(
+                                AgentEvent.Retrying(
+                                    attempt = notice.attempt,
+                                    maxAttempts = notice.maxAttempts,
+                                    delayMs = notice.delayMs,
+                                    reason = notice.reason,
+                                ),
+                            )
                         },
                     )
                 } catch (error: IOException) {
@@ -1116,6 +1145,12 @@ class AgentEngine(
                 // presenting half an answer as a finished one.
                 if (turn.finishReason == "length") {
                     onEvent(AgentEvent.Failed("模型输出达到长度上限被截断，内容可能不完整。"))
+                }
+                // The stream broke after delivering content (see FINISH_CUT): the round is a
+                // success — the answer is real and is kept — but the user should know it stopped
+                // early rather than wonder why the reply ends mid-sentence.
+                if (turn.finishReason == FINISH_CUT) {
+                    onEvent(AgentEvent.Failed("连接中断，这一轮的回答可能不完整。"))
                 }
                 if (turn.toolCalls.isEmpty()) {
                     val assistant = StoredMessage(
