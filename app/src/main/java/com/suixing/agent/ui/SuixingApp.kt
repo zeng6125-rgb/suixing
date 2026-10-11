@@ -14,7 +14,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -142,11 +141,14 @@ import kotlinx.coroutines.launch
  *
  * 全站唯一的转场规格：进（enter）、出（exit）、返回进（popEnter）、返回出（popExit）四套全部
  * 只由下面这组常量和 [NAV_SHIFT_DIVISOR] 决定 —— NavHost 上一次配好，任何目的地都不再单独
- * 覆盖。用户的原话是「动画开闭的尽量各个页面都统一，主要还是统一」。
+ * 覆盖（唯一的例外是「从抽屉来源页返回」那一趟，见 NavHost 上那两条 pop）。
  *
- * 主通道是淡入淡出，位移只有屏宽/12。用户看过 ChatGPT 之后要的是「退出也有动画，连贯虽然
- * 不易察觉」：进页从右侧挪一小步、旧页向左让一小步，返回把这两步原样倒放（回来的那页从左
- * 侧挪回原位）—— 来回是同一段动效的正反两面，不是两套手调的参数。
+ * **只有离场的那一页淡出，进场的那一页不淡入**：用户原话「感觉会残留上一页面的残影，才进入到」
+ * —— 新页 alpha 0→1 的那 240ms 里，旧页正在它后面淡出，于是旧页"透"过新页。进页从第一帧就是
+ * 不透明的（只做位移），观感变成「新页干净地滑进来、旧页退场」。
+ *
+ * 主通道是位移，只有屏宽/12。用户看过 ChatGPT 之后要的是「退出也有动画，连贯虽然不易察觉」：
+ * 进页从右侧挪一小步、旧页向左让一小步并淡出，返回把这两步原样倒放（回来的那页从左侧挪回原位）。
  *
  * 缩放不再参与：0.8.67 修过 scaleIn(0.96) 在页边露缝（露出来的是外壳 Scaffold 的
  * containerColor = surface，与页面底色同色，等于没缩还多一条缝），位移是唯一对着静止的屏幕
@@ -156,6 +158,16 @@ private const val NAV_FADE_MS = 240
 private const val NAV_ENTER_MS = 280
 private const val NAV_EXIT_MS = 200
 private val NAV_EASING = FastOutSlowInEasing
+
+/**
+ * 「这一趟返回」的标志要活多久：转场 lambda 是在转场开始那一刻才求值的，判据必须活过整趟转场
+ * （最长的是进页 280ms），否则它读到 null/false，这一趟又走回带滑动的常规规格 —— 用户看到的
+ * 「点返回按钮时主页面还是在滑动」就是这个。400ms 比 280 长一截，又短到不会影响下一次导航。
+ *
+ * Long 而不是 Int：它唯一的用处是 `delay(...)`，而 delay 只收 Long/Duration（上面那三个
+ * `NAV_*_MS` 是 Int，因为它们只喂给 `tween(...)`，那边收 Int）。
+ */
+private const val NAV_RETURN_FLAG_MS = 400L
 
 /**
  * 横向位移的除数：屏宽 / 12 ≈ 8% 屏宽（1080p 面板上 ≈ 90px）。够看得见，又短到不会和
@@ -244,6 +256,12 @@ fun SuixingApp() {
     // remember 而不是 rememberSaveable：存下来的 "chat" 会在冷启动那一帧（起始页正是 chat）
     // 把抽屉弹开；rotation 不走这条路（manifest 里 configChanges 已含 orientation）。
     var drawerReturnTo by remember { mutableStateOf<String?>(null) }
+    // 「这一趟就是那次返回」：从 route 变回来源页的那一帧起为真，并**活过整趟转场**。
+    // 为什么不能直接用 drawerReturnTo 当判据、还要多这一位：转场 lambda 是在转场开始那一刻
+    // 求值的，而摆位（snapTo）与清标志发生在同一帧的组合末尾 —— 两种时序都可能发生，所以两条
+    // 判据取「或」：同一帧求值时有 drawerReturnTo，晚一帧求值时有这一位。只留一条就会漏，
+    // 用户看到的「点返回按钮时主页面还是在滑动」正是漏掉的那半。
+    var drawerReturning by remember { mutableStateOf(false) }
     // 用户自己收起抽屉（遮罩、返回键）：记下的出发页一起清掉，回来时不该再弹出来。
     val closeDrawer: () -> Unit = {
         scope.launch { drawerState.close() }
@@ -257,7 +275,14 @@ fun SuixingApp() {
     }
     // 返回上一页：抽屉的恢复**不挂在这条路上**（见下面的 SideEffect）——顶栏按钮、系统返回键、
     // 手势返回、以及 NavHost 自己处理的 pop，四条路都从 route 变化上恢复，谁 pop 都一样。
-    val goBack: () -> Unit = { navController.popBackStack() }
+    // 但「这一趟零动画」的标志在这里就先立起来（pop 之前），这样即使转场 lambda 在 pop 的同一帧
+    // 就被求值，它也已经看得到 —— 系统返回那条路没有这个先手，靠下面的 SideEffect 补。
+    val goBack: () -> Unit = {
+        if (navController.previousBackStackEntry?.destination?.route == drawerReturnTo) {
+            drawerReturning = true
+        }
+        navController.popBackStack()
+    }
     // 回到「抽屉的来源页」的那一帧，把抽屉摆成开着：route 变回来源页 ⇒ 抽屉本来就该在那儿。
     //
     // 用 SideEffect 而不是 LaunchedEffect：SideEffect 在组合完成后、**布局之前**跑，同一帧画出来
@@ -273,9 +298,18 @@ fun SuixingApp() {
     if (route == drawerReturnTo) {
         SideEffect {
             drawerReturnTo = null
+            drawerReturning = true
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 drawerState.snapTo(DrawerValue.Open)
             }
+        }
+    }
+    // 转场跑完再把「这一趟」的标志放下：早于转场清掉，两条 pop 转场就会读到 false，这一趟又变成
+    // 带滑动的常规规格。只由 drawerReturning 驱动，不挂 route —— 挂 route 会在每次导航都重置计时。
+    LaunchedEffect(drawerReturning) {
+        if (drawerReturning) {
+            delay(NAV_RETURN_FLAG_MS)
+            drawerReturning = false
         }
     }
 
@@ -449,11 +483,13 @@ fun SuixingApp() {
                         // 成瞬时，用户否了：「退出页面的动画加回来吧……退出也有动画，连贯虽然不
                         // 易察觉」。唯一的例外在下面那两条 pop 转场里（回到抽屉来源页的那一趟），
                         // 除此之外没有任何按目的地分叉的条件。
+                        // 进页**不淡入**：新页从第一帧就是不透明的，只做位移。用户原话「感觉会
+                        // 残留上一页面的残影，才进入到」——新页 alpha 0→1 的这 240ms 里旧页正在
+                        // 它后面淡出，旧页就"透"过来了。离场那页照旧淡出+滑出。
                         enterTransition = {
-                            fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
-                                slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
-                                    it / NAV_SHIFT_DIVISOR
-                                }
+                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
+                                it / NAV_SHIFT_DIVISOR
+                            }
                         },
                         exitTransition = {
                             fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
@@ -467,18 +503,23 @@ fun SuixingApp() {
                         // 口径是**两侧都零动画**：页面直接是那一帧、抽屉已经在（恢复走 snapTo，不重放
                         // 滑入），屏幕上没有任何可见运动。其余每一次返回照常走上面那套统一规格；两边
                         // 共用同一个判断，只关一边会露出半截动画。
+                        // 判据是「或」：drawerReturning 是这一趟的标志（活过整趟转场），
+                        // drawerReturnTo 兜住"转场 lambda 在标志立起来之前就被求值"那种时序。
                         popEnterTransition = {
-                            if (targetState.destination.route == drawerReturnTo) {
+                            if (drawerReturning ||
+                                targetState.destination.route == drawerReturnTo
+                            ) {
                                 EnterTransition.None
                             } else {
-                                fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
-                                    slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
-                                        -it / NAV_SHIFT_DIVISOR
-                                    }
+                                slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
+                                    -it / NAV_SHIFT_DIVISOR
+                                }
                             }
                         },
                         popExitTransition = {
-                            if (targetState.destination.route == drawerReturnTo) {
+                            if (drawerReturning ||
+                                targetState.destination.route == drawerReturnTo
+                            ) {
                                 ExitTransition.None
                             } else {
                                 fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +

@@ -107,7 +107,14 @@ fun CapabilityScreen(onBack: () -> Unit) {
     // 调用就是主线程等 IPC，冷启动进这一页会顿一下。它没有回调可等，所以只是挪走，不改成异步。
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { Core.capabilities.refresh() } }
 
-    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+    // 根节点必须自己铺不透明底：转场里进页是**不淡入**的（见 SuixingApp 顶部那段），这一页
+    // 若透出外壳的底，进页的那一帧就会看到上一页的残影。
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .navigationBarsPadding(),
+    ) {
         PageTopBar(title = "能力", subtitle = "随行能碰到什么，取决于这里", onBack = onBack)
         Column(
             modifier = Modifier

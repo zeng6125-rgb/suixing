@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.extension
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
@@ -39,7 +41,9 @@ fun ExtensionScreen(onBack: () -> Unit) {
     var memoryRefresh by remember { mutableIntStateOf(0) }
     var memoryNew by remember { mutableIntStateOf(0) }
 
-    Box(Modifier.fillMaxSize()) {
+    // 根节点必须自己铺不透明底：转场里进页是**不淡入**的（见 SuixingApp 顶部那段），这一页
+    // 若透出外壳的底，进页的那一帧就会看到上一页的残影。
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize().navigationBarsPadding()) {
             PageTopBar(
                 title = "记忆",

@@ -139,7 +139,14 @@ fun FilesScreen(onBack: () -> Unit) {
         listing = false
     }
 
-    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+    // 根节点必须自己铺不透明底：转场里进页是**不淡入**的（见 SuixingApp 顶部那段），这一页
+    // 若透出外壳的底，进页的那一帧就会看到上一页的残影。
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .navigationBarsPadding(),
+    ) {
         PageTopBar(
             title = "文件",
             subtitle = relativePath(root, current, rootLabel),
