@@ -526,7 +526,12 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         OutcomeCard(current) { outcome = null }
                         Spacer(Modifier.height(8.dp))
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        // 两个按钮按内容居中：转圈那一枚比文字矮一点，Top 对齐会让这一排看起来
+                        // "两个按钮不一样高"（用户截图里报的就是这个）。
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Button(
                             onClick = {
                                 scope.launch {
@@ -562,10 +567,14 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             },
                         ) {
                             if (testing) {
+                                // size，不是 height：只给高度的话，M3 的指示器会按自己的 40dp
+                                // 直径去要宽度，最后画成一个 40×16 的扁弧——用户看到的就是
+                                // 「icon 飞到哪里去了」。转圈只占图标的位置，标签照旧跟着它。
                                 CircularProgressIndicator(
-                                    modifier = Modifier.height(16.dp).padding(end = 8.dp),
+                                    modifier = Modifier.size(16.dp),
                                     strokeWidth = 2.dp,
                                 )
+                                Spacer(Modifier.width(8.dp))
                             }
                             Text(if (testing) "测试中" else "测试连接")
                         }

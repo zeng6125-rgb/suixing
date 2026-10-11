@@ -1315,6 +1315,9 @@ fun ChatScreen(
                     onPickModel = { provider, model -> viewModel.chooseModel(provider.id, model) },
                     onPrefetchWindows = { viewModel.prefetchWindows() },
                     pendingSteers = state.pendingSteers,
+                    pendingTurns = state.pendingTurns,
+                    onPromoteTurn = { id -> viewModel.promoteTurn(state.conversationId, id) },
+                    onRetractTurn = { id -> viewModel.retractTurn(state.conversationId, id) },
                     todos = state.todos,
                     onPromoteSteer = { viewModel.promoteSteer(it) },
                     onRetractSteer = { viewModel.retractSteer(it) },
@@ -4434,6 +4437,16 @@ private fun Composer(
     /** Lines queued for the run that is going, oldest first. */
     pendingSteers: List<PendingSteer>,
     /**
+     * Lines typed in 排队 mode, waiting to be the next turn. Drawn in the same stack as
+     * [pendingSteers] and through the same row — same three actions — but the row is told these are
+     * next turns, so it says 「下一轮发送」 instead of calling them interruptions.
+     */
+    pendingTurns: List<PendingTurn>,
+    /** 「立即插入」 on a waiting turn: hand it to the run in flight as a steer. */
+    onPromoteTurn: (String) -> Unit,
+    /** Drops one waiting turn. */
+    onRetractTurn: (String) -> Unit,
+    /**
      * The agent's own task board, as its last `todo_write` left it. Drawn above the queue, and
      * only while this run is going: the board is the run's plan, not a second transcript.
      */
@@ -4625,6 +4638,41 @@ private fun Composer(
             // on their way to the model, not messages yet — so they are inset from the pill
             // (visibly narrower than it, which is what stops them reading as part of it) and
             // each one carries its own actions as icons.
+            // 排队 turns first: they are the ones that have not gone anywhere yet, so they sit
+            // closest to the field they will be sent from. Without this row the user pressed 插话
+            // again and again — the line left the field with nothing on screen to show for it.
+            if (pendingTurns.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = STEER_QUEUE_INSET),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    pendingTurns.take(STEER_ROWS_SHOWN).forEach { queued ->
+                        // The same row, the same three actions — what changes is what they mean and
+                        // what the row says, which `nextTurn` carries.
+                        SteerQueueRow(
+                            steer = PendingSteer(queued.id, queued.text, queued.imageBase64),
+                            undelivered = false,
+                            nextTurn = true,
+                            onPromote = { onPromoteTurn(queued.id) },
+                            onEdit = {
+                                onRestoreSteer(PendingSteer(queued.id, queued.text, queued.imageBase64))
+                                onRetractTurn(queued.id)
+                            },
+                            onDelete = { onRetractTurn(queued.id) },
+                        )
+                    }
+                    if (pendingTurns.size > STEER_ROWS_SHOWN) {
+                        Text(
+                            text = "还有 ${pendingTurns.size - STEER_ROWS_SHOWN} 条待发送",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 4.dp),
+                        )
+                    }
+                }
+            }
             if (pendingSteers.isNotEmpty()) {
                 Column(
                     modifier = Modifier
@@ -6721,6 +6769,12 @@ private fun SteerQueueRow(
     steer: PendingSteer,
     /** The run is over: this line will never be read unless the user sends it again. */
     undelivered: Boolean,
+    /**
+     * 排队 mode: this line is waiting to be the **next turn**, not an interruption of the one in
+     * flight. The row is otherwise identical — same three actions — but it has to say which of the
+     * two it is, or 「立即插话」 reads as a promise the queue does not make.
+     */
+    nextTurn: Boolean = false,
     onPromote: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -6777,14 +6831,20 @@ private fun SteerQueueRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            // An undelivered line has no round left to interrupt: the action starts a new turn
-            // instead, and the label has to say so.
+            // 排队 rows say what they are: the line has not reached the model at all, so calling
+            // it an interruption would be a lie, and 「立即插入」 is the deliberate way to make it
+            // one. An undelivered steer has no round left to interrupt, so its action starts a new
+            // turn instead and says so.
             QueueAction(
                 icon = R.drawable.ic_arrow_up,
-                label = if (undelivered) "发送" else "立即插话",
+                label = when {
+                    nextTurn -> "立即插入"
+                    undelivered -> "发送"
+                    else -> "立即插话"
+                },
                 onClick = onPromote,
             )
-            QueueAction(icon = R.drawable.ic_square_pen, label = "修改", onClick = onEdit)
+            QueueAction(icon = R.drawable.ic_square_pen, label = "编辑", onClick = onEdit)
             QueueAction(icon = R.drawable.ic_trash, label = "删除", onClick = onDelete)
         }
     }

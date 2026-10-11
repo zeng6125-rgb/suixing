@@ -78,7 +78,7 @@ data class PendingSteer(val id: String, val text: String, val imageBase64: Strin
  * going right now. If the process dies, that run dies with it, so there is no "afterwards" left to
  * send into — and a copy on disk would come back as the app talking to itself.
  */
-data class PendingTurn(val text: String, val imageBase64: String? = null)
+data class PendingTurn(val id: String, val text: String, val imageBase64: String? = null)
 
 data class ChatUiState(
     val conversationId: String = "",
@@ -153,6 +153,15 @@ data class ChatUiState(
     val draft: Draft = Draft(),
     /** Lines queued for the run that is going, oldest first; see [PendingSteer]. */
     val pendingSteers: List<PendingSteer> = emptyList(),
+    /**
+     * Lines typed in 排队 mode, waiting to go out as the next turn; see [PendingTurn].
+     *
+     * Drawn above the composer like [pendingSteers], with its own wording, because the two mean
+     * different things: one is being read by the run in flight, the other has not been sent
+     * anywhere yet. Not drawing it is what made the user press 插话 over and over — the line
+     * vanished into a queue with nothing on screen to show for it.
+     */
+    val pendingTurns: List<PendingTurn> = emptyList(),
     /**
      * The agent's own task board, as the last `todo_write` left it — drawn above the composer
      * while the run that wrote it is going.
@@ -460,6 +469,16 @@ class ChatViewModel : ViewModel() {
     private val pendingTurns = mutableMapOf<String, List<PendingTurn>>()
 
     /**
+     * Conversations with a queued turn currently being handed to [send].
+     *
+     * The two drain hooks (the run-state watcher and the run's own `finally`) can fire for the same
+     * run end, and the first of them starts a run whose end can fire the second. Re-entrancy is what
+     * this closes: a turn is taken off the queue *before* it is sent, so a second entry finds the
+     * queue shorter and cannot deliver the same line twice.
+     */
+    private val draining = mutableSetOf<String>()
+
+    /**
      * The board the last `todo_write` left behind, held so it can be republished.
      *
      * One copy, not one per conversation: the board is app-wide — the file is shared, and two
@@ -534,6 +553,11 @@ class ChatViewModel : ViewModel() {
                 stateWatcher?.cancel()
                 if (chatId.isEmpty()) return@collect
                 stateWatcher = viewModelScope.launch {
+                    // Only a real Running → not-Running transition may drain the 排队 queue. Asking
+                    // on every emission is what let an unrelated publish touch the queue — and this
+                    // flow is not quiet: the run publishes a new Running(stats) every 120ms, so the
+                    // collector runs constantly while a run is going.
+                    var wasRunning = false
                     Core.engine.stateOf(chatId).collect { run ->
                     when (run) {
                         is RunState.Running -> _state.update {
@@ -563,9 +587,11 @@ class ChatViewModel : ViewModel() {
                         else -> _state.update { it.copy(runningHere = false) }
                     }
                     // 排队 mode: the turn the user typed during that run is the *next* turn, and
-                    // this is the first moment it can be one. StateFlow drops repeats, so this
-                    // fires once per real transition rather than on every publish.
-                    if (run !is RunState.Running) drainPendingTurns(chatId)
+                    // this is the first moment it can be one. Gated on the transition rather than on
+                    // the state, so only the end of a run tries — see `wasRunning`.
+                    val running = run is RunState.Running
+                    if (wasRunning && !running) drainPendingTurns(chatId)
+                    wasRunning = running
                 }
                 }
             }
@@ -1072,16 +1098,15 @@ class ChatViewModel : ViewModel() {
     /**
      * Takes a line typed while a run is going, and routes it by the mode the run was started with.
      *
-     * 立即 (`steerMode == 1`): the line interrupts the round in flight — the original behaviour.
-     * 排队 (the default): the line is **not** an interruption at all. It is the next turn, so it
-     * waits in [pendingTurns] and goes out through [send] once this run is over; nothing about it
-     * appears above the composer, because nothing about it is queued *for the model to read
-     * mid-run*. The user asked for exactly this: 「排队发送时…作为新的用户一轮对话发送」.
+     * A line typed while a run is going belongs to **the engine**, which is the only place that
+     * knows what 插话模式 means for this run: 立即 cuts the round and is read now, 排队 is carried at
+     * the next round boundary and shown in the queue above the composer. The view model does not
+     * second-guess it — an earlier version kept its own local queue for 排队 and held the line until
+     * the run ended, which swallowed the user's message (nothing sent, nothing shown, no run left to
+     * deliver it) and is exactly the 「运行时我插话怎么发不出去了」 that came back from the device.
      *
-     * The mode is read off the run rather than off the live setting: a run started in 排队 stays
-     * 排队 for its whole life, which is the same answer the engine gives when it decides where a
-     * line lands. False means "nothing is running, handle this yourself" — the composer falls back
-     * to sending it as an ordinary turn.
+     * False means "there is nothing to steer" — no run, or a blank line — and the composer falls
+     * back to sending it as an ordinary turn.
      */
     fun steer(text: String, imageBase64: String? = null): Boolean {
         val body = text.trim()
@@ -1089,10 +1114,14 @@ class ChatViewModel : ViewModel() {
         if (body.isEmpty() && imageBase64 == null) return false
         if (!Core.engine.isRunning(chatId)) return false
         if (!Core.engine.steersImmediately(chatId)) {
-            // 排队: a new turn, not a steer. The draft is left alone on purpose — the composer
-            // clears its own input and attachment from the true return of this call, and a second
-            // writer here would race that.
-            pendingTurns[chatId] = pendingTurns[chatId].orEmpty() + PendingTurn(body, imageBase64)
+            // 排队: the line is the *next turn*, not an interruption. It waits here, is drawn above
+            // the composer at once (see publishPendingTurns), and goes out through [send] when this
+            // run ends. Its own id, because the row offers the same three actions a queued steer
+            // does — 立即插入 (hand it to the run in flight), 编辑 (take it back to the field) and
+            // 删除 — and all three have to name the line they act on.
+            pendingTurns[chatId] = pendingTurns[chatId].orEmpty() +
+                PendingTurn(UUID.randomUUID().toString().take(8), body, imageBase64)
+            publishPendingTurns(chatId)
             return true
         }
         val id = UUID.randomUUID().toString().take(8)
@@ -1105,35 +1134,6 @@ class ChatViewModel : ViewModel() {
         publishSteers(chatId)
         clearDraft(chatId)
         return true
-    }
-
-    /**
-     * Starts the next queued turn, if the run that was blocking it has really finished.
-     *
-     * **Two callers, and both are needed — do not delete one as redundant.** The engine publishes
-     * its terminal state from *inside* the run and unregisters the run in the caller's `finally`,
-     * so there is a real window where the state already says Done while a start is still refused as
-     * 「already running」. A drain that ran only on the state would drop the turn in exactly that
-     * window and never retry — a terminal StateFlow does not re-emit, so nothing would come along
-     * later to try again. The run-finally is the one moment that is certainly *after* the engine
-     * let go (this view model is the caller that went into the engine), so it is the safety net.
-     *
-     * The head is only dropped once [send] actually took it, so a refusal leaves the turn queued
-     * for the next drain instead of losing it — that is also what makes two callers safe rather
-     * than double-sending. One turn per call: each one is a run of its own, and the next drain
-     * happens when that run ends.
-     *
-     * **Only the conversation on screen is drained.** [send] acts on the displayed conversation and
-     * on nothing else, so a turn queued in a chat the user has since left waits — and goes out when
-     * they come back, because the state watcher re-subscribes and a StateFlow hands it the current
-     * value at once. Sending it from here instead would mean pushing a message into a conversation
-     * nobody is looking at, which is a worse surprise than a turn that waits its turn.
-     */
-    private fun drainPendingTurns(chatId: String) {
-        val next = pendingTurns[chatId].orEmpty().firstOrNull() ?: return
-        if (_state.value.conversationId != chatId) return
-        if (!send(next.text, next.imageBase64)) return
-        pendingTurns[chatId] = pendingTurns[chatId].orEmpty().drop(1)
     }
 
     /** Sends a queued line now, cutting the round in flight so the model sees it at once. */
@@ -1160,10 +1160,94 @@ class ChatViewModel : ViewModel() {
         publishSteers(chatId)
     }
 
+    /**
+     * Drops one waiting 排队 turn.
+     *
+     * By id: the row carries three actions and each has to name the line it acts on, so the turn
+     * needs the same kind of handle a queued steer has.
+     */
+    fun retractTurn(chatId: String, id: String) {
+        pendingTurns[chatId] = pendingTurns[chatId].orEmpty().filterNot { it.id == id }
+        publishPendingTurns(chatId)
+    }
+
+    /**
+     * 「立即插入」 on a waiting turn: it stops being the next turn and becomes an interruption of the
+     * run in flight — the 立即 path, taken deliberately, one line at a time.
+     *
+     * The line is taken out of the queue first, so a run that ends in the same instant cannot also
+     * send it as the next turn. If the engine refuses (nothing running any more, or the line was
+     * already retracted), it goes back to the queue rather than disappearing.
+     */
+    fun promoteTurn(chatId: String, id: String) {
+        val queued = pendingTurns[chatId].orEmpty().firstOrNull { it.id == id } ?: return
+        pendingTurns[chatId] = pendingTurns[chatId].orEmpty().filterNot { it.id == id }
+        publishPendingTurns(chatId)
+        if (Core.engine.steer(chatId, id, queued.text, imageBase64 = queued.imageBase64)) {
+            // It is an interruption now, so it is drawn as one: the same bubble a steer gets.
+            steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, queued.text, queued.imageBase64)
+            publishSteers(chatId)
+            return
+        }
+        pendingTurns[chatId] = pendingTurns[chatId].orEmpty() + queued
+        publishPendingTurns(chatId)
+    }
+
     /** Mirrors one conversation's queue onto the screen, when that is the one on screen. */
     private fun publishSteers(chatId: String) {
         if (_state.value.conversationId != chatId) return
         _state.update { it.copy(pendingSteers = steers[chatId].orEmpty()) }
+    }
+
+    /** The same, for the 排队 turns waiting to become the next run. */
+    private fun publishPendingTurns(chatId: String) {
+        if (_state.value.conversationId != chatId) return
+        _state.update { it.copy(pendingTurns = pendingTurns[chatId].orEmpty()) }
+    }
+
+    /**
+     * Starts the next 排队 turn, if the run that was blocking it has really finished.
+     *
+     * **Taken off the queue first, sent second — and that order is the fix.** An earlier version
+     * sent first and dropped the head only when `send` returned true, so any path that left the head
+     * in place (a refusal while the old run was still registered, or a second hook racing the first)
+     * meant the line was delivered again at the end of the next run, and the one after that: the
+     * assistant answered, and then the same line was sent again, for as long as the user watched.
+     * Sending twice is the worse failure of the two — a dropped line is visible, because its row is
+     * still on screen and the user can send it again, while a repeated one looks like the model
+     * talking to itself.
+     *
+     * So: take it, try to send, and put it back **only** if the send was refused (a run still
+     * registered, or no conversation on screen to send into). [draining] keeps two hooks from
+     * getting in each other's way; a refused turn is restored at the head, in order.
+     */
+    private fun drainPendingTurns(chatId: String) {
+        if (!draining.add(chatId)) return
+        try {
+            val next = pendingTurns[chatId].orEmpty().firstOrNull() ?: return
+            if (_state.value.conversationId != chatId) return
+            pendingTurns[chatId] = pendingTurns[chatId].orEmpty().drop(1)
+            publishPendingTurns(chatId)
+            if (send(next.text, next.imageBase64)) return
+            // Refused: back to the head, where the next trigger will try again. Nothing is lost and
+            // nothing was sent.
+            pendingTurns[chatId] = listOf(next) + pendingTurns[chatId].orEmpty()
+            publishPendingTurns(chatId)
+            // Refused while **nothing is running** is the case that needs help: the engine publishes
+            // a run's terminal state before it lets go of the run, so a drain fired by that state can
+            // arrive in the gap and be refused — and no further emission comes, because the state
+            // flow has already settled. That is 「暂停后再发，助手没有响应」: the turn sat in the queue
+            // with nothing left to trigger it. One short retry closes the gap. A refusal while a run
+            // *is* going needs none: that run's end drains again.
+            if (!Core.engine.isRunning(chatId)) {
+                viewModelScope.launch {
+                    delay(RETRY_TURN_MS)
+                    drainPendingTurns(chatId)
+                }
+            }
+        } finally {
+            draining.remove(chatId)
+        }
     }
 
     /**
@@ -2039,6 +2123,15 @@ private const val LIVE_DRAFT_INTERVAL_MS = 1000L
  * report where each block starts, which it does not do yet.
  */
 private const val DELTA_PUBLISH_MS = 80L
+
+/**
+ * How long to wait before trying a refused 排队 turn again.
+ *
+ * Only used for the refusal that has no other way back: the send was refused although nothing is
+ * running, which means the engine is between publishing a run's terminal state and letting go of the
+ * run. Long enough for that to finish, short enough that the user does not see a gap.
+ */
+private const val RETRY_TURN_MS = 300L
 
 /**
  * How much of a draft is compared against the transcript to decide it was already saved.
