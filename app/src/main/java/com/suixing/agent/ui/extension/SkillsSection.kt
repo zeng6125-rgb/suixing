@@ -19,7 +19,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -100,7 +99,9 @@ fun SkillsSection(
                 )
             }
 
-            loaded == null -> item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
+            // 首帧不画任何东西：读盘只要几毫秒，而"闪一下"正是这一帧造成的 —— 进度条画一帧再被列表
+            // 顶掉，看起来和"先空后满"一样是闪。空态只在**确实读完了且确实是空的**时候画（下一支）。
+            loaded == null -> Unit
 
             loaded.isEmpty() -> item {
                 Text(

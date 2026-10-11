@@ -242,14 +242,18 @@ private fun SettingsRoot(
                 SettingsGroup(
                     title = "模型与对话",
                     rows = listOf(
+                        // 走 `onOpen(...route)`（真路由）而不是 `onOpenPage(...)`（同一个目的地里换内容）：
+                        // 内部切换不经过 NavHost ⇒ 没有任何转场，用户报的「打开子页没有返回动画」就是它。
+                        // 路由本来就存在（`SettingsPageRoute` 按 `SettingsPage.route` 分发），所以这里
+                        // 只是改走它。用 `SettingsPage.X.route` 而不是手写字符串，避免两处各写一份路由名。
                         SettingsGroupRow("模型与生成", "接口、模型与采样") {
-                            onOpenPage(SettingsPage.MODEL)
+                            onOpen(SettingsPage.MODEL.route)
                         },
                         SettingsGroupRow("对话配置", "输入、运行、失败重试与显示") {
-                            onOpenPage(SettingsPage.CONVERSATION)
+                            onOpen(SettingsPage.CONVERSATION.route)
                         },
                         SettingsGroupRow("外观", "主题、配色与排版") {
-                            onOpenPage(SettingsPage.APPEARANCE)
+                            onOpen(SettingsPage.APPEARANCE.route)
                         },
                     ),
                 )
@@ -266,7 +270,7 @@ private fun SettingsRoot(
                             onOpen("tools")
                         },
                         SettingsGroupRow("网络与语音", "搜索走哪里、回复读不读出来") {
-                            onOpenPage(SettingsPage.NETWORK)
+                            onOpen(SettingsPage.NETWORK.route)
                         },
                     ),
                 )
@@ -276,10 +280,10 @@ private fun SettingsRoot(
                     title = "数据与关于",
                     rows = listOf(
                         SettingsGroupRow("数据", "记忆、助手与会话文件") {
-                            onOpenPage(SettingsPage.DATA)
+                            onOpen(SettingsPage.DATA.route)
                         },
                         SettingsGroupRow("用量", "tokens · 30 日柱状 · 按模型") {
-                            onOpenPage(SettingsPage.USAGE)
+                            onOpen(SettingsPage.USAGE.route)
                         },
                         SettingsGroupRow("关于", "版本、隐私与开源许可") {
                             onOpen("about")

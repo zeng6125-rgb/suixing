@@ -1608,6 +1608,14 @@ private fun ChatTopBar(
             Text(
                 text = title,
                 style = titleBarStyle(),
+                // **光学补偿**（不是布局错位）：这一行是 CenterVertically，三个槽位的**盒子中心
+                // 本来就一致**（两侧圆盘 40dp 居中、这个胶囊 44dp 居中）—— 但文字行盒是按
+                // ascender + descender 居中的，中文/拉丁的视觉重量偏上，所以标题**读起来**比两侧
+                // 圆盘高 1–2dp（用户：「icon 和标题没对齐」）。
+                // 只把文字本身下移 1.5dp：在居中的行里，给文字加 `padding(top = 3.dp)` 会让它的
+                // 盒子长高 3dp、重心下移一半 = 1.5dp ✔。**不动胶囊**——动胶囊会让它的上下边与圆盘
+                // 错开，那才是真的没对齐。3dp 这个数要调就调它（视觉上等于 1.5dp 位移）。
+                modifier = Modifier.padding(top = 3.dp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

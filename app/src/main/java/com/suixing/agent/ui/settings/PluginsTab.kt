@@ -66,6 +66,15 @@ fun PluginsSection(onNotify: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var entries by remember { mutableStateOf<List<PluginEntry>>(emptyList()) }
+    /**
+     * Whether the first read has finished — success *or* failure.
+     *
+     * Without it the empty state is drawn on the very first frame, before the disk has been read:
+     * the user sees 「还没有可安装的插件」 for a few milliseconds and then the list, which reads as
+     * "it flashed the empty state before loading". Failure counts as loaded too, or the page would
+     * stay blank for ever after a read error.
+     */
+    var loaded by remember { mutableStateOf(false) }
     var refresh by remember { mutableStateOf(0) }
     var detail by remember { mutableStateOf<PluginSpec?>(null) }
     var pending by remember { mutableStateOf<InstallResult?>(null) }
@@ -73,6 +82,7 @@ fun PluginsSection(onNotify: (String) -> Unit) {
 
     LaunchedEffect(refresh) {
         entries = runCatching { Core.plugins.list() }.getOrDefault(emptyList())
+        loaded = true
     }
 
     // SAF: a `.sapkg` is a zip, and a custom extension is not a mime type, so the picker takes
@@ -119,10 +129,15 @@ fun PluginsSection(onNotify: (String) -> Unit) {
             TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("安装插件") }
         }
         if (entries.isEmpty()) {
-            EmptyState(
-                title = "还没有可安装的插件",
-                subtitle = "插件的形态还在确定中，定下来之后会出现在这里。",
-            )
+            // 首帧不画空态：列表是异步读盘的，第一帧还没有数据 —— 先画"还没有可安装的插件"、读完再画
+            // 列表，用户看到的就是"闪一下初始状态"。读盘只要几毫秒，所以什么都不画（而不是画进度条：
+            // 一个只出现一帧的进度条本身就是那次闪烁）。失败也算读完了，否则页面会永远空白。
+            if (loaded) {
+                EmptyState(
+                    title = "还没有可安装的插件",
+                    subtitle = "插件的形态还在确定中，定下来之后会出现在这里。",
+                )
+            }
         } else {
             // A plain Column, **not** a LazyColumn. This section is drawn inside the tab's own
             // LazyColumn item, and a lazy list measures its items with an unbounded height — a

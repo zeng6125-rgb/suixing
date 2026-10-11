@@ -17,8 +17,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -172,19 +170,10 @@ private const val NAV_SHIFT_DIVISOR = 12
 /**
  * 从抽屉进入的四个顶层目的地。
  *
- * 它们之间是**同级切换**（抽屉是开关，不是栈），所以返回时不该有位移 —— 有位移会让「返回」
- * 看起来像「又进了一页」。见 [NAV_FADE_MS]。
+ * 只用来决定**返回时的滑入方向**：它们自己之间是同级切换，返回走 0.8.91 那个方向（从右侧，
+ * 用户认可的版本）；其余目的地（设置子页）返回时从左侧滑回来。
  */
 private val DRAWER_ROUTES = setOf("files", "tasks", "schedules", "settings")
-
-/**
- * 抽屉路线上的淡入淡出时长。用户拿 GPT 录屏对比的原话是「有一点点动画，但是很淡，就是相当于
- * 蒙版由深到没有」⇒ 只有透明度、没有位移，90–120ms 之间取 110。
- *
- * 淡入**不会**露出下面的聊天页：覆盖层自己那层不透明底（见 NavHost 的 background）挡着，
- * 淡出来的是底色而不是 chat —— 否则这就会变成用户最讨厌的那种残影。
- */
-private const val NAV_FADE_MS = 110
 
 /**
  * The app shell.
@@ -525,52 +514,37 @@ fun SuixingApp() {
                             // 旧页瞬消 + 新页位移滑入（详见文件顶部那段规格）：exit 是 None ⇒ 旧页
                             // 当帧让位、不与新页叠加；enter 只走位移、没有淡入 ⇒ 新页从第一帧就是
                             // 不透明的，所以任何一帧都只有一个页面，结构上不可能有残影。
+                            // 0.8.91 原样（用户：「0.8.91 侧边栏点进其它页的动画可以啊，怎么又改了」）：
+                            // 旧页当帧让位，新页从右侧滑入。抽屉路线**不再**做淡入 —— 我上一版把
+                            // 它改成 fadeIn 是用户没要的改动，已撤。
                             enterTransition = {
-                                if (targetState.destination.route in DRAWER_ROUTES) {
-                                    // 抽屉 → 页面：同级切换，只淡不滑。
-                                    fadeIn(tween(NAV_FADE_MS))
-                                } else {
-                                    slideInHorizontally(
-                                        animationSpec = tween(
-                                            durationMillis = NAV_SLIDE_MS,
-                                            easing = FastOutSlowInEasing,
-                                        ),
-                                    ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
-                                }
+                                slideInHorizontally(
+                                    animationSpec = tween(
+                                        durationMillis = NAV_SLIDE_MS,
+                                        easing = FastOutSlowInEasing,
+                                    ),
+                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
                             },
                             exitTransition = { ExitTransition.None },
                             popEnterTransition = {
-                                // 判据是**被弹掉的那一页**（initialState）：弹掉的是抽屉路线（设置 →
-                                // chat）就只淡不滑；弹掉的是设置子页（模型 → 设置）就走位移 —— 用户
-                                // 要的「各页返回要有动画」正是后者，之前 popEnter 与 enter 同向，
-                                // 返回看起来只是「又进了一页」。
-                                if (initialState.destination.route in DRAWER_ROUTES) {
-                                    fadeIn(tween(NAV_FADE_MS))
-                                } else {
-                                    slideInHorizontally(
-                                        animationSpec = tween(
-                                            durationMillis = NAV_SLIDE_MS,
-                                            easing = FastOutSlowInEasing,
-                                        ),
-                                    ) { fullWidth -> -fullWidth / NAV_SHIFT_DIVISOR }
+                                // 方向按**被弹掉的那一页**（initialState）分：
+                                // · 抽屉路线（设置 → chat）= **0.8.91 原样**，从右侧滑入（+/12）——
+                                //   用户认可的就是它，我上一版改成淡入属于没要的改动，已撤；
+                                // · 设置子页（模型 → 设置）= 从**左侧**滑回来（-/12），这是用户单独
+                                //   要的那条「打开子页要有返回动画」。
+                                slideInHorizontally(
+                                    animationSpec = tween(
+                                        durationMillis = NAV_SLIDE_MS,
+                                        easing = FastOutSlowInEasing,
+                                    ),
+                                ) { fullWidth ->
+                                    val sign = if (initialState.destination.route in DRAWER_ROUTES) 1 else -1
+                                    sign * fullWidth / NAV_SHIFT_DIVISOR
                                 }
                             },
-                            popExitTransition = {
-                                // 返回抽屉路线（设置 → chat）：让**离开的那一页淡出**，而不是当帧消失。
-                                // 用户要的「蒙版由深到没有」就是这一条 —— 原来是 None ⇒ 硬切，读起来
-                                // 就是「返回时闪一下」（与「开闭动画生硬」是同一个病）。
-                                //
-                                // 为什么**不动**那层底色（它在 pop 期间本来就是透明的）：返回的目标是
-                                // 聊天页。底色若在转场期间保持不透明，淡出时露出来的是**底色**而不是
-                                // chat，等底色终于变透明时 chat 再「啪」地出现 —— 那是另一种闪。
-                                // 现在这样：设置页在半透明状态里溶进聊天页，全程没有一帧是纯底色。
-                                if (initialState.destination.route in DRAWER_ROUTES) {
-                                    fadeOut(tween(NAV_FADE_MS))
-                                } else {
-                                    // 子页返回（模型 → 设置）：父页从左侧滑回来盖住它，不需要淡出。
-                                    ExitTransition.None
-                                }
-                            },
+                            // 0.8.91 原样：旧页当帧消失。我上一版加的 fadeOut 已撤 —— 用户要的是
+                            // 0.8.91 那个手感，不是淡出。
+                            popExitTransition = { ExitTransition.None },
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
                                 composable("empty") { }
