@@ -334,7 +334,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                     onNotify = ::notify,
                 )
 
-                else -> PluginsTab()
+                else -> PluginsTab(onNotify = ::notify)
             }
         }
 
@@ -464,14 +464,14 @@ private fun SkillUrlImportDialog(
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = url,
                     onValueChange = { url = it },
                     label = { Text("技能文件地址") },
                     placeholder = { Text("https://example.com/SKILL.md") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 )
                 if (url.isNotBlank() && !usable) {
                     Spacer(Modifier.height(6.dp))
@@ -518,14 +518,15 @@ private fun ToolsTab() {
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp)) {
             OutlinedTextField(
-                textStyle = MaterialTheme.typography.bodySmall,
+                textStyle = MaterialTheme.typography.bodyMedium,
                 value = query,
                 onValueChange = { query = it },
                 // 不要给这个框写死高度：OutlinedTextField 的内容（浮动标签 + 文字行盒 + 上下留白）
                 // 有自己的最小高度，把外层约束压到 44dp 之后放不下，字的下缘（带降部的汉字/字母）
                 // 就被裁掉 —— 0.8.76 收紧密度时压的就是这一处，用户看到的截断即它。
                 // 密度靠下面那些行内边距与间距拿，不靠裁这一个唯一有输入文字的控件。
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                // 字号与最小高度按设置页的统一规格：bodyMedium(14sp) + heightIn(min = 52.dp)。
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 singleLine = true,
                 label = { Text("搜索工具名") },
             )
@@ -579,28 +580,25 @@ private fun ToolsTab() {
 }
 
 /**
- * 「插件」 tab: the place, and the words, for the idea — not the plugins themselves.
+ * 「插件」 tab: the idea, and now the packages themselves.
  *
- * The user's framing is DSH's: everything the app can do is something you can put in and take
- * out. What a plugin *is* here has not been decided yet, so this tab deliberately stops at an
- * explanation. No invented list, no disabled "install" button, no placeholder rows: a screen
- * that pretends to have content is worse than one that says it has none. When the first real
- * shape arrives, its list replaces the [EmptyState] below.
+ * The user's framing is DSH's: everything the app can do is something you can put in and take out.
+ * The intro card explains that; [PluginsSection] below it is the actual store — installed packages,
+ * their level and risk, and a white-box view of what each would do. M1 installs and inspects only:
+ * nothing here reaches the tool table or the prompt yet, which is why the detail view shows raw
+ * templates rather than a friendly summary.
  */
 @Composable
-private fun PluginsTab() {
+private fun PluginsTab(onNotify: (String) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { PluginsIntroCard() }
-        item {
-            EmptyState(
-                title = "还没有可安装的插件",
-                subtitle = "插件的形态还在确定中，定下来之后会出现在这里。",
-            )
-        }
+        // The store draws its own empty state (the same words this tab used to show), so the list and
+        // the "nothing here yet" case stay in one place instead of being decided twice.
+        item { PluginsSection(onNotify = onNotify) }
     }
 }
 
@@ -936,13 +934,13 @@ private fun McpEditorDialog(
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("名称（会进工具名，建议用英文）") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 )
                 Spacer(Modifier.height(10.dp))
 
@@ -969,14 +967,14 @@ private fun McpEditorDialog(
                     )
                 } else {
                     OutlinedTextField(
-                        textStyle = MaterialTheme.typography.bodySmall,
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         value = url,
                         onValueChange = { url = it },
                         label = { Text("服务器地址") },
                         placeholder = { Text("http://127.0.0.1:3000/mcp") },
                         singleLine = true,
                         shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(

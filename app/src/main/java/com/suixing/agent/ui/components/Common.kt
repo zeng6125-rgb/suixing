@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -251,8 +252,10 @@ fun StatusPill(
  * 标准（改这里就是改全站）：
  *  - 纵向 **12dp**：两行行盒 43dp + 24dp = 67dp；单行 25dp + 24dp = 49dp，仍在 48dp 触控下限之上。
  *  - 标题 `bodyLarge`、副标题 `bodySmall`、控件前 12dp。
- *  - **不加横向 padding**：横向留白归容器——卡内的行由 SuixingCard 的 16dp 给，
- *    页面级的行由调用方用 [modifier] 传 16dp。在这里加会让卡里的行变成 32dp 缩进。
+ *  - **横向留白默认不加**（[contentPadding] 默认 0）：卡内的行由 SuixingCard 的 16dp 给，
+ *    页面级的行由调用方用 [modifier] 传 16dp。默认值给 16 会让卡里的行变成 32dp 缩进。
+ *    唯一的例外是 [SettingsGroup]：那里的行要**铺满卡片**（涟漪才碰得到卡片边缘），所以它
+ *    自己把 16dp 从容器挪进 [contentPadding]、并把 [shape] 换成与卡片同形。
  */
 @Composable
 fun SettingRow(
@@ -263,6 +266,10 @@ fun SettingRow(
     onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     titleMaxLines: Int = Int.MAX_VALUE,
+    /** 行自己的可见形状：涟漪的圆角跟着它走。卡内的行由调用方传卡片形状。 */
+    shape: Shape = MaterialTheme.shapes.small,
+    /** 内容内边距，落在**点击区之内** ⇒ 涟漪照样铺满整行（横向），内容仍缩进。 */
+    contentPadding: PaddingValues = PaddingValues(0.dp),
 ) {
     Row(
         modifier = modifier
@@ -273,10 +280,12 @@ fun SettingRow(
                 } else {
                     // 行自带圆角点击区：水波纹跟着圆角走，而不是溢成一个方角。
                     // 走共享修饰符：clip → clickable → 上面的 padding，涟漪就等于整行（含 12dp 行高
-                    // 内边距），不再只盖住文字那一块。
-                    Modifier.suixingClickable(MaterialTheme.shapes.small, onClick = onClick)
+                    // 内边距），不再只盖住文字那一块。[contentPadding] 在它**之后**，所以横向留白
+                    // 也算在点击区里 —— 这正是「涟漪铺满卡片」的关键。
+                    Modifier.suixingClickable(shape, onClick = onClick)
                 },
             )
+            .padding(contentPadding)
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -544,11 +553,14 @@ fun PageTopBar(
                     // 统一 16dp，两者不是同一层，所以这里故意不跟 16dp 走。别当违规改掉。
                     .padding(horizontal = 12.dp)
                     // 内容整体下移：用户原话「顶栏高度保持不变，icon 和标题向下移一点」。
-                    // 用 top-only padding 而不是 offset——padding 在 heightIn(min = 64dp) 之内，
-                    // 栏高一点没变；它把居中盒子压到 54dp，于是内容的视觉中心从 32dp 落到
-                    // 10 + 27 = 37dp，**净下移 5dp**（右侧 actions 与返回键都在这一个 Row 里，
-                    // 跟着同一条基线走，不会出现"标题低了、按钮还在上面"）。
-                    .padding(top = 10.dp),
+                    // **用 offset 而不是 top padding**：这一行是垂直居中的，padding 只给一半
+                    // 位移（P ⇒ P/2），而 P 一大就出事 —— 返回键那枚 disc 的触控盒是
+                    // `minimumInteractiveComponentSize()` 的 48dp，48 + P > 64 时这一行会**长高**
+                    // （heightIn 只是下限），栏高就跟着变了。P = 10 时净位移只有 5dp，用户看不出
+                    // （原话「根本没变化」）。offset 不参与布局 ⇒ 栏高**证明不变**，位移可以给足：
+                    // 16dp 之后内容中心从居中的 32dp 落到 48dp（比上一版的 37dp 再 +11dp），
+                    // 内容底沿 72dp 仍在栏（64dp）+ 栏下 12dp 空隙之内，不裁、不压到页面内容。
+                    .offset(y = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // No disc behind the glyph on purpose: this bar is a filled surface of its
@@ -719,7 +731,12 @@ fun FlatPainterButton(
             modifier = Modifier
                 .size(size)
                 .shadow(
-                    elevation = if (pressed) 8.dp else 6.dp,
+                    // 6dp → 8dp（按下 8 → 10）：用户说主页顶栏那两枚按钮的阴影「再深一点点」。
+                    // 这两枚与标题胶囊（[PressPill]）是同一条基线上的三个元素，所以两处一起抬，
+                    // 免得只有按钮变深、胶囊还浮在原来的高度上。颜色不动：加深靠高度，不靠墨色。
+                    // （同文件 :651 的 [FlatIconButton] 是同一个数值的兄弟，但它不在聊天页顶栏上，
+                    // 所以没跟着动 —— 要一起抬说一声。）
+                    elevation = if (pressed) 10.dp else 8.dp,
                     shape = CircleShape,
                     ambientColor = Color.Black.copy(alpha = 0.12f),
                     spotColor = Color.Black.copy(alpha = 0.12f),
@@ -753,7 +770,9 @@ fun PressPill(
     onClick: (() -> Unit)? = null,
     color: Color = MaterialTheme.colorScheme.surface,
     contentColor: Color = LocalContentColor.current,
-    elevation: Dp = 6.dp,
+    // 6dp → 8dp：与它两侧的两枚 [FlatPainterButton] 一起抬（用户要求顶栏那三个元素的阴影再深
+    // 一点点，且彼此一致）。全站只有聊天页标题这一处用它，所以改默认值不会波及别处。
+    elevation: Dp = 8.dp,
     content: @Composable RowScope.() -> Unit,
 ) {
     val shape = RoundedCornerShape(50)

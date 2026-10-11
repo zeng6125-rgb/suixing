@@ -156,4 +156,81 @@ class FollowReleaseTest {
             ),
         )
     }
+
+    // ------------------------------------------------ the stationary long press (position restore)
+
+    /**
+     * The real log, as the rule sees it: at the very end, a finger down that never travels past the
+     * touch slop, and 1124ms later the list has moved 636px. Below the slop the finger cannot have
+     * scrolled the list at all, so that movement is the selection machinery bringing the selected
+     * line into view — a stationary long press is a request to select, so the position goes back.
+     */
+    @Test
+    fun `a stationary long press that the list moved by itself is undone`() {
+        assertTrue(
+            restoresPositionAfterLongPress(
+                fingerDragged = false,
+                listMoved = true,
+                heldMs = 1124,
+            ),
+        )
+    }
+
+    /** A plain tap: nothing moved, so there is nothing to put back. */
+    @Test
+    fun `a tap has no position to restore`() {
+        assertFalse(
+            restoresPositionAfterLongPress(
+                fingerDragged = false,
+                listMoved = false,
+                heldMs = 120,
+            ),
+        )
+    }
+
+    /** The user dragged the transcript: that movement is theirs and is never undone. */
+    @Test
+    fun `a drag is never undone`() {
+        assertFalse(
+            restoresPositionAfterLongPress(
+                fingerDragged = true,
+                listMoved = true,
+                heldMs = 800,
+            ),
+        )
+    }
+
+    /**
+     * A short *downward* drag (reading older) can stay under the 12dp travel threshold while moving
+     * the list a long way: past the touch slop it is the finger's scroll, so it is not undone.
+     */
+    @Test
+    fun `a short drag that moved the list is not undone either`() {
+        assertFalse(
+            restoresPositionAfterLongPress(
+                fingerDragged = true,
+                listMoved = true,
+                heldMs = 600,
+            ),
+        )
+    }
+
+    /** The threshold is the platform's long-press timeout, inclusive: 499 is still a tap. */
+    @Test
+    fun `the long press threshold is where the restore starts`() {
+        assertFalse(
+            restoresPositionAfterLongPress(
+                fingerDragged = false,
+                listMoved = true,
+                heldMs = 499,
+            ),
+        )
+        assertTrue(
+            restoresPositionAfterLongPress(
+                fingerDragged = false,
+                listMoved = true,
+                heldMs = 500,
+            ),
+        )
+    }
 }

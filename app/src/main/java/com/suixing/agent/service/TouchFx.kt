@@ -118,8 +118,21 @@ private const val FX_HUE_PERIOD_MS = 2000L
  * stroke, higher floor, and a ceiling that is still short of solid.
  */
 private const val FX_BREATH_PERIOD_MS = 2400L
-private const val FX_BREATH_MIN_ALPHA = 0.22f
-private const val FX_BREATH_MAX_ALPHA = 0.55f
+
+/**
+ * The two brightness levels the light aims at, and the ripple it breathes around them.
+ *
+ * Brightness is a **continuous quantity**, not a switch: the view eases toward the target every
+ * frame (see `FxView.onDraw`), so nothing ever steps from dark to bright or back. The ripple rides
+ * on top of whatever the target is, which is what makes a long run read as *alive* rather than as a
+ * lamp that was left on.
+ *
+ * 1.0 while the phone is actually being operated, 0.26 while the run that drove it is still going —
+ * dim enough to be peripheral, bright enough to say "don't touch it, I am still working".
+ */
+private const val FX_ALPHA_HOT = 1f
+private const val FX_ALPHA_IDLE = 0.26f
+private const val FX_BREATH_DEPTH = 0.10f
 
 /**
  * 边缘光的语义（spec v2 §1）：**亮 = 一次 UI 自动化回合正在进行**。
@@ -132,6 +145,16 @@ private const val FX_BREATH_MAX_ALPHA = 0.55f
  * 观察类工具又不在触发集里 —— 用户看到的「一直不灭」与「该亮不亮」都是同一个根因：**缺少回合概念**。
  */
 private const val EPISODE_QUIET_MS = 3000L
+
+/**
+ * How long after the last UI action the phone still counts as **being operated** (full brightness).
+ *
+ * This is the old episode window, and it stays at 3s on purpose: it answers "is the agent touching
+ * the screen right now", which really is a short window. What changed is that it no longer decides
+ * whether the light is *on* — falling out of it now means dropping to the idle breath, not going
+ * dark, so a model that thinks for eight seconds between two taps no longer blinks.
+ */
+private const val FX_UI_HOT_MS = 3000L
 
 /** 开启/续期回合的工具（读屏也是 UI 操作）。 */
 private val FX_UI_EPISODE_TOOLS = setOf(
@@ -147,9 +170,12 @@ private val FX_SHELL_UI_RE = Regex(
 )
 
 /**
- * 熄灭时的淡出步长，每帧一次（25fps ⇒ 从最亮的 0.55 走到 0 约 0.44 秒）。
+ * How far the drawn brightness moves toward its target per frame.
  *
- * 一帧消失会被读成「坏了」；[FX_BREATH_MIN_ALPHA] 是波谷，所以实际从 0.22~0.55 之间开始淡出。
+ * The light is a continuous quantity now, so this is the slope of every rise and fall: at
+ * [FX_BREATH_FRAME_MS] per frame it takes about 0.8s for a full 0→1 sweep and about 0.2s to reach
+ * the idle level — fast enough to feel like a response, slow enough that nothing "pops". A frame
+ * that vanished instantly was read as 「坏了」, and a frame that jumped to full was read as a flash.
  */
 private const val FX_FADE_STEP = 0.05f
 
@@ -320,7 +346,7 @@ object TouchFx {
     private var lastForeground = false
 
     /** The last answer handed to the view, so the trace writes a line when it flips. Main thread. */
-    private var lastLit = false
+    private var lastTarget = -1f
 
     /**
      * 这一回合是否已经写过 `episode=` 的转折行 —— 收尾时据此决定要不要写 `end`。Main thread only.
@@ -526,13 +552,15 @@ object TouchFx {
             val inForeground = foreground()
             lastForeground = inForeground
             // 用户正盯着随行时不亮（spec v2 改动二）：回合照记（lastUiAt 已刷新），只是不显示。
-            val lit = !inForeground
             episodeTraced = true
             traceEpisode(app, if (wasLive) "extend" else "start", source)
-            if (lit) overlay(app)?.setLit(true) else view?.setLit(false)
             main.removeCallbacks(episodeEnd)
-            // 亮着才需要静默收尾；前台抑制期间不必排表（退出前台时 [apply] 会按状态补上）。
-            if (lit) main.postDelayed(episodeEnd, EPISODE_QUIET_MS)
+            // 目标交给 apply 算（它知道 run 是否还在、是不是驱动过手机），这里只负责"这一下算 UI 操作"。
+            // 不自己 setLit：亮度已经是连续量，谁都能定目标就等于两处打架。
+            apply("ui", app)
+            // 回合的静默收尾照旧排表 —— 它现在只写日志（见 [endEpisode]），不再决定灯亮不亮，
+            // 所以前台抑制期间也照样排：那只是"这一回合过去了"的记录。
+            main.postDelayed(episodeEnd, EPISODE_QUIET_MS)
         }
     }
 
@@ -567,7 +595,10 @@ object TouchFx {
         if (!episodeTraced) return
         episodeTraced = false
         traceEpisode(app, "end", reason)
-        view?.setLit(false)
+        // 回合结束 ≠ 灯灭。灯的目标由 [apply] 按「run 还在不在、驱动过没有」重算：驱动中的 run 还活着
+        // 就继续低亮呼吸，任务真的结束了才归零淡出。这里直接灭会在模型思考超过静默窗口的那一瞬间
+        // 闪一下 —— 正是这一轮要修的东西。
+        apply("episode-end", app)
     }
 
     /**
@@ -637,10 +668,23 @@ object TouchFx {
         val inForeground = foreground()
         lastForeground = inForeground
         val live = episodeLive(now)
-        val lit = live && !inForeground
-        traceLight(app, reason, lit, live, running, now, inForeground)
-        if (lit) overlay(app)?.setLit(true) else view?.setLit(false)
-        return lit
+        val sinceUi = if (lastUiAt == 0L) Long.MAX_VALUE else now - lastUiAt
+        // 「这个 run 驱动过手机，而且整轮还没结束」—— 呼吸的全部条件。用它而不是"回合还活着"，
+        // 是因为回合会在两次操作之间断掉，而任务并没有断：模型只是在想。
+        val drivingAlive = drivingIds.any { it in running }
+        val target = when {
+            // 随行在前台一律不亮（用户原话），也不呼吸。
+            inForeground -> 0f
+            // 真在操作手机：全亮。
+            sinceUi < FX_UI_HOT_MS -> FX_ALPHA_HOT
+            // 驱动过手机、整轮还没结束：低亮呼吸。用户在两次操作之间看到的是"还在干活"，不是"灭了又亮"。
+            drivingAlive -> FX_ALPHA_IDLE
+            else -> 0f
+        }
+        traceLight(app, reason, target, live, running, now, inForeground)
+        // 目标值而不是开关：view 自己逐帧缓动逼近，所以亮起/熄灭都是斜坡，不会「啪」地闪。
+        (if (target > 0f) overlay(app) else view)?.setTarget(target)
+        return target > 0f
     }
 
     /**
@@ -658,19 +702,22 @@ object TouchFx {
     private fun traceLight(
         app: Context,
         reason: String,
-        lit: Boolean,
+        target: Float,
         live: Boolean,
         running: Set<String>,
         now: Long,
         foreground: Boolean,
     ) {
-        if (lit == lastLit && now - lastLightTraceAt < FX_LIGHT_TRACE_MS) return
-        lastLit = lit
+        if (target == lastTarget && now - lastLightTraceAt < FX_LIGHT_TRACE_MS) return
+        lastTarget = target
         lastLightTraceAt = now
         trace(
             app,
-            "light=${if (lit) "on" else "off"} live=$live reason=$reason foreground=$foreground " +
-                "sinceUi=${if (lastUiAt == 0L) "-" else "${now - lastUiAt}ms"} quiet=${EPISODE_QUIET_MS}ms " +
+            // target/alpha 一起写：target 是"该多亮"，alpha 是"现在多亮"。两者分开才看得出缓动在不在
+            // 走 —— 只写一个的话，「目标一直是 0.26 却看着在闪」这种报障没有判据。
+            "target=$target alpha=${view?.edgeAlpha ?: 0f} live=$live reason=$reason " +
+                "foreground=$foreground sinceUi=${if (lastUiAt == 0L) "-" else "${now - lastUiAt}ms"} " +
+                "hot=${FX_UI_HOT_MS}ms idle=$FX_ALPHA_IDLE " +
                 "drivingAlive=${drivingIds.any { it in running }} running=${running.size} " +
                 "drivingIds=${drivingIds.size}",
         )
@@ -1002,13 +1049,18 @@ object TouchFx {
         val running = Core.engine.runsFlow.value.keys
         val inForeground = foreground()
         lastForeground = inForeground
-        // 新画布，「该不该亮」不是：窗口被收走 / 服务重连 / 跳转重建之后新 view 的灯是关的，只有按
-        // 当前回合状态立刻对一遍，光才不会跟着旧画布一起消失。这里直接算、直接点亮（不经过 [apply]，
+        // 新画布，「该多亮」不是：窗口被收走 / 服务重连 / 跳转重建之后新 view 的灯是关的，只有按
+        // 当前状态立刻对一遍，光才不会跟着旧画布一起消失。这里直接算、直接给目标（不经过 [apply]，
         // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
-        val live = episodeLive(now)
-        val lit = live && !inForeground
-        traceLight(context, "overlay", lit, live, running, now, inForeground)
-        if (lit) fx.setLit(true)
+        val sinceUi = if (lastUiAt == 0L) Long.MAX_VALUE else now - lastUiAt
+        val target = when {
+            inForeground -> 0f
+            sinceUi < FX_UI_HOT_MS -> FX_ALPHA_HOT
+            drivingIds.any { it in running } -> FX_ALPHA_IDLE
+            else -> 0f
+        }
+        traceLight(context, "overlay", target, episodeLive(now), running, now, inForeground)
+        fx.setTarget(target)
         return fx
     }
 
@@ -1126,8 +1178,9 @@ private class FxView(
     private val rainbowMatrix = Matrix()
 
     /** 回合是否亮着，由 [TouchFx] 的回合状态机开关 —— 是状态，不是有固定时长的动画。 */
-    private var isLit = false
-    private var litStart = 0L
+    /** Where the light is heading (see [setTarget]); [drawnAlpha] chases it frame by frame. */
+    private var targetAlpha = 0f
+    private var litStart = SystemClock.uptimeMillis()
 
     /**
      * 当前实际亮度（0 = 全灭）。onDraw 写、日志从别的线程读，所以 volatile。名字不叫 `alpha`：
@@ -1136,19 +1189,23 @@ private class FxView(
     @Volatile
     private var drawnAlpha = 0f
 
-    val lit: Boolean get() = isLit
+    val lit: Boolean get() = drawnAlpha > 0.01f
 
     /** 实际亮度，供 trace 的 `alpha=` 读 —— 见 [TouchFx.trace]。 */
     val edgeAlpha: Float get() = drawnAlpha
 
     /**
-     * 回合的开关，由 [TouchFx] 调（不是手势）：开 = 从波谷起呼吸；关 = 交给 onDraw 淡出，淡尽后
-     * 不再排帧。幂等，续期不会重启动画 —— 一串动作因此不会闪。
+     * What the light is aiming at, 0…1. Set by [TouchFx] (the decision), eased toward by [onDraw]
+     * (the drawing). Not a boolean on purpose: two hard states is exactly what made the light blink
+     * whenever the model thought for longer than the old 3s window.
+     *
+     * Idempotent, and re-aiming does not restart anything — a run that keeps operating the phone
+     * simply stays at the same target, so a burst of actions cannot make it flicker.
      */
-    fun setLit(on: Boolean) {
-        if (isLit == on) return
-        isLit = on
-        if (on) litStart = SystemClock.uptimeMillis()
+    fun setTarget(value: Float) {
+        val next = value.coerceIn(0f, 1f)
+        if (next == targetAlpha) return
+        targetAlpha = next
         invalidate()
     }
 
@@ -1170,9 +1227,9 @@ private class FxView(
     override fun onDraw(canvas: Canvas) {
         val now = SystemClock.uptimeMillis()
         val edgeElapsed = now - edgeStart
-        // 零绘制早退（spec v2 改动四）：不亮、已淡尽、也没有手势动画时，一帧都不画。窗口常驻着空转，
+        // 零绘制早退（spec v2 改动四）：目标为 0、已淡尽、也没有手势动画时，一帧都不画。窗口常驻着空转，
         // 代价只是一次什么都不画的回调，比反复 addView/removeView 便宜得多。
-        if (!isLit && drawnAlpha <= 0f && rings.isEmpty() && trails.isEmpty() &&
+        if (targetAlpha <= 0f && drawnAlpha <= 0f && rings.isEmpty() && trails.isEmpty() &&
             edgeElapsed >= FX_EDGE_DURATION_MS
         ) {
             return
@@ -1185,13 +1242,16 @@ private class FxView(
         trails.removeAll { now - it.startAt > FX_SWIPE_DURATION_MS }
         for (trail in trails) drawTrail(canvas, trail, now)
 
-        // 灯的亮度：亮着走呼吸波（从波谷起，不重启）；刚灭则逐帧淡出到 0 —— 一帧消失会被读成「坏了」。
-        if (isLit) {
-            val phase = ((now - litStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
-            val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
-            drawnAlpha = FX_BREATH_MIN_ALPHA + (FX_BREATH_MAX_ALPHA - FX_BREATH_MIN_ALPHA) * wave
-        } else if (drawnAlpha > 0f) {
-            drawnAlpha = (drawnAlpha - FX_FADE_STEP).coerceAtLeast(0f)
+        // 亮度是连续量：先算这一帧该到哪（目标 + 呼吸涟漪），再朝它走一步。两个硬状态换成"缓动逼近"
+        // 正是这一轮要的连续性 —— 目标从 1.0 掉到 0.26 时看到的是斜坡，不是一次闪。
+        val phase = ((now - litStart) % FX_BREATH_PERIOD_MS).toFloat() / FX_BREATH_PERIOD_MS
+        val wave = (1f - cos(phase * 2f * PI.toFloat())) / 2f
+        // 涟漪只在有目标时叠加：归零时不能再有涟漪，否则灯永远淡不尽（也就永远排帧）。
+        val aim = (targetAlpha + if (targetAlpha > 0f) FX_BREATH_DEPTH * wave else 0f).coerceIn(0f, 1f)
+        drawnAlpha = if (aim > drawnAlpha) {
+            (drawnAlpha + FX_FADE_STEP).coerceAtMost(aim)
+        } else {
+            (drawnAlpha - FX_FADE_STEP).coerceAtLeast(aim)
         }
         // Under the flash, so an action still reads as brighter than the state it happened in.
         if (drawnAlpha > 0f) drawGlow(canvas, drawnAlpha, now)
@@ -1202,8 +1262,8 @@ private class FxView(
             // A gesture is a burst of frames; the breath is a slow glow and 25fps is plenty for
             // it, so the two run at their own rates instead of the window spinning at 60fps.
             animating -> postInvalidateOnAnimation()
-            // 亮着或还在淡出 ⇒ 继续排帧；淡尽之后这里什么也不排，窗口就安静下来了。
-            isLit || drawnAlpha > 0f -> postInvalidateDelayed(FX_BREATH_FRAME_MS)
+            // 还有目标、或还没淡尽 ⇒ 继续排帧；淡尽之后这里什么也不排，窗口就安静下来了。
+            targetAlpha > 0f || drawnAlpha > 0f -> postInvalidateDelayed(FX_BREATH_FRAME_MS)
         }
     }
 

@@ -479,6 +479,43 @@ class ChatViewModel : ViewModel() {
     private val draining = mutableSetOf<String>()
 
     /**
+     * How many attempts the run in flight has spent on retries; 0 when none.
+     *
+     * Set by [AgentEvent.Retrying] and read when the run finally fails, so the give-up line can say
+     * how many tries it took. A counter rather than a flag: "已重试 2 次" is the number the user
+     * needs, and it is the same number the failure text carries.
+     */
+    private var retriesThisRun = 0
+
+    /**
+     * One line about retries, appended to `files/retry-trace.log`.
+     *
+     * **Why here and not inside `LlmClient.complete`.** The retry decision is made in the client, but
+     * the client has no `Context` — it is deliberately a plain OkHttp class with no Android
+     * dependency — and `AgentEngine` has none either (it takes everything by injection and does not
+     * reference `Core`). The view model is the first place in the chain that has both a `Context`
+     * and both ends of the story: [AgentEvent.Retrying] when an attempt is repeated, and
+     * [AgentEvent.Failed] when they run out. The give-up line is therefore driven by
+     * [retriesThisRun], which [AgentEvent.Retrying] sets — not by matching text in the message.
+     *
+     * Written off the main thread, and never allowed to fail the run: a diagnostic that can break
+     * what it is diagnosing is worse than no diagnostic.
+     */
+    private fun retryTrace(line: String) {
+        val context = runCatching { Core.appContext }.getOrNull() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val file = java.io.File(context.filesDir, RETRY_TRACE_FILE)
+                if (file.length() > RETRY_TRACE_MAX_BYTES) {
+                    val tail = file.readText().takeLast(RETRY_TRACE_KEEP_CHARS)
+                    file.writeText(tail)
+                }
+                file.appendText("${System.currentTimeMillis()} $line\n")
+            }
+        }
+    }
+
+    /**
      * The board the last `todo_write` left behind, held so it can be republished.
      *
      * One copy, not one per conversation: the board is app-wide — the file is shared, and two
@@ -848,6 +885,24 @@ class ChatViewModel : ViewModel() {
             Core.settings.update { stored ->
                 stored.copy(modelContexts = stored.modelContexts.withUpstreamDefaults(gathered))
             }
+        }
+    }
+
+    /**
+     * 改名：写盘，并让屏幕上这一份跟着走。
+     *
+     * 不能只改仓库：这一屏的标题是 [_state] 里的一份拷贝，而每轮结束 [persistDisplayed] 都会把
+     * 那份拷贝写回去（[save] 里 `derived = title` 取的就是它）—— 只改仓库的话，用户给**当前
+     * 打开的这个会话**改名，下一轮就会被悄悄改回旧标题。别的会话没有这个问题，但两条路都从
+     * 这里走，调用方就不必自己判断「改的是不是当前这一个」。
+     */
+    fun renameConversation(id: String, title: String) {
+        val clean = title.trim()
+        if (id.isEmpty() || clean.isEmpty()) return
+        viewModelScope.launch {
+            Core.chats.rename(id, clean)
+            if (_state.value.conversationId == id) _state.update { it.copy(title = clean) }
+            sessions[id]?.let { putSession(it.copy(title = clean)) }
         }
     }
 
@@ -1533,17 +1588,40 @@ class ChatViewModel : ViewModel() {
 
             // The error rides with the run: it shows on the error card only while that
             // conversation is the one on screen, and travels with it otherwise.
-            is AgentEvent.Failed -> base.copy(error = event.message)
+            is AgentEvent.Failed -> {
+                // 用尽次数后的最终失败：把"试过几次"和原因一起落到诊断文件里。这一行由 [Retrying]
+                // 设下的计数驱动，不去解析文案 —— 文案会改，计数器不会。
+                if (retriesThisRun > 0) {
+                    retryTrace("retry-giveup attempts=$retriesThisRun message=${event.message}")
+                    retriesThisRun = 0
+                }
+                base.copy(error = event.message)
+            }
 
             // A failed attempt that is being repeated. The run is still going — it is waiting — and
             // without this the screen says nothing at all for the length of the delay, which is
             // exactly how a retrying run got read as one that had stopped. Whatever event comes next
             // overwrites the line.
-            is AgentEvent.Retrying -> base.copy(
-                status = "连接失败，${event.delayMs / 1000} 秒后重试（第 ${event.attempt} 次）· ${event.reason}",
-            )
+            is AgentEvent.Retrying -> {
+                retriesThisRun = event.attempt
+                retryTrace(
+                    "retry-start attempt=${event.attempt} max=${event.maxAttempts} " +
+                        "code=${event.code ?: "none"} delayMs=${event.delayMs} reason=${event.reason} " +
+                        // These two are invariants of the decision, not measurements: a retry is only
+                        // taken when nothing arrived on the attempt (or it would have been kept as
+                        // content) and when the call was not cancelled. Written out anyway, because a
+                        // log reader should not have to know the rule to trust the line.
+                        "received=0 cancelled=0",
+                )
+                base.copy(
+                    status = "连接失败，${event.delayMs / 1000} 秒后重试（第 ${event.attempt} 次）· ${event.reason}",
+                )
+            }
 
-            is AgentEvent.Finished -> live
+            is AgentEvent.Finished -> {
+                retriesThisRun = 0
+                live
+            }
 
             // The model has the line now: it leaves the queue and becomes a message in the
             // same breath, so a queued line is never both. Marked `steer` so the transcript
@@ -2153,6 +2231,18 @@ private const val DELTA_PUBLISH_MS = 80L
  * run. Long enough for that to finish, short enough that the user does not see a gap.
  */
 private const val RETRY_TURN_MS = 300L
+
+/**
+ * Where the retry diagnostic goes, and how it is kept from growing without bound.
+ *
+ * `files/retry-trace.log`, next to `fx-trace.log`: a user reporting 「自动重试真的重试了吗」 can be
+ * answered from the file instead of from a claim. Rotated by truncating to the newest
+ * [RETRY_TRACE_KEEP_CHARS] once it passes [RETRY_TRACE_MAX_BYTES] — retries are rare, so this is
+ * history rather than a ring buffer.
+ */
+private const val RETRY_TRACE_FILE = "retry-trace.log"
+private const val RETRY_TRACE_MAX_BYTES = 128 * 1024L
+private const val RETRY_TRACE_KEEP_CHARS = 64 * 1024
 
 /**
  * How much of a draft is compared against the transcript to decide it was already saved.

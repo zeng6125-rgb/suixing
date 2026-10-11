@@ -1,0 +1,483 @@
+package com.suixing.agent.ui.settings
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import com.suixing.agent.core.Core
+import com.suixing.agent.plugins.EnvDecl
+import com.suixing.agent.plugins.InstallResult
+import com.suixing.agent.plugins.PluginEntry
+import com.suixing.agent.plugins.PluginLevel
+import com.suixing.agent.plugins.PluginSpec
+import com.suixing.agent.plugins.Severity
+import com.suixing.agent.ui.components.EmptyState
+import com.suixing.agent.ui.components.StatusPill
+import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.theme.Tone
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+/**
+ * The 「插件」 tab: what is installed, what each one would do, and how to put one in.
+ *
+ * **M1 is a white-box milestone.** A plugin can be installed, validated and inspected, and its
+ * enable switch records a decision — but nothing here reaches the tool table or the system prompt
+ * yet. That is why every screen shows the raw material (the exec template, the hooks, the injected
+ * text) instead of a friendly summary: the user is being asked to judge a package that will later
+ * run, and a prettified view would hide exactly what they need to read.
+ *
+ * The install flow is deliberately two-step. `install` unpacks into a staging area and returns an
+ * [InstallResult] — the manifest, the level, the templates and every issue — and only
+ * `confirmInstall` moves it into place. A package the validator rejects never becomes installed, and
+ * a package it merely warns about is shown with its warnings before the user agrees.
+ */
+@Composable
+fun PluginsSection(onNotify: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var entries by remember { mutableStateOf<List<PluginEntry>>(emptyList()) }
+    var refresh by remember { mutableStateOf(0) }
+    var detail by remember { mutableStateOf<PluginSpec?>(null) }
+    var pending by remember { mutableStateOf<InstallResult?>(null) }
+    var envFor by remember { mutableStateOf<PluginSpec?>(null) }
+
+    LaunchedEffect(refresh) {
+        entries = runCatching { Core.plugins.list() }.getOrDefault(emptyList())
+    }
+
+    // SAF: a `.sapkg` is a zip, and a custom extension is not a mime type, so the picker takes
+    // anything and the validator is what decides whether it is a plugin.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val staged = withContext(Dispatchers.IO) {
+                runCatching {
+                    val target = File(context.cacheDir, "plugin-import.zip")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        target.outputStream().use { output -> input.copyTo(output) }
+                    } ?: return@runCatching null
+                    target
+                }.getOrNull()
+            }
+            if (staged == null) {
+                onNotify("读不到这个文件")
+                return@launch
+            }
+            // install() runs the validator and stops at the white-box gate: nothing is in place yet.
+            val result = runCatching { Core.plugins.install(staged) }.getOrElse { error ->
+                onNotify("导入失败：${error.message ?: error.javaClass.simpleName}")
+                return@launch
+            }
+            withContext(Dispatchers.IO) { runCatching { staged.delete() } }
+            pending = result
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (entries.isEmpty()) "" else "已安装 ${entries.size} 个",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("安装插件") }
+        }
+        if (entries.isEmpty()) {
+            EmptyState(
+                title = "还没有可安装的插件",
+                subtitle = "插件的形态还在确定中，定下来之后会出现在这里。",
+            )
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 100.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(entries, key = { it.id }) { entry ->
+                    PluginRow(
+                        entry = entry,
+                        onOpen = { scope.launch { detail = Core.plugins.readSpec(entry.id) } },
+                        onToggle = { wanted ->
+                            scope.launch {
+                                if (wanted) {
+                                    val missing = Core.plugins.missingRequiredEnv(entry.id)
+                                    if (missing.isNotEmpty()) {
+                                        // Enabling without the values a plugin declared it needs would
+                                        // install a package that cannot run, so the form comes first.
+                                        onNotify("还缺 ${missing.size} 个必填项，先填写")
+                                        envFor = Core.plugins.readSpec(entry.id)
+                                        return@launch
+                                    }
+                                }
+                                Core.plugins.setEnabled(entry.id, wanted)
+                                refresh++
+                            }
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    detail?.let { spec ->
+        PluginDetailDialog(
+            spec = spec,
+            onDismiss = { detail = null },
+            onFillEnv = { envFor = spec },
+            onUninstall = {
+                scope.launch {
+                    Core.plugins.uninstall(spec.id)
+                    detail = null
+                    refresh++
+                    onNotify("已卸载 ${spec.displayName.zh}")
+                }
+            },
+            onToggle = { wanted ->
+                scope.launch {
+                    if (wanted && Core.plugins.missingRequiredEnv(spec.id).isNotEmpty()) {
+                        envFor = spec
+                        return@launch
+                    }
+                    Core.plugins.setEnabled(spec.id, wanted)
+                    detail = null
+                    refresh++
+                }
+            },
+        )
+    }
+
+    pending?.let { result ->
+        InstallConfirmDialog(
+            result = result,
+            onCancel = {
+                // Backing out discards the staged copy: a package that was never confirmed must not
+                // be left half-installed for the next launch to find.
+                scope.launch {
+                    result.spec?.let { Core.plugins.uninstall(it.id) }
+                    pending = null
+                    refresh++
+                }
+            },
+            onConfirm = {
+                scope.launch {
+                    result.spec?.let { Core.plugins.confirmInstall(it.id) }
+                    pending = null
+                    refresh++
+                    onNotify("已安装 ${result.summary?.displayName?.zh ?: "插件"}")
+                }
+            },
+        )
+    }
+
+    envFor?.let { spec ->
+        EnvDialog(
+            spec = spec,
+            onDismiss = { envFor = null },
+            onSave = { values ->
+                scope.launch {
+                    values.forEach { (name, value) -> Core.plugins.setEnvValue(spec.id, name, value) }
+                    envFor = null
+                    refresh++
+                    onNotify("已保存 ${values.size} 项")
+                }
+            },
+        )
+    }
+}
+
+/** One installed plugin: name, version, level, risk, and the enable switch. */
+@Composable
+private fun PluginRow(entry: PluginEntry, onOpen: () -> Unit, onToggle: (Boolean) -> Unit) {
+    val spec = entry.spec
+    SuixingCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = spec?.displayName?.zh ?: entry.id,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = listOfNotNull(
+                        spec?.version?.let { "v$it" },
+                        spec?.author?.takeIf { it.isNotBlank() },
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            entry.level?.let { LevelBadge(it) }
+            Spacer(Modifier.width(6.dp))
+            RiskBadge(spec)
+            Spacer(Modifier.width(10.dp))
+            Switch(checked = entry.state.enabled, onCheckedChange = onToggle)
+        }
+        // A plugin the validator could not read still has to say so where it is listed, or a broken
+        // package looks like an installed one with a blank name.
+        entry.issues.take(2).forEach { issue ->
+            Text(
+                text = "${issue.code}: ${issue.message}",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (issue.severity == Severity.ERROR) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        TextButton(onClick = onOpen) { Text("详情") }
+    }
+}
+
+@Composable
+private fun LevelBadge(level: PluginLevel) {
+    val tone = when (level) {
+        PluginLevel.L1 -> Tone.OK
+        PluginLevel.L2 -> Tone.OK
+        PluginLevel.L3 -> Tone.WARN
+        PluginLevel.L4 -> Tone.WARN
+    }
+    StatusPill(text = level.name, tone = tone)
+}
+
+@Composable
+private fun RiskBadge(spec: PluginSpec?) {
+    val risk = spec?.tools?.firstOrNull()?.risk
+    if (risk.isNullOrBlank()) return
+    StatusPill(
+        text = risk,
+        tone = if (risk == "read" || risk == "network") Tone.OK else Tone.WARN,
+    )
+}
+
+/**
+ * The white-box view: what this plugin would actually do, in its own words.
+ *
+ * Every block is the raw material — the exec template with its `{{placeholders}}` intact, the hook
+ * rules, the text that would be injected, the env names with secrets masked. Reading it is the
+ * point; a summary would be a promise about code the user cannot see.
+ */
+@Composable
+private fun PluginDetailDialog(
+    spec: PluginSpec,
+    onDismiss: () -> Unit,
+    onFillEnv: () -> Unit,
+    onUninstall: () -> Unit,
+    onToggle: (Boolean) -> Unit,
+) {
+    var env by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(spec.id) {
+        env = runCatching { Core.plugins.env(spec.id) }.getOrDefault(emptyMap())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(spec.displayName.zh) },
+        text = {
+            SelectionContainer {
+                Column(Modifier.horizontalScroll(rememberScrollState())) {
+                    Text(spec.description.zh, style = MaterialTheme.typography.bodySmall)
+                    spec.tools.forEach { tool ->
+                        Spacer(Modifier.height(10.dp))
+                        Text("工具 ${tool.name}（${tool.risk ?: "read"}）", style = MaterialTheme.typography.titleSmall)
+                        if (tool.description.isNotBlank()) {
+                            Text(tool.description, style = MaterialTheme.typography.bodySmall)
+                        }
+                        // The template itself, variables and all: this is the thing being trusted.
+                        val template = tool.exec.command ?: tool.exec.url ?: tool.exec.type
+                        Text(
+                            text = template,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        )
+                    }
+                    if (spec.hooks.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("hooks", style = MaterialTheme.typography.titleSmall)
+                        spec.hooks.forEach { hook ->
+                            Text(
+                                text = "${hook.on} → ${hook.action}" +
+                                    (hook.`when`.tool?.let { "（工具 $it）" } ?: "") +
+                                    (hook.message?.let { "：$it" } ?: ""),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                    if (spec.context.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("注入的上下文", style = MaterialTheme.typography.titleSmall)
+                        spec.context.forEach { block ->
+                            Text(block.content, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (spec.env.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("env", style = MaterialTheme.typography.titleSmall)
+                        spec.env.forEach { decl ->
+                            val value = env[decl.name]
+                            Text(
+                                text = decl.name + if (decl.required) "（必填）" else "" +
+                                    " = " + when {
+                                        value.isNullOrEmpty() -> "（未填）"
+                                        decl.secret -> "••••••"
+                                        else -> value
+                                    },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                TextButton(onClick = { onToggle(true) }) { Text("启用") }
+                TextButton(onClick = { onToggle(false) }) { Text("停用") }
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onFillEnv) { Text("填 env") }
+                TextButton(onClick = onUninstall) { Text("卸载") }
+            }
+        },
+    )
+}
+
+/**
+ * The confirmation page shown before anything is moved into place.
+ *
+ * Errors block the confirm button; warnings are listed and do not. Every issue prints its
+ * [com.suixing.agent.plugins.ReasonCode] next to its message — a machine-readable code is what makes
+ * a report actionable, and a silent failure is what this milestone exists to avoid.
+ */
+@Composable
+private fun InstallConfirmDialog(
+    result: InstallResult,
+    onCancel: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val summary = result.summary
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(if (result.ok) "确认安装" else "这个包不能安装") },
+        text = {
+            SelectionContainer {
+                Column(Modifier.horizontalScroll(rememberScrollState())) {
+                    Text(
+                        text = summary?.displayName?.zh ?: "（读不出名字）",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = listOfNotNull(
+                            summary?.id,
+                            summary?.version?.let { "v$it" },
+                            result.level?.name,
+                            summary?.risk,
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (result.execTemplates.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("会执行的内容", style = MaterialTheme.typography.titleSmall)
+                        result.execTemplates.forEach { template ->
+                            Text(
+                                text = template,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            )
+                        }
+                    }
+                    if (result.issues.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        result.issues.forEach { issue ->
+                            Text(
+                                text = "[${issue.severity.name}] ${issue.code}: ${issue.message}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (issue.severity == Severity.ERROR) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = result.ok) { Text("安装") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("取消") } },
+    )
+}
+
+/** Fills in what the manifest declared as required, before the plugin can be switched on. */
+@Composable
+private fun EnvDialog(
+    spec: PluginSpec,
+    onDismiss: () -> Unit,
+    onSave: (Map<String, String>) -> Unit,
+) {
+    val fields = remember(spec.id) { spec.env.filter { it.required } }
+    var values by remember(spec.id) { mutableStateOf(fields.associate { it.name to (it.defaultValue ?: "") }) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("填写 ${spec.displayName.zh} 需要的值") },
+        text = {
+            Column {
+                fields.forEach { decl: EnvDecl ->
+                    OutlinedTextField(
+                        value = values[decl.name].orEmpty(),
+                        onValueChange = { next -> values = values + (decl.name to next) },
+                        label = { Text(decl.name) },
+                        supportingText = decl.description?.let { { Text(it) } },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(values.filterValues { it.isNotBlank() }) },
+                enabled = fields.all { !values[it.name].isNullOrBlank() },
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}

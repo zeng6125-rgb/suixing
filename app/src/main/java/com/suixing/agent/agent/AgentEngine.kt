@@ -102,6 +102,8 @@ sealed interface AgentEvent {
         val delayMs: Long,
         /** Short and user-facing: why the attempt is being repeated. */
         val reason: String,
+        /** The HTTP status that failed; null for a transport failure. For the trace, not the UI. */
+        val code: Int? = null,
     ) : AgentEvent
 }
 
@@ -1100,6 +1102,7 @@ class AgentEngine(
                                     maxAttempts = notice.maxAttempts,
                                     delayMs = notice.delayMs,
                                     reason = notice.reason,
+                                    code = notice.code,
                                 ),
                             )
                         },
@@ -1144,7 +1147,25 @@ class AgentEngine(
                 // A truncated turn can end mid-tool-call, so say so instead of silently
                 // presenting half an answer as a finished one.
                 if (turn.finishReason == "length") {
-                    onEvent(AgentEvent.Failed("模型输出达到长度上限被截断，内容可能不完整。"))
+                    // 说清是**谁**截断的。留空 = 0 ⇒ `max_tokens` 根本不发（LlmClient.kt:287），所以
+                    // 这个 length 只可能来自上游：它自己的输出上限，或者上下文窗口被填满。原来的
+                    // 「模型输出达到长度上限」会让人以为是自己设的那个值 —— 而那个值没有发出去。
+                    val produced = turn.usage?.completionTokens?.takeIf { it > 0 }
+                    val ours = settings.maxTokens
+                    val who = if (ours > 0) {
+                        "本轮设的上限 $ours tokens"
+                    } else {
+                        "本地没有设置上限（max_tokens 未发送）"
+                    }
+                    onEvent(
+                        AgentEvent.Failed(
+                            "上游把这一轮截断了（$who" +
+                                (produced?.let { "，已输出约 $it tokens" } ?: "") +
+                                "）。可能是上游模型自己的输出上限，也可能是上下文窗口已满：" +
+                                "把要求拆小一点再试，或在「设置」里填一个明确的最大输出。" +
+                                "若刚才是用 write_file 写大文件，请让它分几次写（先写头部，再 append 追加）。",
+                        ),
+                    )
                 }
                 // The stream broke after delivering content (see FINISH_CUT): the round is a
                 // success — the answer is real and is kept — but the user should know it stopped
@@ -1869,6 +1890,18 @@ class AgentEngine(
         append(
             "\n多步任务先用 todo_write 列清单，每完成一步重写一遍完整清单（不是追加）：" +
                 "你的上下文会被压缩，任务板不会。",
+        )
+        // 工具参数一律计入**输出**：它是 assistant 的 tool-call 参数，也就是 completion tokens
+        // （LlmClient.kt:416 累加、:486 append）。write_file 之所以常见，是因为它的参数就是"整份文件
+        // 的内容"—— 大小完全由模型一次写多少决定，别的工具的参数通常只有几个字段。所以这条规则针对
+        // write_file，但同样的道理对任何"一次吐很大一段参数"的调用都成立（例如 todo_write 重写整张
+        // 清单、run_shell 带一大段脚本）。
+        // 约 200 行 / 8KB 的量级依据：代码约 4 字符/token ⇒ 8KB ≈ 2k tokens，在常见的 4k–8k 输出上限
+        // 里留得下同一轮的工具调用与说明文字；再小会让模型频繁分块、每块都要一次往返。
+        append(
+            "\n写文件用 write_file：内容超过约 200 行或 8KB 时**分几次写**——" +
+                "先写头部，再用 `append: true` 分段追加，不要在一次调用里吐出整个大文件" +
+                "（那会撞上模型自己的输出上限，这一轮会被截断）。",
         )
     }
 

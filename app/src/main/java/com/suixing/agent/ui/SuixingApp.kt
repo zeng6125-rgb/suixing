@@ -1,10 +1,24 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.suixing.agent.ui
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.widget.Toast
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedTextField
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -69,6 +83,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -126,24 +141,31 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * 全站唯一的转场规格：**瞬时切换，零动画**。进（enter）、出（exit）、返回进（popEnter）、返回出
- * （popExit）四条都是 [androidx.compose.animation.EnterTransition.None] /
- * [androidx.compose.animation.ExitTransition.None]，配置点在 NavHost 上（搜 `enterTransition`），
- * 任何目的地都不再单独覆盖，也没有任何按目的地分叉的分支。
+ * 全站唯一的转场规格：**旧页瞬消 + 新页带着位移滑入**，屏幕上任何时刻只有一个页面。
  *
- * 为什么连淡化都不要：**任何淡化都必然有"两页同时可见"的中间帧**——新页 alpha 从 0 涨到 1 的
- * 那段时间里，旧页还在它后面（或反过来），叠出来的就是用户说的**残影**。用户原话：
- * 「我都录视频给你了，还做成这吊样？**这动画，我不要残影的动画**」。他给的录屏实测数字是
- * 「切换在 1–2 帧（≈40–80ms）内完成」——那本质上就是瞬切，不是可感知的淡化。
+ * - 出（exit）与返回出（popExit）是 [ExitTransition.None]：旧页当帧让位，**不与新页叠加**；
+ * - 进（enter）与返回进（popEnter）是 [androidx.compose.animation.slideInHorizontally]，
+ *   只走位移、**没有淡入** ⇒ 新页从第一帧就是**不透明**的。
  *
- * 历史（别再加回来）：位移（整幅横移 → 屏宽 1/12）、交叉淡化 180/150、快速淡化 120/80，全部被
- * 用户否掉；`scaleIn(0.96)` 那版还会在页边露缝（露出来的是外壳 Scaffold 的 containerColor =
- * surface，与页面底色同色，等于没缩还多一条缝）。**要"没有残影"，新页必须从第一帧就是不透明的
- * ——只有瞬切做得到。**
+ * 为什么不能用淡化：任何淡化都必然有「两页同时可见」的中间帧 —— 新页 alpha 从 0 涨到 1 的那段
+ * 时间里旧页还在它后面，叠出来就是用户说的**残影**（他原话：「这动画，我不要残影的动画」）。
+ * 位移不会：新页一出现就是满的，只是还没滑到位。
+ *
+ * 为什么是 200ms / 屏宽÷12：用户给的 ChatGPT 录屏实测是「切换 1–2 帧完成 + 收尾约 150ms」
+ * ⇒ 用「瞬消 + 200ms 位移」逼近那个手感；幅度小（约 8% 屏宽）是为了让这 200ms 读成「到位」，
+ * 而不是「从屏幕外飞进来」。
+ *
+ * 历史（别再加回来）：交叉淡化 180/150、快速淡化 120/80、整幅横移、`scaleIn(0.96)`（会在页边
+ * 露缝，露出来的是外壳 Scaffold 的 containerColor = surface，与页面底色同色，等于没缩还多一条缝）
+ * —— 淡化那几版都是被「残影」否掉的。
  *
  * 抽屉不在此列：点行时它 `snapTo(Closed)`、返回来源页时 `snapTo(Open)`（同样瞬时、无叠加），
  * 用户自己开合（汉堡键 / 左缘拖动 / 点遮罩 / 返回键）仍走库的滑入滑出动画。
  */
+private const val NAV_SLIDE_MS = 200
+
+/** 新页滑入的幅度：屏宽 ÷ 这个数（12 ⇒ 约 8% 屏宽）。见上面那段规格。 */
+private const val NAV_SHIFT_DIVISOR = 12
 
 /**
  * The app shell.
@@ -249,7 +271,13 @@ fun SuixingApp() {
     val chatFromDrawer: () -> Unit = {
         drawerReturnTo = null
         drawerTarget = null
-        scope.launch { drawerState.close() }
+        // snapTo 而不是 close()：close 是库那条 ~256ms 的左滑，那 256ms 里抽屉与遮罩正盖在刚
+        // 显示的聊天页上 —— 用户报的「残影」里就有这一帧（点页面行那条路早就是 snapTo，只有
+        // 这里漏了）。UNDISPATCHED 让这次状态写入与下面的导航落在同一帧；手感不变：抽屉本来
+        // 就是「不在了」，不是「滑走了」。
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            drawerState.snapTo(DrawerValue.Closed)
+        }
         showChat()
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
@@ -386,6 +414,16 @@ fun SuixingApp() {
                             chatFromDrawer()
                         },
                         onDeleteConversation = { chat.deleteConversation(it) },
+                        // 改名必须走 ViewModel：它手里有一份标题拷贝，每轮结束会写回盘（见
+                        // ChatViewModel.renameConversation）。置顶是纯标签，直接落仓库就够。
+                        onRenameConversation = { conversation, title ->
+                            chat.renameConversation(conversation.id, title)
+                        },
+                        onTogglePin = { conversation ->
+                            scope.launch {
+                                Core.chats.setPinned(conversation.id, !conversation.pinned)
+                            }
+                        },
                         onNavigate = open,
                         onAssistants = {
                             // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
@@ -438,6 +476,19 @@ fun SuixingApp() {
                             startDestination = "empty",
                             modifier = Modifier
                                 .fillMaxSize()
+                                // 覆盖层自己不透明：NavHost 是透明的，而「新页还没画出第一帧」
+                                // （新页是一次全新组合，重页面尤其明显）或「状态栏/导航栏那一圈
+                                // 没被页面画满」时，露出来的就是下面那份常驻的 chat —— 用户报的
+                                // 「残影」就是这层露底，不是交叉淡化。这一层保证「要么是 chat、
+                                // 要么是新页」，不存在中间态；route == "empty"（没有覆盖层）时
+                                // 保持透明，chat 照旧可见。
+                                .background(
+                                    if (route == "empty") {
+                                        Color.Transparent
+                                    } else {
+                                        MaterialTheme.colorScheme.background
+                                    },
+                                )
                                 // 覆盖层盖住了 chat，但页面自己的根只画底色、不消费触摸：点在页面
                                 // 空白处（不是按钮/列表的地方）会"穿透"到下面仍在组合里的聊天页，
                                 // 打到输入框、消息行、麦克风上。这一层只在真有覆盖层时才加（route
@@ -452,12 +503,28 @@ fun SuixingApp() {
                                         Modifier.pointerInput(route) { detectTapGestures { } }
                                     },
                                 ),
-                            // 瞬时切换：四条全是 None，一帧都不演 —— 结构上不可能出现"两页同时
-                            // 可见"的中间帧，也就没有残影（用户原话：「这动画，我不要残影的动画」，
-                            // 他给的录屏实测也是 1–2 帧内完成 ⇒ 那就是瞬切）。详见文件顶部那段规格。
-                            enterTransition = { EnterTransition.None },
+                            // 旧页瞬消 + 新页位移滑入（详见文件顶部那段规格）：exit 是 None ⇒ 旧页
+                            // 当帧让位、不与新页叠加；enter 只走位移、没有淡入 ⇒ 新页从第一帧就是
+                            // 不透明的，所以任何一帧都只有一个页面，结构上不可能有残影。
+                            enterTransition = {
+                                slideInHorizontally(
+                                    animationSpec = tween(
+                                        durationMillis = NAV_SLIDE_MS,
+                                        easing = FastOutSlowInEasing,
+                                    ),
+                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
+                            },
                             exitTransition = { ExitTransition.None },
-                            popEnterTransition = { EnterTransition.None },
+                            // 返回进也用同一个方向（用户要的是「顺滑」而不是「方向正确」）；若要
+                            // 返回时从左侧回来，把这里的 fullWidth 取负即可，一个字的事。
+                            popEnterTransition = {
+                                slideInHorizontally(
+                                    animationSpec = tween(
+                                        durationMillis = NAV_SLIDE_MS,
+                                        easing = FastOutSlowInEasing,
+                                    ),
+                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
+                            },
                             popExitTransition = { ExitTransition.None },
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
@@ -591,15 +658,48 @@ private fun Drawer(
     onNew: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
     onDeleteConversation: (Conversation) -> Unit,
+    onRenameConversation: (Conversation, String) -> Unit,
+    onTogglePin: (Conversation) -> Unit,
     consoleOn: Boolean,
     onToggleConsole: () -> Unit,
     onNavigate: (String) -> Unit,
     onAssistants: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     // Every delete entry in the drawer funnels through this one confirmation: a swipe
     // of the thumb on a row must not be able to erase a conversation outright.
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
+    var pendingRename by remember { mutableStateOf<Conversation?>(null) }
+    // 长按出来的菜单：只记「哪一行的菜单开着」，于是抽屉里同时最多只有一个菜单。
+    var menuFor by remember { mutableStateOf<String?>(null) }
+    // 导出与「设置 → 会话」页同一套：系统选择器（SAF），不碰 FileProvider、不改 manifest。
+    var pendingExport by remember { mutableStateOf<Conversation?>(null) }
+    val exporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        val chat = pendingExport
+        pendingExport = null
+        if (uri == null || chat == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val source = File(context.filesDir, "chats/${chat.id}.json")
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        source.inputStream().use { it.copyTo(out) }
+                    } ?: error("打不开目标文件")
+                }.isSuccess
+            }
+            // 抽屉里没有 SnackbarHost（它是一块面板，不是一个 Scaffold），所以这里用 Toast：
+            // 「复制/导出到底成没成」必须当场看见，否则用户只能靠猜。
+            Toast.makeText(
+                context,
+                if (ok) "已导出「${chat.title}」" else "导出失败，换个位置再试",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(open) {
         if (open) {
@@ -674,13 +774,42 @@ private fun Drawer(
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
             ) {
-                items(conversations, key = { it.id }) { conversation ->
+                // 置顶只在抽屉里排：仓库那份列表仍是时间序（会话管理页与「上次打开」都吃它），
+                // 这里换的是展示顺序，不是数据的顺序。
+                val ordered = conversations.sortedWith(
+                    compareByDescending<Conversation> { it.pinned }
+                        .thenByDescending { it.updatedAt },
+                )
+                items(ordered, key = { it.id }) { conversation ->
                     ConversationRow(
                         conversation = conversation,
                         selected = conversation.id == activeId,
                         running = conversation.id in runningId,
+                        menuOpen = menuFor == conversation.id,
                         onClick = { onOpenConversation(conversation) },
-                        onDelete = { pendingDelete = conversation },
+                        onLongClick = { menuFor = conversation.id },
+                        onMenuDismiss = { menuFor = null },
+                        onRename = {
+                            menuFor = null
+                            pendingRename = conversation
+                        },
+                        onDelete = {
+                            menuFor = null
+                            pendingDelete = conversation
+                        },
+                        onTogglePin = {
+                            menuFor = null
+                            onTogglePin(conversation)
+                        },
+                        onCopyTitle = {
+                            menuFor = null
+                            copyTitle(context, conversation.title)
+                        },
+                        onExport = {
+                            menuFor = null
+                            pendingExport = conversation
+                            exporter.launch(exportName(conversation.title))
+                        },
                     )
                 }
             }
@@ -737,14 +866,44 @@ private fun Drawer(
             )
         }
     }
+    // 改名：空标题或取消 ⇒ 一个字都不改（这里没有「清空标题」这种需求，标题是行的身份）。
+    pendingRename?.let { target ->
+        var draft by remember(target.id) { mutableStateOf(target.title) }
+        AlertDialog(
+            onDismissRequest = { pendingRename = null },
+            title = { Text("重命名会话") },
+            text = {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("标题") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingRename = null
+                        onRenameConversation(target, draft)
+                    },
+                    enabled = draft.isNotBlank(),
+                ) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { pendingRename = null }) { Text("取消") } },
+        )
+    }
     pendingDelete?.let { target ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("删除会话") },
+            // 与「设置 → 会话」页同一句话：说清删掉的是什么、有多少、能不能撤销。
+            title = { Text("删除这个会话？") },
             text = {
                 Text(
-                    text = target.title,
-                    maxLines = 3,
+                    text = "「${target.title}」的聊天记录（${target.messages.size} 条消息）会被永久删除，" +
+                        "不能撤销。工作区里的文件不受影响。",
+                    maxLines = 6,
                     overflow = TextOverflow.Ellipsis,
                 )
             },
@@ -765,65 +924,115 @@ private fun Drawer(
     }
 }
 
+/**
+ * 复制标题到剪贴板。抽屉里没有 SnackbarHost（它是一块面板，不是 Scaffold），所以用 Toast
+ * 报结果 —— 与导出同一条理由：这类动作「成没成」必须当场看得见。
+ */
+private fun copyTitle(context: android.content.Context, title: String) {
+    val clipboard = context.getSystemService(ClipboardManager::class.java)
+    // 服务拿不到时不能报「已复制」：这条提示只有真的写进去了才该出现。
+    val ok = clipboard != null &&
+        runCatching { clipboard.setPrimaryClip(ClipData.newPlainText("Suixing", title)) }.isSuccess
+    Toast.makeText(
+        context,
+        if (ok) "已复制标题" else "复制失败",
+        Toast.LENGTH_SHORT,
+    ).show()
+}
+
+/**
+ * 导出文件名。与「设置 → 会话」页那个同名函数同一形状（标题 + .json），只是它是 private 的，
+ * 这里用不了；两处都只做一件事：把标题里能当路径用的字符换掉。
+ */
+private fun exportName(title: String): String {
+    val clean = title.replace('/', '／').replace('\\', '＼').trim()
+    return (clean.ifEmpty { "会话" }) + ".json"
+}
+
 @Composable
 private fun ConversationRow(
     conversation: Conversation,
     selected: Boolean,
     running: Boolean,
+    menuOpen: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onMenuDismiss: () -> Unit,
+    onRename: () -> Unit,
     onDelete: () -> Unit,
+    onTogglePin: () -> Unit,
+    onCopyTitle: () -> Unit,
+    onExport: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    Surface(
-        onClick = onClick,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp),
-        shape = MaterialTheme.shapes.medium,
-        color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
-    ) {
-        Row(
-            modifier = Modifier.padding(start = 14.dp, end = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    // 短按打开、长按出菜单：一行上只挂这一个手势。菜单里的每一项都走抽屉里已经有的那几条路
+    // （删除仍旧进 pendingDelete 那个二次确认）。Surface(onClick) 不支持长按，所以点击交给
+    // combinedClickable，Surface 只负责形状与底色；clip 是为了让水波纹跟着圆角走。
+    Box {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+                .clip(MaterialTheme.shapes.medium)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+            shape = MaterialTheme.shapes.medium,
+            color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
         ) {
-            if (running) {
-                // 运行中的会话可能在用户看不见的那一屏里跑，抽屉里得有个标记，
-                // 否则「谁在占着那个 run」只能靠猜。标记本身在转：静止的点看不出
-                // 「它正在动」，而这一行要回答的正是「现在有没有人在跑」。
-                // 14dp 的环比原来的 7dp 点宽，间距收窄到 2dp，标题的左缘不动。
-                RunningSpinner(Modifier.size(14.dp))
-                Spacer(Modifier.width(2.dp))
-            }
-            Text(
-                text = conversation.title,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (selected) scheme.primary else scheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            // A run owns its conversation and the view model refuses to delete it, so an
-            // enabled button here was a tap that silently did nothing. The icon is dimmed
-            // to Material's disabled alpha by hand because the explicit tint below would
-            // otherwise keep it looking live.
-            // The icon keeps its 18dp and the ripple its 36dp disc; the 48dp minimum sits
-            // outside them, so only the touch area grows.
-            IconButton(
-                onClick = onDelete,
-                enabled = !running,
-                modifier = Modifier.minimumInteractiveComponentSize().size(36.dp),
+            Row(
+                modifier = Modifier.padding(start = 14.dp, end = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_trash),
-                    contentDescription = "删除会话",
-                    tint = if (running) {
-                        scheme.onSurfaceVariant.copy(alpha = 0.38f)
-                    } else {
-                        scheme.onSurfaceVariant
-                    },
-                    modifier = Modifier.size(18.dp),
+                if (running) {
+                    // 运行中的会话可能在用户看不见的那一屏里跑，抽屉里得有个标记，
+                    // 否则「谁在占着那个 run」只能靠猜。标记本身在转：静止的点看不出
+                    // 「它正在动」，而这一行要回答的正是「现在有没有人在跑」。
+                    // 14dp 的环比原来的 7dp 点宽，间距收窄到 2dp，标题的左缘不动。
+                    RunningSpinner(Modifier.size(14.dp))
+                    Spacer(Modifier.width(2.dp))
+                }
+                Text(
+                    text = conversation.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (selected) scheme.primary else scheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                // A run owns its conversation and the view model refuses to delete it, so an
+                // enabled button here was a tap that silently did nothing. The icon is dimmed
+                // to Material's disabled alpha by hand because the explicit tint below would
+                // otherwise keep it looking live.
+                // The icon keeps its 18dp and the ripple its 36dp disc; the 48dp minimum sits
+                // outside them, so only the touch area grows.
+                IconButton(
+                    onClick = onDelete,
+                    enabled = !running,
+                    modifier = Modifier.minimumInteractiveComponentSize().size(36.dp),
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_trash),
+                        contentDescription = "删除会话",
+                        tint = if (running) {
+                            scheme.onSurfaceVariant.copy(alpha = 0.38f)
+                        } else {
+                            scheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
+        }
+        // 长按出来的菜单。锚在这一行上（Box 内），所以它贴着被长按的那一条弹出；
+        // 删除排在最后，与「设置 → 会话」页那两个动作的顺序一致。
+        DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuDismiss) {
+            DropdownMenuItem(text = { Text("改名") }, onClick = onRename)
+            DropdownMenuItem(
+                text = { Text(if (conversation.pinned) "取消置顶" else "置顶") },
+                onClick = onTogglePin,
+            )
+            DropdownMenuItem(text = { Text("复制标题") }, onClick = onCopyTitle)
+            DropdownMenuItem(text = { Text("导出") }, onClick = onExport)
+            DropdownMenuItem(text = { Text("删除") }, onClick = onDelete)
         }
     }
 }

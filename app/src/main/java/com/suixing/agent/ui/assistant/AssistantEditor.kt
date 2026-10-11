@@ -7,6 +7,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -130,6 +132,11 @@ fun AssistantEditor(
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
+                // 系统栏内边距交给顶栏自己吃（SuixingTopBar 内部就是 statusBarsPadding()），
+                // Scaffold 不再算一份：默认的 contentWindowInsets 会把这套 inset 消费掉，顶栏那句
+                // 便读成 0，于是窗口铺到状态栏了、内容却没让开——用户看到的「状态栏不沉浸」。
+                // 与设置页各页一致（SettingsScreen 里每页都是 WindowInsets(0,0,0,0)）。
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 topBar = {
                     // The shell's drawer handle rides on SuixingTopBar and the composition
                     // local follows the composition into this dialog's window — but the
@@ -319,56 +326,72 @@ private fun IdentitySection(
             }
         }
         Spacer(Modifier.height(10.dp))
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ASSISTANT_AVATARS.forEach { emoji ->
-                val selected = draft.avatarPath.isBlank() && draft.avatar == emoji
-                Surface(
-                    onClick = { onPickEmoji(emoji) },
-                    shape = CircleShape,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainerHigh
-                    },
-                    border = BorderStroke(
-                        1.dp,
-                        if (selected) {
-                            MaterialTheme.colorScheme.primary
+        // 列数与格子尺寸按**可用宽度算**，不写死：先按理想格子（48dp）估能放几列，再把余量平均
+        // 分给每个格子，于是最后一列的右缘正好落在容器右缘——不再出现「5 列挤在左边、右边一大片
+        // 空白」。格子有 40..56dp 的夹取，超宽屏上按整行居中，而不是把圆圈撑成巨无霸。
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val gap = 8.dp
+            val ideal = 48.dp
+            val columns = (((maxWidth + gap) / (ideal + gap)).toInt()).coerceIn(4, ASSISTANT_AVATARS.size)
+            val cell = ((maxWidth - gap * (columns - 1)) / columns).coerceIn(40.dp, 56.dp)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(gap),
+                maxItemsInEachRow = columns,
+            ) {
+                ASSISTANT_AVATARS.forEach { emoji ->
+                    val selected = draft.avatarPath.isBlank() && draft.avatar == emoji
+                    Surface(
+                        onClick = { onPickEmoji(emoji) },
+                        shape = CircleShape,
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.primaryContainer
                         } else {
-                            MaterialTheme.colorScheme.outlineVariant
+                            MaterialTheme.colorScheme.surfaceContainerHigh
                         },
-                    ),
-                ) {
-                    Box(Modifier.size(42.dp), contentAlignment = Alignment.Center) {
-                        // 19sp 不写死：按 titleLarge 的比例给，用户调「外观→字号」时这个
-                        // emoji 跟着缩放（写死 sp 会把缩放静默关掉）。
-                        val face = MaterialTheme.typography.titleLarge
-                        Text(emoji, style = face.copy(fontSize = face.fontSize * (19f / 22f)))
+                        border = BorderStroke(
+                            1.dp,
+                            if (selected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outlineVariant
+                            },
+                        ),
+                    ) {
+                        Box(Modifier.size(cell), contentAlignment = Alignment.Center) {
+                            // 19sp 不写死：按 titleLarge 的比例给，用户调「外观→字号」时这个
+                            // emoji 跟着缩放（写死 sp 会把缩放静默关掉）。
+                            val face = MaterialTheme.typography.titleLarge
+                            Text(emoji, style = face.copy(fontSize = face.fontSize * (19f / 22f)))
+                        }
                     }
                 }
             }
         }
         Spacer(Modifier.height(14.dp))
         OutlinedTextField(
-            // bodySmall(12sp/16dp) 与浮动标签同号：标签行 + 输入行 + 上下 8dp ≈ 48dp，正好落在
-            // 下面的下限上，于是这个框真的比 M3 默认的 56dp 矮一档。
-            textStyle = MaterialTheme.typography.bodySmall,
+            // bodyMedium(14sp)：bodySmall 那次是「为了压高度把字缩了」，用户直接否掉（「字体还
+            // 过于小了」）。字号回到正常，高度改由下面那个 heightIn 下限控制。
+            //
+            // 为什么一个**下限**就能比 M3 默认矮：OutlinedTextField 内部用的是
+            // `defaultMinSize(minHeight = 56.dp)`，而 defaultMinSize 只在**外层没给最小约束**
+            // 时生效——外面写了 `heightIn(min = 48.dp)`，传入的最小高度就不是 0，内部那句被让位，
+            // 于是 48dp 真的落到 48dp（标签行 + 输入行 + 上下 8dp 正好填满）。
+            // 反过来，写死 `height(48.dp)` 是**上限**：用户把「外观→字号」调大时字会被裁掉，工具页
+            // 搜索框踩过这个坑（ToolsScreen.kt:521-524）。下限不裁：字大了框跟着长高。
+            textStyle = MaterialTheme.typography.bodyMedium,
             value = draft.name,
             onValueChange = { onDraft(draft.copy(name = it)) },
-            // **下限**而不是固定高度：M3 的 OutlinedTextField 内容（浮动标签 + 文字行盒 + 留白）
-            // 有自己的最小高度，写死高度就会在字号放大时把字的下缘裁掉——工具页搜索框踩过这个坑
-            // （见 ToolsScreen.kt:521-524）。heightIn 只会给一个地板，内容需要时它自己长高。
+            // 下限，不是固定高度：内容需要时它自己长高，字号放大也不会裁字。
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             label = { Text("名字") },
             singleLine = true,
         )
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(
-            textStyle = MaterialTheme.typography.bodySmall,
+            // 与「名字」同一个字号、同一个下限：三个框看起来必须是同一种控件。
+            textStyle = MaterialTheme.typography.bodyMedium,
             value = draft.description,
             onValueChange = { onDraft(draft.copy(description = it)) },
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),

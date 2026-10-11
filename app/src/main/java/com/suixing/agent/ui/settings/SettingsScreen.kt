@@ -66,6 +66,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -370,12 +371,24 @@ private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
             shape = MaterialTheme.shapes.large,
             color = MaterialTheme.colorScheme.surfaceContainerLow,
         ) {
-            Column(Modifier.padding(horizontal = 16.dp)) {
+            // 行铺满卡片（横向留白交给 SettingRow 的 contentPadding）：涟漪因此能碰到卡片的左右
+            // 边缘与圆角，而不是被容器的 16dp 缩在中间 —— 用户报的「涟漪没填满/没变化」就是它。
+            // 分割线仍缩进 16dp，与文字左缘对齐。
+            Column {
                 rows.forEachIndexed { index, row ->
                     if (index > 0) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
                     }
-                    SettingsLink(title = row.title, subtitle = row.summary, onClick = row.onClick)
+                    SettingsLink(
+                        title = row.title,
+                        subtitle = row.summary,
+                        onClick = row.onClick,
+                        shape = MaterialTheme.shapes.large,
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                    )
                 }
             }
         }
@@ -611,16 +624,16 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         ) {
             item {
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = form.baseUrl,
                     onValueChange = { value ->
                         form = form.copy(baseUrl = value)
                             .mapProvider(selected?.id) { it.copy(baseUrl = value) }
                     },
-                    // 设置页输入框的统一规格（本文件其余十几处同此，不重复注释）：bodySmall
-                    // （12sp）+ `heightIn(min = 48.dp)`。**别再压死高度**——写死 height(48.dp)
-                    // 会在「外观 → 字号」放大时裁掉汉字下缘（工具页搜索框就是这么出事的，那段
-                    // 注释在 ToolsScreen.kt:521-524）；矮是字号给的，不是把盒子压扁来的。
+                    // 设置页输入框的统一规格（本文件其余十几处同此，不重复注释）：
+                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。**别再压死高度**——写死
+                    // height(48.dp) 会在「外观 → 字号」放大时裁掉汉字下缘（工具页搜索框就是这么
+                    // 出事的，那段注释在 ToolsScreen.kt:524-527）；矮是字号给的，不是把盒子压扁来的。
                     label = { Text("接口地址") },
                     // 明文 http 是刻意留着的（局域网里的 Ollama / LM Studio 就只有 http），但
                     // key 会跟着明文走——这一句是用户敲下那个地址之前唯一的提醒。
@@ -632,14 +645,24 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 )
             }
             item {
                 // The provider's own name, editable in place: the chip row's long-press
                 // rename stays, but the name is read every day and typed once a month.
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    // 单行输入框的统一规格（本文件其余十几处同此，不重复注释）：
+                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。
+                    //
+                    // **为什么看起来「没变矮」**（写给下一轮，别再试 `height(...)`）：
+                    // material3 1.3.1 的 `OutlinedTextField` 自带 **56dp 最小高度**
+                    // （TextFieldDefaults.MinHeight），而且**没有 `contentPadding` 参数**
+                    // （OutlinedTextFieldDefaults.contentPadding() 只服务自绘 decoration）
+                    // ⇒ 在不裁字的前提下**压不到 56dp 以下**；写死 `height(52.dp)` 是把 56dp 的
+                    // 容器硬压扁，会裁掉汉字下缘（工具页搜索框就是这么出过事的）。要真的更矮，
+                    // 只能手绘输入框 —— 那是另一个量级的活。所以这里用 min：跟着字号长、永不裁字。
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = selected?.name.orEmpty(),
                     onValueChange = { value ->
                         form = form.mapProvider(selected?.id) { it.copy(name = value) }
@@ -650,7 +673,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     label = { Text("提供方名称") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 )
             }
             item {
@@ -669,7 +692,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             }
             item {
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = form.apiKey,
                     onValueChange = { value ->
                         form = form.copy(apiKey = value)
@@ -679,7 +702,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
                     visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 )
             }
             item {
@@ -688,7 +711,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // alias stays read-only, under the field and on the picker's chips.
                 val alias = selected?.aliases?.get(form.model)
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = form.model,
                     onValueChange = { form = form.copy(model = it) },
                     label = { Text("当前模型") },
@@ -699,7 +722,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 )
             }
             item {
@@ -802,7 +825,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                             modifier = Modifier.widthIn(max = 110.dp),
                                         )
                                     },
-                                    modifier = Modifier.combinedClickable(
+                                    // clip 必须在 combinedClickable **之前**：涟漪要跟着 chip 的圆角
+                                    // 走，否则它是一块方角盖在圆角 chip 上（全文件唯一一处漏了 clip）。
+                                    modifier = Modifier
+                                        .clip(MaterialTheme.shapes.small)
+                                        .combinedClickable(
                                         onClick = {
                                             if (endpointEdited) {
                                                 pendingSwitch = provider.id
@@ -967,7 +994,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // writes the provider's nullable field, where an empty box is null.
                 val ownMax = selected?.takeIf { it.ownSampling }?.maxTokens
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = if (selected?.ownSampling == true) {
                         if (ownMax == null || ownMax <= 0) "" else ownMax.toString()
                     } else {
@@ -982,7 +1009,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             form.copy(maxTokens = parsed)
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     label = { Text("最大输出 tokens（留空 = 不限）") },
                     placeholder = { Text("例如 4096") },
                     singleLine = true,
@@ -1660,6 +1687,27 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
             // 思考块与「看到什么」的六项搬到了「对话配置」页：它们是对话内容的显示方式，不是
             // 主题/排版。字段与存储没动。
             item {
+                LabeledBlock(
+                    label = "提示条自动消失",
+                    hint = "屏幕上方那条提示（例如连接中断）几秒后自己消失；「不消失」只能手点 × 关掉。" +
+                        "回答卡片里的原因不受这里影响。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("5 秒", "10 秒", "30 秒", "不消失"),
+                        selectedIndex = when (stored.bannerSeconds) {
+                            5 -> 0
+                            30 -> 2
+                            0 -> 3
+                            else -> 1
+                        },
+                        onSelect = { index ->
+                            scope.persist { it.copy(bannerSeconds = listOf(5, 10, 30, 0)[index]) }
+                        },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
                 TextButton(
                     onClick = {
                         val defaults = AppSettings()
@@ -1670,6 +1718,9 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 fontScale = defaults.fontScale,
                                 bubbleWidth = defaults.bubbleWidth,
                                 cornerScale = defaults.cornerScale,
+                                // 这一页现在是六项：新加的提示条时长也在「恢复默认外观」里，
+                                // 否则按了恢复却留着上一轮的设置，用户会以为按钮坏了。
+                                bannerSeconds = defaults.bannerSeconds,
                             )
                         }
                     },
@@ -1700,10 +1751,10 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
         ) {
             item {
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = stored.searchEndpoint,
                     onValueChange = { value -> scope.persist { it.copy(searchEndpoint = value) } },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     label = { Text("搜索接口（可留空）") },
                     placeholder = { Text("https://api.tavily.com/search") },
                     singleLine = true,
@@ -1715,10 +1766,10 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             }
             item {
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = stored.searchApiKey,
                     onValueChange = { value -> scope.persist { it.copy(searchApiKey = value) } },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     label = { Text("搜索接口 Key（可留空）") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
@@ -1766,10 +1817,10 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             if (stored.voiceInput) {
                 item {
                     OutlinedTextField(
-                        textStyle = MaterialTheme.typography.bodySmall,
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         value = stored.asrModel,
                         onValueChange = { value -> scope.persist { it.copy(asrModel = value) } },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                         label = { Text("语音转写模型") },
                         placeholder = { Text("whisper-1") },
                         singleLine = true,
@@ -2095,12 +2146,12 @@ private fun RenameDialog(
         title = { Text("重命名提供方") },
         text = {
             OutlinedTextField(
-                textStyle = MaterialTheme.typography.bodySmall,
+                textStyle = MaterialTheme.typography.bodyMedium,
                 value = name,
                 onValueChange = { name = it },
                 singleLine = true,
                 shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
             )
         },
         confirmButton = {
@@ -2215,13 +2266,13 @@ private fun ModelPickerDialog(
                 Spacer(Modifier.height(4.dp))
                 if (models.size > 8) {
                     OutlinedTextField(
-                        textStyle = MaterialTheme.typography.bodySmall,
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         value = query,
                         onValueChange = { query = it },
                         label = { Text("筛选") },
                         singleLine = true,
                         shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     )
                     Spacer(Modifier.height(8.dp))
                 }
@@ -2413,7 +2464,7 @@ private fun ModelCheckRow(
         }
         if (editing) {
             OutlinedTextField(
-                textStyle = MaterialTheme.typography.bodySmall,
+                textStyle = MaterialTheme.typography.bodyMedium,
                 value = draft,
                 onValueChange = { raw -> draft = raw.filter { it.isDigit() }.take(7) },
                 label = { Text("上下文窗口（tokens，留空 = 不限）") },
@@ -2427,7 +2478,9 @@ private fun ModelCheckRow(
                         editing = false
                     }) { Text("保存") }
                 },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                // 这是 chip 行里的内联编辑器（自带 start/end/bottom 的紧凑内边距），高度同样收到
+                // 52dp：与其它单行输入框一致，多出来的 4dp 只是让这一行略高一点。
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
                     .padding(start = 12.dp, end = 8.dp, bottom = 6.dp),
             )
         }
@@ -2452,13 +2505,13 @@ private fun AliasDialog(initial: String, onDismiss: () -> Unit, onConfirm: (Stri
         title = { Text("模型别名") },
         text = {
             OutlinedTextField(
-                textStyle = MaterialTheme.typography.bodySmall,
+                textStyle = MaterialTheme.typography.bodyMedium,
                 value = value,
                 onValueChange = { value = it },
                 label = { Text("显示名（留空 = 用回原 id）") },
                 singleLine = true,
                 shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
             )
         },
         confirmButton = { TextButton(onClick = { onConfirm(value.trim()) }) { Text("保存") } },
@@ -2475,13 +2528,13 @@ private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
         title = { Text("自定义模型") },
         text = {
             OutlinedTextField(
-                textStyle = MaterialTheme.typography.bodySmall,
+                textStyle = MaterialTheme.typography.bodyMedium,
                 value = value,
                 onValueChange = { value = it },
                 label = { Text("模型 id") },
                 singleLine = true,
                 shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
             )
         },
         confirmButton = {
@@ -2496,7 +2549,14 @@ private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
 
 /** A row that leaves this page: the chevron is what says so before it is tapped. */
 @Composable
-private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
+private fun SettingsLink(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    /** 由 [SettingsGroup] 传卡片形状与 16dp 内容内边距：行要铺满卡片，涟漪才碰得到边缘。 */
+    shape: Shape = MaterialTheme.shapes.small,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
+) {
     // 行本身只有一份实现（Common.SettingRow），这里只接上「离开这一页」这件事：
     // 点击 + 右侧 chevron。几何、字号、行高都在 SettingRow 里，改那里就是改全站。
     SettingRow(
@@ -2504,6 +2564,8 @@ private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
         subtitle = subtitle,
         onClick = onClick,
         control = { RowChevron() },
+        shape = shape,
+        contentPadding = contentPadding,
     )
 }
 

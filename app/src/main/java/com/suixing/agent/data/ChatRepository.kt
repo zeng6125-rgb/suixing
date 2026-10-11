@@ -63,10 +63,54 @@ class ChatRepository(private val context: Context) {
         // the later write can be the older snapshot, and two truncating writes can
         // interleave into a file that no longer parses.
         lock.withLock {
-            val stamped = conversation.copy(updatedAt = System.currentTimeMillis())
+            // 置顶由 [setPinned] 单独管，正文保存只继承盘上那一位：调用方（ChatViewModel 的
+            // save）是按字段重建 Conversation 的，新字段默认 false —— 不在这里继承，一次
+            // 「消息落盘」就会把用户刚置顶的会话取消置顶（那个构造里 providerId / model /
+            // reasoningEffort / checkpoints 都为此写了同样的继承，这里是同一个坑的第五个）。
+            val onDisk = _conversations.value.firstOrNull { it.id == conversation.id }
+            val stamped = conversation.copy(
+                updatedAt = System.currentTimeMillis(),
+                pinned = onDisk?.pinned ?: conversation.pinned,
+            )
             write(stamped)
             val rest = _conversations.value.filterNot { it.id == stamped.id }
             _conversations.value = (listOf(stamped) + rest).sortedByDescending { it.updatedAt }
+        }
+    }
+
+    /**
+     * 置顶 / 取消置顶。只改这一位，**不动 `updatedAt`**。
+     *
+     * 不复用 [save]：那个方法会把 `updatedAt` 盖成「现在」，于是置顶看起来像一次编辑 ——
+     * 会话管理页那一行会显示成「刚刚更新」，其它按时间排的地方也会被这一下打乱。置顶是个
+     * 标签，不是一次内容变更。
+     *
+     * 列表顺序也不在这里动：抽屉自己按「置顶优先」排（那是它的展示规则），[conversations]
+     * 保持原本的时间序，别处读到的还是同一份。
+     */
+    suspend fun setPinned(id: String, pinned: Boolean) = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
+            val next = current.copy(pinned = pinned)
+            write(next)
+            _conversations.value = _conversations.value.map { if (it.id == id) next else it }
+        }
+    }
+
+    /**
+     * 改名。与 [setPinned] 同理**不动 `updatedAt`**：改名是给这一篇换个标签，不是新的对话内容。
+     *
+     * 调用方要注意：屏幕上那一份标题是 ChatViewModel 里的拷贝，只改这里的话，用户给**当前打开
+     * 的会话**改名会在下一轮被它写回去 —— 所以 UI 走 `ChatViewModel.renameConversation`。
+     */
+    suspend fun rename(id: String, title: String) = withContext(Dispatchers.IO) {
+        val clean = title.trim()
+        if (clean.isEmpty()) return@withContext
+        lock.withLock {
+            val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
+            val next = current.copy(title = clean)
+            write(next)
+            _conversations.value = _conversations.value.map { if (it.id == id) next else it }
         }
     }
 

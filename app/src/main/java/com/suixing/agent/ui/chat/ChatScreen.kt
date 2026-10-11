@@ -16,6 +16,7 @@ import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Base64
+import android.view.ViewConfiguration
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,6 +49,7 @@ import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -140,6 +142,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -167,6 +170,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -337,6 +341,8 @@ fun ChatScreen(
     }
 
     var assistantsOpen by remember { mutableStateOf(false) }
+    // 任务清单：输入框上方那一行点开就是它（完整清单，可滚动）。
+    var todoSheetOpen by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     fun attach(uri: Uri?, kind: AttachKind) {
@@ -606,6 +612,11 @@ fun ChatScreen(
     // and a re-arm mid-press is what let the next streamed frame pin the list to its end under the
     // hand. Transient by nature — a rotation mid-press is not a state worth restoring.
     var pressed by remember { mutableStateOf(false) }
+    // 按下期间列表自己动过没有。**必须按帧采样**：指针事件只在手指移动时到达，而静止的长按
+    // （选文本）期间 `isScrollInProgress` 一次也采不到 —— 真机日志里 `scrolled=false` 而位置
+    // 却变了 636px，就是这一条采样空档。判定本身还靠「按下/抬起的位置对」，这一条只是让日志
+    // 与判定都别再漏。
+    var pressScrolled by remember { mutableStateOf(false) }
     // Set while the list is being scrolled by us. Without it the follow scroll itself trips
     // the "user scrolled away" branch below, following goes false, and the run stops
     // following its own output — which is exactly what it used to do.
@@ -613,6 +624,14 @@ fun ChatScreen(
     // When the last pin ran: the scroll watcher below sees our own pin's scrolling a beat late
     // (the programmatic guard is already down by then) and would read it as a user drag.
     var lastPinAt by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(pressed) {
+        if (!pressed) return@LaunchedEffect
+        pressScrolled = false
+        while (true) {
+            if (!programmatic && listState.isScrollInProgress) pressScrolled = true
+            withFrameNanos { }
+        }
+    }
     LaunchedEffect(listState) {
         // The hand wins the moment it moves. `canScrollBackward` is false while the list sits
         // at its end and true the instant a drag lifts it off, so following is dropped on the
@@ -630,6 +649,7 @@ fun ChatScreen(
                     SystemClock.uptimeMillis() - lastPinAt > 120
                 ) {
                     following = false
+                    scrollDiag(context, "watch:decision=drop(hand)", listState, following, itemCount, ime = heldIme) // 量完删
                 } else if (!scrolling && !pressed && listState.atVeryEnd()) {
                     // Released at the end again — or the user tapped 跳最新, which sets
                     // following itself: either way the run may follow its output again.
@@ -642,6 +662,7 @@ fun ChatScreen(
                     // A press that ends without moving (a tap) still re-arms, through the release
                     // path, which is where that decision belongs.
                     following = true
+                    scrollDiag(context, "watch:decision=rearm(atEnd)", listState, following, itemCount, ime = heldIme) // 量完删
                 }
             }
     }
@@ -672,8 +693,10 @@ fun ChatScreen(
             // point is wrong, so the pull to the end is the only time it shows.
             if (!following) return@LaunchedEffect
             listState.scrollToItem(itemCount - 1)
+            scrollDiag(context, "cold-pin:pass1", listState, following, itemCount) // 量完删
             if (!following) return@LaunchedEffect
             listState.scrollBy(FOLLOW_SCROLL_PX)
+            scrollDiag(context, "cold-pin:pass2", listState, following, itemCount) // 量完删
         } finally {
             programmatic = false
         }
@@ -720,8 +743,10 @@ fun ChatScreen(
         try {
             if (!gateOpen()) return@LaunchedEffect
             listState.scrollToItem(itemCount - 1)
+            scrollDiag(context, "pin:pass1", listState, following, itemCount) // 量完删
             if (!gateOpen()) return@LaunchedEffect
             listState.scrollBy(FOLLOW_SCROLL_PX)
+            scrollDiag(context, "pin:pass1b", listState, following, itemCount) // 量完删
             // A second pass once the new item has been measured. The first scroll runs in the
             // frame the item was added, when its height is still unknown, so the end it lands on
             // is short by exactly the height of what just appeared — the status line of a fresh
@@ -736,6 +761,7 @@ fun ChatScreen(
                 listState.scrollToItem(itemCount - 1)
                 if (!gateOpen()) return@LaunchedEffect
                 listState.scrollBy(FOLLOW_SCROLL_PX)
+                scrollDiag(context, "pin:pass2", listState, following, itemCount) // 量完删
             }
         } finally {
             programmatic = false
@@ -814,6 +840,7 @@ fun ChatScreen(
         programmatic = true
         lastPinAt = SystemClock.uptimeMillis()
         try {
+            scrollDiag(context, "ime:delta=$previous->$heldIme", listState, following, itemCount, ime = heldIme) // 量完删
             listState.dispatchRawDelta(
                 (heldIme - previous).toFloat() +
                     (navBarPad(heldIme) - navBarPad(previous)).toFloat(),
@@ -837,6 +864,7 @@ fun ChatScreen(
             if (itemCount > 0) {
                 programmatic = true
                 try {
+                    scrollDiag(context, "jump:latest", listState, following, itemCount) // 量完删
                     listState.scrollToItem(itemCount - 1)
                     listState.scrollBy(FOLLOW_SCROLL_PX)
                 } finally {
@@ -846,6 +874,15 @@ fun ChatScreen(
         }
     }
 
+    // 提示条自己走：默认 10 秒（用户：「10 秒消失吧」），外观页可改成 5/30 秒或永不。
+    // 键里带上秒数，改设置时重新计时；错误换了内容也重新计时（同一句话不重来）。
+    LaunchedEffect(state.error, settings.bannerSeconds) {
+        if (state.error == null) return@LaunchedEffect
+        val seconds = settings.bannerSeconds
+        if (seconds <= 0) return@LaunchedEffect
+        delay(seconds * 1000L)
+        viewModel.dismissError()
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         // No topBar slot: the header floats over the transcript as three discs, so the
@@ -906,6 +943,12 @@ fun ChatScreen(
                     // In px, converted once: a raw pixel threshold would be a couple of
                     // millimetres on a dense screen and a centimetre on a sparse one.
                     val releaseDragPx = with(LocalDensity.current) { RELEASE_DRAG_DP.toPx() }
+                    // 手指有没有真的拖动过：**触摸斜率**，也就是 Compose 的滚动开始生效的那条线。
+                    // 手指没越过它，列表就绝不可能因为手指而滚动 —— 这是「静止长按」的判据（见
+                    // restoresPositionAfterLongPress）。
+                    val touchSlopPx = with(LocalDensity.current) {
+                        ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+                    }
                     // The gesture system's own long-press timeout, read rather than assumed: our
                     // constant sat below it (450 against the platform's 500), so a press in that
                     // window started a selection — the IME collapsing with it — while the release
@@ -950,6 +993,10 @@ fun ChatScreen(
                                         // excluded so our own pin cannot pass for a hand: a tap that
                                         // happens to land during a pin is still a tap.
                                         var scrolled = false
+                                        // 手指有没有越过触摸斜率。越过之前，Compose 的滚动根本不会
+                                        // 因为手指而动 —— 所以「没越过 + 列表却动了」只可能是别的东西
+                                        // 在滚（选择机制把选中行拉进视野）。这是长按还原位置的判据。
+                                        var fingerDragged = false
                                         var released = false
                                         while (!released) {
                                             val next = awaitPointerEvent(PointerEventPass.Initial)
@@ -957,8 +1004,12 @@ fun ChatScreen(
                                             // Remembered, not acted on: the follow is already down.
                                             // An upward move is what separates a drag, which must
                                             // stay released, from a plain tap, which must not.
-                                            if (!released && downY - next.changes.first().position.y > releaseDragPx) {
+                                            val dy = downY - next.changes.first().position.y
+                                            if (!released && dy > releaseDragPx) {
                                                 movedUp = true
+                                            }
+                                            if (!released && abs(dy) > touchSlopPx) {
+                                                fingerDragged = true
                                             }
                                             if (!released && !programmatic && listState.isScrollInProgress) {
                                                 scrolled = true
@@ -980,15 +1031,56 @@ fun ChatScreen(
                                         // follow back, and the release rule below decides whether it
                                         // should.
                                         pressed = false
-                                        scrollDiag(context, "press:up:movedUp=$movedUp:scrolled=$scrolled:atEnd=$atEndNow", listState, following, itemCount, ime = heldIme) // 量完删
+                                        // 按下期间列表动过没有：指针采样（手指动的拖拽）与帧采样
+                                        // （静止长按里框架自己滚的）取或。
+                                        val movedByList = scrolled || pressScrolled
+                                        scrollDiag(context, "press:up:movedUp=$movedUp:fingerDragged=$fingerDragged:scrolled=$scrolled:frameScrolled=$pressScrolled:atEnd=$atEndNow", listState, following, itemCount, ime = heldIme) // 量完删
                                         val held = SystemClock.uptimeMillis() - pressedAt
-                                        if (restoresFollowAfterPress(
+                                        val nowIndex = listState.firstVisibleItemIndex
+                                        val nowOffset = listState.firstVisibleItemScrollOffset
+                                        val listMoved = nowIndex != downIndex || nowOffset != downOffset
+                                        // 静止的长按（选文本）**期间列表自己动了**：那是选择机制把内容
+                                        // 拉进视野，不是用户的意图，用户看到的就是「长按一下，位置跳了」。
+                                        // 把位置放回按下时的地方，并把 follow 还原成按下前的值 —— 长按
+                                        // 之后的状态与长按之前完全一致。手指越过触摸斜率动过的（拖拽/
+                                        // 滑动）不碰：那时位置变化就是用户自己造成的。
+                                        if (restoresPositionAfterLongPress(
+                                                fingerDragged = fingerDragged,
+                                                listMoved = listMoved,
+                                                heldMs = held,
+                                                holdMs = holdToSelectMs,
+                                            )
+                                        ) {
+                                            // 受限挂起上下文（`awaitPointerEventScope`）里不能直接调
+                                            // `scrollToItem` —— 它是 LazyListState 的挂起成员，编译器
+                                            // 只允许受限范围内的那些。滚动作交给屏幕自己的 scope，
+                                            // 判定与日志留在这里。
+                                            scrollDiag(
+                                                context,
+                                                "press:up:restore-position=$downIndex+$downOffset",
+                                                listState,
+                                                wasFollowing,
+                                                itemCount,
+                                                ime = heldIme,
+                                            ) // 量完删
+                                            following = wasFollowing
+                                            val restoreIndex = downIndex
+                                            val restoreOffset = downOffset
+                                            scope.launch {
+                                                programmatic = true
+                                                try {
+                                                    listState.scrollToItem(restoreIndex, restoreOffset)
+                                                } finally {
+                                                    programmatic = false
+                                                }
+                                            }
+                                        } else if (restoresFollowAfterPress(
                                                 movedUp = movedUp,
-                                                scrolledDuringPress = scrolled,
+                                                scrolledDuringPress = movedByList,
                                                 downIndex = downIndex,
                                                 downOffset = downOffset,
-                                                nowIndex = listState.firstVisibleItemIndex,
-                                                nowOffset = listState.firstVisibleItemScrollOffset,
+                                                nowIndex = nowIndex,
+                                                nowOffset = nowOffset,
                                                 atVeryEnd = atEndNow,
                                                 heldMs = held,
                                                 holdMs = holdToSelectMs,
@@ -1083,6 +1175,12 @@ fun ChatScreen(
                                     onRegenerate = { viewModel.regenerate() },
                                     onEdit = { editing = it },
                                 )
+                                // 中断/截断/失败的原因属于**这一轮的回答**，所以画在这张卡片里，
+                                // 而不是浮在屏幕上的通知条（用户原话「要输出在卡片里面」）。
+                                // 只挂在最后一张卡片上：它就是刚刚结束的那一轮。
+                                if (row.message.id == visible.lastOrNull()?.message?.id) {
+                                    state.error?.let { reason -> RunReasonLine(reason) }
+                                }
                             }
                             // The compression record sits under the last message it folded
                             // away: that is the point in the transcript where the model
@@ -1219,14 +1317,15 @@ fun ChatScreen(
                         ),
                     ),
             )
-            // The error banner rides below the header's control row and above the fade
-            // layer: in the column it sat under the status strip, and the fade ate its
-            // text. status bar + 4dp lift + 56dp row + 8dp of air.
-            state.error?.let { message ->
+            // 浮层提示条只留给**没有卡片可依附**的情况：有回答卡片时，中断/截断/失败的原因画在
+            // 那张卡片里面（见 RunReasonLine）——用户原话「要输出在卡片里面」。
+            state.error?.takeIf { visible.isEmpty() }?.let { message ->
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .padding(top = statusBarInset + 68.dp),
+                        // 顶栏那一行占 status bar + 4dp lift + 56dp，所以 64dp 就是「按钮下方一点点」；
+                        // 68dp 时它离顶栏还有一段，读起来像浮在内容中间（用户要求往上一点）。
+                        .padding(top = statusBarInset + 64.dp),
                 ) {
                     ErrorCard(message = message, onDismiss = { viewModel.dismissError() })
                 }
@@ -1277,6 +1376,7 @@ fun ChatScreen(
                     // retracted 插话, a branch switch, another conversation opened by a deep link.
                     // A jump to a turn that is no longer drawn is a no-op, never a crash.
                     turnIndices.getOrNull(turn)?.let { index ->
+                        scrollDiag(context, "jump:turn=$index", listState, following, itemCount) // 量完删
                         scope.launch { listState.animateScrollToItem(index) }
                     }
                 },
@@ -1320,6 +1420,7 @@ fun ChatScreen(
                     onPromoteTurn = { id -> viewModel.promoteTurn(state.conversationId, id) },
                     onRetractTurn = { id -> viewModel.retractTurn(state.conversationId, id) },
                     todos = state.todos,
+                    onOpenTodos = { todoSheetOpen = true },
                     onPromoteSteer = { viewModel.promoteSteer(it) },
                     onRetractSteer = { viewModel.retractSteer(it) },
                     attachment = attachment,
@@ -1415,6 +1516,12 @@ fun ChatScreen(
                 onResult = { text -> setDraft(text = if (input.isBlank()) text else "$input $text") },
                 onDismiss = { voiceOpen = false },
             )
+        }
+        // 任务清单的完整版：点输入框上方那一行打开。清单在跑完/清空时自己为空，所以这里不需要
+        // 额外的开关——内容没了，表也就没什么可显示。
+        if (todoSheetOpen) {
+            // `state.todos`，不是 `todos`：那个名字是 Composer 的参数，在这一层不存在。
+            TodoSheet(todos = state.todos, onDismiss = { todoSheetOpen = false })
         }
     }
 
@@ -2804,6 +2911,36 @@ private fun BranchArrow(
 private val PROCESS_TITLE_MAX = 160.dp
 
 /**
+ * 卡片级可点块的按下反馈：**整块背景压暗**，不用涟漪。
+ *
+ * M3 的 `ripple()` 是 bounded 的：半径＝触摸点到本节点**最远角**的距离。放在一个又高又宽的卡片上，
+ * 它画出来就是一个大圆（被圆角裁掉一半仍是个圆），与「这一块被按下了」的预期完全不是一回事 ——
+ * 用户看到的就是「为什么是个圆形」。这里换成整块 8% 的 onSurface 叠色，形状与可见圆角一致，
+ * 松手即恢复。
+ *
+ * 只给**卡片级**的可点块用（工具行、折叠卡片的表头、检查点卡）；单行小按钮（图标按钮、菜单行、
+ * 26dp 的圆形动作）保留 M3 原生涟漪，那才是涟漪本来该有的样子。
+ *
+ * 没有复用 `suixingClickable`：它的两个重载都把 `indication = ripple()` 写死了，没有留出
+ * 「不要涟漪」的入口。
+ */
+@Composable
+private fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    return this
+        .clip(shape)
+        .background(
+            if (pressed) {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+            } else {
+                Color.Transparent
+            },
+        )
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+}
+
+/**
  * The chrome every folded process block shares: thinking, a tool call and the turn's own
  * summary all draw through this, so a reply that thinks, calls, thinks again reads as one
  * repeating shape instead of three unrelated widgets stacked in a column.
@@ -2841,9 +2978,9 @@ private fun ProcessCard(
                     // card's height down, so it is a fixed height, not a minimum —
                     // nothing in the row wraps (every text is maxLines 1).
                     .height(36.dp)
-                    // 走共享修饰符：clip(整行形状) → clickable → padding。顺序钉死在这里，涟漪就
-                    // 等于这一行的可见形状（含左右 12dp 内边距），不会缩成中间一个圆点。
-                    .suixingClickable(
+                    // 整块按下反馈（见 blockPress）：这一行是整条卡片的表头，宽度铺满、还是展开
+                    // 后整块内容的入口，涟漪在这里画出来就是个横跨半个屏幕的圆。
+                    .blockPress(
                         RoundedCornerShape(
                             topStart = 16.dp,
                             topEnd = 16.dp,
@@ -3188,8 +3325,9 @@ private fun ReasoningBlock(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // 走共享修饰符：涟漪按整行形状画，也不被 padding 裁掉。
-                    .suixingClickable(MaterialTheme.shapes.small, onClick = toggle),
+                    // 整块按下反馈（见 blockPress）：这一行铺满整条卡片的宽度，涟漪在这么宽的行上
+                    // 是一大片弧形，不是「按下这一行」。
+                    .blockPress(MaterialTheme.shapes.small, onClick = toggle),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
@@ -3439,12 +3577,10 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(MaterialTheme.shapes.small)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = onToggle,
-            )
+            // 整块按下反馈（见 blockPress）：这一列**展开后包含整段参数与输出**，是有多高就多高
+            // 的节点 —— 涟漪的半径按「到最远角的距离」算，于是画出来正是一个大圆，也就是用户
+            // 截图里那个「为什么是个圆形」。
+            .blockPress(MaterialTheme.shapes.small, onClick = onToggle)
             .padding(vertical = 4.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -4446,6 +4582,8 @@ private fun Composer(
      * only while this run is going: the board is the run's plan, not a second transcript.
      */
     todos: List<TodoItem> = emptyList(),
+    /** 点「任务 2/5」那一行：完整清单在 ChatScreen 里画（这个 composable 拿不到那个状态）。 */
+    onOpenTodos: () -> Unit,
     /** Sends a queued line now, cutting the round in flight. */
     onPromoteSteer: (String) -> Unit,
     /** Drops a queued line before the model reads it; 「修改」 uses it too. */
@@ -4600,28 +4738,16 @@ private fun Composer(
             if (running && todos.isNotEmpty()) {
                 val rows = todoRows(todos)
                 val done = todos.count { it.status == TODO_COMPLETED }
-                val open = todos.size - done
-                val shownOpen = rows.count { it.status != TODO_COMPLETED }
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = STEER_QUEUE_INSET),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    rows.forEachIndexed { index, item ->
+                // 一行，只一行：进行中的那条（没有就取第一条待办），右边是完成数/总数。用户的话：
+                // 「不要堆多行，就一行就行了」——整条清单改由点击这一行打开（见 TodoSheet）。
+                val current = rows.firstOrNull { it.status == TODO_IN_PROGRESS } ?: rows.firstOrNull()
+                if (current != null) {
+                    // 与排队行同一个内缩：它们同属「输入框上方那一列」，宽度必须一致。
+                    Box(Modifier.padding(horizontal = STEER_QUEUE_INSET)) {
                         TodoQueueRow(
-                            item = item,
-                            // The tally rides the first row only: one number for the board,
-                            // repeated on every line it would read as several boards.
-                            tally = if (index == 0) "$done/${todos.size}" else null,
-                        )
-                    }
-                    if (open > shownOpen) {
-                        Text(
-                            text = "还有 ${open - shownOpen} 项",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = scheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 4.dp),
+                            item = current,
+                            tally = "$done/${todos.size}",
+                            onClick = onOpenTodos,
                         )
                     }
                 }
@@ -6588,9 +6714,15 @@ private fun scrollDiag(
     ime: Int = -1,
 ) {
     val app = context.applicationContext
+    // `itemCount` is what the **caller's lambda captured**, and a long-lived effect
+    // (`LaunchedEffect(listState)`, `pointerInput(Unit)`) captures it from the composition that
+    // created the lambda — so the watch lines print the 0 of the first frame while the press lines,
+    // created later, print the real count. `items=` is read live off the list itself and is the
+    // number to trust; the two disagreeing is the stale capture, not a different list.
     val line = "$event" +
         " following=$following" +
         " itemCount=$itemCount" +
+        " items=${state.layoutInfo.totalItemsCount}" +
         " first=${state.firstVisibleItemIndex}+${state.firstVisibleItemScrollOffset}" +
         " scrolling=${state.isScrollInProgress}" +
         " canBack=${state.canScrollBackward}" +
@@ -6644,12 +6776,9 @@ private fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Stored
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(MaterialTheme.shapes.small)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = ripple(),
-                    onClick = { expanded = !expanded },
-                )
+                // 整块按下反馈（见 blockPress）：检查点卡的表头也是铺满宽度的一行，展开后是整段
+                // 摘要的入口；涟漪在这种宽度上同样是一大片圆。
+                .blockPress(MaterialTheme.shapes.small, onClick = { expanded = !expanded })
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -6885,7 +7014,12 @@ private fun SteerQueueRow(
  * [tally] is 「已完成/总数」, drawn on the board's first row alone.
  */
 @Composable
-private fun TodoQueueRow(item: TodoItem, tally: String?) {
+private fun TodoQueueRow(
+    item: TodoItem,
+    tally: String?,
+    /** 点这一行看完整清单；null 时不可点（只作展示用）。 */
+    onClick: (() -> Unit)? = null,
+) {
     val scheme = MaterialTheme.colorScheme
     val done = item.status == TODO_COMPLETED
     val active = item.status == TODO_IN_PROGRESS
@@ -6894,13 +7028,12 @@ private fun TodoQueueRow(item: TodoItem, tally: String?) {
         done -> scheme.onSurfaceVariant.copy(alpha = 0.6f)
         else -> scheme.onSurfaceVariant
     }
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = scheme.surfaceContainerHigh,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(36.dp),
-    ) {
+    // Surface 的 onClick 重载：可点时它自己带 ripple 与语义，不用另加 clickable。
+    val shape = RoundedCornerShape(14.dp)
+    val modifier = Modifier
+        .fillMaxWidth()
+        .height(36.dp)
+    val body: @Composable () -> Unit = {
         Row(
             modifier = Modifier
                 .fillMaxSize()
@@ -6934,6 +7067,132 @@ private fun TodoQueueRow(item: TodoItem, tally: String?) {
                 )
             }
         }
+    }
+    if (onClick == null) {
+        Surface(shape = shape, color = scheme.surfaceContainerHigh, modifier = modifier) { body() }
+    } else {
+        // 可点：整行就是「看完整清单」的入口，形状/颜色/高度与不可点时完全一致。
+        Surface(
+            onClick = onClick,
+            shape = shape,
+            color = scheme.surfaceContainerHigh,
+            modifier = modifier,
+        ) { body() }
+    }
+}
+
+/**
+ * 卡片底部的一行原因：中断、上游截断、失败。
+ *
+ * 属于这一轮的回答，所以跟着卡片走 —— 用户看到「连接中断」时，它就该长在那条半截回答的下面，
+ * 而不是屏幕顶上一条与内容无关的浮层。样式用卡片里既有的一档小字（labelSmall）加错误色，
+ * 不再新造一种提示形态。
+ */
+@Composable
+private fun RunReasonLine(reason: String) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, top = 6.dp, end = 4.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
+            contentDescription = null,
+            tint = scheme.error,
+            modifier = Modifier.size(14.dp).padding(top = 1.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = reason,
+            style = MaterialTheme.typography.labelSmall,
+            color = scheme.error,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * 完整任务清单：输入框上方那一行点开就是它。
+ *
+ * 那一行只放得下一条 —— 进行中的那条 + 完成数/总数（用户：「不要堆多行，就一行就行了」），
+ * 清单本身得有地方看，所以点它开半屏表（站内既有的范式，见 AssistantSheet）。只读：改状态是
+ * 模型自己的事，这里给的是「这个任务一共要做哪些、做到哪了」。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val done = todos.count { it.status == TODO_COMPLETED }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = scheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp),
+        ) {
+            Text("任务清单", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "已完成 $done/${todos.size}",
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(todos) { item -> TodoSheetRow(item) }
+            }
+        }
+    }
+}
+
+/** 清单里的一行：状态标记 + 事项；完成的划掉一点、进行中的用品牌色。 */
+@Composable
+private fun TodoSheetRow(item: TodoItem) {
+    val scheme = MaterialTheme.colorScheme
+    val done = item.status == TODO_COMPLETED
+    val active = item.status == TODO_IN_PROGRESS
+    val ink = when {
+        active -> scheme.primary
+        done -> scheme.onSurfaceVariant.copy(alpha = 0.6f)
+        else -> scheme.onSurface
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            imageVector = ImageVector.vectorResource(
+                when {
+                    done -> R.drawable.ic_circle_check
+                    // 没有专门的「进行中」图标：箭头朝右＝正在往前走，比再画一个圆点更不含糊。
+                    active -> R.drawable.ic_chevron_right
+                    else -> R.drawable.ic_list_checks
+                },
+            ),
+            contentDescription = null,
+            tint = when {
+                active -> scheme.primary
+                done -> scheme.onSurfaceVariant.copy(alpha = 0.6f)
+                else -> scheme.onSurfaceVariant
+            },
+            modifier = Modifier.size(16.dp).padding(top = 2.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = item.subject,
+            style = MaterialTheme.typography.bodyMedium,
+            color = ink,
+            textDecoration = if (done) TextDecoration.LineThrough else null,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -7207,6 +7466,32 @@ internal fun restoresFollowAfterPress(
     heldMs = heldMs,
     holdMs = holdMs,
 )
+
+/**
+ * Whether a press that the list moved **on its own** has to be undone.
+ *
+ * The case this exists for, from a real log: at the very end (`canForward=false`), a finger goes
+ * down and does not move; ~330ms later the list is 636px further up with `isScrollInProgress=true`,
+ * and at release `movedUp=false` — the finger never travelled. That is not a gesture. It is the text
+ * selection machinery (`SelectionContainer`) bringing the selected line into view, and it is the
+ * 「长按滚动位置变」 the user keeps reporting: a stationary long press is a request to select, not a
+ * request to move.
+ *
+ * [fingerDragged] is whether the finger ever travelled past the **touch slop** — the threshold at
+ * which Compose's scrollable starts moving the list from a finger at all. That is what makes this
+ * rule decidable: below the slop the finger *cannot* have scrolled the list, so a list that moved
+ * anyway was moved by something else. (An earlier version of this asked "did the list move during
+ * the press" as well, which is self-contradictory: the framework's own scroll sets that flag, so the
+ * branch could never fire — the unit test for the real log caught it.)
+ *
+ * [listMoved] is the position pair at press-down against release.
+ */
+internal fun restoresPositionAfterLongPress(
+    fingerDragged: Boolean,
+    listMoved: Boolean,
+    heldMs: Long,
+    holdMs: Long = HOLD_TO_SELECT_MS,
+): Boolean = !fingerDragged && listMoved && heldMs >= holdMs
 
 /** Far more than any transcript: the list clamps this to its own end. */
 private const val FOLLOW_SCROLL_PX = 200_000f

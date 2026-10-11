@@ -12,6 +12,7 @@ import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.TodoStore
 import com.suixing.agent.data.UsageStore
+import com.suixing.agent.plugins.PluginStore
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.mcp.McpManager
 import com.suixing.agent.service.SchedulerService
@@ -79,6 +80,16 @@ object Core {
     lateinit var schedules: ScheduleStore
         private set
 
+    /**
+     * Installed plugins: one folder per plugin under `filesDir/plugins`.
+     *
+     * A store rather than a live registry: M1 installs, validates and shows what a package *would*
+     * do. Nothing here is wired into the tool table or the prompt yet, which is why the UI is a
+     * white-box view of the manifest rather than a switch that changes behaviour.
+     */
+    lateinit var plugins: PluginStore
+        private set
+
     /** Token usage aggregated from the chat transcripts; shared so one watermark serves all readers. */
     lateinit var usage: UsageStore
         private set
@@ -122,6 +133,7 @@ object Core {
             jobs = JobStore(File(appContext.filesDir, "jobs"), appScope)
             todos = TodoStore(File(appContext.filesDir, "todos.json"))
             schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))
+            plugins = PluginStore(File(appContext.filesDir, "plugins"))
             usage = UsageStore(appContext)
             tools = ToolRegistry(
                 appContext, capabilities, skills, speaker, settings, memory, profile, jobs, todos,

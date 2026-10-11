@@ -73,7 +73,7 @@ internal fun ContextWindowDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodySmall,
+                    textStyle = MaterialTheme.typography.bodyMedium,
                     value = text,
                     onValueChange = { value -> text = value.filter { it.isDigit() || it == '.' } },
                     label = { Text("k tokens") },
@@ -82,7 +82,7 @@ internal fun ContextWindowDialog(
                     // 打不出「.」的话，1.5k 这种值就只有建议按钮写得进去。
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     isError = invalid,
                     supportingText = supporting,
                 )

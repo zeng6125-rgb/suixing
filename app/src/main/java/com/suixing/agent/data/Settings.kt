@@ -229,6 +229,12 @@ data class AppSettings(
     /** Keep the thinking block on the transcript once the answer is there. */
     val showReasoning: Boolean = true,
     /**
+     * 浮层提示条多少秒后自己消失；**0 ＝ 不自动消失**（只能手点 ×）。
+     *
+     * 只影响浮层那种全局提示：回答卡片里的原因（中断/截断）跟着卡片走，不归这个开关管。
+     */
+    val bannerSeconds: Int = 10,
+    /**
      * Every endpoint the user set up. [baseUrl] / [apiKey] / [model] above stay the
      * *active* triple, so switching models is a single copy() and nothing else in
      * the app has to know that providers exist.

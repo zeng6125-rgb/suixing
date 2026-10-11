@@ -176,6 +176,13 @@ data class RetryNotice(
     val delayMs: Long,
     /** Short, user-facing: why this attempt is being repeated. */
     val reason: String,
+    /**
+     * The HTTP status that failed, or null for a transport failure (no status ever arrived).
+     *
+     * Carried so the caller's trace can say *what* is being retried: "429 twice" and "connection
+     * reset twice" are the same to the retry rule and completely different to whoever reads the log.
+     */
+    val code: Int? = null,
 )
 
 /**
@@ -392,6 +399,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                     maxAttempts = maxRetries,
                     delayMs = seconds * 1000L,
                     reason = retryReason(code),
+                    code = code,
                 ),
             )
             // Cancellable on purpose: a stop during the wait must end the run at once rather than

@@ -104,6 +104,16 @@ data class Conversation(
     /** The persona this conversation speaks as; empty falls back to the active one. */
     val assistantId: String = "",
     /**
+     * 抽屉里的置顶。**带默认值**：仓库的 Json 是 `ignoreUnknownKeys = true`，老文件没有这一位
+     * 也能解析（读成 false），所以不需要迁移。
+     *
+     * 它只影响抽屉自己的排序（`ui/SuixingApp.kt` 的 `Drawer` 按「置顶优先、再按时间」排）；
+     * [ChatRepository] 里那份列表顺序仍是时间序，会话管理页与「上次打开」都吃它。
+     * 写这一位只走 [ChatRepository.setPinned]：正文保存（[ChatRepository.save]）会继承盘上的
+     * 值，免得一次消息落盘把用户刚置顶的会话悄悄取消置顶。
+     */
+    val pinned: Boolean = false,
+    /**
      * Which run of each turn is on screen, keyed by the id of the user message that
      * opened the turn. Missing entries mean "the newest run", which is what a
      * freshly answered question should show.
