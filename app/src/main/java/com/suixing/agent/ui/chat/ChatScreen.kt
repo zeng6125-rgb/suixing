@@ -108,7 +108,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -338,7 +337,11 @@ fun ChatScreen(
     // suffix, in whole turns: always the newest ones, so a streaming answer keeps its place
     // in it, and 加载更早 only ever grows it. The count resets with the conversation: the
     // window is a property of the chat being read, not of the screen that reads it.
-    var shownTurns by remember(state.conversationId) { mutableIntStateOf(PAGE_TURNS) }
+    // Saved for the same reason as the scroll position and the follow below: a visit to the
+    // settings page disposes this composition, and a plain `remember` would collapse the transcript
+    // back to the newest page — the reader's 加载更早 taps undone, which reads as the page having
+    // reloaded. The key still resets it when the conversation really changes.
+    var shownTurns by rememberSaveable(state.conversationId) { mutableIntStateOf(PAGE_TURNS) }
     // What every derivation below is keyed on: which conversation, how many rows it has, and which
     // row is last.
     //
@@ -552,7 +555,13 @@ fun ChatScreen(
     // Auto-scrolling is the scroll position's decision, not the transcript's: while the
     // list sits at the end a growing reply keeps it there, and the moment the user drags
     // up to read something the view stops being yanked back down.
-    var following by remember { mutableStateOf(true) }
+    //
+    // Saved, like the scroll position it describes. Leaving the screen for the settings page
+    // disposes this composition and coming back builds it again: a plain `remember` would hand the
+    // reader a fresh `true`, so a chat they had scrolled up in would start following again the
+    // moment the next token landed. The position is restored by the list's own saver; this is the
+    // other half of that state, and the two have to agree or the transcript drifts.
+    var following by rememberSaveable { mutableStateOf(true) }
     // Set while the list is being scrolled by us. Without it the follow scroll itself trips
     // the "user scrolled away" branch below, following goes false, and the run stops
     // following its own output — which is exactly what it used to do.
@@ -587,7 +596,18 @@ fun ChatScreen(
     // The list keeps one scroll state for the whole screen, so a switch would otherwise
     // land at the previous chat's offset. Not gated by autoFollow: that setting decides
     // what *new* messages do, while this is simply where a conversation opens.
-    LaunchedEffect(state.conversationId) {
+    //
+    // Once per conversation, not once per visit. A `LaunchedEffect` starts again every time its
+    // composable enters the composition, and leaving for the settings page and coming back is
+    // exactly that — so this pin used to re-run on every return: the scroll position the list had
+    // just restored was thrown away and the transcript snapped to its end, with the follow
+    // re-armed, which is what read as "the page reloaded". The flag is `rememberSaveable`, so it
+    // survives that trip with the position it belongs to, and it resets when the conversation
+    // really changes (the key) or when the process starts fresh.
+    var pinned by rememberSaveable(state.conversationId) { mutableStateOf(false) }
+    LaunchedEffect(state.conversationId, pinned) {
+        if (pinned) return@LaunchedEffect
+        pinned = true
         following = true
         if (itemCount <= 0) return@LaunchedEffect
         programmatic = true
@@ -4632,12 +4652,12 @@ private fun Composer(
                             // their 48dp touch boxes, so the box already contributes 8dp of air on
                             // each side of the disc. Twelve here put the 「+」 16dp from the
                             // capsule's edge and read as a gap the user asked to close.
-                            .padding(start = 4.dp, end = 12.dp, bottom = 8.dp)
+                            .padding(start = 0.dp, end = 12.dp, bottom = 8.dp)
                             .height(48.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        // 2dp, not 4: the gap the eye sees is this plus the two touch boxes' own
-                        // 8dp either side, so every dp here is worth three on screen.
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        // Zero: the two buttons' own boxes supply the only gap between their glyphs,
+                        // and every dp spent here is a dp the user sees between the icons.
+                        horizontalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
                     // The anchor's own left edge and the card's width, both measured: the card opens
                     // to the right of this button, and on a window narrower than the button plus
@@ -4647,18 +4667,21 @@ private fun Composer(
                     Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
                         IconButton(
                             onClick = { menuOpen = true },
-                            // The 48dp minimum sits outside the 32dp disc, exactly as the assistant
-                            // sheet's star does: the disc is what the eye reads, the touch target is
-                            // what the thumb needs, and shrinking the visual must not shrink the
-                            // latter. `Modifier.size(40.dp)` alone (what this used to be) does the
-                            // opposite — it clamps the minimum to 40.
-                            modifier = Modifier.minimumInteractiveComponentSize().size(32.dp),
+                            // 44dp, and the glyph fills more of it than before: the number the user
+                            // reads is the distance between the two glyphs and from them to the
+                            // capsule's edge, and that distance is the box minus the glyph plus the
+                            // row's own padding. A 48dp box with an 18dp glyph in it measured 30dp
+                            // between the icons — wider than the 40dp button it replaced — which is
+                            // why the first pass "made no difference" on screen. 44dp is the floor
+                            // the touch target was allowed to come down to; the glyphs are back at
+                            // their original sizes so the boxes read as tight, not as empty.
+                            modifier = Modifier.size(44.dp),
                         ) {
                             Icon(
                                 imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
                                 contentDescription = "添加图片或文件",
                                 tint = scheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(22.dp),
                             )
                         }
                         // The same card as the model sheet: one popup style for the whole
@@ -4667,10 +4690,10 @@ private fun Composer(
                             visible = menuOpen,
                             onDismiss = { menuOpen = false },
                             // Opens upward from the button it belongs to. BottomStart puts the
-                            // popup's bottom edge on the anchor's bottom edge, and the anchor is
-                            // the button's 48dp *touch* box — so the offset has to clear that box
-                            // (which now leaves exactly the 8dp of air above the 32dp disc that
-                            // the button draws; -8dp alone left the card sitting on the button).
+                            // popup's bottom edge on the anchor's bottom edge, and the anchor is the
+                            // button's own 44dp box — so the offset clears that box plus the 8dp of
+                            // air the card is meant to leave above it (-8dp alone left the card
+                            // sitting on the button).
                             alignment = Alignment.BottomStart,
                             offset = with(density) {
                                 IntOffset(
@@ -4680,7 +4703,7 @@ private fun Composer(
                                         windowPx = screenWidthPx,
                                         edgePx = popupEdgePx,
                                     ).roundToInt(),
-                                    -48.dp.roundToPx(),
+                                    -52.dp.roundToPx(),
                                 )
                             },
                             // Same reason as the model sheet: this card hangs off a button of
@@ -4752,10 +4775,9 @@ private fun Composer(
                     ) {
                         IconButton(
                             onClick = { approvalOpen = true },
-                            // Same pair as the 「+」 beside it: a 32dp disc, a 48dp touch target.
-                            // The two are one visual group on the row's left, so they shrink
-                            // together or the row reads as lopsided.
-                            modifier = Modifier.minimumInteractiveComponentSize().size(32.dp),
+                            // Same 44dp box and the same glyph size as the 「+」 beside it: the two are
+                            // one visual group on the row's left, so they are measured together.
+                            modifier = Modifier.size(44.dp),
                         ) {
                             Icon(
                                 imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
@@ -4765,7 +4787,7 @@ private fun Composer(
                                     ApprovalMode.AUTO -> scheme.primary
                                     else -> scheme.onSurfaceVariant
                                 },
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(20.dp),
                             )
                         }
                         MenuCard(
@@ -4780,7 +4802,7 @@ private fun Composer(
                                         windowPx = screenWidthPx,
                                         edgePx = popupEdgePx,
                                     ).roundToInt(),
-                                    -48.dp.roundToPx(),
+                                    -52.dp.roundToPx(),
                                 )
                             },
                             focusable = false,

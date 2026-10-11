@@ -233,11 +233,15 @@ fun SuixingApp() {
 
     // Top-level destinations replace each other: the drawer is a switch, not a stack.
     val open: (String) -> Unit = { target ->
-        // 只有这一条路径压到 120ms：抽屉里点一行时，面板左滑与新页右滑 8% 是两条横向运动，
-        // 库默认那 ~256ms 会让它们叠着演（用户抱怨过的「两层各动一半」）。手势拖动、汉堡键、
-        // 遮罩点击都走库自己的 spec——那些场景没有新页入场跟它抢。抽屉本来就关着时这一句
-        // 是空操作（聊天页顶栏那个「打开设置」走的就是这条路）。
-        scope.launch { drawerState.animateTo(DrawerValue.Closed, tween(120)) }
+        // 离开抽屉这一趟**不播关闭动画**：用户两次抱怨的都是「能看见抽屉动」——先是「两层各动
+        // 一半」，后来是「我已经完全看到他被关掉的残影」。所以这里直接 snapTo(Closed)：同帧、
+        // 零动画，新页干净地入场。UNDISPATCHED 让状态写在导航之前当场落地，否则它会被排到下一个
+        // 主线程消息、那一帧就晚了（与返回时 snapTo(Open) 同一套做法，两条路观感对称，也就不像
+        // 「硬做」）。抽屉本来就关着时这一句是空操作（聊天页顶栏那个「打开设置」走的就是这条路）。
+        // 用户**主动**开合（汉堡键 LocalOpenSidebar、手势拖动、遮罩点击）仍走库的动画。
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            drawerState.snapTo(DrawerValue.Closed)
+        }
         navController.navigate(target) {
             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
             launchSingleTop = true
