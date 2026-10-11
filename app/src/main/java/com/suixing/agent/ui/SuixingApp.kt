@@ -6,8 +6,6 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -17,17 +15,13 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -50,27 +44,31 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -210,7 +208,9 @@ fun SuixingApp() {
         chat.state.map { it.assistantId }.distinctUntilChanged()
     }.collectAsState(initial = "")
 
-    var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    // 抽屉本体交给 M3 的 ModalNavigationDrawer：手势（边缘拖动跟手）、遮罩、面板位移全归库。
+    // 自绘那版只能整段出现/消失——边缘拖不动，用户点名的就是这条。
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
     // 抽屉里那张半屏助手表：和聊天页那张是同一个 AssistantSheet，只是宿主换成了外壳。
     // remember 而不是 rememberSaveable（与聊天页那张表一致）：进程重启后它不该自己弹回来。
     var shellAssistants by remember { mutableStateOf(false) }
@@ -230,7 +230,11 @@ fun SuixingApp() {
 
     // Top-level destinations replace each other: the drawer is a switch, not a stack.
     val open: (String) -> Unit = { target ->
-        drawerOpen = false
+        // 只有这一条路径压到 120ms：抽屉里点一行时，面板左滑与新页右滑 8% 是两条横向运动，
+        // 库默认那 ~256ms 会让它们叠着演（用户抱怨过的「两层各动一半」）。手势拖动、汉堡键、
+        // 遮罩点击都走库自己的 spec——那些场景没有新页入场跟它抢。抽屉本来就关着时这一句
+        // 是空操作（聊天页顶栏那个「打开设置」走的就是这条路）。
+        scope.launch { drawerState.animateTo(DrawerValue.Closed, tween(120)) }
         navController.navigate(target) {
             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
             launchSingleTop = true
@@ -243,19 +247,15 @@ fun SuixingApp() {
     // 从抽屉里点走一行时，记下出发的是哪一页：用户按返回回到那一页，抽屉应该还是开着的。
     // 这件事用户改口过三次（「每次回来侧边栏都会被关掉」→「也不要重放抽屉的动画」→
     // 「退出页面的动画加回来」→ 最后一句「我跟你说了在侧边栏打开界面返回时，不要把侧边栏
-    // 关闭」），最终口径就是最后那一句：**状态要恢复，动画不要**。所以恢复时置 drawerInstant。
-    // 只由抽屉自己的入口置位——聊天页那个「打开设置」不是从抽屉走的，不该把抽屉带回来。
+    // 关闭」），最终口径就是最后那一句：**状态要恢复，动画不要**——所以恢复走 snapTo，
+    // 那一段滑入一次都不演。只由抽屉自己的入口置位——聊天页那个「打开设置」不是从抽屉走的，
+    // 不该把抽屉带回来。
     // remember 而不是 rememberSaveable：存下来的 "chat" 会在冷启动那一帧（起始页正是 chat）
     // 把抽屉弹开；rotation 不走这条路（manifest 里 configChanges 已含 orientation）。
     var drawerReturnTo by remember { mutableStateOf<String?>(null) }
-    // 恢复只恢复状态，不重放动画：用户明确反对过「回来的时候那个侧边栏的动画再来一遍」，
-    // 他要的是「已经在那儿」。这一位只由下面的恢复路径置起，由「用户自己拉开抽屉」那条唯一
-    // 路径清掉——清的那一刻抽屉是关着的，换 spec 不会打断任何正在跑的动画。于是恢复那一次
-    // 是瞬时出现，之后每次手动打开照常演 240ms 左滑。
-    var drawerInstant by remember { mutableStateOf(false) }
     // 用户自己收起抽屉（遮罩、返回键）：记下的出发页一起清掉，回来时不该再弹出来。
     val closeDrawer: () -> Unit = {
-        drawerOpen = false
+        scope.launch { drawerState.close() }
         drawerReturnTo = null
     }
     // 抽屉里的一行：比 open 多记一件事。目标是当前页时（点会话、点新对话）不记——那不是
@@ -264,16 +264,25 @@ fun SuixingApp() {
         if (target != route) drawerReturnTo = route
         open(target)
     }
-    // 回到出发的那一页就把抽屉放回去：状态要，动画不要（见 drawerInstant）。这个 effect 只挂
-    // 在 route 上、不挂 drawerReturnTo：点走的那一帧，抽屉的关闭和导航都还没生效，两个键都挂
-    // 着会在那一帧就把抽屉判成「该开着」又弹回来；只认路由变化，就只在真的回到那一页时触发。
-    LaunchedEffect(route) {
-        val from = drawerReturnTo
-        if (from != null && route == from) {
-            drawerReturnTo = null
-            drawerInstant = true
-            drawerOpen = true
+    // 返回上一页。唯一特殊的一趟：这一趟的落点是「抽屉的来源页」——抽屉必须**在目标页出现的
+    // 那一帧就已经在那儿**，所以先把 drawerState 摆成 Open 再 pop。放在 pop 之后再补一帧，
+    // 用户看到的就是「先闪一下主页面才出现侧边栏」（他上一轮的原话，也是换库的理由之一）。
+    // snapTo 不播动画，正是他要的「已经在那儿」。
+    // UNDISPATCHED：snapTo 是挂起函数，普通 launch 会把它排到下一个主线程消息，那一帧就已经
+    // 晚了；UNDISPATCHED 让它在 popBackStack() 之前当场落地（状态写在第一个挂起点之前）。
+    val goBack: () -> Unit = {
+        if (navController.previousBackStackEntry?.destination?.route == drawerReturnTo) {
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                drawerState.snapTo(DrawerValue.Open)
+            }
         }
+        navController.popBackStack()
+    }
+    // 回到出发页之后把记的出发页清掉：抽屉本身已经在 goBack 里摆好了，这里不再补动画。
+    // 只挂在 route 上、不挂 drawerReturnTo：点走的那一帧两个键都还挂着，会在那一帧就把
+    // 抽屉判成「该开着」又弹回来。
+    LaunchedEffect(route) {
+        if (route == drawerReturnTo) drawerReturnTo = null
     }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
@@ -301,23 +310,25 @@ fun SuixingApp() {
         imeDir = 0
     }
     CompositionLocalProvider(
-        // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：把「恢复不重放
-        // 动画」那一位还回去，下一次开合照常演左滑。
-        LocalOpenSidebar provides {
-            drawerInstant = false
-            drawerOpen = true
-        },
+        // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：演库自己那
+        // 一段滑入——用户反对的从来是「返回时把它重放一遍」，不是手动打开时的动画。
+        LocalOpenSidebar provides { scope.launch { drawerState.open() } },
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
         LocalHeldImePx provides heldImePx,
     ) {
-        // The drawer is the shell's own panel rather than a ModalNavigationDrawer, so
-        // nothing else consumes BACK: without this, BACK with the drawer open finished
-        // the activity and dropped the user on the home screen. 助手 opens a half-screen
-        // sheet of its own again and a sheet swallows BACK first, so the drawer is the
-        // only case left here — the approval card is a dialog and swallows BACK too.
-        BackHandler(enabled = drawerOpen) { closeDrawer() }
+        // 抽屉开着时 BACK 先关抽屉：ModalNavigationDrawer 只接管预测性返回的手势，普通 BACK
+        // 仍会交给 Activity，不收这一句就会退出应用。助手那张半屏表自己吞 BACK，审批卡是
+        // dialog 也吞，所以这里只剩抽屉这一种。
+        BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
+        // 这一趟 BACK 的落点正是抽屉的来源页：交给 goBack —— 它会把抽屉先摆好再 pop，否则
+        // 用户看到的是「先闪一下主页面才出现侧边栏」。其余情况一律不拦，让 NavHost 自己处理
+        // （保留它的预测性返回动画）。
+        BackHandler(
+            enabled = !drawerState.isOpen && drawerReturnTo != null &&
+                navController.previousBackStackEntry?.destination?.route == drawerReturnTo,
+        ) { goBack() }
         // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
         // the strip behind the keyboard was left unpainted and the window's own white showed
         // through the keyboard's rounded corners as a pale seam. This box is not inset, so
@@ -367,183 +378,189 @@ fun SuixingApp() {
                 },
             ),
         ) {
-            Box(Modifier.fillMaxSize())
-            Scaffold(
-                modifier = Modifier.padding(bottom = with(rootDensity) { heldImePx.toDp() }),
-                // surface, not background: the scaffold covers the strip behind the keyboard, and
-                // its white container was exactly the pale seam the keyboard's rounded corners
-                // revealed against the chat canvas.
-                containerColor = MaterialTheme.colorScheme.surface,
-                // Screens own their top inset (their headers paint behind the status
-                // bar) and the composer owns the bottom one, so the scaffold reserves
-                // nothing for itself.
-                contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            ) { padding ->
-                NavHost(
-                    navController = navController,
-                    startDestination = "chat",
-                    modifier = Modifier.padding(padding),
-                    // Every destination enters and leaves with the same three channels — a
-                    // fade, a short horizontal push and a depth change — so a push and a pop
-                    // read as one gesture played backwards. The push is deliberately short
-                    // (1/12 screen width): the drawer already owns the long leftward slide,
-                    // and a second full-width sweep under it would read as two panels
-                    // fighting, while a small one only says "this page moved".
-                    // 位移只有屏宽/12（NAV_SHIFT_DIVISOR）：新页从右侧挪一小步、旧页向左让
-                    // 一小步，返回时这两步原样倒放。整幅横移那一版（新页整幅滑入、旧页 1/3
-                    // 幅视差）在用户看过 ChatGPT 之后仍嫌「不够连贯」——小位移 + 淡入淡出
-                    // 才是那一段观感的来源。抽屉仍是它自己的 300dp 左滑，与页面这一小步
-                    // 方向不同，不会混。
-                    // 四套转场全在这一个地方配：进/出/返回进/返回出都是同一组 NAV_* 常量、
-                    // 同一个位移除数，方向互为镜像（见文件顶部那段）。返回的动画上一版被砍
-                    // 成瞬时，用户否了：「退出页面的动画加回来吧……退出也有动画，连贯虽然不
-                    // 易察觉」。唯一的例外在下面那两条 pop 转场里（回到抽屉来源页的那一趟），
-                    // 除此之外没有任何按目的地分叉的条件。
-                    enterTransition = {
-                        fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
-                            slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
-                                it / NAV_SHIFT_DIVISOR
+            ModalNavigationDrawer(
+                drawerState = drawerState,
+                // 边缘拖动跟手（拖到一半松手会回弹）、遮罩与面板位移全归库——用户点名的「不要自绘」。
+                gesturesEnabled = true,
+                // 遮罩浓度照搬自绘那版：M3 默认 scrim 是 32%，这块面板从第一天起是 45% 的黑。
+                scrimColor = Color.Black.copy(alpha = 0.45f),
+                drawerContent = {
+                    Drawer(
+                        open = drawerState.isOpen,
+                        route = route,
+                        conversations = conversations,
+                        activeId = activeConversationId,
+                        runningId = runningIds,
+                        onNew = {
+                            chat.newConversation()
+                            openFromDrawer("chat")
+                        },
+                        onOpenConversation = { conversation ->
+                            chat.openConversation(conversation)
+                            openFromDrawer("chat")
+                        },
+                        onDeleteConversation = { chat.deleteConversation(it) },
+                        onNavigate = openFromDrawer,
+                        onAssistants = {
+                            // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
+                            closeDrawer()
+                            shellAssistants = true
+                        },
+                        consoleOn = settings.floatingConsole,
+                        onToggleConsole = {
+                            if (settings.floatingConsole) {
+                                // Written first, then stopped: the switch is what the run checks,
+                                // and a console left running after the switch went off would
+                                // linger until the run ended on its own.
+                                scope.launch { Core.settings.update { it.copy(floatingConsole = false) } }
+                                FloatConsoleService.stop(context)
+                            } else if (FloatConsoleService.canDrawOverlays(context)) {
+                                scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
+                                FloatConsoleService.start(context)
+                            } else {
+                                // Not persisted on the way out: without the grant the switch
+                                // would read ON while no ball could ever appear.
+                                overlayPermissionLauncher.launch(
+                                    FloatConsoleService.overlayPermissionIntent(context),
+                                )
                             }
-                    },
-                    exitTransition = {
-                        fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                            slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
-                                -it / NAV_SHIFT_DIVISOR
-                            }
-                    },
-                    // 唯一的例外：这一趟 pop 的目的地正是「抽屉的来源页」——也就是我们马上要把抽屉
-                    // 放回去的那一次。抽屉此刻已经在那儿（恢复不重放滑入），页面若再滑一遍，就会被
-                    // 45% 遮罩读成「两层各动一半」（用户原话：「返回时候侧边栏遮挡的主页面为什么也
-                    // 有动画」）。但也**不能全瞬时**：他随后把口径说清了——「返回的时候也有动画，
-                    // 侧边栏不关闭，还是点进去的状态，返回时的动画可以轻一点的淡淡的，这样又不会
-                    // 觉得没有过渡」。所以这一趟只保留淡入淡出、去掉位移、时长压到 140ms：过渡在，
-                    // 但不抢眼。其余每一次返回照常走上面那套统一规格。两边共用同一个判断，只关一边
-                    // 会露出半截动画。
-                    popEnterTransition = {
-                        if (targetState.destination.route == drawerReturnTo) {
-                            fadeIn(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
-                        } else {
+                        },
+                    )
+                },
+            ) {
+                Scaffold(
+                    modifier = Modifier.padding(bottom = with(rootDensity) { heldImePx.toDp() }),
+                    // surface, not background: the scaffold covers the strip behind the keyboard, and
+                    // its white container was exactly the pale seam the keyboard's rounded corners
+                    // revealed against the chat canvas.
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    // Screens own their top inset (their headers paint behind the status
+                    // bar) and the composer owns the bottom one, so the scaffold reserves
+                    // nothing for itself.
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                ) { padding ->
+                    NavHost(
+                        navController = navController,
+                        startDestination = "chat",
+                        modifier = Modifier.padding(padding),
+                        // Every destination enters and leaves with the same three channels — a
+                        // fade, a short horizontal push and a depth change — so a push and a pop
+                        // read as one gesture played backwards. The push is deliberately short
+                        // (1/12 screen width): the drawer already owns the long leftward slide,
+                        // and a second full-width sweep under it would read as two panels
+                        // fighting, while a small one only says "this page moved".
+                        // 位移只有屏宽/12（NAV_SHIFT_DIVISOR）：新页从右侧挪一小步、旧页向左让
+                        // 一小步，返回时这两步原样倒放。整幅横移那一版（新页整幅滑入、旧页 1/3
+                        // 幅视差）在用户看过 ChatGPT 之后仍嫌「不够连贯」——小位移 + 淡入淡出
+                        // 才是那一段观感的来源。抽屉仍是它自己的 300dp 左滑，与页面这一小步
+                        // 方向不同，不会混。
+                        // 四套转场全在这一个地方配：进/出/返回进/返回出都是同一组 NAV_* 常量、
+                        // 同一个位移除数，方向互为镜像（见文件顶部那段）。返回的动画上一版被砍
+                        // 成瞬时，用户否了：「退出页面的动画加回来吧……退出也有动画，连贯虽然不
+                        // 易察觉」。唯一的例外在下面那两条 pop 转场里（回到抽屉来源页的那一趟），
+                        // 除此之外没有任何按目的地分叉的条件。
+                        enterTransition = {
                             fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
                                 slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
-                                    -it / NAV_SHIFT_DIVISOR
-                                }
-                        }
-                    },
-                    popExitTransition = {
-                        if (targetState.destination.route == drawerReturnTo) {
-                            fadeOut(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
-                        } else {
-                            fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
-                                slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
                                     it / NAV_SHIFT_DIVISOR
                                 }
-                        }
-                    },
-                ) {
-                    composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
-                    composable("files") { FilesScreen(onBack = { navController.popBackStack() }) }
-                    composable("tasks") { TasksScreen(onBack = { navController.popBackStack() }) }
-                    // 定时任务是「到点自己跑」的那一份，与 agent 的 todo 看板（"tasks"）是两件
-                    // 事：抽屉那行说的「任务」一直指的是后者，用户以为是摆设，才有了这一页。
-                    composable("schedules") { SchedulesScreen(onBack = { navController.popBackStack() }) }
-                    composable("settings") {
-                        SettingsScreen(
-                            onOpen = push,
-                            onBack = { navController.popBackStack() },
-                        )
-                    }
-                    // 设置里的六个子页各是一条真路由，而不是设置页内部的 when 分支：同一
-                    // 个目的地里换内容，NavHost 不参与，于是进出完全没有转场——用户说的
-                    // 「就是复用的，根本没有切换动画」正是这个。走 push 而不是 open：抽屉
-                    // 是同级切换，设置子页是往下一层，返回要回到那份列表。
-                    listOf(
-                        "settings/model",
-                        "settings/steer",
-                        "settings/appearance",
-                        "settings/network",
-                        "settings/data",
-                        "settings/usage",
-                    ).forEach { route ->
-                        composable(route) {
-                            SettingsPageRoute(
-                                route = route,
+                        },
+                        exitTransition = {
+                            fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                                slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
+                                    -it / NAV_SHIFT_DIVISOR
+                                }
+                        },
+                        // 唯一的例外：这一趟 pop 的目的地正是「抽屉的来源页」——也就是我们马上要把抽屉
+                        // 放回去的那一次。抽屉此刻已经在那儿（恢复不重放滑入），页面若再滑一遍，就会被
+                        // 45% 遮罩读成「两层各动一半」（用户原话：「返回时候侧边栏遮挡的主页面为什么也
+                        // 有动画」）。但也**不能全瞬时**：他随后把口径说清了——「返回的时候也有动画，
+                        // 侧边栏不关闭，还是点进去的状态，返回时的动画可以轻一点的淡淡的，这样又不会
+                        // 觉得没有过渡」。所以这一趟只保留淡入淡出、去掉位移、时长压到 140ms：过渡在，
+                        // 但不抢眼。其余每一次返回照常走上面那套统一规格。两边共用同一个判断，只关一边
+                        // 会露出半截动画。
+                        popEnterTransition = {
+                            if (targetState.destination.route == drawerReturnTo) {
+                                fadeIn(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
+                            } else {
+                                fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
+                                    slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
+                                        -it / NAV_SHIFT_DIVISOR
+                                    }
+                            }
+                        },
+                        popExitTransition = {
+                            if (targetState.destination.route == drawerReturnTo) {
+                                fadeOut(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
+                            } else {
+                                fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
+                                    slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {
+                                        it / NAV_SHIFT_DIVISOR
+                                    }
+                            }
+                        },
+                    ) {
+                        composable("chat") { ChatScreen(viewModel = chat, onOpenSettings = { open("settings") }) }
+                        composable("files") { FilesScreen(onBack = goBack) }
+                        composable("tasks") { TasksScreen(onBack = goBack) }
+                        // 定时任务是「到点自己跑」的那一份，与 agent 的 todo 看板（"tasks"）是两件
+                        // 事：抽屉那行说的「任务」一直指的是后者，用户以为是摆设，才有了这一页。
+                        composable("schedules") { SchedulesScreen(onBack = goBack) }
+                        composable("settings") {
+                            SettingsScreen(
                                 onOpen = push,
-                                onBack = { navController.popBackStack() },
+                                onBack = goBack,
+                            )
+                        }
+                        // 设置里的六个子页各是一条真路由，而不是设置页内部的 when 分支：同一
+                        // 个目的地里换内容，NavHost 不参与，于是进出完全没有转场——用户说的
+                        // 「就是复用的，根本没有切换动画」正是这个。走 push 而不是 open：抽屉
+                        // 是同级切换，设置子页是往下一层，返回要回到那份列表。
+                        listOf(
+                            "settings/model",
+                            "settings/steer",
+                            "settings/appearance",
+                            "settings/network",
+                            "settings/data",
+                            "settings/usage",
+                        ).forEach { route ->
+                            composable(route) {
+                                SettingsPageRoute(
+                                    route = route,
+                                    onOpen = push,
+                                    onBack = goBack,
+                                )
+                            }
+                        }
+                        composable("capability") { CapabilityScreen(onBack = goBack) }
+                        composable("tools") { ToolsScreen(onBack = goBack) }
+                        composable("about") { AboutScreen(onBack = goBack) }
+                        // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
+                        composable("extension") {
+                            ExtensionScreen(onBack = goBack)
+                        }
+                        // 用户画像：一份纯文本自述（filesDir/profile.md），随每次请求注入提示词。
+                        composable("profile") {
+                            ProfileScreen(onBack = goBack)
+                        }
+                        // 助手设置：一整页，不是半屏的表。抽屉那一行和设置页那一行都推这一页，
+                        // 于是「编辑助手」只有一条路、一个实现；半屏的表只剩聊天页那个随手
+                        // 切换助手的窗口。
+                        composable("assistants") {
+                            AssistantScreen(
+                                assistants = settings.assistants,
+                                activeId = assistantId.ifBlank { settings.activeAssistantId },
+                                settings = settings,
+                                onUse = { chat.useAssistant(it) },
+                                onSetDefault = { chat.setDefaultAssistant(it) },
+                                onSave = { chat.saveAssistant(it) },
+                                onDelete = { chat.deleteAssistant(it) },
+                                onBack = goBack,
                             )
                         }
                     }
-                    composable("capability") { CapabilityScreen(onBack = { navController.popBackStack() }) }
-                    composable("tools") { ToolsScreen(onBack = { navController.popBackStack() }) }
-                    composable("about") { AboutScreen(onBack = { navController.popBackStack() }) }
-                    // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
-                    composable("extension") {
-                        ExtensionScreen(onBack = { navController.popBackStack() })
-                    }
-                    // 用户画像：一份纯文本自述（filesDir/profile.md），随每次请求注入提示词。
-                    composable("profile") {
-                        ProfileScreen(onBack = { navController.popBackStack() })
-                    }
-                    // 助手设置：一整页，不是半屏的表。抽屉那一行和设置页那一行都推这一页，
-                    // 于是「编辑助手」只有一条路、一个实现；半屏的表只剩聊天页那个随手
-                    // 切换助手的窗口。
-                    composable("assistants") {
-                        AssistantScreen(
-                            assistants = settings.assistants,
-                            activeId = assistantId.ifBlank { settings.activeAssistantId },
-                            settings = settings,
-                            onUse = { chat.useAssistant(it) },
-                            onSetDefault = { chat.setDefaultAssistant(it) },
-                            onSave = { chat.saveAssistant(it) },
-                            onDelete = { chat.deleteAssistant(it) },
-                            onBack = { navController.popBackStack() },
-                        )
-                    }
                 }
             }
-            Drawer(
-                open = drawerOpen,
-                // 恢复那一次瞬时出现（见 drawerInstant），不重放滑入。
-                instant = drawerInstant,
-                route = route,
-                conversations = conversations,
-                activeId = activeConversationId,
-                runningId = runningIds,
-                onClose = closeDrawer,
-                onNew = {
-                    chat.newConversation()
-                    openFromDrawer("chat")
-                },
-                onOpenConversation = { conversation ->
-                    chat.openConversation(conversation)
-                    openFromDrawer("chat")
-                },
-                onDeleteConversation = { chat.deleteConversation(it) },
-                onNavigate = openFromDrawer,
-                onAssistants = {
-                    // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
-                    drawerOpen = false
-                    shellAssistants = true
-                },
-                consoleOn = settings.floatingConsole,
-                onToggleConsole = {
-                    if (settings.floatingConsole) {
-                        // Written first, then stopped: the switch is what the run checks,
-                        // and a console left running after the switch went off would
-                        // linger until the run ended on its own.
-                        scope.launch { Core.settings.update { it.copy(floatingConsole = false) } }
-                        FloatConsoleService.stop(context)
-                    } else if (FloatConsoleService.canDrawOverlays(context)) {
-                        scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
-                        FloatConsoleService.start(context)
-                    } else {
-                        // Not persisted on the way out: without the grant the switch
-                        // would read ON while no ball could ever appear.
-                        overlayPermissionLauncher.launch(
-                            FloatConsoleService.overlayPermissionIntent(context),
-                        )
-                    }
-                },
-            )
         }
     }
 
@@ -580,17 +597,18 @@ fun SuixingApp() {
 
 /**
  * The left drawer: conversations on top, everything else at the bottom.
+ *
+ * 面板本体是 M3 的 [ModalDrawerSheet]（用户点名「不要自绘」）：拖动跟手、遮罩与位移都归库。
+ * 圆角、底色、宽度、elevation 全部显式覆盖成自绘那版的值——换库不许换设计。
  */
 @Composable
-private fun BoxScope.Drawer(
+private fun Drawer(
+    /** 抽屉是否开着（= drawerState.isOpen）：只用来在拉开时收起键盘。 */
     open: Boolean,
-    /** 恢复（回到出发页）那一次：立即出现，不重放滑入动画——用户明确要的。 */
-    instant: Boolean,
     route: String,
     conversations: List<Conversation>,
     activeId: String,
     runningId: Set<String>,
-    onClose: () -> Unit,
     onNew: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
     onDeleteConversation: (Conversation) -> Unit,
@@ -614,152 +632,130 @@ private fun BoxScope.Drawer(
         }
     }
 
-    // 遮罩与面板同一条出场时长（120ms），而且刻意短于路由转场：抽屉里点一行时，导航是
-    // 当场发出的，面板若还按 200/160ms 慢慢退，就会和新页面的入场（280ms）同帧叠着演，
-    // 屏幕上同时有两条滑动（用户说「动画有点奇怪」）。缩到 120ms 让面板先退干净、页面再
-    // 到位；入场保持原样（240/180），那是用户已经接受的一半。
-    // instant（从别的页面返回、抽屉本来就该在那儿）连这一半都不演：遮罩与面板走同一条路，
-    // 否则会出现「面板已经在了、遮罩还在淡入」的错位。
-    AnimatedVisibility(
-        visible = open,
-        enter = if (instant) EnterTransition.None else fadeIn(tween(180)),
-        exit = fadeOut(tween(120)),
+    // 面板：库负责拖动/回弹/遮罩/位移，视觉参数逐条覆盖回自绘那版——
+    // 宽度 300dp（库的 sizeIn 区间是 240–360dp）、圆角只有右侧两角 30dp（库默认四角 16dp）、
+    // 底色 surfaceContainerHigh（库默认 surfaceContainerLow）、elevation 0（库默认 16dp 的
+    // tonal elevation，那会把底色再调亮一档，用户看了几个版本的颜色就变了）。
+    // windowInsets 归零：状态栏/导航栏/键盘的内边距一直由下面这层 Column 自己管，库那层
+    // 再补一次就是双重内边距。
+    ModalDrawerSheet(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(300.dp),
+        drawerShape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp),
+        drawerContainerColor = scheme.surfaceContainerHigh,
+        drawerTonalElevation = 0.dp,
+        windowInsets = WindowInsets(0, 0, 0, 0),
     ) {
-        Box(
+        Column(
             Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.45f))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onClose,
-                ),
-        )
-    }
-
-    AnimatedVisibility(
-        visible = open,
-        modifier = Modifier.align(Alignment.CenterStart),
-        enter = if (instant) EnterTransition.None else slideInHorizontally(tween(240)) { -it },
-        exit = slideOutHorizontally(tween(120)) { -it },
-    ) {
-        Surface(
-            modifier = Modifier
                 .fillMaxHeight()
-                .width(300.dp),
-            shape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp),
-            color = scheme.surfaceContainerHigh,
+                .statusBarsPadding()
+                .windowInsetsPadding(WindowInsets.navigationBars.exclude(WindowInsets.ime))
+                // The keyboard can be up when the drawer is opened mid-sentence: the
+                // panel keeps clear of it the same way the shell does.
+                .imePadding()
+                .padding(vertical = 18.dp),
         ) {
-            Column(
-                Modifier
-                    .fillMaxHeight()
-                    .statusBarsPadding()
-                    .windowInsetsPadding(WindowInsets.navigationBars.exclude(WindowInsets.ime))
-                    // The keyboard can be up when the drawer is opened mid-sentence: the
-                    // panel keeps clear of it the same way the shell does.
-                    .imePadding()
-                    .padding(vertical = 18.dp),
+            Row(
+                modifier = Modifier.padding(start = 20.dp, end = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    modifier = Modifier.padding(start = 20.dp, end = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    SuixingMark(size = 30.dp)
-                    Spacer(Modifier.width(11.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("随行", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            text = "跟着你走的手机智能体",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = scheme.onSurfaceVariant,
-                        )
-                    }
-                    IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
-                        // The same glyph the chat header's compose button draws, at the same
-                        // 22dp: the drawer and the bar are two doors to one action, and they
-                        // read as two until the drawing is shared.
-                        Icon(
-                            painter = painterResource(R.drawable.ic_compose),
-                            contentDescription = "新对话",
-                            tint = scheme.primary,
-                            modifier = Modifier.size(22.dp),
-                        )
-                    }
+                SuixingMark(size = 30.dp)
+                Spacer(Modifier.width(11.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("随行", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "跟着你走的手机智能体",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                    )
                 }
-
-                Spacer(Modifier.height(14.dp))
-                HorizontalDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    color = scheme.outlineVariant,
-                )
-                Spacer(Modifier.height(6.dp))
-
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                ) {
-                    items(conversations, key = { it.id }) { conversation ->
-                        ConversationRow(
-                            conversation = conversation,
-                            selected = conversation.id == activeId,
-                            running = conversation.id in runningId,
-                            onClick = { onOpenConversation(conversation) },
-                            onDelete = { pendingDelete = conversation },
-                        )
-                    }
+                IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
+                    // The same glyph the chat header's compose button draws, at the same
+                    // 22dp: the drawer and the bar are two doors to one action, and they
+                    // read as two until the drawing is shared.
+                    Icon(
+                        painter = painterResource(R.drawable.ic_compose),
+                        contentDescription = "新对话",
+                        tint = scheme.primary,
+                        modifier = Modifier.size(22.dp),
+                    )
                 }
-
-                Spacer(Modifier.height(6.dp))
-                HorizontalDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    color = scheme.outlineVariant,
-                )
-                Spacer(Modifier.height(6.dp))
-                // 助手这一行开的是半屏表，不是整页：在抽屉里挑助手是「挑完接着聊」，
-                // 不该被推到一整页上去。整页仍是设置页「助手」那一行的目的地
-                // （route = "assistants"），两个宿主共用同一份 AssistantListContent。
-                DrawerAction(
-                    label = "助手",
-                    icon = painterResource(R.drawable.ic_bot),
-                    selected = route == "assistants",
-                    onClick = onAssistants,
-                )
-                DrawerAction(
-                    label = "定时任务",
-                    icon = painterResource(R.drawable.ic_clock),
-                    selected = route == "schedules",
-                    onClick = { onNavigate("schedules") },
-                )
-                DrawerAction(
-                    label = "文件",
-                    icon = painterResource(R.drawable.ic_folder_open),
-                    selected = route == "files",
-                    onClick = { onNavigate("files") },
-                )
-                // The console's switch moved out of the chat header into here: on
-                // without the overlay grant would read ON with no ball, so the grant
-                // page comes first and the switch flips when the grant lands.
-                DrawerAction(
-                    label = "悬浮窗控制台",
-                    icon = painterResource(R.drawable.ic_picture_in_picture_2),
-                    selected = false,
-                    // The whole row toggles, both ways: this row is the app's only
-                    // console switch (the settings page is text only), so a row that
-                    // could only turn it on left the user tapping a dead row while the
-                    // ball was up. The Switch keeps its own handler; a child consumes
-                    // the tap, so the two never fire together.
-                    onClick = onToggleConsole,
-                    trailing = {
-                        Switch(checked = consoleOn, onCheckedChange = { onToggleConsole() })
-                    },
-                )
-                DrawerAction(
-                    label = "设置",
-                    icon = painterResource(R.drawable.ic_settings),
-                    selected = route == "settings",
-                    onClick = { onNavigate("settings") },
-                )
             }
+
+            Spacer(Modifier.height(14.dp))
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = scheme.outlineVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+            ) {
+                items(conversations, key = { it.id }) { conversation ->
+                    ConversationRow(
+                        conversation = conversation,
+                        selected = conversation.id == activeId,
+                        running = conversation.id in runningId,
+                        onClick = { onOpenConversation(conversation) },
+                        onDelete = { pendingDelete = conversation },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = scheme.outlineVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            // 助手这一行开的是半屏表，不是整页：在抽屉里挑助手是「挑完接着聊」，
+            // 不该被推到一整页上去。整页仍是设置页「助手」那一行的目的地
+            // （route = "assistants"），两个宿主共用同一份 AssistantListContent。
+            DrawerAction(
+                label = "助手",
+                icon = painterResource(R.drawable.ic_bot),
+                selected = route == "assistants",
+                onClick = onAssistants,
+            )
+            DrawerAction(
+                label = "定时任务",
+                icon = painterResource(R.drawable.ic_clock),
+                selected = route == "schedules",
+                onClick = { onNavigate("schedules") },
+            )
+            DrawerAction(
+                label = "文件",
+                icon = painterResource(R.drawable.ic_folder_open),
+                selected = route == "files",
+                onClick = { onNavigate("files") },
+            )
+            // The console's switch moved out of the chat header into here: on
+            // without the overlay grant would read ON with no ball, so the grant
+            // page comes first and the switch flips when the grant lands.
+            DrawerAction(
+                label = "悬浮窗控制台",
+                icon = painterResource(R.drawable.ic_picture_in_picture_2),
+                selected = false,
+                // The whole row toggles, both ways: this row is the app's only
+                // console switch (the settings page is text only), so a row that
+                // could only turn it on left the user tapping a dead row while the
+                // ball was up. The Switch keeps its own handler; a child consumes
+                // the tap, so the two never fire together.
+                onClick = onToggleConsole,
+                trailing = {
+                    Switch(checked = consoleOn, onCheckedChange = { onToggleConsole() })
+                },
+            )
+            DrawerAction(
+                label = "设置",
+                icon = painterResource(R.drawable.ic_settings),
+                selected = route == "settings",
+                onClick = { onNavigate("settings") },
+            )
         }
     }
     pendingDelete?.let { target ->
