@@ -146,7 +146,7 @@ class ParallelRunTest {
         val holds = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
         private val cuts = ConcurrentHashMap<String, Boolean>()
         val client: LlmClient = mockk {
-            coEvery { complete(any(), any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 val model = firstArg<AppSettings>().model
                 // The hold exists before the run is announced, so a test that sees
                 // `started` can always find the matching hold.

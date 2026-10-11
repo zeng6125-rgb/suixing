@@ -85,85 +85,63 @@ class ShellTierTest {
     }
 
     @Test
-    fun `root is not a channel at all while 允许使用 Root is off`() {
-        // 安全语义：关掉之后无论设备是否 root、无论探测到什么，都不得解析到 ROOT。
-        // 关＝不探测、也不会用 root —— 这一条就是「不会用」的落点。
+    fun `a probed root is reachable with nothing else to switch on`() {
+        // root 像别的能力一样自动探测：探测到可用，档位选择器就是唯一的决定者。
+        // （曾经有过一个「允许使用 Root」开关，用户否掉了它：档次已经够了。）
         val rooted = device(accessibility = true, shell = true, root = true)
-        for (preferred in listOf("", "hypervisor", CapabilityTiers.ACCESSIBILITY, CapabilityTiers.SHELL, CapabilityTiers.ROOT, CapabilityTiers.NONE)) {
-            assertTrue(
-                "preferred=$preferred must not reach root",
-                rooted.shellTier(preferred, rootAllowed = false) != ShellTier.ROOT,
-            )
-        }
-    }
-
-    @Test
-    fun `with root off the channel falls to what is left`() {
-        // 关掉 root 不是「降级到标准档」：Shizuku 还在就照旧用 Shizuku，两个都没有才是标准档。
-        assertEquals(ShellTier.SHIZUKU, device(shell = true, root = true).shellTier(CapabilityTiers.ROOT, rootAllowed = false))
-        assertEquals(ShellTier.SHIZUKU, device(shell = true, root = true).shellTier("", rootAllowed = false))
-        assertEquals(ShellTier.LOCAL, device(root = true).shellTier(CapabilityTiers.ROOT, rootAllowed = false))
-        assertEquals(ShellTier.LOCAL, device(accessibility = true, root = true).shellTier("", rootAllowed = false))
-        // 标准档本来就到不了 root，开关关掉后它的答案不变。
-        assertEquals(ShellTier.LOCAL, device(shell = true, root = true).shellTier(CapabilityTiers.NONE, rootAllowed = false))
-    }
-
-    @Test
-    fun `the switch on keeps the behaviour that was already there`() {
-        // 默认（不传参）＝开关打开：老调用点与既有行为一字不变，默认值是 true 就是为了这个。
-        val rooted = device(shell = true, root = true)
+        assertEquals(ShellTier.ROOT, rooted.shellTier(""))
         assertEquals(ShellTier.ROOT, rooted.shellTier(CapabilityTiers.ROOT))
-        assertEquals(ShellTier.ROOT, rooted.shellTier(CapabilityTiers.ROOT, rootAllowed = true))
-        assertEquals(ShellTier.ROOT, rooted.shellTier("", rootAllowed = true))
+        // 探测不到就只有下面两档，没有别的闸门要过。
+        assertEquals(ShellTier.SHIZUKU, device(shell = true).shellTier(""))
     }
 
     @Test
-    fun `an explicit mode=root still obeys the switch`() {
-        // 显式档位是请求不是许可：开关关掉时，模型自己点名 root 也只能落到解析出来的通道。
-        assertEquals("shizuku", shellChannel("root", ShellTier.SHIZUKU, rootAllowed = false))
-        assertEquals("local", shellChannel("root", ShellTier.LOCAL, rootAllowed = false))
-        // 打开时保持原样：显式要求 root 就走 root。
-        assertEquals("root", shellChannel("root", ShellTier.ROOT, rootAllowed = true))
-        // 别的档位不受这个开关影响（开关只管 root）。
-        assertEquals("local", shellChannel("local", ShellTier.ROOT, rootAllowed = false))
-        assertEquals("shizuku", shellChannel("shizuku", ShellTier.ROOT, rootAllowed = false))
+    fun `an explicit mode=root is clamped to what the device resolved`() {
+        // 显式档位是请求不是许可：设备解析不到 root 时，模型自己点名 root 也只能落到解析结果。
+        assertEquals("shizuku", shellChannel("root", ShellTier.SHIZUKU))
+        assertEquals("local", shellChannel("root", ShellTier.LOCAL))
+        // 解析到 root 就走 root：这一条是「root 自动探测」的直接后果。
+        assertEquals("root", shellChannel("root", ShellTier.ROOT))
+        // 别的档位本来就在请求之下，钳制不动它们。
+        assertEquals("local", shellChannel("local", ShellTier.ROOT))
+        assertEquals("shizuku", shellChannel("shizuku", ShellTier.ROOT))
         // 没指定档位（auto 或任何未知值）本来就该走解析结果。
-        assertEquals("shizuku", shellChannel("auto", ShellTier.SHIZUKU, rootAllowed = true))
-        assertEquals("local", shellChannel("hypervisor", ShellTier.LOCAL, rootAllowed = true))
+        assertEquals("shizuku", shellChannel("auto", ShellTier.SHIZUKU))
+        assertEquals("local", shellChannel("hypervisor", ShellTier.LOCAL))
     }
 
     @Test
-    fun `naming root cannot get past the switch, through the whole decision`() {
-        // 串起整条链：同一份 state 上先解析档位、再选通道 —— 开关关着时，
+    fun `naming root cannot exceed the resolved tier, through the whole decision`() {
+        // 串起整条链：先解析档位、再选通道。root 没探测到（rootProbed=false）时，
         // 模型无论怎么点名 root，最终选出来的通道都不是 root。
-        val rooted = device(shell = true, root = true)
+        val notProbed = device(shell = true, root = true, rootProbed = false)
         for (preferred in listOf("", CapabilityTiers.ROOT, CapabilityTiers.ACCESSIBILITY)) {
-            val resolved = rooted.shellTier(preferred, rootAllowed = false)
+            val resolved = notProbed.shellTier(preferred)
             assertTrue(
                 "preferred=$preferred must not run as root",
-                shellChannel("root", resolved, rootAllowed = false) != "root",
+                shellChannel("root", resolved) != "root",
             )
         }
-        // 开关打开时同一条链给出 root，说明上面否掉的不是「永远拿不到 root」。
-        val on = rooted.shellTier(CapabilityTiers.ROOT, rootAllowed = true)
-        assertEquals("root", shellChannel("root", on, rootAllowed = true))
+        // 探测到之后同一条链给出 root，说明上面否掉的不是「永远拿不到 root」。
+        val probed = device(shell = true, root = true)
+        assertEquals("root", shellChannel("root", probed.shellTier(CapabilityTiers.ROOT)))
     }
 
     @Test
     fun `an explicit tier never goes above the tier the user fixed`() {
         // 固定标准档：点名 shizuku 也落到 local —— 用户说「只用应用自身权限」就是只用它。
         val rooted = device(shell = true, root = true)
-        assertEquals("local", shellChannel("shizuku", rooted.shellTier(CapabilityTiers.NONE), rootAllowed = true))
-        assertEquals("local", shellChannel("root", rooted.shellTier(CapabilityTiers.NONE), rootAllowed = true))
+        assertEquals("local", shellChannel("shizuku", rooted.shellTier(CapabilityTiers.NONE)))
+        assertEquals("local", shellChannel("root", rooted.shellTier(CapabilityTiers.NONE)))
     }
 
     @Test
     fun `an explicit tier inside the fixed range is still honoured`() {
         val rooted = device(accessibility = true, shell = true, root = true)
         // 固定无障碍档：它允许的范围到最高可用档，点名 shizuku 就在范围内。
-        assertEquals("shizuku", shellChannel("shizuku", rooted.shellTier(CapabilityTiers.ACCESSIBILITY), rootAllowed = true))
+        assertEquals("shizuku", shellChannel("shizuku", rooted.shellTier(CapabilityTiers.ACCESSIBILITY)))
         // 固定 Root：低档请求是允许的 —— 点名 shizuku 走 shizuku，既不被抬到 root 也不被否掉。
-        assertEquals("shizuku", shellChannel("shizuku", rooted.shellTier(CapabilityTiers.ROOT), rootAllowed = true))
-        assertEquals("local", shellChannel("local", rooted.shellTier(CapabilityTiers.ROOT), rootAllowed = true))
+        assertEquals("shizuku", shellChannel("shizuku", rooted.shellTier(CapabilityTiers.ROOT)))
+        assertEquals("local", shellChannel("local", rooted.shellTier(CapabilityTiers.ROOT)))
     }
 }

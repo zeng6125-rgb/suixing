@@ -159,6 +159,26 @@ data class AppSettings(
      * 取其轻。只在当前模型设了窗口（[modelContexts]）时才可能触发。
      */
     val autoCompress: Boolean = true,
+    /**
+     * 失败后自动重试一轮。
+     *
+     * 默认开：它覆盖的失败——连接被掐、超时、网关抽风、被限流——本来就是偶发的，而另一种做法
+     * 是让用户自己再按一次发送。但这不是「一律重试」：具体规则在 `LlmClient.shouldRetry`，
+     * 对端点给出的真实错误（认证、参数）、用户主动停止、以及**任何已经吐出过文字的尝试**都
+     * 不重试——最后这条最关键，重发会把同一段回答给用户看两遍，还多计一次费。
+     */
+    val retryOnFailure: Boolean = true,
+    /**
+     * 一轮失败后最多再试几次（0 = 不重试）。总尝试次数 = 这个数 + 最初的第一次。
+     */
+    val retryMaxAttempts: Int = 2,
+    /**
+     * 两次尝试之间等多少秒（服务端没明说时）。
+     *
+     * 服务端给了 `Retry-After` 就以它为准：什么时候准备好，端点自己最清楚。读取处统一
+     * 夹到 1–60 秒。
+     */
+    val retryDelaySeconds: Int = 5,
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     /**
@@ -167,21 +187,6 @@ data class AppSettings(
      */
     val paletteMode: Int = 0,
     val themeMode: Int = 0,
-    /**
-     * Whether the agent may use the root channel at all.
-     *
-     * **Default true on purpose, and that is the whole point of the switch.** Before it existed the
-     * app probed `su` on every cold start and used it when the device had it. A default of false
-     * would therefore have silently downgraded every existing user at the moment of upgrade — no
-     * superuser prompt any more, root gone from 执行档次, no warning — which is the opposite of what
-     * a switch is for. Default true = exactly the behaviour that was already there; only a user who
-     * turns it off gets the new behaviour.
-     *
-     * Off means: nothing probes root (so no superuser prompt on a cold start), and
-     * [com.suixing.agent.capability.CapabilityState.shellTier] never resolves to ROOT however the
-     * device is rooted.
-     */
-    val enableRoot: Boolean = true,
     /**
      * Off by default because the default endpoint (deepseek-chat) is text-only and
      * rejects any request carrying an image. Turn it on for vision models.

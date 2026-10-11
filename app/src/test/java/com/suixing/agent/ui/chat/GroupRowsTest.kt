@@ -177,4 +177,68 @@ class GroupRowsTest {
         assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
         assertEquals(listOf("a1", "a2"), rows[1].rounds.map { it.id })
     }
+
+    /**
+     * A tool result that carries no run id while the answer carries one used to take the whole turn
+     * with it: `Transcript.chosenRuns` picked the turn's run as `activeRuns[turn] ?: runs.last()`,
+     * the stray result's empty run was the newest, and `Transcript.active` then kept that single
+     * message and filtered the answer out — the answer vanished rather than being drawn beside it.
+     * The tie-break now prefers a run that names itself (`Transcript.chosenRuns`), so the answer is
+     * still there and the tool card folds into it.
+     */
+    @Test
+    fun `a tool result with no run id does not hide the answer`() {
+        val messages = listOf(
+            question("q1"),
+            silentRound("a1", "r1", "t1"),
+            result("m1", "", "t1"),
+            round("a2", "r1", "正文", "想过"),
+        )
+
+        val rows = group(messages)
+
+        assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
+        assertEquals(1, rows[1].parts.count { it is Part.Text })
+        // The stray result still belongs to the card: it is the run's own tool round, drawn with
+        // the answer it produced.
+        assertEquals(listOf("m1", "a2"), rows[1].rounds.map { it.id })
+    }
+
+    /**
+     * The same split one step later: a round that only thought, then the round that answered.
+     * Both carry the run id, so this is the shape that must keep folding — the regression guard
+     * for the ordinary case while the rule above grew a second way in.
+     */
+    @Test
+    fun `a round that only thought folds into the round that writes the prose`() {
+        val messages = listOf(
+            question("q1"),
+            round("a1", "r1", "", "想过"),
+            round("a2", "r1", "正文", "又想过"),
+        )
+
+        val rows = group(messages)
+
+        assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
+        assertEquals(2, rows[1].parts.count { it is Part.Thinking })
+    }
+
+    /**
+     * A transcript written before runs were keyed shares one run id, [Transcript.BASE_RUN] — the
+     * empty string — and its rounds used to refuse to fold because the comparison required a
+     * non-empty run. Two rounds of one legacy answer are still one answer.
+     */
+    @Test
+    fun `rounds written before runs were keyed still fold into one card`() {
+        val messages = listOf(
+            question("q1"),
+            round("a1", "", "", "想过"),
+            round("a2", "", "正文", null),
+        )
+
+        val rows = group(messages)
+
+        assertEquals(listOf("q1", "a2"), rows.map { it.message.id })
+        assertEquals(listOf("a1", "a2"), rows[1].rounds.map { it.id })
+    }
 }

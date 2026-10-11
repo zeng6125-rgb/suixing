@@ -6,6 +6,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -61,6 +62,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import kotlinx.coroutines.CoroutineStart
@@ -163,17 +165,6 @@ private val NAV_EASING = FastOutSlowInEasing
 private const val NAV_SHIFT_DIVISOR = 12
 
 /**
- * 回到「抽屉的来源页」那一趟专用的淡入淡出时长：只淡、不位移、比常规 pop 短。
- *
- * 抽屉此刻已经在屏幕上（恢复不重放滑入），页面再做 8% 的位移就会被 45% 遮罩读成「两层各动
- * 一半」；但全瞬时又会被读成「没有过渡」（用户前后两句话：「返回时候侧边栏遮挡的主页面为什么
- * 也有动画」→「返回时的动画可以轻一点的淡淡的，这样又不会觉得没有过渡」）。140ms 的纯淡化
- * 是这两句的交集：能感觉到，但不抢眼。其余每一次返回仍走 [NAV_FADE_MS]/[NAV_ENTER_MS]/
- * [NAV_EXIT_MS] 那套全站统一规格。
- */
-private const val NAV_DRAWER_RETURN_MS = 140
-
-/**
  * The app shell.
  *
  * Navigation lives in the left drawer, and the drawer is mostly a conversation list:
@@ -264,25 +255,28 @@ fun SuixingApp() {
         if (target != route) drawerReturnTo = route
         open(target)
     }
-    // 返回上一页。唯一特殊的一趟：这一趟的落点是「抽屉的来源页」——抽屉必须**在目标页出现的
-    // 那一帧就已经在那儿**，所以先把 drawerState 摆成 Open 再 pop。放在 pop 之后再补一帧，
-    // 用户看到的就是「先闪一下主页面才出现侧边栏」（他上一轮的原话，也是换库的理由之一）。
-    // snapTo 不播动画，正是他要的「已经在那儿」。
-    // UNDISPATCHED：snapTo 是挂起函数，普通 launch 会把它排到下一个主线程消息，那一帧就已经
-    // 晚了；UNDISPATCHED 让它在 popBackStack() 之前当场落地（状态写在第一个挂起点之前）。
-    val goBack: () -> Unit = {
-        if (navController.previousBackStackEntry?.destination?.route == drawerReturnTo) {
+    // 返回上一页：抽屉的恢复**不挂在这条路上**（见下面的 SideEffect）——顶栏按钮、系统返回键、
+    // 手势返回、以及 NavHost 自己处理的 pop，四条路都从 route 变化上恢复，谁 pop 都一样。
+    val goBack: () -> Unit = { navController.popBackStack() }
+    // 回到「抽屉的来源页」的那一帧，把抽屉摆成开着：route 变回来源页 ⇒ 抽屉本来就该在那儿。
+    //
+    // 用 SideEffect 而不是 LaunchedEffect：SideEffect 在组合完成后、**布局之前**跑，同一帧画出来
+    // 就是「目标页 + 已经开着的抽屉」；LaunchedEffect 要等下一帧，用户看到的就是「先闪一下主页面
+    // 才出现侧边栏」（他两轮都在说这条）。snapTo 不播动画，正是他要的「已经在那儿」。
+    // UNDISPATCHED：snapTo 是挂起函数，普通 launch 会把写入排到下一个主线程消息，那一帧就晚了。
+    //
+    // 为什么按 route 派生、而不是让每条 pop 路径自己先 snapTo 再 pop：早先那版就是后者
+    // （goBack 里 snapTo + 一个 BackHandler 分支），结果系统返回走的是 NavHost 自己注册的回调
+    // （它比外壳里的 BackHandler 后注册、优先级更高），根本不经过我们——于是只有点顶栏返回按钮
+    // 才不闪，用户原话：「只有点返回按钮才有那套返回处理，系统返回（手势/返回键）没有」。
+    // 从 route 派生之后，恢复与「谁触发的 pop」无关，四条路完全一致。
+    if (route == drawerReturnTo) {
+        SideEffect {
+            drawerReturnTo = null
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 drawerState.snapTo(DrawerValue.Open)
             }
         }
-        navController.popBackStack()
-    }
-    // 回到出发页之后把记的出发页清掉：抽屉本身已经在 goBack 里摆好了，这里不再补动画。
-    // 只挂在 route 上、不挂 drawerReturnTo：点走的那一帧两个键都还挂着，会在那一帧就把
-    // 抽屉判成「该开着」又弹回来。
-    LaunchedEffect(route) {
-        if (route == drawerReturnTo) drawerReturnTo = null
     }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
@@ -321,14 +315,10 @@ fun SuixingApp() {
         // 抽屉开着时 BACK 先关抽屉：ModalNavigationDrawer 只接管预测性返回的手势，普通 BACK
         // 仍会交给 Activity，不收这一句就会退出应用。助手那张半屏表自己吞 BACK，审批卡是
         // dialog 也吞，所以这里只剩抽屉这一种。
+        // 「返回抽屉来源页」那一趟**不需要**在这里拦：抽屉的恢复是从 route 派生的一帧内动作
+        // （见上面的 SideEffect），系统返回走 NavHost 自己的回调也一样会恢复——拦下来反而会
+        // 把 NavHost 的预测性返回动画弄没。
         BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
-        // 这一趟 BACK 的落点正是抽屉的来源页：交给 goBack —— 它会把抽屉先摆好再 pop，否则
-        // 用户看到的是「先闪一下主页面才出现侧边栏」。其余情况一律不拦，让 NavHost 自己处理
-        // （保留它的预测性返回动画）。
-        BackHandler(
-            enabled = !drawerState.isOpen && drawerReturnTo != null &&
-                navController.previousBackStackEntry?.destination?.route == drawerReturnTo,
-        ) { goBack() }
         // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
         // the strip behind the keyboard was left unpainted and the window's own white showed
         // through the keyboard's rounded corners as a pale seam. This box is not inset, so
@@ -471,17 +461,15 @@ fun SuixingApp() {
                                     -it / NAV_SHIFT_DIVISOR
                                 }
                         },
-                        // 唯一的例外：这一趟 pop 的目的地正是「抽屉的来源页」——也就是我们马上要把抽屉
-                        // 放回去的那一次。抽屉此刻已经在那儿（恢复不重放滑入），页面若再滑一遍，就会被
-                        // 45% 遮罩读成「两层各动一半」（用户原话：「返回时候侧边栏遮挡的主页面为什么也
-                        // 有动画」）。但也**不能全瞬时**：他随后把口径说清了——「返回的时候也有动画，
-                        // 侧边栏不关闭，还是点进去的状态，返回时的动画可以轻一点的淡淡的，这样又不会
-                        // 觉得没有过渡」。所以这一趟只保留淡入淡出、去掉位移、时长压到 140ms：过渡在，
-                        // 但不抢眼。其余每一次返回照常走上面那套统一规格。两边共用同一个判断，只关一边
-                        // 会露出半截动画。
+                        // 唯一的例外：这一趟 pop 的目的地正是「抽屉的来源页」——也就是抽屉被摆回
+                        // 打开的那一次。用户对这条路径改口过三次（「主页面为什么也有动画」→「返回
+                        // 时的动画可以轻一点的淡淡的」→ 看到实物后「返回时页面动就是不对」），最终
+                        // 口径是**两侧都零动画**：页面直接是那一帧、抽屉已经在（恢复走 snapTo，不重放
+                        // 滑入），屏幕上没有任何可见运动。其余每一次返回照常走上面那套统一规格；两边
+                        // 共用同一个判断，只关一边会露出半截动画。
                         popEnterTransition = {
                             if (targetState.destination.route == drawerReturnTo) {
-                                fadeIn(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
+                                EnterTransition.None
                             } else {
                                 fadeIn(tween(NAV_FADE_MS, easing = NAV_EASING)) +
                                     slideInHorizontally(tween(NAV_ENTER_MS, easing = NAV_EASING)) {
@@ -491,7 +479,7 @@ fun SuixingApp() {
                         },
                         popExitTransition = {
                             if (targetState.destination.route == drawerReturnTo) {
-                                fadeOut(tween(NAV_DRAWER_RETURN_MS, easing = NAV_EASING))
+                                ExitTransition.None
                             } else {
                                 fadeOut(tween(NAV_EXIT_MS, easing = NAV_EASING)) +
                                     slideOutHorizontally(tween(NAV_EXIT_MS, easing = NAV_EASING)) {

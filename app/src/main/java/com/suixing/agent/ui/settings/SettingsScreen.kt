@@ -954,9 +954,17 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item {
+                // 0 是「不限制」，但把 0 直接摆在标签上读起来像个没配好的空值——用户原话
+                // 「把 0 字样改成无限」。存储值不变（仍是 0），引擎那侧 `roundLimit <= 0`
+                // 就是不限（AgentEngine.kt:975），所以这里只改给人看的那个词。
                 LabeledSlider(
-                    label = "最大工具轮数 ${form.maxToolRounds}",
-                    hint = "一次任务里最多连续调用多少次工具；0 = 不限制。",
+                    label = if (form.maxToolRounds <= 0) {
+                        "最大工具轮数 无限"
+                    } else {
+                        "最大工具轮数 ${form.maxToolRounds}"
+                    },
+                    hint = "一次任务里最多连续调用多少次工具；0＝不限轮数（显示为「无限」），" +
+                        "拖到最左就是不限制。",
                     value = form.maxToolRounds.toFloat(),
                     range = 0f..40f,
                     steps = 39,

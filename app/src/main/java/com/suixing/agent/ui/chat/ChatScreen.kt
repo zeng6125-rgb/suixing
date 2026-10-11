@@ -108,6 +108,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -1870,7 +1871,17 @@ internal fun groupRows(
                     if (message.text.isNotBlank()) add(Part.Text(message.text))
                 }
                 val index = openIndex
-                if (index >= 0 && run.isNotEmpty() && run == openRun) {
+                // A round folds into the bubble already open when its run is that row's run. The
+                // comparison used to demand a *non-empty* run as well, and that is the one thing it
+                // must not do: `Transcript.BASE_RUN` is the empty string — the run id every message
+                // written before branching shares — so two rounds of one legacy answer could never
+                // fold, and they drew as two cards, the first of them a process header with no prose
+                // under it. That is the whole of this rule; a first version of the fix also let a
+                // "tool card with no assistant round yet" be claimed by any round, and the test for
+                // it proved the branch unreachable: `groupRows` is fed `Transcript.active(...)`,
+                // which keeps one run per turn, so every assistant and tool message of a turn
+                // already carries the same run id and the plain comparison folds them all.
+                if (index >= 0 && run == openRun) {
                     val open = rows[index]
                     rows[index] = open.copy(
                         message = message,
@@ -4617,10 +4628,16 @@ private fun Composer(
                     // ellipses with the circle clipped to a 40x36 box.
                     Row(
                         modifier = Modifier
-                            .padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
+                            // 4dp rather than 12: the two buttons on the left are now discs inside
+                            // their 48dp touch boxes, so the box already contributes 8dp of air on
+                            // each side of the disc. Twelve here put the 「+」 16dp from the
+                            // capsule's edge and read as a gap the user asked to close.
+                            .padding(start = 4.dp, end = 12.dp, bottom = 8.dp)
                             .height(48.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        // 2dp, not 4: the gap the eye sees is this plus the two touch boxes' own
+                        // 8dp either side, so every dp here is worth three on screen.
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                     // The anchor's own left edge and the card's width, both measured: the card opens
                     // to the right of this button, and on a window narrower than the button plus
@@ -4630,13 +4647,18 @@ private fun Composer(
                     Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
                         IconButton(
                             onClick = { menuOpen = true },
-                            modifier = Modifier.size(40.dp),
+                            // The 48dp minimum sits outside the 32dp disc, exactly as the assistant
+                            // sheet's star does: the disc is what the eye reads, the touch target is
+                            // what the thumb needs, and shrinking the visual must not shrink the
+                            // latter. `Modifier.size(40.dp)` alone (what this used to be) does the
+                            // opposite — it clamps the minimum to 40.
+                            modifier = Modifier.minimumInteractiveComponentSize().size(32.dp),
                         ) {
                             Icon(
                                 imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
                                 contentDescription = "添加图片或文件",
                                 tint = scheme.onSurfaceVariant,
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(18.dp),
                             )
                         }
                         // The same card as the model sheet: one popup style for the whole
@@ -4645,9 +4667,10 @@ private fun Composer(
                             visible = menuOpen,
                             onDismiss = { menuOpen = false },
                             // Opens upward from the button it belongs to. BottomStart puts the
-                            // popup's bottom edge on the anchor's bottom edge, so the offset has
-                            // to clear the whole 40dp button plus the 8dp of air — -8dp alone
-                            // left the card sitting on top of the plus button.
+                            // popup's bottom edge on the anchor's bottom edge, and the anchor is
+                            // the button's 48dp *touch* box — so the offset has to clear that box
+                            // (which now leaves exactly the 8dp of air above the 32dp disc that
+                            // the button draws; -8dp alone left the card sitting on the button).
                             alignment = Alignment.BottomStart,
                             offset = with(density) {
                                 IntOffset(
@@ -4729,7 +4752,10 @@ private fun Composer(
                     ) {
                         IconButton(
                             onClick = { approvalOpen = true },
-                            modifier = Modifier.size(40.dp),
+                            // Same pair as the 「+」 beside it: a 32dp disc, a 48dp touch target.
+                            // The two are one visual group on the row's left, so they shrink
+                            // together or the row reads as lopsided.
+                            modifier = Modifier.minimumInteractiveComponentSize().size(32.dp),
                         ) {
                             Icon(
                                 imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
@@ -4739,7 +4765,7 @@ private fun Composer(
                                     ApprovalMode.AUTO -> scheme.primary
                                     else -> scheme.onSurfaceVariant
                                 },
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(18.dp),
                             )
                         }
                         MenuCard(

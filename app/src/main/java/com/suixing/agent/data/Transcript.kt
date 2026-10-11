@@ -43,14 +43,25 @@ object Transcript {
         return out
     }
 
-    /** The run each turn should draw: the user's pick when it still exists, else the newest. */
+    /**
+     * The run each turn should draw: the user's pick when it still exists, else the newest.
+     *
+     * "Newest" skips [BASE_RUN] when the turn has a keyed run at all, and that skip is the point.
+     * The empty id is what every message written before branching shares, so one run-less message
+     * — an old tool result, a round restored from a draft — used to make the empty run the turn's
+     * newest, and the whole turn was then filtered down to that single message: the answer
+     * disappeared instead of being drawn beside it. An explicit pick is still honoured, including
+     * a pick of [BASE_RUN] itself; only this tie-break prefers a run that names itself.
+     */
     fun chosenRuns(
         messages: List<StoredMessage>,
         activeRuns: Map<String, String>,
     ): Map<String, String> {
         val turnOf = turnOf(messages)
         return runsByTurn(messages, turnOf).mapValues { (turn, runs) ->
-            activeRuns[turn]?.takeIf { it in runs } ?: runs.last()
+            activeRuns[turn]?.takeIf { it in runs }
+                ?: runs.lastOrNull { it.isNotEmpty() }
+                ?: runs.last()
         }
     }
 

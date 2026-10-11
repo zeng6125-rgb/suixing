@@ -123,7 +123,7 @@ class ShellTools(
         drawInputFx(command, tool = "run_shell")
         val state = capabilities.state.value
         if (mode == "root" && !state.rootProbed) capabilities.probeRoot()
-        val chosen = shellChannel(mode, capabilities.shellTier(), capabilities.rootAllowed.value)
+        val chosen = shellChannel(mode, capabilities.shellTier())
         val result: ShellResult = when (chosen) {
             "root" -> Shell.root(command)
             "shizuku" -> Shell.shizuku(command)
@@ -245,21 +245,19 @@ class ShellTools(
  * rule is one sentence — an explicit tier is a request, not a permission. It can never go above the
  * tier the user fixed (naming `shizuku` while 标准档 is fixed runs as the app), and it is never
  * raised above what was asked for either (naming `shizuku` while Root is fixed runs Shizuku, not
- * root). Naming `root` with 「允许使用 Root」 off is the same idea one step further: that tier is not
- * reachable at all, so the request is the resolved channel and the clamp leaves it alone. Before
- * any of this, naming a tier ran it outright — which made both the 执行档次 picker and the root
- * switch suggestions the model could talk its way around.
+ * root). Naming `root` on a device where root is not ready is the same idea one step further: the
+ * request is clamped to what `CapabilityState.shellTier` resolved.
  *
  * The comparison uses [ShellTier]'s own declaration order (LOCAL < SHIZUKU < ROOT, ascending
  * privilege), so the two orderings cannot drift apart.
  */
-internal fun shellChannel(mode: String, resolved: ShellTier, rootAllowed: Boolean): String {
+internal fun shellChannel(mode: String, resolved: ShellTier): String {
     // What the caller asked for, as a tier. Nothing asked for (auto, or a value this build does not
     // know) asks for exactly what the device resolved.
     val requested = when (mode) {
         "local" -> ShellTier.LOCAL
         "shizuku" -> ShellTier.SHIZUKU
-        "root" -> if (rootAllowed) ShellTier.ROOT else resolved
+        "root" -> ShellTier.ROOT
         else -> resolved
     }
     return minOf(requested, resolved).channel

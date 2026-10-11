@@ -3,6 +3,8 @@ package com.suixing.agent.llm
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.tools.ToolSpec
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -94,7 +96,99 @@ data class AssistantTurn(
     val usage: Usage? = null,
 )
 
-class LlmException(message: String) : Exception(message)
+class LlmException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/** The shortest and longest wait between two attempts, whatever the settings or a header says. */
+internal const val MIN_RETRY_DELAY_SECONDS = 1
+internal const val MAX_RETRY_DELAY_SECONDS = 60
+
+/** The most retries the settings can ask for; the settings page offers 0–5. */
+internal const val MAX_RETRY_ATTEMPTS = 5
+
+/**
+ * Whether a failed attempt may be tried again.
+ *
+ * One function, so the rule is one place and can be tested without a server. The rule, in order:
+ *
+ *  - **the user stopped it** — never retry. A cancelled call is an instruction, not a failure;
+ *  - **anything already arrived** — never retry. The endpoint may have billed for the part it sent,
+ *    and resending would hand the user the same paragraph twice. This is the line that keeps a
+ *    retry from turning into duplicated output;
+ *  - **out of attempts** — no. [attempt] counts attempts already made (1 after the first try), and
+ *    [maxAttempts] is how many *retries* are allowed, so `attempt <= maxAttempts` is the budget;
+ *  - **no status** — a transport failure (connection reset, DNS, timeout) and worth another go;
+ *  - **429** — rate limited, worth another go (the caller prefers the server's `Retry-After`);
+ *  - **5xx** — the server's own fault, worth another go;
+ *  - **any other status** — a real answer: 400 means the request is wrong, 401/403 means the key is,
+ *    and repeating either just repeats the error.
+ */
+internal fun shouldRetry(
+    status: Int?,
+    attempt: Int,
+    maxAttempts: Int,
+    receivedAnyOutput: Boolean,
+    cancelled: Boolean,
+): Boolean {
+    if (cancelled) return false
+    if (receivedAnyOutput) return false
+    if (attempt > maxAttempts) return false
+    return when {
+        status == null -> true
+        status == 429 -> true
+        status in 500..599 -> true
+        else -> false
+    }
+}
+
+/**
+ * `Retry-After` in seconds, or null when the header is absent or unreadable.
+ *
+ * A readable number is honoured as the server's own timing and clamped into
+ * [MIN_RETRY_DELAY_SECONDS]..[MAX_RETRY_DELAY_SECONDS]: `0` ("retry now") becomes the one-second
+ * floor rather than the configured delay, because the server did say something and it said "no
+ * wait"; an hour becomes a minute, because a wait that long reads as a hang.
+ *
+ * Only the delta-seconds form is read. The HTTP-date form, a negative number and plain garbage are
+ * all treated as unreadable and return null, which leaves the caller with the configured delay —
+ * the safe direction, since guessing a date wrong could park the run far longer than the user asked
+ * for.
+ */
+internal fun parseRetryAfter(header: String?): Int? = header
+    ?.trim()
+    ?.toIntOrNull()
+    ?.takeIf { it >= 0 }
+    ?.coerceIn(MIN_RETRY_DELAY_SECONDS, MAX_RETRY_DELAY_SECONDS)
+
+/** Handed to [LlmClient.complete]'s `onRetry` just before it waits. */
+data class RetryNotice(
+    /** Which attempt just failed (1 = the first try). */
+    val attempt: Int,
+    /** How many retries the settings allow, so the caller can say "第 2 次重试". */
+    val maxAttempts: Int,
+    val delayMs: Long,
+    /** Short, user-facing: why this attempt is being repeated. */
+    val reason: String,
+)
+
+/**
+ * A failed attempt, carrying what the retry decision needs. Never escapes [LlmClient.complete]:
+ * the original failure is what gets thrown once the retries are used up.
+ *
+ * The field is [failure] and not `cause`: `Throwable.cause` already means something here (it is set
+ * by the constructor below), and a same-named property would shadow it.
+ */
+private class AttemptFailure(
+    val code: Int?,
+    val retryAfterSeconds: Int?,
+    val failure: Throwable,
+) : Exception(failure.message, failure)
+
+/** Short, user-facing reason for a retryable status. */
+private fun retryReason(code: Int?): String = when {
+    code == 429 -> "服务器限流（429）"
+    code != null -> "服务器出错（$code）"
+    else -> "网络中断"
+}
 
 /**
  * Minimal streaming client for any OpenAI-compatible endpoint
@@ -165,6 +259,13 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
          * real instead of "stops when the model gets around to it".
          */
         onCall: (Call) -> Unit = {},
+        /**
+         * Told before each retry wait, so the caller can show something instead of going quiet.
+         *
+         * Never called for the final failure — that travels as the thrown error, the same way it
+         * always has.
+         */
+        onRetry: (RetryNotice) -> Unit = {},
     ): AssistantTurn = withContext(Dispatchers.IO) {
         val url = endpoint(settings.baseUrl)
         val payload = buildJsonObject {
@@ -193,34 +294,87 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             .post(payload.toString().toRequestBody(JSON_MEDIA))
             .build()
 
-        val call = clientFor(settings).newCall(request)
-        onCall(call)
-        call.execute().use { response ->
-            val body = response.body
-            if (!response.isSuccessful || body == null) {
-                throw LlmException(friendlyHttp(response.code, body?.string().orEmpty()))
-            }
-            val stream = StreamTurn()
-            val source = body.source()
-            while (true) {
-                val line = source.readUtf8Line() ?: break
-                if (line.isEmpty()) continue
-                if (!line.startsWith("data:")) continue
-                val data = line.removePrefix("data:").trim()
-                if (data.isEmpty()) continue
-                // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
-                // connection open afterwards would otherwise leave this loop blocked until the read
-                // timeout — or the 10-minute call cap — with the whole answer already in hand.
-                if (data == "[DONE]") break
-                val chunk = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
-                chunk["error"]?.let { error ->
-                    val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content ?: error.toString()
-                    throw LlmException("接口返回错误：$message")
-                }
-                stream.accept(chunk, onDelta, onReasoning)
-            }
-            stream.toTurn()
+        val maxRetries = if (settings.retryOnFailure) {
+            settings.retryMaxAttempts.coerceIn(0, MAX_RETRY_ATTEMPTS)
+        } else {
+            0
         }
+        var attempt = 0
+        while (true) {
+            attempt++
+            // Whether *this* attempt delivered anything. The retry decision needs it per attempt:
+            // text that arrived on a previous try does not matter (nothing was kept), but text that
+            // arrived on this one does — the endpoint has already been paid for it and the user has
+            // already seen it, so resending would duplicate both.
+            var received = false
+            val call = clientFor(settings).newCall(request)
+            onCall(call)
+            val outcome = runCatching {
+                call.execute().use { response ->
+                    val body = response.body
+                    if (!response.isSuccessful || body == null) {
+                        // The status and the header are what the retry decision runs on, so they ride
+                        // along in the failure instead of being flattened into a message here.
+                        throw AttemptFailure(
+                            code = response.code,
+                            retryAfterSeconds = parseRetryAfter(response.header("Retry-After")),
+                            failure = LlmException(friendlyHttp(response.code, body?.string().orEmpty())),
+                        )
+                    }
+                    val stream = StreamTurn()
+                    val source = body.source()
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (line.isEmpty()) continue
+                        if (!line.startsWith("data:")) continue
+                        val data = line.removePrefix("data:").trim()
+                        if (data.isEmpty()) continue
+                        // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
+                        // connection open afterwards would otherwise leave this loop blocked until the
+                        // read timeout — or the 10-minute call cap — with the answer already in hand.
+                        if (data == "[DONE]") break
+                        val chunk = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
+                        chunk["error"]?.let { error ->
+                            val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content ?: error.toString()
+                            throw LlmException("接口返回错误：$message")
+                        }
+                        stream.accept(
+                            chunk,
+                            { piece -> received = true; onDelta(piece) },
+                            { piece -> received = true; onReasoning(piece) },
+                        )
+                    }
+                    stream.toTurn()
+                }
+            }
+            outcome.getOrNull()?.let { return@withContext it }
+            val failure = outcome.exceptionOrNull() ?: error("runCatching without a value")
+            val code = (failure as? AttemptFailure)?.code
+            // OkHttp reports a cancelled call as an IOException, so the call's own flag is the
+            // reliable way to tell "the user stopped this" from "the network broke".
+            val cancelled = call.isCanceled() || !isActive
+            if (!shouldRetry(code, attempt, maxRetries, received, cancelled)) {
+                // The original failure is what callers have always seen: an LlmException with the
+                // friendly message for a status, or the raw IOException for a transport failure.
+                throw (failure as? AttemptFailure)?.failure ?: failure
+            }
+            val serverSeconds = (failure as? AttemptFailure)?.retryAfterSeconds
+            val seconds = serverSeconds
+                ?: settings.retryDelaySeconds.coerceIn(MIN_RETRY_DELAY_SECONDS, MAX_RETRY_DELAY_SECONDS)
+            onRetry(
+                RetryNotice(
+                    attempt = attempt,
+                    maxAttempts = maxRetries,
+                    delayMs = seconds * 1000L,
+                    reason = retryReason(code),
+                ),
+            )
+            // Cancellable on purpose: a stop during the wait must end the run at once rather than
+            // after the sleep, and `delay` throws CancellationException exactly for that.
+            delay(seconds * 1000L)
+        }
+        @Suppress("UNREACHABLE_CODE")
+        error("unreachable")
     }
 
     private class MutableToolCall {

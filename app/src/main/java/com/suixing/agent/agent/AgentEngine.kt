@@ -14,6 +14,7 @@ import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
+import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.llm.Usage
 import com.suixing.agent.skills.SkillStore
@@ -971,6 +972,10 @@ class AgentEngine(
         // two leaves the call in the transcript with nothing answering it, which drew as an empty
         // tool card — indistinguishable from a tool that returned nothing at all.
         var openCalls: List<StoredToolCall> = emptyList()
+        // Retries spent on the round that is currently in flight, so a failure that used them all
+        // can say so. Reset per round: the number is about the attempt that finally failed, not
+        // about how unlucky the whole run was.
+        var retriesThisRound = 0
         try {
             while (roundLimit <= 0 || round < roundLimit) {
                 round++
@@ -993,6 +998,7 @@ class AgentEngine(
                 // Cleared with the round: whatever the last one ended with is over, and a
                 // line that outlives its step reads as a stall.
                 liveLine = ""
+                retriesThisRound = 0
                 if (cancelled.get()) {
                     finishCancelled(onEvent, streamed, reasoning, openCalls)
                     return produced
@@ -1035,6 +1041,13 @@ class AgentEngine(
                             onEvent(AgentEvent.ReasoningDelta(piece))
                         },
                         onCall = { inFlight = it },
+                        // Visible rather than silent: a retry means the user is waiting longer for
+                        // nothing they can see, and a console line is the difference between
+                        // "it is thinking" and "it is stuck".
+                        onRetry = { notice ->
+                            retriesThisRound = notice.attempt
+                            liveLine = "第 ${notice.attempt} 次重试（${notice.delayMs / 1000}s 后）· ${notice.reason}"
+                        },
                     )
                 } catch (error: IOException) {
                     // Cancelling a call surfaces as an IOException on the reading
@@ -1222,14 +1235,26 @@ class AgentEngine(
                 finishCancelled(onEvent, streamed, reasoning, openCalls)
                 return produced
             }
-            publish(RunState.Failed(error.message ?: error::class.java.simpleName))
-            throw error
+            val message = (error.message ?: error::class.java.simpleName) + retryNote(retriesThisRound)
+            publish(RunState.Failed(message))
+            // The chat screen shows the *thrown* error's message, so the note has to travel with it
+            // too — otherwise the number only ever appears in the console. Wrapped rather than
+            // rebuilt: the original rides along as the cause, so nothing about it is lost.
+            throw if (retriesThisRound > 0) LlmException(message, error) else error
         } finally {
             inFlight = null
             // Nothing is published here. The run has already said how it ended, and that
             // answer is what the conversation's state flow keeps for whoever still reads it.
         }
     }
+
+    /**
+     * 「（已重试 N 次）」 for a failure that used up its retries, empty otherwise.
+     *
+     * A user who waited through two retries is owed the number: without it the same error reads
+     * like the first attempt failed, and the retry setting looks like it did nothing.
+     */
+    private fun retryNote(retries: Int): String = if (retries > 0) "（已重试 $retries 次）" else ""
 
     /**
      * Publishes the end of a stopped run.

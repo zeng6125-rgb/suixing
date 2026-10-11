@@ -19,6 +19,8 @@ import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
 import com.suixing.agent.llm.LlmClient
+import com.suixing.agent.llm.LlmException
+import com.suixing.agent.llm.describeError
 import com.suixing.agent.service.AgentForegroundService
 import com.suixing.agent.ui.settings.withUpstreamDefaults
 import kotlinx.coroutines.CancellationException
@@ -1230,7 +1232,30 @@ class ChatViewModel : ViewModel() {
                 status = "已停止"
                 throw cancellation
             } catch (error: Throwable) {
-                failure = error.message ?: error::class.java.simpleName
+                // The transport's own words say nothing the user can act on — "timeout",
+                // "Connection reset", "Trust anchor for certification path not found" — and they
+                // are in English besides. `describeError` walks the cause chain and turns them into
+                // what to do about the address, the certificate or the key; it is the same
+                // description the settings page's connection test shows, so a failure reads the
+                // same wherever it is met.
+                //
+                // One thing it cannot know is kept: a round the engine retried is re-thrown as an
+                // LlmException whose message is the failure's own text — or, when it had none, its
+                // class name (AgentEngine's own catch) — followed by the retry note. The note is
+                // what is left once that prefix is gone, and it is only taken when it still looks
+                // like the note (the engine's own full-width parenthesis); anything else means the
+                // message was not shaped as expected, and the description stands alone rather than
+                // repeating an English class name underneath itself.
+                val note = if (error.cause != null && error is LlmException) {
+                    val prefix = error.cause?.let { it.message ?: it::class.java.simpleName }.orEmpty()
+                    error.message.orEmpty().removePrefix(prefix).trim().takeIf { it.startsWith("（") }
+                        .orEmpty()
+                } else {
+                    ""
+                }
+                failure = listOf(describeError(error), note)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n")
             } finally {
                 AgentForegroundService.stop(Core.appContext)
                 withContext(NonCancellable) {
