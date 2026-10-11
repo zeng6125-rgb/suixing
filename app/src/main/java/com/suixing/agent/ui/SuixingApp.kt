@@ -18,6 +18,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -554,7 +555,22 @@ fun SuixingApp() {
                                     ) { fullWidth -> -fullWidth / NAV_SHIFT_DIVISOR }
                                 }
                             },
-                            popExitTransition = { ExitTransition.None },
+                            popExitTransition = {
+                                // 返回抽屉路线（设置 → chat）：让**离开的那一页淡出**，而不是当帧消失。
+                                // 用户要的「蒙版由深到没有」就是这一条 —— 原来是 None ⇒ 硬切，读起来
+                                // 就是「返回时闪一下」（与「开闭动画生硬」是同一个病）。
+                                //
+                                // 为什么**不动**那层底色（它在 pop 期间本来就是透明的）：返回的目标是
+                                // 聊天页。底色若在转场期间保持不透明，淡出时露出来的是**底色**而不是
+                                // chat，等底色终于变透明时 chat 再「啪」地出现 —— 那是另一种闪。
+                                // 现在这样：设置页在半透明状态里溶进聊天页，全程没有一帧是纯底色。
+                                if (initialState.destination.route in DRAWER_ROUTES) {
+                                    fadeOut(tween(NAV_FADE_MS))
+                                } else {
+                                    // 子页返回（模型 → 设置）：父页从左侧滑回来盖住它，不需要淡出。
+                                    ExitTransition.None
+                                }
+                            },
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
                                 composable("empty") { }

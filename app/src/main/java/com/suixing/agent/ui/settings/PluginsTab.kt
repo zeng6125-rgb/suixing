@@ -4,16 +4,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -107,7 +103,9 @@ fun PluginsSection(onNotify: (String) -> Unit) {
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // fillMaxWidth, not fillMaxSize: this section is drawn as an item of the tab's LazyColumn, where
+    // the height constraint is unbounded — a fillMaxHeight there is meaningless at best.
+    Column(Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -126,11 +124,16 @@ fun PluginsSection(onNotify: (String) -> Unit) {
                 subtitle = "插件的形态还在确定中，定下来之后会出现在这里。",
             )
         } else {
-            LazyColumn(
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 100.dp),
+            // A plain Column, **not** a LazyColumn. This section is drawn inside the tab's own
+            // LazyColumn item, and a lazy list measures its items with an unbounded height — a
+            // second vertical scrollable down there is the "infinity maximum height constraints"
+            // crash (v0.8.92, tapping the plugins tab). The tab already scrolls; the list is short;
+            // there is nothing for a lazy list to do here.
+            Column(
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                items(entries, key = { it.id }) { entry ->
+                entries.forEach { entry ->
                     PluginRow(
                         entry = entry,
                         onOpen = { scope.launch { detail = Core.plugins.readSpec(entry.id) } },
