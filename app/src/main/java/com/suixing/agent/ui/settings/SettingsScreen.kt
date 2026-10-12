@@ -544,7 +544,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             PageTopBar(
                 title = SettingsPage.MODEL.title,
                 onBack = onBack,
-                subtitle = if (dirty) "有未保存的改动" else null,
+                // 副标题（`if (dirty) "有未保存的改动"`）搬到内容区第一行 —— 它是这一页**唯一**的
+                // 真信息，不能随「任何页都不要副标题」一起丢掉（见下面 LazyColumn 的第一项）。
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
@@ -627,6 +628,17 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            // 从顶栏搬下来的「有未保存的改动」（顶栏不再有副标题）：dirty 时才出现，放在内容区
+            // 第一行 —— 用户改完设置抬头就能看到，不用去找保存键。
+            if (dirty) {
+                item {
+                    Text(
+                        text = "有未保存的改动",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
             item {
                 OutlinedTextField(
                     // 15sp 走比例式而不是 `15.sp`：写死 sp 会关掉「外观 → 字号」的缩放（规范第 6 条），
@@ -674,7 +686,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     onValueChange = { value ->
                         form = form.mapProvider(selected?.id) { it.copy(name = value) }
                         // 只改草稿：每敲一键写一次盘，会让所有观察 settings 的地方跟着重组，
-                        // 顶栏那句「有未保存的改动」一闪一灭，看起来就是标题在抖。停手后再落盘。
+                        // 内容区那一行「有未保存的改动」一闪一灭，看起来就是那行字在抖。停手后再落盘。
                         pendingName = selected?.id?.takeIf { it.isNotEmpty() }?.let { it to value }
                     },
                     label = { Text("提供方名称") },

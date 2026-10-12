@@ -160,7 +160,8 @@ fun FilesScreen(onBack: () -> Unit) {
     ) {
         PageTopBar(
             title = "文件",
-            subtitle = relativePath(root, current, rootLabel),
+            // 副标题（当前路径）去掉：顶栏不带副标题，而**面包屑就在下面**（同一屏可见），
+            // 路径信息一点没丢。
             onBack = onBack,
             actions = {
                 // 三个根 ⇒ 菜单，而不是继续循环。二态时那颗按钮的语义是"切到另一个"，一眼就懂；

@@ -115,7 +115,9 @@ fun CapabilityScreen(onBack: () -> Unit) {
             .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding(),
     ) {
-        PageTopBar(title = "能力", subtitle = "随行能碰到什么，取决于这里", onBack = onBack)
+        // 顶栏不带副标题（用户：「任何页都不要副标题」）；无副标题时标题在行内居中 ⇒
+        // 与返回箭头中心天然重合（结构性对齐，不需要任何补偿）。
+        PageTopBar(title = "能力", onBack = onBack)
         Column(
             modifier = Modifier
                 .fillMaxSize()

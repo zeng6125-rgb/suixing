@@ -40,7 +40,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.dp
@@ -71,34 +71,40 @@ fun AvatarCropper(
     onConfirm: (AvatarCropRect) -> Unit,
 ) {
     val density = LocalDensity.current
-    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-    // 方框：屏宽的 78%，最多 320dp —— 小屏上留出两侧的手指余量，大屏上不至于糊成一片。
-    val frameDp = minOf(screenWidth * 0.78f, 320.dp)
-    val framePx = with(density) { frameDp.toPx() }
-    // 1× 的定义就是「刚好盖住方框」：短边贴住框，另一轴溢出。用户看到的初始画面没有黑边。
-    val baseScale = framePx / min(source.width, source.height).toFloat()
-    var zoom by remember { mutableStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-
-    fun clamp(current: Offset, scale: Float): Offset {
-        val displayScale = baseScale * scale
-        val maxX = ((source.width * displayScale - framePx) / 2f).coerceAtLeast(0f)
-        val maxY = ((source.height * displayScale - framePx) / 2f).coerceAtLeast(0f)
-        return Offset(current.x.coerceIn(-maxX, maxX), current.y.coerceIn(-maxY, maxY))
-    }
 
     Dialog(
         onDismissRequest = onCancel,
-        // decorFitsSystemWindows = false：默认 true 会让这个对话框窗口自己躲开系统栏，于是窗口
-        // 铺不满、状态栏那一条露的是后面的聊天页。铺满之后由下面两处自己吃 inset：顶部返回键与
-        // 底部按钮各让开一条系统栏，按钮也就不会被手势条顶掉。
+        // 这一页也要铺到状态栏（背景延伸到那一条），内容自己吃 inset：顶部返回键与底部按钮
+        // 各让开一条系统栏，按钮不会被手势条顶掉。
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             decorFitsSystemWindows = false,
         ),
     ) {
-        Surface(Modifier.fillMaxSize(), color = Color(0xF20B0C0D)) {
-            Box(Modifier.fillMaxSize()) {
+        // 保险丝（与编辑页同一个，见 DialogEdgeToEdge 的注释：机制是假设、症状来自截图，
+        // 两种成因它都治、开关本来生效时是空操作）。
+        DialogEdgeToEdge()
+        // 完全不透明的底色：这一层就是整页，后面那份编辑页不该透过来（用户看到的「画了两份」
+        // 有一半是半透明底导致的透视）。0xF2 → 0xFF。
+        Surface(Modifier.fillMaxSize(), color = Color(0xFF0B0C0D)) {
+            // 几何全部在这里算：`BoxWithConstraints` 的 maxWidth/maxHeight 就是**本组合拿到的可用
+            // 尺寸**（对话框窗口在这台 ROM 上不是整屏 —— 截图里那圈超出图片的大圆，就是按屏幕宽
+            // 算、却画在小窗口里的结果）。它天然是"窗口/容器"而不是屏幕，类型也全是 Dp，不用再换算。
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                val frameDp = minOf(maxWidth * 0.78f, maxHeight * 0.5f, 320.dp)
+                val framePx = with(density) { frameDp.toPx() }
+                // 1× 的定义就是「刚好盖住方框」：短边贴住框，另一轴溢出。初始画面没有黑边。
+                val baseScale = framePx / min(source.width, source.height).toFloat()
+                var zoom by remember { mutableStateOf(1f) }
+                var offset by remember { mutableStateOf(Offset.Zero) }
+
+                fun clamp(current: Offset, scale: Float): Offset {
+                    val displayScale = baseScale * scale
+                    val maxX = ((source.width * displayScale - framePx) / 2f).coerceAtLeast(0f)
+                    val maxY = ((source.height * displayScale - framePx) / 2f).coerceAtLeast(0f)
+                    return Offset(current.x.coerceIn(-maxX, maxX), current.y.coerceIn(-maxY, maxY))
+                }
+                Box(Modifier.fillMaxSize()) {
                 // 1) 整张图，居中、可平移缩放。requiredSize 而不是 size：它故意比框大，size 会被
                 //    父约束夹住、缩放就失效了。
                 val displayScale = baseScale * zoom
@@ -180,7 +186,10 @@ fun AvatarCropper(
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = dialogSystemBarPad(bottom = true))
+                        // 安全区 + 额外的 16dp：只靠 navigationBarsPadding 时，手势条机型上按钮会贴
+                        // 到屏幕最下缘（截图里只露出一截绿色）。inset 拿不到时 dialogSystemBarPad
+                        // 退回平台的手势条高度。
+                        .padding(bottom = dialogSystemBarPad(bottom = true) + 16.dp)
                         .fillMaxWidth()
                         .padding(horizontal = 24.dp, vertical = 18.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
@@ -204,6 +213,7 @@ fun AvatarCropper(
                     ) {
                         Text("确定")
                     }
+                }
                 }
             }
         }

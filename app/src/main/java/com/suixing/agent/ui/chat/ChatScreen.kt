@@ -1289,12 +1289,12 @@ fun ChatScreen(
                                         bubbleMaxWidth = bubbleMaxWidth,
                                         reasoningExpansion = reasoningExpansion,
                                     )
-                                    // 上下对齐（用户给的数：start 4dp、top 8dp、bottom 0）：卡片自己的
-                                    // 下内边距是 10dp（AssistantRow 的 Column，ChatScreen.kt:2645），
-                                    // 所以「卡片底 → 文字」＝10+8＝18dp；文字下面到下一项是
-                                    // bottom + 列表的 spacedBy(16dp)，取 bottom = 2dp 正好也是 18dp。
-                                    // 用户说的 bottom 0 差 2dp（16 vs 18），这里补平；要严格照 0 就
-                                    // 把这一行改回 0.dp。
+                                    // 上下对齐（账在下面两行算）：卡片自身的下内边距是 **10dp**
+                                    // （AssistantRow 的 Column，`:2651`），所以「卡片底 → 状态行顶」
+                                    // ＝ 10 + top；「状态行底 → composer 顶」＝ bottom + **16dp**
+                                    // （列表底部余白 `contentPadding.bottom = stackFootprint + 16.dp`，
+                                    // `:1112`）。取 top = 8、bottom = 2 ⇒ 两边都是 **18dp**，相等。
+                                    // 键盘抬起/收起都一致：那 16dp 是相对 composer 顶边算的。
                                     if (state.runningHere) {
                                         RunStatusLine(
                                             text = liveStatusText,
@@ -1320,14 +1320,17 @@ fun ChatScreen(
                                     text = liveStatusText,
                                     startedAt = runStartedAt[runKey] ?: 0L,
                                     timed = statsNote.isEmpty(),
-                                    // 用户给的数：start 4dp、top 8dp、bottom 0dp。这一行是「已发送
-                                    // 还没回答」时的**最后一项**，下面没有卡片，bottom 只决定列表末尾
-                                    // 的余白，所以 0 就是「不多留一段」；上面 16dp 是列表间距，加 8dp
-                                    // 与卡片之间的气口。
+                                    // 上下对齐（与卡片下方那一行同一套账）：上面是**列表间距 16dp**
+                                    // 加这里的 top，下面是这里的 bottom 加**列表底部余白 16dp**
+                                    // （contentPadding.bottom = stackFootprint + 16dp，`:1112`）。
+                                    // 取 top = bottom = 2dp ⇒ 上下都是 18dp，与「卡片 → 状态行」
+                                    // 那条的 18dp 完全相同（卡片自身下内边距 10dp + top 8dp）。
+                                    // 键盘抬起/收起都一样：那 16dp 是相对 composer 顶边算的，
+                                    // composer 动了它跟着动，间隙本身不变。
                                     modifier = Modifier.padding(
                                         start = 4.dp,
-                                        top = 8.dp,
-                                        bottom = 0.dp,
+                                        top = 2.dp,
+                                        bottom = 2.dp,
                                     ),
                                 )
                             }
@@ -4944,12 +4947,20 @@ private fun Composer(
                                 if (running) {
                                     // The attachment rides along: 排队 mode turns this into the next
                                     // turn, 立即 mode into a steer, and either way a picture the user
-                                    // attached belongs to the line. Both are cleared only once the
-                                    // view model says it took them.
-                                    if (onSteer(text, attachment?.base64)) {
-                                        onInput("")
-                                        onClearAttachment()
-                                    }
+                                    // attached belongs to the line.
+                                    //
+                                    // The field is cleared by the **view model**, not here — see
+                                    // ChatViewModel.steer, which clears on both accepted paths. This
+                                    // used to clear as well, and that second writer is why the text and
+                                    // the picture kept coming back: `setDraft`'s defaults come from
+                                    // *this composition's* captured draft, so `onInput("")` wrote the old
+                                    // uri/name straight back into `_drafts`, and the collector pushed it
+                                    // onto the screen a frame later.
+                                    //
+                                    // A refusal (the run ended between the last frame and this tap)
+                                    // falls through to an ordinary send, so the line is never left
+                                    // sitting in the box with nothing happening.
+                                    if (!onSteer(text, attachment?.base64)) onSend()
                                 } else {
                                     onSend()
                                 }
@@ -5298,10 +5309,10 @@ private fun Composer(
                         },
                         onClick = {
                             when {
-                                steers -> if (onSteer(input.trim(), attachment?.base64)) {
-                                    onInput("")
-                                    onClearAttachment()
-                                }
+                                // Cleared by the view model when it takes the line, not here — see the
+                                // note on the Enter path above. A refusal falls through to a normal
+                                // send, so the text cannot be stranded in the field.
+                                steers -> if (!onSteer(input.trim(), attachment?.base64)) onSend()
                                 running -> onStop()
                                 else -> onSend()
                             }

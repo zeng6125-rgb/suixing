@@ -47,7 +47,8 @@ fun ExtensionScreen(onBack: () -> Unit) {
         Column(Modifier.fillMaxSize().navigationBarsPadding()) {
             PageTopBar(
                 title = "记忆",
-                subtitle = "模型自己写下的长期备忘",
+                // 副标题去掉（用户：「任何页都不要副标题」）：「模型自己写下的长期备忘」是装饰性的，
+                // 页面第一张卡已经把这层意思说清了。
                 onBack = onBack,
                 actions = {
                     IconButton(onClick = { memoryRefresh++ }) {

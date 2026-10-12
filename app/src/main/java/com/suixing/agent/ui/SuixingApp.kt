@@ -18,8 +18,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -164,8 +164,15 @@ import kotlinx.coroutines.launch
  * 抽屉不在此列：点行时它 `snapTo(Closed)`、返回来源页时 `snapTo(Open)`（同样瞬时、无叠加），
  * 用户自己开合（汉堡键 / 左缘拖动 / 点遮罩 / 返回键）仍走库的滑入滑出动画。
  */
+/** 0.8.91 原样：新页滑入的时长。 */
+private const val NAV_SLIDE_MS = 200
+
+/** 新页滑入的幅度：屏宽 ÷ 这个数（12 ⇒ 约 8% 屏宽）。 */
+private const val NAV_SHIFT_DIVISOR = 12
+
 /**
- * 转场时长：进页淡入、返回淡出都用它（200ms）。抽屉自己的滑出是库那条 ~250ms，两者同帧起跑。
+ * **只有返回**用这一条（用户要的「极轻的蒙版由深到没有」）：被关掉的那页淡出，下面那页不动。
+ * 进页**不用**它 —— 进页是 0.8.91 的滑入（用户：「点进去的动画可以」）。
  */
 private const val NAV_FADE_MS = 200
 
@@ -242,10 +249,11 @@ fun SuixingApp() {
     // route 恰好等于那个陈旧名字，抽屉就会自己弹出来。
     var drawerTarget by remember { mutableStateOf<String?>(null) }
     val open: (String) -> Unit = { target ->
-        // **用库的关闭动画（close），不要 snapTo**：用户逐帧看了录屏，说 snapTo 那条「抽屉先瞬间
-        // 消失、页面才进来」被读成「先关侧边栏再进页面」，逻辑不对。改成 close()（~250ms 滑出），
-        // 与下面的导航同帧起跑 ⇒ 抽屉滑出的同时新页面淡进来。
-        scope.launch { drawerState.close() }
+        // 0.8.91 原样：瞬消（snapTo），不是库那条 ~250ms 的滑出；UNDISPATCHED 让这次状态写入与
+        // 下面的导航落在同一帧。**别再改成 close()** —— 之后试过的「滑出 + 淡入」被用户否掉了。
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            drawerState.snapTo(DrawerValue.Closed)
+        }
         if (target != route) {
             drawerReturnTo = route
             drawerTarget = target
@@ -274,8 +282,10 @@ fun SuixingApp() {
     val chatFromDrawer: () -> Unit = {
         drawerReturnTo = null
         drawerTarget = null
-        // 同 open()：库的关闭动画，不要 snapTo（理由见那里）。
-        scope.launch { drawerState.close() }
+        // 0.8.91 原样：与 open() 同一条（snapTo + UNDISPATCHED）。
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            drawerState.snapTo(DrawerValue.Closed)
+        }
         showChat()
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
@@ -501,12 +511,20 @@ fun SuixingApp() {
                             // 进页 = **淡入、无位移**（用户逐帧看录屏：点抽屉一行时要「抽屉滑出 + 页面
                             // 淡进」同时进行，加位移会变成两段动作）。旧页当帧让位，露出来的先是那层
                             // 不透明底（route != "empty" ⇒ 底色在），所以淡入期间不会透出聊天页。
+                            // 0.8.91 原样（用户唯一明确说过「可以」的那一版）：新页从右侧滑入
+                            // （1/12 屏宽、200ms）。**不要再改这一条** —— 之后试过的淡入/淡出、方向
+                            // 分流、±1/12、opaque+delay 全被用户否掉。
                             enterTransition = {
-                                fadeIn(tween(NAV_FADE_MS, easing = FastOutSlowInEasing))
+                                slideInHorizontally(
+                                    animationSpec = tween(
+                                        durationMillis = NAV_SLIDE_MS,
+                                        easing = FastOutSlowInEasing,
+                                    ),
+                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
                             },
                             exitTransition = { ExitTransition.None },
-                            // 返回 = **上层淡出、聊天页直接在底下露出来**：chat 自己不参与转场
-                            // （popEnter = None，它不动），被关掉的那页 fadeOut ⇒ 没有任何一帧是纯底色。
+                            // **只有返回这一条**按用户的新要求做：上层淡出、下面那页不动
+                            // （「蒙版由深到没有」）。进页不受影响 —— 它是上面那条 0.8.91 的滑入。
                             popEnterTransition = { EnterTransition.None },
                             popExitTransition = {
                                 fadeOut(tween(NAV_FADE_MS, easing = FastOutSlowInEasing))

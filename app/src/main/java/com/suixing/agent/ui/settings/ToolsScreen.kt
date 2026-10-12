@@ -217,12 +217,8 @@ fun ToolsScreen(onBack: () -> Unit) {
         Column(Modifier.fillMaxSize().navigationBarsPadding()) {
             PageTopBar(
                 title = "工具",
-                subtitle = when (tab) {
-                    0 -> "模型能调用的全部工具"
-                    1 -> "技能给模型加知识"
-                    2 -> "MCP 给模型加工具"
-                    else -> "插件：随行的一切能力都以插件形式提供"
-                },
+                // 副标题（每个 tab 一句说明）去掉：顶栏不带副标题，而当前 tab 由下面的
+                // SegmentedPill 高亮着，说明文字不是必需信息。
                 onBack = onBack,
                 actions = {
                     // 工具页与插件页没有可刷新的东西：工具那栏跟着 MCP 状态与能力状态自己变，

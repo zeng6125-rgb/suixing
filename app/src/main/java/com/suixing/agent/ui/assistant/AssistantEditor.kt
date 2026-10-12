@@ -1,6 +1,10 @@
 package com.suixing.agent.ui.assistant
 
 import android.graphics.Bitmap
+// Android 的 Color（`ColorDrawable(Color.TRANSPARENT)` 用它），不是 Compose 的
+// androidx.compose.ui.graphics.Color —— 两个同名类，别混。
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -44,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,12 +58,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
 import com.suixing.agent.data.ASSISTANT_AVATARS
@@ -71,6 +79,31 @@ import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SettingRow
 import kotlinx.coroutines.launch
+
+/**
+ * 保险丝：**直接对对话框自己的窗口**再调一次「铺满」并把窗口背景清成透明。
+ *
+ * 症状（来自用户截图，不是推测）：编辑助手页的状态栏那一条是**白底**，不是本页背景色；裁剪页
+ * 顶上那块带 `01:47` 的"小预览"也是同一类露底。`DialogProperties.decorFitsSystemWindows = false`
+ * 是文档里那个开关，代码里也一直在用，但**截图说明它在这台机器上没有达到预期效果**。
+ *
+ * **机制是假设，未经实测**：能解释症状的有两种，谁真谁假需要 logcat / 窗口尺寸才能定 ——
+ * ①窗口没有真正铺到状态栏，那一条露的是后面的活动页（助手列表，白底）；②窗口铺到了，但窗口自己
+ * 的默认背景是白的，盖住了本页 Surface。这个函数**两种都治**：对窗口调 `setDecorFitsSystemWindows`
+ * 管①，清掉窗口背景管②；而开关本来就生效的机器上它两个都是空操作（幂等），所以留着不亏。
+ */
+@Composable
+internal fun DialogEdgeToEdge() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val window = (view.parent as? DialogWindowProvider)?.window
+        window?.let {
+            WindowCompat.setDecorFitsSystemWindows(it, false)
+            it.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        }
+        onDispose { }
+    }
+}
 
 /**
  * 对话框窗口里「系统栏到底占多高」。
@@ -152,15 +185,20 @@ fun AssistantEditor(
 
     Dialog(
         onDismissRequest = onDismiss,
-        // decorFitsSystemWindows = false：默认值 true 会让这个**对话框窗口**自己躲开系统栏，
-        // 于是这一页既不画状态栏那一条、也不给顶栏留内边距——状态栏区域露出的是后面被压暗的
-        // 聊天页，用户看到的就是「这一页状态栏没有」。铺到状态栏之后，本页的 Surface 盖住整窗，
-        // 顶栏那句 statusBarsPadding()（Common.kt:353）再把内容推到状态栏下面，与其它页一致。
+        // 这一页要铺到状态栏：`decorFitsSystemWindows = false` 是文档里那个开关，先留着它；
+        // 顶栏自己那句 statusBarsPadding()（Common.kt:415）再把内容推到状态栏下面。
+        //
+        // 但用户截图里状态栏那一条仍是**白底**（不是本页背景色），所以下面还有一道保险：
+        // [DialogEdgeToEdge] 直接对对话框自己的窗口再调一次同一个开关、并清掉窗口默认背景。
+        // **两处都留**：开关生效的机器上第二道是幂等的空操作，没生效的机器上才是它起作用。
+        // （"窗口没铺满"是**从症状反推的假设**，没有 logcat/窗口尺寸实测；症状本身来自截图。）
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             decorFitsSystemWindows = false,
         ),
     ) {
+        // 保险丝：见上。开关已生效时它什么也不改。
+        DialogEdgeToEdge()
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
