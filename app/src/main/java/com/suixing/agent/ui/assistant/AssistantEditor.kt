@@ -100,6 +100,13 @@ internal fun DialogEdgeToEdge() {
         window?.let {
             WindowCompat.setDecorFitsSystemWindows(it, false)
             it.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            // Dialog 窗口默认是 wrap-content：高度不铺满时，状态栏那一条露的是**窗口外面**的东西
+            // （后面的页/白底），用户截图里那条白带正是它。显式铺满两个方向，配合上面的
+            // decorFitsSystemWindows=false 与透明背景，窗口才真正覆盖整屏。
+            it.setLayout(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            )
         }
         onDispose { }
     }
