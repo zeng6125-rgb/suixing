@@ -19,9 +19,11 @@ import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.llm.Usage
+import com.suixing.agent.plugins.ManifestValidator
 import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.tools.TIER_ACCESSIBILITY
+import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
 import com.suixing.agent.tools.TIER_SHELL
 import com.suixing.agent.tools.ToolRegistry
@@ -1061,6 +1063,10 @@ class AgentEngine(
                 val pluginSpecs = PluginRuntime.enabledPlugins()
                 val toolSpecs = builtinSpecs +
                     PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
+                // 接线点 B（HOST-DEV §5）：这一轮的 hooks 快照，与工具表同一次读盘。分发处每条
+                // 调用都过一遍 [PluginRuntime.preExecute] —— 每轮读一次目录是刻意的（热插拔），
+                // 每条调用查一次 hook 是纯函数、不碰磁盘。
+                val hooks = PluginRuntime.hooksFor(pluginSpecs)
                 breakTools = toolSpecs.sumOf {
                     it.name.length + it.description.length + it.parameters.toString().length
                 } / 4
@@ -1234,21 +1240,56 @@ class AgentEngine(
                     }
                     val argsPreview = call.arguments.take(600)
                     val tool = registry.find(call.name)
+                    // 接线点 B（HOST-DEV §5）：内置找不到这个名字才落到插件（`<id>.<tool>`）——
+                    // 与工具表拼装（接线点 A）同一个顺序，内置优先，插件顶不掉 `run_shell` 这类。
+                    val pluginTool = if (tool == null) PluginRuntime.resolve(pluginSpecs, call.name) else null
+                    // 谁真的跑这一条。null ＝ 两边都没有这个名字（模型编了个工具名）。
+                    val runner: (suspend (JsonObject) -> ToolResult)? = when {
+                        tool != null -> { args -> tool.run(args) }
+                        pluginTool != null -> { args ->
+                            PluginRuntime.execute(pluginTool.first, pluginTool.second, args)
+                        }
+                        else -> null
+                    }
+                    // 能力档：插件工具的档由 exec 决定 —— `needs_root` 才要 root，其余固定 local
+                    // （＝本应用身份，不需要额外能力），所以只有 root 那一档会被 blockedReason 拦住。
+                    val tier = when {
+                        pluginTool != null ->
+                            if (pluginTool.second.exec.needsRoot) TIER_ROOT else TIER_NONE
+                        tool != null -> tool.tier
+                        else -> null
+                    }
+                    // 风险档只有插件工具有（内置工具只有能力档），所以 min_risk 条件对内置一律
+                    // 不成立；要拦内置工具用 `when.tool` + `when.regex`。
+                    val risk = pluginTool?.let { ManifestValidator.riskOf(it.second) }
+                    val verdict = PluginRuntime.preExecute(hooks, call.name, argsPreview, risk)
                     var toolMs = 0L
-                    val result = if (tool == null) {
+                    val result = if (runner == null) {
                         ToolResult.failure("未知工具：${call.name}")
+                    } else if (verdict.deny) {
+                        // 与「能力不足」同一类：跑都没跑，所以不发 ToolStarted。
+                        ToolResult.failure(verdict.message ?: "插件 hook 拒绝了这次调用。")
                     } else {
-                        val blocked = blockedReason(tool.tier, capabilities)
+                        val blocked = tier?.let { blockedReason(it, capabilities) }
                         if (blocked != null) {
                             ToolResult.failure(blocked)
                         } else {
                             liveLine = "🔧 ${call.name}…"
                             onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
-                            if (!gate.request(chatId, call.name, argsPreview, settings.approvalMode)) {
+                            // `require_confirm` 只把「自动运行」提到「问一次」。禁止档不动：那是用户
+                            // 禁掉了一切工具，插件不能替用户放开成一次询问；已经点过「总是允许」的
+                            // 也照旧放行 —— 用户的手动决定比插件的声明更 deliberate。
+                            val mode =
+                                if (verdict.requireConfirm && settings.approvalMode == ApprovalMode.AUTO) {
+                                    ApprovalMode.ASK
+                                } else {
+                                    settings.approvalMode
+                                }
+                            if (!gate.request(chatId, call.name, argsPreview, mode)) {
                                 ToolResult.failure("用户拒绝了这次调用。")
                             } else {
                                 val startedAt = System.currentTimeMillis()
-                                runCatching { tool.run(parseArgs(call.arguments)) }.getOrElse { error ->
+                                runCatching { runner(parseArgs(call.arguments)) }.getOrElse { error ->
                                     if (error is CancellationException) throw error
                                     ToolResult.failure("工具执行异常：${error.message ?: error::class.java.simpleName}")
                                 }.also { toolMs = System.currentTimeMillis() - startedAt }

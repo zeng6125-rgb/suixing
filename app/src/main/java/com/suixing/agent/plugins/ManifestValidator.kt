@@ -353,7 +353,8 @@ object ManifestValidator {
         return if (declared != null && rank(declared) > rank(inferred)) declared else inferred
     }
 
-    private fun rank(risk: String): Int = when (risk) {
+    /** 风险档的高低（low < medium < high）。hook 的 `min_risk` 与 [riskOf] 共用这一把尺。 */
+    internal fun rank(risk: String): Int = when (risk) {
         "high" -> 3
         "medium" -> 2
         else -> 1

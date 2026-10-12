@@ -41,6 +41,14 @@ class PluginStore(private val baseDir: File) {
     private fun pluginDir(id: String) = File(baseDir, id)
 
     /**
+     * 一个插件的目录（绝对路径）。**路径算术，不碰磁盘** —— 所以不是 suspend，也不校验它存在。
+     *
+     * 给执行管道用：`{{plugin_dir}}` 与 shell 的默认 cwd 都是它（M3）。目录不存在时执行会自己失败，
+     * 这里不必先 stat 一次。
+     */
+    fun dirOf(id: String): File = pluginDir(id)
+
+    /**
      * 列出现有插件：**先扫目录**（真源），再用 [KNOWN_FILE] 差量修正。
      *
      * 扫出来的每个目录都要给出 `spec`（解析失败就是 null + 一条 SCHEMA_INVALID），绝不静默跳过 ——
