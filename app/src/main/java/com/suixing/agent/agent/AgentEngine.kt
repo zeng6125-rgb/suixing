@@ -19,6 +19,7 @@ import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.llm.Usage
+import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.tools.TIER_ACCESSIBILITY
 import com.suixing.agent.tools.TIER_ROOT
@@ -1053,7 +1054,13 @@ class AgentEngine(
                 // Measured here, where the wire for this round is final: steering has landed
                 // and compression has already run, so the numbers match what is about to be
                 // sent rather than what the round started with.
-                val toolSpecs = registry.all().map { it.spec }
+                // 接线点 A（HOST-DEV §5）：内置工具之后**追加启用插件的工具**（`<id>.<tool>`）。
+                // 重名的插件工具在 PluginRuntime.toolSpecs 里被跳过并记日志 —— 内置优先，绝不覆盖。
+                // 实时读盘：用户刚启用的插件，下一个请求就该出现在工具表里。
+                val builtinSpecs = registry.all().map { it.spec }
+                val pluginSpecs = PluginRuntime.enabledPlugins()
+                val toolSpecs = builtinSpecs +
+                    PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
                 breakTools = toolSpecs.sumOf {
                     it.name.length + it.description.length + it.parameters.toString().length
                 } / 4
@@ -1856,6 +1863,10 @@ class AgentEngine(
         append(settings.systemPrompt.trim())
         append("\n\n## 可用工具\n")
         append(registry.promptSummary())
+        // 接线点 A（HOST-DEV §5）：让模型知道插件工具也能调，命名与内置一致。
+        // 这句是**固定文案**：插件列表是实时变的，而 systemPrompt() 不是 suspend（读盘要 suspend），
+        // 所以不在这里读插件；没有启用插件时多说一句也无害（模型看不到那个名字就不会去调）。
+        append("\n\n用户启用了插件提供的扩展工具（`id.tool` 命名），调用方式与内置工具一致。")
         // 禁止档下每一次调用都必然失败（[request] 直接返回 false，模型只会拿到「用户拒绝了
         // 这次调用。」），而上面那张工具表照旧列着。不在这里说明，模型就会一轮轮撞墙、把整轮
         // 时间花在被拒的调用上，而不是直接回答用户。

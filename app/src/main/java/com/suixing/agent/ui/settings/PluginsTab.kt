@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -28,8 +30,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.core.Core
 import com.suixing.agent.plugins.EnvDecl
@@ -177,6 +182,12 @@ fun PluginsSection(onNotify: (String) -> Unit) {
     detail?.let { spec ->
         PluginDetailDialog(
             spec = spec,
+            // Read from the list that is already loaded rather than fetching again: the switch in the
+            // row and the button in the dialog are the same state, and two reads could disagree.
+            enabled = entries.firstOrNull { it.id == spec.id }?.state?.enabled == true,
+            // The store's own directory for this plugin (filesDir/plugins/<id>), read from the same
+            // loaded entry — not re-derived from a string, so what is shown is what is on disk.
+            dir = entries.firstOrNull { it.id == spec.id }?.dir?.absolutePath.orEmpty(),
             onDismiss = { detail = null },
             onFillEnv = { envFor = spec },
             onUninstall = {
@@ -314,6 +325,13 @@ private fun RiskBadge(spec: PluginSpec?) {
 @Composable
 private fun PluginDetailDialog(
     spec: PluginSpec,
+    /** Whether this plugin is currently switched on — the action button shows one of the two. */
+    enabled: Boolean,
+    /**
+     * Where this plugin lives on disk, absolute. Shown so the user can find it with a file manager —
+     * the same reason the skills page prints its root path.
+     */
+    dir: String,
     onDismiss: () -> Unit,
     onFillEnv: () -> Unit,
     onUninstall: () -> Unit,
@@ -330,6 +348,26 @@ private fun PluginDetailDialog(
             SelectionContainer {
                 Column(Modifier.horizontalScroll(rememberScrollState())) {
                     Text(spec.description.zh, style = MaterialTheme.typography.bodySmall)
+                    if (dir.isNotBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("目录", style = MaterialTheme.typography.titleSmall)
+                        val clipboard = LocalClipboardManager.current
+                        val context = LocalContext.current
+                        Text(
+                            text = dir,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            // Two lines and an ellipsis: an absolute path under /data/data is long,
+                            // and letting it wrap freely would push the buttons off the dialog.
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.clickable {
+                                // The repo's own copy idiom (ChatScreen's message copy): the platform
+                                // clipboard plus a toast, so a long path can be pasted somewhere useful.
+                                clipboard.setText(AnnotatedString(dir))
+                                Toast.makeText(context, "已复制路径", Toast.LENGTH_SHORT).show()
+                            },
+                        )
+                    }
                     spec.tools.forEach { tool ->
                         Spacer(Modifier.height(10.dp))
                         Text("工具 ${tool.name}（${tool.risk ?: "read"}）", style = MaterialTheme.typography.titleSmall)
@@ -382,14 +420,22 @@ private fun PluginDetailDialog(
             }
         },
         confirmButton = {
-            Row {
-                TextButton(onClick = { onToggle(true) }) { Text("启用") }
+            // 二选一，不是并排两个：一个插件不可能同时"已启用"和"未启用"，两个按钮同时出现会让
+            // 用户以为它们是两个不同的动作（而不是同一个开关的两面）。
+            if (enabled) {
                 TextButton(onClick = { onToggle(false) }) { Text("停用") }
+            } else {
+                TextButton(onClick = { onToggle(true) }) { Text("启用") }
             }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = onFillEnv) { Text("填 env") }
+                // 只在 manifest 真的声明了 env 时才画：没有 env 的插件上这个按钮点了什么也不会发生，
+                // 一个按不动的按钮比没有按钮更让人困惑。有 env 但**都不是必填**的也画 —— 选填项也是
+                // 用户可以填的东西。
+                if (spec.env.isNotEmpty()) {
+                    TextButton(onClick = onFillEnv) { Text("填 env") }
+                }
                 TextButton(onClick = onUninstall) { Text("卸载") }
             }
         },

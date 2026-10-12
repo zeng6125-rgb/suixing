@@ -139,6 +139,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -612,6 +615,9 @@ fun ChatScreen(
     // and a re-arm mid-press is what let the next streamed frame pin the list to its end under the
     // hand. Transient by nature — a rotation mid-press is not a state worth restoring.
     var pressed by remember { mutableStateOf(false) }
+    // 手指有没有越过触摸斜率。**必须是 state**：`nestedScroll` 的连接要读它决定放不放行，而那个
+    // 回调不在组合里跑 —— 只有活着 state 才读得到当前值。按下时清零、循环里越过斜率就置位。
+    var fingerDragged by remember { mutableStateOf(false) }
     // 按下期间列表自己动过没有。**必须按帧采样**：指针事件只在手指移动时到达，而静止的长按
     // （选文本）期间 `isScrollInProgress` 一次也采不到 —— 真机日志里 `scrolled=false` 而位置
     // 却变了 636px，就是这一条采样空档。判定本身还靠「按下/抬起的位置对」，这一条只是让日志
@@ -959,6 +965,32 @@ fun ChatScreen(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
+                            // 按住期间不许动：手指按下、又没越过触摸斜率时，把一切滚动增量都吃掉。
+                            //
+                            // 为什么不能只靠事后还原（restoresPositionAfterLongPress）：框架把选中
+                            // 行拉进视野是**先发生**的，用户已经看见了那段位移，我们再把位置放回去，
+                            // 观感就是「中途滚了一下才滚回来」（用户复测的原话）。这里在滚动**到达
+                            // 列表之前**就返回 Offset.Zero 把它消费掉，那次滚动根本不会发生。
+                            //
+                            // 放行条件只有一条：手指真的拖动过（越过触摸斜率）⇒ 用户自己要滚，一律
+                            // 放行。`pressed`/`fingerDragged` 是长按路径一直在用的那两个瞬态量，读的是
+                            // 活的 state（委托属性捕获的是 MutableState 本身），不是组合时的快照。
+                            .nestedScroll(
+                                object : NestedScrollConnection {
+                                    override fun onPreScroll(
+                                        available: Offset,
+                                        source: NestedScrollSource,
+                                    ): Offset =
+                                        if (pressed && !fingerDragged) available else Offset.Zero
+
+                                    override fun onPostScroll(
+                                        consumed: Offset,
+                                        available: Offset,
+                                        source: NestedScrollSource,
+                                    ): Offset =
+                                        if (pressed && !fingerDragged) available else Offset.Zero
+                                },
+                            )
                             // A finger on the transcript releases the follow the instant it lands,
                             // not after a threshold. Waiting for the 450ms long press — or for 12dp
                             // of travel — meant a streaming answer kept pinning the list to its end
@@ -984,6 +1016,7 @@ fun ChatScreen(
                                         val wasFollowing = following
                                         following = false
                                         pressed = true
+                                        fingerDragged = false
                                         scrollDiag(context, "press:down", listState, wasFollowing, itemCount, ime = heldIme) // 量完删
                                         var movedUp = false
                                         // Whether the list itself moved. A hand can travel less than
@@ -995,8 +1028,9 @@ fun ChatScreen(
                                         var scrolled = false
                                         // 手指有没有越过触摸斜率。越过之前，Compose 的滚动根本不会
                                         // 因为手指而动 —— 所以「没越过 + 列表却动了」只可能是别的东西
-                                        // 在滚（选择机制把选中行拉进视野）。这是长按还原位置的判据。
-                                        var fingerDragged = false
+                                        // 在滚（选择机制把选中行拉进视野）。这是长按还原位置的判据，
+                                        // 也是 nestedScroll 放不放行的开关（它是外层那个 state，
+                                        // 按下时已清零，这里只置位）。
                                         var released = false
                                         while (!released) {
                                             val next = awaitPointerEvent(PointerEventPass.Initial)

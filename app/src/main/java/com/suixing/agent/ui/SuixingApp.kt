@@ -18,8 +18,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -164,18 +164,10 @@ import kotlinx.coroutines.launch
  * 抽屉不在此列：点行时它 `snapTo(Closed)`、返回来源页时 `snapTo(Open)`（同样瞬时、无叠加），
  * 用户自己开合（汉堡键 / 左缘拖动 / 点遮罩 / 返回键）仍走库的滑入滑出动画。
  */
-private const val NAV_SLIDE_MS = 200
-
-/** 新页滑入的幅度：屏宽 ÷ 这个数（12 ⇒ 约 8% 屏宽）。见上面那段规格。 */
-private const val NAV_SHIFT_DIVISOR = 12
-
 /**
- * 从抽屉进入的四个顶层目的地。
- *
- * 两处用它分流：**进页**（它们走 0.8.91 那条右侧滑入，子页不播动画）与**返回**（它们走 0.8.91
- * 原样，子页走「极轻」的淡入 + 微位移）。其余目的地都是设置子页。
+ * 转场时长：进页淡入、返回淡出都用它（200ms）。抽屉自己的滑出是库那条 ~250ms，两者同帧起跑。
  */
-private val DRAWER_ROUTES = setOf("files", "tasks", "schedules", "settings")
+private const val NAV_FADE_MS = 200
 
 /**
  * The app shell.
@@ -192,29 +184,6 @@ fun SuixingApp() {
     val backStackEntry by navController.currentBackStackEntryAsState()
     // 当前**覆盖层**的路由；"empty" 是栈底那层透明的占位 —— 也就是"chat 露着"。
     val route = backStackEntry?.destination?.route?.substringBefore('?') ?: "empty"
-
-    /**
-     * 覆盖层容器那层不透明底该不该在。
-     *
-     * **判据不能是「当前 route」**：`route` 在 pop 的**第一帧**就变回 "empty"，而此时 pop 转场
-     * 还在跑 ⇒ 底下的聊天页立刻透出来，用户看到的就是「返回时底部闪动」（0.8.94 没有、0.8.95
-     * 才出现的回归 —— 那一版把六个设置子页从「页内换内容」改成了走真路由，于是它们第一次真的
-     * 播 NavHost 的 pop 转场，这条一直存在的时序问题才暴露出来）。
-     *
-     * 所以：进覆盖层立刻落 true；离开时**等一个转场时长**再落 false（转场跑完之前一直不透明，
-     * 露出来的只能是底色，不会是 chat）。用 `delay` 而不是 pop 完成回调：`NAV_SLIDE_MS` 就是那条
-     * 转场的长度，两者共用同一个常量，改一个另一个跟着走；回调那套要多引一个 transition 状态。
-     */
-    var opaque by remember { mutableStateOf(false) }
-    val overlayPresent = route != "empty"
-    LaunchedEffect(overlayPresent) {
-        if (overlayPresent) {
-            opaque = true
-        } else {
-            delay(NAV_SLIDE_MS.toLong())
-            opaque = false
-        }
-    }
     val pending by Core.gate.pending.collectAsState()
 
     // Owned here rather than inside the chat screen: the drawer lists and switches the
@@ -273,9 +242,10 @@ fun SuixingApp() {
     // route 恰好等于那个陈旧名字，抽屉就会自己弹出来。
     var drawerTarget by remember { mutableStateOf<String?>(null) }
     val open: (String) -> Unit = { target ->
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            drawerState.snapTo(DrawerValue.Closed)
-        }
+        // **用库的关闭动画（close），不要 snapTo**：用户逐帧看了录屏，说 snapTo 那条「抽屉先瞬间
+        // 消失、页面才进来」被读成「先关侧边栏再进页面」，逻辑不对。改成 close()（~250ms 滑出），
+        // 与下面的导航同帧起跑 ⇒ 抽屉滑出的同时新页面淡进来。
+        scope.launch { drawerState.close() }
         if (target != route) {
             drawerReturnTo = route
             drawerTarget = target
@@ -304,13 +274,8 @@ fun SuixingApp() {
     val chatFromDrawer: () -> Unit = {
         drawerReturnTo = null
         drawerTarget = null
-        // snapTo 而不是 close()：close 是库那条 ~256ms 的左滑，那 256ms 里抽屉与遮罩正盖在刚
-        // 显示的聊天页上 —— 用户报的「残影」里就有这一帧（点页面行那条路早就是 snapTo，只有
-        // 这里漏了）。UNDISPATCHED 让这次状态写入与下面的导航落在同一帧；手感不变：抽屉本来
-        // 就是「不在了」，不是「滑走了」。
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            drawerState.snapTo(DrawerValue.Closed)
-        }
+        // 同 open()：库的关闭动画，不要 snapTo（理由见那里）。
+        scope.launch { drawerState.close() }
         showChat()
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
@@ -509,22 +474,14 @@ fun SuixingApp() {
                             startDestination = "empty",
                             modifier = Modifier
                                 .fillMaxSize()
-                                // 覆盖层自己不透明：NavHost 是透明的，而「新页还没画出第一帧」
-                                // （新页是一次全新组合，重页面尤其明显）或「状态栏/导航栏那一圈
-                                // 没被页面画满」时，露出来的就是下面那份常驻的 chat —— 用户报的
-                                // 「残影」就是这层露底，不是交叉淡化。这一层保证「要么是 chat、
-                                // 要么是新页」，不存在中间态；route == "empty"（没有覆盖层）时
-                                // 保持透明，chat 照旧可见。
-                                .background(
-                                    // 判据是 [opaque]（转场期间保持不透明），不是 `route` —— 见它的
-                                    // KDoc：跟着 route 走会在 pop 的第一帧变透明，转场期间底下的聊天页
-                                    // 就透出来了，那就是用户报的「返回时底部闪动」。
-                                    if (opaque) {
-                                        MaterialTheme.colorScheme.background
-                                    } else {
-                                        Color.Transparent
-                                    },
-                                )
+                                // **这里不铺底色**（原来有一层 `.background(if (route == "empty") …)`，已删）：
+                                // 用户逐帧截图显示，返回的**第一帧右侧是一块空白** —— pop 开始时 route 还是
+                                // 旧页那条 ⇒ 这层底色仍在，而旧页已经开始淡出 ⇒ 露出来的就是底色本身。
+                                // 每个覆盖层页面自己就有不透明底（各页 `Scaffold(containerColor = background)`），
+                                // 外面这层多余；删掉后返回第一帧露出的直接是**聊天页** ✔。
+                                // 代价（认了）：push 时新页首帧若没画满，可能露出一帧聊天页 —— 比「每次返回
+                                // 都空白 200ms」轻得多。**不要再加回「转场期间保持不透明」那套**（`opaque`
+                                // + delay 会把窗口拉到 200ms，空白更明显）。
                                 // 覆盖层盖住了 chat，但页面自己的根只画底色、不消费触摸：点在页面
                                 // 空白处（不是按钮/列表的地方）会"穿透"到下面仍在组合里的聊天页，
                                 // 打到输入框、消息行、麦克风上。这一层只在真有覆盖层时才加（route
@@ -541,51 +498,18 @@ fun SuixingApp() {
                                 ),
                             // 进页**不播动画**（按最小、最保守的形态落地）：
                             // · 抽屉路线（点抽屉进页面）= 0.8.91 原样，从右侧滑入 —— 用户认可的版本，
-                            //   一点都不要动；
-                            // · 子页（设置 → 模型）= enter 与 exit 都是 None ⇒ 旧页不瞬消、新页不滑入，
-                            //   也就没有「新页滑进来时旧页已消失、中间露出空底」那种破相。
-                            // 进页 = 0.8.91 原样，**不动**（用户：「点进去的动画可以」）：新页从右侧
-                            // 滑入 1/12 屏宽、200ms。抽屉路线与子页**同一条**，没有分支。
+                            // 进页 = **淡入、无位移**（用户逐帧看录屏：点抽屉一行时要「抽屉滑出 + 页面
+                            // 淡进」同时进行，加位移会变成两段动作）。旧页当帧让位，露出来的先是那层
+                            // 不透明底（route != "empty" ⇒ 底色在），所以淡入期间不会透出聊天页。
                             enterTransition = {
-                                slideInHorizontally(
-                                    animationSpec = tween(
-                                        durationMillis = NAV_SLIDE_MS,
-                                        easing = FastOutSlowInEasing,
-                                    ),
-                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
+                                fadeIn(tween(NAV_FADE_MS, easing = FastOutSlowInEasing))
                             },
                             exitTransition = { ExitTransition.None },
-                            // 返回：**父页原地不动**（子页返回时它直接露出来，不滑入 —— 上一版让它
-                            // 从左侧滑回来，与「进页」太像，用户读成「没加动画」）。返回的视觉信号
-                            // 全部交给 popExit 的「上层向右滑走」，见下。
-                            // 抽屉路线返回仍是 0.8.91 原样（从右侧滑入 +/12），不要动。
-                            popEnterTransition = {
-                                if (initialState.destination.route in DRAWER_ROUTES) {
-                                    slideInHorizontally(
-                                        animationSpec = tween(
-                                            durationMillis = NAV_SLIDE_MS,
-                                            easing = FastOutSlowInEasing,
-                                        ),
-                                    ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
-                                } else {
-                                    EnterTransition.None
-                                }
-                            },
-                            // 返回的**视觉信号**在这里：被关掉的那一页**向右滑出去**（「上面那页滑走、
-                            // 露出下面那页」的经典形态），父页原地不动 ⇒ 一眼能看出这是「返回」而不是
-                            // 「又进了一页」。位移/时长与进页同一套规格（1/12、200ms），方向相反。
-                            // 抽屉路线返回仍是 0.8.91 原样（旧页当帧消失），不要动。
+                            // 返回 = **上层淡出、聊天页直接在底下露出来**：chat 自己不参与转场
+                            // （popEnter = None，它不动），被关掉的那页 fadeOut ⇒ 没有任何一帧是纯底色。
+                            popEnterTransition = { EnterTransition.None },
                             popExitTransition = {
-                                if (initialState.destination.route in DRAWER_ROUTES) {
-                                    ExitTransition.None
-                                } else {
-                                    slideOutHorizontally(
-                                        animationSpec = tween(
-                                            durationMillis = NAV_SLIDE_MS,
-                                            easing = FastOutSlowInEasing,
-                                        ),
-                                    ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
-                                }
+                                fadeOut(tween(NAV_FADE_MS, easing = FastOutSlowInEasing))
                             },
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。

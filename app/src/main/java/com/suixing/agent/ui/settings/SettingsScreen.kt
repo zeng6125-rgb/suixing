@@ -243,9 +243,9 @@ private fun SettingsRoot(
                     title = "模型与对话",
                     rows = listOf(
                         // 走 `onOpen(...route)`（真路由）而不是 `onOpenPage(...)`（同一个目的地里换内容）：
-                        // 内部切换不经过 NavHost ⇒ 没有任何转场，用户报的「打开子页没有返回动画」就是它。
-                        // 路由本来就存在（`SettingsPageRoute` 按 `SettingsPage.route` 分发），所以这里
-                        // 只是改走它。用 `SettingsPage.X.route` 而不是手写字符串，避免两处各写一份路由名。
+                        // 内部切换不经过 NavHost ⇒ 没有任何转场。路由本来就存在（`SettingsPageRoute` 按
+                        // `SettingsPage.route` 分发），所以这里只是改走它；用 `SettingsPage.X.route` 而不是
+                        // 手写字符串，避免两处各写一份路由名。
                         SettingsGroupRow("模型与生成", "接口、模型与采样") {
                             onOpen(SettingsPage.MODEL.route)
                         },

@@ -30,6 +30,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -82,6 +84,9 @@ fun FilesScreen(onBack: () -> Unit) {
     // user grants 「所有文件访问权限」 — without it the listing above it is invisible to us.
     val appRoot = remember { workspaceDir(context) }
     val externalRoot = remember { Environment.getExternalStorageDirectory() }
+    // 第三个根：插件目录（filesDir/plugins）。它在应用私有目录里，**文件页本来就能读**，
+    // 不需要「所有文件访问权限」—— 那条闸门只属于 /sdcard。
+    val pluginRoot = remember { File(context.filesDir, "plugins") }
     val supportsAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     var allFilesGranted by remember {
         mutableStateOf(supportsAllFiles && Environment.isExternalStorageManager())
@@ -89,6 +94,7 @@ fun FilesScreen(onBack: () -> Unit) {
     var root by remember { mutableStateOf(appRoot) }
     var current by remember { mutableStateOf(root) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var rootMenu by remember { mutableStateOf(false) }
     val allFilesLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) {
@@ -99,7 +105,12 @@ fun FilesScreen(onBack: () -> Unit) {
             current = externalRoot
         }
     }
-    val rootLabel = if (root == appRoot) "工作目录" else "/sdcard"
+    // 三个根了，所以标签要认三支；`when` 而不是二选一，免得第四个根再加时又漏一个。
+    val rootLabel = when (root) {
+        appRoot -> "工作目录"
+        externalRoot -> "/sdcard"
+        else -> "插件目录"
+    }
     var entries by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var listError by remember { mutableStateOf<String?>(null) }
     var listing by remember { mutableStateOf(true) }
@@ -152,40 +163,65 @@ fun FilesScreen(onBack: () -> Unit) {
             subtitle = relativePath(root, current, rootLabel),
             onBack = onBack,
             actions = {
-                IconButton(
-                    onClick = {
-                        if (root == appRoot) {
-                            if (allFilesGranted) {
-                                root = externalRoot
-                                current = externalRoot
+                // 三个根 ⇒ 菜单，而不是继续循环。二态时那颗按钮的语义是"切到另一个"，一眼就懂；
+                // 三态之后循环按钮必须用文案说明"下一次点会去哪"，而其中一支还带权限闸门（/sdcard），
+                // 一个按钮承担不了这些。菜单把三个根一次列全，被闸门挡住的那支也能就地说明。
+                Box {
+                    IconButton(onClick = { rootMenu = true }) {
+                        Icon(
+                            ImageVector.vectorResource(R.drawable.ic_folder_open),
+                            contentDescription = "切换目录根（当前：$rootLabel）",
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    DropdownMenu(expanded = rootMenu, onDismissRequest = { rootMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("工作目录") },
+                            onClick = {
+                                rootMenu = false
+                                root = appRoot
+                                current = appRoot
                                 notice = null
-                            } else {
-                                // The grant lives in the system settings app, so it is reached
-                                // through the launcher and re-read on the way back. Only a ROM
-                                // without either page falls through to the message.
-                                val opened = allFilesAccessIntents(context).any { intent ->
-                                    runCatching { allFilesLauncher.launch(intent) }.isSuccess
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (allFilesGranted) "/sdcard" else "/sdcard（需要所有文件访问权限）")
+                            },
+                            onClick = {
+                                rootMenu = false
+                                if (allFilesGranted) {
+                                    root = externalRoot
+                                    current = externalRoot
+                                    notice = null
+                                } else {
+                                    // The grant lives in the system settings app, so it is reached
+                                    // through the launcher and re-read on the way back. Only a ROM
+                                    // without either page falls through to the message.
+                                    val opened = allFilesAccessIntents(context).any { intent ->
+                                        runCatching { allFilesLauncher.launch(intent) }.isSuccess
+                                    }
+                                    if (!opened) {
+                                        notice = "本机打不开「所有文件访问权限」设置，可以改用 Shizuku 或 root 拿全盘访问。"
+                                    }
                                 }
-                                if (!opened) {
-                                    notice = "本机打不开「所有文件访问权限」设置，可以改用 Shizuku 或 root 拿全盘访问。"
-                                }
-                            }
-                        } else {
-                            root = appRoot
-                            current = appRoot
-                            notice = null
-                        }
-                    },
-                ) {
-                    Icon(
-                        ImageVector.vectorResource(R.drawable.ic_folder_open),
-                        contentDescription = if (root == appRoot) {
-                            if (allFilesGranted) "切换到 /sdcard" else "授权后查看 /sdcard"
-                        } else {
-                            "回到应用目录"
-                        },
-                        modifier = Modifier.size(20.dp),
-                    )
+                            },
+                        )
+                        // 插件目录没有闸门：filesDir 是应用自己的目录，文件页本来就能读。
+                        DropdownMenuItem(
+                            text = { Text("插件目录") },
+                            onClick = {
+                                rootMenu = false
+                                // 先确保它存在。目录还没建过时 listFiles() 返回 null，而那条
+                                // 失败文案说的是「可能缺少所有文件访问权限」—— 对一个我们自己拥有的
+                                // 私有目录，那是误导。PluginStore 自己也是先 mkdirs() 再列。
+                                pluginRoot.mkdirs()
+                                root = pluginRoot
+                                current = pluginRoot
+                                notice = null
+                            },
+                        )
+                    }
                 }
                 IconButton(onClick = { reload++ }) {
                     Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), contentDescription = "刷新", modifier = Modifier.size(20.dp))
@@ -212,16 +248,22 @@ fun FilesScreen(onBack: () -> Unit) {
 
         if (current == root) {
             Text(
-                text = if (root == appRoot) {
-                    if (allFilesGranted) {
+                text = when (root) {
+                    appRoot -> if (allFilesGranted) {
                         "这里是随行的默认工作目录，模型用相对路径读写的文件都在这里。" +
                             "顶栏的文件夹按钮可以切到 /sdcard。"
                     } else {
                         "这里是随行的默认工作目录，模型用相对路径读写的文件都在这里。" +
                             "顶栏的文件夹按钮会带你去开「所有文件访问权限」，开完就能看 /sdcard。"
                     }
-                } else {
-                    "正在浏览 /sdcard：共享存储里的文件都能进。顶栏的文件夹按钮可以回到应用目录。"
+
+                    externalRoot ->
+                        "正在浏览 /sdcard：共享存储里的文件都能进。顶栏的文件夹按钮可以回到应用目录。"
+
+                    // 只读的说明写在这里：这个根是给"看"用的，插件由插件页管理，免得两条写入路径。
+                    else ->
+                        "这是已安装插件所在的目录（应用私有）。每个插件一个子目录，里面的 manifest.json " +
+                            "就是它的说明书；这里只能查看，装卸与开关都在「工具 → 插件」页。"
                 },
                 modifier = Modifier.padding(horizontal = 16.dp),
                 style = MaterialTheme.typography.bodySmall,

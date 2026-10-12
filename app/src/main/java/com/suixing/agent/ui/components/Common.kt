@@ -49,6 +49,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
@@ -575,34 +576,49 @@ fun PageTopBar(
                     shadowElevation = 0.dp,
                 )
                 Spacer(Modifier.width(12.dp))
-                // 图标与标题同一条基线（用户：「icon 和标题没对齐」）。**算式**（相对栏顶 64dp 盒子，
-                // 已含整行的 offset(16dp)，以下都是视觉位置）：
-                //   标题列 = 标题 25dp + 副标题 18dp = 43dp，整列居中 ⇒ 列占 26.5–69.5；
-                //   标题在列内占 26.5–51.5 ⇒ **标题中心 39dp**；
-                //   返回键那枚 disc 的中心 = 行中心 = **48dp**（16 + 64/2）；
-                //   ⇒ 标题比图标**高 9dp**，要把整列**往下**移 9dp：39 + 9 = 48 ✔。
-                // **符号是 +9，不是 −9**：负号会把标题推到 30dp，比改之前还歪 18dp —— 上一版就是这
-                // 么错的，用户因此说「依旧没对齐」。没有副标题时列里只有标题、本来就居中 ⇒ 保持 0。
-                // 副标题随之下移到 60.5–78.5，仍在标题下方；64dp 是 heightIn(min)、栏可长高，不裁。
-                // 9dp 按标准字号档算：特大档（1.26×）副标题行高 ≈23dp ⇒ 残差约 2dp。
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .offset(y = if (subtitle != null) 9.dp else 0.dp),
-                ) {
+                // **结构性对齐**：标题的中心**必然**等于行的垂直中心（也就等于返回箭头 disc 的中心），
+                // 与有没有副标题无关。保证它的是两个 modifier，不是任何补偿数字：
+                //   · `Box(Modifier.weight(1f))` —— Box 的高度由**最高的子项**决定，而副标题是用
+                //     `offset` 挂出去的（offset 不参与布局）⇒ Box 高 = 标题行高（titleMedium 25dp）
+                //     ⇒ Box 被 Row 的 `CenterVertically` 居中 ⇒ **Box 中心 = 行中心**；
+                //   · 标题 `align(Alignment.CenterStart)` ⇒ 标题在 Box 内居中 ⇒ **标题中心 = Box 中心**。
+                //   串起来：标题中心 = 行中心 = disc 中心 ✔（不再依赖任何 ±Ndp 的补偿）。
+                // 副标题：同样 CenterStart 居中，再整体下移「两行行高之和的一半」= 两行紧挨时的中心距；
+                // 用 LocalDensity 把 sp 行高换算成 dp（`toDp()` 会算上 fontScale）⇒ 字号档变了自动跟随，
+                // 不写死 9/18 这种数字。
+                //
+                // 历史（别再退回补丁）：这里曾用 `.offset(y = if (subtitle != null) 9.dp else 0.dp)`
+                // 上下挪整列 —— 那是补偿数字，还写反过一次符号（−9 让标题比不改更歪 18dp）。
+                Box(Modifier.weight(1f)) {
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.align(Alignment.CenterStart),
                     )
                     if (subtitle != null) {
+                        // 行高**先取成局部 val**：`MaterialTheme.typography` 是 @Composable 读取，而
+                        // `with(LocalDensity.current) { … }` 的 lambda 不是 @Composable ⇒ 在块内读它
+                        // 编译不过（TextUnit 的类型推断也跟着塌：Unresolved reference 'plus'）。
+                        // 读出来再换算就没这个问题；`(titleLine + subLine)` 保持 TextUnit、`/ 2` 也在
+                        // TextUnit 上算，最后 `.toDp()`（会算上 fontScale ⇒ 字号档自动跟随）。
+                        val titleLine = MaterialTheme.typography.titleMedium.lineHeight
+                        val subLine = MaterialTheme.typography.bodySmall.lineHeight
+                        // 用 Dp 相加而不是 TextUnit 相加：TextUnit 的 `+` 在类型推断不稳时会被解析成
+                        // 歧义候选（本轮就踩到：Unresolved reference 'plus' + 重载歧义）。先各自 toDp()
+                        // 再相加，类型是明确的 Dp。toDp() 会算上 fontScale ⇒ 字号档自动跟随。
+                        val density = LocalDensity.current
+                        val stackShift: Dp = with(density) { titleLine.toDp() + subLine.toDp() } / 2
                         Text(
                             text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .offset(y = stackShift),
                         )
                     }
                 }
