@@ -1,5 +1,11 @@
 package com.suixing.agent.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -56,6 +62,40 @@ import com.suixing.agent.R
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
+
+/**
+ * 全站统一的进/退场动画（0.8.106，用户：「进新页的动画需要都统一」）。
+ *
+ * 与 NavHost 的页面转场**同一套数字、同一个来源**：进页＝从右滑入 1/12 屏宽、200ms；
+ * 退场＝淡出 200ms（「蒙版由深到没有」）。覆盖层（助手编辑页/裁剪页）走 [FullScreenOverlay]，
+ * 导航页走 SuixingApp 的 NavHost，两边都引这三个常量 —— 改一处全站跟着改，不会再出现
+ * 「一会有一会没有」的第二套动画。
+ */
+const val NAV_ENTER_MS = 200
+const val NAV_EXIT_MS = 200
+const val NAV_SHIFT_DIVISOR = 12
+
+/**
+ * 主窗口里的全屏覆盖层：进出场与导航页同一套动画（[NAV_ENTER_MS]/[NAV_EXIT_MS]）。
+ *
+ * 退场期间 [content] 仍然在组合里（AnimatedVisibility 的语义），所以宿主要把「最后一次的
+ * 内容」留到退场结束（见各宿主的 lastId 写法），否则淡出的那 200ms 会是一片空白。
+ */
+@Composable
+fun FullScreenOverlay(
+    visible: Boolean,
+    content: @Composable () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = slideInHorizontally(
+            animationSpec = tween(durationMillis = NAV_ENTER_MS, easing = FastOutSlowInEasing),
+        ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR },
+        exit = fadeOut(tween(NAV_EXIT_MS, easing = FastOutSlowInEasing)),
+    ) {
+        content()
+    }
+}
 
 /**
  * 全站统一的可点块：形状、涟漪、按下反馈都从这一处来。
@@ -389,6 +429,12 @@ fun SuixingTopBar(
     leading: (@Composable () -> Unit)? = null,
     subtitleTrailing: (@Composable () -> Unit)? = null,
     actions: @Composable RowScope.() -> Unit = {},
+    /**
+     * 行内容的起始内边距。默认 8dp（有抽屉手柄的页：手柄自己带视觉重量）；没有手柄、
+     * 直接以头像/返回箭头开头的页传 16dp，与页面内容的 16dp 边距对齐（用户：编辑页
+     * 「左边距大一点点」）。
+     */
+    startPadding: Dp = 8.dp,
 ) {
     val scheme = MaterialTheme.colorScheme
     Box(
@@ -415,7 +461,7 @@ fun SuixingTopBar(
             modifier = Modifier
                 .statusBarsPadding()
                 .fillMaxWidth()
-                .padding(start = 8.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+                .padding(start = startPadding, end = 6.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // On the left, because the drawer it opens is on the left: a handle on the

@@ -256,6 +256,11 @@ private data class RunSession(
     val runningTool: String? = null,
     /** When the still-open thinking block started, so its clock is its own. */
     val thinkingStartedAt: Long = 0L,
+    /**
+     * 当前「段」在 [RunSession.parts] 里的起点下标。段＝最后一个工具行/插话行/轮落盘之后的那一段
+     * 流。同一段里思考与正文各自只持一个块（交错流不再把一句话劈开）；跨过切点才是新的一段。
+     */
+    val segmentStart: Int = 0,
     /** What the live bubble draws, in arrival order. */
     val parts: List<LivePart> = emptyList(),
     val error: String? = null,
@@ -516,14 +521,15 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
-     * The board the last `todo_write` left behind, held so it can be republished.
+     * 每个会话**自己**的板上快照：chatId → 该会话的 run 最近一次 todo 工具事件时文件里的清单。
      *
-     * One copy, not one per conversation: the board is app-wide — the file is shared, and two
-     * runs write the same list — so a per-chat copy would be a second source of truth that the
-     * next run's write would contradict. Cleared when a run starts, which is what keeps it from
-     * being the *previous* run's plan on screen.
+     * **文件（TodoStore）仍是唯一事实源**：这里只是事件之间的显示缓存，每次 todo 工具事件都从
+     * 文件重读、从不参与写（写只走 TodoTools）。按会话持有是因为用户报了反过来的病：A 会话的
+     * `todo_write` 事件到达时用户在 B 会话，旧的全局一份把 A 的板子画到了 B 屏幕上（「其它会话的
+     * 任务队列出现在另一个会话」）。缓存落后于别的会话的写入正是想要的隔离：一个会话只画自己
+     * 的 run 写的计划。开跑时清空自己那格（不继承上一轮的计划），与旧的全局版同一个不变量。
      */
-    private var todos: List<TodoItem> = emptyList()
+    private val todoBoards = mutableMapOf<String, List<TodoItem>>()
 
     /**
      * One live copy per running conversation, keyed by chat id. A single slot is what
@@ -756,8 +762,8 @@ class ChatViewModel : ViewModel() {
                 // still show what is waiting.
                 pendingSteers = steers[conversation.id].orEmpty(),
                 // And so does the board: it is read from disk on tool events, so a state built
-                // here would otherwise be the one place it is missing.
-                todos = todos,
+                // here would otherwise be the one place it is missing. 只取这个会话自己那一格。
+                todos = todoBoards[conversation.id].orEmpty(),
             )
         } else {
             // A conversation that never picked a persona keeps the one already on screen,
@@ -1319,19 +1325,21 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
-     * Re-reads the board and puts it on screen.
+     * Re-reads the board and puts it on screen — **for the conversation the event belongs to**.
      *
      * There is no flow to collect: [TodoStore] writes the whole list under a lock and nothing
      * else in the app touches it, so the two tool events are the clock. Off the main thread
      * because the board is a file, and this runs on the reader thread that delivers events.
-     * Published to whatever conversation is on screen — the board is app-wide — while the row
-     * itself is drawn only for a run that is going (see the composer's own condition).
+     * 只发给 [chatId] 自己（在屏就同时上屏，不在屏就只进它的缓存）：事件带的是哪个会话的 run，
+     * 板子就属于哪个会话 —— 旧的「发给在屏会话」会把 A 的计划画到 B 屏幕上。
      */
-    private fun refreshTodos() {
+    private fun refreshTodos(chatId: String) {
         viewModelScope.launch {
             val board = withContext(Dispatchers.IO) { Core.todos.read() }
-            todos = board
-            _state.update { it.copy(todos = board) }
+            todoBoards[chatId] = board
+            if (_state.value.conversationId == chatId) {
+                _state.update { it.copy(todos = board) }
+            }
         }
     }
 
@@ -1371,10 +1379,10 @@ class ChatViewModel : ViewModel() {
             ),
         )
         // A new run starts with an empty board on screen. The file still holds the last run's
-        // items — it is the app-wide board, not this run's — and drawing them here would show
-        // the previous task's plan wearing the new run's clothes, most visibly for a run that
-        // never touches the todo tools at all. The first `todo_write` of this run puts it back.
-        todos = emptyList()
+        // items — and drawing them here would show the previous task's plan wearing the new
+        // run's clothes, most visibly for a run that never touches the todo tools at all.
+        // The first `todo_write` of this run puts it back. 只清这个会话自己那一格。
+        todoBoards[chatId] = emptyList()
         _state.update { it.copy(todos = emptyList()) }
         jobs[chatId] = viewModelScope.launch {
             AgentForegroundService.start(Core.appContext, "随行正在执行任务")
@@ -1495,12 +1503,46 @@ class ChatViewModel : ViewModel() {
                 failure = listOf(describeError(error), note)
                     .filter { it.isNotBlank() }
                     .joinToString("\n")
+                // 「tool name is invalid or duplicated」这类 400 的最小探针全部 200（点号/横杠/重名/
+                // 插件全 schema/带未知工具名的历史，两个通道都测过），复现不出确切触发条件 ⇒ 让它
+                // 自己报：把这一轮的工具表与历史引用过的工具名写进 trace，下次发生直接读日志定位。
+                if (failure.contains("tool name", ignoreCase = true)) {
+                    val live = sessions[chatId]
+                    val historyCalls = live?.messages
+                        ?.flatMap { it.toolCalls }
+                        ?.map { it.name }
+                        ?.distinct()
+                        ?.takeLast(40)
+                        .orEmpty()
+                    retryTrace(
+                        "toolname-400 toolsTable=${Core.tools.names().joinToString(",")} " +
+                            "historyCalls=${historyCalls.joinToString(",")}",
+                    )
+                }
             } finally {
                 AgentForegroundService.stop(Core.appContext)
                 withContext(NonCancellable) {
                     // First of all: the writer must not run again, or a tick landing after
                     // the clear below would resurrect a draft for an answer already saved.
                     writer.cancel()
+                    // 传输层抛异常的失败（400/超时/断连）不走 AgentEvent.Failed，而回执只埋在
+                    // Failed 分支 ⇒ 横幅倒计时一过就什么都不剩（用户：「红色回执依旧会消失」）。
+                    // 这里补同一张回执：进 live.messages，下面的最终 saveSession 自然落盘。
+                    // Failed 分支已写过回执的（末条已是 SYSTEM）不重复写。
+                    if (failure != null) {
+                        sessions[chatId]?.let { live ->
+                            if (live.messages.lastOrNull()?.role != Roles.SYSTEM) {
+                                sessions[chatId] = live.copy(
+                                    messages = live.messages + StoredMessage(
+                                        id = UUID.randomUUID().toString(),
+                                        role = Roles.SYSTEM,
+                                        text = "这一轮最终失败：$failure",
+                                        runId = live.runId,
+                                    ),
+                                )
+                            }
+                        }
+                    }
                     // A cancelled coroutine refuses to suspend, so the final save has to
                     // run in a NonCancellable block or a stopped run loses its messages.
                     // Whatever the endpoint sent since the last publish belongs to the answer
@@ -1553,24 +1595,35 @@ class ChatViewModel : ViewModel() {
             // The round is stored, but it is not drawn from the transcript: the live
             // bubble keeps drawing it until the run lands, so the reply stays one bubble
             // from the first token to the last.
-            is AgentEvent.AssistantMessage -> base.copy(
-                messages = base.messages + event.message.copy(runId = base.runId),
-                parts = base.parts.sealThinking(base.thinkingStartedAt),
-                // The round is a message now, so the two live buffers start empty: from here
-                // they hold the round still being written, not the run so far. That is what
-                // lets the draft carry the part no message has yet — otherwise it would hand
-                // the whole run back as one paragraph and repeat the rounds already stored.
-                streaming = "",
-                reasoning = "",
-            )
+            is AgentEvent.AssistantMessage -> {
+                // 轮落盘＝一段结束：封口思考块，并把段起点推到封口后的末尾 —— 下一轮（或同一 run
+                // 的下一段）的思考/正文不会与这一轮的合并成一个块。
+                val sealed = base.parts.sealThinking(base.thinkingStartedAt)
+                base.copy(
+                    messages = base.messages + event.message.copy(runId = base.runId),
+                    parts = sealed,
+                    segmentStart = sealed.size,
+                    // The round is a message now, so the two live buffers start empty: from here
+                    // they hold the round still being written, not the run so far. That is what
+                    // lets the draft carry the part no message has yet — otherwise it would hand
+                    // the whole run back as one paragraph and repeat the rounds already stored.
+                    streaming = "",
+                    reasoning = "",
+                )
+            }
 
-            is AgentEvent.ToolStarted -> base.copy(
-                // 「正在调用」 rather than a bare verb: the line is a sentence the user reads
-                // while waiting, and 「调用 read_file」 read as a log entry.
-                status = "正在调用 ${event.name}",
-                runningTool = event.name,
-                parts = base.parts.sealThinking(base.thinkingStartedAt).startTool(event.name, event.args),
-            )
+            is AgentEvent.ToolStarted -> {
+                // 工具行＝一段结束（理由同 [appendText]：工具前后的正文是两段话）。
+                val sealed = base.parts.sealThinking(base.thinkingStartedAt).startTool(event.name, event.args)
+                base.copy(
+                    // 「正在调用」 rather than a bare verb: the line is a sentence the user reads
+                    // while waiting, and 「调用 read_file」 read as a log entry.
+                    status = "正在调用 ${event.name}",
+                    runningTool = event.name,
+                    parts = sealed,
+                    segmentStart = sealed.size,
+                )
+            }
 
             is AgentEvent.ToolMessage -> base.copy(
                 messages = base.messages + event.message.copy(runId = base.runId),
@@ -1599,7 +1652,20 @@ class ChatViewModel : ViewModel() {
                     "turn-failed" + (if (attempts > 0) " attempts=$attempts" else "") +
                         " message=${event.message}",
                 )
-                base.copy(error = event.message)
+                // 最终失败要**像回复一样留在会话里**（用户：「如果最终确实是失败了，需要把失败的
+                // 提示类似气泡那样作为回复」）。横幅 10 秒就自动消失、卡片里那行小红字也不落盘，
+                // 关掉应用就再也查不到这一轮为什么死 —— 所以把失败文本作为一条消息进 live.messages，
+                // run 结束时那次最终 saveSession 自然把它写进文件。角色用 SYSTEM：引擎回放 wire 只
+                // 认 user/assistant/tool（AgentEngine:1822-1852），它不会进下一轮的请求；转录单独
+                // 画它一行（groupRows 的 SYSTEM 分支）。注入点必须在 endSession 之前 —— finally 的
+                // 顺序是 flushDeltas → saveSession → endSession(remove)，这里 live 还在。
+                val receipt = StoredMessage(
+                    id = UUID.randomUUID().toString(),
+                    role = Roles.SYSTEM,
+                    text = "这一轮最终失败：${event.message}",
+                    runId = base.runId,
+                )
+                base.copy(error = event.message, messages = base.messages + receipt)
             }
 
             // A failed attempt that is being repeated. The run is still going — it is waiting — and
@@ -1660,10 +1726,15 @@ class ChatViewModel : ViewModel() {
                     // alone, and [Transcript.active] keeps every user message whatever its run.
                     runId = base.runId,
                 )
-                base.copy(
-                    messages = base.messages + line,
-                    parts = base.parts.sealThinking(base.thinkingStartedAt) + LivePart.Steer(line),
-                )
+                run {
+                    // 插话行＝一段结束：用户插进来的这条线把前后的流分成两段。
+                    val sealed = base.parts.sealThinking(base.thinkingStartedAt) + LivePart.Steer(line)
+                    base.copy(
+                        messages = base.messages + line,
+                        parts = sealed,
+                        segmentStart = sealed.size,
+                    )
+                }
             }
         }
         putSession(next)
@@ -1674,7 +1745,7 @@ class ChatViewModel : ViewModel() {
         if (event is AgentEvent.ToolStarted && event.name == TODO_TOOL ||
             event is AgentEvent.ToolFinished && event.name == TODO_TOOL
         ) {
-            refreshTodos()
+            refreshTodos(chatId)
         }
         // Saved straight away: a handed-over line that only lived in memory would vanish the
         // moment the user switches conversations, which is when they go looking for it.
@@ -1693,17 +1764,21 @@ class ChatViewModel : ViewModel() {
         if (text.isNotEmpty()) {
             next = next.copy(
                 streaming = next.streaming + text,
-                parts = next.parts.sealThinking(next.thinkingStartedAt).appendText(text),
+                // 不在这里 seal 思考块：交错流（思考→正文→思考→正文）里正文一到就封口，会把
+                // 同一段思考劈成两块、同一段正文劈成两块（真机截图：一句「先说声抱歉…」被一个
+                // 2-token 的思考块从中间劈开）。封口只发生在工具行/插话行/本轮落盘那一刻，
+                // 与 settled 视图「一条消息＝一个思考块＋一段正文」同形。
+                parts = next.parts.appendText(text, next.segmentStart),
                 status = "",
             )
         }
         if (reasoning.isNotEmpty()) {
-            // A delta after a tool or after prose opens a new block: its clock starts now,
-            // not at the run's start.
-            val opening = next.parts.lastOrNull() !is LivePart.Thinking
+            // 同一段（最后一个工具行/插话行之后）里已有思考块就续进去，它的钟从第一次思考
+            // delta 起算；跨过工具行/插话行才是新的一段，钟才重置。
+            val opening = !next.parts.hasOpenThinking(next.segmentStart)
             next = next.copy(
                 reasoning = next.reasoning + reasoning,
-                parts = next.parts.appendThinking(reasoning),
+                parts = next.parts.appendThinking(reasoning, next.segmentStart),
                 status = "",
                 thinkingStartedAt = if (opening) System.currentTimeMillis() else next.thinkingStartedAt,
             )
@@ -1727,23 +1802,37 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
-     * Appends a text delta to the piece being written, or opens a new one.
+     * Appends a text delta to the prose piece of the **current segment**, or opens one.
      *
-     * A tool call between two stretches of prose starts a second piece: the two stretches
-     * are not one paragraph, and merging them would draw the model's "let me check" before
-     * a tool and its answer after it as a single run-on line.
+     * 判据是「当前段（[segmentStart] 之后）里有没有正文块」，不是「上一个 part 是不是正文」：
+     * 交错流（思考→正文→思考→正文）里若按上一个 part 判，一个 2-token 的思考块就会把一句
+     * 话劈成两块（真机截图实测）。同一段里正文只持一个块；跨过工具行/插话行/轮落盘才是新段
+     * —— 工具前后的正文确实是两段话，合并会把「让我查一下」和查完的回答连成一行。
      */
-    private fun List<LivePart>.appendText(delta: String): List<LivePart> =
-        when (val last = lastOrNull()) {
-            is LivePart.Text -> dropLast(1) + last.copy(text = last.text + delta)
-            else -> this + LivePart.Text(delta)
-        }
+    private fun List<LivePart>.appendText(delta: String, segmentStart: Int): List<LivePart> {
+        val from = segmentStart.coerceIn(0, size)
+        val tailIdx = subList(from, size).indexOfLast { it is LivePart.Text }
+        if (tailIdx < 0) return this + LivePart.Text(delta)
+        val idx = from + tailIdx
+        val part = this[idx] as LivePart.Text
+        return take(idx) + part.copy(text = part.text + delta) + drop(idx + 1)
+    }
 
-    private fun List<LivePart>.appendThinking(delta: String): List<LivePart> =
-        when (val last = lastOrNull()) {
-            is LivePart.Thinking -> dropLast(1) + last.copy(text = last.text + delta)
-            else -> this + LivePart.Thinking(delta)
-        }
+    /** 同 [appendText]：同一段里思考只持一个块，交错流不再劈开。 */
+    private fun List<LivePart>.appendThinking(delta: String, segmentStart: Int): List<LivePart> {
+        val from = segmentStart.coerceIn(0, size)
+        val tailIdx = subList(from, size).indexOfLast { it is LivePart.Thinking }
+        if (tailIdx < 0) return this + LivePart.Thinking(delta)
+        val idx = from + tailIdx
+        val part = this[idx] as LivePart.Thinking
+        return take(idx) + part.copy(text = part.text + delta) + drop(idx + 1)
+    }
+
+    /** 当前段里是否已有思考块（决定这一段的思考钟是续走还是重置）。 */
+    private fun List<LivePart>.hasOpenThinking(segmentStart: Int): Boolean {
+        val from = segmentStart.coerceIn(0, size)
+        return subList(from, size).any { it is LivePart.Thinking }
+    }
 
     /**
      * Freezes the still-open thinking block the moment the run moves on: its own text

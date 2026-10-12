@@ -2485,15 +2485,20 @@ private fun ModelCheckRow(
             OutlinedTextField(
                 textStyle = settingsFieldText,
                 value = draft,
-                onValueChange = { raw -> draft = raw.filter { it.isDigit() }.take(7) },
-                label = { Text("上下文窗口（tokens，留空 = 不限）") },
-                placeholder = { Text("例如 128000") },
+                // 与对话框同一套单位（k/m，见 parseWindowTokens）：裸数字＝tokens。
+                onValueChange = { raw ->
+                    draft = raw.filter {
+                        it.isDigit() || it == '.' || it == 'k' || it == 'K' || it == 'm' || it == 'M'
+                    }.take(10)
+                },
+                label = { Text("上下文窗口（tokens，可带 k / m；留空 = 不限）") },
+                placeholder = { Text("例如 128k") },
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                 shape = MaterialTheme.shapes.small,
                 trailingIcon = {
                     TextButton(onClick = {
-                        onContext(draft.toIntOrNull() ?: 0)
+                        onContext(parseWindowTokens(draft) ?: 0)
                         editing = false
                     }) { Text("保存") }
                 },

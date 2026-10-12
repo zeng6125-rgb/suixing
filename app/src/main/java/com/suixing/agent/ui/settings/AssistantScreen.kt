@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.settings
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -7,11 +8,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
+import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantListContent
+import com.suixing.agent.ui.components.FullScreenOverlay
 import com.suixing.agent.ui.components.PageTopBar
 
 /**
@@ -35,30 +44,61 @@ fun AssistantScreen(
     onDelete: (Assistant) -> Unit,
     onBack: () -> Unit,
 ) {
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { PageTopBar(title = "助手", onBack = onBack) },
-    ) { padding ->
-        AssistantListContent(
-            assistants = assistants,
-            activeId = activeId,
-            settings = settings,
-            onUse = onUse,
-            onSetDefault = onSetDefault,
-            onSave = onSave,
-            onDelete = onDelete,
-            // 整页不因为选中就退出：用户是来管理助手的，卡片上移到「当前」的那个勾就是
-            // 回执；要回聊天页，返回键就在顶上。半屏的表必须关，否则挡住对话又说不清选没选中。
-            onPicked = {},
-            // 顶栏已经写着「助手」，列表里不再重复一遍标题（副标题留着，它说明这些卡片是什么）。
-            title = null,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                // 列表自己滚动，导航栏的内边距就留在滚动区之外：最后一行不会被手势条压住。
-                .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-        )
+    // 编辑器是主窗口里的全屏覆盖层（结构路，0.8.105）：整页宿主就地画在 Scaffold 之上，
+    // BACK 先关编辑、再退页面（编辑器自己的 BackHandler 优先）。
+    var editingId by remember { mutableStateOf<String?>(null) }
+    val servers by Core.mcp.servers.collectAsState()
+    val toolNames = remember(servers) { Core.tools.names() }
+    val editing = editingId?.let { id ->
+        assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
+    }
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            topBar = { PageTopBar(title = "助手", onBack = onBack) },
+        ) { padding ->
+            AssistantListContent(
+                assistants = assistants,
+                activeId = activeId,
+                settings = settings,
+                onUse = onUse,
+                onSetDefault = onSetDefault,
+                onOpenEditor = { editingId = it },
+                // 整页不因为选中就退出：用户是来管理助手的，卡片上移到「当前」的那个勾就是
+                // 回执；要回聊天页，返回键就在顶上。半屏的表必须关，否则挡住对话又说不清选没选中。
+                onPicked = {},
+                // 顶栏已经写着「助手」，列表里不再重复一遍标题（副标题留着，它说明这些卡片是什么）。
+                title = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    // 列表自己滚动，导航栏的内边距就留在滚动区之外：最后一行不会被手势条压住。
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
+        editing?.let { target ->
+            FullScreenOverlay(visible = true) {
+                AssistantEditor(
+                    initial = target,
+                    settings = settings,
+                    toolNames = toolNames,
+                    onSave = {
+                        onSave(it)
+                        editingId = null
+                    },
+                    onDelete = if (assistants.size > 1) {
+                        {
+                            onDelete(target)
+                            editingId = null
+                        }
+                    } else {
+                        null
+                    },
+                    onDismiss = { editingId = null },
+                )
+            }
+        }
     }
 }

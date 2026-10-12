@@ -183,6 +183,22 @@ object PluginRuntime {
         toolName: String,
         args: String,
         risk: String?,
+    ): HookVerdict = runCatching {
+        preExecuteUnsafe(hooks, toolName, args, risk)
+    }.getOrElse { error ->
+        // 0.8.100 真机教训：裁决本身抛异常（当时是门面类 <clinit> 失败变成的
+        // NoClassDefFoundError）会掀翻整轮 run —— 用户看到「对话自己停了」。裁决失败时**落到
+        // require_confirm** 而不是放行或炸轮：AUTO 档会变成「问一次」（人在环里，坏掉的守卫不会
+        // 静默失效），ASK/DENY 档行为不变；同时记一条日志说明为什么。
+        PluginLog.skip("hook 裁决（$toolName）", "${error::class.java.simpleName}: ${error.message}")
+        HookVerdict(requireConfirm = true)
+    }
+
+    private fun preExecuteUnsafe(
+        hooks: List<Pair<PluginSpec, HookDecl>>,
+        toolName: String,
+        args: String,
+        risk: String?,
     ): HookVerdict {
         var requireConfirm = false
         for ((spec, hook) in hooks) {
@@ -472,18 +488,31 @@ private const val DEFAULT_MAX_CHARS = 8000
 
 private const val MAX_RESPONSE_BYTES = 1024 * 1024
 
-private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+/**
+ * **必须 `by lazy`**（0.8.100 真机实测的教训）：顶层 val 会进本文件门面类 `PluginRuntimeKt` 的
+ * `<clinit>`。触发点在引擎分发处：每条工具调用先过 [preExecute]，它碰顶层 [HOOK_REGEX]；[execute]
+ * 里的 [render]/[http] 碰 [TEMPLATE_VAR]/[HTTP_CLIENT] —— 任一处都会触发门面类初始化。
+ * `OkHttpClient.Builder().build()` / `toMediaType()` 在这台真机的 ART 上初始化失败 ⇒ 第一次
+ * `ExceptionInInitializerError`、之后每次引用都是 `NoClassDefFoundError: …PluginRuntimeKt`，
+ * 而 [preExecute] 不在任何 `runCatching` 里 ⇒ **整轮 run 被掀翻**（用户看到「对话自己停了」+ 红字）。
+ * lazy 把 okhttp 的初始化推迟到真正发 http 那一刻：那一步在引擎的 `runCatching` 里，失败只是一条
+ * 工具失败消息，不会带走整轮。JVM 单测里这段初始化是好的（453/453），所以这条只能靠真机发现。
+ */
+private val JSON_MEDIA_TYPE by lazy { "application/json; charset=utf-8".toMediaType() }
 
 /**
  * 插件 http 的公共客户端。`followSslRedirects = false` 是故意的：https → http 的跳转会把
  * `Authorization` 一起带过去（OkHttp 只在同源时剥 header），而插件的 url 是别人写的。
+ * 同样 `by lazy`，理由见 [JSON_MEDIA_TYPE] 的注释。
  */
-private val HTTP_CLIENT = OkHttpClient.Builder()
-    .connectTimeout(15, TimeUnit.SECONDS)
-    .readTimeout(60, TimeUnit.SECONDS)
-    .followRedirects(true)
-    .followSslRedirects(false)
-    .build()
+private val HTTP_CLIENT by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(false)
+        .build()
+}
 
 /** 读管道里的「跳过」也要说出来（§0.4 失败要显式）—— 落到 fx-trace 同级的日志习惯里。 */
 private object PluginLog {

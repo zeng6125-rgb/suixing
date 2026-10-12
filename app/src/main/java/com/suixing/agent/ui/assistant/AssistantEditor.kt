@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 // androidx.compose.ui.graphics.Color —— 两个同名类，别混。
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -93,9 +94,9 @@ import kotlinx.coroutines.launch
  * 管①，清掉窗口背景管②；而开关本来就生效的机器上它两个都是空操作（幂等），所以留着不亏。
  */
 @Composable
-internal fun DialogEdgeToEdge() {
+internal fun DialogEdgeToEdge(darkIcon: Boolean = false) {
     val view = LocalView.current
-    DisposableEffect(view) {
+    DisposableEffect(view, darkIcon) {
         val window = (view.parent as? DialogWindowProvider)?.window
         window?.let {
             WindowCompat.setDecorFitsSystemWindows(it, false)
@@ -107,6 +108,15 @@ internal fun DialogEdgeToEdge() {
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             )
+            // **状态栏/导航栏那一条的颜色是窗口自己的属性**，不跟内容走：DialogWindow 新建时拿
+            // 的是主题默认的状态栏色（这台机器上是灰/白），于是内容铺到了状态栏底下、那一条却还
+            // 是灰的 —— 用户三轮截图里的「状态栏半成品」就是它。前三道保险丝（decorFits / 背景 /
+            // 铺满）都没碰这两个颜色，所以一直漏。设成透明，那一条才真正露出本页内容。
+            it.statusBarColor = android.graphics.Color.TRANSPARENT
+            it.navigationBarColor = android.graphics.Color.TRANSPARENT
+            // 状态栏图标（时钟/信号/电池）的明暗跟着**本页背景**走：浅底要深色图标、黑底要浅色。
+            // Dialog 窗口不继承主窗口的设置，所以每页自己声明。
+            WindowCompat.getInsetsController(it, view).isAppearanceLightStatusBars = darkIcon
         }
         onDispose { }
     }
@@ -154,6 +164,11 @@ fun AssistantEditor(
     onSave: (Assistant) -> Unit,
     onDelete: (() -> Unit)?,
     onDismiss: () -> Unit,
+    /**
+     * BACK 是否归这一页收。覆盖层退场的那 200ms 里本页仍在组合（AnimatedVisibility 的语义），
+     * 那时 BACK 不该再被它吃掉一次 —— 宿主在退场期间传 false。
+     */
+    backEnabled: Boolean = true,
 ) {
     var draft by remember(initial) { mutableStateOf(initial) }
     val isNew = settings.assistant(initial.id) == null
@@ -190,22 +205,12 @@ fun AssistantEditor(
         }
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        // 这一页要铺到状态栏：`decorFitsSystemWindows = false` 是文档里那个开关，先留着它；
-        // 顶栏自己那句 statusBarsPadding()（Common.kt:415）再把内容推到状态栏下面。
-        //
-        // 但用户截图里状态栏那一条仍是**白底**（不是本页背景色），所以下面还有一道保险：
-        // [DialogEdgeToEdge] 直接对对话框自己的窗口再调一次同一个开关、并清掉窗口默认背景。
-        // **两处都留**：开关生效的机器上第二道是幂等的空操作，没生效的机器上才是它起作用。
-        // （"窗口没铺满"是**从症状反推的假设**，没有 logcat/窗口尺寸实测；症状本身来自截图。）
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false,
-        ),
-    ) {
-        // 保险丝：见上。开关已生效时它什么也不改。
-        DialogEdgeToEdge()
+    // 结构路（0.8.105）：编辑页**不再是 Dialog 窗口**，而是主窗口里的全屏一层。Dialog 窗口在这台
+    // 设备上四道保险丝（decorFits / 清背景 / MATCH_PARENT / 状态栏色透明）全部实测无效，状态栏那
+    // 一条始终不对；主窗口的沉浸行为是真机验证过正确的（聊天页/设置页都对）。宿主决定它画在哪：
+    // 设置页就地画，聊天页画在根覆盖层（见 AssistantSheet 的 editorHost）。BACK 由 BackHandler 收。
+    Box(Modifier.fillMaxSize()) {
+        BackHandler(enabled = backEnabled) { onDismiss() }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
@@ -221,27 +226,28 @@ fun AssistantEditor(
                     // tap. A dialog is a place with no sidebar: a null local says exactly
                     // that.
                     CompositionLocalProvider(LocalOpenSidebar provides null) {
-                        // 顶栏内部本来就有 statusBarsPadding()，但这个**对话框窗口**不一定把 inset
-                        // 送进来（见 dialogSystemBarPad）：inset 可用时它是 0，不会重复加；不可用时
-                        // 用它退回平台自己的状态栏高度，于是顶栏不会再压在状态栏上。
-                        Box(Modifier.padding(top = dialogSystemBarPad())) {
-                            SuixingTopBar(
-                                title = if (isNew) "新建助手" else "编辑助手",
-                                subtitle = draft.label,
-                                leading = {
-                                    AssistantAvatar(
-                                        face = draft.face,
-                                        avatarPath = draft.avatarPath,
-                                        size = 38.dp,
-                                        shape = MaterialTheme.shapes.medium,
-                                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                                    )
-                                },
-                                actions = {
-                                    TextButton(onClick = { onSave(draft) }) { Text("保存") }
-                                },
-                            )
-                        }
+                        // 主窗口里 inset 是真分发的，SuixingTopBar 自己那句 statusBarsPadding()
+                        // （Common.kt:416）就够；Dialog 时代那道 dialogSystemBarPad 补垫已删，
+                        // 留着会把顶栏往下推两遍状态栏高度。
+                        SuixingTopBar(
+                            title = if (isNew) "新建助手" else "编辑助手",
+                            subtitle = draft.label,
+                            // 没有抽屉手柄的页：头像直接顶到 8dp 会显得比别的页更贴边，
+                            // 与页面内容对齐到 16dp（用户：「左边距大一点点」）。
+                            startPadding = 16.dp,
+                            leading = {
+                                AssistantAvatar(
+                                    face = draft.face,
+                                    avatarPath = draft.avatarPath,
+                                    size = 38.dp,
+                                    shape = MaterialTheme.shapes.medium,
+                                    containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                )
+                            },
+                            actions = {
+                                TextButton(onClick = { onSave(draft) }) { Text("保存") }
+                            },
+                        )
                     }
                 },
             ) { padding ->

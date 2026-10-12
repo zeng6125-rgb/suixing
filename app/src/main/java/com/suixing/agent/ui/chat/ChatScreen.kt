@@ -169,6 +169,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
@@ -207,11 +208,13 @@ import com.suixing.agent.data.label
 import com.suixing.agent.data.modelOffers
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.ui.assistant.AssistantAvatar
+import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.DrawerButton
 import com.suixing.agent.ui.components.FlatIconButton
 import com.suixing.agent.ui.components.FlatPainterButton
+import com.suixing.agent.ui.components.FullScreenOverlay
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
@@ -344,6 +347,8 @@ fun ChatScreen(
     }
 
     var assistantsOpen by remember { mutableStateOf(false) }
+    // 助手编辑器的开关（主窗口全屏覆盖层，结构路 0.8.105）：id 而非对象，转屏/重组不丢。
+    var editorAssistantId by remember { mutableStateOf<String?>(null) }
     // 任务清单：输入框上方那一行点开就是它（完整清单，可滚动）。
     var todoSheetOpen by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -623,6 +628,12 @@ fun ChatScreen(
     // 却变了 636px，就是这一条采样空档。判定本身还靠「按下/抬起的位置对」，这一条只是让日志
     // 与判定都别再漏。
     var pressScrolled by remember { mutableStateOf(false) }
+    // 按下那一刻的位置（供按住期间的逐帧守护用）。真机日志（2026-10-13 两条真长按）：
+    // 抬手时净位移是 0，但 frameScrolled=true —— 选择机制的 bringIntoView 在**按住期间**把列表
+    // 拉走又（部分）回来，用户看到的就是中间那一跳。nestedScroll 吃得掉增量、吃不掉直接跳转，
+    // 所以守护放在这里：按住且手指没在拖时，位置一旦偏离按下点就同帧放回去。
+    var pressDownIndex by remember { mutableIntStateOf(-1) }
+    var pressDownOffset by remember { mutableIntStateOf(0) }
     // Set while the list is being scrolled by us. Without it the follow scroll itself trips
     // the "user scrolled away" branch below, following goes false, and the run stops
     // following its own output — which is exactly what it used to do.
@@ -635,6 +646,20 @@ fun ChatScreen(
         pressScrolled = false
         while (true) {
             if (!programmatic && listState.isScrollInProgress) pressScrolled = true
+            // 按住期间的逐帧守护：选择机制把选中行拉进视野是一次程序滚动，nestedScroll 吃不掉
+            // 直接跳转；这里每帧比对按下点，偏了就同帧放回去 —— 用户看不到中间那一跳。
+            // 手指在拖（fingerDragged）时不碰：那时的位移是用户自己的。
+            if (!fingerDragged && pressDownIndex >= 0 &&
+                (listState.firstVisibleItemIndex != pressDownIndex ||
+                    listState.firstVisibleItemScrollOffset != pressDownOffset)
+            ) {
+                programmatic = true
+                try {
+                    listState.scrollToItem(pressDownIndex, pressDownOffset)
+                } finally {
+                    programmatic = false
+                }
+            }
             withFrameNanos { }
         }
     }
@@ -1017,6 +1042,8 @@ fun ChatScreen(
                                         following = false
                                         pressed = true
                                         fingerDragged = false
+                                        pressDownIndex = downIndex
+                                        pressDownOffset = downOffset
                                         scrollDiag(context, "press:down", listState, wasFollowing, itemCount, ime = heldIme) // 量完删
                                         var movedUp = false
                                         // Whether the list itself moved. A hand can travel less than
@@ -1122,6 +1149,7 @@ fun ChatScreen(
                                         ) {
                                             following = wasFollowing
                                         }
+                                        pressDownIndex = -1
                                     }
                                 }
                             },
@@ -1575,10 +1603,49 @@ fun ChatScreen(
             settings = settings,
             onUse = { viewModel.useAssistant(it) },
             onSetDefault = { viewModel.setDefaultAssistant(it) },
-            onSave = { viewModel.saveAssistant(it) },
-            onDelete = { viewModel.deleteAssistant(it) },
+            // 编辑/新建：收掉半屏表，编辑器画在主窗口的全屏覆盖层（结构路，0.8.105）。
+            onOpenEditor = { id ->
+                assistantsOpen = false
+                editorAssistantId = id
+            },
             onDismiss = { assistantsOpen = false },
         )
+    }
+
+    // 助手编辑器：主窗口里的全屏一层，盖住聊天页的一切（含浮动头）。Dialog 窗口在这台设备上
+    // 的状态栏行为修了四轮都不对，所以这一页不再有自己的窗口。进出场与导航页同一套动画
+    // （FullScreenOverlay）；退场那 200ms 里内容靠 lastEditorId 留住，不会淡出一片空白。
+    var lastEditorId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(editorAssistantId) {
+        if (editorAssistantId != null) lastEditorId = editorAssistantId
+    }
+    FullScreenOverlay(visible = editorAssistantId != null) {
+        val id = editorAssistantId ?: lastEditorId
+        if (id != null) {
+            val servers by Core.mcp.servers.collectAsState()
+            val toolNames = remember(servers) { Core.tools.names() }
+            val target = settings.assistants.firstOrNull { it.id == id }
+                ?: Assistant(id = id, avatar = "🧭")
+            AssistantEditor(
+                initial = target,
+                settings = settings,
+                toolNames = toolNames,
+                backEnabled = editorAssistantId != null,
+                onSave = {
+                    viewModel.saveAssistant(it)
+                    editorAssistantId = null
+                },
+                onDelete = if (settings.assistants.size > 1) {
+                    {
+                        viewModel.deleteAssistant(target)
+                        editorAssistantId = null
+                    }
+                } else {
+                    null
+                },
+                onDismiss = { editorAssistantId = null },
+            )
+        }
     }
 
     editing?.let { message ->
@@ -1648,17 +1715,18 @@ private fun ChatTopBar(
                 .weight(1f)
                 .height(44.dp),
         ) {
+            val style = titleBarStyle()
             Text(
                 text = title,
-                style = titleBarStyle(),
-                // **光学补偿**（不是布局错位）：这一行是 CenterVertically，三个槽位的**盒子中心
-                // 本来就一致**（两侧圆盘 40dp 居中、这个胶囊 44dp 居中）—— 但文字行盒是按
-                // ascender + descender 居中的，中文/拉丁的视觉重量偏上，所以标题**读起来**比两侧
-                // 圆盘高 1–2dp（用户：「icon 和标题没对齐」）。
-                // 只把文字本身下移 1.5dp：在居中的行里，给文字加 `padding(top = 3.dp)` 会让它的
-                // 盒子长高 3dp、重心下移一半 = 1.5dp ✔。**不动胶囊**——动胶囊会让它的上下边与圆盘
-                // 错开，那才是真的没对齐。3dp 这个数要调就调它（视觉上等于 1.5dp 位移）。
-                modifier = Modifier.padding(top = 3.dp),
+                // 行盒收紧到字形高度，居中才是真的居中（用户：「标题是不是没有垂直居中」）。
+                // 默认 includeFontPadding 会在行盒**顶部**加一段 ascent 留白，中文的视觉重量又
+                // 偏上，两个不对称叠起来，CenterVertically 居中的是一个比字高、且上重下轻的盒子
+                // ⇒ 字读起来偏离胶囊中心。收紧后行盒＝字形盒，居中的就是字本身；旧的
+                // `padding(top = 3.dp)` 光学补偿是在补行盒的不对称，根除了就不需要它了。
+                style = style.copy(
+                    lineHeight = style.fontSize,
+                    platformStyle = PlatformTextStyle(includeFontPadding = false),
+                ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -2045,6 +2113,10 @@ private fun StoredMessage.isVisible(): Boolean = when (role) {
     Roles.USER -> text.isNotBlank() || imageBase64 != null
     Roles.ASSISTANT -> text.isNotBlank() || !reasoning.isNullOrBlank()
     Roles.TOOL -> true
+    // 失败回执（VM 在 Failed 时写的一条 system 消息）：它存在的意义就是被看见，所以有字就画。
+    // 磁盘上此前没有任何 system 消息（全仓 11 处 StoredMessage 构造点 + 真机两份 chat JSON 核实），
+    // 上下文摘要只进 wire 不落盘，所以这个分支不会被摘要误触发。
+    Roles.SYSTEM -> text.isNotBlank()
     else -> false
 }
 
@@ -2208,8 +2280,12 @@ internal fun groupRows(
                     showTimeLabel = needsTimeLabel(previous, message),
                 )
                 previous = message
-                openIndex = -1
-                openRun = null
+                // 失败回执自己成一行、不接管 open 气泡：它后面不该再往里折工具行或正文
+                // （run 已经结束）。普通可见消息维持原行为（关掉 open 气泡）。
+                if (message.role != Roles.SYSTEM) {
+                    openIndex = -1
+                    openRun = null
+                }
             }
 
             else -> Unit
@@ -2323,6 +2399,10 @@ private fun MessageRow(
             onRegenerate = onRegenerate,
             onEdit = onEdit,
         )
+
+        // 失败回执：run 最终失败时 VM 落盘的一条 system 消息。它不是模型的回答，所以不带头像、
+        // 不带操作行 —— 一条全宽的红色小卡，像气泡一样留在会话里，重开还在。
+        Roles.SYSTEM -> FailureReceiptRow(text = row.message.text)
 
         // A tool result with no bubble above it still renders as one, card only. It is
         // `row.parts` rather than the row's own message: once this card is the run's open
@@ -4548,8 +4628,9 @@ private fun RunStatusLine(
         text = caption,
         style = statusLineStyle(),
         color = color,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
+        // 不截断（用户：「错误的提示要显示全」）。重试/失败那行是这条状态线写的（VM 的
+        // Retrying/Failed 分支），一行省略号会把「服务器限流（429），用…」的后半句吃掉，
+        // 而那一半正是用户要读的原因。允许换行；它本来就短，只有失败原因会长。
         modifier = modifier,
     )
 }
@@ -4851,6 +4932,10 @@ private fun Composer(
                         )
                     }
                 }
+                // 与下面 pendingSteers 块同一个 3dp（用户：「插话进队列是紧贴的，点了立即插话
+                // 就有缝隙了」——两种状态的间距必须恒定）。队列行属于它将要发出的那个输入框，
+                // 但「紧贴」和「恒贴 3dp」之间选恒定：状态切换时布局不跳。
+                Spacer(Modifier.height(3.dp))
             }
             if (pendingSteers.isNotEmpty()) {
                 Column(
@@ -5675,6 +5760,12 @@ private fun GenerationSheet(
     // thinks — or the full list of models. The list became a page of its own because the user
     // asked for the first page to stay small.
     var picking by remember { mutableStateOf(false) }
+    // 关掉就回第一页（用户：「选了模型进列表页，关掉再开还停在列表页，要点返回才到思考强度页」）。
+    // 这张卡关着也保持 composed（为了进出动画），页状态不会随卸载重置，所以显式在 visible 落
+    // false 时清掉。只清页、不清 [folded]：折叠是用户对着列表做的选择，重开还在更顺手。
+    LaunchedEffect(visible) {
+        if (!visible) picking = false
+    }
     // Providers whose list is folded away. The one answering this conversation starts open:
     // the list is what the page is for, and folding everything would hide it.
     val folded = remember { mutableStateMapOf<String, Boolean>() }
@@ -7176,6 +7267,42 @@ private fun RunReasonLine(reason: String) {
             color = scheme.error,
             modifier = Modifier.weight(1f),
         )
+    }
+}
+
+/**
+ * 失败回执：run 最终失败时 VM 落盘的一条 system 消息画成的红色小卡。
+ *
+ * 与 [RunReasonLine] 的分工：那条是**进行中/刚结束**时挂在最后一张卡片里的小红字（会随横幅
+ * 计时消失）；这一条是**留在会话记录里**的那一份 —— 用户原话「如果最终确实是失败了，需要把
+ * 失败的提示类似气泡那样作为回复」。全宽、可换行、不截断，重开会话还在。
+ */
+@Composable
+private fun FailureReceiptRow(text: String) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = scheme.errorContainer.copy(alpha = 0.5f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
+                contentDescription = null,
+                tint = scheme.error,
+                modifier = Modifier.size(14.dp).padding(top = 1.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.onErrorContainer,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 

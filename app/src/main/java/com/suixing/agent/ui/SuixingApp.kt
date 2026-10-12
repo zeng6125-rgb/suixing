@@ -120,7 +120,13 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.service.FloatConsoleService
+import com.suixing.agent.data.Assistant
+import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
+import com.suixing.agent.ui.components.FullScreenOverlay
+import com.suixing.agent.ui.components.NAV_ENTER_MS
+import com.suixing.agent.ui.components.NAV_EXIT_MS
+import com.suixing.agent.ui.components.NAV_SHIFT_DIVISOR
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
@@ -164,17 +170,17 @@ import kotlinx.coroutines.launch
  * 抽屉不在此列：点行时它 `snapTo(Closed)`、返回来源页时 `snapTo(Open)`（同样瞬时、无叠加），
  * 用户自己开合（汉堡键 / 左缘拖动 / 点遮罩 / 返回键）仍走库的滑入滑出动画。
  */
-/** 0.8.91 原样：新页滑入的时长。 */
-private const val NAV_SLIDE_MS = 200
+/** 0.8.91 原样：新页滑入的时长。全站统一数字在 [com.suixing.agent.ui.components.NAV_ENTER_MS]。 */
+private const val NAV_SLIDE_MS = NAV_ENTER_MS
 
-/** 新页滑入的幅度：屏宽 ÷ 这个数（12 ⇒ 约 8% 屏宽）。 */
-private const val NAV_SHIFT_DIVISOR = 12
+/** 新页滑入的幅度：屏宽 ÷ 这个数（12 ⇒ 约 8% 屏宽）。同 [NAV_SHIFT_DIVISOR]。 */
+private const val NAV_SHIFT = NAV_SHIFT_DIVISOR
 
 /**
  * **只有返回**用这一条（用户要的「极轻的蒙版由深到没有」）：被关掉的那页淡出，下面那页不动。
  * 进页**不用**它 —— 进页是 0.8.91 的滑入（用户：「点进去的动画可以」）。
  */
-private const val NAV_FADE_MS = 200
+private const val NAV_FADE_MS = NAV_EXIT_MS
 
 /**
  * The app shell.
@@ -218,6 +224,8 @@ fun SuixingApp() {
     // 抽屉里那张半屏助手表：和聊天页那张是同一个 AssistantSheet，只是宿主换成了外壳。
     // remember 而不是 rememberSaveable（与聊天页那张表一致）：进程重启后它不该自己弹回来。
     var shellAssistants by remember { mutableStateOf(false) }
+    // 抽屉路线的助手编辑器（主窗口全屏覆盖层，结构路 0.8.105）。
+    var editorAssistantId by remember { mutableStateOf<String?>(null) }
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -520,7 +528,7 @@ fun SuixingApp() {
                                         durationMillis = NAV_SLIDE_MS,
                                         easing = FastOutSlowInEasing,
                                     ),
-                                ) { fullWidth -> fullWidth / NAV_SHIFT_DIVISOR }
+                                ) { fullWidth -> fullWidth / NAV_SHIFT }
                             },
                             exitTransition = { ExitTransition.None },
                             // **只有返回这一条**按用户的新要求做：上层淡出、下面那页不动
@@ -637,10 +645,49 @@ fun SuixingApp() {
             settings = settings,
             onUse = { chat.useAssistant(it) },
             onSetDefault = { chat.setDefaultAssistant(it) },
-            onSave = { chat.saveAssistant(it) },
-            onDelete = { chat.deleteAssistant(it) },
+            // 编辑/新建：收掉半屏表，编辑器画在主窗口的全屏覆盖层（结构路，0.8.105）。
+            onOpenEditor = { id ->
+                shellAssistants = false
+                editorAssistantId = id
+            },
             onDismiss = { shellAssistants = false },
         )
+    }
+
+    // 助手编辑器：主窗口里的全屏一层，盖住抽屉与半屏表之上的一切。Dialog 窗口在这台设备上
+    // 的状态栏行为修了四轮都不对，所以这一页不再有自己的窗口；BACK 由它自己的 BackHandler 收。
+    // 进出场与导航页同一套动画（FullScreenOverlay），退场那 200ms 里内容靠 lastEditorId 留住。
+    var lastEditorId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(editorAssistantId) {
+        if (editorAssistantId != null) lastEditorId = editorAssistantId
+    }
+    FullScreenOverlay(visible = editorAssistantId != null) {
+        val id = editorAssistantId ?: lastEditorId
+        if (id != null) {
+            val servers by Core.mcp.servers.collectAsState()
+            val toolNames = remember(servers) { Core.tools.names() }
+            val target = settings.assistants.firstOrNull { it.id == id }
+                ?: Assistant(id = id, avatar = "🧭")
+            AssistantEditor(
+                initial = target,
+                settings = settings,
+                toolNames = toolNames,
+                backEnabled = editorAssistantId != null,
+                onSave = {
+                    chat.saveAssistant(it)
+                    editorAssistantId = null
+                },
+                onDelete = if (settings.assistants.size > 1) {
+                    {
+                        chat.deleteAssistant(target)
+                        editorAssistantId = null
+                    }
+                } else {
+                    null
+                },
+                onDismiss = { editorAssistantId = null },
+            )
+        }
     }
 }
 

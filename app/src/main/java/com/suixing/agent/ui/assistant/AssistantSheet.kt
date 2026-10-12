@@ -60,8 +60,8 @@ fun AssistantSheet(
     settings: AppSettings,
     onUse: (Assistant) -> Unit,
     onSetDefault: (Assistant) -> Unit,
-    onSave: (Assistant) -> Unit,
-    onDelete: (Assistant) -> Unit,
+    /** 点「编辑/新建」：宿主自己决定编辑器画在哪（主窗口覆盖层），表先收起来。 */
+    onOpenEditor: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -77,8 +77,7 @@ fun AssistantSheet(
             settings = settings,
             onUse = onUse,
             onSetDefault = onSetDefault,
-            onSave = onSave,
-            onDelete = onDelete,
+            onOpenEditor = onOpenEditor,
             // 选一张卡就是选完了：表要收起来，否则用户看着还开着的半屏列表不知道有没有生效。
             onPicked = onDismiss,
             modifier = Modifier
@@ -108,28 +107,14 @@ fun AssistantListContent(
     settings: AppSettings,
     onUse: (Assistant) -> Unit,
     onSetDefault: (Assistant) -> Unit,
-    onSave: (Assistant) -> Unit,
-    onDelete: (Assistant) -> Unit,
+    /** 点「编辑」或「新建」：编辑器画在哪由宿主决定（主窗口全屏覆盖层），这里只报 id。 */
+    onOpenEditor: (String) -> Unit,
     /** What picking a persona means to the host: the sheet closes, the page stays. */
     onPicked: () -> Unit,
     modifier: Modifier = Modifier,
     /** Null when the host's own bar already carries the title. */
     title: String? = "助手",
 ) {
-    // Kept as an id rather than the object so a rotation no longer closes the editor: an
-    // existing persona is looked up in settings again, and the one id that cannot be found
-    // is the freshly created draft, which is rebuilt from its id and the same defaults.
-    // The in-progress edits still live in the editor's own draft.
-    var editingId by rememberSaveable { mutableStateOf<String?>(null) }
-    // MCP 的工具是运行时才注册的（连上后 replaceDynamic 写进 ToolRegistry），而 ToolRegistry
-    // 本身不可观察：直接 Core.tools.names() 是打开编辑器那一刻的死快照，之后新工具永远不出现，
-    // 「工具还在加载…」也就永远不消失。这里借 MCP 的 StateFlow 当刷新键 —— 它每次变化都对应
-    // 一次 replaceDynamic（与 ToolsScreen 的 ToolsTab 同一套做法），只在 ui/ 内就能修。
-    val servers by Core.mcp.servers.collectAsState()
-    val toolNames = remember(servers) { Core.tools.names() }
-    val editing = editingId?.let { id ->
-        assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
-    }
     // 两两一行是布局用的中间结果，不是状态：不 remember 就每次重组都重建一层嵌套 List。
     val rows = remember(assistants) { assistants.chunked(2) }
 
@@ -144,7 +129,7 @@ fun AssistantListContent(
                 )
             }
             FilledTonalButton(
-                onClick = { editingId = UUID.randomUUID().toString() },
+                onClick = { onOpenEditor(UUID.randomUUID().toString()) },
             ) {
                 Icon(ImageVector.vectorResource(R.drawable.ic_plus), contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
@@ -175,7 +160,7 @@ fun AssistantListContent(
                                 onUse(assistant)
                                 onPicked()
                             },
-                            onEdit = { editingId = assistant.id },
+                            onEdit = { onOpenEditor(assistant.id) },
                             onSetDefault = { onSetDefault(assistant) },
                         )
                     }
@@ -185,27 +170,6 @@ fun AssistantListContent(
                 }
             }
         }
-    }
-
-    editing?.let { target ->
-        AssistantEditor(
-            initial = target,
-            settings = settings,
-            toolNames = toolNames,
-            onSave = {
-                onSave(it)
-                editingId = null
-            },
-            onDelete = if (assistants.size > 1) {
-                {
-                    onDelete(target)
-                    editingId = null
-                }
-            } else {
-                null
-            },
-            onDismiss = { editingId = null },
-        )
     }
 }
 
@@ -246,18 +210,20 @@ private fun AssistantCard(
                     shape = MaterialTheme.shapes.small,
                     containerColor = scheme.surfaceContainerHigh,
                 )
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(2.dp))
                 // One slot for "this is the app-wide default" and "make it one": the star is
                 // the action, and once taken it greys out rather than disappearing, so cards
                 // keep the same geometry in both states. The state itself is spelled out on
                 // the model line, where there is room for words.
                 //
-                // 紧挨头像，不再被 weight 推到最右：它是这张脸的状态标记（用户：「星号离头像太远」），
-                // 右边留一个 weight 把编辑图标推到卡片的另一头。
+                // 紧挨头像（用户两次点名「星号离头像太远」）：视觉间隙只剩 2dp spacer + 盒内
+                // 7.5dp。**不给 48dp 触摸下限**——那个下限把 15dp 图标居中在 48dp 盒里，两侧各
+                // 多 16.5dp 空气，正是截图里的「远」。行高由编辑按钮的 48dp 下限与 38dp 头像
+                // 撑着，收窄这里不动卡片几何。
                 IconButton(
                     onClick = onSetDefault,
                     enabled = !isDefault,
-                    modifier = Modifier.minimumInteractiveComponentSize().size(30.dp),
+                    modifier = Modifier.size(30.dp),
                 ) {
                     Icon(
                         imageVector = ImageVector.vectorResource(R.drawable.ic_star),

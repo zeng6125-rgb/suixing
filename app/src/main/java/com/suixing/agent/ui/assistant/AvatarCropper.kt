@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.assistant
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -72,18 +75,11 @@ fun AvatarCropper(
 ) {
     val density = LocalDensity.current
 
-    Dialog(
-        onDismissRequest = onCancel,
-        // 这一页也要铺到状态栏（背景延伸到那一条），内容自己吃 inset：顶部返回键与底部按钮
-        // 各让开一条系统栏，按钮不会被手势条顶掉。
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false,
-        ),
-    ) {
-        // 保险丝（与编辑页同一个，见 DialogEdgeToEdge 的注释：机制是假设、症状来自截图，
-        // 两种成因它都治、开关本来生效时是空操作）。
-        DialogEdgeToEdge()
+    // 结构路（0.8.105）：裁剪页**不再是 Dialog 窗口**，而是主窗口里的全屏一层（画在编辑页之上、
+    // 盖住顶栏）。Dialog 窗口在这台设备上的状态栏/手势条行为修了四轮都不对；主窗口的沉浸是真机
+    // 验证过正确的。BACK 由 BackHandler 收（＝取消）。
+    Box(Modifier.fillMaxSize()) {
+        BackHandler { onCancel() }
         // 完全不透明的底色：这一层就是整页，后面那份编辑页不该透过来（用户看到的「画了两份」
         // 有一半是半透明底导致的透视）。0xF2 → 0xFF。
         Surface(Modifier.fillMaxSize(), color = Color(0xFF0B0C0D)) {
@@ -195,7 +191,20 @@ fun AvatarCropper(
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(onClick = onCancel) { Text("取消", color = Color.White) }
+                    // 取消要有背景、两个按钮都要够高（用户：「按钮能不能画高一点？取消怎么没有
+                    // 背景？」）。黑底上的裸 TextButton 读起来像一行字而不是按钮；给取消一个半透
+                    // 明白底胶囊，与确定同高（48dp），两个才是一对。
+                    Button(
+                        onClick = onCancel,
+                        shape = MaterialTheme.shapes.medium,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White.copy(alpha = 0.16f),
+                            contentColor = Color.White,
+                        ),
+                        modifier = Modifier.height(48.dp),
+                    ) {
+                        Text("取消")
+                    }
                     Button(
                         onClick = {
                             onConfirm(
@@ -210,6 +219,7 @@ fun AvatarCropper(
                             )
                         },
                         shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.height(48.dp),
                     ) {
                         Text("确定")
                     }
