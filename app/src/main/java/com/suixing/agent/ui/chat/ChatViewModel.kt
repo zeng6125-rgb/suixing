@@ -7,6 +7,7 @@ import com.suixing.agent.agent.AgentEvent
 import com.suixing.agent.agent.RunState
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
+import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.ContextCheckpoint
@@ -14,6 +15,7 @@ import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.LiveDraft
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.Tps
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.choiceFor
@@ -51,8 +53,15 @@ import kotlin.math.roundToInt
  */
 data class Draft(
     val text: String = "",
+    /** 文件附件的标记（单个）：路径注入正文，见 ChatScreen.withAttachment。 */
     val attachmentUri: String? = null,
     val attachmentName: String? = null,
+    /**
+     * 已缓存图片的标签（顺序＝发送顺序）。多附件（用户：「图片为什么只能添加一张」）：图片本体在
+     * view model 的 [ChatViewModel.attachmentsFor] 缓存里，这里只放**触发 remember 重读**的标记 ——
+     * 与单值时代的 attachmentUri 同一个作用，换成列表而已。
+     */
+    val imageNames: List<String> = emptyList(),
 )
 
 /**
@@ -63,7 +72,7 @@ data class Draft(
  * edit or delete it. The queue is deliberately never written to disk — it is the state of
  * a run that is still going, and a restarted process has no such run.
  */
-data class PendingSteer(val id: String, val text: String, val imageBase64: String? = null)
+data class PendingSteer(val id: String, val text: String, val imagesBase64: List<String> = emptyList())
 
 /**
  * A whole turn the user sent while a run was going, in 排队 mode.
@@ -78,7 +87,7 @@ data class PendingSteer(val id: String, val text: String, val imageBase64: Strin
  * going right now. If the process dies, that run dies with it, so there is no "afterwards" left to
  * send into — and a copy on disk would come back as the app talking to itself.
  */
-data class PendingTurn(val id: String, val text: String, val imageBase64: String? = null)
+data class PendingTurn(val id: String, val text: String, val imagesBase64: List<String> = emptyList())
 
 data class ChatUiState(
     val conversationId: String = "",
@@ -140,6 +149,12 @@ data class ChatUiState(
      * frozen record and this is ignored.
      */
     val stats: StreamStats? = null,
+    /**
+     * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）的**当前窗口**读数，不依赖 run：打开面板时
+     * 按当前上下文算一次（[refreshContextBreakdown]），所以没有 run 也常驻显示。有 run 时面板优先
+     * 用 [stats] 里的实测三块。
+     */
+    val contextBreakdown: Triple<Int, Int, Int>? = null,
     /** The live bubble's pieces; empty unless this conversation owns the running run. */
     val liveParts: List<LivePart> = emptyList(),
     /**
@@ -288,7 +303,9 @@ data class SessionStats(
             val prompt = messages.sumOf { it.promptTokens }
             val completion = messages.sumOf { it.completionTokens }
             val cached = messages.sumOf { it.cachedTokens }
-            val elapsed = messages.sumOf { it.elapsedMs }
+            // 官方聚合＝ΣdecodeTokens/ΣdecodeMs：分母只数各轮「首字之后→结束」，不含 TTFT 等待。
+            // TOOL 消息 elapsedMs=0，天然不进这个和（sumOf 只累加 assistant 轮的 decode 段）。
+            val decode = messages.sumOf { Tps.decodeMs(it.elapsedMs, it.firstTokenMs) }
             val tokens = prompt + completion
             // Nothing to say about an empty conversation, or one whose endpoint never
             // reported usage.
@@ -304,7 +321,7 @@ data class SessionStats(
                 // all — the user saw 「缓存命中」 vanish. Whole percent, because the ring has
                 // room for three digits and a decimal point would not be one of them.
                 cachePercent = if (prompt > 0) (cached.toLong() * 100.0 / prompt).roundToInt() else 0,
-                perSecond = if (elapsed > 0) completion * 1000.0 / elapsed else 0.0,
+                perSecond = Tps.of(completion, decode),
                 contextTokens = newest?.promptTokens ?: 0,
                 contextWindow = contextWindow,
             )
@@ -493,6 +510,13 @@ class ChatViewModel : ViewModel() {
     private var retriesThisRun = 0
 
     /**
+     * 这一轮被中断的原因，写进落盘那条半截回答的尾部（用户：「中断提示不要这么简单，由 xxx 原因，
+     * 对话中断」）。[stop] 置「用户停止」；引擎自己取消（轮数上限、网关结束等）用默认文案。
+     * 消费一次就复位，避免下一次中断顶着上一次的原因。
+     */
+    private var cancelReason = "任务被停止"
+
+    /**
      * One line about retries, appended to `files/retry-trace.log`.
      *
      * **Why here and not inside `LlmClient.complete`.** The retry decision is made in the client, but
@@ -553,13 +577,30 @@ class ChatViewModel : ViewModel() {
      * (what a restore can mean); the decoded bitmap lives here for the session, so a
      * chip keeps its thumbnail across a drawer switch without re-decoding.
      */
-    private val attachmentCache = mutableMapOf<String, Attachment>()
+    private val attachmentCache = mutableMapOf<String, MutableList<Attachment>>()
 
-    fun cacheAttachment(chatId: String, attachment: Attachment?) {
-        if (attachment == null) attachmentCache.remove(chatId) else attachmentCache[chatId] = attachment
+    /** 追加一张图/一个文件到这条会话的附件列（多附件：不再覆盖上一张）。 */
+    fun addAttachment(chatId: String, attachment: Attachment) {
+        attachmentCache.getOrPut(chatId) { mutableListOf() } += attachment
     }
 
-    fun attachmentFor(chatId: String): Attachment? = attachmentCache[chatId]
+    /** 删掉附件列里第 [index] 个；删空即移除整条缓存。 */
+    fun removeAttachmentAt(chatId: String, index: Int) {
+        val list = attachmentCache[chatId] ?: return
+        if (index !in list.indices) return
+        list.removeAt(index)
+        if (list.isEmpty()) attachmentCache.remove(chatId)
+    }
+
+    fun cacheAttachment(chatId: String, attachment: Attachment?) {
+        if (attachment == null) attachmentCache.remove(chatId)
+        else attachmentCache[chatId] = mutableListOf(attachment)
+    }
+
+    fun attachmentFor(chatId: String): Attachment? = attachmentCache[chatId]?.firstOrNull()
+
+    /** 这条会话当前的全部附件（顺序＝添加顺序＝发送顺序）。 */
+    fun attachmentsFor(chatId: String): List<Attachment> = attachmentCache[chatId] ?: emptyList()
 
     /** Writes [draft] as the conversation's unsent text; the display follows at once. */
     fun onDraftChange(chatId: String, draft: Draft) {
@@ -622,6 +663,9 @@ class ChatViewModel : ViewModel() {
                             // Idle, so the screen has to be released here — otherwise the
                             // composer keeps its stop button and the conversation stays
                             // locked until the user switches away and back.
+                            // stats **不**在这里清：清掉后圆环回落到 newestStored＝压缩前那一轮的
+                            // 上报值（用户截图里的 90%），正是「一中断就显示之前的」。保留 stats 时
+                            // 圆环继续显示本轮实测的 currentPrompt（含压缩后的真实大小）。
                             _state.update { it.copy(runningHere = false) }
                             sessions[chatId]?.let { live ->
                                 viewModelScope.launch { saveSession(live) }
@@ -630,7 +674,11 @@ class ChatViewModel : ViewModel() {
                         }
 
                         is RunState.Idle -> _state.update {
-                            it.copy(runningHere = false, stats = null)
+                            // **stats 不清**（用户：「进度条那些怎么只有 run 才显示」）：圆环面板的三行
+                            // 占比（系统提示词/工具定义/对话消息）读的就是它，清掉后 run 一结束三行
+                            // 就消失。它是「这段上下文由什么构成」的最后一次实测，空闲时照旧显示才有
+                            // 意义；下一次 run 会覆盖它。runningHere 照旧落回 false。
+                            it.copy(runningHere = false)
                         }
 
                         else -> _state.update { it.copy(runningHere = false) }
@@ -1024,9 +1072,9 @@ class ChatViewModel : ViewModel() {
     // -------------------------------------------------------------------- turns
 
     /** Returns false when the message was dropped, so the caller keeps the input text. */
-    fun send(text: String, imageBase64: String? = null): Boolean {
+    fun send(text: String, imagesBase64: List<String> = emptyList()): Boolean {
         val body = text.trim()
-        if (body.isEmpty() && imageBase64 == null) return false
+        if (body.isEmpty() && imagesBase64.isEmpty()) return false
         if (_state.value.conversationId.isEmpty()) return false
         // No global lock: the engine refuses a second run in the same conversation
         // (two runs would interleave into one transcript), and every other
@@ -1037,7 +1085,7 @@ class ChatViewModel : ViewModel() {
             id = UUID.randomUUID().toString(),
             role = Roles.USER,
             text = body,
-            imageBase64 = imageBase64,
+            imagesBase64 = imagesBase64,
         )
         val fresh = UUID.randomUUID().toString()
         _state.update {
@@ -1149,6 +1197,9 @@ class ChatViewModel : ViewModel() {
         // Only this conversation's reading: the speaker is one app-wide queue, so an
         // unconditional stop here used to cut short a reply another chat was reading out.
         val chatId = _state.value.conversationId
+        // 中断原因（用户：「中断提示不要这么简单，由 xxx 原因，对话中断」）：由这里落下的停止
+        // 标成「用户停止」，落盘那条半截回答的尾部就写得出原因；引擎自己取消的轮次用默认文案。
+        cancelReason = "用户停止"
         if (speakingChatId == chatId) {
             Core.speaker.stop()
             speakingChatId = null
@@ -1175,10 +1226,10 @@ class ChatViewModel : ViewModel() {
      * False means "there is nothing to steer" — no run, or a blank line — and the composer falls
      * back to sending it as an ordinary turn.
      */
-    fun steer(text: String, imageBase64: String? = null): Boolean {
+    fun steer(text: String, imagesBase64: List<String> = emptyList()): Boolean {
         val body = text.trim()
         val chatId = _state.value.conversationId
-        if (body.isEmpty() && imageBase64 == null) return false
+        if (body.isEmpty() && imagesBase64.isEmpty()) return false
         if (!Core.engine.isRunning(chatId)) return false
         if (!Core.engine.steersImmediately(chatId)) {
             // 排队: the line is the *next turn*, not an interruption. It waits here, is drawn above
@@ -1187,7 +1238,7 @@ class ChatViewModel : ViewModel() {
             // does — 立即插入 (hand it to the run in flight), 编辑 (take it back to the field) and
             // 删除 — and all three have to name the line they act on.
             pendingTurns[chatId] = pendingTurns[chatId].orEmpty() +
-                PendingTurn(UUID.randomUUID().toString().take(8), body, imageBase64)
+                PendingTurn(UUID.randomUUID().toString().take(8), body, imagesBase64)
             publishPendingTurns(chatId)
             // The field is cleared here rather than left to the caller. The composer does clear on
             // a true return, but the device is the verdict on trusting that: the line appeared in
@@ -1199,12 +1250,12 @@ class ChatViewModel : ViewModel() {
             return true
         }
         val id = UUID.randomUUID().toString().take(8)
-        if (!Core.engine.steer(chatId, id, body, imageBase64 = imageBase64)) return false
+        if (!Core.engine.steer(chatId, id, body, imagesBase64 = imagesBase64)) return false
         // No TouchFx.noteActivity here on purpose. The edge light means "the agent is operating the
         // phone right now" — UI automation — and a line the user typed is not that. A steer that
         // kept the light alive would say the phone is being driven while nothing is driving it. The
         // round's own model/tool activity already lights it and the round's end already puts it out.
-        steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, body, imageBase64)
+        steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, body, imagesBase64)
         publishSteers(chatId)
         clearDraft(chatId)
         return true
@@ -1218,7 +1269,7 @@ class ChatViewModel : ViewModel() {
         // No round left to interrupt: the line goes out as an ordinary message instead of
         // being silently dropped — but only because the user asked for it now.
         retractSteer(id)
-        if (send(queued.text, queued.imageBase64)) return
+        if (send(queued.text, queued.imagesBase64)) return
         // The send was refused after all — another run in this conversation got there first. The
         // line has already been taken off the board, so putting it back is the only way it is not
         // lost without a word: the row returns and the user can send it again.
@@ -1257,9 +1308,9 @@ class ChatViewModel : ViewModel() {
         val queued = pendingTurns[chatId].orEmpty().firstOrNull { it.id == id } ?: return
         pendingTurns[chatId] = pendingTurns[chatId].orEmpty().filterNot { it.id == id }
         publishPendingTurns(chatId)
-        if (Core.engine.steer(chatId, id, queued.text, imageBase64 = queued.imageBase64)) {
+        if (Core.engine.steer(chatId, id, queued.text, imagesBase64 = queued.imagesBase64)) {
             // It is an interruption now, so it is drawn as one: the same bubble a steer gets.
-            steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, queued.text, queued.imageBase64)
+            steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, queued.text, queued.imagesBase64)
             publishSteers(chatId)
             return
         }
@@ -1302,7 +1353,7 @@ class ChatViewModel : ViewModel() {
             if (_state.value.conversationId != chatId) return
             pendingTurns[chatId] = pendingTurns[chatId].orEmpty().drop(1)
             publishPendingTurns(chatId)
-            if (send(next.text, next.imageBase64)) return
+            if (send(next.text, next.imagesBase64)) return
             // Refused: back to the head, where the next trigger will try again. Nothing is lost and
             // nothing was sent.
             pendingTurns[chatId] = listOf(next) + pendingTurns[chatId].orEmpty()
@@ -1351,6 +1402,63 @@ class ChatViewModel : ViewModel() {
      * also when compressing would have nothing to do.
      */
     fun requestCompress(): Boolean = Core.engine.requestCompress(_state.value.conversationId)
+
+    /**
+     * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）：按**当前**上下文算一次，不依赖 run。
+     *
+     * 面板打开时调用（用户：「系统提示词就是当前窗口的 tokens 和占比，不是单个 run 的」）—— 没有
+     * run 也能看到当前窗口的构成。**这是估算，不是引擎的实测口径**：除数（字符 ÷ 4）、工具表公式
+     * （名称 + 描述 + schema 的字符数）、对话消息范围（最后一个 checkpoint 之后 + 摘要本身）都与
+     * 引擎一致，但系统提示词只取「人设 + 工具摘要」两项，记忆/画像/技能目录等分量没有计入（引擎的
+     * systemPrompt 是 RunHandle 的私有成员，UI 侧够不到）。run 一开始，面板就改用 [ChatUiState.stats]
+     * 里引擎的实测三块，估算值被覆盖。计算走 Dispatchers.Default：要拼工具表并遍历历史。
+     */
+    fun refreshContextBreakdown() {
+        val shown = _state.value
+        val chatId = shown.conversationId
+        viewModelScope.launch {
+            val settings = Core.settings.current()
+            val assistant = settings.assistant(shown.assistantId)
+            val persona = settings.forAssistant(assistant)
+            val choice = settings.choiceFor(shown.providerId, shown.model, assistant)
+            val effective = persona.copy(
+                baseUrl = choice.baseUrl,
+                apiKey = choice.apiKey,
+                model = choice.model,
+                reasoningEffort = shown.reasoningEffort ?: persona.reasoningEffort,
+            )
+            val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
+            val split = withContext(Dispatchers.Default) {
+                val checkpoint = shown.checkpoints.lastOrNull()
+                val start = checkpoint?.let { cp ->
+                    val at = shown.messages.indexOfFirst { it.id == cp.toMessageId }
+                    if (at >= 0) at + 1 else 0
+                } ?: 0
+                val kept = if (start in 1..shown.messages.lastIndex) {
+                    shown.messages.subList(start, shown.messages.size)
+                } else {
+                    shown.messages
+                }
+                val historyChars = kept.sumOf { message ->
+                    message.text.length +
+                        message.toolOutput.orEmpty().length +
+                        message.toolArgs.orEmpty().length
+                } + (checkpoint?.summary?.length ?: 0)
+                val builtinSpecs = registry.all().map { it.spec }
+                val pluginSpecs = PluginRuntime.enabledPlugins()
+                val toolSpecs = builtinSpecs +
+                    PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
+                val tools = toolSpecs.sumOf {
+                    it.name.length + it.description.length + it.parameters.toString().length
+                } / 4
+                val system = (effective.systemPrompt.length + registry.promptSummary().length) / 4
+                Triple(system, tools, historyChars / 4)
+            }
+            _state.update {
+                if (it.conversationId == chatId) it.copy(contextBreakdown = split) else it
+            }
+        }
+    }
 
     fun dismissError() {
         _state.update { it.copy(error = null) }
@@ -1411,7 +1519,7 @@ class ChatViewModel : ViewModel() {
                                 queued.id,
                                 queued.text,
                                 immediate = false,
-                                imageBase64 = queued.imageBase64,
+                                imagesBase64 = queued.imagesBase64,
                             )
                         }
                 }
@@ -1527,17 +1635,21 @@ class ChatViewModel : ViewModel() {
                     writer.cancel()
                     // 传输层抛异常的失败（400/超时/断连）不走 AgentEvent.Failed，而回执只埋在
                     // Failed 分支 ⇒ 横幅倒计时一过就什么都不剩（用户：「红色回执依旧会消失」）。
-                    // 这里补同一张回执：进 live.messages，下面的最终 saveSession 自然落盘。
+                    // 这里补同一张回执，并且**必须走 putSession**：直接给 sessions[chatId] 赋值只会
+                    // 落盘、不上屏 —— 上一版就是这么漏的，用户当轮只看到会消失的横幅。putSession
+                    // 同时写 sessions 与在屏 state，红卡当场出现；下面的最终 saveSession 再落盘。
                     // Failed 分支已写过回执的（末条已是 SYSTEM）不重复写。
                     if (failure != null) {
                         sessions[chatId]?.let { live ->
                             if (live.messages.lastOrNull()?.role != Roles.SYSTEM) {
-                                sessions[chatId] = live.copy(
-                                    messages = live.messages + StoredMessage(
-                                        id = UUID.randomUUID().toString(),
-                                        role = Roles.SYSTEM,
-                                        text = "这一轮最终失败：$failure",
-                                        runId = live.runId,
+                                putSession(
+                                    live.copy(
+                                        messages = live.messages + StoredMessage(
+                                            id = UUID.randomUUID().toString(),
+                                            role = Roles.SYSTEM,
+                                            text = "这一轮最终失败：$failure",
+                                            runId = live.runId,
+                                        ),
                                     ),
                                 )
                             }
@@ -1665,7 +1777,17 @@ class ChatViewModel : ViewModel() {
                     text = "这一轮最终失败：${event.message}",
                     runId = base.runId,
                 )
-                base.copy(error = event.message, messages = base.messages + receipt)
+                // **插到失败那一轮的最后一条消息后面**（用户：「一轮错误就跟在一轮后面」「为什么
+                // 老是放在卡片前面」）：Failed 事件可能晚于下一条消息到达（用户已发下一问/排队已
+                // 落地），追加到表尾回执就跑到下一轮卡片前面去了。按 runId 找它那一轮的末条；
+                // 找不到（极端乱序）才退回表尾。
+                val at = base.messages.indexOfLast { it.runId == base.runId && it.runId.isNotEmpty() }
+                val messages = if (at >= 0) {
+                    base.messages.subList(0, at + 1) + receipt + base.messages.subList(at + 1, base.messages.size)
+                } else {
+                    base.messages + receipt
+                }
+                base.copy(error = event.message, messages = messages)
             }
 
             // A failed attempt that is being repeated. The run is still going — it is waiting — and
@@ -1716,7 +1838,7 @@ class ChatViewModel : ViewModel() {
                     // The picture travels with the event, so the bubble the user sees is the
                     // message the model was given — and it is stored, so a later run replaying
                     // this history still sends it.
-                    imageBase64 = event.imageBase64,
+                    imagesBase64 = event.imagesBase64,
                     steer = true,
                     // This run's id, like every other message it writes. The screen hides the
                     // live run's stored rows while the bubble draws them; a steer without the
@@ -2023,7 +2145,9 @@ class ChatViewModel : ViewModel() {
         // paragraph that was still being written. Until the run ends they exist nowhere else,
         // and leaving them out is what brought the card back as a bare sentence with no chain
         // of thought and no tool row — the answer with its reasoning and its work removed.
-        val restored = liveDraftRecovery(draft, messages)
+        val restored = liveDraftRecovery(draft, messages, cancelReason = cancelReason)
+        // 原因消费一次即复位：下一轮若是引擎自己取消，写的就是默认文案而不是这一次的。
+        cancelReason = "任务被停止"
         // Nothing this draft holds is missing from the transcript; clearing it is all that is
         // left.
         if (restored.isEmpty()) {
@@ -2257,7 +2381,12 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
  * for no reason.
  */
-internal fun liveDraftRecovery(draft: LiveDraft, messages: List<StoredMessage>): List<StoredMessage> {
+internal fun liveDraftRecovery(
+    draft: LiveDraft,
+    messages: List<StoredMessage>,
+    /** 中断原因，写进半截回答的尾部（用户：「由 xxx 原因，对话中断」）。 */
+    cancelReason: String = "任务被停止",
+): List<StoredMessage> {
     val restored = draft.messages.filterNot { written -> messages.any { it.id == written.id } }
     val probe = draft.text.trim().take(LIVE_DRAFT_PROBE_CHARS)
     val delivered = probe.isNotEmpty() && messages.any { message ->
@@ -2278,7 +2407,11 @@ internal fun liveDraftRecovery(draft: LiveDraft, messages: List<StoredMessage>):
             StoredMessage(
                 id = UUID.randomUUID().toString(),
                 role = Roles.ASSISTANT,
-                text = if (body.isEmpty()) "（中断）" else body + "\n\n（中断）",
+                text = if (body.isEmpty()) {
+                    "（由「$cancelReason」原因，对话中断）"
+                } else {
+                    body + "\n\n（由「$cancelReason」原因，对话中断）"
+                },
                 reasoning = draft.reasoning,
                 runId = draft.runId,
             ),

@@ -16,7 +16,6 @@ import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Base64
-import android.view.ViewConfiguration
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,6 +31,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
@@ -59,6 +60,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
@@ -83,6 +85,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -112,6 +115,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -139,8 +144,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -157,9 +160,13 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -179,9 +186,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -198,6 +209,7 @@ import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.Tps
 import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TodoItem
@@ -215,7 +227,9 @@ import com.suixing.agent.ui.components.DrawerButton
 import com.suixing.agent.ui.components.FlatIconButton
 import com.suixing.agent.ui.components.FlatPainterButton
 import com.suixing.agent.ui.components.FullScreenOverlay
+import com.suixing.agent.ui.components.LocalPathClick
 import com.suixing.agent.ui.components.LocalHeldImePx
+import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.PressPill
@@ -257,6 +271,8 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    // 顶层拿一次剪贴板：文件路径菜单的「复制」用（见 [PathActionSheet] 接线处）。
+    val clipboard = LocalClipboardManager.current
     // The unsent text is the view model's, keyed by conversation: typing here, opening
     // another chat and coming back restores exactly what was left, and nothing leaks
     // across the switch.
@@ -266,15 +282,21 @@ fun ChatScreen(
     // hold a 「修改」-restored picture carry the *same* marker uri and label — without this, coming
     // back from one to the other kept the previous chat's decoded bitmap (the chip would show, and
     // send, the wrong picture).
-    val attachment = remember(state.conversationId, draft.attachmentUri, draft.attachmentName) {
-        viewModel.attachmentFor(state.conversationId)
+    val attachments = remember(
+        state.conversationId,
+        draft.attachmentUri,
+        draft.attachmentName,
+        draft.imageNames,
+    ) {
+        viewModel.attachmentsFor(state.conversationId)
     }
     fun setDraft(
         text: String = input,
         uri: String? = draft.attachmentUri,
         name: String? = draft.attachmentName,
+        imageNames: List<String> = draft.imageNames,
     ) {
-        viewModel.onDraftChange(state.conversationId, Draft(text, uri, name))
+        viewModel.onDraftChange(state.conversationId, Draft(text, uri, name, imageNames))
     }
 
     /**
@@ -296,18 +318,14 @@ fun ChatScreen(
      */
     suspend fun restoreQueuedSteer(steer: PendingSteer) {
         val text = if (input.isBlank()) steer.text else "${input.trimEnd()} ${steer.text}"
-        val base64 = steer.imageBase64
-        if (base64 == null) {
-            setDraft(text = text)
-            return
+        // 多附件：排队行的图逐张解回缓存列；一张解不开就跳过它（丢一张图比丢整句话小）。
+        var restored = 0
+        for (base64 in steer.imagesBase64) {
+            val bitmap = decodeAttachment(base64) ?: continue
+            viewModel.addAttachment(state.conversationId, bitmapAttachment(bitmap, QUEUED_IMAGE_LABEL))
+            restored++
         }
-        val bitmap = decodeAttachment(base64)
-        if (bitmap == null) {
-            setDraft(text = text)
-            return
-        }
-        viewModel.cacheAttachment(state.conversationId, bitmapAttachment(bitmap, QUEUED_IMAGE_LABEL))
-        setDraft(text = text, uri = QUEUED_ATTACHMENT_URI, name = QUEUED_IMAGE_LABEL)
+        setDraft(text = text, imageNames = draft.imageNames + List(restored) { QUEUED_IMAGE_LABEL })
     }
     var editing by remember { mutableStateOf<StoredMessage?>(null) }
     // The composer stack's own measured height: the node inside all of its paddings, so the
@@ -320,19 +338,23 @@ fun ChatScreen(
     val navBarPx = with(LocalDensity.current) { WindowInsets.navigationBars.getBottom(this) }
     fun navBarPad(ime: Int): Int = (navBarPx - ime).coerceAtLeast(0)
     // The room the floating stack takes out of the transcript: the composer's height, the strip
-    // under it, and its 12dp of air. Measured on the device (uiautomator bounds, keyboard down:
-    // pill 297px + 33px + 60px = the 390px between the composer's top edge and the list's own
-    // bottom edge), and derived here rather than measured from those two edges.
-    //
-    // Those two edges are written in a layout callback and read by the next frame's composition,
-    // so the list was always laid out with the *previous* frame's room, and the keyboard moves
-    // exactly one term of it — the strip under the composer, which grows back as the keys leave.
-    // That one frame of lag is the last few pixels of a close: the card sat that frame's strip
-    // closer to the composer, and the pin put it back on the next frame. The inset that moves
-    // the strip is known here, before the layout, and it is the same clamped one the shell lays
-    // itself out with.
+    var listBottomY by remember { mutableStateOf(0f) }
+    var composerTopY by remember { mutableStateOf(0f) }
+    // 让位 = 列表底到 composer 可见顶的实测距离 − 想要的可见空隙（空闲 16dp / 运行 12dp）。
+    // 队列行画在药丸之上，所以必须测整栈顶边而不是药丸顶。
+    var pillHeightPx by remember { mutableIntStateOf(0) }
     val stackFootprint = with(LocalDensity.current) {
-        composerH + (navBarPad(heldIme) + COMPOSER_BOTTOM_PAD.roundToPx()).toDp()
+        val gap = if (listBottomY > 0f && composerTopY > 0f && listBottomY > composerTopY) {
+            (listBottomY - composerTopY).toDp()
+        } else if (pillHeightPx > 0) {
+            (pillHeightPx + COMPOSER_BOTTOM_PAD.roundToPx() + navBarPad(heldIme)).toDp()
+        } else {
+            composerH
+        }
+        // 可见空隙 = padding − gap（末项底边在视口底 − padding，composer 顶在视口底 − gap）
+        // ⇒ padding = gap + 16dp（空闲）/ gap + 12dp（运行时）。反号的后果截图实锤过：
+        // 末项底边落到 composer 顶**下面**，回执/状态行被埋进输入框（「进水下去了」）。
+        (gap + if (state.runningHere) 12.dp else 16.dp).coerceAtLeast(0.dp)
     }
 
     var voiceOpen by remember { mutableStateOf(false) }
@@ -360,23 +382,26 @@ fun ChatScreen(
             if (picked == null) {
                 snackbarHostState.showSnackbar(if (kind == AttachKind.FILE) "读不到这个文件" else "读不到这张图片")
             } else {
-                viewModel.cacheAttachment(state.conversationId, picked)
-                setDraft(uri = uri.toString(), name = picked.label)
+                // 多附件：追加而不是覆盖（用户：「图片为什么只能添加一张」）。draft 的 imageNames
+                // 是 remember 的重读触发器，标签列与缓存列同序。
+                viewModel.addAttachment(state.conversationId, picked)
+                setDraft(imageNames = draft.imageNames + picked.label)
             }
         }
     }
 
     val imagePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia(),
-    ) { uri -> attach(uri, AttachKind.IMAGE) }
+        // 多附件：PickMultipleVisualMedia 让用户一次连选多张（用户选了「不限张数」）。
+        ActivityResultContracts.PickMultipleVisualMedia(),
+    ) { uris -> uris.forEach { attach(it, AttachKind.IMAGE) } }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicturePreview(),
     ) { bitmap ->
         if (bitmap != null) {
             val picked = bitmapAttachment(bitmap)
-            viewModel.cacheAttachment(state.conversationId, picked)
-            setDraft(uri = null, name = picked.label)
+            viewModel.addAttachment(state.conversationId, picked)
+            setDraft(imageNames = draft.imageNames + picked.label)
         }
     }
 
@@ -436,6 +461,15 @@ fun ChatScreen(
         groupRows(state.messages.drop(page.from), state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
+    // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
+    // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
+    // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
+    val receipts = remember(state.conversationId, state.messagesRevision, page) {
+        state.messages.drop(page.from).filter { it.role == Roles.SYSTEM }
+    }
+    // 没有回执的失败（发送阶段错误等）的实时行，画在最后一轮下面。
+    val errorLine = state.error != null &&
+        receipts.none { it.text == "这一轮最终失败：${state.error}" }
     val reasoning = if (settings.showReasoning) state.reasoning else ""
     // Whatever the run produces first — a tool call, a thought or a word — opens the live
     // bubble. Waiting for text is what used to leave a tool call stranded on its own until
@@ -467,29 +501,46 @@ fun ChatScreen(
     // cache figure says nothing about the window as it stands now.
     val newestUsage = visible.lastOrNull { it.usage != null }?.usage
     // What the endpoint never priced, sized off the text: the ring's floor for a conversation
-    // whose gateway sends no usage block (or one stored before the counts existed). The
-    // arithmetic is the engine's own ([estimateTokens], shared rather than copied), and the walk
-    // runs on the same key as the sums below — one pass per row that lands, not one per publish.
-    val transcriptEstimate = remember(rowsKey) { state.messages.sumOf { estimateTokens(it) } }
+    val transcriptEstimate = remember(rowsKey, state.checkpoints) {
+        val last = state.checkpoints.lastOrNull()
+        val start = last?.let { cp ->
+            val i = state.messages.indexOfFirst { it.id == cp.toMessageId }
+            if (i >= 0) i + 1 else 0
+        } ?: 0
+        val kept = if (start in 1..state.messages.lastIndex) {
+            state.messages.subList(start, state.messages.size)
+        } else {
+            state.messages
+        }
+        kept.sumOf { estimateTokens(it) } + (last?.summary?.length ?: 0) / 3
+    }
     // The number itself is picked by [ringReading], in the order that keeps it honest: the
     // endpoint's own count for the round that just reported, else the newest stored round's, else
     // the live run's estimate off the wire's characters, else the transcript's own size. The last
     // two are what take 「暂无数据」 off the card: many gateways ignore
     // `stream_options.include_usage` (see LlmClient's own note), and for those the ring had no
     // number for the whole conversation. A proportion labelled 「约」 beats a blank.
+    // 圆环读数（用户：「37 和 48 到底哪个是真的」「一直变来变去」）：**只认实测一个口径** ——
+    // currentPrompt 是引擎自己的 /4 粗估（37 那档），lastPromptTokens 才是网关实测（48 那档）；
+    // 之前把粗估排第一、还把两个口径的 max 存进保持值 ⇒ 两个口径轮流上屏就是跳变本身。
+    // 现在：本轮实测 → 按会话保持的最近实测 → 落盘的最近实测；粗估只作「从没实测过」的兜底。
+    val heldPrompt = rememberSaveable(state.conversationId) { mutableIntStateOf(0) }
+    val reported = state.stats?.lastPromptTokens ?: 0
+    LaunchedEffect(reported) {
+        if (reported > 0) heldPrompt.intValue = reported
+    }
     val reading = ringReading(
-        liveReported = state.stats?.lastPromptTokens ?: 0,
+        liveReported = if (reported > 0) reported else heldPrompt.intValue,
         newestStored = newestUsage?.prompt ?: 0,
         liveEstimate = state.stats?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
         transcriptEstimate = transcriptEstimate,
     )
+    // 每轮结束重算一次「下一轮请求的大小」，喂圆环面板的三行占比。
+    LaunchedEffect(state.runningHere) {
+        if (!state.runningHere) viewModel.refreshContextBreakdown()
+    }
     val contextUsed = reading.tokens
-    // The cache figure the ring's card shows is the whole conversation's, summed once in the
-    // view model ([SessionStats.cachePercent]); the newest round's own ratio is no longer read
-    // here, so nothing is derived from it.
-    // What the conversation has spent in total, summed once in the view model rather than
-    // walked here: a long transcript is thousands of messages, and the ring's card is
-    // redrawn far more often than the number changes.
+    // 圆环读数诊断（用户选的「加日志抓，不再猜」）：任一候选源或 run 状态变化时记一行，含全部
     val session = viewModel.sessionStats.collectAsState(initial = null).value
     val sessionTokens = session?.tokens ?: 0
     val sessionTurns = session?.turns ?: 0
@@ -524,21 +575,33 @@ fun ChatScreen(
     val checkpointsByRow = remember(state.checkpoints, visible) {
         val byId = visible.associateBy { it.message.id }
         val indexOf = visible.withIndex().associate { (index, row) -> row.message.id to index }
-        state.checkpoints.mapNotNull { checkpoint ->
+        val orphanToTop = mutableListOf<ContextCheckpoint>()
+        val placed = state.checkpoints.mapNotNull { checkpoint ->
             val owner = byId[checkpoint.toMessageId]
                 ?: visible.firstOrNull { row ->
                     row.rounds.any { it.id == checkpoint.toMessageId }
                 }
-            // Nothing to hang it on: a branch switch or a trimmed conversation. Dropping it
-            // beats drawing it somewhere it does not belong.
-            val id = owner?.message?.id ?: return@mapNotNull null
+            if (owner == null) {
+                // 锚点落在当前页窗口之外（转录按页后缀加载）：旧行为是**丢掉不画** —— 用户看到
+                // 的就是「压缩记录时有时无、过几轮就消失」。改挂到**本页最旧一行**顶上：折叠发生
+                // 在它们之前，这里就是折叠历史在当前页的起点，画在这里永远比消失诚实。
+                orphanToTop += checkpoint
+                return@mapNotNull null
+            }
+            val id = owner.message.id
             val at = indexOf[id] ?: return@mapNotNull null
             at to checkpoint
         }.groupBy({ it.first }, { it.second })
             .mapKeys { (index, _) -> visible[index].message.id }
+            .toMutableMap()
+        if (orphanToTop.isNotEmpty()) {
+            visible.firstOrNull()?.let { top ->
+                placed[top.message.id] = (placed[top.message.id].orEmpty()) + orphanToTop
+            }
+        }
+        placed
     }
-    // The run caption's text, and whether it carries a clock: the compression note is a
-    // fact about the context rather than progress, so it never shows a duration.
+    // 压缩的告知就是转录里那条记录行本身（用户：「不需要 toast/snackbar，有对话里类似状态条的
     val statsNote = state.stats?.note.orEmpty()
     val liveStatusText = statsNote.ifEmpty {
         // No ellipsis: 「正在思考…」 was read as a truncation of something longer. The line
@@ -575,9 +638,10 @@ fun ChatScreen(
     // The 「加载更早」 line sits above the transcript as an item of its own, so every row
     // below it is one item further down than its place in [visible].
     val rowOffset = if (page.hasEarlier) 1 else 0
-    // The live card and, under it, its progress caption: both are items of the list, so
-    // the count everything else scrolls by includes them.
-    val itemCount = visible.size + rowOffset + if (live) 2 else 0
+    // The live card (with its progress caption inside) is one item; the error line and the
+    // 「加载更早」 line are items of their own. 底锚下这个数只用于「有没有内容」与插入回底。
+    val itemCount = visible.size + rowOffset +
+        (if (errorLine) 1 else 0) + if (live || state.runningHere) 1 else 0
 
     // The user's own messages are the landmarks of a conversation, so the status line can
     // say "turn 2 of 5" and jump between them without the engine knowing anything about it.
@@ -602,286 +666,75 @@ fun ChatScreen(
             }
             .map { it + rowOffset }
     }
+    // 喂序（顶锚正序）：load-earlier? → visible → errorLine? → live?；增长在末尾，读上面时视口不动。
+    fun fedIndexOf(oldVisible: Int) = rowOffset + oldVisible
+
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
-    val currentTurn = turnIndices.indexOfLast { it <= firstVisible }.coerceAtLeast(0) + 1
+    // 顶锚下 firstVisibleItemIndex 就是喂序索引；减掉前缀（load-earlier）即 visible 坐标。
+    val firstVisibleOld = (firstVisible - rowOffset)
+        .coerceIn(0, (visible.size - 1).coerceAtLeast(0))
+    val currentTurn = turnIndices.indexOfLast { it <= firstVisibleOld + rowOffset }
+        .coerceAtLeast(0) + 1
 
-    // Auto-scrolling is the scroll position's decision, not the transcript's: while the
-    // list sits at the end a growing reply keeps it there, and the moment the user drags
-    // up to read something the view stops being yanked back down.
-    //
-    // Saved, like the scroll position it describes. Leaving the screen for the settings page
-    // disposes this composition and coming back builds it again: a plain `remember` would hand the
-    // reader a fresh `true`, so a chat they had scrolled up in would start following again the
-    // moment the next token landed. The position is restored by the list's own saver; this is the
-    // other half of that state, and the two have to agree or the transcript drifts.
-    var following by rememberSaveable { mutableStateOf(true) }
-    // A finger is on the transcript right now. Its one job is to stop the watcher below from
-    // handing the follow back while the press is still going: the press took it away on purpose,
-    // and a re-arm mid-press is what let the next streamed frame pin the list to its end under the
-    // hand. Transient by nature — a rotation mid-press is not a state worth restoring.
+    // ===== 滚动与阅读位置：顶锚列表，逻辑全在 ChatScroll.kt =====
+    // 顶锚下内容往末尾追加 ⇒ 读上面时视口天然不动；追底＝在底就贴底；取消＝手指上拖 4dp。
+    // 这一层没有任何"纠正"代码。
     var pressed by remember { mutableStateOf(false) }
-    // 手指有没有越过触摸斜率。**必须是 state**：`nestedScroll` 的连接要读它决定放不放行，而那个
-    // 回调不在组合里跑 —— 只有活着 state 才读得到当前值。按下时清零、循环里越过斜率就置位。
-    var fingerDragged by remember { mutableStateOf(false) }
-    // 按下期间列表自己动过没有。**必须按帧采样**：指针事件只在手指移动时到达，而静止的长按
-    // （选文本）期间 `isScrollInProgress` 一次也采不到 —— 真机日志里 `scrolled=false` 而位置
-    // 却变了 636px，就是这一条采样空档。判定本身还靠「按下/抬起的位置对」，这一条只是让日志
-    // 与判定都别再漏。
-    var pressScrolled by remember { mutableStateOf(false) }
-    // 按下那一刻的位置（供按住期间的逐帧守护用）。真机日志（2026-10-13 两条真长按）：
-    // 抬手时净位移是 0，但 frameScrolled=true —— 选择机制的 bringIntoView 在**按住期间**把列表
-    // 拉走又（部分）回来，用户看到的就是中间那一跳。nestedScroll 吃得掉增量、吃不掉直接跳转，
-    // 所以守护放在这里：按住且手指没在拖时，位置一旦偏离按下点就同帧放回去。
-    var pressDownIndex by remember { mutableIntStateOf(-1) }
-    var pressDownOffset by remember { mutableIntStateOf(0) }
-    // Set while the list is being scrolled by us. Without it the follow scroll itself trips
-    // the "user scrolled away" branch below, following goes false, and the run stops
-    // following its own output — which is exactly what it used to do.
-    var programmatic by remember { mutableStateOf(false) }
-    // When the last pin ran: the scroll watcher below sees our own pin's scrolling a beat late
-    // (the programmatic guard is already down by then) and would read it as a user drag.
-    var lastPinAt by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(pressed) {
-        if (!pressed) return@LaunchedEffect
-        pressScrolled = false
-        while (true) {
-            if (!programmatic && listState.isScrollInProgress) pressScrolled = true
-            // 按住期间的逐帧守护：选择机制把选中行拉进视野是一次程序滚动，nestedScroll 吃不掉
-            // 直接跳转；这里每帧比对按下点，偏了就同帧放回去 —— 用户看不到中间那一跳。
-            // 手指在拖（fingerDragged）时不碰：那时的位移是用户自己的。
-            if (!fingerDragged && pressDownIndex >= 0 &&
-                (listState.firstVisibleItemIndex != pressDownIndex ||
-                    listState.firstVisibleItemScrollOffset != pressDownOffset)
-            ) {
-                programmatic = true
-                try {
-                    listState.scrollToItem(pressDownIndex, pressDownOffset)
-                } finally {
-                    programmatic = false
-                }
-            }
-            withFrameNanos { }
-        }
-    }
-    LaunchedEffect(listState) {
-        // The hand wins the moment it moves. `canScrollBackward` is false while the list sits
-        // at its end and true the instant a drag lifts it off, so following is dropped on the
-        // first pixel of an upward swipe — a distance threshold (the old 48px) meant a slow
-        // stream kept the list pinned while the user dragged, and they had to fight it.
-        snapshotFlow { listState.isScrollInProgress to listState.canScrollBackward }
-            .collect { (scrolling, canScrollBack) ->
-                scrollDiag(context, "watch:emit", listState, following, itemCount, ime = heldIme) // 量完删
-                // Our own pin scrolls synchronously; by the time this collector sees the
-                // scrolling flag the programmatic guard is already down, and it read the pin as
-                // a user drag and killed following mid-transition — the card then froze while
-                // the viewport kept growing, which is the dip. Ignore scrolling that lands
-                // within 120ms of a pin; a real hand drag never does.
-                if (scrolling && !programmatic && canScrollBack &&
-                    SystemClock.uptimeMillis() - lastPinAt > 120
-                ) {
-                    following = false
-                    scrollDiag(context, "watch:decision=drop(hand)", listState, following, itemCount, ime = heldIme) // 量完删
-                } else if (!scrolling && !pressed && listState.atVeryEnd()) {
-                    // Released at the end again — or the user tapped 跳最新, which sets
-                    // following itself: either way the run may follow its output again.
-                    //
-                    // `!pressed` is the whole guard: without it this branch also fired while a
-                    // finger was *down* on a bubble, re-arming the follow the press had just taken
-                    // away — and the next streamed frame pinned the list to its end under the
-                    // finger. That is the jump the user reports on pressing to select text, and it
-                    // needs no keyboard: the press only has to happen while the list is at its end.
-                    // A press that ends without moving (a tap) still re-arms, through the release
-                    // path, which is where that decision belongs.
-                    following = true
-                    scrollDiag(context, "watch:decision=rearm(atEnd)", listState, following, itemCount, ime = heldIme) // 量完删
-                }
-            }
-    }
-    // A new conversation starts at its newest message, whoever was reading what before.
-    // The list keeps one scroll state for the whole screen, so a switch would otherwise
-    // land at the previous chat's offset. Not gated by autoFollow: that setting decides
-    // what *new* messages do, while this is simply where a conversation opens.
-    //
-    // Once per conversation, not once per visit. A `LaunchedEffect` starts again every time its
-    // composable enters the composition, and leaving for the settings page and coming back is
-    // exactly that — so this pin used to re-run on every return: the scroll position the list had
-    // just restored was thrown away and the transcript snapped to its end, with the follow
-    // re-armed, which is what read as "the page reloaded". The flag is `rememberSaveable`, so it
-    // survives that trip with the position it belongs to, and it resets when the conversation
-    // really changes (the key) or when the process starts fresh.
-    var pinned by rememberSaveable(state.conversationId) { mutableStateOf(false) }
-    LaunchedEffect(state.conversationId, pinned) {
-        if (pinned) return@LaunchedEffect
-        pinned = true
-        following = true
-        if (itemCount <= 0) return@LaunchedEffect
-        programmatic = true
+    var pressUpAt by remember { mutableLongStateOf(0L) }
+    var pressGuardOn by remember { mutableStateOf(false) }
+    // composition local 只能在组合里读：先在组合层捕获，守护协程里用这个引用。
+    val setSelectionActive = LocalSetSelectionActive.current
+    LaunchedEffect(pressGuardOn) {
+        if (!pressGuardOn) return@LaunchedEffect
+        setSelectionActive?.invoke(true)
         try {
-            scrollDiag(context, "cold-pin:begin", listState, following, itemCount) // 量完删
-            // Re-checked before each scroll, because `following` is not a key of this effect: a
-            // hand that lands after it starts is in the middle of a pin it cannot stop, and this
-            // pass is the one that makes the jump — a cold start is the only time the landing
-            // point is wrong, so the pull to the end is the only time it shows.
-            if (!following) return@LaunchedEffect
-            listState.scrollToItem(itemCount - 1)
-            scrollDiag(context, "cold-pin:pass1", listState, following, itemCount) // 量完删
-            if (!following) return@LaunchedEffect
-            listState.scrollBy(FOLLOW_SCROLL_PX)
-            scrollDiag(context, "cold-pin:pass2", listState, following, itemCount) // 量完删
-        } finally {
-            programmatic = false
-        }
-    }
-    // The item count the last pin saw. A pin that is only following growing text needs one
-    // pass: the item's new height is measured in the very layout the scroll lands in, so the
-    // end it reaches is the real end. The second pass exists for the frame an item was
-    // *added* in, where its height is still unknown — and running it on every publish doubled
-    // the work of a pin that already runs twelve times a second: four full re-measures of the
-    // list per publish while an answer streams, which is one of the frames the ghost lives in.
-    var pinnedCount by remember { mutableIntStateOf(-1) }
-    // Every event that can change the height of the last item is a trigger: the streamed
-    // text, a tool row appearing or finishing, and the status line — not just the count.
-    LaunchedEffect(
-        itemCount,
-        state.streaming.length,
-        state.reasoning.length,
-        state.liveParts,
-        state.status,
-        settings.autoFollow,
-        // `following` is a key, not only a check, and that is what makes a press stop a pin that is
-        // already on its way: `scrollToItem` and `scrollBy` are suspending, so a gate re-checked
-        // between them cannot stop the scroll they have already asked for — the press lands in that
-        // suspension and the list moves under the finger anyway. Keying the effect on the flag makes
-        // the press cancel the coroutine, and a cancelled scroll stops where it is.
-        following,
-    ) {
-        // Re-taken before every scroll below, not just at the top. `following` is not a key of
-        // this effect, so a finger that lands while a pin is in flight used to be dragged to the
-        // end by the scrolls already on their way — which is the jump the user reported, and the
-        // reason it only ever showed on a cold start: that is where the first pin takes the
-        // two-pass path, with a frame wait between the passes that gives the hand time to land.
-        fun gateOpen() = following && settings.autoFollow
-        if (itemCount <= 0 || !gateOpen()) return@LaunchedEffect
-        // A drag in flight pauses the pin: content updates land between the frames of a
-        // gesture, and pinning on one of them yanks the list back to the end under the user's
-        // finger — which is what made "scroll up a little" not enough. The release effect
-        // above has already dropped `following` by then; this is the belt to that pair of
-        // braces for the frame or two before it runs.
-        if (listState.isScrollInProgress && !programmatic) return@LaunchedEffect
-        val added = pinnedCount != itemCount
-        pinnedCount = itemCount
-        programmatic = true
-        try {
-            if (!gateOpen()) return@LaunchedEffect
-            listState.scrollToItem(itemCount - 1)
-            scrollDiag(context, "pin:pass1", listState, following, itemCount) // 量完删
-            if (!gateOpen()) return@LaunchedEffect
-            listState.scrollBy(FOLLOW_SCROLL_PX)
-            scrollDiag(context, "pin:pass1b", listState, following, itemCount) // 量完删
-            // A second pass once the new item has been measured. The first scroll runs in the
-            // frame the item was added, when its height is still unknown, so the end it lands on
-            // is short by exactly the height of what just appeared — the status line of a fresh
-            // question ended up under the composer that way.
-            //
-            // Both passes are instant. Animating this was a mistake: it is a correction of a few
-            // dozen pixels that the user did not ask to watch, and a moving scroll position after
-            // every send is worse than a jump they never see.
-            if (added) {
+            while (pressGuardOn) {
+                if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
+                    pressGuardOn = false
+                }
                 withFrameNanos { }
-                if (!gateOpen()) return@LaunchedEffect
-                listState.scrollToItem(itemCount - 1)
-                if (!gateOpen()) return@LaunchedEffect
-                listState.scrollBy(FOLLOW_SCROLL_PX)
-                scrollDiag(context, "pin:pass2", listState, following, itemCount) // 量完删
             }
         } finally {
-            programmatic = false
+            // 组合被带走（切会话/退页）也要解冻，否则外壳的 IME clamp 永远停摆。
+            setSelectionActive?.invoke(false)
         }
     }
-
-    // The keyboard is not a scroll: it squeezes this screen's viewport from the bottom, so a
-    // list pinned to its end keeps its offset and leaves its last card below the fold while
-    // the composer rises above the keys.
-    //
-    // The trigger is the viewport's own height, not the IME inset. Measured on the device with
-    // the keyboard up and down (uiautomator bounds): pinning on the inset value left the last
-    // card 108px above the composer with the keyboard up against 48px with it down — the inset
-    // effect ran on the last value it was handed, and the layout settled 60px later with nothing
-    // left to re-pin it. The viewport height changes when the layout changes, which is the thing
-    // that actually has to be answered.
-    val viewportHeight by remember {
-        derivedStateOf { listState.layoutInfo.viewportSize.height }
-    }
-    // The keyboard's own inset, read raw: the platform animates it frame by frame, so this
-    // effect re-runs on every frame of the keyboard's motion and the instant pin inside it is
-    // what keeps the last card glued above the composer. This is the trigger that worked in
-    // 0.8.15-0.8.17; the viewport-height variants that replaced it (single compensation, then a
-    // frame loop) each regressed one direction of the transition, so it comes back as it was.
-    val keyboardInset = WindowInsets.ime.getBottom(LocalDensity.current)
-    // One keyboard transition has one direction. The platform's inset animation ends with a
-    // small rebound of a few pixels the other way, and following it faithfully is what put a
-    // visible one-frame hitch at the end of every close on a 120Hz display. Opposite-direction
-    // changes below the clamp are the rebound, not a new transition: they are dropped. Real
-    // frames of a transition are 30-80px, so the clamp cannot eat one.
-    var followDir by remember { mutableStateOf(0) }
-    var lastInset by remember { mutableStateOf(-1) }
-    LaunchedEffect(keyboardInset) {
-        val previous = lastInset
-        lastInset = keyboardInset
-        if (previous < 0) return@LaunchedEffect
-        val delta = keyboardInset - previous
-        if (delta == 0) return@LaunchedEffect
-        val dir = if (delta > 0) 1 else -1
-        if (followDir != 0 && dir != followDir && abs(delta) <= REBOUND_CLAMP_PX) return@LaunchedEffect
-        followDir = dir
-        // No pin here on purpose. This effect runs before layout, so a pin here uses last
-        // frame's composer position and lands a few pixels short until the next frame — the
-        // tiny end-of-close "settle" the user felt as a rebound. The pin lives in the composer's
-        // layout callback instead (onPlaced), where the position is this frame's.
-    }
-    // The transition is over once the inset has been still for a beat: forget its direction so
-    // the next one, whichever way it goes, is followed from its first frame.
-    LaunchedEffect(keyboardInset) {
-        delay(300)
-        followDir = 0
-    }
-    // The keyboard is a layout change, so the list has to be moved by exactly what the
-    // composer is moved by, in the same frame the composer moves.
-    //
-    // Two terms, because the room the stack takes out of the transcript has two: the scaffold
-    // the composer sits on, which the clamped inset moves by the whole delta, and the strip the
-    // composer pads itself by at the bottom, which grows back by that same delta as the keys
-    // leave (it is the navigation bar's height once the keyboard is fully down, and nothing
-    // while it is up). The list's own bottom padding carries both terms — see stackFootprint —
-    // so compensating by the first one alone left the card that frame's strip short, which is
-    // the settle the user kept feeling. Compensating here, before this frame's layout, puts the
-    // last card where the composer is going to be in the frame it gets there. The clamp is the
-    // same one the shell lays itself out with (LocalHeldImePx), so the platform's
-    // end-of-animation rebound is not followed by either of them.
-    //
-    // The pin in the composer's layout callback below stays as the correction, but on its own
-    // it is always one frame late: the LazyColumn is measured before the composer is placed,
-    // so a scroll dispatched from that callback can only land in the next frame's layout.
-    var lastHeldIme by remember { mutableIntStateOf(-1) }
-    LaunchedEffect(heldIme) {
-        val previous = lastHeldIme
-        lastHeldIme = heldIme
-        if (previous < 0 || heldIme == previous) return@LaunchedEffect
-        if (!following || !settings.autoFollow) return@LaunchedEffect
-        programmatic = true
-        lastPinAt = SystemClock.uptimeMillis()
-        try {
-            scrollDiag(context, "ime:delta=$previous->$heldIme", listState, following, itemCount, ime = heldIme) // 量完删
-            listState.dispatchRawDelta(
-                (heldIme - previous).toFloat() +
-                    (navBarPad(heldIme) - navBarPad(previous)).toFloat(),
-            )
-        } finally {
-            programmatic = false
+    val scroll = rememberChatScroll(
+        listState = listState,
+        itemCount = itemCount,
+        autoFollow = settings.autoFollow,
+        pressed = pressed,
+        pressGuardOn = pressGuardOn,
+    )
+    // 切换会话前存位置；打开时有记忆回记忆、没有回底。
+    var lastConvId by remember { mutableStateOf(state.conversationId) }
+    LaunchedEffect(state.conversationId) {
+        if (lastConvId != state.conversationId) {
+            scroll.saveSpot(lastConvId)
+            lastConvId = state.conversationId
         }
     }
-    val atEnd by remember { derivedStateOf { listState.atEnd() } }
-
+    var openedPinned by rememberSaveable(state.conversationId) { mutableStateOf(false) }
+    LaunchedEffect(state.conversationId, itemCount, openedPinned) {
+        if (openedPinned || itemCount <= 0) return@LaunchedEffect
+        openedPinned = true
+        val saved = scroll.takeSpot(state.conversationId)
+        val idx = if (saved?.first != null) {
+            visible.indexOfFirst { it.message.id == saved.first }
+        } else {
+            -1
+        }
+        if (idx >= 0 && saved != null) {
+            scroll.stickToBottom = false
+            scroll.spotKey = saved.first
+            scroll.spotOffset = saved.second
+            // 喂序索引 = rowOffset（load-earlier 占 index0）+ visible 内下标。
+            listState.scrollToItem(rowOffset + idx, saved.second)
+        } else {
+            scroll.stickToBottom = true
+            scroll.toBottom(itemCount)
+        }
+    }
     // 外观 → 气泡宽度. Measured against the screen, which is what the setting promises
     // in its own words: 标准 (0.94) stays wider than the transcript's own 16dp margins,
     // so the default leaves every card exactly as wide as it has always been, and only
@@ -891,16 +744,9 @@ fun ChatScreen(
 
     fun jumpToLatest() {
         scope.launch {
-            following = true
+            scroll.stickToBottom = true
             if (itemCount > 0) {
-                programmatic = true
-                try {
-                    scrollDiag(context, "jump:latest", listState, following, itemCount) // 量完删
-                    listState.scrollToItem(itemCount - 1)
-                    listState.scrollBy(FOLLOW_SCROLL_PX)
-                } finally {
-                    programmatic = false
-                }
+                scroll.toBottom(itemCount)
             }
         }
     }
@@ -914,6 +760,13 @@ fun ChatScreen(
         delay(seconds * 1000L)
         viewModel.dismissError()
     }
+    // 文件路径点击 → 弹菜单（复制 / 让随行读取），LINK-CLICK-SPEC §3.2 一期。回调经 LocalPathClick
+    // 下传，四个 MarkdownText 调用点与中间各层组件都不用加参数。lambda 用 remember 稳定引用：否则
+    // 每次重组新建实例会让 InlineText 的 remember(pathClick) 失效、流式时每帧重排文本。
+    // 内部 Scaffold 未重新缩进——重排 670 行是纯噪音 diff，Kotlin 不依赖缩进。
+    var pathMenuPath by remember { mutableStateOf<String?>(null) }
+    val onPathMenu = remember { { path: String -> pathMenuPath = path } }
+    CompositionLocalProvider(LocalPathClick provides onPathMenu) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         // No topBar slot: the header floats over the transcript as three discs, so the
@@ -971,216 +824,60 @@ fun ChatScreen(
                         EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
                     }
                 } else {
-                    // In px, converted once: a raw pixel threshold would be a couple of
-                    // millimetres on a dense screen and a centimetre on a sparse one.
-                    val releaseDragPx = with(LocalDensity.current) { RELEASE_DRAG_DP.toPx() }
-                    // 手指有没有真的拖动过：**触摸斜率**，也就是 Compose 的滚动开始生效的那条线。
-                    // 手指没越过它，列表就绝不可能因为手指而滚动 —— 这是「静止长按」的判据（见
-                    // restoresPositionAfterLongPress）。
-                    val touchSlopPx = with(LocalDensity.current) {
-                        ViewConfiguration.get(context).scaledTouchSlop.toFloat()
-                    }
-                    // The gesture system's own long-press timeout, read rather than assumed: our
-                    // constant sat below it (450 against the platform's 500), so a press in that
-                    // window started a selection — the IME collapsing with it — while the release
-                    // below still counted as a tap and handed the follow back, and the follow is
-                    // what moves the list when the keyboard goes. One clock, not two.
-                    val holdToSelectMs = LocalViewConfiguration.current.longPressTimeoutMillis
+                    CompositionLocalProvider(LocalReadingPinned provides !scroll.stickToBottom) {
                     LazyColumn(
                         state = listState,
+                        // **顶锚**（标准画法）：内容往末尾追加，读上面时视口天然不动；追底＝在底就
+                        // 滚到末尾。旧底锚（reverseLayout）把增长放在布局起点，是"乱飞/抖/拉回"的根源。
                         modifier = Modifier
                             .fillMaxSize()
-                            // 按住期间不许动：手指按下、又没越过触摸斜率时，把一切滚动增量都吃掉。
-                            //
-                            // 为什么不能只靠事后还原（restoresPositionAfterLongPress）：框架把选中
-                            // 行拉进视野是**先发生**的，用户已经看见了那段位移，我们再把位置放回去，
-                            // 观感就是「中途滚了一下才滚回来」（用户复测的原话）。这里在滚动**到达
-                            // 列表之前**就返回 Offset.Zero 把它消费掉，那次滚动根本不会发生。
-                            //
-                            // 放行条件只有一条：手指真的拖动过（越过触摸斜率）⇒ 用户自己要滚，一律
-                            // 放行。`pressed`/`fingerDragged` 是长按路径一直在用的那两个瞬态量，读的是
-                            // 活的 state（委托属性捕获的是 MutableState 本身），不是组合时的快照。
-                            .nestedScroll(
-                                object : NestedScrollConnection {
-                                    override fun onPreScroll(
-                                        available: Offset,
-                                        source: NestedScrollSource,
-                                    ): Offset =
-                                        if (pressed && !fingerDragged) available else Offset.Zero
-
-                                    override fun onPostScroll(
-                                        consumed: Offset,
-                                        available: Offset,
-                                        source: NestedScrollSource,
-                                    ): Offset =
-                                        if (pressed && !fingerDragged) available else Offset.Zero
-                                },
-                            )
-                            // A finger on the transcript releases the follow the instant it lands,
-                            // not after a threshold. Waiting for the 450ms long press — or for 12dp
-                            // of travel — meant a streaming answer kept pinning the list to its end
-                            // under a finger that had already started selecting text, and the
-                            // position, with the selection on it, moved. A drag wins that argument
-                            // through the scroll watcher below; this gives a press the same right
-                            // from its first frame. The events are only observed, at the initial
-                            // pass, so selection and scrolling still receive them untouched —
-                            // nothing here consumes anything.
+                            // 列表自己的底边（窗口坐标）：让位用它当基准 —— 它和 composer 在同一个
+                            // 坐标系里，键盘弹起时两者一起被抬上去，所以「列表底 − 药丸顶」在抬起
+                            // 与收起两种状态下都是真实可见的空隙（之前拿屏幕高当基准，比根容器实际
+                            // 高度大，让位就越算越大）。
+                            .onGloballyPositioned {
+                                listBottomY = it.positionInWindow().y + it.size.height
+                            }
+                            // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {
                                     while (true) {
                                         val down = awaitPointerEvent(PointerEventPass.Initial)
                                         if (down.changes.none { it.pressed }) continue
-                                        val pressedAt = SystemClock.uptimeMillis()
                                         val downY = down.changes.first().position.y
-                                        // Where the transcript stood when the finger landed. Compared
-                                        // with the same pair at release: any difference means the
-                                        // list moved, which is the one fact that must keep the follow
-                                        // released (see restoresFollowAfterPress).
-                                        val downIndex = listState.firstVisibleItemIndex
-                                        val downOffset = listState.firstVisibleItemScrollOffset
-                                        val wasFollowing = following
-                                        following = false
                                         pressed = true
-                                        fingerDragged = false
-                                        pressDownIndex = downIndex
-                                        pressDownOffset = downOffset
-                                        scrollDiag(context, "press:down", listState, wasFollowing, itemCount, ime = heldIme) // 量完删
-                                        var movedUp = false
-                                        // Whether the list itself moved. A hand can travel less than
-                                        // the 12dp above and still send the list a long way: a fling,
-                                        // and — the case that matters — a drag *downward*, which is
-                                        // the gesture that reads older messages. `programmatic` is
-                                        // excluded so our own pin cannot pass for a hand: a tap that
-                                        // happens to land during a pin is still a tap.
-                                        var scrolled = false
-                                        // 手指有没有越过触摸斜率。越过之前，Compose 的滚动根本不会
-                                        // 因为手指而动 —— 所以「没越过 + 列表却动了」只可能是别的东西
-                                        // 在滚（选择机制把选中行拉进视野）。这是长按还原位置的判据，
-                                        // 也是 nestedScroll 放不放行的开关（它是外层那个 state，
-                                        // 按下时已清零，这里只置位）。
+                                        pressGuardOn = true
                                         var released = false
                                         while (!released) {
                                             val next = awaitPointerEvent(PointerEventPass.Initial)
+                                            val change = next.changes.firstOrNull()
+                                            if (change != null && change.pressed &&
+                                                downY - change.position.y > CANCEL_FOLLOW_PX
+                                            ) {
+                                                scroll.stickToBottom = false
+                                            }
                                             released = next.changes.none { it.pressed }
-                                            // Remembered, not acted on: the follow is already down.
-                                            // An upward move is what separates a drag, which must
-                                            // stay released, from a plain tap, which must not.
-                                            val dy = downY - next.changes.first().position.y
-                                            if (!released && dy > releaseDragPx) {
-                                                movedUp = true
-                                            }
-                                            if (!released && abs(dy) > touchSlopPx) {
-                                                fingerDragged = true
-                                            }
-                                            if (!released && !programmatic && listState.isScrollInProgress) {
-                                                scrolled = true
-                                            }
                                         }
-                                        // A tap is not the user reaching into the content: short, never
-                                        // dragged up, and a list that never moved. The long press that
-                                        // starts a selection, any drag — in either direction — and
-                                        // anything the list itself scrolled leave the follow released
-                                        // until the scroll watcher re-arms it at the end.
-                                        //
-                                        // 「Never moved」 is the position pair, not the finger: a drag of
-                                        // a few pixels, or one that ends before the scroll-progress flag
-                                        // is ever sampled, still moved the list. And the end is the
-                                        // absolute end — a few pixels short of it is where the reader
-                                        // was, not where the follow wants to be.
-                                        val atEndNow = listState.atVeryEnd()
-                                        // The finger is up: from here the watcher may hand the
-                                        // follow back, and the release rule below decides whether it
-                                        // should.
                                         pressed = false
-                                        // 按下期间列表动过没有：指针采样（手指动的拖拽）与帧采样
-                                        // （静止长按里框架自己滚的）取或。
-                                        val movedByList = scrolled || pressScrolled
-                                        scrollDiag(context, "press:up:movedUp=$movedUp:fingerDragged=$fingerDragged:scrolled=$scrolled:frameScrolled=$pressScrolled:atEnd=$atEndNow", listState, following, itemCount, ime = heldIme) // 量完删
-                                        val held = SystemClock.uptimeMillis() - pressedAt
-                                        val nowIndex = listState.firstVisibleItemIndex
-                                        val nowOffset = listState.firstVisibleItemScrollOffset
-                                        val listMoved = nowIndex != downIndex || nowOffset != downOffset
-                                        // 静止的长按（选文本）**期间列表自己动了**：那是选择机制把内容
-                                        // 拉进视野，不是用户的意图，用户看到的就是「长按一下，位置跳了」。
-                                        // 把位置放回按下时的地方，并把 follow 还原成按下前的值 —— 长按
-                                        // 之后的状态与长按之前完全一致。手指越过触摸斜率动过的（拖拽/
-                                        // 滑动）不碰：那时位置变化就是用户自己造成的。
-                                        if (restoresPositionAfterLongPress(
-                                                fingerDragged = fingerDragged,
-                                                listMoved = listMoved,
-                                                heldMs = held,
-                                                holdMs = holdToSelectMs,
-                                            )
-                                        ) {
-                                            // 受限挂起上下文（`awaitPointerEventScope`）里不能直接调
-                                            // `scrollToItem` —— 它是 LazyListState 的挂起成员，编译器
-                                            // 只允许受限范围内的那些。滚动作交给屏幕自己的 scope，
-                                            // 判定与日志留在这里。
-                                            scrollDiag(
-                                                context,
-                                                "press:up:restore-position=$downIndex+$downOffset",
-                                                listState,
-                                                wasFollowing,
-                                                itemCount,
-                                                ime = heldIme,
-                                            ) // 量完删
-                                            following = wasFollowing
-                                            val restoreIndex = downIndex
-                                            val restoreOffset = downOffset
-                                            scope.launch {
-                                                programmatic = true
-                                                try {
-                                                    listState.scrollToItem(restoreIndex, restoreOffset)
-                                                } finally {
-                                                    programmatic = false
-                                                }
-                                            }
-                                        } else if (restoresFollowAfterPress(
-                                                movedUp = movedUp,
-                                                scrolledDuringPress = movedByList,
-                                                downIndex = downIndex,
-                                                downOffset = downOffset,
-                                                nowIndex = nowIndex,
-                                                nowOffset = nowOffset,
-                                                atVeryEnd = atEndNow,
-                                                heldMs = held,
-                                                holdMs = holdToSelectMs,
-                                            )
-                                        ) {
-                                            following = wasFollowing
-                                        }
-                                        pressDownIndex = -1
+                                        pressUpAt = SystemClock.uptimeMillis()
                                     }
                                 }
                             },
                         contentPadding = PaddingValues(
                             start = 16.dp,
                             end = 16.dp,
-                            // The floating header owns the status bar strip, so the
-                            // first bubble starts below its discs with 16dp of air:
-                            // status bar + 4dp lift + 56dp row + 16dp gap.
+                            // 顶边：悬浮顶栏占着状态栏那一条。
                             top = with(LocalDensity.current) {
                                 WindowInsets.statusBars.getTop(this).toDp()
                             } + 76.dp,
-                            // The composer floats over the list, so the list leaves exactly the
-                            // room the stack occupies plus the air below it. Measured as the
-                            // distance from the composer's top edge to the list's own bottom
-                            // edge — not as the composer's height, which is what left the two
-                            // states different: the space *under* the composer changes with the
-                            // keyboard (96px with it down, 36px with it up on this device), and
-                            // 16dp of air, the number the user measured as right with the
-                            // keyboard down: the last card reads as separate from the field
-                            // without a band of empty canvas under it.
-                            bottom = stackFootprint + 16.dp,
+                            // *composer 的让位走 contentPadding，不走列表项**（真机日志实锤：
+                            bottom = stackFootprint,
                         ),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
+                        // 顶锚：「加载更早」在**小索引端**（视觉顶部）。往它前面追加更老的轮次时
+                        // 现有 item 的索引整体后移，但 LazyColumn 按 key 钉住首可见项 ⇒ 阅读位不动。
                         if (page.hasEarlier) {
-                            // The way back into the turns that are not drawn yet, and the only
-                            // way there: the page is a suffix of the conversation, so an older
-                            // turn is reached from the oldest end forward, never by jumping into
-                            // the middle of a turn the grouping has not seen. One page a tap;
-                            // reading is not following, so the follow is dropped with it.
                             item(key = "load-earlier") {
                                 Box(
                                     modifier = Modifier.fillMaxWidth(),
@@ -1188,7 +885,6 @@ fun ChatScreen(
                                 ) {
                                     TextButton(
                                         onClick = {
-                                            following = false
                                             shownTurns += PAGE_TURNS
                                         },
                                     ) {
@@ -1210,7 +906,9 @@ fun ChatScreen(
                                 // 外观 → 显示时间: off means no labels at all, not fewer.
                                 if (settings.showTimestamps && row.showTimeLabel) {
                                     TimeLabel(row.message.timestamp)
-                                    Spacer(Modifier.height(3.dp))
+                                    // 3dp 太挤，时间像是贴在气泡上（用户：「间距再大一点」）。6dp 让它
+                                    // 读作一行独立的抬头，又不会散开成两个东西。
+                                    Spacer(Modifier.height(6.dp))
                                 }
                                 MessageRow(
                                     row = row,
@@ -1237,12 +935,8 @@ fun ChatScreen(
                                     onRegenerate = { viewModel.regenerate() },
                                     onEdit = { editing = it },
                                 )
-                                // 中断/截断/失败的原因属于**这一轮的回答**，所以画在这张卡片里，
-                                // 而不是浮在屏幕上的通知条（用户原话「要输出在卡片里面」）。
-                                // 只挂在最后一张卡片上：它就是刚刚结束的那一轮。
-                                if (row.message.id == visible.lastOrNull()?.message?.id) {
-                                    state.error?.let { reason -> RunReasonLine(reason) }
-                                }
+                                // 中断/截断/失败的原因不再挂在这里：错误提醒统一画在列表最底
+                                // （回执行 + 无回执时的实时红字），同一次失败只通知一次。
                             }
                             // The compression record sits under the last message it folded
                             // away: that is the point in the transcript where the model
@@ -1260,12 +954,20 @@ fun ChatScreen(
                                 }
                             }
                         }
+                        // 没有回执的实时失败（发送阶段错误等）画在最后一轮下面；有回执的失败由
+                        // 回执自己跟在那一轮后面（内联），同文案不重复画。
+                        if (errorLine) {
+                            item(key = "error:${state.conversationId}") {
+                                RunReasonLine(state.error.orEmpty())
+                            }
+                        }
                         if (live) {
                             // Keyed by conversation: the live row keeps its slot for as long
                             // as it is on screen, and a switch used to hand the next chat
                             // whatever the previous one had left in that slot.
                             item(key = "streaming:${state.conversationId}") {
-                                Column {
+                                // 自然高度 + 实测：追底靠 streamHeightPx 当"长高了"的信号。
+                                Column(Modifier.onSizeChanged { scroll.streamHeightPx = it.height }) {
                                     AssistantRow(
                                         parts = state.liveParts.mapNotNull { part ->
                                             when (part) {
@@ -1317,12 +1019,9 @@ fun ChatScreen(
                                         bubbleMaxWidth = bubbleMaxWidth,
                                         reasoningExpansion = reasoningExpansion,
                                     )
-                                    // 上下对齐（账在下面两行算）：卡片自身的下内边距是 **10dp**
-                                    // （AssistantRow 的 Column，`:2651`），所以「卡片底 → 状态行顶」
-                                    // ＝ 10 + top；「状态行底 → composer 顶」＝ bottom + **16dp**
-                                    // （列表底部余白 `contentPadding.bottom = stackFootprint + 16.dp`，
-                                    // `:1112`）。取 top = 8、bottom = 2 ⇒ 两边都是 **18dp**，相等。
-                                    // 键盘抬起/收起都一致：那 16dp 是相对 composer 顶边算的。
+                                    // 上下同宽 10dp（用户实测「10 更有呼吸感」，且要改矮不改高）：
+                                    // 气泡白底 → 状态行顶 = top = 10dp；状态行底 → composer 顶 =
+                                    // bottom 2dp + 列表底余白 8dp（跑的时候）= 10dp。
                                     if (state.runningHere) {
                                         RunStatusLine(
                                             text = liveStatusText,
@@ -1330,7 +1029,7 @@ fun ChatScreen(
                                             timed = statsNote.isEmpty(),
                                             modifier = Modifier.padding(
                                                 start = 4.dp,
-                                                top = 8.dp,
+                                                top = 10.dp,
                                                 bottom = 2.dp,
                                             ),
                                         )
@@ -1348,21 +1047,15 @@ fun ChatScreen(
                                     text = liveStatusText,
                                     startedAt = runStartedAt[runKey] ?: 0L,
                                     timed = statsNote.isEmpty(),
-                                    // 上下对齐（与卡片下方那一行同一套账）：上面是**列表间距 16dp**
-                                    // 加这里的 top，下面是这里的 bottom 加**列表底部余白 16dp**
-                                    // （contentPadding.bottom = stackFootprint + 16dp，`:1112`）。
-                                    // 取 top = bottom = 2dp ⇒ 上下都是 18dp，与「卡片 → 状态行」
-                                    // 那条的 18dp 完全相同（卡片自身下内边距 10dp + top 8dp）。
-                                    // 键盘抬起/收起都一样：那 16dp 是相对 composer 顶边算的，
-                                    // composer 动了它跟着动，间隙本身不变。
-                                    modifier = Modifier.padding(
-                                        start = 4.dp,
-                                        top = 2.dp,
-                                        bottom = 2.dp,
-                                    ),
+                                    // 上下都 12dp（用户：「状态行的空隙也是错的，12dp 啊」）：
+                                    // 下 = contentPadding(12dp) 直接给；上 = 16dp 项间距 − lift 4dp。
+                                    modifier = Modifier
+                                        .liftIntoGap(4.dp)
+                                        .padding(start = 4.dp, top = 0.dp, bottom = 0.dp),
                                 )
                             }
                         }
+                    }
                     }
                 }
             }
@@ -1405,6 +1098,21 @@ fun ChatScreen(
             ChatTopBar(
                 title = state.title,
                 onNew = { viewModel.newConversation() },
+                contextEntry = {
+                    TopBarContextEntry(
+                        used = contextUsed,
+                        estimated = reading.estimated,
+                        window = contextWindow,
+                        sessionTokens = sessionTokens,
+                        sessionEstimate = sessionEstimate,
+                        sessionSplit = sessionSplit,
+                        sessionTurns = sessionTurns,
+                        sessionPerSecond = session?.perSecond ?: 0.0,
+                        sessionCachePercent = session?.cachePercent ?: 0,
+                        sessionElapsedMs = sessionElapsedMs,
+                        live = state.stats,
+                    )
+                },
             )
             // The jump-to-latest button lives inside the composer stack (first row of
             // its column): 12dp above whatever the stack's top row is, clear of the
@@ -1420,11 +1128,6 @@ fun ChatScreen(
                     .padding(end = 4.dp),
                 labelOf = { turn ->
                     // A number alone cannot tell two turns about the same thing apart, so
-                    // the label carries the opening words of the question too — but only
-                    // its first line and only 8 characters, because the label floats over
-                    // the transcript and has to be readable in the glance it gets.
-                    // Numbered from [TurnPage.earlier]: the drawn turns are the tail of the
-                    // conversation, and calling the oldest one drawn 「第 1 轮」 would be a lie.
                     val opening = visible.getOrNull(turnIndices.getOrElse(turn) { -1 } - rowOffset)
                         ?.message
                         ?.text
@@ -1439,16 +1142,13 @@ fun ChatScreen(
                     }
                 },
                 onJumpTo = { turn ->
-                    // Choosing a turn is reading, not following: the stream must not drag
-                    // the view back down while the user is somewhere else in the answer.
-                    following = false
                     // `getOrNull`, not `turnIndices[turn]`: the row the finger was on is a row of
                     // the window the gesture started in, and a window can shrink under it — a
                     // retracted 插话, a branch switch, another conversation opened by a deep link.
                     // A jump to a turn that is no longer drawn is a no-op, never a crash.
+                    // 底锚：turnIndices 是 visible 坐标（含 rowOffset），换算成喂序索引再跳。
                     turnIndices.getOrNull(turn)?.let { index ->
-                        scrollDiag(context, "jump:turn=$index", listState, following, itemCount) // 量完删
-                        scope.launch { listState.animateScrollToItem(index) }
+                        scope.launch { listState.animateScrollToItem(fedIndexOf(index - rowOffset)) }
                     }
                 },
             )
@@ -1470,6 +1170,11 @@ fun ChatScreen(
                     contextWindow = contextWindow,
                     contextUsed = contextUsed,
                     contextEstimated = reading.estimated,
+                    // 面板三行：run 中用实测三块，空闲用按当前上下文算出来的那份（打开面板时刷新）。
+                    contextBreak = state.stats?.let {
+                        Triple(it.breakSystem, it.breakTools, it.breakHistory)
+                    } ?: state.contextBreakdown,
+                    onContextPanelOpen = { viewModel.refreshContextBreakdown() },
                     sessionTokens = sessionTokens,
                     sessionEstimate = sessionEstimate,
                     sessionSplit = sessionSplit,
@@ -1494,10 +1199,10 @@ fun ChatScreen(
                     onOpenTodos = { todoSheetOpen = true },
                     onPromoteSteer = { viewModel.promoteSteer(it) },
                     onRetractSteer = { viewModel.retractSteer(it) },
-                    attachment = attachment,
-                    onClearAttachment = {
-                        viewModel.cacheAttachment(state.conversationId, null)
-                        setDraft(uri = null, name = null)
+                    attachments = attachments,
+                    onRemoveAttachment = { index ->
+                        viewModel.removeAttachmentAt(state.conversationId, index)
+                        setDraft(imageNames = draft.imageNames.toMutableList().apply { removeAt(index) })
                     },
                     onPickImage = {
                         imagePicker.launch(
@@ -1509,27 +1214,21 @@ fun ChatScreen(
                     onSend = {
                         // The view model clears this conversation's draft on success;
                         // a refused send keeps the text where the user left it.
-                        viewModel.send(input, attachment?.base64)
+                        val (body, images) = withAttachment(attachments, input)
+                        viewModel.send(body, images)
+                        // 发送 = 明确要回到最新：先放行追底再跳，并清掉阅读位置记忆。
+                        scroll.stickToBottom = true
+                        scroll.spotKey = null
+                        jumpToLatest()
                     },
                     onStop = { viewModel.stop() },
-                    onSteer = { text, image -> viewModel.steer(text, image) },
+                    onSteer = { text, images -> viewModel.steer(text, images) },
                     onRequestCompress = { viewModel.requestCompress() },
                     onFocused = {
-                        // Only a transcript that was already at its end follows the
-                        // keyboard. Scrolling to the last item would put its *top* at the
-                        // top of the viewport — the bottom padding is what makes that
-                        // reachable — which is the drift the field tap used to cause, and
-                        // a reader parked mid-conversation must not be dragged anywhere.
-                        if (following && itemCount > 0) {
-                            scope.launch {
-                                programmatic = true
-                                try {
-                                    listState.scrollToItem(itemCount - 1)
-                                    listState.scrollBy(FOLLOW_SCROLL_PX)
-                                } finally {
-                                    programmatic = false
-                                }
-                            }
+                        // 顶锚：只有本来就在底的转录才跟着键盘走；停在会话中段的不动（首可见项
+                        // 被 LazyColumn 钉住，键盘挤压视口不会挪阅读位）。回到底＝贴底。
+                        if (scroll.stickToBottom && itemCount > 0) {
+                            scope.launch { scroll.toBottom(itemCount) }
                         }
                     },
                     onMic = {
@@ -1552,27 +1251,31 @@ fun ChatScreen(
                     },
                     onOpenSettings = onOpenSettings,
                     jumpToLatest = { jumpToLatest() },
-                    showJump = !atEnd,
+                    // 按钮已移到 composer 之外（见下），这里只保留参数以免动调用链。
+                    showJump = false,
                     onHeightChanged = { composerH = it },
-                    onPlaced = {
-                        // The keyboard follow lives here, in the composer's own layout
-                        // callback: this runs after the composer has been placed for this
-                        // frame, so the pin uses the position the user is actually seeing.
-                        // Pinning from the inset effect instead ran before layout and landed a
-                        // few pixels short every frame, which read as a settle at the end of a
-                        // close. At the end dispatchRawDelta consumes nothing and triggers no
-                        // further layout, so the loop stops by itself.
-                        if (following && settings.autoFollow) {
-                            programmatic = true
-                            lastPinAt = SystemClock.uptimeMillis()
-                            try {
-                                listState.dispatchRawDelta(FOLLOW_SCROLL_PX)
-                            } finally {
-                                programmatic = false
-                            }
-                        }
-                    },
+                    onTopChanged = { composerTopY = it },
+                    onPillHeight = { pillHeightPx = it },
+                    // 底锚：键盘起落改的是列表底 padding，index0 就在底边上 ⇒ 一个滚动都不需要。
+                    onPlaced = {},
                 )
+                // 「回到最新」浮钮：**画在 composer 之外**（兄弟节点），高度不参与 composer 的
+                // 测量 ⇒ 它出现/消失不会改底部让位、不会把转录顶上去（用户报的「往上滑一点点就
+                // 跳」）。位置：composer 顶再往上 12dp，右边缘 40dp 离屏边（与回合导航条留 12dp 气）。
+                if (!scroll.atBottom && !state.loading) {
+                    CircleActionButton(
+                        icon = ImageVector.vectorResource(R.drawable.ic_arrow_down),
+                        contentDescription = "回到最新",
+                        onClick = { jumpToLatest() },
+                        size = 48.dp,
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        iconSize = 22.dp,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(y = -(48.dp + 12.dp))
+                            .padding(end = 24.dp),
+                    )
+                }
             }
             }
         }
@@ -1594,6 +1297,26 @@ fun ChatScreen(
             // `state.todos`，不是 `todos`：那个名字是 Composer 的参数，在这一层不存在。
             TodoSheet(todos = state.todos, onDismiss = { todoSheetOpen = false })
         }
+    }
+    }
+
+    // 文件路径菜单（LINK-CLICK-SPEC §3.2 一期）：复制路径、让随行读取。一期不碰 FileProvider
+    // （那是二期「文件管理器打开 / 分享」）。「让随行读取」＝往会话发一条带该路径的用户消息，
+    // agent 有 read_file/run_shell，能自己读；文件已在上一轮作为附件落进 inbox 的也照此办理。
+    pathMenuPath?.let { path ->
+        PathActionSheet(
+            path = path,
+            onDismiss = { pathMenuPath = null },
+            onCopy = {
+                clipboard.setText(AnnotatedString(path))
+                pathMenuPath = null
+                scope.launch { snackbarHostState.showSnackbar("已复制路径") }
+            },
+            onAskModel = {
+                pathMenuPath = null
+                viewModel.send("读取这个文件并总结：$path")
+            },
+        )
     }
 
     if (assistantsOpen) {
@@ -1681,6 +1404,8 @@ fun ChatScreen(
 private fun ChatTopBar(
     title: String,
     onNew: () -> Unit,
+    /** 标题胶囊右侧的入口（用户：「原圆环的内容移至标题胶囊右侧，可以换个 icon」）；null 不画。 */
+    contextEntry: (@Composable RowScope.() -> Unit)? = null,
 ) {
     // Read outside the click lambda: the composition local is a composable read, and the
     // lambda is not composable.
@@ -1718,11 +1443,11 @@ private fun ChatTopBar(
             val style = titleBarStyle()
             Text(
                 text = title,
+                // **标题要让位**（用户：「标题一长就把会话数据按钮挤没了」）：Row 先量无 weight 的
+                // 子项（右侧入口按钮拿到它的固有宽度），标题再拿剩下的、超长省略 —— 按钮永远不会
+                // 被挤走。之前标题没有宽度约束，长标题按固有宽吃满整行，按钮和 Spacer 一起被压成 0。
+                modifier = Modifier.weight(1f),
                 // 行盒收紧到字形高度，居中才是真的居中（用户：「标题是不是没有垂直居中」）。
-                // 默认 includeFontPadding 会在行盒**顶部**加一段 ascent 留白，中文的视觉重量又
-                // 偏上，两个不对称叠起来，CenterVertically 居中的是一个比字高、且上重下轻的盒子
-                // ⇒ 字读起来偏离胶囊中心。收紧后行盒＝字形盒，居中的就是字本身；旧的
-                // `padding(top = 3.dp)` 光学补偿是在补行盒的不对称，根除了就不需要它了。
                 style = style.copy(
                     lineHeight = style.fontSize,
                     platformStyle = PlatformTextStyle(includeFontPadding = false),
@@ -1730,6 +1455,9 @@ private fun ChatTopBar(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (contextEntry != null) {
+                contextEntry.invoke(this)
+            }
         }
         FlatPainterButton(
             painter = painterResource(R.drawable.ic_compose),
@@ -2066,12 +1794,17 @@ internal data class Usage(
     val reasoning: Int = 0,
     val cached: Int = 0,
     val elapsedMs: Long = 0,
+    /** Σ各轮 decodeMs（首字之后→结束），TPS 的官方分母。[elapsedMs] 是墙钟和，只给「总用时」显示。 */
+    val decodeMs: Long = 0,
 ) {
     val known: Boolean get() = prompt > 0 || completion > 0
 
-    /** Output tokens per second, or zero when the endpoint never said how long it took. */
+    /**
+     * 官方口径 TPS：completion（含推理）÷ decodeMs。用 decodeMs 而非 elapsedMs —— 后者含 TTFT
+     * 等待，会系统性低估。不可测（decodeMs≤0 或没有输出）返回 0.0。
+     */
     val perSecond: Double
-        get() = if (elapsedMs <= 0 || completion <= 0) 0.0 else completion * 1000.0 / elapsedMs
+        get() = Tps.of(completion, decodeMs)
 
     companion object {
         fun of(rounds: List<StoredMessage>): Usage? {
@@ -2083,6 +1816,8 @@ internal data class Usage(
                 reasoning = rounds.sumOf { it.reasoningTokens },
                 cached = newest.cachedTokens,
                 elapsedMs = rounds.sumOf { it.elapsedMs },
+                // 官方多轮聚合＝ΣdecodeTokens/ΣdecodeMs（client.js:8331-8333）：逐轮求 decode 段再相加。
+                decodeMs = rounds.sumOf { Tps.decodeMs(it.elapsedMs, it.firstTokenMs) },
             )
         }
     }
@@ -2110,7 +1845,7 @@ internal data class Branch(
  * stray empty bubbles between tool chips.
  */
 private fun StoredMessage.isVisible(): Boolean = when (role) {
-    Roles.USER -> text.isNotBlank() || imageBase64 != null
+    Roles.USER -> text.isNotBlank() || allImages.isNotEmpty()
     Roles.ASSISTANT -> text.isNotBlank() || !reasoning.isNullOrBlank()
     Roles.TOOL -> true
     // 失败回执（VM 在 Failed 时写的一条 system 消息）：它存在的意义就是被看见，所以有字就画。
@@ -2231,9 +1966,16 @@ internal fun groupRows(
                 // already carries the same run id and the plain comparison folds them all.
                 if (index >= 0 && run == openRun) {
                     val open = rows[index]
+                    // 相邻同文思考去重（用户截图：「两个一模一样的」）：重试/中断重落盘会把同一段
+                    // 思维链再写一次，同一张卡里就出现两个一字不差的思考块。相邻且文本相同只留
+                    // 第一个 —— 卡片表头的「思考 N 段」也跟着不再虚高。
+                    val fresh = arrived.filterNot { part ->
+                        part is Part.Thinking &&
+                            (open.parts.lastOrNull() as? Part.Thinking)?.text == part.text
+                    }
                     rows[index] = open.copy(
                         message = message,
-                        parts = open.parts + arrived,
+                        parts = open.parts + fresh,
                         rounds = open.rounds + message,
                         // The switcher only hangs off the reply's last round, which
                         // is this one.
@@ -2452,7 +2194,7 @@ private fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit) 
                 }
                 Spacer(Modifier.height(5.dp))
             }
-            message.imageBase64?.let { ImageBlock(it) }
+            message.allImages.forEach { ImageBlock(it) }
             if (message.text.isNotBlank()) {
                 // The user's own words are plain text, never parsed as Markdown — someone typing
                 // "1. do this" means the list item, not a heading. The style is still the
@@ -2535,6 +2277,8 @@ private fun TurnMetrics(
     cachedTokens: Int,
     /** 「提供方 / 模型」 that produced this round; blank leaves the line out. */
     engineLabel: String = "",
+    /** 官方口径 TPS（ΣcompletionTokens / ΣdecodeMs），由调用方从 [Usage.perSecond] 算好传入。 */
+    tps: Double = 0.0,
 ) {
     val total = promptTokens + completionTokens
     if (elapsedMs <= 0 && total <= 0) return
@@ -2627,17 +2371,12 @@ private fun TurnMetrics(
                                 },
                             )
                         }
-                        if (completionTokens > 0 && elapsedMs > 0) {
-                            RingDetail(
-                                "输出速度（TPS）",
-                                remember(completionTokens, elapsedMs) {
-                                    String.format(
-                                        Locale.getDefault(),
-                                        "%.1f tok/s",
-                                        completionTokens * 1000.0 / elapsedMs,
-                                    )
-                                },
-                            )
+                        if (tps > 0) {
+                            // 官方口径由调用方从 Usage.perSecond（Σcompletion ÷ ΣdecodeMs）算好传进来 ——
+                            // 不在这里现算，因为 elapsedMs 是整轮 run 墙钟、completionTokens 是单轮，
+                            // 口径错配会把 200 算成 40。显示用官方取整（≥10 整数、<10 一位小数）。
+                            val tpsLabel = remember(tps) { "${Tps.format(tps)} tok/s" }
+                            RingDetail("输出速度（TPS）", tpsLabel)
                         }
                     }
 
@@ -2807,6 +2546,8 @@ private fun AssistantRow(
                     followReasoning = followReasoning,
                     // The card's thinks are settled ones: this is what decides whether they open.
                     expandReasoning = expandReasoning,
+                    // 工具块与运行时同一套默认展开设置（用户：「展开时原样展开」）。
+                    expandTools = expandTools,
                     // The stored blocks answer to their message, so the table keeps their
                     // state apart from the live run's and from every other message's.
                     messageId = message?.id.orEmpty(),
@@ -2950,6 +2691,9 @@ private fun AssistantRow(
                         completionTokens = message.completionTokens,
                         cachedTokens = message.cachedTokens,
                         engineLabel = engineLabel,
+                        // 官方口径 TPS：usage 是这个 run 所有轮的聚合（Σcompletion、ΣdecodeMs），
+                        // perSecond 已按 decodeMs 算好。null（端点没报 usage）就不画那一行。
+                        tps = usage?.perSecond ?: 0.0,
                     )
                     MessageActions(message = message, onEdit = onEdit)
                 }
@@ -3041,6 +2785,12 @@ private fun BranchArrow(
  */
 private val PROCESS_TITLE_MAX = 160.dp
 
+/** 折叠块展开/收起的高度动画时长：够看出"展开"这个动作，又不至于等。 */
+private const val PROCESS_EXPAND_MS = 180
+
+/** 阅读锚活着（人停在历史里）时为 true：折叠动画改即时完成，避免动画每帧推内容+闸门每帧拉回的抖动。 */
+private val LocalReadingPinned = compositionLocalOf { false }
+
 /**
  * 卡片级可点块的按下反馈：**整块背景压暗**，不用涟漪。
  *
@@ -3093,36 +2843,22 @@ private fun ProcessCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        // From the theme, not a 16dp literal: SettingsScreen's AdvancedSection documents itself
-        // as "same chrome as the process cards in the chat screen", and 16 written twice stops
-        // being one shape the moment 外观 → 圆角 moves off the standard tier.
-        shape = MaterialTheme.shapes.medium,
-        color = scheme.surfaceContainer,
-    ) {
-        Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    // Exactly 36dp folded: the fourth time the user has nailed this
-                    // card's height down, so it is a fixed height, not a minimum —
-                    // nothing in the row wraps (every text is maxLines 1).
-                    .height(36.dp)
-                    // 整块按下反馈（见 blockPress）：这一行是整条卡片的表头，宽度铺满、还是展开
-                    // 后整块内容的入口，涟漪在这里画出来就是个横跨半个屏幕的圆。
-                    .blockPress(
-                        RoundedCornerShape(
-                            topStart = 16.dp,
-                            topEnd = 16.dp,
-                            bottomStart = if (expanded) 0.dp else 16.dp,
-                            bottomEnd = if (expanded) 0.dp else 16.dp,
-                        ),
-                        onClick = onToggle,
-                    )
-                    .padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+    // *折叠条切换后视口不动** —— 不在这里做任何事：这一项变高变矮会把上方内容推走，而 ChatScreen
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                // Exactly 36dp folded: the fourth time the user has nailed this
+                // card's height down, so it is a fixed height, not a minimum —
+                // nothing in the row wraps (every text is maxLines 1).
+                .height(36.dp)
+                // 整块按下反馈（见 blockPress）：这一行是折叠条的入口，涟漪是一颗小圆角矩形。
+                .blockPress(RoundedCornerShape(8.dp)) {
+                    onToggle()
+                }
+                .padding(horizontal = 0.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
                 // One slot for all three card families: the icon sits centred in a
                 // 24dp box at 16dp, so Psychology, Build and Insights line up exactly
                 // instead of each header carrying its own size and tint.
@@ -3192,18 +2928,31 @@ private fun ProcessCard(
                     modifier = Modifier.size(18.dp),
                 )
             }
-            if (expanded) {
-                // Header and content are one card; the hairline is their only seam.
-                HorizontalDivider(color = scheme.outlineVariant)
-                // The grid the expanded rows share: 12dp of side air, 8dp above and
-                // below, and every row inside lines its own column up to this edge.
-                Column(
-                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    content = content,
-                )
+            // 展开体走高度动画（用户：「点折叠块卡片闪一下，不自然展开」——原来是裸 if，内容一帧
+            AnimatedVisibility(
+                visible = expanded,
+                // *动态展开**（用户：「展开方向要动态展开啊」）：回到 Compose 的默认方向 ——
+                enter = expandVertically(
+                    tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
+                ) + fadeIn(tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS / 2)),
+                exit = shrinkVertically(
+                    tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
+                ) + fadeOut(tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS / 2)),
+            ) {
+                Column {
+                    // Header and content are one card; the hairline is their only seam.
+                    HorizontalDivider(color = scheme.outlineVariant)
+                    // The grid the expanded rows share: 12dp of side air, 8dp above and
+                    // below, and every row inside lines its own column up to this edge.
+                    Column(
+                        // 水平 0dp（用户：「展开时原样展开」）：运行时那些块是顶到卡片左右边缘的，
+                        // 12dp 内边距让展开后的内容整体变窄 —— 就是「又窄又短」的那一半。
+                        Modifier.padding(horizontal = 0.dp, vertical = 8.dp),
+                        content = content,
+                    )
+                }
             }
         }
-    }
 }
 
 /**
@@ -3350,48 +3099,27 @@ private fun ReasoningBlock(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
+            // *顶锚正序**（与主转录同一套标准画法，用户：「思维链那个列表也是一直自己会动的」）：
             val inner = rememberLazyListState()
-            // Whether this chain is chasing its own tail, and whether the hand has taken it
-            // over. The same pair, and the same rules, as the transcript's own follow — see
-            // the screen's `following`/`programmatic` above.
-            var follow by remember(blockId) { mutableStateOf(true) }
-            var autoScrolled by remember(blockId) { mutableStateOf(false) }
-            var lastAutoAt by remember(blockId) { mutableLongStateOf(0L) }
+            // 追尾开关：手指往上拖就停跟，真滚到底再跟回来。**不能用 !canScrollForward 当判据** ——
+            // 顶锚下内容一长高它就变真，追一次就再也不追（用户：「思维链的追底呢」）。
+            var innerFollow by remember { mutableStateOf(true) }
+            var innerWasScrolling by remember { mutableStateOf(false) }
             LaunchedEffect(inner) {
-                snapshotFlow { inner.isScrollInProgress to inner.canScrollBackward }
-                    .collect { (scrolling, canScrollBack) ->
-                        if (scrolling && !autoScrolled && canScrollBack &&
-                            SystemClock.uptimeMillis() - lastAutoAt > 120
-                        ) {
-                            // The hand wins the moment it lifts the chain off its tail; the
-                            // next frame of the stream must not yank it back down.
-                            follow = false
-                        } else if (!scrolling && inner.atVeryEnd()) {
-                            // Released at the bottom again: the chain may chase its tail once
-                            // more. A chain that never left its end keeps following anyway.
-                            //
-                            // 与正文同一条规则：判「到底」只能用 [atVeryEnd]，**不要再回到容差**
-                            // （原来的 `atEnd(slack = 8)`）。思维链是 px 级的滚动，滚几个像素就落在
-                            // 8px 容差里 ⇒ 手指一松就重新追尾，和用户报的「往上滑一点点，又追底」
-                            // 是同一个形态；这个内层列表有自己的一套 follow/autoScrolled，所以它
-                            // 不会因为正文修好了而跟着好。
-                            follow = true
+                snapshotFlow { inner.isScrollInProgress to inner.canScrollForward }
+                    .collect { (scrolling, canForward) ->
+                        if (!canForward) {
+                            innerFollow = true
+                        } else if (innerWasScrolling && !scrolling) {
+                            // 一次滚动结束在非底部 ⇒ 用户拖上去的（程序化贴底只会停在底部）。
+                            innerFollow = false
                         }
-                        autoScrolled = false
+                        innerWasScrolling = scrolling
                     }
             }
-            // Every growth of the chain is a trigger — that is what "跟随最新" is for.
-            LaunchedEffect(lines.size, expanded, follow, followReasoning) {
-                if (!expanded || !streaming || !followReasoning || !follow) return@LaunchedEffect
-                if (inner.isScrollInProgress && !autoScrolled) return@LaunchedEffect
-                if (lines.isEmpty()) return@LaunchedEffect
-                autoScrolled = true
-                lastAutoAt = SystemClock.uptimeMillis()
-                // Instant, not animated. The chain grows every frame or two while the think
-                // streams, and an [animateScrollToItem] that is still in flight when the next
-                // line lands is simply dropped — the view froze mid-chain, which is exactly
-                // what the user saw. A jump they cannot watch beats a follow that never arrives.
-                inner.scrollToItem(lines.lastIndex)
+            LaunchedEffect(inner, lines.size, expanded, followReasoning, innerFollow) {
+                if (!expanded || !followReasoning || !innerFollow) return@LaunchedEffect
+                inner.pinToBottom(lines.size)
             }
             LazyColumn(
                 state = inner,
@@ -3442,26 +3170,22 @@ private fun ReasoningBlock(
         }
     }
     if (nested) {
-        // A row of the summary card's grid: no surface of its own, its icon slot on
-        // the same left edge as the tool rows, its chain indented to the name column.
+        // **平铺的折叠块**（用户：「思考块就是折叠块的啊，展开还是虚拟列表啊」+「要的就是平铺」）：
+        // 外层不再套卡片底（见 ProcessCard），这一块自己是一条折叠条 —— 表头（图标 + 思考过程 +
+        // 段信息 + 箭头）+ 展开后仍是虚拟列表（chain 里的 LazyColumn，逐行虚拟化、高度有上限）。
         Column(
             Modifier
                 .fillMaxWidth()
                 .padding(vertical = 4.dp),
         ) {
-            // The tap target is the header row alone, clipped to a rounded rectangle before the
-            // ripple is attached. On the Column it used to cover the whole block — chain
-            // included — so the ripple spilled over the text and a tap anywhere in the chain
-            // folded it.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     // 折叠块统一（与 ProcessCard 表头、ToolRow 同一套）：固定 36dp 行高 + 12dp
                     // 水平内边距 + labelMedium 标题。折叠态每行都是 maxLines=1，固定高度不会裁字。
                     .height(36.dp)
-                    .padding(horizontal = 12.dp)
-                    // 整块按下反馈（见 blockPress）：这一行铺满整条卡片的宽度，涟漪在这么宽的行上
-                    // 是一大片弧形，不是「按下这一行」。
+                    .padding(horizontal = 0.dp)
+                    // 整块按下反馈（见 blockPress）：平铺后这一行就是折叠条本体，涟漪是小圆角矩形。
                     .blockPress(MaterialTheme.shapes.small, onClick = toggle),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -3480,10 +3204,6 @@ private fun ReasoningBlock(
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    // Takes what four characters need and hands the rest to the preview: the
-                    // half-row share this used to hold was the band of nothing after it.
-                    // [status] is called after the gap below, since this row draws its own
-                    // header instead of going through [ProcessCard].
                 )
                 if (meta.isNotEmpty()) Spacer(Modifier.width(8.dp))
                 status()
@@ -3513,6 +3233,8 @@ private fun ReasoningBlock(
                 )
             }
             if (expanded) {
+                // 虚拟列表照旧（用户：「展开还是虚拟列表啊」）：chain 内部就是 LazyColumn，
+                // 逐行虚拟化 + heightIn(max = 外观里的思考块高度) 上限。
                 Column(Modifier.padding(start = 44.dp, top = 4.dp)) { chain() }
             }
         }
@@ -3697,7 +3419,7 @@ private fun ToolDetail(line: ToolLine) {
             }
         }
     }
-    line.message?.imageBase64?.let { ImageBlock(it) }
+    line.message?.allImages?.forEach { ImageBlock(it) }
 }
 
 @Composable
@@ -3716,7 +3438,7 @@ private fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
             .blockPress(MaterialTheme.shapes.small, onClick = onToggle)
             // 折叠块统一：水平 12dp 内边距与另外两处表头一致；行高加在**表头那一行**上（这一列
             // 展开后还有内容，给 Column 定高会把详情裁掉）。
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = 0.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().height(36.dp),
@@ -3817,6 +3539,8 @@ private fun TurnSummary(
     followReasoning: Boolean = true,
     /** 外观 → 历史思考块默认展开; passed on to each think in this card. */
     expandReasoning: Boolean = true,
+    /** 外观 → 工具块默认展开; 与运行时同一套（[ToolBundle.startExpanded]）。 */
+    expandTools: Boolean = false,
     /**
      * The run's own note — the compression line, when there was one. It belongs in this
      * header rather than only in the status line: the status line is gone the moment the run
@@ -3846,13 +3570,14 @@ private fun TurnSummary(
     val tail = buildList {
         if (live != null) {
             add("出 ${live.tokensOut}")
-            if (live.tokPerSec > 0) add(String.format(Locale.US, "%.1f tok/s", live.tokPerSec))
+            // 官方取整（≥10 整数、<10 一位小数），与统计卡、悬浮窗一致 —— 不是统一的 %.1f。
+            if (live.tokPerSec > 0) add("${Tps.format(live.tokPerSec.toDouble())} tok/s")
             if (live.elapsedMs > 0) add(formatDuration(live.elapsedMs))
         } else if (settled != null) {
             if (settled.prompt > 0) add("入 ${settled.prompt}")
             if (settled.completion > 0) add("出 ${settled.completion}")
             if (settled.perSecond > 0) {
-                add(String.format(Locale.US, "%.1f tok/s", settled.perSecond))
+                add("${Tps.format(settled.perSecond)} tok/s")
             }
             if (settled.elapsedMs > 0) add(formatDuration(settled.elapsedMs))
         }
@@ -3888,7 +3613,7 @@ private fun TurnSummary(
         // thinking blocks (foldable, full text), tool rows, every stretch of prose
         // including the mid-run transitions, steer bubbles — the same sequence the
         // live bubble drew. The usage detail closes the list.
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             // The answer itself is already drawn by the bubble below this card (the settled
             // path keeps the last stretch of prose). Leaving a second copy in here is what
             // made one reply read as a stack of the same text; the mid-run transitions — the
@@ -3915,25 +3640,19 @@ private fun TurnSummary(
                             // 历史思考块默认展开 is on; a tap on its header decides it per
                             // conversation either way (the expansion table is keyed by chat).
                             expandReasoning = expandReasoning,
-                            nested = true,
+                            // *原样展开**（用户：「折叠条只把最后那段最终文本之外的收起，展开时原样
+                            nested = false,
                             maxHeight = reasoningMaxHeight,
                             followReasoning = followReasoning,
                         )
 
                         is Part.Tools -> {
-                            var openTool by remember { mutableStateOf<String?>(null) }
-                            part.calls.forEachIndexed { index, call ->
-                                // Name + status on the row, arguments and output behind its
-                                // own tap — the same two-level row the live bundle draws.
-                                val callKey = call.message?.id ?: "summary-$index"
-                                ToolRow(
-                                    line = call,
-                                    expanded = openTool == callKey,
-                                    onToggle = {
-                                        openTool = if (openTool == callKey) null else callKey
-                                    },
-                                )
-                            }
+                            // **与运行时同一套渲染**（用户：「展开时原样展开，不对 UI 做任何更改」）：
+                            // 这里原来每个调用单独一行，运行时是合并成「调用 N 个工具」的 ToolBundle。
+                            ToolBundle(
+                                tools = part.calls,
+                                startExpanded = expandTools,
+                            )
                         }
 
                         // Prose keeps the card's own left edge: it is read as the answer's
@@ -4602,6 +4321,22 @@ private fun BlinkingCursor() {
  * else, and the elapsed time is read off the wall clock on each tick, so a line that is
  * re-created (a switch away and back) still shows the true time rather than restarting.
  */
+/**
+ * 把内容上移 [amount] 吃进列表间距（spacedBy 的 16dp）里，布局高度同步减掉这一段 ——
+ * 「无气泡时状态行的上间隙」要从 16 压到 10 的那 6dp 就从这里来。
+ *
+ * 不用负 padding：`Modifier.padding` 收负值不可靠（supervisor 指出会抛异常）。这里只依赖两件
+ * 官方且极常见的行为：子节点可以放在负坐标（`Modifier.offset` 同源的 place），以及布局尺寸非负
+ * （[amount] 与高度差都 coerce 到 ≥0，不会量出负尺寸）。
+ */
+private fun Modifier.liftIntoGap(amount: Dp): Modifier = layout { measurable, constraints ->
+    val lift = amount.roundToPx().coerceAtLeast(0)
+    val placeable = measurable.measure(constraints)
+    layout(placeable.width, (placeable.height - lift).coerceAtLeast(0)) {
+        placeable.place(0, -lift)
+    }
+}
+
 @Composable
 private fun RunStatusLine(
     text: String,
@@ -4671,6 +4406,13 @@ private fun Composer(
     contextUsed: Int,
     /** True when [contextUsed] is this app's own estimate rather than the endpoint's count. */
     contextEstimated: Boolean = false,
+    /**
+     * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）的当前窗口读数，不依赖 run：空闲时由
+     * [onContextPanelOpen] 触发上层计算后从这里进来。
+     */
+    contextBreak: Triple<Int, Int, Int>? = null,
+    /** 面板打开时回调：上层按当前上下文算一次三行。 */
+    onContextPanelOpen: () -> Unit = {},
     /** Everything this conversation has ever spent, for the ring's detail card. */
     sessionTokens: Int,
     /** The text-based floor for the ring's cumulative row, when nothing was ever priced. */
@@ -4693,15 +4435,16 @@ private fun Composer(
     onPrefetchWindows: () -> Unit,
     /** Writes a thinking level onto this conversation alone. */
     onChooseReasoning: (String) -> Unit,
-    attachment: Attachment?,
-    onClearAttachment: () -> Unit,
+    attachments: List<Attachment>,
+    /** 删附件列里第几个；多附件后「清空」就是逐个删到空。 */
+    onRemoveAttachment: (Int) -> Unit,
     onPickImage: () -> Unit,
     onTakePhoto: () -> Unit,
     onPickFile: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     /** Queues a line for the running model; false means it was dropped. */
-    onSteer: (String, String?) -> Boolean,
+    onSteer: (String, List<String>) -> Boolean,
     /** Asks the live run to fold the conversation at its next turn boundary. */
     onRequestCompress: () -> Boolean,
     /** Lines queued for the run that is going, oldest first. */
@@ -4745,16 +4488,29 @@ private fun Composer(
      * transcript (the caller adds the strip under it and its own 12dp of air).
      */
     onHeightChanged: (Dp) -> Unit,
+    /** 可见药丸的上边缘（窗口坐标，px）：让位取证用（见 ChatScreen 的 stackFootprint）。 */
+    onTopChanged: (Float) -> Unit = {},
+    /** 可见药丸的高度（px，常量）：让位就由它 + 下方内边距 + 导航条组成。 */
+    onPillHeight: (Int) -> Unit = {},
     /** Called once the stack has been placed for this frame: the caller's follow pin rides it. */
     onPlaced: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // 发送后键盘退避（用户：「抬起输入法发送时，对话框也会挡住」）：不收键盘的话 composer 悬在
+    // 键盘上方、把列表尾的状态行盖在后面。发送＝这句话说完了，收键盘让整条栈落回去；「停止」
+    // 不收（那一下没有发送任何文字，用户的手还在输入上）。
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val dismissKeyboard = {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
     val density = LocalDensity.current
     // The window's own width, which is what a popup has to fit inside. `screenWidthDp` is the
     // window's, not the display's, so a card that fits here also fits a split-screen window.
     val windowWidth = LocalConfiguration.current.screenWidthDp.dp
     val screenWidthPx = with(density) { windowWidth.toPx() }
-    val popupEdgePx = with(density) { POPUP_EDGE.toPx() }
+    val popupEdgePx = with(density) { POPUP_EDGE_AIR.toPx() }
     var menuOpen by remember { mutableStateOf(false) }
     var sheetOpen by remember { mutableStateOf(false) }
     // The approval mode's own card, anchored to its button like the other two.
@@ -4823,46 +4579,37 @@ private fun Composer(
             // above, and it is measured here, inside the padding (see COMPOSER_BOTTOM_PAD).
             .padding(top = 6.dp, bottom = COMPOSER_BOTTOM_PAD)
             .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) }
+            // *整个 composer 栈的可见顶边**（窗口坐标）—— 不是药丸顶！插话队列行、待办板、
+            .onGloballyPositioned {
+                val topPadPx = with(density) { 6.dp.toPx() }
+                onTopChanged(it.positionInWindow().y + topPadPx)
+            }
             // Placed for this frame: the caller's follow pin is dispatched from here.
             .onGloballyPositioned { onPlaced() },
     ) {
         Column {
-            // The jump-to-latest button rides the stack's own top: 12dp above whatever
-            // the next row is, end-aligned, so it can never hide behind the pill.
-            if (showJump) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        // 24dp inside this box, and the box itself is 16dp inside the screen, so
-                        // the disc's right edge sits 40dp from the screen edge. The scrubber's
-                        // own column is 4dp of edge gap plus 24dp of line, i.e. 28dp: 12dp of air
-                        // between the disc and a turn line, which is what keeps them from reading
-                        // as one control. It used to be 40dp here, which put the disc 56dp out —
-                        // far enough that the user asked for it closer to the ring.
-                        .padding(end = 24.dp),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    // Deliberately one step up from the shared 40dp disc: this button is
-                    // the only one that floats alone over the transcript with no bar behind
-                    // it, and it has to be found without looking. Keep it a size larger
-                    // than the header's discs rather than flattening it into the scale.
-                    CircleActionButton(
-                        icon = ImageVector.vectorResource(R.drawable.ic_arrow_down),
-                        contentDescription = "回到最新",
-                        onClick = jumpToLatest,
-                        size = 48.dp,
-                        containerColor = scheme.surface,
-                        iconSize = 22.dp,
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-            }
+            // 「回到最新」按钮**不在这里**（用户报的「往上滑一点点就跳」）：它原来在本列里占
+            // 48dp + 12dp，一出现就把 composer 撑高 60dp ⇒ 底部让位跟着变大 ⇒ 整条转录被顶上去
+            // 60dp。现在画在 composer 之外的兄弟节点上（见 ChatScreen 里的 jumpToLatest 浮钮），
+            // 高度不参与 [onHeightChanged] 的测量。
             // No progress line here any more: the run's caption lives in the transcript,
             // where the answer is going to appear. Pinned above the pill it read as a
             // second, competing status area — and it carried no clock, so the wait looked
             // untimed while the user was staring at it.
-            attachment?.let {
-                AttachmentChip(attachment = it, onRemove = onClearAttachment)
+            // 多附件一排：每张 chip 可单独删（onRemoveAttachment 报下标），横向可滚 —— 不限张数时
+            // 一排装不下也不能把 composer 撑高。
+            if (attachments.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = STEER_QUEUE_INSET)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    attachments.forEachIndexed { index, item ->
+                        AttachmentChip(attachment = item, onRemove = { onRemoveAttachment(index) })
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
             }
             // The agent's own board, above the queue: what it is doing right now, then what the
@@ -4912,12 +4659,12 @@ private fun Composer(
                         // The same row, the same three actions — what changes is what they mean and
                         // what the row says, which `nextTurn` carries.
                         SteerQueueRow(
-                            steer = PendingSteer(queued.id, queued.text, queued.imageBase64),
+                            steer = PendingSteer(queued.id, queued.text, queued.imagesBase64),
                             undelivered = false,
                             nextTurn = true,
                             onPromote = { onPromoteTurn(queued.id) },
                             onEdit = {
-                                onRestoreSteer(PendingSteer(queued.id, queued.text, queued.imageBase64))
+                                onRestoreSteer(PendingSteer(queued.id, queued.text, queued.imagesBase64))
                                 onRetractTurn(queued.id)
                             },
                             onDelete = { onRetractTurn(queued.id) },
@@ -4978,7 +4725,9 @@ private fun Composer(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .shadow(
+                    // 让位不再用这里：**药丸顶不含队列行**，已改由 composer 根容器上报整个栈的
+                    // 可见顶边（见下方 Composer 根 Box 的 onGloballyPositioned）。
+                    .onSizeChanged { onPillHeight(it.height) }                    .shadow(
                         elevation = 8.dp,
                         shape = RoundedCornerShape(24.dp),
                         ambientColor = Color.Black.copy(alpha = 0.25f),
@@ -5028,7 +4777,7 @@ private fun Composer(
                                 val text = input.trim()
                                 // A picture with no caption is still something to send: only an
                                 // entirely empty composer does nothing here.
-                                if (text.isEmpty() && attachment == null) return@KeyboardActions
+                                if (text.isEmpty() && attachments.isEmpty()) return@KeyboardActions
                                 if (running) {
                                     // The attachment rides along: 排队 mode turns this into the next
                                     // turn, 立即 mode into a steer, and either way a picture the user
@@ -5045,10 +4794,12 @@ private fun Composer(
                                     // A refusal (the run ended between the last frame and this tap)
                                     // falls through to an ordinary send, so the line is never left
                                     // sitting in the box with nothing happening.
-                                    if (!onSteer(text, attachment?.base64)) onSend()
+                                    withAttachment(attachments, text)
+                                        .let { (body, images) -> if (!onSteer(body, images)) onSend() }
                                 } else {
                                     onSend()
                                 }
+                                dismissKeyboard()
                             },
                         ),
                         decorationBox = { inner ->
@@ -5347,6 +5098,8 @@ private fun Composer(
                         sessionCachePercent = sessionCachePercent,
                         sessionElapsedMs = sessionElapsedMs,
                         live = stats,
+                        breakSplit = contextBreak,
+                        onPanelOpen = onContextPanelOpen,
                     )
                     // The ring's own right margin: the row packs its children edge to edge, and the
                     // gauge sat hard against whatever follows it — the mic when 语音输入 is on, the
@@ -5369,7 +5122,7 @@ private fun Composer(
                             )
                         }
                     }
-                    val hasSomething = input.isNotBlank() || attachment != null
+                    val hasSomething = input.isNotBlank() || attachments.isNotEmpty()
                     // While a run is going, a field with something in it sends that line to the
                     // run; an empty field stops it. One button, and what it does is what the
                     // field in front of the user says — the separate 插话 button only ever made
@@ -5397,9 +5150,16 @@ private fun Composer(
                                 // Cleared by the view model when it takes the line, not here — see the
                                 // note on the Enter path above. A refusal falls through to a normal
                                 // send, so the text cannot be stranded in the field.
-                                steers -> if (!onSteer(input.trim(), attachment?.base64)) onSend()
+                                steers -> {
+                                    withAttachment(attachments, input.trim())
+                                        .let { (body, images) -> if (!onSteer(body, images)) onSend() }
+                                    dismissKeyboard()
+                                }
                                 running -> onStop()
-                                else -> onSend()
+                                else -> {
+                                    onSend()
+                                    dismissKeyboard()
+                                }
                             }
                         },
                         enabled = sendable,
@@ -5434,7 +5194,8 @@ private fun Composer(
 private fun statusLineStyle(): TextStyle = MaterialTheme.typography.labelMedium
 
 /**
- * 思考强度 beside the model chip: the same six levels as the settings slider, written
+ * 思考强度 beside the model chip: the same levels as the settings slider (REASONING_LEVELS),
+ * written
  * through on selection. It lands on the provider the active assistant is bound to when
  * that provider owns its sampling knobs, and on the global setting otherwise — the same
  * precedence [AppSettings.forAssistant] resolves with.
@@ -5534,6 +5295,15 @@ private fun MenuCard(
 /** The margin a popup keeps from the window's own edges. */
 private val POPUP_EDGE = 8.dp
 
+/** 取消追底的手指位移阈值（用户：「取消的最小方法就是往上移动一点就需要取消」）。 */
+private const val CANCEL_FOLLOW_PX = 4f
+
+/** 弹窗离屏幕边缘的**呼吸感**（用户：「弹窗位置不要贴屏幕边缘，留点呼吸感」）。 */
+private val POPUP_EDGE_AIR = 16.dp
+
+/** 圆环面板离屏幕右边缘的距离（实测面板停在 63dp 处后定的值，见 ContextRing 里的说明）。 */
+private val RING_POPUP_EDGE = 12.dp
+
 /**
  * A popup's width cap: the width it wants, never wider than the window it opens in.
  *
@@ -5541,7 +5311,7 @@ private val POPUP_EDGE = 8.dp
  * would hand a card a size the window does not have. A card wider than its window is a card whose
  * right half is off the screen: the model sheet's 340dp needs a 356dp window to fit.
  */
-private fun popupCap(nominal: Dp, windowWidth: Dp): Dp = minOf(nominal, windowWidth - POPUP_EDGE * 2)
+private fun popupCap(nominal: Dp, windowWidth: Dp): Dp = minOf(nominal, windowWidth - POPUP_EDGE_AIR * 2)
 
 /**
  * How far a popup anchored at [anchorLeft] has to move to stay inside the window.
@@ -5732,7 +5502,7 @@ private fun GenerationSheet(
     var sheetWidth by remember { mutableStateOf(0) }
     val windowWidth = LocalConfiguration.current.screenWidthDp.dp
     val screenPx = with(density) { windowWidth.toPx() }
-    val edge = with(density) { POPUP_EDGE.toPx() }
+    val edge = with(density) { POPUP_EDGE_AIR.toPx() }
     // Right-aligned to the capsule that opened it, not centred: centred put the sheet's mass to
     // the left of the ring, which read as left-aligned. Falls back to the free space's own right
     // edge until the capsule has been measured — the two agree whenever the name is long enough
@@ -6158,10 +5928,6 @@ private fun VoiceOverlay(
             ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             ?.firstOrNull()
             ?.trim()
-        voiceTrace(
-            context,
-            "systemActivity result=${result.resultCode} chars=${text?.length ?: 0}",
-        )
         if (result.resultCode == Activity.RESULT_OK && !text.isNullOrEmpty()) {
             onResult(text)
             // The same pair the in-app recognizer's onResults calls: the words go into the field
@@ -6181,9 +5947,6 @@ private fun VoiceOverlay(
         }
     }
     val useSystemInput: () -> Unit = {
-        // 这是**用户主动**选的兜底，不再自动交接：那个系统面板正是被否掉两次的东西，只在用户
-        // 自己要的时候才拉起来。诊断仍留痕，顺便记下这台机器本来会走哪条识别引擎。
-        voiceTrace(context, "handoff=systemActivity systemEngine=${voiceEngine(context).name}")
         // 我们自己的录音要先放手，否则系统界面拿不到麦克风。
         recorder.cancel()
         phase = VoicePhase.Preparing
@@ -6361,47 +6124,8 @@ private fun voiceEngine(context: Context): VoiceEngine {
     val onDevice = sdk >= Build.VERSION_CODES.S &&
         runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }.getOrDefault(false)
     val engine = if (onDevice) VoiceEngine.ON_DEVICE else VoiceEngine.SYSTEM
-    // 诊断：用户报「还是走系统界面」时，这一行就能区分「设备端模型没装」与「ROM 拒绝了第三方」。
-    voiceTrace(
-        context,
-        "engine sdk=$sdk isOnDeviceAvailable=$onDevice engine=$engine " +
-            "preferOffline=${engine != VoiceEngine.ON_DEVICE}",
-    )
     return engine
 }
-
-/**
- * 语音链的诊断日志：`filesDir/voice-trace.log`。
- *
- * 三条路径（设备端 / 经典服务 / 系统识别 Activity）在屏幕上长得一样，用户报「丑、还是走系统的」
- * 时无法只从截图分辨；这个文件把每一步写下来：选了哪条引擎、识别器回了什么错误码、有没有把系统
- * Activity 拉起来。只写日志，不改行为。
- */
-private fun voiceTrace(context: Context, line: String) {
-    val stamp = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
-    val app = context.applicationContext
-    voiceTraceWorker.execute { appendBoundedLog(app, "voice-trace.log", "$stamp $line") }
-}
-
-/**
- * One line into a diagnostic file that cannot grow without limit.
- *
- * Both logs in this file are read by a human debugging a phone, and neither is worth a byte of
- * storage that outlives the session that wrote it: past 32KB the file is cut back to its last
- * 16KB, so the newest history is what survives. Runs on the caller's worker, never on a
- * composition or a gesture — the append is disk IO.
- */
-private fun appendBoundedLog(app: Context, name: String, line: String) {
-    runCatching {
-        val file = File(app.filesDir, name)
-        if (file.length() > 32 * 1024) {
-            file.writeText(file.readText().takeLast(16 * 1024))
-        }
-        file.appendText("${SystemClock.uptimeMillis()} $line\n")
-    }
-}
-
-private val voiceTraceWorker = Executors.newSingleThreadExecutor()
 
 /**
  * 胶囊上的录音计时：`0:07`。分钟只在超过一分钟时出现，平时两位数字更安静。
@@ -6446,7 +6170,21 @@ data class Attachment(
     val base64: String,
     val label: String,
     val preview: ImageBitmap? = null,
+    /** 文件附件的落盘路径（图片为 null）。发送时拼进消息正文 —— 见 [withAttachment]。 */
+    val filePath: String? = null,
 )
+
+/** 附件与正文的合流（用户：「文件的注入不生效，随对话发出就消失了」）。 */
+private fun withAttachment(attachments: List<Attachment>, text: String): Pair<String, List<String>> {
+    val paths = attachments.mapNotNull { it.filePath }
+    val body = if (paths.isEmpty()) {
+        text
+    } else {
+        val note = paths.joinToString("\n") { "［附件文件］$it" }
+        if (text.isBlank()) note else "${text.trimEnd()}\n\n$note"
+    }
+    return body to attachments.mapNotNull { it.base64.takeIf { b -> b.isNotEmpty() } }
+}
 
 private enum class AttachKind { IMAGE, FILE }
 
@@ -6486,26 +6224,27 @@ private fun ContextRing(
     sessionCachePercent: Int,
     sessionElapsedMs: Long,
     live: StreamStats?,
+    /**
+     * 面板三行（系统提示词 / 工具定义 / 对话消息）的**当前窗口**读数，不依赖 run：run 中优先用
+     * [live] 的实测三块，空闲用这个（打开面板时由 [onPanelOpen] 触发上层按当前上下文算）。
+     */
+    breakSplit: Triple<Int, Int, Int>? = null,
+    /** 打开面板时回调：让上层按当前上下文算一次三行（见 ChatViewModel.refreshContextBreakdown）。 */
+    onPanelOpen: () -> Unit = {},
 ) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
     val fraction = if (known) (used.toFloat() / window).coerceIn(0f, 1f) else 0f
     val tone = if (fraction >= 0.8f) scheme.error else scheme.primary
     val track = scheme.surfaceVariant
+    // 布局取证要用（见 layoutDiag）。
+    val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
     // A focus-less popup does not receive BACK either: without this the press falls through to the
     // activity and finishes it. Same pair the composer's own cards use.
     BackHandler(enabled = open) { open = false }
-    // The card opens upward, centred on the ring — and the ring sits at the row's right end, so a
-    // 264dp card centred on it hung off the screen's right edge. Both the anchor and the card are
-    // measured and the card is slid back inside the window, the same rule the model sheet uses.
-    var ringAnchorCentreX by remember { mutableStateOf(0f) }
-    var ringCardWidth by remember { mutableStateOf(0) }
     val density = LocalDensity.current
-    val ringScreenWidthPx = with(density) {
-        LocalConfiguration.current.screenWidthDp.dp.toPx()
-    }
-    val ringEdgePx = with(density) { POPUP_EDGE.toPx() }
+    val ringPopupMarginPx = with(density) { RING_POPUP_EDGE.toPx() }
     // The number in the middle, as a whole percent: the arc is a shape and the number is the
     // figure behind it. A window that was never set has no percentage to show (0 = unlimited,
     // not 0%), and 0% is a ring with no arc to read it against.
@@ -6517,7 +6256,11 @@ private fun ContextRing(
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = ripple(),
-                onClick = { open = true },
+                onClick = {
+                    open = true
+                    // 打开即按当前上下文算一次三行（不依赖 run）：空闲时也有得显示。
+                    onPanelOpen()
+                },
             ),
         contentAlignment = Alignment.Center,
     ) {
@@ -6567,8 +6310,7 @@ private fun ContextRing(
         // upward from the ring instead of covering the row it belongs to.
         Box(
             Modifier
-                .align(Alignment.TopCenter)
-                .onGloballyPositioned { ringAnchorCentreX = it.boundsInWindow().center.x },
+                .align(Alignment.TopCenter),
         ) {
             // A focusable window takes the keyboard away from the field below — the user asked why
             // tapping the ring closes the input method, and that is the whole of the answer: the
@@ -6590,24 +6332,29 @@ private fun ContextRing(
                     )
                 }
                 Popup(
-                    alignment = Alignment.BottomCenter,
-                    offset = with(density) {
-                        IntOffset(
-                            popupNudgeCentred(
-                                anchorCentre = ringAnchorCentreX,
-                                width = ringCardWidth,
-                                windowPx = ringScreenWidthPx,
-                                edgePx = ringEdgePx,
-                            ).roundToInt(),
-                            -8.dp.roundToPx(),
-                        )
+                    // *显式定位**（不再用 alignment）：真机截图量到面板落在屏幕**左侧**
+                    popupPositionProvider = remember(ringPopupMarginPx) {
+                        object : PopupPositionProvider {
+                            override fun calculatePosition(
+                                anchorBounds: IntRect,
+                                windowSize: IntSize,
+                                layoutDirection: LayoutDirection,
+                                popupContentSize: IntSize,
+                            ): IntOffset {
+                                val margin = ringPopupMarginPx.toInt()
+                                val x = (windowSize.width - margin - popupContentSize.width)
+                                    .coerceAtLeast(margin)
+                                val y = (anchorBounds.top - popupContentSize.height - 8)
+                                    .coerceAtLeast(0)
+                                return IntOffset(x, y)
+                            }
+                        }
                     },
                     onDismissRequest = { open = false },
                     properties = PopupProperties(focusable = false),
                 ) {
                     Box(
                         Modifier
-                            .onSizeChanged { ringCardWidth = it.width }
                             // A focus-less window only receives what lands inside it, and drawing
                             // its own background is not the same as consuming a touch: without
                             // this the tap on the card would fall through to the transcript the
@@ -6617,18 +6364,13 @@ private fun ContextRing(
                                 indication = null,
                             ) {},
                     ) {
-                        ContextRingCard(
+                        ContextPanelCard(
                             used = used,
-                            estimated = estimated,
                             window = window,
-                            sessionTokens = sessionTokens,
-                            sessionEstimate = sessionEstimate,
-                            sessionSplit = sessionSplit,
-                            sessionTurns = sessionTurns,
-                            sessionPerSecond = sessionPerSecond,
-                            sessionCachePercent = sessionCachePercent,
-                            sessionElapsedMs = sessionElapsedMs,
-                            live = live,
+                            // 实测优先（run 中），空闲用上层按当前上下文算出来的那份。
+                            split = live?.let {
+                                Triple(it.breakSystem, it.breakTools, it.breakHistory)
+                            } ?: breakSplit,
                         )
                     }
                 }
@@ -6755,7 +6497,7 @@ private fun ContextRingCard(
                 RingDetail(
                     "输出速度",
                     remember(sessionPerSecond) {
-                        String.format(Locale.getDefault(), "%.1f tok/s", sessionPerSecond)
+                        "${Tps.format(sessionPerSecond)} tok/s"
                     },
                 )
             }
@@ -6765,6 +6507,232 @@ private fun ContextRingCard(
                     remember(sessionElapsedMs) { formatRunElapsed(sessionElapsedMs) },
                 )
             }
+            }
+        }
+    }
+}
+
+/**
+ * The ring's popup content, restyled to the panel the user handed over as a screenshot:
+ * a title row (「上下文已用 N%」 with the 「~used / window」 figure right-aligned), a progress
+ * bar, then the live request's three shares as dotted rows with their own proportion bars.
+ * The old detail card (占用/缓存/累计/速度/时间) did not go away — it moved to the title
+ * capsule's entry ([TopBarContextEntry]); this panel is what the composer's ring opens now.
+ */
+@Composable
+private fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, Int>?) {
+    val scheme = MaterialTheme.colorScheme
+    val known = window > 0
+    val percent = if (known) used * 100 / window else 0
+    Column(
+        modifier = Modifier
+            .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
+            .shadow(
+                elevation = 8.dp,
+                shape = RoundedCornerShape(16.dp),
+                ambientColor = Color.Black.copy(alpha = 0.25f),
+                spotColor = Color.Black.copy(alpha = 0.25f),
+            )
+            .clip(RoundedCornerShape(16.dp))
+            .background(scheme.surface)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (known) "上下文已用 $percent%" else "上下文用量",
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.onSurface,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = if (known) {
+                    "~${panelTokens(used)} / ${panelTokens(window)}"
+                } else {
+                    "~${panelTokens(used)}"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
+        if (known) {
+            LinearProgressIndicator(
+                progress = { (percent / 100f).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        // 三行**常驻**（用户：「系统提示词就是当前窗口的 tokens 和占比，不是单个 run 的」）：
+        // 数值来自实测（run 中）或按当前上下文的估算（空闲，见 refreshContextBreakdown），
+        // 所以打开面板就有；进度条基准是**上下文窗口**（三行占比之和 = 顶部那条的比例）。
+        split?.let { (system, tools, history) ->
+            val parts = listOf(
+                Triple("系统提示词", system, scheme.primary),
+                Triple("工具定义", tools, scheme.secondary),
+                Triple("对话消息", history, scheme.tertiary),
+            )
+            Spacer(Modifier.height(4.dp))
+            parts.forEach { (label, value, tone) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(tone))
+                    Spacer(Modifier.width(9.dp))
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.bodySmall,
+                        // *fill = true**（用户：「进度条没有对齐」）：fill=false 时标签列只占自己
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "~${panelTokens(value)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        softWrap = false,
+                        // 定宽（用户：「进度条，长度对齐」）：值列宽窄不一会把后面的小条挤得参差；
+                        // 定宽后三行的条同起点同长度，右端与顶部进度条对齐。
+                        modifier = Modifier.width(44.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(scheme.surfaceContainerHighest),
+                    ) {
+                        // 基准 = 上下文窗口（用户：「进度条是以上下文窗口为准啊」）：每段条长 = 该段
+                        // ÷ 窗口，于是三行加起来就是顶部那条的总占比。窗口未设置（0）时退回三块之和，
+                        // 至少还能看构成。
+                        val denominator = if (window > 0) window else parts.sumOf { it.second }
+                        val fraction = if (denominator > 0) {
+                            value.toFloat() / denominator
+                        } else {
+                            0f
+                        }
+                        Box(
+                            Modifier
+                                .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                                .fillMaxHeight()
+                                .background(tone),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 「6.9K / 23.9K / 150K / 1M」: one decimal under 100 of a unit, whole above, unit letter capped. */
+private fun panelTokens(v: Int): String {
+    val k = v / 1000.0
+    val (n, unit) = if (k >= 1000.0) k / 1000.0 to "M" else k to "K"
+    val s = String.format(java.util.Locale.US, "%.1f", n)
+    return (if (s.endsWith(".0")) s.dropLast(2) else s) + unit
+}
+
+/**
+ * The context entry on the title capsule's right end (user: 「原圆环的内容移至标题胶囊右侧，
+ * 可以换个 icon」): a bar-chart glyph, and a popup that opens **downward** — the bar sits at the
+ * screen's top, so the ring's upward-opening card would leave the window here. Its content is
+ * the ring's original detail card, unchanged.
+ */
+@Composable
+private fun TopBarContextEntry(
+    used: Int,
+    estimated: Boolean,
+    window: Int,
+    sessionTokens: Int,
+    sessionEstimate: Int,
+    sessionSplit: SessionSplit,
+    sessionTurns: Int,
+    sessionPerSecond: Double,
+    sessionCachePercent: Int,
+    sessionElapsedMs: Long,
+    live: StreamStats?,
+) {
+    var open by remember { mutableStateOf(false) }
+    BackHandler(enabled = open) { open = false }
+    var anchorCentreX by remember { mutableStateOf(0f) }
+    var cardWidth by remember { mutableStateOf(0) }
+    val density = LocalDensity.current
+    val screenPx = with(density) {
+        LocalConfiguration.current.screenWidthDp.dp.toPx()
+    }
+    val edgePx = with(density) { POPUP_EDGE_AIR.toPx() }
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .onGloballyPositioned { anchorCentreX = it.boundsInWindow().center.x }
+            .clip(CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = { open = true },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_chart_column),
+            contentDescription = "上下文用量明细",
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (open) {
+            Popup(properties = PopupProperties(focusable = false)) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { open = false },
+                )
+            }
+            Popup(
+                alignment = Alignment.TopCenter,
+                offset = with(density) {
+                    IntOffset(
+                        popupNudgeCentred(
+                            anchorCentre = anchorCentreX,
+                            width = cardWidth,
+                            windowPx = screenPx,
+                            edgePx = edgePx,
+                        ).roundToInt(),
+                        // Below the glyph, clear of the capsule: the icon box is 28dp tall.
+                        28.dp.roundToPx() + 8.dp.roundToPx(),
+                    )
+                },
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Box(
+                    Modifier
+                        .onSizeChanged { cardWidth = it.width }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {},
+                ) {
+                    ContextRingCard(
+                        used = used,
+                        estimated = estimated,
+                        window = window,
+                        sessionTokens = sessionTokens,
+                        sessionEstimate = sessionEstimate,
+                        sessionSplit = sessionSplit,
+                        sessionTurns = sessionTurns,
+                        sessionPerSecond = sessionPerSecond,
+                        sessionCachePercent = sessionCachePercent,
+                        sessionElapsedMs = sessionElapsedMs,
+                        live = live,
+                    )
+                }
             }
         }
     }
@@ -6837,57 +6805,6 @@ private fun shortTokens(tokens: Int): String = when {
  */
 private fun fullTokens(tokens: Long): String = String.format(Locale.US, "%,d", tokens)
 
-/**
- * 量完删 — an instrument, not a feature (task-9).
- *
- * The jump the user reported (a long press moving the transcript) reproduces only on their own
- * device, after a cold start, and it is a race between a finger landing and a pin already in
- * flight; adb is out of bounds, so the three moments that decide it are written to
- * `filesDir/scroll-diag.log`: a conversation's opening pin, a finger landing, and a finger
- * lifting. `press:up:movedUp=…:scrolled=…:atEnd=…` is the line that settles it —
- * `movedUp=false scrolled=true` on an upward read means the gesture was a scroll and the follow
- * must stay released; `scrolled=false` while the list plainly moved means the flag missed its
- * scroll, and the `press:down` line's `first=`/`itemCount` say where it started.
- *
- * Bounded and off the main thread, exactly like [voiceTrace]: the file keeps its last 16KB once
- * it passes 32KB, and the append runs on the shared diagnostic worker, so the press path never
- * touches the disk. That bound is the fix for what this was — a log that grew without limit on
- * the one path that must stay cheap.
- *
- * Delete this, its three call sites (all marked 量完删) and the log once the user confirms the
- * jump is gone; the fix it was measuring shipped in 0.8.77.
- */
-private fun scrollDiag(
-    context: Context,
-    event: String,
-    state: LazyListState,
-    following: Boolean,
-    itemCount: Int,
-    /**
-     * The keyboard inset at the moment of the line, when the caller knows it. A long press that
-     * ends with the IME gone is the signature of the selection path (the field lost focus); a
-     * press that ends with the same inset as it started is not.
-     */
-    ime: Int = -1,
-) {
-    val app = context.applicationContext
-    // `itemCount` is what the **caller's lambda captured**, and a long-lived effect
-    // (`LaunchedEffect(listState)`, `pointerInput(Unit)`) captures it from the composition that
-    // created the lambda — so the watch lines print the 0 of the first frame while the press lines,
-    // created later, print the real count. `items=` is read live off the list itself and is the
-    // number to trust; the two disagreeing is the stale capture, not a different list.
-    val line = "$event" +
-        " following=$following" +
-        " itemCount=$itemCount" +
-        " items=${state.layoutInfo.totalItemsCount}" +
-        " first=${state.firstVisibleItemIndex}+${state.firstVisibleItemScrollOffset}" +
-        " scrolling=${state.isScrollInProgress}" +
-        " canBack=${state.canScrollBackward}" +
-        " canForward=${state.canScrollForward}" +
-        (if (ime >= 0) " ime=$ime" else "")
-    voiceTraceWorker.execute { appendBoundedLog(app, "scroll-diag.log", line) }
-}
-
 /** The three parts of a conversation's spend, as the endpoint itself reports them. */
 private data class SessionSplit(val uncached: Long, val cached: Long, val output: Long)
 
@@ -6929,105 +6846,73 @@ private fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Stored
     val scheme = MaterialTheme.colorScheme
     var expanded by rememberSaveable { mutableStateOf(false) }
     var showOriginal by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
+    // *和思考块/工具块同一个折叠壳**（用户：「不要直勾勾显示在卡片下方，像工具块思考块一样
+    ProcessCard(
+        icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+        title = "已压缩上下文 · ${formatTime(checkpoint.at)}",
+        expanded = expanded,
+        onToggle = { expanded = !expanded },
+        preview = "${originals.size} 条消息 → 摘要",
+    ) {
+        Box(
+            Modifier
                 .fillMaxWidth()
-                // 整块按下反馈（见 blockPress）：检查点卡的表头也是铺满宽度的一行，展开后是整段
-                // 摘要的入口；涟漪在这种宽度上同样是一大片圆。
-                .blockPress(MaterialTheme.shapes.small, onClick = { expanded = !expanded })
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .heightIn(max = 200.dp)
+                .verticalScroll(rememberScrollState()),
         ) {
-            Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.ic_minimize_2),
-                contentDescription = null,
-                tint = scheme.onSurfaceVariant,
-                modifier = Modifier.size(14.dp),
-            )
-            Spacer(Modifier.width(6.dp))
             Text(
-                text = "已压缩上下文 · ${formatTime(checkpoint.at)} · " +
-                    "${checkpoint.messages} 条消息 → 摘要",
-                style = MaterialTheme.typography.labelSmall,
-                color = scheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(
-                imageVector = if (expanded) ImageVector.vectorResource(R.drawable.ic_chevron_up) else ImageVector.vectorResource(R.drawable.ic_chevron_down),
-                contentDescription = null,
-                tint = scheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp),
+                text = checkpoint.summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.onSurface,
             )
         }
-        if (expanded) {
+        Text(
+            // 同表头口径：条数用转录计数（[originals]），与「查看原文」展开看到的一致；
+            // checkpoint.messages 是 wire 计数，不展示。
+            text = "压缩前约 ${shortTokens(checkpoint.promptTokens)} tokens · " +
+                "${originals.size} 条消息 · ${formatTime(checkpoint.at)}",
+            style = MaterialTheme.typography.labelSmall,
+            color = scheme.onSurfaceVariant,
+        )
+        TextButton(
+            onClick = { showOriginal = !showOriginal },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        ) {
+            Text(
+                text = if (showOriginal) "收起原文" else "查看原文",
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+        if (showOriginal) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 20.dp, top = 6.dp, bottom = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                    .heightIn(max = 240.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 200.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    Text(
-                        text = checkpoint.summary,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = scheme.onSurface,
-                    )
-                }
                 Text(
-                    text = "压缩前约 ${shortTokens(checkpoint.promptTokens)} tokens · " +
-                        "${checkpoint.messages} 条消息 · ${formatTime(checkpoint.at)}",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "被压缩的原文（${originals.size} 条）",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = FontWeight.SemiBold,
+                    ),
                     color = scheme.onSurfaceVariant,
                 )
-                TextButton(
-                    onClick = { showOriginal = !showOriginal },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        text = if (showOriginal) "收起原文" else "查看原文",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-                if (showOriginal) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
+                originals.forEach { original ->
+                    Column {
                         Text(
-                            text = "被压缩的原文（${originals.size} 条）",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.SemiBold,
-                            ),
+                            text = "${if (original.role == Roles.USER) "我" else "随行"} · " +
+                                formatTime(original.timestamp),
+                            style = MaterialTheme.typography.labelSmall,
                             color = scheme.onSurfaceVariant,
                         )
-                        originals.forEach { original ->
-                            Column {
-                                Text(
-                                    text = "${if (original.role == Roles.USER) "我" else "随行"} · " +
-                                        formatTime(original.timestamp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = scheme.onSurfaceVariant,
-                                )
-                                Text(
-                                    text = original.text,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = scheme.onSurface,
-                                    maxLines = 6,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
+                        Text(
+                            text = original.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = scheme.onSurface,
+                            maxLines = 6,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }
@@ -7085,13 +6970,15 @@ private fun SteerQueueRow(
             Spacer(Modifier.width(8.dp))
             // A line that is only a picture has no text to show, and an empty bar leaves the user
             // unable to tell what is waiting — so it says what it is.
-            val label = steer.text.ifBlank { if (steer.imageBase64 != null) "（图片）" else steer.text }
+            val label = steer.text.ifBlank { if (steer.imagesBase64.isNotEmpty()) "（图片）" else steer.text }
             // The picture itself, at the size this 36dp bar can hold. Decoded here rather than
             // through ImageBlock: that one is built for a bubble (its own size plus the full-screen
-            // preview dialog), so it would be a second layout path, not a reuse.
-            var thumb by remember(steer.imageBase64) { mutableStateOf<ImageBitmap?>(null) }
-            LaunchedEffect(steer.imageBase64) {
-                thumb = steer.imageBase64?.let { decodeAttachment(it, target = THUMB_PX)?.asImageBitmap() }
+            // preview dialog), so it would be a second layout path, not a reuse. 多附件只画第一张
+            // 缩略图 + 计数，一排 24dp 的格子装不下也不该装下整列。
+            val firstImage = steer.imagesBase64.firstOrNull()
+            var thumb by remember(firstImage) { mutableStateOf<ImageBitmap?>(null) }
+            LaunchedEffect(firstImage) {
+                thumb = firstImage?.let { decodeAttachment(it, target = THUMB_PX)?.asImageBitmap() }
             }
             // Tapping the thumbnail opens the picture at full size. The decode happens on the tap,
             // not in the row: the 24dp copy above is downsampled to [THUMB_PX] and blowing it up
@@ -7099,7 +6986,7 @@ private fun SteerQueueRow(
             // again — on IO — at a size worth looking at.
             val rowScope = rememberCoroutineScope()
             val rowContext = LocalContext.current
-            var fullPicture by remember(steer.imageBase64) { mutableStateOf<ImageBitmap?>(null) }
+            var fullPicture by remember(firstImage) { mutableStateOf<ImageBitmap?>(null) }
             thumb?.let { picture ->
                 Image(
                     bitmap = picture,
@@ -7112,7 +6999,7 @@ private fun SteerQueueRow(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = ripple(),
                         ) {
-                            val base64 = steer.imageBase64 ?: return@clickable
+                            val base64 = firstImage ?: return@clickable
                             rowScope.launch {
                                 val decoded = decodeAttachment(base64, target = FULL_PREVIEW_PX)
                                 if (decoded == null) {
@@ -7267,6 +7154,19 @@ private fun RunReasonLine(reason: String) {
             color = scheme.error,
             modifier = Modifier.weight(1f),
         )
+        // 错误提醒可复制（用户：「错误提醒怎么还不能复制」）：排查要的就是这段原文。
+        val clip = LocalClipboardManager.current
+        IconButton(
+            onClick = { clip.setText(AnnotatedString(reason)) },
+            modifier = Modifier.size(24.dp),
+        ) {
+            Icon(
+                imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
+                contentDescription = "复制错误提醒",
+                tint = scheme.error,
+                modifier = Modifier.size(13.dp),
+            )
+        }
     }
 }
 
@@ -7302,17 +7202,24 @@ private fun FailureReceiptRow(text: String) {
                 color = scheme.onErrorContainer,
                 modifier = Modifier.weight(1f),
             )
+            // 同 [RunReasonLine]：回执也要能复制（排查要原文）。
+            val clip = LocalClipboardManager.current
+            IconButton(
+                onClick = { clip.setText(AnnotatedString(text)) },
+                modifier = Modifier.size(26.dp),
+            ) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
+                    contentDescription = "复制错误提醒",
+                    tint = scheme.error,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
         }
     }
 }
 
-/**
- * 完整任务清单：输入框上方那一行点开就是它。
- *
- * 那一行只放得下一条 —— 进行中的那条 + 完成数/总数（用户：「不要堆多行，就一行就行了」），
- * 清单本身得有地方看，所以点它开半屏表（站内既有的范式，见 AssistantSheet）。只读：改状态是
- * 模型自己的事，这里给的是「这个任务一共要做哪些、做到哪了」。
- */
+/** 完整任务清单：输入框上方那一行点开就是它。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
@@ -7342,6 +7249,55 @@ private fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
             ) {
                 items(todos) { item -> TodoSheetRow(item) }
             }
+        }
+    }
+}
+
+/**
+ * 文件路径菜单（LINK-CLICK-SPEC §3.2 一期）：点消息里的文件路径弹出来。
+ *
+ * 一期只有两项，且都是「永远可用」的：复制路径、让随行读取。二期才加 FileProvider 的
+ * 「文件管理器打开 / 分享」——spec 说得很明白，ACTION_VIEW 对 mime 与已装 app 依赖太大
+ * （`.md` 多半没有对应 app），所以把复制与让模型读这两个不会断的放前面。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PathActionSheet(
+    path: String,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onAskModel: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = scheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp),
+        ) {
+            // 路径本体：等宽、可换行、不截断——用户要核对的就是这串。
+            Text(
+                text = path,
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = scheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(12.dp))
+            MenuItemRow(
+                icon = ImageVector.vectorResource(R.drawable.ic_copy),
+                label = "复制路径",
+                onClick = onCopy,
+            )
+            MenuItemRow(
+                icon = ImageVector.vectorResource(R.drawable.ic_bot),
+                label = "让随行读取并总结",
+                onClick = onAskModel,
+            )
         }
     }
 }
@@ -7438,9 +7394,9 @@ private fun QueueAction(icon: Int, label: String, onClick: () -> Unit) {
 private fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     // The same inset the queue rows and the board above use: the strip and the rows under it are
-    // one column of things belonging to the field, and 10dp against their 12dp put the picture two
-    // pixels left of the bars below it — the misalignment the user pointed at.
-    Row(modifier = Modifier.padding(start = STEER_QUEUE_INSET)) {
+    // one column of things belonging to the field. 多附件后内缩交给外面那一排 Row（每张 chip 自带
+    // 会在一排里叠出参差的间距）。
+    Row {
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = scheme.surfaceContainerHigh,
@@ -7561,8 +7517,10 @@ internal fun ringReading(
     liveEstimate: Int,
     transcriptEstimate: Int = 0,
 ): RingReading = when {
+    // 实测口径优先：网关回报（含按会话保持的最近一次）→ 落盘回报。
     liveReported > 0 -> RingReading(liveReported, estimated = false)
     newestStored > 0 -> RingReading(newestStored, estimated = false)
+    // 从没实测过（网关不报用量）才用粗估兜底，并标「约」。
     liveEstimate > 0 -> RingReading(liveEstimate, estimated = true)
     transcriptEstimate > 0 -> RingReading(transcriptEstimate, estimated = true)
     else -> RingReading(0, estimated = false)
@@ -7577,138 +7535,10 @@ private fun LazyListState.atEnd(slack: Int = 24): Boolean {
 }
 
 /**
- * True only at the very end of the transcript: there is nothing left to scroll toward.
- *
- * Deliberately **not** [atEnd] with a small slack, which is the shape that produced 「往上滑一点点，
- * 又追底」. The slack is pixels, so a drag of a few pixels — just past the touch slop, under the
- * 12dp travel threshold — left the list inside the tolerance: the watcher read that as "released at
- * the end again" and re-armed the follow, and the next streamed frame pulled the transcript to the
- * bottom. The reader had moved the list; they had just not moved it far. `canScrollForward` is the
- * list's own answer to "is anything below", so it cannot disagree with the real position the way an
- * arithmetic tolerance can.
+ * 抬手后守护窗还开多久。选择手柄在抬手那一刻才出现、框架的 bringIntoView 跟着落在抬手后，
+ * 400ms 够盖住它那次程序滚动，又短到不会跟用户随后的正常滚动打架。
  */
-private fun LazyListState.atVeryEnd(): Boolean = !canScrollForward
-
-/**
- * Whether a gesture that has just ended may hand the follow back to the transcript.
- *
- * Only a tap does, and a tap is all three of these: it was short, it never dragged upward, and the
- * list never moved. The last one is the one that was missing. Keyed on "did not drag up" alone, a
- * drag *downward* — the gesture that reads older messages, and the one a flick is made of — counted
- * as a tap, so the follow was handed back the instant the finger lifted and the next publish hauled
- * the transcript to its end again: the position chasing the bottom, on every scroll.
- *
- * `atEnd` is the second half of the same idea: the follow may only be re-armed while the list is
- * still where the follow wants it, so a tap that ends anywhere else cannot restore it either.
- *
- * [holdMs] is the caller's own long-press timeout, and the caller passes the platform's rather than
- * this file's constant — see the constant's own note for the window that made a selection long
- * press look like a tap.
- *
- * **What the caller owes this function.** [scrolled] has to mean "the transcript moved", and it
- * cannot be derived from `isScrollInProgress` sampling alone: that flag is read on pointer events,
- * so a short drag can end before it is ever seen, and it is suppressed entirely while our own pin
- * runs. The caller therefore passes the **visible position at press-down and at release**
- * ([restoresFollowAfterPress] does the comparison) — a difference of one pixel is a moved list. And
- * [atEnd] has to mean the **absolute** end, not "within a tolerance of it": a reader a few pixels
- * off the end is where the follow must not return to, which is the whole shape of 「往上滑一点点，
- * 又追底」.
- */
-internal fun restoresFollow(
-    movedUp: Boolean,
-    scrolled: Boolean,
-    atEnd: Boolean,
-    heldMs: Long,
-    holdMs: Long = HOLD_TO_SELECT_MS,
-): Boolean = !movedUp && !scrolled && atEnd && heldMs < holdMs
-
-/**
- * The release decision as the list actually sees it, which is the half [restoresFollow] cannot
- * answer on its own.
- *
- * Two inputs are computed here rather than at the call site, because both were wrong in the same
- * way — they asked "did the finger travel?" instead of "did the transcript move?":
- *
- *  - **the position comparison**: [downIndex]/[downOffset] are the first visible item at press-down
- *    and [nowIndex]/[nowOffset] at release. Any difference at all means the list moved, however
- *    small the gesture was and however briefly it lasted — and a moved list must never have the
- *    follow handed back, or the next publish hauls the reader back to the bottom. This is the
- *    signal the scroll-progress sampling misses: a short drag can end before the flag is ever read,
- *    and a drag that only just passed the touch slop moves the list by a few pixels.
- *  - **[atVeryEnd]**: the caller passes whether the list is at its absolute end, not "within a
- *    tolerance of it". A reader who scrolled up by a few pixels is not at the end, and must not be
- *    treated as one.
- *
- * A tap that moved nothing and ended at the absolute end still restores: tapping a card to open it
- * is not an interaction with the position.
- */
-internal fun restoresFollowAfterPress(
-    movedUp: Boolean,
-    scrolledDuringPress: Boolean,
-    downIndex: Int,
-    downOffset: Int,
-    nowIndex: Int,
-    nowOffset: Int,
-    atVeryEnd: Boolean,
-    heldMs: Long,
-    holdMs: Long = HOLD_TO_SELECT_MS,
-): Boolean = restoresFollow(
-    movedUp = movedUp,
-    scrolled = scrolledDuringPress || downIndex != nowIndex || downOffset != nowOffset,
-    atEnd = atVeryEnd,
-    heldMs = heldMs,
-    holdMs = holdMs,
-)
-
-/**
- * Whether a press that the list moved **on its own** has to be undone.
- *
- * The case this exists for, from a real log: at the very end (`canForward=false`), a finger goes
- * down and does not move; ~330ms later the list is 636px further up with `isScrollInProgress=true`,
- * and at release `movedUp=false` — the finger never travelled. That is not a gesture. It is the text
- * selection machinery (`SelectionContainer`) bringing the selected line into view, and it is the
- * 「长按滚动位置变」 the user keeps reporting: a stationary long press is a request to select, not a
- * request to move.
- *
- * [fingerDragged] is whether the finger ever travelled past the **touch slop** — the threshold at
- * which Compose's scrollable starts moving the list from a finger at all. That is what makes this
- * rule decidable: below the slop the finger *cannot* have scrolled the list, so a list that moved
- * anyway was moved by something else. (An earlier version of this asked "did the list move during
- * the press" as well, which is self-contradictory: the framework's own scroll sets that flag, so the
- * branch could never fire — the unit test for the real log caught it.)
- *
- * [listMoved] is the position pair at press-down against release.
- */
-internal fun restoresPositionAfterLongPress(
-    fingerDragged: Boolean,
-    listMoved: Boolean,
-    heldMs: Long,
-    holdMs: Long = HOLD_TO_SELECT_MS,
-): Boolean = !fingerDragged && listMoved && heldMs >= holdMs
-
-/** Far more than any transcript: the list clamps this to its own end. */
-private const val FOLLOW_SCROLL_PX = 200_000f
-
-/**
- * How long a press has to last before it counts as the user reaching into the content.
- *
- * The platform's own long-press threshold is 500ms and text selection starts there; a shorter
- * window here would drop the follow scroll on an ordinary tap, which is not an interaction with
- * the position at all.
- *
- * This is the **fallback**, and the value used to be 450 — *below* the platform's own 500, which is
- * the window this constant's own reasoning warned about: a press of 450–500ms is a selection long
- * press to the system (the IME starts collapsing under it) while `restoresFollow` still called it a
- * tap and handed the follow back, after which the keyboard-inset follow and the composer's pin
- * moved the list — the long-press jump, still there after every other fix. The caller now passes
- * the platform's live value (`LocalViewConfiguration.longPressTimeoutMillis`), which is 500 unless
- * the device or an accessibility setting says otherwise; this constant only covers a caller that
- * has none.
- */
-private const val HOLD_TO_SELECT_MS = 500L
-
-/** How far an upward drag has to travel to release the follow, in dp (converted per density). */
-private val RELEASE_DRAG_DP = 12.dp
+private val LONG_PRESS_SETTLE_MS = 400L
 
 /**
  * The air the composer leaves under its pill, in dp.
@@ -7718,9 +7548,6 @@ private val RELEASE_DRAG_DP = 12.dp
  * in one of them and a measured number in the other, which is how the two drifted a frame apart.
  */
 private val COMPOSER_BOTTOM_PAD = 12.dp
-
-/** Largest opposite-direction inset change treated as the platform animation's rebound. */
-private const val REBOUND_CLAMP_PX = 24
 
 /**
  * The size of a viewport change that is a jump rather than a frame of an animation.
@@ -7852,7 +7679,7 @@ private fun importFile(context: Context, uri: Uri): Attachment? = runCatching {
     context.contentResolver.openInputStream(uri)?.use { input ->
         target.outputStream().use { output -> input.copyTo(output) }
     } ?: return@runCatching null
-    Attachment(base64 = "", label = target.absolutePath)
+    Attachment(base64 = "", label = target.absolutePath, filePath = target.absolutePath)
 }.getOrNull()
 
 private fun displayName(context: Context, uri: Uri): String? {
@@ -7954,6 +7781,8 @@ private fun ImagePreviewDialog(
         offset = if (scale > 1f) offset + pan else Offset.Zero
     }
     val viewer: @Composable () -> Unit = {
+        // 手势返回也要关（用户：「预览图片的时候，手势返回为什么不会关闭图片」）。keepKeyboard 那条
+        BackHandler(onBack = onDismiss)
         Box(
             Modifier
                 .fillMaxSize()
@@ -8048,3 +7877,4 @@ private fun formatRunElapsed(millis: Long): String {
         "${seconds / 60} 分 ${(seconds % 60).toString().padStart(2, '0')} 秒"
     }
 }
+
