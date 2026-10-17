@@ -116,6 +116,47 @@ class UserProfileStore(private val context: Context) {
         }
     }
 
+    /**
+     * 模型写的画像（`profile_write` 工具与自动整理）走这里：**先过「会不会丢旧条目」的闸**。
+     *
+     * 旧画像里成条的 `- ` 条目在新版中消失超过 30%（且至少 3 条）就整次拒绝 —— 那通常不是
+     * 「这些信息过时了」，而是模型没把旧条目抄全。整篇替换的协议决定了代码无从知道它抄漏了
+     * 哪几条，所以只能这样拦。返回 null 表示已写入，否则是拒绝原因（旧画像一个字都没动）。
+     *
+     * 用户自己在设置页改画像走 [write]，不受这道闸限制：删掉什么是他的权利。
+     */
+    suspend fun writeGuarded(value: String): String? = withContext(Dispatchers.IO) {
+        lock.withLock {
+            if (value.length > MAX_LENGTH) return@withContext "超过 $MAX_LENGTH 字，未保存"
+            val old = read()
+            val total = bullets(old).size
+            val lost = lostBullets(old, value).size
+            if (total >= 3 && lost >= 3 && lost * 100 / total > 30) {
+                return@withContext "这次总结会丢掉 $lost/$total 条旧信息，未保存（旧画像原样保留）"
+            }
+            // 备份在写之前：写坏了还能手工找回上一版。
+            if (old.isNotBlank()) {
+                runCatching { File(context.filesDir, "profile.md.bak").writeText(old) }
+            }
+            val ok = writeFile(value)
+            if (ok) _text.value = value
+            if (ok) null else "写入失败，检查应用存储空间"
+        }
+    }
+
+    /** 画像里成条的信息：`- ` 开头的行（去掉标记与首尾空白）。 */
+    private fun bullets(text: String): List<String> = text.lines()
+        .map { it.trim() }
+        .filter { it.startsWith("- ") }
+        .map { it.removePrefix("- ").trim() }
+        .filter { it.isNotEmpty() }
+
+    /** 旧条目里，新版本中找不到的那些（忽略空格差异，避免排版改动被当成丢失）。 */
+    private fun lostBullets(old: String, next: String): List<String> {
+        val haystack = next.replace(" ", "").replace("\u3000", "")
+        return bullets(old).filter { it.replace(" ", "").replace("\u3000", "") !in haystack }
+    }
+
     private fun read(): String {
         if (!file.exists()) return ""
         val text = runCatching { file.readText() }.getOrNull()

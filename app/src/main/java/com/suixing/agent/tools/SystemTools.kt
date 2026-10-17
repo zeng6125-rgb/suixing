@@ -31,80 +31,86 @@ class SystemTools(
     private val profile: UserProfileStore,
 ) : ToolGroup() {
 
+    override val group: String = "系统"
+
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             "device_info",
-            "获取设备信息：型号、安卓版本、屏幕分辨率、当前时间、电量、存储空间、本应用版本。",
+            "Device information: model, Android version, screen resolution, current time, battery, " +
+                "storage and this app's version.",
             Schema.objectOf(emptyList()),
         ),
         ToolSpec(
             "list_apps",
-            "列出手机上已安装且可启动的应用（名称 + 包名），可用 query 过滤。",
+            "List the launchable apps installed on the phone (name + package); query filters them.",
             Schema.objectOf(
                 properties = listOf(
-                    "query" to Schema.string("按名称或包名过滤，可省略"),
-                    "limit" to Schema.integer("最多返回多少个，默认 80", default = 80, minimum = 1, maximum = 300),
+                    "query" to Schema.string("Filter by name or package; optional"),
+                    "limit" to Schema.integer("Maximum results, default 80", default = 80, minimum = 1, maximum = 300),
                 ),
             ),
         ),
         ToolSpec(
             "open_app",
-            "打开一个应用。优先按包名，也可以给应用名称（如「微信」）。",
+            "Open an app: by package name first, or by its display name (e.g. 微信).",
             Schema.objectOf(
-                properties = listOf("target" to Schema.string("包名或应用名称")),
+                properties = listOf("target" to Schema.string("Package name or app name")),
                 required = listOf("target"),
             ),
         ),
         ToolSpec(
             "open_url",
-            "用系统浏览器或对应应用打开一个网址。",
+            "Open a URL with the system browser or the matching app.",
             Schema.objectOf(
-                properties = listOf("url" to Schema.string("要打开的网址")),
+                properties = listOf("url" to Schema.string("URL to open")),
                 required = listOf("url"),
             ),
         ),
         ToolSpec(
             "clipboard_read",
-            "读取剪贴板文本。注意：安卓 10 以上只有本应用在前台时才能读。",
+            "Read the clipboard text. Note: on Android 10+ this only works while this app is in the foreground.",
             Schema.objectOf(emptyList()),
         ),
         ToolSpec(
             "clipboard_write",
-            "写入剪贴板。常用于把长文本或中文安全地送进其它应用的输入框。",
+            "Write to the clipboard — the reliable way to get long or Chinese text into another app's input field.",
             Schema.objectOf(
-                properties = listOf("text" to Schema.string("要写入剪贴板的文本")),
+                properties = listOf("text" to Schema.string("Text to put on the clipboard")),
                 required = listOf("text"),
             ),
         ),
         ToolSpec(
             "memory_write",
-            "把一条长期备忘写入本地记忆（跨会话保留），例如用户的偏好、常用路径。",
+            "Save a long-term note to local memory (kept across sessions), e.g. the user's preferences " +
+                "or frequently used paths.",
             Schema.objectOf(
                 properties = listOf(
-                    "key" to Schema.string("备忘的键名"),
-                    "value" to Schema.string("备忘内容"),
+                    "key" to Schema.string("Key of the note"),
+                    "value" to Schema.string("Note content"),
                 ),
                 required = listOf("key", "value"),
             ),
         ),
         ToolSpec(
             "memory_read",
-            "读取本地长期备忘；不传 key 则返回全部。",
-            Schema.objectOf(properties = listOf("key" to Schema.string("要读取的键名，可省略"))),
+            "Read local long-term notes; without key it returns all of them.",
+            Schema.objectOf(properties = listOf("key" to Schema.string("Key to read; optional"))),
         ),
         ToolSpec(
             "profile_write",
-            "整篇覆盖写入用户画像：这是关于用户的长期画像 —— 沟通风格与语气偏好、性格、" +
-                "长期目标、兴趣、工作与生活背景、明确的偏好与禁忌；不写一次性任务细节。" +
-                "先 profile_read 看现有内容，避免覆盖掉还成立的旧内容。",
+            "Overwrite the whole user profile: the long-term picture of this user — communication style " +
+                "and tone, personality, long-term goals, interests, work and life background, explicit " +
+                "preferences and taboos. Do not put one-off task details here. Read it with profile_read " +
+                "first so still-valid content is not lost.",
             Schema.objectOf(
-                properties = listOf("text" to Schema.string("画像全文，会覆盖旧内容")),
+                properties = listOf("text" to Schema.string("The whole profile; replaces the old one")),
                 required = listOf("text"),
             ),
         ),
         ToolSpec(
             "profile_read",
-            "读取用户画像全文。它已经随每次请求带上，需要原样引用或准备覆盖写入时再读。",
+            "Read the whole user profile. It already rides along with every request; read it when you " +
+                "need to quote it verbatim or are about to overwrite it.",
             Schema.objectOf(emptyList()),
         ),
     )
@@ -120,7 +126,7 @@ class SystemTools(
         "memory_read" -> memoryRead(args)
         "profile_write" -> profileWrite(args)
         "profile_read" -> profileRead()
-        else -> ToolResult.failure("未知工具：$name")
+        else -> ToolResult.failure("Unknown tool: $name")
     }
 
     private suspend fun deviceInfo(): ToolResult = withContext(Dispatchers.IO) { readDeviceInfo() }
@@ -290,11 +296,13 @@ class SystemTools(
                 "内容过长（${text.length}/${UserProfileStore.MAX_LENGTH} 字），请精简后再写",
             )
         }
-        val ok = profile.write(text)
-        return if (ok) {
+        // 模型整篇重写时最容易发生的事：没把旧条目抄全 ⇒ 旧信息被抹掉。闸门在 store 里，
+        // 这里只把拒绝原因原样交给模型，让它重写一份带着旧条目的完整版。
+        val refused = profile.writeGuarded(text)
+        return if (refused == null) {
             ToolResult.success("已更新用户画像（${text.length} 字）")
         } else {
-            ToolResult.failure("写入用户画像失败，检查应用存储空间")
+            ToolResult.failure("未写入：$refused")
         }
     }
 

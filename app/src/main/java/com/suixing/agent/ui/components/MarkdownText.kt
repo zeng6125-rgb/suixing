@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -266,6 +267,13 @@ private fun splitTableRow(line: String): List<String> =
 // ---------------------------------------------------------------------------
 
 private val EMPTY_SPAN = SpanStyle()
+
+/**
+ * 文件路径的点击回调（LINK-CLICK-SPEC §3.2）。宿主（ChatScreen）在会话页顶层 provide 一次，
+ * 所有 [InlineText] 叶子就地读取 —— 四个 MarkdownText 调用点与中间各层 block composable 都
+ * **不用加参数**。null（默认）时路径只是带色文本、不可点。
+ */
+val LocalPathClick = compositionLocalOf<((String) -> Unit)?> { null }
 private val BOLD_SPAN = SpanStyle(fontWeight = FontWeight.SemiBold)
 private val ITALIC_SPAN = SpanStyle(fontStyle = FontStyle.Italic)
 private val STRIKE_SPAN = SpanStyle(textDecoration = TextDecoration.LineThrough)
@@ -274,6 +282,17 @@ private const val URL_HTTP = "http://"
 private const val URL_STOP = "<>\"`"
 private const val URL_TRAILING = ".,;:!?*_~'\""
 private const val ESCAPABLE = "*_`~[]()\\"
+
+// 文件路径识别（LINK-CLICK-SPEC §1.3）：只认这几类**绝对路径根**，不认相对路径（歧义太大）。
+// 允许中文文件名（pathEnd 在空白/引号/CJK 标点处停，与 URL 同构）。走 InlineScanner 而非独立
+// 正则 detect()：复用已有的 [label](url)/裸 URL 识别，天然避开 spec §1.4 警告的重叠 span。
+private val PATH_ROOTS = listOf(
+    "/sdcard/", "/storage/emulated/", "/storage/self/primary/",
+    "/data/data/", "/data/local/tmp/", "/data/user/",
+)
+
+/** 一个 link 字符串是不是绝对文件路径（而非 URL）。addRun 用它决定挂 Url 还是 Clickable。 */
+private fun isFilePath(s: String): Boolean = PATH_ROOTS.any { s.startsWith(it) }
 
 fun inlineMarkdown(
     text: String,
@@ -299,6 +318,9 @@ private class InlineScanner(
     private val linkColor: Color,
     private val baseWeight: FontWeight?,
     private val onUrlClick: ((String) -> Unit)?,
+    // 文件路径的点击回调（LINK-CLICK-SPEC §3.2）。与 onUrlClick 分开：URL 恒走默认浏览器，
+    // 路径才弹菜单。null 时路径只是带色文本、不可点（避免「看着能点却没反应」）。
+    private val onPathClick: ((String) -> Unit)? = null,
     // Inline code's size. Unspecified inherits the text around it, which is what the pure
     // entry point wants; the renderer passes the 13sp body slot instead.
     private val codeFontSize: TextUnit = TextUnit.Unspecified,
@@ -308,6 +330,8 @@ private class InlineScanner(
 ) {
     private val out = AnnotatedString.Builder()
     private val linkStyle = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
+    // 文件路径：主色但**无下划线**（LINK-CLICK-SPEC §2.1）——与 URL 区分，符合「链接才带下划线」的直觉。
+    private val pathStyle = SpanStyle(color = linkColor)
     private val codeStyle = SpanStyle(
         background = codeBackground,
         color = codeColor,
@@ -383,7 +407,14 @@ private class InlineScanner(
                         i++
                     } else {
                         flush()
-                        emit(target.labelStart, target.labelEnd, style.merge(linkStyle), target.url)
+                        // 目标可能是 URL 或文件路径（spec §1.1 两种都允许）。路径用 pathStyle（无
+                        // 下划线）并加 `file:` 前缀，addRun 据此挂 Clickable 而非 Url。
+                        val isPath = isFilePath(target.url)
+                        emit(
+                            target.labelStart, target.labelEnd,
+                            style.merge(if (isPath) pathStyle else linkStyle),
+                            if (isPath) "file:${target.url}" else target.url,
+                        )
                         i = target.end
                     }
                 }
@@ -394,6 +425,21 @@ private class InlineScanner(
                     val url = text.substring(i, end)
                     addRun(url, style.merge(linkStyle), url)
                     i = end
+                }
+                // 裸文件路径（spec §1.3）：绝对路径根开头才认，走到路径末尾、剥掉句末标点与尾斜杠。
+                // 只在回调存在时才真正可点（addRun 里把关），没回调时它就是一段普通主色文本 —— 但
+                // pathStyle 无下划线，不至于伪装成能点的链接。
+                link == null && c == '/' && startsPath(i, to) -> {
+                    val end = pathEnd(i, to)
+                    if (end <= i) {
+                        buffer.append(c)
+                        i++
+                    } else {
+                        flush()
+                        val path = text.substring(i, end)
+                        addRun(path, style.merge(pathStyle), "file:$path")
+                        i = end
+                    }
                 }
                 else -> {
                     buffer.append(c)
@@ -412,12 +458,31 @@ private class InlineScanner(
         if (style != EMPTY_SPAN) out.addStyle(style, start, end)
         // LinkAnnotation.Url is stable in ui-text 1.7.x and Text itself wires the
         // click handling, so no ClickableText and no pointerInput hit testing.
-        val click = onUrlClick
-        if (link != null && click != null) {
+        if (link == null) return
+        if (link.startsWith("file:")) {
+            // 文件路径（LINK-CLICK-SPEC §1.3/§3.2）：只在有 onPathClick 回调时才可点 —— 没有回调的
+            // Clickable 会「看着能点、点了没反应」，比不加更糟。回调解掉 `file:` 前缀后拿到路径，
+            // 调用方弹菜单（复制 / 让随行读取）。URL 与路径分属两个回调：URL 恒走默认浏览器。
+            val path = link.removePrefix("file:")
+            val pathClick = onPathClick
+            if (pathClick != null) {
+                out.addLink(
+                    LinkAnnotation.Clickable(
+                        tag = link,
+                        linkInteractionListener = LinkInteractionListener { pathClick(path) },
+                    ),
+                    start,
+                    end,
+                )
+            }
+        } else {
+            // URL **恒挂** annotation：有回调用回调，没回调时 listener=null，Compose 的 Text 用
+            // LocalUriHandler 默认开浏览器（spec §2.1「Text itself wires the click handling」）。
+            // 旧代码只在有回调时才挂，而四个调用点都没传回调 ⇒ URL 有下划线却点不动，这是 bug。
             out.addLink(
                 LinkAnnotation.Url(
                     url = link,
-                    linkInteractionListener = LinkInteractionListener { click(link) },
+                    linkInteractionListener = onUrlClick?.let { cb -> LinkInteractionListener { cb(link) } },
                 ),
                 start,
                 end,
@@ -459,6 +524,30 @@ private class InlineScanner(
         if (index > 0 && text[index - 1].isLetterOrDigit()) return false
         if (index + URL_HTTPS.length <= to && text.startsWith(URL_HTTPS, index)) return true
         return index + URL_HTTP.length <= to && text.startsWith(URL_HTTP, index)
+    }
+
+    // 一个 '/' 处是不是某类绝对路径根（§1.3）。前一字符是字母数字就不算（避开 http://… 里的 /）。
+    private fun startsPath(index: Int, to: Int): Boolean {
+        if (index > 0 && text[index - 1].isLetterOrDigit()) return false
+        return PATH_ROOTS.any { root ->
+            index + root.length <= to && text.regionMatches(index, root, 0, root.length)
+        }
+    }
+
+    // 路径末尾：吃到空白/引号/尖括号/反引号为止，再剥掉句末标点与尾斜杠（§1.3：末尾 / 视为目录，
+    // 但这里不识别目录，只保证不把 '.' 或 '，' 这种吃进路径）。与 urlEnd 同构，但用路径的停止集。
+    private fun pathEnd(from: Int, to: Int): Int {
+        var end = from
+        while (end < to) {
+            val c = text[end]
+            if (c.isWhitespace() || c == '"' || c == '<' || c == '>' || c == '`' ||
+                c == '，' || c == '。' || c == '；' || c == '：' || c == '、' ||
+                c == '）' || c == '》' || c == '】' || c == '」'
+            ) break
+            end++
+        }
+        while (end > from && (text[end - 1] in URL_TRAILING || text[end - 1] == '/')) end--
+        return end
     }
 
     private fun urlEnd(from: Int, to: Int): Int {
@@ -746,7 +835,9 @@ private fun InlineText(
     onUrlClick: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    val annotated = remember(text, palette, onUrlClick) {
+    // 路径回调从 CompositionLocal 就地读（叶子层），调用点与中间层零改动。URL 仍走 onUrlClick。
+    val pathClick = LocalPathClick.current
+    val annotated = remember(text, palette, onUrlClick, pathClick) {
         InlineScanner(
             text = text,
             codeBackground = palette.codeBackground,
@@ -755,6 +846,7 @@ private fun InlineText(
             // The block style already carries the base weight; spans only add to it.
             baseWeight = null,
             onUrlClick = onUrlClick,
+            onPathClick = pathClick,
             codeFontSize = palette.codeFontSize,
         ).scan()
     }

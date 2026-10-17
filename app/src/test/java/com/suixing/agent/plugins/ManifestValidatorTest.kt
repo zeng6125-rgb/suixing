@@ -117,11 +117,21 @@ class ManifestValidatorTest {
     // ---------------------------------------------------------------- 2. id
 
     @Test
-    fun `id 必须符合两种形态之一`() {
+    fun `id 必须符合命名规则且不含点号`() {
         assertTrue(check(valid.replace("\"id\": \"github\"", "\"id\": \"GitHub\""), dirName = "GitHub").has(ReasonCode.ID_MISMATCH))
         assertTrue(check(valid.replace("\"id\": \"github\"", "\"id\": \"1github\""), dirName = "1github").has(ReasonCode.ID_MISMATCH))
-        // 第三方两段式是合法的
-        assertTrue(check(valid.replace("\"id\": \"github\"", "\"id\": \"acme.github\""), dirName = "acme.github").ok)
+        // 两段式命名空间 0.8.107 起**非法**：注册名要发给模型网关，点号整批拒收（deepseek 11152）。
+        assertTrue(check(valid.replace("\"id\": \"github\"", "\"id\": \"acme.github\""), dirName = "acme.github").has(ReasonCode.ID_MISMATCH))
+        // 超长 id 也拒（注册名 `<id>_<tool>` 要简洁）。
+        val longId = "a" + "b".repeat(32)
+        assertTrue(check(valid.replace("\"id\": \"github\"", "\"id\": \"$longId\""), dirName = longId).has(ReasonCode.ID_MISMATCH))
+    }
+
+    @Test
+    fun `id 含下划线要拒（注册名可逆的前提）`() {
+        // 注册名是 `<id>_<tool>`：id 若允许下划线，`ab`+`c_d` 与 `ab_c`+`d` 会撞成同一个注册名，
+        // resolve 反查与查重都会歧义。id 的字符集里没有下划线，第一个下划线就必然是分隔符。
+        assertTrue(check(valid.replace("\"id\": \"github\"", "\"id\": \"ab_c\""), dirName = "ab_c").has(ReasonCode.ID_MISMATCH))
     }
 
     @Test
@@ -137,7 +147,7 @@ class ManifestValidatorTest {
     }
 
     @Test
-    fun `tools 为空要拒`() {
+    fun `tools 与 hooks 都空要拒`() {
         // 用「闭合括号在 2 空格缩进」定位 tools 数组：PluginSpec.tools 没有默认值，整段删掉会让
         // 反序列化直接失败（那是 SCHEMA_INVALID，测不到 TOOL_NAME_INVALID），所以只能留空数组。
         val noTools = valid.replace(Regex("\"tools\": \\[[\\s\\S]*?\\n  ]"), "\"tools\": []")
@@ -146,9 +156,21 @@ class ManifestValidatorTest {
     }
 
     @Test
+    fun `tools 空但有 hooks 要放行`() {
+        // 守卫型插件（能力全在 hooks）不该被逼挂 noop 占位工具（0.8.107 放宽）。
+        val hooksOnly = valid.replace(
+            Regex("\"tools\": \\[[\\s\\S]*?\\n  ]"),
+            "\"tools\": [],\n  \"hooks\": [{\"on\": \"tools/pre-execute\", \"when\": {}, \"action\": \"log\"}]",
+        )
+        val result = check(hooksOnly)
+        assertFalse("有 hooks 的插件不该因 tools 空被拒", result.has(ReasonCode.TOOL_NAME_INVALID))
+    }
+
+    @Test
     fun `与内置工具或已装插件重名要拒`() {
-        assertTrue(check(valid, builtin = setOf("github.repo_search")).has(ReasonCode.NAME_CONFLICT))
-        assertTrue(check(valid, installed = setOf("github.repo_search")).has(ReasonCode.NAME_CONFLICT))
+        // 注册名分隔符是下划线（0.8.107，网关只收 [a-zA-Z0-9_-]）。
+        assertTrue(check(valid, builtin = setOf("github_repo_search")).has(ReasonCode.NAME_CONFLICT))
+        assertTrue(check(valid, installed = setOf("github_repo_search")).has(ReasonCode.NAME_CONFLICT))
     }
 
     // ---------------------------------------------------------------- 4. 模板变量闭环

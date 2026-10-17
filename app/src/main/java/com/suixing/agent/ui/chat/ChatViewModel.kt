@@ -13,6 +13,7 @@ import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.LiveDraft
+import com.suixing.agent.data.PerfRecord
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Tps
@@ -515,6 +516,12 @@ class ChatViewModel : ViewModel() {
      * 消费一次就复位，避免下一次中断顶着上一次的原因。
      */
     private var cancelReason = "任务被停止"
+
+    /**
+     * 哪些会话的运行是**用户按中断按钮**停的：停止不是失败，不写回执、不留红色提示。
+     * 按 chatId 记 —— 多个会话可以同时跑，单个布尔会把别的会话的真实失败一起吞掉。
+     */
+    private val userStopped = mutableSetOf<String>()
 
     /**
      * One line about retries, appended to `files/retry-trace.log`.
@@ -1200,6 +1207,8 @@ class ChatViewModel : ViewModel() {
         // 中断原因（用户：「中断提示不要这么简单，由 xxx 原因，对话中断」）：由这里落下的停止
         // 标成「用户停止」，落盘那条半截回答的尾部就写得出原因；引擎自己取消的轮次用默认文案。
         cancelReason = "用户停止"
+        // 停止不是失败：见 start() 里 catch 的用法（用户：「点击中断按钮中断的不必弹出错误提示」）。
+        userStopped += chatId
         if (speakingChatId == chatId) {
             Core.speaker.stop()
             speakingChatId = null
@@ -1404,6 +1413,47 @@ class ChatViewModel : ViewModel() {
     fun requestCompress(): Boolean = Core.engine.requestCompress(_state.value.conversationId)
 
     /**
+     * **没有 run 时**手动压缩：按已落盘的历史压一次，并把结果记成一条压缩记录。
+     *
+     * 记录落进 [ChatUiState.checkpoints]，转录里就会在它覆盖的那一段位置出现一张压缩块 ——
+     * 和工具块、思考块一样是卡片，不用另做一套界面（用户：「就气泡＋压缩块就行了」）。
+     * 压完顺手刷新圆环的上下文读数。
+     */
+    fun compressNow() {
+        val shown = _state.value
+        val chatId = shown.conversationId
+        if (chatId.isEmpty()) return
+        // 已经有 run 在跑：交给引擎在轮次边界处理，不在这里并行再压一次。
+        if (jobs.containsKey(chatId)) return
+        if (compressing.contains(chatId)) return
+        compressing += chatId
+        viewModelScope.launch {
+            try {
+                val base = Core.settings.current()
+                val assistant = base.assistant(shown.assistantId) ?: base.activeAssistant()
+                // 与 start() 走同一条端点链：会话自己的选择 → 人设的固定 → 全局默认。
+                val persona = base.forAssistant(assistant)
+                val choice = base.choiceFor(shown.providerId, shown.model, assistant)
+                val settings = persona.copy(
+                    baseUrl = choice.baseUrl,
+                    apiKey = choice.apiKey,
+                    model = choice.model,
+                    reasoningEffort = shown.reasoningEffort ?: persona.reasoningEffort,
+                )
+                val history = sessions[chatId]?.messages ?: shown.messages
+                Core.engine.compressNow(history, settings) { checkpoint ->
+                    recordCheckpoint(chatId, checkpoint)
+                }
+            } finally {
+                compressing -= chatId
+            }
+        }
+    }
+
+    /** 正在手动压缩的会话，防止连点。 */
+    private val compressing = mutableSetOf<String>()
+
+    /**
      * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）：按**当前**上下文算一次，不依赖 run。
      *
      * 面板打开时调用（用户：「系统提示词就是当前窗口的 tokens 和占比，不是单个 run 的」）—— 没有
@@ -1491,7 +1541,10 @@ class ChatViewModel : ViewModel() {
         // run's clothes, most visibly for a run that never touches the todo tools at all.
         // The first `todo_write` of this run puts it back. 只清这个会话自己那一格。
         todoBoards[chatId] = emptyList()
-        _state.update { it.copy(todos = emptyList()) }
+        // 新一轮开始：清掉上一轮留下的红色提示，并把"用户停止"标记复位（否则这一轮真失败会被
+        // 当成用户中断而不再报出来）。
+        userStopped -= chatId
+        _state.update { it.copy(todos = emptyList(), error = null) }
         jobs[chatId] = viewModelScope.launch {
             AgentForegroundService.start(Core.appContext, "随行正在执行任务")
             // The draft writer rides inside the run's own coroutine, so it stops the moment
@@ -1608,13 +1661,21 @@ class ChatViewModel : ViewModel() {
                 } else {
                     ""
                 }
-                failure = listOf(describeError(error), note)
+                val described = listOf(describeError(error), note)
                     .filter { it.isNotBlank() }
                     .joinToString("\n")
+                // 用户按了中断按钮：这不是失败。传输层被取消时抛的是 IOException("Canceled") 而不是
+                // CancellationException，会掉进这个分支被当成失败 —— 写回执、留红色提示（用户：
+                // 「点击中断按钮中断的不必弹出错误提示」）。此时只把状态收成「已停止」，不写回执、不留错误。
+                if (chatId in userStopped) {
+                    status = "已停止"
+                } else {
+                    failure = described
+                }
                 // 「tool name is invalid or duplicated」这类 400 的最小探针全部 200（点号/横杠/重名/
                 // 插件全 schema/带未知工具名的历史，两个通道都测过），复现不出确切触发条件 ⇒ 让它
                 // 自己报：把这一轮的工具表与历史引用过的工具名写进 trace，下次发生直接读日志定位。
-                if (failure.contains("tool name", ignoreCase = true)) {
+                if (failure?.contains("tool name", ignoreCase = true) == true) {
                     val live = sessions[chatId]
                     val historyCalls = live?.messages
                         ?.flatMap { it.toolCalls }
@@ -1647,7 +1708,7 @@ class ChatViewModel : ViewModel() {
                                         messages = live.messages + StoredMessage(
                                             id = UUID.randomUUID().toString(),
                                             role = Roles.SYSTEM,
-                                            text = "这一轮最终失败：$failure",
+                                            text = FAILURE_RECEIPT_PREFIX + failure,
                                             runId = live.runId,
                                         ),
                                     ),
@@ -1661,6 +1722,25 @@ class ChatViewModel : ViewModel() {
                     // too: without this flush a stopped run would save all but its tail.
                     flushDeltas(chatId)
                     sessions[chatId]?.let { saveSession(it) }
+                    // 性能记录：**这一轮真的发生了什么**。首字延迟、缓存命中、prompt/completion
+                    // 都取自本轮落下的那条回答（StoredMessage 本身就带着端点的回报），不另做估算。
+                    // 请求体大小目前没有采集点，留 0 —— 监测页会把它显示成「—」，不是「测到零」。
+                    val answered = sessions[chatId]?.messages
+                        ?.lastOrNull { it.role == Roles.ASSISTANT && it.promptTokens > 0 }
+                    val runStats = _state.value.stats
+                    if (answered != null || runStats != null) {
+                        Core.perf.record(
+                            PerfRecord(
+                                at = System.currentTimeMillis(),
+                                conversationId = chatId,
+                                ttftMs = answered?.firstTokenMs ?: 0,
+                                totalMs = answered?.elapsedMs ?: (runStats?.elapsedMs ?: 0),
+                                promptTokens = answered?.promptTokens ?: (runStats?.lastPromptTokens ?: 0),
+                                completionTokens = answered?.completionTokens ?: (runStats?.tokensOut ?: 0),
+                                cachedTokens = answered?.cachedTokens ?: 0,
+                            ),
+                        )
+                    }
                     endSession(chatId, status, failure)
                     // The run is over for certain here — this coroutine is the one that called
                     // into the engine, so it has already returned and unregistered. A turn queued
@@ -1774,7 +1854,7 @@ class ChatViewModel : ViewModel() {
                 val receipt = StoredMessage(
                     id = UUID.randomUUID().toString(),
                     role = Roles.SYSTEM,
-                    text = "这一轮最终失败：${event.message}",
+                    text = FAILURE_RECEIPT_PREFIX + event.message,
                     runId = base.runId,
                 )
                 // **插到失败那一轮的最后一条消息后面**（用户：「一轮错误就跟在一轮后面」「为什么
@@ -1787,7 +1867,9 @@ class ChatViewModel : ViewModel() {
                 } else {
                     base.messages + receipt
                 }
-                base.copy(error = event.message, messages = messages)
+                // 用户自己按了中断：取消路径上引擎仍可能报 Failed，那不是失败 —— 不落回执、
+                // 不留红色提示（用户：「点击中断按钮中断的不必弹出错误提示」）。
+                if (chatId in userStopped) base else base.copy(error = event.message, messages = messages)
             }
 
             // A failed attempt that is being repeated. The run is still going — it is waiting — and
@@ -2145,7 +2227,13 @@ class ChatViewModel : ViewModel() {
         // paragraph that was still being written. Until the run ends they exist nowhere else,
         // and leaving them out is what brought the card back as a bare sentence with no chain
         // of thought and no tool row — the answer with its reasoning and its work removed.
-        val restored = liveDraftRecovery(draft, messages, cancelReason = cancelReason)
+        val restored = liveDraftRecovery(
+            draft,
+            messages,
+            // 用户自己按停：留空串 ⇒ 尾部不写任何说明（见 liveDraftRecovery）。引擎/超时那种
+            // 被动中断仍写原因，用户才知道为什么断了。
+            cancelReason = if (chatId in userStopped) "" else cancelReason,
+        )
         // 原因消费一次即复位：下一轮若是引擎自己取消，写的就是默认文案而不是这一次的。
         cancelReason = "任务被停止"
         // Nothing this draft holds is missing from the transcript; clearing it is all that is
@@ -2400,6 +2488,15 @@ internal fun liveDraftRecovery(
     // restored above — is exactly what the user watched arrive and expects to find again. The
     // marker stands alone as the bubble's text in that case.
     val body = draft.text.trimEnd()
+    // 空串＝用户自己按的停止：**一个字都不补**（用户：「用户自行点击的中断不需要错误提示」）。
+    // 半截回答原样收尾，读起来就是「我说到这儿就够了」，而不是一次失败。
+    val text = if (cancelReason.isBlank()) {
+        body
+    } else if (body.isEmpty()) {
+        "（由「$cancelReason」原因，对话中断）"
+    } else {
+        body + "\n\n（由「$cancelReason」原因，对话中断）"
+    }
     val line = if (delivered || (probe.isEmpty() && draft.reasoning.isNullOrBlank() && restored.isEmpty())) {
         emptyList()
     } else {
@@ -2407,11 +2504,7 @@ internal fun liveDraftRecovery(
             StoredMessage(
                 id = UUID.randomUUID().toString(),
                 role = Roles.ASSISTANT,
-                text = if (body.isEmpty()) {
-                    "（由「$cancelReason」原因，对话中断）"
-                } else {
-                    body + "\n\n（由「$cancelReason」原因，对话中断）"
-                },
+                text = text,
                 reasoning = draft.reasoning,
                 runId = draft.runId,
             ),

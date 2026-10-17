@@ -44,11 +44,38 @@ data class ChatMessage(
     val toolCalls: List<ToolCallRequest> = emptyList(),
     val toolCallId: String? = null,
     val imageBase64: String? = null,
+    /** 多附件：这条消息携带的全部图片；wire 上每张一个 image_url 项。见 [allImages]。 */
+    val imagesBase64: List<String> = emptyList(),
+    /**
+     * 这条消息里的图片是**工具截的**（ui_screenshot），不是用户上传的附件。
+     *
+     * 只有截图会在超预算时被降级（见 AgentEngine.pruneRequestImages）：用户自己传的图是他给的
+     * 输入，静默省掉等于篡改；工具截的图随时可以重截。
+     */
+    val toolScreenshot: Boolean = false,
 ) {
+    /** 单值与列表的聚合读侧：旧调用点（工具截图）与新调用点（多附件）都不丢。 */
+    val allImages: List<String> get() = imagesBase64.ifEmpty { listOfNotNull(imageBase64) }
+
+    /** 去掉图片并补一行说明；[toolScreenshot] 保留，降级过的条目仍认得出是截图。 */
+    fun omitImages(note: String): ChatMessage = copy(
+        text = (text + note).trim(),
+        imageBase64 = null,
+        imagesBase64 = emptyList(),
+    )
+
     companion object {
         fun system(text: String) = ChatMessage("system", text)
 
         fun user(text: String, imageBase64: String? = null) = ChatMessage("user", text, imageBase64 = imageBase64)
+
+        /** 多附件变体：一条用户消息带全部图片。 */
+        fun user(text: String, imagesBase64: List<String>) =
+            ChatMessage("user", text, imagesBase64 = imagesBase64)
+
+        /** 工具截图：带上 [toolScreenshot]，超预算时是可以被降级的那一类。 */
+        fun screenshot(text: String, imagesBase64: List<String>) =
+            ChatMessage("user", text, imagesBase64 = imagesBase64, toolScreenshot = true)
 
         fun assistant(text: String, toolCalls: List<ToolCallRequest> = emptyList()) =
             ChatMessage("assistant", text, toolCalls)
@@ -233,6 +260,8 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             .url(modelsEndpoint(settings.baseUrl))
             .header("Accept", "application/json")
             .apply { if (settings.apiKey.isNotBlank()) header("Authorization", "Bearer ${settings.apiKey}") }
+            // 自定义头同样要带（高级参数）：网关若靠特殊头鉴权，/models 不带就是 401。
+            .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
             .build()
         clientFor(settings).newCall(request).execute().use { response ->
@@ -252,6 +281,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             .url(modelsEndpoint(settings.baseUrl))
             .header("Accept", "application/json")
             .apply { if (settings.apiKey.isNotBlank()) header("Authorization", "Bearer ${settings.apiKey}") }
+            .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
             .build()
         clientFor(settings).newCall(request).execute().use { response ->
@@ -301,11 +331,16 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                 put("tool_choice", JsonPrimitive("auto"))
             }
         }
-        val request = Request.Builder()
+        val builder = Request.Builder()
             .url(url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .header("Authorization", "Bearer ${settings.apiKey}")
+        // 自定义请求头最后加（设置→高级参数）：同名时用户的值赢过上面的默认头。
+        settings.requestHeaders.forEach { (name, value) ->
+            if (name.isNotBlank()) builder.header(name, value)
+        }
+        val request = builder
             .post(payload.toString().toRequestBody(JSON_MEDIA))
             .build()
 
@@ -331,12 +366,26 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                 call.execute().use { response ->
                     val body = response.body
                     if (!response.isSuccessful || body == null) {
+                        // 取证（真机 0.8.116 报障：压缩后首轮被网关 400，错误体只说「request was
+                        // rejected by an internal MaaS component」，本地 A/B 把形状/体量/模型假设全
+                        // 证伪后仍不知真因）：非 2xx 时把**完整请求体**与响应体落盘，下次复现拉文件
+                        // 就能对着真 payload 找差异。截断到 2MB 防撑爆私有目录；只留最近一次。
+                        val errBody = body?.string().orEmpty()
+                        runCatching {
+                            val app = com.suixing.agent.core.Core.appContext
+                            val dump = buildJsonObject {
+                                put("code", JsonPrimitive(response.code))
+                                put("response", JsonPrimitive(errBody.take(8_000)))
+                                put("request", JsonPrimitive(payload.toString().take(2_000_000)))
+                            }
+                            java.io.File(app.filesDir, "last-http-error.json").writeText(dump.toString())
+                        }
                         // The status and the header are what the retry decision runs on, so they ride
                         // along in the failure instead of being flattened into a message here.
                         throw AttemptFailure(
                             code = response.code,
                             retryAfterSeconds = parseRetryAfter(response.header("Retry-After")),
-                            failure = LlmException(friendlyHttp(response.code, body?.string().orEmpty())),
+                            failure = LlmException(friendlyHttp(response.code, errBody)),
                         )
                     }
                     val stream = StreamTurn().also { partial = it }
@@ -506,9 +555,10 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
 
     private fun encodeMessage(message: ChatMessage): JsonObject = buildJsonObject {
         put("role", JsonPrimitive(message.role))
-        val image = message.imageBase64
+        val images = message.allImages
         when {
-            image != null -> put(
+            // 多附件：content 数组里每张图一个 image_url 项（OpenAI 兼容格式本就允许并列多项）。
+            images.isNotEmpty() -> put(
                 "content",
                 buildJsonArray {
                     if (message.text.isNotBlank()) {
@@ -517,13 +567,15 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                             put("text", JsonPrimitive(message.text))
                         })
                     }
-                    add(buildJsonObject {
-                        put("type", JsonPrimitive("image_url"))
-                        put(
-                            "image_url",
-                            buildJsonObject { put("url", JsonPrimitive("data:image/jpeg;base64,$image")) },
-                        )
-                    })
+                    images.forEach { image ->
+                        add(buildJsonObject {
+                            put("type", JsonPrimitive("image_url"))
+                            put(
+                                "image_url",
+                                buildJsonObject { put("url", JsonPrimitive("data:image/jpeg;base64,$image")) },
+                            )
+                        })
+                    }
                 },
             )
             else -> put("content", JsonPrimitive(message.text))
@@ -541,7 +593,10 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                                 "function",
                                 buildJsonObject {
                                     put("name", JsonPrimitive(call.name))
-                                    put("arguments", JsonPrimitive(call.arguments))
+                                    // 空参数一律发 `{}`（用户报的 HTTP 400「invalid function call
+                                    // parameters」）：网关会校验历史里每个 tool_call 的 arguments
+                                    // 是不是合法 JSON 对象，空字符串（无参调用、旧存档）会被直接拒。
+                                    put("arguments", JsonPrimitive(call.arguments.ifBlank { "{}" }))
                                 },
                             )
                         })
@@ -558,9 +613,25 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             buildJsonObject {
                 put("name", JsonPrimitive(spec.name))
                 put("description", JsonPrimitive(spec.description))
-                put("parameters", spec.parameters as JsonElement)
+                // 出口兜底（取证：网关 11129「工具定义不符合模型要求」会拒掉**整个请求**，一个
+                // 工具的 schema 缺 type/properties 就连坐全部工具）：这里再确认一次它是合法的
+                // JSON Schema 对象。源头已在 PluginRuntime.normalizeSchema 补齐，这一层保证
+                // 任何工具族（内置/插件/将来新增）都不会把整批请求拖死。
+                put("parameters", spec.parameters.normalizedSchema() as JsonElement)
             },
         )
+    }
+
+    /** `{"type":"object","properties":{…}}`：缺什么补什么，已有的关键字原样保留。 */
+    private fun JsonObject.normalizedSchema(): JsonObject {
+        val props = this["properties"] as? JsonObject
+        val typed = (this["type"] as? JsonPrimitive)?.content == "object"
+        if (typed && props != null) return this
+        return buildJsonObject {
+            forEach { (key, value) -> if (key != "type" && key != "properties") put(key, value) }
+            put("type", JsonPrimitive("object"))
+            put("properties", props ?: JsonObject(emptyMap()))
+        }
     }
 
     private fun endpoint(baseUrl: String): String {
@@ -585,7 +656,11 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(180, TimeUnit.SECONDS)
+            // 600s, not 180（用户：「为什么老是会断？你是不是默认设置了什么输出时间」——是，
+            // 就是这里）：深度思考的轮可以三分钟没有一个字节（真机截图 227s/294s 的 run），180s
+            // 的 read timeout 把这种轮切成「连接中断」。流式响应有连续数据、真死连接仍会在这
+            // 里暴露；长思考无字节不是死连接。上限交给 10 分钟的 callTimeout 一条。
+            .readTimeout(600, TimeUnit.SECONDS)
             .callTimeout(600, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
@@ -859,6 +934,22 @@ internal fun describeError(error: Throwable): String {
             "连不上服务器：确认端口是开着的，而且手机和服务器在同一个网络。"
         chain.any { it is LlmException } ->
             chain.first { it is LlmException }.message.orEmpty().ifBlank { "请求失败" }
-        else -> "${error::class.java.simpleName}：${error.message ?: "没有更多信息"}"
+        // 兜底行带上 **cause 链**：ExceptionInInitializerError 这类异常的 message 是 null，真因在
+        // cause 里（哪个类的静态初始化炸了）。只打类名时回执写「没有更多信息」，真机复现也定不了位
+        // （用户截图报过）。链取到第一个有 message 的为止，够定位又不刷屏。
+        else -> buildString {
+            append(error::class.java.simpleName)
+            append("：")
+            append(error.message ?: "没有更多信息")
+            var cause = error.cause
+            var depth = 0
+            while (cause != null && depth < 3) {
+                append(" ← ")
+                append(cause::class.java.simpleName)
+                cause.message?.let { append("(").append(it).append(")") }
+                cause = cause.cause
+                depth++
+            }
+        }
     }
 }

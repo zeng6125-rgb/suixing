@@ -8,24 +8,21 @@ import org.junit.Test
 /**
  * Which number the ring draws, and whether it says 「约」.
  *
- * The order is the whole point of the function: the endpoint's own count for the round that just
- * reported, then the newest round in the transcript, then the run's own character-based estimate
- * of the wire, and last the transcript's own size. The last two are what took 「暂无数据」 off the
- * card — for the gateways that ignore `stream_options.include_usage` there is no count at all, and
- * the card used to be empty on a conversation plainly full of text. Both are flagged, because a
- * proportion presented as a count is the one thing this card must not do.
+ * 只认**实测**一个口径：本轮网关回报 → 按会话保持的最近实测（调用方传入 liveReported）→
+ * 落盘的最近一轮回报。粗估（/4）只作「从没实测过」的兜底并标「约」。
+ * 两个口径混在一条回落链上就是用户报的 37/48 跃变：37 是粗估、48 是实测。
  */
 class RingReadingTest {
 
     @Test
-    fun `the endpoint's own count wins over everything else`() {
+    fun `the measured report wins over the character estimate`() {
         val reading = ringReading(liveReported = 12_000, newestStored = 9_000, liveEstimate = 11_000)
         assertEquals(12_000, reading.tokens)
         assertFalse(reading.estimated)
     }
 
     @Test
-    fun `the newest stored round is used when nothing is reported yet`() {
+    fun `the stored report is used when nothing is reported live`() {
         val reading = ringReading(liveReported = 0, newestStored = 9_000, liveEstimate = 11_000)
         assertEquals(9_000, reading.tokens)
         assertFalse("a stored count is the endpoint's own, not an estimate", reading.estimated)

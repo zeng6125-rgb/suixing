@@ -58,7 +58,9 @@ import com.suixing.agent.mcp.McpManager
 import com.suixing.agent.mcp.McpServerState
 import com.suixing.agent.mcp.McpStatus
 import com.suixing.agent.skills.Skill
+import com.suixing.agent.agent.COMPRESS_CONTEXT_SPEC
 import com.suixing.agent.tools.TIER_ACCESSIBILITY
+import com.suixing.agent.tools.virtualTool
 import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
 import com.suixing.agent.tools.TIER_SHELL
@@ -89,55 +91,25 @@ private const val MCP_GROUP = "MCP（外部）"
 private const val OTHER_GROUP = "其它"
 
 /**
- * The ToolGroup each registered tool name came from, read off the bundles in
- * `com.suixing.agent.tools`.
- *
- * The registry does not carry that fact: [com.suixing.agent.tools.ToolRegistry.add] wraps every
- * spec in an anonymous [com.suixing.agent.tools.Tool] that keeps only the spec and the group's
- * tier (tools/Tool.kt:153-162), so "which bundle registered this" cannot be asked at runtime.
- * The rows below are still read live from [Core.tools] — this table only decides which bucket a
- * name falls into, and a name that is not listed lands in [OTHER_GROUP] instead of vanishing.
- *
- * One bundle per entry, in the order the groups should be shown:
- * FileTools, ShellTools, UiTools, SystemTools (which is where `memory_*` is registered,
- * SystemTools.kt:77-88), JobTools, TodoTools, ScheduleTools, SkillTools, WebTools, VoiceTools.
+ * 分组由**工具包自己声明**（[com.suixing.agent.tools.ToolGroup.group]，经
+ * [com.suixing.agent.tools.ToolRegistry.groupOf] 取用）：这一页不再维护「工具名 → 分组」的表，
+ * 加一个工具、删一个工具，分组和组头的人数都自动跟着变。
+ * MCP 前缀归到 [MCP_GROUP]，没声明分组的归到 [OTHER_GROUP]，两组都排在最后。
  */
-private val TOOL_GROUPS: List<Pair<String, List<String>>> = listOf(
-    "文件" to listOf(
-        "read_file", "write_file", "list_dir", "make_dir", "stat_path",
-        "move_path", "delete_path", "find_files", "search_in_files",
-    ),
-    "Shell" to listOf("run_shell", "app_action"),
-    "界面操作" to listOf(
-        "ui_dump", "ui_screenshot", "ui_tap", "ui_long_press", "ui_swipe", "ui_click_text",
-        "ui_type", "ui_type_into", "ui_key", "ui_current_app", "ui_wait",
-    ),
-    "系统" to listOf(
-        "device_info", "list_apps", "open_app", "open_url", "clipboard_read", "clipboard_write",
-        "memory_write", "memory_read",
-    ),
-    "后台任务" to listOf("job_start", "job_list", "job_output", "job_kill"),
-    "任务清单" to listOf("todo_write", "todo_read"),
-    "定时提醒" to listOf("schedule_create", "schedule_list", "schedule_update", "schedule_delete"),
-    "技能" to listOf("skill_list", "skill_read", "skill_save"),
-    "网络" to listOf("web_fetch", "web_download", "web_search"),
-    "语音" to listOf("speak", "stop_speaking"),
-)
-
-private val GROUP_BY_NAME: Map<String, String> = buildMap {
-    TOOL_GROUPS.forEach { (group, names) -> names.forEach { put(it, group) } }
-}
-
 private fun groupOf(name: String): String = when {
     name.startsWith(McpManager.MCP_PREFIX) -> MCP_GROUP
-    else -> GROUP_BY_NAME[name] ?: OTHER_GROUP
+    else -> Core.tools.groupOf(name).ifBlank { OTHER_GROUP }
 }
 
-/** Keeps the drawn order the same as [TOOL_GROUPS]; MCP and 其它 come last. */
-private fun groupRank(group: String): Int = when (group) {
-    MCP_GROUP -> TOOL_GROUPS.size
-    OTHER_GROUP -> TOOL_GROUPS.size + 1
-    else -> TOOL_GROUPS.indexOfFirst { it.first == group }.coerceAtLeast(0)
+/** 组的显示顺序＝工具包的注册顺序；MCP 与「其它」垫底。 */
+private fun groupRank(group: String): Int {
+    val order = Core.tools.groupOrder()
+    val declared = order.indexOf(group)
+    return when {
+        declared >= 0 -> declared
+        group == MCP_GROUP -> order.size
+        else -> order.size + 1
+    }
 }
 
 /**
@@ -494,7 +466,11 @@ private fun ToolsTab() {
     // the MCP state changes; the builtin half never changes after Core.init.
     val servers by Core.mcp.servers.collectAsState()
     val capabilities by Core.capabilities.state.collectAsState()
-    val tools = remember(servers) { Core.tools.all() }
+    val tools = remember(servers) {
+        // 引擎的虚拟工具不在注册表里（compress_context 在分发前被拦截，见 AgentEngine），
+        // 但模型看得到它，所以页面上也要有这一行 —— 否则用户会觉得工具列表不全。
+        Core.tools.all() + virtualTool(COMPRESS_CONTEXT_SPEC)
+    }
     var query by rememberSaveable { mutableStateOf("") }
 
     val filtered = remember(tools, query) {
@@ -565,7 +541,7 @@ private fun ToolsTab() {
                     items(groupTools, key = { it.spec.name }) { tool ->
                         ToolRow(
                             name = tool.spec.name,
-                            description = tool.spec.description,
+                            description = toolCopyZh(tool.spec.name, tool.spec.description),
                             requirement = requirementOf(tool.tier, capabilities),
                         )
                     }

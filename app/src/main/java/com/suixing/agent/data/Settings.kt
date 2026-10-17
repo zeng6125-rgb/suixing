@@ -142,10 +142,29 @@ data class AppSettings(
      */
     val modelContexts: Map<String, Int> = emptyMap(),
     /**
+     * 最大输出 tokens **按模型**（同 [modelContexts] 的模式）：0/缺席＝不说、模型默认。
+     * 全局 [maxTokens] 与 provider 级已退役，仅老文件回退（[withMaxTokensMigration] 搬值）。
+     */
+    val modelMaxTokens: Map<String, Int> = emptyMap(),
+    /**
+     * 自定义请求头（用户：「模型与生成要加入请求头的设置，加到高级参数」）：`Name: Value`
+     * 一行一条，随每个请求发出（覆盖同名默认头由 OkHttp 的最后写入决定，故在默认头之后加）。
+     */
+    val requestHeaders: Map<String, String> = emptyMap(),
+    /**
      * Tool-calling rounds allowed in one turn. 0 means no limit, which is the
      * default: a long task should not be cut off at an arbitrary number.
      */
     val maxToolRounds: Int = 0,
+    /**
+     * 一轮里**最多几条工具调用并发跑**。1＝串行（今天的默认行为，也是唯一零风险的值）；
+     * N>1 时一轮内最多 N 条同时执行，结果仍按模型请求的顺序回写 wire（端点对 tool 消息顺序敏感）。
+     *
+     * 两个刻意的限制：① **只在 AUTO 审批档生效** —— ASK 档的授权弹窗每个会话只有一个待决位
+     * （ApprovalGate 的 waiters 按 chatId 单槽），两条调用同时求授权会互相覆盖、死等；② shell 类
+     * 工具并发可能互相踩（同时写一个文件），所以默认保持 1，由用户按需开。
+     */
+    val toolParallel: Int = 1,
     /**
      * 插话落在哪里。0 排队：等这一轮模型说完，在下一轮请求前注入，模型把它当成
      * 「用户在我干活时说的」；1 立即：掐断在途的流，让模型马上看到这句话——代价是
@@ -279,6 +298,8 @@ data class AppSettings(
     val consoleWhileRunning: Boolean = true,
     /** 悬浮窗展开面板的宽度，dp；0 表示用默认宽度。右下角的拖拽手柄写这里。 */
     val consoleWidthDp: Int = 0,
+    /** 悬浮窗展开面板的高度，dp；0 表示随内容自适应（默认）。手柄向上拖写这里。 */
+    val consoleHeightDp: Int = 0,
     /** 0 小, 1 标准, 2 大, 3 特大 */
     val fontScale: Int = 1,
     /** 0 窄, 1 标准, 2 宽 —— 助手气泡最多占屏宽的比例，由聊天页读取 */
@@ -384,6 +405,13 @@ data class AppSettings(
 
     /** The context ceiling for [model]; 0 when the user never set one for it. */
     fun contextWindowFor(model: String): Int = modelContexts[model] ?: 0
+
+    /**
+     * 最大输出 tokens **按模型**（用户：「取消全局性的最大输出，改用各个模型默认的，然后可以
+     * 自定义，跟上下文窗口一样可设置」）。0 或缺席＝不说、由模型/端点默认决定。全局与
+     * provider 级字段已退役（[migrated] 把旧值搬进这张表），只作老文件的回退。
+     */
+    fun maxTokensFor(model: String): Int = modelMaxTokens[model] ?: 0
 
     /**
      * 实际使用的压缩阈值，0.20–0.95。
@@ -493,7 +521,24 @@ class SettingsRepository(private val context: Context) {
  * `apiKey` / `model` triple. Wrap that in a single provider so the picker and the
  * switcher have something to show without the user re-entering anything.
  */
-private fun AppSettings.migrated(): AppSettings = withProviders().withAssistants()
+private fun AppSettings.migrated(): AppSettings =
+    withProviders().withAssistants().withMaxTokensMigration()
+
+/**
+ * 老文件的 provider 级最大输出搬进按模型的表（一次性）：provider 填过数、而它名下的模型在
+ * [modelMaxTokens] 里还没有值时，把那个数写给这些模型 —— 用户设过的不丢；已经按模型设过的
+ * 键不被覆盖（自定义赢过迁移）。provider 级字段本身保留作回退，不再有新写入。
+ */
+private fun AppSettings.withMaxTokensMigration(): AppSettings {
+    val moved = providers.fold(modelMaxTokens) { acc, provider ->
+        val value = provider.maxTokens ?: return@fold acc
+        if (value <= 0) return@fold acc
+        provider.enabled.fold(acc) { inner, model ->
+            if (model.isBlank() || model in inner) inner else inner + (model to value)
+        }
+    }
+    return if (moved === modelMaxTokens) this else copy(modelMaxTokens = moved)
+}
 
 private fun AppSettings.withProviders(): AppSettings {
     if (providers.isNotEmpty() || baseUrl.isBlank()) return this
@@ -537,7 +582,9 @@ fun AppSettings.forAssistant(assistant: Assistant?): AppSettings {
         apiKey = provider?.apiKey?.ifBlank { null } ?: apiKey,
         temperature = assistant.temperature ?: own?.temperature ?: temperature,
         topP = own?.topP ?: topP,
-        maxTokens = own?.maxTokens ?: maxTokens,
+        // 最大输出**按模型**（用户：「取消全局性的，改用各模型默认＋可自定义，跟上下文窗口一样」）：
+        // 本模型填了数就用它；没填才回退 provider 级/全局（老文件的值，迁移后通常为空/0）。
+        maxTokens = maxTokensFor(model).takeIf { it > 0 } ?: provider?.maxTokens ?: maxTokens,
         reasoningEffort = own?.reasoningEffort ?: reasoningEffort,
     )
 }

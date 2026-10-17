@@ -402,7 +402,10 @@ class InterruptPersistenceTest {
             "读完了，我再想一下",
             interrupted.reasoning,
         )
-        assertTrue("and the card says it was cut off", interrupted.text.endsWith("（中断）"))
+        assertTrue(
+            "and the card says it was cut off, with the reason",
+            interrupted.text.endsWith("（由「任务被停止」原因，对话中断）"),
+        )
 
         val restoredCall = transcript.firstOrNull { message -> message.toolCalls.any { it.id == "call_1" } }
         val restoredAnswer = transcript.firstOrNull { message -> message.toolCallId == "call_1" }
@@ -461,8 +464,13 @@ class InterruptPersistenceTest {
         val recovered = liveDraftRecovery(draft, emptyList())
 
         assertEquals("one card comes back", 1, recovered.size)
-        assertEquals("（中断）", recovered.single().text)
+        assertEquals("（由「任务被停止」原因，对话中断）", recovered.single().text)
         assertEquals("我先想想这个文件在哪", recovered.single().reasoning)
+        assertEquals(
+            "调用方给的原因就是标记里写的原因（用户：「由 xxx 原因，对话中断」）",
+            "（由「用户停止」原因，对话中断）",
+            liveDraftRecovery(draft, emptyList(), cancelReason = "用户停止").single().text,
+        )
 
         assertTrue(
             "a draft with neither thinking nor an answer stays out of the transcript",

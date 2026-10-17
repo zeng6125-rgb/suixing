@@ -74,8 +74,8 @@ class PluginStore(private val baseDir: File) {
                 issues += PluginIssue(ReasonCode.SCHEMA_INVALID, Severity.ERROR, "目录里没有 manifest.json")
                 null
             }
-            // 已装插件的注册名，用来查重（同名工具两个插件不能共存）。
-            spec?.tools?.forEach { installedToolNames += "${spec.id}.${it.name}" }
+            // 已装插件的注册名，用来查重（同名工具两个插件不能共存）。分隔符下划线，见 PluginRuntime。
+            spec?.tools?.forEach { installedToolNames += "${spec.id}_${it.name}" }
             PluginEntry(
                 id = dir.name,
                 dir = dir,

@@ -1,6 +1,7 @@
 package com.suixing.agent.ui
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -11,6 +12,8 @@ import com.suixing.agent.ui.components.listStart
 import com.suixing.agent.ui.components.orderedMarker
 import com.suixing.agent.ui.components.parseMarkdown
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 // Plain JVM tests: both parser entry points are free of Android/Compose runtime
@@ -299,6 +302,34 @@ class MarkdownTest {
         assertEquals(4, span.start)
         assertEquals(19, span.end)
         assertEquals(linkColor, span.item.color)
+    }
+
+    @Test
+    fun `a bare url carries a Url annotation even with no callback`() {
+        // 回归：旧 addRun 只在 onUrlClick != null 时挂 LinkAnnotation，而 inline() 传的正是 null，
+        // 于是 URL 有下划线样式却**没有可点击 annotation** —— 点了没反应。URL 恒挂 Url annotation
+        // 后，listener 为 null 时 Compose 用 LocalUriHandler 默认开浏览器。
+        val result = inline("see https://x.dev/a. next")
+        val links = result.getLinkAnnotations(0, result.length)
+        assertEquals(1, links.size)
+        val url = links.single().item
+        assertTrue("必须是 Url annotation", url is LinkAnnotation.Url)
+        assertEquals("https://x.dev/a", (url as LinkAnnotation.Url).url)
+        assertNull("没有回调时 listener 为 null，走默认浏览器", url.linkInteractionListener)
+    }
+
+    @Test
+    fun `a file path is colored but not underlined`() {
+        // §1.3 裸文件路径识别：主色但无下划线（区别于 URL）。onUrlClick=null 时不挂 Clickable，
+        // 所以它就是一段带色的普通文本 —— 有样式 span、无 link annotation。
+        val result = inline("见 /sdcard/x.md")
+        assertEquals("见 /sdcard/x.md", result.text)
+        val span = result.spanStyles.single()
+        assertEquals(2, span.start)
+        assertEquals(14, span.end)
+        assertEquals(linkColor, span.item.color)
+        assertNull("路径无下划线（区别于 URL）", span.item.textDecoration)
+        assertEquals("null 回调时路径不可点，无 link annotation", 0, result.getLinkAnnotations(0, result.length).size)
     }
 
     @Test

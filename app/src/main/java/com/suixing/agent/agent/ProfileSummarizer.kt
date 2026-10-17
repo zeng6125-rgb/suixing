@@ -3,7 +3,10 @@ package com.suixing.agent.agent
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.ProfileApply
 import com.suixing.agent.data.UserProfileStore
+import com.suixing.agent.data.applyProfileOps
+import com.suixing.agent.data.parseProfileOps
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
 import com.suixing.agent.llm.ChatMessage
@@ -69,10 +72,15 @@ class ProfileSummarizer(private val llm: LlmClient) {
         }.getOrElse { return ProfileSummary.Failed(it.message ?: "请求失败") }
         val next = turn.text.trim()
         if (next.isEmpty()) return ProfileSummary.Failed("模型没有返回内容")
-        if (next == old) return ProfileSummary.Unchanged
-        if (!store.write(next)) {
-            return ProfileSummary.Failed("总结超过 ${UserProfileStore.MAX_LENGTH} 字，未保存")
-        }
+        // 模型只交回变更行（见 ProfileOps）：旧条目不在它手里，所以「增补」是代码保证的，
+        // 不是靠它抄全。没有任何变更行 = 最近的对话里没有关于这个人的新信息。
+        val ops = parseProfileOps(turn.text)
+        if (ops.isEmpty()) return ProfileSummary.Unchanged
+        val applied = applyProfileOps(old, ops, UserProfileStore.MAX_LENGTH)
+        if (applied is ProfileApply.Rejected) return ProfileSummary.Failed(applied.reason)
+        val merged = (applied as ProfileApply.Ok).text
+        if (merged == old) return ProfileSummary.Unchanged
+        store.writeGuarded(merged)?.let { reason -> return ProfileSummary.Failed(reason) }
         store.markSummarized(System.currentTimeMillis())
         return ProfileSummary.Updated
     }
@@ -155,16 +163,19 @@ fun AppSettings.profileEndpoint(): AppSettings {
  */
 private const val SYSTEM_PROMPT =
     "你是用户画像整理器。目标是一份「了解这个人」的画像，不是他的操作记录。\n" +
-        "在【旧画像】上增补与修正：仍然成立的条目保留，新信息补进最合适的小节，与旧条目重复的" +
-        "合并，被新信息推翻的改掉。输出必须是完整的一篇（旧条目 + 新条目），整篇会直接替换原文件。\n" +
-        "按这六个维度组织，只写有内容的小节，没有就不写：\n" +
-        "1 沟通风格与语气偏好（怎么称呼他、希望你怎么说话、答复长短、语言）；2 性格特点；" +
-        "3 长期目标；4 兴趣爱好；5 工作与生活背景；6 明确的偏好与禁忌。\n" +
+        "**只输出变更行，不要输出整篇画像**。现有画像由程序保管，你只说这一轮要加什么、" +
+        "删什么、改什么；旧条目不在你手里，所以你写不出「抄漏」这种事故。\n" +
+        "每行一条，四种前缀：\n" +
+        "「+ 文本」新增一条；「+ [小节名] 文本」新增并归到指定小节；\n" +
+        "「- 文本」删掉一条（文本必须与现有条目逐字一致）；「~ 旧文本 => 新文本」把一条改成新的。\n" +
+        "按这六个小节组织新增内容，只写有内容的小节：" +
+        "沟通风格与语气偏好（怎么称呼他、希望你怎么说话、答复长短、语言）；性格特点；" +
+        "长期目标；兴趣爱好；工作与生活背景；明确的偏好与禁忌。\n" +
         "不要写：某次任务的细节或临时安排、一次问答的内容、工具调用与执行结果、随手可得的琐事、" +
-        "任何与「了解这个人」无关的操作记录。正例「他习惯让我先备份再改文件」；" +
-        "反例「10 月 3 日让我改了 config.json」。\n" +
-        "格式：中文，Markdown 三级小标题（### 维度名）+ 每条一句话，全篇不超过 600 字、最多 12 条，" +
-        "宁缺毋滥。若【最近的对话】里没有关于这个人的新信息，原样返回【旧画像】，一个字都不要改。"
+        "任何与「了解这个人」无关的操作记录。正例「+ [沟通风格与语气偏好] 习惯让我先备份再改文件」；" +
+        "反例「+ 10 月 3 日让我改了 config.json」。\n" +
+        "格式：中文，每条一句话，全篇不超过 600 字、最多 12 条，宁缺毋滥。" +
+        "若【最近的对话】里没有关于这个人的新信息，**什么都不要输出**（空回复即可）。"
 
 /** 一次总结最多读进去多少字的对话：够看出习惯，又不至于让整理本身变成一次大请求。 */
 private const val MAX_CONVERSATION_CHARS = 6000

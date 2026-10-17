@@ -13,8 +13,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 117
-        versionName = "0.8.106"
+        versionCode = 206
+        versionName = "0.8.195"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -58,6 +58,14 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        // bash / busybox 以 `jniLibs/arm64-v8a/libbash.so`、`libbusybox.so` 随包分发（GPL 静态
+        // 二进制，来源 Debian bash-static / busybox-static，AArch64）。**必须 legacy packaging**：
+        // AGP 默认把 .so 留在 APK 里靠 mmap 加载，那样没有可执行文件路径，execve 起不来。
+        // 解压后它们落在 nativeLibraryDir —— 那是 Android 10+ 唯一允许 app 执行自己文件的目录
+        // （filesDir 因 W^X 被禁）。
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 
@@ -104,3 +112,63 @@ dependencies {
     // constructors, which is what makes engine-level tests possible on the JVM.
     testImplementation("io.mockk:mockk:1.13.13")
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

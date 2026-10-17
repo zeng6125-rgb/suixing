@@ -30,37 +30,46 @@ class WebTools(
     private val settings: SettingsRepository,
 ) : ToolGroup() {
 
+    override val group: String = "网络"
+
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             name = "web_fetch",
-            description = "抓取一个网址的内容。默认把 HTML 转成纯文本，适合读文章、文档、接口返回。",
+            description = "Fetch the contents of a URL. HTML is converted to plain text by default, " +
+                "which suits articles, docs and API responses.",
             parameters = Schema.objectOf(
                 listOf(
-                    "url" to Schema.string("完整地址，必须以 http:// 或 https:// 开头"),
-                    "max_chars" to Schema.integer("最多返回多少字符", default = 12000, minimum = 500, maximum = 60000),
-                    "raw" to Schema.boolean("true 则返回原始 HTML 不做转换", default = false),
+                    "url" to Schema.string("Full address; must start with http:// or https://"),
+                    "max_chars" to Schema.integer(
+                        "Maximum number of characters to return",
+                        default = 12000,
+                        minimum = 500,
+                        maximum = 60000,
+                    ),
+                    "raw" to Schema.boolean("true returns the raw HTML without conversion", default = false),
                 ),
                 listOf("url"),
             ),
         ),
         ToolSpec(
             name = "web_download",
-            description = "把网址指向的文件下载到本机路径（APK、图片、压缩包等）。",
+            description = "Download the file a URL points to into a local path (APKs, images, archives).",
             parameters = Schema.objectOf(
                 listOf(
-                    "url" to Schema.string("完整地址"),
-                    "path" to Schema.string("保存到的本机路径，支持 ~ 开头的相对路径"),
+                    "url" to Schema.string("Full address"),
+                    "path" to Schema.string("Local path to save to; a relative path starting with ~ is allowed"),
                 ),
                 listOf("url", "path"),
             ),
         ),
         ToolSpec(
             name = "web_search",
-            description = "搜索互联网，返回标题、链接与摘要。适合先搜再决定抓哪个页面。",
+            description = "Search the web and return titles, links and snippets. Search first, then " +
+                "decide which page to fetch.",
             parameters = Schema.objectOf(
                 listOf(
-                    "query" to Schema.string("搜索词"),
-                    "count" to Schema.integer("返回条数", default = 5, minimum = 1, maximum = 10),
+                    "query" to Schema.string("Search terms"),
+                    "count" to Schema.integer("Number of results", default = 5, minimum = 1, maximum = 10),
                 ),
                 listOf("query"),
             ),
@@ -73,13 +82,13 @@ class WebTools(
         "web_fetch" -> fetch(args)
         "web_download" -> download(args)
         "web_search" -> search(args)
-        else -> ToolResult.failure("未知网络工具：$name")
+        else -> ToolResult.failure("Unknown web tool: $name")
     }
 
     private suspend fun fetch(args: JsonObject): ToolResult {
         val url = args.str("url")?.trim().orEmpty()
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            return ToolResult.failure("url 必须以 http:// 或 https:// 开头")
+            return ToolResult.failure("url must start with http:// or https://")
         }
         val limit = args.int("max_chars", 12000).coerceIn(500, 60_000)
         val raw = args.bool("raw", false)
@@ -87,16 +96,20 @@ class WebTools(
             runCatching {
                 client.newCall(request(url).build()).execute().use { response ->
                     if (!response.isSuccessful) {
-                        return@use ToolResult.failure("请求失败：HTTP ${response.code} ${response.message}")
+                        return@use ToolResult.failure("Request failed: HTTP ${response.code} ${response.message}")
                     }
                     val body = readText(response)
                     val text = if (raw) body else htmlToText(body)
                     val head = text.take(limit)
-                    val suffix = if (text.length > limit) "\n…（内容共 ${text.length} 字，已截断）" else ""
+                    val suffix = if (text.length > limit) {
+                        "\n… (${text.length} characters in total, truncated)"
+                    } else {
+                        ""
+                    }
                     ToolResult.success("$url\n\n$head$suffix")
                 }
             }.getOrElse { error ->
-                ToolResult.failure("抓取失败：${error.message ?: error::class.java.simpleName}")
+                ToolResult.failure("Fetch failed: ${error.message ?: error::class.java.simpleName}")
             }
         }
     }
@@ -104,10 +117,10 @@ class WebTools(
     private suspend fun download(args: JsonObject): ToolResult {
         val url = args.str("url")?.trim().orEmpty()
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            return ToolResult.failure("url 必须以 http:// 或 https:// 开头")
+            return ToolResult.failure("url must start with http:// or https://")
         }
         val rawPath = args.str("path")?.trim().orEmpty()
-        if (rawPath.isEmpty()) return ToolResult.failure("缺少参数 path")
+        if (rawPath.isEmpty()) return ToolResult.failure("Missing argument: path")
         return withContext(Dispatchers.IO) {
             runCatching {
                 // Leftovers from a download that was killed mid-write: the part file under this
@@ -117,12 +130,15 @@ class WebTools(
                 target.parentFile?.mkdirs()
                 client.newCall(request(url).build()).execute().use { response ->
                     if (!response.isSuccessful) {
-                        return@use ToolResult.failure("下载失败：HTTP ${response.code} ${response.message}")
+                        return@use ToolResult.failure("Download failed: HTTP ${response.code} ${response.message}")
                     }
-                    val body = response.body ?: return@use ToolResult.failure("下载失败：响应为空")
+                    val body = response.body ?: return@use ToolResult.failure("Download failed: empty response")
                     val declared = body.contentLength()
                     if (declared > MAX_DOWNLOAD_BYTES) {
-                        return@use ToolResult.failure("文件太大（${declared / 1024 / 1024} MB），上限 ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB")
+                        return@use ToolResult.failure(
+                            "File too large (${declared / 1024 / 1024} MB); the limit is " +
+                                "${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB",
+                        )
                     }
                     // Written beside the target and renamed only once it is complete: a
                     // half-finished download must never sit under the final name, where the
@@ -135,27 +151,29 @@ class WebTools(
                         }
                         if (part.length() > MAX_DOWNLOAD_BYTES) {
                             part.delete()
-                            return@use ToolResult.failure("文件超过 ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB，已删除")
+                            return@use ToolResult.failure(
+                                "File exceeds ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB; deleted",
+                            )
                         }
                         if (!part.renameTo(target)) {
                             part.delete()
-                            return@use ToolResult.failure("下载失败：无法写入 ${target.absolutePath}")
+                            return@use ToolResult.failure("Download failed: cannot write ${target.absolutePath}")
                         }
                     } catch (error: Exception) {
                         part.delete()
                         throw error
                     }
-                    ToolResult.success("已保存到 ${target.absolutePath}（${humanSize(target.length())}）")
+                    ToolResult.success("Saved to ${target.absolutePath} (${humanSize(target.length())})")
                 }
             }.getOrElse { error ->
-                ToolResult.failure("下载失败：${error.message ?: error::class.java.simpleName}")
+                ToolResult.failure("Download failed: ${error.message ?: error::class.java.simpleName}")
             }
         }
     }
 
     private suspend fun search(args: JsonObject): ToolResult {
         val query = args.str("query")?.trim().orEmpty()
-        if (query.isEmpty()) return ToolResult.failure("缺少参数 query")
+        if (query.isEmpty()) return ToolResult.failure("Missing argument: query")
         val count = args.int("count", 5).coerceIn(1, 10)
         val config = settings.current()
         return if (config.searchEndpoint.isNotBlank()) {
@@ -181,24 +199,24 @@ class WebTools(
                 client.newCall(builder.build()).execute().use { response ->
                     val body = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        return@use ToolResult.failure("搜索失败：HTTP ${response.code} ${body.take(200)}")
+                        return@use ToolResult.failure("Search failed: HTTP ${response.code} ${body.take(200)}")
                     }
                     val results = runCatching {
                         Json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
                     }.getOrElse { emptyList() }
-                    if (results.isEmpty()) return@use ToolResult.success("没有搜到结果。")
+                    if (results.isEmpty()) return@use ToolResult.success("No results found.")
                     ToolResult.success(
                         results.take(count).joinToString("\n\n") { item ->
                             val obj = item.jsonObject
                             val title = obj["title"]?.jsonPrimitive?.content.orEmpty()
                             val link = obj["url"]?.jsonPrimitive?.content.orEmpty()
                             val snippet = obj["content"]?.jsonPrimitive?.content.orEmpty()
-                            "【$title】\n$link\n${snippet.take(400)}"
+                            "[$title]\n$link\n${snippet.take(400)}"
                         },
                     )
                 }
             }.getOrElse { error ->
-                ToolResult.failure("搜索失败：${error.message ?: error::class.java.simpleName}")
+                ToolResult.failure("Search failed: ${error.message ?: error::class.java.simpleName}")
             }
         }
 
@@ -212,22 +230,24 @@ class WebTools(
             client.newCall(request(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@use ToolResult.failure(
-                        "内置搜索不可用（HTTP ${response.code}）。可在「设置 → 搜索接口」填一个 Tavily 兼容接口。",
+                        "Built-in search unavailable (HTTP ${response.code}). You can set a " +
+                            "Tavily-compatible endpoint under 「设置 → 搜索接口」.",
                     )
                 }
                 val html = readText(response)
                 val hits = parseDuckDuckGo(html, count)
                 if (hits.isEmpty()) {
                     return@use ToolResult.failure(
-                        "内置搜索没有解析到结果（可能被限流）。可在「设置 → 搜索接口」填一个 Tavily 兼容接口。",
+                        "Built-in search parsed no results (it may be rate-limited). You can set a " +
+                            "Tavily-compatible endpoint under 「设置 → 搜索接口」.",
                     )
                 }
                 ToolResult.success(hits.joinToString("\n\n"))
             }
         }.getOrElse { error ->
             ToolResult.failure(
-                "内置搜索失败：${error.message ?: error::class.java.simpleName}。" +
-                    "可在「设置 → 搜索接口」填一个 Tavily 兼容接口。",
+                "Built-in search failed: ${error.message ?: error::class.java.simpleName}. " +
+                    "You can set a Tavily-compatible endpoint under 「设置 → 搜索接口」.",
             )
         }
     }
@@ -247,7 +267,7 @@ class WebTools(
             val href = decodeEntities(match.groupValues[1])
             val title = htmlToText(match.groupValues[2])
             val snippet = snippets.getOrNull(index)?.let { htmlToText(it.groupValues[1]) }.orEmpty()
-            "【$title】\n${cleanDuckDuckGoLink(href)}\n${snippet.take(300)}"
+            "[$title]\n${cleanDuckDuckGoLink(href)}\n${snippet.take(300)}"
         }
     }
 
@@ -280,7 +300,11 @@ class WebTools(
         val name = declared ?: fromMeta ?: "utf-8"
         val charset = runCatching { Charset.forName(name) }.getOrDefault(Charsets.UTF_8)
         val text = runCatching { String(bytes, charset) }.getOrDefault(String(bytes, Charsets.UTF_8))
-        return if (truncated) "$text\n…（响应过大，只读取了前 ${humanSize(MAX_FETCH_BYTES.toLong())}）" else text
+        return if (truncated) {
+            "$text\n… (response too large; only the first ${humanSize(MAX_FETCH_BYTES.toLong())} were read)"
+        } else {
+            text
+        }
     }
 
     /**

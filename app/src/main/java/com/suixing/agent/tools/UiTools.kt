@@ -27,111 +27,122 @@ import java.io.File
  *
  * Every call says which route it took, so a failure is explainable instead of silent.
  */
-class UiTools(
+/** 落盘的截图只留最近这么多张：够回溯几步，又不会把存储吃光。 */
+private const val SHOTS_KEPT = 20
+
+internal class UiTools(
     private val context: Context,
     private val capabilities: CapabilityHub,
 ) : ToolGroup() {
 
     override val tier: String = TIER_ACCESSIBILITY
 
+    override val group: String = "界面操作"
+
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             "ui_dump",
-            "读取当前屏幕的可交互元素（文本、描述、中心坐标、是否可点击）。这是了解界面的首选方式，" +
-                "比截图更快更省 token。",
+            "Read the interactive elements on the current screen (text, description, centre " +
+                "coordinates, whether it is clickable). This is the first way to understand a screen — " +
+                "faster and cheaper in tokens than a screenshot.",
             Schema.objectOf(
                 properties = listOf(
-                    "max_nodes" to Schema.integer("最多返回多少个节点，默认 140", default = 140, minimum = 10, maximum = 500),
+                    "max_nodes" to Schema.integer("Maximum nodes to return, default 140", default = 140, minimum = 10, maximum = 500),
                 ),
             ),
         ),
         ToolSpec(
             "ui_screenshot",
-            "截取当前屏幕，返回图片给模型看（适合界面元素没有文字或 ui_dump 不够时）。",
+            "Capture the current screen and return the image to the model (for screens whose elements " +
+                "carry no text, or when ui_dump is not enough).",
             Schema.objectOf(
                 properties = listOf(
-                    "max_width" to Schema.integer("缩放后的最大宽度，默认 1080", default = 1080, minimum = 320, maximum = 2160),
-                    "quality" to Schema.integer("JPEG 质量 1-100，默认 72", default = 72, minimum = 1, maximum = 100),
+                    "max_width" to Schema.integer("Maximum width after scaling, default 1080", default = 1080, minimum = 320, maximum = 2160),
+                    "quality" to Schema.integer("JPEG quality 1-100, default 72", default = 72, minimum = 1, maximum = 100),
+                    "path" to Schema.string(
+                        "Optional: reload a previously saved screenshot from this path instead of taking a new one",
+                    ),
                 ),
             ),
         ),
         ToolSpec(
             "ui_tap",
-            "点击屏幕上的坐标点。",
+            "Tap a point on the screen.",
             Schema.objectOf(
                 properties = listOf(
-                    "x" to Schema.integer("横坐标（像素）"),
-                    "y" to Schema.integer("纵坐标（像素）"),
+                    "x" to Schema.integer("Horizontal coordinate (pixels)"),
+                    "y" to Schema.integer("Vertical coordinate (pixels)"),
                 ),
                 required = listOf("x", "y"),
             ),
         ),
         ToolSpec(
             "ui_long_press",
-            "长按屏幕上的坐标点。",
+            "Long-press a point on the screen.",
             Schema.objectOf(
                 properties = listOf(
-                    "x" to Schema.integer("横坐标（像素）"),
-                    "y" to Schema.integer("纵坐标（像素）"),
+                    "x" to Schema.integer("Horizontal coordinate (pixels)"),
+                    "y" to Schema.integer("Vertical coordinate (pixels)"),
                 ),
                 required = listOf("x", "y"),
             ),
         ),
         ToolSpec(
             "ui_swipe",
-            "从一点滑动到另一点（滚动列表、翻页、解锁）。",
+            "Swipe from one point to another (scroll a list, turn a page, unlock).",
             Schema.objectOf(
                 properties = listOf(
-                    "x1" to Schema.integer("起点横坐标"),
-                    "y1" to Schema.integer("起点纵坐标"),
-                    "x2" to Schema.integer("终点横坐标"),
-                    "y2" to Schema.integer("终点纵坐标"),
-                    "duration" to Schema.integer("滑动时长（毫秒），默认 300", default = 300, minimum = 60, maximum = 5000),
+                    "x1" to Schema.integer("Start X"),
+                    "y1" to Schema.integer("Start Y"),
+                    "x2" to Schema.integer("End X"),
+                    "y2" to Schema.integer("End Y"),
+                    "duration" to Schema.integer("Swipe duration in milliseconds, default 300", default = 300, minimum = 60, maximum = 5000),
                 ),
                 required = listOf("x1", "y1", "x2", "y2"),
             ),
         ),
         ToolSpec(
             "ui_click_text",
-            "按屏幕上的文字或控件描述点击（比坐标更稳）。",
+            "Click by the text or content description on screen (more reliable than coordinates).",
             Schema.objectOf(
                 properties = listOf(
-                    "text" to Schema.string("要点击的文本或描述"),
-                    "exact" to Schema.boolean("是否要求完全相等，默认 false（包含即可）", default = false),
+                    "text" to Schema.string("Text or description to click"),
+                    "exact" to Schema.boolean("Require an exact match, default false (substring is enough)", default = false),
                 ),
                 required = listOf("text"),
             ),
         ),
         ToolSpec(
             "ui_type",
-            "向当前获得焦点的输入框输入文本。走无障碍时支持中文；" +
-                "只有 Shizuku / root 时只能输入英文数字。",
+            "Type text into the input field that currently has focus. Chinese works over the " +
+                "accessibility channel; with Shizuku or root only ASCII letters and digits can be typed.",
             Schema.objectOf(
                 properties = listOf(
-                    "text" to Schema.string("要输入的文本"),
-                    "append" to Schema.boolean("是否追加到已有内容后面，默认 false", default = false),
+                    "text" to Schema.string("Text to type"),
+                    "append" to Schema.boolean("Append after the existing content, default false", default = false),
                 ),
                 required = listOf("text"),
             ),
         ),
         ToolSpec(
             "ui_type_into",
-            "先点击某个文字/描述所在的输入框，再输入文本，一步完成填表（需要无障碍服务）。",
+            "Click the input field that carries this text or description and type into it — one step " +
+                "for filling a form (needs the accessibility service).",
             Schema.objectOf(
                 properties = listOf(
-                    "label" to Schema.string("输入框的提示文字、标签或描述"),
-                    "text" to Schema.string("要输入的文本"),
+                    "label" to Schema.string("Hint text, label or description of the input field"),
+                    "text" to Schema.string("Text to type"),
                 ),
                 required = listOf("label", "text"),
             ),
         ),
         ToolSpec(
             "ui_key",
-            "发送系统按键：back（返回）、home（桌面）、recents（多任务）、notifications（通知栏）。",
+            "Send a system key: back, home, recents, notifications.",
             Schema.objectOf(
                 properties = listOf(
                     "key" to Schema.string(
-                        "按键名",
+                        "Key name",
                         enumValues = listOf("back", "home", "recents", "notifications"),
                     ),
                 ),
@@ -140,15 +151,15 @@ class UiTools(
         ),
         ToolSpec(
             "ui_current_app",
-            "查看当前前台应用的包名。",
+            "Show the package name of the app currently in the foreground.",
             Schema.objectOf(emptyList()),
         ),
         ToolSpec(
             "ui_wait",
-            "等待一段时间（等界面加载）。",
+            "Wait for a while (for a screen to load).",
             Schema.objectOf(
                 properties = listOf(
-                    "ms" to Schema.integer("等待毫秒数，默认 1000", default = 1000, minimum = 100, maximum = 30000),
+                    "ms" to Schema.integer("Milliseconds to wait, default 1000", default = 1000, minimum = 100, maximum = 30000),
                 ),
             ),
         ),
@@ -321,14 +332,29 @@ class UiTools(
     private suspend fun screenshot(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
         // 同上：截图也是 UI 操作（spec v2 §2）。
         TouchFx.noteToolActivity(context, "ui_screenshot")
+        // 用 path 重新加载一张旧截图：出站时更早的截图会被省略（省带宽），占位里给出路径，
+        // 模型需要再看一眼时用它把原图重新挂回 wire —— 不必重新截图、也不必让用户重做界面。
+        args.str("path")?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+            val file = resolveUserPath(context, raw)
+            if (!file.exists()) return ToolResult.failure("截图文件不存在：${file.absolutePath}")
+            val bytes = withContext(Dispatchers.IO) { runCatching { file.readBytes() }.getOrNull() }
+                ?: return ToolResult.failure("读不了这个文件：${file.absolutePath}")
+            return ToolResult.image(
+                "已重新加载截图 ${file.absolutePath}（${bytes.size / 1024} KB），图片随下一条消息一起提供。",
+                Base64.encodeToString(bytes, Base64.NO_WRAP),
+            )
+        }
         val maxWidth = args.int("max_width", 1080).coerceIn(320, 2160)
         val quality = args.int("quality", 72).coerceIn(1, 100)
 
         if (service != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             val bytes = withContext(Dispatchers.IO) { service.screenshotJpeg(maxWidth, quality) }
             if (bytes != null) {
+                val kept = withContext(Dispatchers.IO) { saveShot(bytes) }
                 return ToolResult.image(
-                    "已截图（${bytes.size / 1024} KB），图片随下一条消息一起提供。",
+                    "已截图（${bytes.size / 1024} KB）" +
+                        (kept?.let { "，原图：${it.absolutePath}（重看用 ui_screenshot path=$it）" } ?: "") +
+                        "，图片随下一条消息一起提供。",
                     Base64.encodeToString(bytes, Base64.NO_WRAP),
                 )
             }
@@ -354,11 +380,28 @@ class UiTools(
 
         val bytes = withContext(Dispatchers.IO) { encodeJpeg(png, maxWidth, quality) }
             ?: return ToolResult.failure("截图拿到了，但解码失败。")
+        val kept = withContext(Dispatchers.IO) { saveShot(bytes) }
         return ToolResult.image(
-            "已通过 ${shellName()} 截图（${bytes.size / 1024} KB），图片随下一条消息一起提供。",
+            "已通过 ${shellName()} 截图（${bytes.size / 1024} KB）" +
+                (kept?.let { "，原图：${it.absolutePath}（重看用 ui_screenshot path=$it）" } ?: "") +
+                "，图片随下一条消息一起提供。",
             Base64.encodeToString(bytes, Base64.NO_WRAP),
         )
     }
+
+    /**
+     * 把截图存到 `filesDir/shots/`，只留最近 [SHOTS_KEPT] 张。
+     *
+     * 落盘的理由不是"给用户看"，而是**让省略可回溯**：出站时更早的截图会被降级成一行占位
+     * （见 AgentEngine.pruneOldImages），占位里带着这个路径，模型需要时能把它重新挂回 wire。
+     */
+    private fun saveShot(bytes: ByteArray): File? = runCatching {
+        val dir = File(context.filesDir, "shots").apply { mkdirs() }
+        val file = File(dir, "shot-${System.currentTimeMillis()}.jpg")
+        file.writeBytes(bytes)
+        dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(SHOTS_KEPT)?.forEach { it.delete() }
+        file
+    }.getOrNull()
 
     private fun encodeJpeg(png: ByteArray, maxWidth: Int, quality: Int): ByteArray? = runCatching {
         val decoded = BitmapFactory.decodeByteArray(png, 0, png.size)

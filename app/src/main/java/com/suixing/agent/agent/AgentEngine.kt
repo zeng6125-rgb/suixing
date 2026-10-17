@@ -13,6 +13,7 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.StoredToolCall
+import com.suixing.agent.data.Tps
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.FINISH_CUT
 import com.suixing.agent.llm.LlmClient
@@ -21,7 +22,12 @@ import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.llm.Usage
 import com.suixing.agent.plugins.ManifestValidator
 import com.suixing.agent.plugins.PluginRuntime
+import com.suixing.agent.plugins.HookDecl
+import com.suixing.agent.plugins.HookVerdict
+import com.suixing.agent.plugins.PluginSpec
+import com.suixing.agent.core.Core
 import com.suixing.agent.skills.SkillStore
+import com.suixing.agent.service.TouchFx
 import com.suixing.agent.tools.TIER_ACCESSIBILITY
 import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
@@ -31,6 +37,8 @@ import com.suixing.agent.tools.ToolResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,11 +47,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import okhttp3.Call
+import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.UUID
@@ -87,7 +98,7 @@ sealed interface AgentEvent {
          * transcript would show a steer that silently lost its attachment, while the model had
          * been sent it.
          */
-        val imageBase64: String? = null,
+        val imagesBase64: List<String> = emptyList(),
     ) : AgentEvent
 
     /**
@@ -117,7 +128,7 @@ sealed interface AgentEvent {
  * inside an `inner class` (`'Class' is prohibited here`), and both this and [WireSpan] are only
  * names for the run's own bookkeeping.
  */
-private data class Steer(val id: String, val text: String, val imageBase64: String? = null)
+private data class Steer(val id: String, val text: String, val imagesBase64: List<String> = emptyList())
 
 /**
  * Which stored message a stretch of the wire came from: [from] is where it starts and [to] is one
@@ -127,6 +138,22 @@ private data class Steer(val id: String, val text: String, val imageBase64: Stri
  * folded away — a compression that cannot say what it covered can never be resumed from.
  */
 private data class WireSpan(val id: String, val from: Int, val to: Int)
+
+/**
+ * 一条工具调用的执行结果，与「把它写回 wire」分离（[executeOneTool] 只产这个，[runLoop] 里的
+ * commitTool 才碰 wire/spans/produced/openCalls）。
+ *
+ * 分离是并行的前提：执行阶段（可能很慢、可并发）不碰任何 run 级可变状态；回写阶段在主协程里
+ * 按模型请求的顺序逐条做，端点对 tool 消息顺序敏感，回写绝不能乱序。
+ */
+private data class ToolOutcome(
+    val call: ToolCallRequest,
+    val result: ToolResult,
+    /** 这一条实际跑了多久（毫秒）；被拒/未知工具为 0。 */
+    val toolMs: Long,
+    /** 给审批与事件用的参数预览（截断过的）。 */
+    val argsPreview: String,
+)
 
 /**
  * Holds a tool call until the user answers. In ASK mode the agent coroutine
@@ -291,6 +318,15 @@ data class StreamStats(
      */
     val lastPromptTokens: Int = 0,
     /**
+     * **当前这一轮请求**的实际大小（端点报过的真实值 + 自上次上报以来的增量估算）。
+     *
+     * 与 [lastPromptTokens]（上一轮上报值）的区别：wire 每轮在长，而 lastPromptTokens 要等本轮
+     * usage 回来才更新 —— 显示层拿它当「现在多大」会在轮内停在旧值、轮末跳一下。这个字段在
+     * 每轮请求定型时（wire 最终、工具表拼完）刷新，轮内稳定、跨轮单调，显示不再一会大一会小
+     * （用户报的「上下文窗口一会大一会小」）。首轮还没有任何端点读数时它是 chars 估算。
+     */
+    val currentPrompt: Int = 0,
+    /**
      * Where the prompt goes, split three ways, for the breakdown bar in the UI.
      *
      * Estimated from characters, so the three do not have to add up to [lastPromptTokens]:
@@ -404,8 +440,8 @@ class AgentEngine(
         id: String,
         text: String,
         immediate: Boolean = runs.value[chatId]?.steerMode == STEER_IMMEDIATE,
-        imageBase64: String? = null,
-    ): Boolean = runs.value[chatId]?.steer(id, text, immediate, imageBase64) ?: false
+        imagesBase64: List<String> = emptyList(),
+    ): Boolean = runs.value[chatId]?.steer(id, text, immediate, imagesBase64) ?: false
 
     /**
      * Whether the run in [chatId] takes a line as an interruption (立即) rather than as something
@@ -599,6 +635,53 @@ class AgentEngine(
      * An inner class on purpose — the loop needs the engine's prompt building, tool registry and
      * HTTP client, and those really are shared.
      */
+    /**
+     * **没有 run 时**手动压缩一次（用户：「无 run 的时候用，就气泡＋压缩块就行了」）。
+     *
+     * 与 run 内的压缩共用同一套切法（[planCompaction]）与同一份提示词（[COMPRESS_PROMPT]），
+     * 区别只在于它不碰任何在飞的 wire：按已落盘的历史算一段、交给模型摘要、把结果交回去存成
+     * 压缩记录 —— 记录落进 `checkpoints`，转录里就会在它覆盖的位置出现一张压缩块。
+     *
+     * @return null 表示成功；否则是给用户看的原因。
+     */
+    suspend fun compressNow(
+        history: List<StoredMessage>,
+        settings: AppSettings,
+        onCheckpoint: (ContextCheckpoint) -> Unit,
+    ): String? {
+        val plan = planCompaction(history) ?: return "消息太少，没有可压缩的内容"
+        val turn = runCatching {
+            llm.complete(
+                settings = settings,
+                messages = listOf(
+                    ChatMessage.system(COMPRESS_PROMPT),
+                    ChatMessage.user(plan.transcript),
+                ),
+                tools = emptyList(),
+            )
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            return "压缩失败：${error.message ?: error.javaClass.simpleName}"
+        }
+        val summary = turn.text.trim()
+        if (summary.isBlank()) return "压缩失败：模型没有返回摘要"
+        val first = plan.coveredIds.firstOrNull() ?: return "没有找到可压缩的消息范围"
+        val last = plan.coveredIds.lastOrNull() ?: return "没有找到可压缩的消息范围"
+        onCheckpoint(
+            ContextCheckpoint(
+                id = UUID.randomUUID().toString(),
+                at = System.currentTimeMillis(),
+                fromMessageId = first,
+                toMessageId = last,
+                summary = summary,
+                messages = plan.foldedMessages,
+                // 估算口径与 run 内一致：中文约 3 字符 1 token。
+                promptTokens = plan.transcript.length / 3,
+            ),
+        )
+        return null
+    }
+
     inner class RunHandle(
         val chatId: String,
         val title: String,
@@ -698,6 +781,8 @@ class AgentEngine(
         /** Prompt tokens the endpoint reported for the last round; 0 = it never did. */
         @Volatile
         private var lastPromptTokens = 0
+        /** 当前轮请求的估算大小，见 [StreamStats.currentPrompt]。每轮定型时刷新。 */
+        private var currentPromptEstimate = 0
 
         /** Wire size in characters when [lastPromptTokens] was recorded, to price the growth. */
         @Volatile
@@ -729,6 +814,45 @@ class AgentEngine(
         private val outChars = AtomicInteger(0)
 
         private val thinkingChars = AtomicInteger(0)
+
+        /**
+         * 当前这一轮首个块（正文或思考，任意）到达的 [System.currentTimeMillis] 时刻，0＝本轮还没
+         * 出字。每轮开始清零、本轮结束累加进 [decodeMsAccum] 后再清零 —— 所以它在「两轮之间的工具
+         * 执行期」是 0，不会被 [stats] 重复计入。与 turn 内的 firstChunkAt 同基（millis）。
+         */
+        @Volatile
+        private var curTurnFirstChunkMs = 0L
+
+        /**
+         * 已结束各轮的 decodeMs 之和（官方多轮聚合＝ΣdecodeTokens/ΣdecodeMs，client.js:8331-8333）。
+         * decodeMs＝每轮「首字之后→结束」，**不含** TTFT 等待、也**不含**轮间的工具执行时间 —— 这正是
+         * 拿整轮墙钟当分母会系统性低估 TPS 的原因。[stats] 再加上当前轮的实时 decode 段。
+         */
+        @Volatile
+        private var decodeMsAccum = 0L
+
+        /**
+         * live TPS 用的「每字符 token 数」，由本 run 已完成轮的真实 usage 反推校准。
+         *
+         * 为什么不用 companion 的 [estimateTokens]（chars/3）：那个 /3 是英文系数，还给**上下文预算**
+         * 用（要保守，好让压缩早触发），不能动。但中文实测 ~0.5-0.9 token/字（真机：211 思考字→195
+         * completion token），用 /3 会把 live TPS 低估 2-3 倍 —— 用户看到的「明明 200 tok/s、手机上
+         * 只有几十」就是这个。每轮结束拿端点报的真 completionTokens ÷ 本轮字符数校准一次，生成中就用
+         * 校准值估分子；首轮还没有 usage 时用 [DEFAULT_LIVE_TOKENS_PER_CHAR]。
+         */
+        @Volatile
+        private var liveTokensPerChar = DEFAULT_LIVE_TOKENS_PER_CHAR
+
+        /** 上一次校准时的累计字符数（outChars+thinkingChars），用来算「本轮」的字符增量。 */
+        @Volatile
+        private var calibCharsBaseline = 0
+
+        /**
+         * live 输出 token 估算：用校准过的 [liveTokensPerChar]，不是保守的 chars/3。
+         * 只喂 TPS 读数与「出 N」显示；上下文预算仍走 companion 的 [estimateTokens]。
+         */
+        private fun estimateOutputTokens(chars: Int): Int =
+            (chars * liveTokensPerChar).toInt()
 
     /**
      * Stops this run. See [AgentEngine.cancel] for why the call itself has to be cancelled.
@@ -768,11 +892,11 @@ class AgentEngine(
      *   blank. A line the user says twice keeps both, because each one has its own [id]. A line
      *   that is only a picture is taken too — that is still something the user sent.
      */
-    fun steer(id: String, text: String, immediate: Boolean, imageBase64: String? = null): Boolean {
+    fun steer(id: String, text: String, immediate: Boolean, imagesBase64: List<String> = emptyList()): Boolean {
         if (!isLive()) return false
         val body = text.trim()
-        if (body.isEmpty() && imageBase64 == null) return false
-        val line = Steer(id, body, imageBase64)
+        if (body.isEmpty() && imagesBase64.isEmpty()) return false
+        val line = Steer(id, body, imagesBase64)
         synchronized(steeringLock) {
             if (immediate) urgent[id] = line else steering[id] = line
         }
@@ -1025,6 +1149,61 @@ class AgentEngine(
         // can say so. Reset per round: the number is about the attempt that finally failed, not
         // about how unlucky the whole run was.
         var retriesThisRound = 0
+
+        /**
+         * 把一条工具结果**回写**进 run 级状态：transcript、wire、spans、openCalls、live 行与事件。
+         *
+         * 局部函数（不是成员）：它要写的是 [runLoop] 的局部变量（wire/spans/produced/openCalls），
+         * 成员函数够不着。**只在主协程里逐条调用、按模型请求的顺序** —— 端点对 tool 消息顺序敏感，
+         * 并行执行的结果也必须排着队回写。执行阶段（[executeOneTool]）不碰这些，所以能并发。
+         */
+        fun commitTool(outcome: ToolOutcome) {
+            val call = outcome.call
+            val result = outcome.result
+            // 超长输出**不能无声截断**：完整内容落盘、路径写进结果，模型才知道自己没看全、
+            // 也才知道去哪取（见 spillToolOutput）。落盘失败时同样会写明"截断了且没存下来"。
+            val spill = spillToolOutput(
+                dir = File(Core.appContext.filesDir, "toolout"),
+                tool = call.name,
+                output = result.output,
+                maxKept = MAX_TOOL_OUTPUT,
+            )
+            val output = spill?.kept ?: result.output
+            val stored = StoredMessage(
+                id = UUID.randomUUID().toString(),
+                role = Roles.TOOL,
+                text = "",
+                toolName = call.name,
+                toolArgs = call.arguments,
+                toolOutput = output,
+                toolOk = result.ok,
+                toolCallId = call.id,
+                imageBase64 = result.imageBase64,
+            )
+            produced += stored
+            onEvent(AgentEvent.ToolMessage(stored))
+            // Answered, so a stop from here on must not answer it a second time.
+            openCalls = openCalls.filterNot { it.id == call.id }
+            val toolAt = wire.size
+            wire += ChatMessage.tool(call.id, output)
+            spans += WireSpan(stored.id, toolAt, wire.size)
+            result.imageBase64?.let { base64 ->
+                if (settings.imageInput) {
+                    wire += ChatMessage.screenshot("（这是上一步 $call.name 返回的截图）", listOf(base64))
+                } else {
+                    wire += ChatMessage.user(
+                        "（上一步 $call.name 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
+                    )
+                }
+            }
+            liveLine = if (result.ok) {
+                String.format(Locale.US, "✓ %s %.1fs", call.name, outcome.toolMs / 1000.0)
+            } else {
+                "✗ ${call.name}"
+            }
+            onEvent(AgentEvent.ToolFinished(call.name, result.ok, output))
+        }
+
         try {
             while (roundLimit <= 0 || round < roundLimit) {
                 round++
@@ -1059,7 +1238,7 @@ class AgentEngine(
                 // 接线点 A（HOST-DEV §5）：内置工具之后**追加启用插件的工具**（`<id>.<tool>`）。
                 // 重名的插件工具在 PluginRuntime.toolSpecs 里被跳过并记日志 —— 内置优先，绝不覆盖。
                 // 实时读盘：用户刚启用的插件，下一个请求就该出现在工具表里。
-                val builtinSpecs = registry.all().map { it.spec }
+                val builtinSpecs = registry.all().map { it.spec } + COMPRESS_CONTEXT_SPEC
                 val pluginSpecs = PluginRuntime.enabledPlugins()
                 val toolSpecs = builtinSpecs +
                     PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
@@ -1070,7 +1249,20 @@ class AgentEngine(
                 breakTools = toolSpecs.sumOf {
                     it.name.length + it.description.length + it.parameters.toString().length
                 } / 4
-                breakHistory = wire.filter { it.role != ROLE_SYSTEM }.sumOf { messageChars(it) } / 4
+                // 三个数字都来自同一份 wire：一次遍历算完，别为每个数字各扫一遍
+                // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
+                var historyChars = 0
+                var totalChars = 0
+                var imageCarriers = 0
+                for (message in wire) {
+                    val chars = messageChars(message)
+                    totalChars += chars
+                    if (message.role != ROLE_SYSTEM) historyChars += chars
+                    if (message.allImages.isNotEmpty()) imageCarriers++
+                }
+                breakHistory = historyChars / 4
+                // 显示层的「当前请求多大」：wire 在这一刻定型，估算＝端点真实值 + 增量。
+                currentPromptEstimate = estimatePromptTokens(totalChars, imageCarriers)
                 val turnStartedAt = System.currentTimeMillis()
                 // When the first piece of anything arrived: the wait a user actually feels,
                 // and one the endpoint's own usage block never reports.
@@ -1083,10 +1275,13 @@ class AgentEngine(
                 val turn = try {
                     llm.complete(
                         settings = settings,
-                        messages = wire,
+                        // 出站前按预算降级更早的**工具截图**（见 pruneRequestImages）：live 与
+                        // rebuild 都经过这一个函数，所以两条路径发出去的 prompt 仍然一致。
+                        messages = pruneRequestImages(wire, MAX_REQUEST_IMAGE_CHARS),
                         tools = toolSpecs,
                         onDelta = { piece ->
                             if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
+                            if (curTurnFirstChunkMs == 0L) curTurnFirstChunkMs = System.currentTimeMillis()
                             outChars.addAndGet(piece.length)
                             streamed.append(piece)
                             liveLine = streamed.takeLast(LIVE_LINE_CHARS).toString()
@@ -1094,6 +1289,7 @@ class AgentEngine(
                         },
                         onReasoning = { piece ->
                             if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
+                            if (curTurnFirstChunkMs == 0L) curTurnFirstChunkMs = System.currentTimeMillis()
                             thinkingChars.addAndGet(piece.length)
                             reasoning.append(piece)
                             liveLine = "思考中…"
@@ -1148,13 +1344,32 @@ class AgentEngine(
                 }
                 val elapsed = System.currentTimeMillis() - turnStartedAt
                 val firstTokenMs = if (firstChunkAt > 0L) firstChunkAt - turnStartedAt else 0L
+                // 本轮结束：把它的 decode 段（首字之后→结束）累加进 run 级和，再清零本轮标记，
+                // 这样轮间的工具执行期不会被 [stats] 当成 decode 时间。官方多轮聚合＝Σdecode/Σtokens。
+                decodeMsAccum += Tps.decodeMs(elapsed, firstTokenMs)
+                curTurnFirstChunkMs = 0L
                 val usage = turn.usage
+                // 用这一轮端点报的**真实** completionTokens 校准 live 估算的每字符 token 数：
+                // 本轮字符增量 = 当前累计 − 上次校准时的累计。字符够多、比率落在合理区间才采纳，
+                // 否则保留旧值 —— 防一轮畸形数据（纯工具调用轮字符≈0，或极短轮次）把估算带飞。
+                // 这修的是「明明 200 tok/s、手机上只有几十」：live 分子此前用 chars/3（英文系数），
+                // 对中文低估 ~2.7 倍。校准后从第二轮起 live 读数就贴着真实值。
+                usage?.completionTokens?.takeIf { it > 0 }?.let { realTokens ->
+                    val totalChars = outChars.get() + thinkingChars.get()
+                    val turnChars = totalChars - calibCharsBaseline
+                    if (turnChars >= CALIB_MIN_CHARS) {
+                        val ratio = (realTokens.toFloat() / turnChars)
+                            .coerceIn(MIN_LIVE_TOKENS_PER_CHAR, MAX_LIVE_TOKENS_PER_CHAR)
+                        liveTokensPerChar = ratio
+                        calibCharsBaseline = totalChars
+                    }
+                }
                 // Kept for the context readout and for pricing the next round's growth:
                 // only the endpoint knows how big the prompt really was.
                 usage?.promptTokens?.takeIf { it > 0 }?.let { reported ->
                     lastPromptTokens = reported
                     lastPromptChars = wireChars(wire)
-                    lastPromptImages = wire.count { it.imageBase64 != null }
+                    lastPromptImages = wire.count { it.allImages.isNotEmpty() }
                 }
                 val thinking = turn.reasoning.takeIf { it.isNotBlank() }
                 // A truncated turn can end mid-tool-call, so say so instead of silently
@@ -1182,7 +1397,10 @@ class AgentEngine(
                 // The stream broke after delivering content (see FINISH_CUT): the round is a
                 // success — the answer is real and is kept — but the user should know it stopped
                 // early rather than wonder why the reply ends mid-sentence.
-                if (turn.finishReason == FINISH_CUT) {
+                // **用户自己按停不算错误**（用户：「不是我自己中断也算错误吗」）：停止同样把流
+                // 切断成 FINISH_CUT，不加这道判定就会给"用户刚按下的按钮"发一张错误回执；每停一次
+                // 一张，连停五次就是截图里那五条一模一样的红卡。
+                if (turn.finishReason == FINISH_CUT && !cancelled.get()) {
                     onEvent(AgentEvent.Failed("连接中断，这一轮的回答可能不完整。"))
                 }
                 if (turn.toolCalls.isEmpty()) {
@@ -1231,105 +1449,61 @@ class AgentEngine(
                 reasoning = StringBuilder()
                 openCalls = assistant.toolCalls
 
-                for (call in turn.toolCalls) {
-                    // Checked before every call, not after the batch: a stop means the
-                    // tools the model asked for in the same breath do not run either.
-                    if (cancelled.get()) {
+                // 并行度（对话配置「工具并行数」）：1＝串行，就是今天的行为，语义一字不改；
+                // N>1 时一轮内最多 N 条工具**同时**执行，但结果仍按模型请求的顺序回写 wire ——
+                // 端点对 tool 消息的顺序敏感，乱序会让下一轮读到错配的结果。
+                // **只在 AUTO 档生效**：ASK 档的授权弹窗每个会话只有一个待决位（ApprovalGate 的
+                // waiters 按 chatId 单槽），两条调用同时求授权会互相覆盖、死等；ASK 强制串行。
+                val parallel = if (settings.approvalMode == ApprovalMode.AUTO) {
+                    settings.toolParallel.coerceAtLeast(1)
+                } else {
+                    1
+                }
+                if (parallel <= 1) {
+                    for (call in turn.toolCalls) {
+                        // Checked before every call, not after the batch: a stop means the
+                        // tools the model asked for in the same breath do not run either.
+                        if (cancelled.get()) {
                             finishCancelled(onEvent, streamed, reasoning, openCalls)
-                        return produced
-                    }
-                    val argsPreview = call.arguments.take(600)
-                    val tool = registry.find(call.name)
-                    // 接线点 B（HOST-DEV §5）：内置找不到这个名字才落到插件（`<id>.<tool>`）——
-                    // 与工具表拼装（接线点 A）同一个顺序，内置优先，插件顶不掉 `run_shell` 这类。
-                    val pluginTool = if (tool == null) PluginRuntime.resolve(pluginSpecs, call.name) else null
-                    // 谁真的跑这一条。null ＝ 两边都没有这个名字（模型编了个工具名）。
-                    val runner: (suspend (JsonObject) -> ToolResult)? = when {
-                        tool != null -> { args -> tool.run(args) }
-                        pluginTool != null -> { args ->
-                            PluginRuntime.execute(pluginTool.first, pluginTool.second, args)
+                            return produced
                         }
-                        else -> null
+                        val outcome = executeOneTool(
+                            call, registry, pluginSpecs, hooks, capabilities, gate, settings, chatId, onEvent,
+                        ) ?: run {
+                            finishCancelled(onEvent, streamed, reasoning, openCalls)
+                            return produced
+                        }
+                        commitTool(outcome)
                     }
-                    // 能力档：插件工具的档由 exec 决定 —— `needs_root` 才要 root，其余固定 local
-                    // （＝本应用身份，不需要额外能力），所以只有 root 那一档会被 blockedReason 拦住。
-                    val tier = when {
-                        pluginTool != null ->
-                            if (pluginTool.second.exec.needsRoot) TIER_ROOT else TIER_NONE
-                        tool != null -> tool.tier
-                        else -> null
-                    }
-                    // 风险档只有插件工具有（内置工具只有能力档），所以 min_risk 条件对内置一律
-                    // 不成立；要拦内置工具用 `when.tool` + `when.regex`。
-                    val risk = pluginTool?.let { ManifestValidator.riskOf(it.second) }
-                    val verdict = PluginRuntime.preExecute(hooks, call.name, argsPreview, risk)
-                    var toolMs = 0L
-                    val result = if (runner == null) {
-                        ToolResult.failure("未知工具：${call.name}")
-                    } else if (verdict.deny) {
-                        // 与「能力不足」同一类：跑都没跑，所以不发 ToolStarted。
-                        ToolResult.failure(verdict.message ?: "插件 hook 拒绝了这次调用。")
-                    } else {
-                        val blocked = tier?.let { blockedReason(it, capabilities) }
-                        if (blocked != null) {
-                            ToolResult.failure(blocked)
-                        } else {
-                            liveLine = "🔧 ${call.name}…"
-                            onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
-                            // `require_confirm` 只把「自动运行」提到「问一次」。禁止档不动：那是用户
-                            // 禁掉了一切工具，插件不能替用户放开成一次询问；已经点过「总是允许」的
-                            // 也照旧放行 —— 用户的手动决定比插件的声明更 deliberate。
-                            val mode =
-                                if (verdict.requireConfirm && settings.approvalMode == ApprovalMode.AUTO) {
-                                    ApprovalMode.ASK
-                                } else {
-                                    settings.approvalMode
+                } else {
+                    // 分块并发：一块最多 parallel 条同时跑（async 全部起飞），块内按原顺序 await 并
+                    // 回写，再放下一块。块与块之间是一道屏障 —— 换来的是「顺序回写」这条硬约束的
+                    // 简单实现，且取消检查落在每块开头与每条执行的开头。coroutineScope 保证块里的
+                    // async 都收干净才往下走（含异常路径）。
+                    for (chunk in turn.toolCalls.chunked(parallel)) {
+                        if (cancelled.get()) {
+                            finishCancelled(onEvent, streamed, reasoning, openCalls)
+                            return produced
+                        }
+                        val outcomes = coroutineScope {
+                            val deferreds = chunk.map { call ->
+                                async {
+                                    executeOneTool(
+                                        call, registry, pluginSpecs, hooks, capabilities, gate, settings, chatId, onEvent,
+                                    )
                                 }
-                            if (!gate.request(chatId, call.name, argsPreview, mode)) {
-                                ToolResult.failure("用户拒绝了这次调用。")
-                            } else {
-                                val startedAt = System.currentTimeMillis()
-                                runCatching { runner(parseArgs(call.arguments)) }.getOrElse { error ->
-                                    if (error is CancellationException) throw error
-                                    ToolResult.failure("工具执行异常：${error.message ?: error::class.java.simpleName}")
-                                }.also { toolMs = System.currentTimeMillis() - startedAt }
                             }
+                            deferreds.map { it.await() }
+                        }
+                        for (outcome in outcomes) {
+                            if (outcome == null) {
+                                // 这条在执行开头看到取消：收尾，同块其余的 await 已返回或已取消。
+                                finishCancelled(onEvent, streamed, reasoning, openCalls)
+                                return produced
+                            }
+                            commitTool(outcome)
                         }
                     }
-                    val output = result.output.take(MAX_TOOL_OUTPUT)
-                    val stored = StoredMessage(
-                        id = UUID.randomUUID().toString(),
-                        role = Roles.TOOL,
-                        text = "",
-                        toolName = call.name,
-                        toolArgs = call.arguments,
-                        toolOutput = output,
-                        toolOk = result.ok,
-                        toolCallId = call.id,
-                        imageBase64 = result.imageBase64,
-                    )
-                    produced += stored
-                    onEvent(AgentEvent.ToolMessage(stored))
-                    // Answered, so a stop from here on must not answer it a second time.
-                    openCalls = openCalls.filterNot { it.id == call.id }
-                    val toolAt = wire.size
-                    wire += ChatMessage.tool(call.id, output)
-                    spans += WireSpan(stored.id, toolAt, wire.size)
-                    result.imageBase64?.let { base64 ->
-                        if (settings.imageInput) {
-                            wire += ChatMessage.user("（这是上一步 $call.name 返回的截图）", base64)
-                        } else {
-                            wire += ChatMessage.user(
-                                "（上一步 $call.name 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
-                            )
-                        }
-                    }
-                    liveLine = if (result.ok) {
-                        String.format(Locale.US, "✓ %s %.1fs", call.name, toolMs / 1000.0)
-                    } else {
-                        "✗ ${call.name}"
-                    }
-                    onEvent(AgentEvent.ToolFinished(call.name, result.ok, output))
                 }
             }
             // Only reachable with a ceiling: unlimited rounds end by returning above.
@@ -1498,16 +1672,17 @@ class AgentEngine(
             // The same construction an ordinary user message gets, picture included: a steer with
             // an attachment is still a message the user sent, and the gate is the same one
             // (`imageInput`), with the same sentence when the model cannot be shown the image.
-            val image = line.imageBase64.takeIf { settings.imageInput }
-            val note = if (line.imageBase64 != null && image == null) {
+            // 多附件：整列过 imageInput 门；关着时一句说明，模型知道有图但看不到。
+            val images = line.imagesBase64.takeIf { settings.imageInput }.orEmpty()
+            val note = if (line.imagesBase64.isNotEmpty() && images.isEmpty()) {
                 "（图片已省略：当前未开启「模型支持图片输入」）"
             } else {
                 ""
             }
-            wire += ChatMessage.user("（用户在任务进行中说：${line.text}）$note", image)
+            wire += ChatMessage.user("（用户在任务进行中说：${line.text}）$note", images)
             // Announced after the wire, never before: a caller told about a line and then shown a
             // prompt without it would have written a bubble the model never saw.
-            onEvent(AgentEvent.Steered(line.id, line.text, line.imageBase64))
+            onEvent(AgentEvent.Steered(line.id, line.text, line.imagesBase64))
         }
         return batch.size
     }
@@ -1680,7 +1855,7 @@ class AgentEngine(
         message.toolCalls.forEach { call ->
             append("\n  [调用工具 ").append(call.name).append(' ').append(call.arguments).append(']')
         }
-        if (message.imageBase64 != null) append("\n  （含一张截图，已省略）")
+        if (message.allImages.isNotEmpty()) append("\n  （含截图，已省略）")
     }
 
     /**
@@ -1699,9 +1874,14 @@ class AgentEngine(
      * Before the first usage arrives there is nothing to anchor to, so the whole wire is estimated
      * the pessimistic way.
      */
-    private fun estimatePromptTokens(wire: List<ChatMessage>): Int {
-        val chars = wireChars(wire)
-        val images = wire.count { it.imageBase64 != null }
+    private fun estimatePromptTokens(wire: List<ChatMessage>): Int =
+        estimatePromptTokens(wireChars(wire), wire.count { it.allImages.isNotEmpty() })
+
+    /**
+     * 同一个估算，但字符数与图片数由调用方提供 —— 调用点已经遍历过一遍 wire 时用它，
+     * 免得为两个数字再各扫一次整份历史。数值与 [estimatePromptTokens] 完全一致。
+     */
+    private fun estimatePromptTokens(chars: Int, images: Int): Int {
         val reported = lastPromptTokens
         if (reported <= 0) return chars / 3 + images * IMAGE_TOKENS
         val textDelta = (chars - lastPromptChars).coerceAtLeast(0) / 4
@@ -1726,13 +1906,28 @@ class AgentEngine(
 
     private fun stats(): StreamStats {
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
-        val tokens = estimateTokens(outChars.get())
+        // live 输出 token 用**校准过的**每字符 token 数估（见 liveTokensPerChar），不是保守的
+        // chars/3 —— 后者对中文低估 ~2.7 倍，是「200 tok/s 显示成几十」的根因。展示与 TPS 分子都用它。
+        val outTokens = estimateOutputTokens(outChars.get())
+        val thinkTokens = estimateOutputTokens(thinkingChars.get())
+        // 官方口径分母＝decodeMs（首字之后→结束），不含 TTFT 等待、也不含轮间工具执行时间。
+        // 已结束各轮的和在 [decodeMsAccum]；当前正在流式的这一轮再加上「本轮首字→现在」。
+        val liveDecode = if (curTurnFirstChunkMs > 0L) {
+            (System.currentTimeMillis() - curTurnFirstChunkMs).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        val decodeMs = decodeMsAccum + liveDecode
+        // 分子＝**全部**输出 token（正文 + 思考）：官方 outputTokens 含 reasoning、不减它，而
+        // decodeMs 的时间也含生成思考那段。分子只数正文会在长思考期系统性低估 TPS，故这里加上思考。
+        val tpsTokens = outTokens + thinkTokens
         return StreamStats(
-            tokensOut = tokens,
-            thinkingTokens = estimateTokens(thinkingChars.get()),
+            tokensOut = outTokens,
+            thinkingTokens = thinkTokens,
             elapsedMs = elapsedMs,
-            tokPerSec = if (elapsedMs <= 0L) 0f else tokens * 1000f / elapsedMs,
+            tokPerSec = Tps.of(tpsTokens, decodeMs).toFloat(),
             lastPromptTokens = lastPromptTokens,
+            currentPrompt = currentPromptEstimate,
             breakSystem = breakSystem,
             breakTools = breakTools,
             breakHistory = breakHistory,
@@ -1813,8 +2008,8 @@ class AgentEngine(
     ) {
         // Images only go out when the configured model can read them; a text-only
         // endpoint rejects the whole request otherwise.
-        val image = message.imageBase64.takeIf { settings.imageInput }
-        val note = if (message.imageBase64 != null && image == null) {
+        val imageList = message.allImages.takeIf { settings.imageInput }.orEmpty()
+        val note = if (message.allImages.isNotEmpty() && imageList.isEmpty()) {
             "\n（图片已省略：当前未开启「模型支持图片输入」）"
         } else {
             ""
@@ -1828,9 +2023,9 @@ class AgentEngine(
                     // same omitted-image note as the live path. Leaving the image out here is what
                     // would make a steer with a photo work in the run it was sent in and silently
                     // lose it in every run that rebuilds this history afterwards.
-                    wire += ChatMessage.user("（用户在任务进行中说：${message.text}）$note", image)
+                    wire += ChatMessage.user("（用户在任务进行中说：${message.text}）$note", imageList)
                 } else {
-                    wire += ChatMessage.user(message.text + note, image)
+                    wire += ChatMessage.user(message.text + note, imageList)
                 }
             Roles.SYSTEM -> wire += ChatMessage.system(message.text)
             Roles.ASSISTANT -> wire += ChatMessage.assistant(
@@ -1846,9 +2041,9 @@ class AgentEngine(
                 // image input on the picture itself goes out, and with it off the model is told a
                 // picture existed and that it cannot see it.
                 val tool = message.toolName.orEmpty()
-                if (image != null) {
-                    wire += ChatMessage.user("（这是上一步 $tool 返回的截图）", image)
-                } else if (message.imageBase64 != null) {
+                if (imageList.isNotEmpty()) {
+                    wire += ChatMessage.screenshot("（这是上一步 $tool 返回的截图）", imageList)
+                } else if (message.allImages.isNotEmpty()) {
                     wire += ChatMessage.user(
                         "（上一步 $tool 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
                     )
@@ -1894,6 +2089,128 @@ class AgentEngine(
         runCatching { Json.parseToJsonElement(raw.ifBlank { "{}" }).jsonObject }
             .getOrElse { JsonObject(emptyMap()) }
 
+    /**
+     * 跑**一条**工具调用，只产出 [ToolOutcome]，不碰 run 级的可变状态（wire/spans/produced/
+     * openCalls 都在 [runLoop] 的局部里，回写由那边的 commitTool 做）—— 这是并行的前提：
+     * 执行阶段（可能很慢）可以多条同时飞，回写阶段在主协程里按模型请求的顺序逐条做。
+     *
+     * 返回 null ＝ 这一条在开跑前看到取消（[cancelled]），调用方据此收尾。
+     */
+    private suspend fun executeOneTool(
+        call: ToolCallRequest,
+        registry: ToolRegistry,
+        pluginSpecs: List<PluginSpec>,
+        hooks: List<Pair<PluginSpec, HookDecl>>,
+        capabilities: CapabilityHub,
+        gate: ApprovalGate,
+        settings: AppSettings,
+        chatId: String,
+        onEvent: (AgentEvent) -> Unit,
+    ): ToolOutcome? {
+        // Checked before the call, not after the batch: a stop means the tools the model
+        // asked for in the same breath do not run either.
+        if (cancelled.get()) return null
+        val argsPreview = call.arguments.take(600)
+        // 「压缩上下文」是引擎自己的虚拟工具（用户：「要有压缩上下文的指令工具」）：不进 registry
+        // （没有要跑的实现、没有能力档），在分发前拦截 —— 置 [compressNow]，本轮边界上由
+        // [compressContext] 消费。它不碰手机也不发网络请求，所以不发 ToolStarted、不进 TouchFx
+        // 埋点（边缘光的语义是「在操作手机」，压缩不是）。
+        if (call.name == COMPRESS_CONTEXT_TOOL) {
+            compressNow = true
+            return ToolOutcome(
+                call = call,
+                result = ToolResult.success(
+                    "已请求压缩上下文：本轮结束后，最旧的一段对话会被折成摘要，之后的请求只带摘要与近期消息。",
+                ),
+                toolMs = 0,
+                argsPreview = argsPreview,
+            )
+        }
+        val tool = registry.find(call.name)
+        // 接线点 B（HOST-DEV §5）：内置找不到这个名字才落到插件（`<id>_<tool>`）——
+        // 与工具表拼装（接线点 A）同一个顺序，内置优先，插件顶不掉 `run_shell` 这类。
+        // resolve 也兜底：与 risk/preExecute 同一条理由 —— 插件链路的类静态初始化抛 Error 时，
+        // 不该把整轮 run 打死（FEEDBACK v0.8.112 P0#1 真机出现过 ExceptionInInitializerError）。
+        val pluginTool = if (tool == null) {
+            runCatching { PluginRuntime.resolve(pluginSpecs, call.name) }
+                .getOrElse { error ->
+                    PluginRuntime.logPluginError("插件工具解析失败（已兜底跳过）", error)
+                    null
+                }
+        } else {
+            null
+        }
+        // 谁真的跑这一条。null ＝ 两边都没有这个名字（模型编了个工具名）。
+        val runner: (suspend (JsonObject) -> ToolResult)? = when {
+            tool != null -> { args -> tool.run(args) }
+            pluginTool != null -> { args ->
+                PluginRuntime.execute(pluginTool.first, pluginTool.second, args)
+            }
+            else -> null
+        }
+        // 能力档：插件工具的档由 exec 决定 —— `needs_root` 才要 root，其余固定 local
+        // （＝本应用身份，不需要额外能力），所以只有 root 那一档会被 blockedReason 拦住。
+        val tier = when {
+            pluginTool != null ->
+                if (pluginTool.second.exec.needsRoot) TIER_ROOT else TIER_NONE
+            tool != null -> tool.tier
+            else -> null
+        }
+        // 风险档只有插件工具有（内置工具只有能力档），所以 min_risk 条件对内置一律
+        // 不成立；要拦内置工具用 `when.tool` + `when.regex`。
+        // **容错兜底**（FEEDBACK v0.8.112 P0#1 的机制面）：risk 推断与 hook 裁决在 runCatching
+        // **外面** —— 插件链路上任何类的静态初始化抛 Error（真机出现过
+        // ExceptionInInitializerError）都会穿透 executeOneTool、把整轮 run 打死成「这一轮最终
+        // 失败」。插件是第三方代码，它的坏不该是整轮的坏：这里兜成一次工具失败，run 照常继续。
+        val risk = runCatching { pluginTool?.let { ManifestValidator.riskOf(it.second) } }
+            .getOrElse { error ->
+                // 兜底吞掉的同时留证：clinit 类 Error 的真因在 cause 链里，不记下来下次复现
+                // 还是「没有更多信息」。PluginLog 落插件自己的日志文件。
+                PluginRuntime.logPluginError("risk 推断失败（已兜底跳过）", error)
+                null
+            }
+        val verdict = runCatching { PluginRuntime.preExecute(hooks, call.name, argsPreview, risk) }
+            .getOrElse { error ->
+                PluginRuntime.logPluginError("hook 裁决失败（已兜底放行）", error)
+                HookVerdict()
+            }
+        var toolMs = 0L
+        val result = if (runner == null) {
+            ToolResult.failure("未知工具：${call.name}")
+        } else if (verdict.deny) {
+            // 与「能力不足」同一类：跑都没跑，所以不发 ToolStarted。
+            ToolResult.failure(verdict.message ?: "插件 hook 拒绝了这次调用。")
+        } else {
+            val blocked = tier?.let { blockedReason(it, capabilities) }
+            if (blocked != null) {
+                ToolResult.failure(blocked)
+            } else {
+                liveLine = "🔧 ${call.name}…"
+                onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
+                // 边缘光的**单一埋点**（v3 会话制）：所有真正开跑的工具调用（内置 + 插件）都过这里，
+                // TouchFx 据此判定「UI 操作＝开会话 / 非 UI 工具＝显式结束会话」。以前埋点散在
+                // ShellTools/UiTools 两处，read_file / web_search / 插件工具都不经过 ⇒ 覆盖洞会让
+                // 「不控制就不灭」失效。参数原文（未掩码）给 TouchFx 判 run_shell 里是否真碰 UI。
+                runCatching { TouchFx.noteToolActivity(Core.appContext, call.name, call.arguments) }
+                // AUTO 档**不弹任何授权**（用户多次明确要求）：插件的 require_confirm
+                // 不再把 AUTO 升级成「问一次」——它降级为日志（preExecute 里已记）。
+                // deny 仍拦（不弹窗，只让那次调用失败并说明原因）；ASK/DENY 档与
+                // 「总是允许」照旧。要守卫插件真拦人，把审批档设成「每次询问」。
+                val mode = settings.approvalMode
+                if (!gate.request(chatId, call.name, argsPreview, mode)) {
+                    ToolResult.failure("用户拒绝了这次调用。")
+                } else {
+                    val startedAt = System.currentTimeMillis()
+                    runCatching { runner(parseArgs(call.arguments)) }.getOrElse { error ->
+                        if (error is CancellationException) throw error
+                        ToolResult.failure("工具执行异常：${error.message ?: error::class.java.simpleName}")
+                    }.also { toolMs = System.currentTimeMillis() - startedAt }
+                }
+            }
+        }
+        return ToolOutcome(call = call, result = result, toolMs = toolMs, argsPreview = argsPreview)
+    }
+
     private fun systemPrompt(
         settings: AppSettings,
         registry: ToolRegistry,
@@ -1931,16 +2248,17 @@ class AgentEngine(
             append(about)
         }
         append(
-            "\n\n调用工具时，参数必须是合法 JSON 对象。一次可以并行调用多个工具。" +
-                "工具返回失败时先分析原因，不要重复同样的调用。" +
-                "任务完成后，用简洁的中文向用户说明做了什么、结果如何。",
+            "\n\nTool calls: arguments must be a valid JSON object, and several tools may be called in " +
+                "parallel. When a tool fails, read the error and adjust — do not repeat the same call. " +
+                "When the work is done, answer the user in Chinese, briefly saying what you did and " +
+                "what happened.",
         )
         // The board is the one piece of state that outlives the context window, so the prompt
         // has to say so: a model that keeps its plan in its head loses it the first time the
         // history is summarised.
         append(
-            "\n多步任务先用 todo_write 列清单，每完成一步重写一遍完整清单（不是追加）：" +
-                "你的上下文会被压缩，任务板不会。",
+            "\nPlanning: for multi-step work, call todo_write first and rewrite the complete list after " +
+                "each step (rewrite, not append) — your context may be compacted, the board will not be.",
         )
         // 工具参数一律计入**输出**：它是 assistant 的 tool-call 参数，也就是 completion tokens
         // （LlmClient.kt:416 累加、:486 append）。write_file 之所以常见，是因为它的参数就是"整份文件
@@ -1950,9 +2268,17 @@ class AgentEngine(
         // 约 200 行 / 8KB 的量级依据：代码约 4 字符/token ⇒ 8KB ≈ 2k tokens，在常见的 4k–8k 输出上限
         // 里留得下同一轮的工具调用与说明文字；再小会让模型频繁分块、每块都要一次往返。
         append(
-            "\n写文件用 write_file：内容超过约 200 行或 8KB 时**分几次写**——" +
-                "先写头部，再用 `append: true` 分段追加，不要在一次调用里吐出整个大文件" +
-                "（那会撞上模型自己的输出上限，这一轮会被截断）。",
+            "\nWriting files: use write_file. For content over roughly 200 lines or 8KB, write it in " +
+                "parts — the head first, then append with `append: true`; do not emit a whole large file " +
+                "in one call (that hits the model's own output limit and the round gets truncated).",
+        )
+        // 压缩工具的存在要告诉模型，否则它不知道自己手里有这把刀（用户：「要有压缩上下文的
+        // 指令工具」）。触发时机写清楚：长任务跑到中后段、或用户说上下文太长/太慢时。
+        append(
+            "\nContext: when it gets long (a long run, or the user says responses are slow or the " +
+                "context is too long), call $COMPRESS_CONTEXT_TOOL — the oldest span is folded into a " +
+                "summary and later requests carry that summary plus the recent messages. The current " +
+                "round continues normally.",
         )
     }
 
@@ -1998,17 +2324,29 @@ class AgentEngine(
         private const val ROLE_TOOL = "tool"
         private const val ROLE_SYSTEM = "system"
 
-        private const val COMPRESS_PROMPT =
-            "把下面这段 agent 执行历史压缩成要点摘要。保留：已经得出的结论、涉及的文件路径与命令、" +
-                "已经做出的决定及其原因、尚未完成的事项。丢掉：寒暄、重复的尝试、被推翻的中间过程。" +
-                "直接输出摘要正文，不要加任何开场白或标题。"
-
         /**
          * Roughly a token per three characters of Chinese, which is where the error
          * hurts most; English runs closer to four. Close enough for a speed readout
          * and for a context budget, and both would rather be over-cautious than late.
          */
         private fun estimateTokens(chars: Int): Int = chars / 3
+
+        /**
+         * live TPS 估算的 fallback「每字符 token 数」，用在第一轮还没有真实 usage 可校准之前。
+         *
+         * 0.9 是**真机实测**的中位数/均值（deepseek-v4.1-flash 七轮：token/字 mean=0.89、
+         * median=0.91；短消息高到 1.6、长消息低到 0.5，因为每条有固定开销 + 边际 ~0.5）。绝不能用
+         * companion 的 chars/3（=0.33）—— 那是英文系数，对中文低估约 2.7 倍，正是「明明 200 tok/s、
+         * 手机上只有几十」的根因。首轮之后立即被真实 usage 校准值取代。
+         */
+        private const val DEFAULT_LIVE_TOKENS_PER_CHAR = 0.9f
+
+        /** 自校准的合理区间：低于/高于就夹住，防一轮畸形数据（如纯工具调用轮字符≈0）把估算带飞。 */
+        private const val MIN_LIVE_TOKENS_PER_CHAR = 0.3f
+        private const val MAX_LIVE_TOKENS_PER_CHAR = 2.5f
+
+        /** 校准至少要这么多字符才可信：太短的轮次字符噪声大、比率会剧烈跳动。 */
+        private const val CALIB_MIN_CHARS = 40
     }
 }
 
@@ -2025,6 +2363,25 @@ class AgentEngine(
  * function and has to price images the same way.
  */
 private const val IMAGE_TOKENS = 1000
+
+/**
+ * 「压缩上下文」虚拟工具的名字（用户：「要有压缩上下文的指令工具」）。
+ *
+ * 它不在 [com.suixing.agent.tools.ToolRegistry] 里：没有要跑的实现、没有能力档，只在
+ * [AgentEngine.RunHandle.executeOneTool] 分发前被拦截（置 compressNow，本轮边界消费）。名字进
+ * 请求的工具表（接线点 A 追加 [COMPRESS_CONTEXT_SPEC]），模型才调得到它。
+ */
+const val COMPRESS_CONTEXT_TOOL = "compress_context"
+
+/** 虚拟工具的规格：无参数。schema 用 OpenAI 的 object 形状，与 [com.suixing.agent.tools.Schema] 同款。 */
+internal val COMPRESS_CONTEXT_SPEC = com.suixing.agent.tools.ToolSpec(
+    name = COMPRESS_CONTEXT_TOOL,
+    description = "Compact the context: fold the oldest part of this conversation into a summary, so " +
+        "later requests carry the summary plus the recent messages. Call it when a long run has been " +
+        "going for a while, or when the user says responses are slow or the context is too long. " +
+        "The current round continues normally afterwards.",
+    parameters = com.suixing.agent.tools.Schema.objectOf(emptyList()),
+)
 
 /**
  * What a tool card says when the user stopped the run before the tool answered.
@@ -2050,7 +2407,7 @@ private const val INTERRUPTED_TOOL_OUTPUT = "（已中断：任务被停止，�
  */
 internal fun estimateTokens(message: StoredMessage): Int {
     val text = message.text.length + message.toolOutput.orEmpty().length + message.toolArgs.orEmpty().length
-    val image = if (message.imageBase64 != null) IMAGE_TOKENS else 0
+    val image = IMAGE_TOKENS * message.allImages.size
     return text / 3 + image
 }
 

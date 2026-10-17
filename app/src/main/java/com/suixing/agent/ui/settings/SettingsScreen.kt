@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -75,6 +76,7 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -154,6 +156,7 @@ private enum class SettingsPage(val title: String, val route: String) {
     DATA("数据", "settings/data"),
     CHATS("会话管理", "settings/chats"),
     USAGE("用量", "settings/usage"),
+    PERF("性能", "settings/perf"),
 }
 
 /**
@@ -201,6 +204,7 @@ internal fun SettingsPageRoute(
             onOpenConversation = onOpenConversation,
         )
         SettingsPage.USAGE -> UsageScreen(onBack = onBack)
+        SettingsPage.PERF -> PerfScreen(onBack = onBack)
         null -> Unit
     }
 }
@@ -284,6 +288,11 @@ private fun SettingsRoot(
                         },
                         SettingsGroupRow("用量", "tokens · 30 日柱状 · 按模型") {
                             onOpen(SettingsPage.USAGE.route)
+                        },
+                        // 性能页回答的是「这一轮到底慢在哪」：耗时、tokens、缓存命中都来自端点
+                        // 自己的回报，不是估算；没采集到的项显示「—」，不用 0 冒充测量。
+                        SettingsGroupRow("性能", "首字延迟 · 整轮耗时 · 缓存命中 · 输出速度") {
+                            onOpen(SettingsPage.PERF.route)
                         },
                         SettingsGroupRow("关于", "版本、隐私与开源许可") {
                             onOpen("about")
@@ -1008,28 +1017,33 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
-            item {
-                // 最大输出 belongs to the isolation group: with 独立采样 on it reads and
-                // writes the provider's nullable field, where an empty box is null.
-                val ownMax = selected?.takeIf { it.ownSampling }?.maxTokens
+            item(key = "max-tokens") {
+                // 最大输出**按模型**（用户：「取消全局性的，改用各模型默认＋可自定义，跟上下文
+                // 窗口一样」）：存 [AppSettings.modelMaxTokens]，键是裸模型 id（与 modelContexts
+                // 同一套键规则）；留空＝不说、模型/端点默认。老文件的 provider 级值由迁移搬进来。
+                //
+                // 输入框的 value 是**本地 raw 文本**，不是从 form 反推（用户：「输入一个，输入框自动
+                // 关了」）：打第一个字符时 parsed 写回 form、整页重组、无 key 的 item 被重建 ⇒ 焦点
+                // 丢、键盘收。raw 只跟手指走，form 只在解析后单向写；item 带 key 稳定身份。
+                val model = form.model
+                val modelMax = form.maxTokensFor(model)
+                var raw by remember(model) {
+                    mutableStateOf(if (modelMax <= 0) "" else modelMax.toString())
+                }
                 OutlinedTextField(
                     textStyle = settingsFieldText,
-                    value = if (selected?.ownSampling == true) {
-                        if (ownMax == null || ownMax <= 0) "" else ownMax.toString()
-                    } else {
-                        if (form.maxTokens <= 0) "" else form.maxTokens.toString()
-                    },
-                    onValueChange = { raw ->
-                        val digits = raw.filter { it.isDigit() }.take(6)
+                    value = raw,
+                    onValueChange = { input ->
+                        val digits = input.filter { it.isDigit() }.take(6)
+                        raw = digits
                         val parsed = digits.toIntOrNull() ?: 0
-                        form = if (selected?.ownSampling == true) {
-                            form.mapProvider(selected.id) { it.copy(maxTokens = parsed.takeIf { v -> v > 0 }) }
-                        } else {
-                            form.copy(maxTokens = parsed)
-                        }
+                        form = form.copy(
+                            modelMaxTokens = form.modelMaxTokens.withMaxTokens(model, parsed),
+                        )
+                        scope.persist { it.copy(modelMaxTokens = form.modelMaxTokens) }
                     },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                    label = { Text("最大输出 tokens（留空 = 不限）") },
+                    label = { Text("当前模型最大输出 tokens（留空 = 模型默认）") },
                     placeholder = { Text("例如 4096") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -1067,7 +1081,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     // on = they read and write this provider's nullable overrides.
                     SettingRow(
                         title = "独立采样参数",
-                        subtitle = "开启后温度 / Top P / 思考强度 / 最大输出只作用于当前提供方。",
+                        subtitle = "开启后温度 / Top P / 思考强度只作用于当前提供方。",
                         control = {
                             Switch(
                                 checked = selected?.ownSampling == true,
@@ -1121,7 +1135,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     val (wire, name) = REASONING_LEVELS[effort]
                     LabeledSlider(
                         label = "思考强度 · " + if (wire.isEmpty() || wire == name) name else "$name ($wire)",
-                        hint = "对应接口的 reasoning_effort；xhigh 仅部分模型支持，不支持的忽略。",
+                        hint = "对应接口的 reasoning_effort；xhigh / max 仅部分模型支持，不支持的忽略。",
                         value = effort.toFloat(),
                         range = 0f..REASONING_LEVELS.lastIndex.toFloat(),
                         steps = REASONING_LEVELS.size - 2,
@@ -1134,6 +1148,44 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             }
                         },
                     )
+                    Spacer(Modifier.height(12.dp))
+                    // 自定义请求头（用户：「模型与生成要加入请求头的设置有些需要，加到高级参数」）：
+                    // 一行一条 `Name: Value`，随每个请求发出（对话与模型列表都带）。raw 文本跟手指
+                    // 走、form 解析后单向写 —— 与最大输出输入框同一条教训：value 从 form 反推会在
+                    // 每次击键重组时丢焦点。
+                    var headersRaw by remember {
+                        mutableStateOf(
+                            form.requestHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" },
+                        )
+                    }
+                    LabeledBlock(
+                        label = "自定义请求头",
+                        hint = "一行一条，格式 Name: Value；随每个请求发送（含模型列表拉取）。留空＝不加。",
+                    ) {
+                        OutlinedTextField(
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            value = headersRaw,
+                            onValueChange = { input ->
+                                headersRaw = input
+                                val parsed = input.lines()
+                                    .mapNotNull { line ->
+                                        val at = line.indexOf(':')
+                                        if (at <= 0) return@mapNotNull null
+                                        val name = line.substring(0, at).trim()
+                                        val value = line.substring(at + 1).trim()
+                                        if (name.isEmpty()) return@mapNotNull null
+                                        name to value
+                                    }
+                                    .toMap()
+                                form = form.copy(requestHeaders = parsed)
+                                scope.persist { it.copy(requestHeaders = parsed) }
+                            },
+                            minLines = 3,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("X-Custom-Header: value") },
+                        )
+                    }
                 }
             }
         }
@@ -1144,6 +1196,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             models = selected.models,
             enabled = selected.enabled,
             contexts = form.modelContexts,
+            maxTokensMap = form.modelMaxTokens,
             provider = selected,
             onContext = { model, window ->
                 // Written through immediately: the window belongs to the model, and the
@@ -1151,6 +1204,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // updated first so the page's other unsaved edits survive the write.
                 form = form.copy(modelContexts = form.modelContexts.withContextWindow(model, window))
                 scope.persist { it.copy(modelContexts = form.modelContexts) }
+            },
+            onMaxTokens = { model, tokens ->
+                form = form.copy(modelMaxTokens = form.modelMaxTokens.withMaxTokens(model, tokens))
+                scope.persist { it.copy(modelMaxTokens = form.modelMaxTokens) }
             },
             onAlias = { model, name ->
                 form = form.mapProvider(selected.id) { cfg ->
@@ -1302,6 +1359,26 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     range = 0f..40f,
                     steps = 39,
                     onValueChange = { turns -> scope.persist { it.copy(maxToolRounds = turns.toInt()) } },
+                )
+            }
+            item {
+                // 一轮里最多几条工具调用并发跑。1＝串行（默认，与历史行为一字不差）；N>1 时一轮内
+                // 最多 N 条同时执行、结果仍按模型请求的顺序回写。只在 AUTO 审批档生效（ASK 档的
+                // 授权弹窗每会话单槽，并发会互相顶掉），故 ASK 时引擎强制串行 —— 这里照常显示设置。
+                LabeledSlider(
+                    label = if (stored.toolParallel <= 1) {
+                        "工具并行数 串行"
+                    } else {
+                        "工具并行数 ${stored.toolParallel}"
+                    },
+                    hint = "模型一轮里请求的多个工具，最多几条同时跑。1＝逐个串行（默认，最稳）；" +
+                        "调大可加快多工具任务，但 shell 类工具并发可能互相踩（同时写一个文件）。" +
+                        "审批档为「每次询问」时强制串行（授权弹窗一次只挂一个）。",
+                    value = stored.toolParallel.toFloat(),
+                    // 4 个档位（1/2/3/4）＝ steps+2，故 steps=2（与上面 0..40/steps=39 同构）。
+                    range = 1f..4f,
+                    steps = 2,
+                    onValueChange = { n -> scope.persist { it.copy(toolParallel = n.toInt()) } },
                 )
             }
             // 「自动整理用户画像」与「画像整理间隔」搬到了用户画像页（ProfileScreen）：它们管的是
@@ -1936,6 +2013,14 @@ internal fun ConversationManagerScreen(
     val snackbar = remember { SnackbarHostState() }
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
     var pendingExport by remember { mutableStateOf<Conversation?>(null) }
+    // 详情弹窗（用户：「会话管理要有会话的文件，可以看会话详细日志、大小等等」）：文件路径/大小/
+    // 修改时间 + 原始 JSON 尾部。文件信息在 IO 上读，弹窗开着才读一次。
+    var pendingInfo by remember { mutableStateOf<Conversation?>(null) }
+    var chatFileInfo by remember { mutableStateOf<ChatFileInfo?>(null) }
+    LaunchedEffect(pendingInfo) {
+        val chat = pendingInfo ?: return@LaunchedEffect
+        chatFileInfo = withContext(Dispatchers.IO) { readChatFileInfo(context, chat.id) }
+    }
     // 系统选择器（SAF）：不需要 FileProvider、不改 manifest，用户自己决定存到哪。
     val exporter = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
@@ -1969,8 +2054,9 @@ internal fun ConversationManagerScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            val ordered = conversations.sortedByDescending { it.updatedAt }
-            if (ordered.isEmpty()) {
+            val active = conversations.filterNot { it.archived }.sortedByDescending { it.updatedAt }
+            val archived = conversations.filter { it.archived }.sortedByDescending { it.updatedAt }
+            if (active.isEmpty() && archived.isEmpty()) {
                 item {
                     EmptyState(
                         title = "还没有会话",
@@ -1979,18 +2065,58 @@ internal fun ConversationManagerScreen(
                     )
                 }
             } else {
-                items(ordered, key = { it.id }) { conversation ->
+                items(active, key = { it.id }) { conversation ->
+                    val bytes = remember(conversation.id) {
+                        File(context.filesDir, "chats/${conversation.id}.json").let {
+                            if (it.exists()) it.length() else -1L
+                        }
+                    }
                     ConversationRow(
                         title = conversation.title,
                         subtitle = "${lastUpdated(conversation.updatedAt)} · " +
-                            "${conversation.messages.size} 条消息",
+                            "${conversation.messages.size} 条消息" +
+                            (if (bytes >= 0) " · ${humanBytes(bytes)}" else ""),
                         onOpen = { onOpenConversation(conversation.id) },
+                        onInfo = { pendingInfo = conversation },
                         onExport = {
                             pendingExport = conversation
                             exporter.launch(exportFileName(conversation.title))
                         },
                         onDelete = { pendingDelete = conversation },
                     )
+                }
+                // 已归档：抽屉里看不到它们（归档就是把它从那份列表里收起来），这一页是唯一的
+                // 入口 —— 用户指定「已归档的显示搞到会话管理那里」。分组排在活动会话下面，
+                // 每行多一枚「取消归档」，其余动作（详情/导出/删除）与活动行一致。
+                if (archived.isNotEmpty()) {
+                    item(key = "archived-header") {
+                        Text(
+                            text = "已归档（${archived.size}）",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
+                        )
+                    }
+                    items(archived, key = { it.id }) { conversation ->
+                        ConversationRow(
+                            title = conversation.title,
+                            subtitle = "已归档 · ${lastUpdated(conversation.updatedAt)} · " +
+                                "${conversation.messages.size} 条消息",
+                            onOpen = { onOpenConversation(conversation.id) },
+                            onInfo = { pendingInfo = conversation },
+                            onExport = {
+                                pendingExport = conversation
+                                exporter.launch(exportFileName(conversation.title))
+                            },
+                            onDelete = { pendingDelete = conversation },
+                            onUnarchive = {
+                                scope.launch {
+                                    Core.chats.setArchived(conversation.id, false)
+                                    snackbar.showSnackbar("已取消归档「${conversation.title}」")
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -2019,16 +2145,22 @@ internal fun ConversationManagerScreen(
             dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
         )
     }
+    pendingInfo?.let { chat ->
+        ChatInfoDialog(info = chatFileInfo, onDismiss = { pendingInfo = null })
+    }
 }
 
-/** 一行会话：点行打开，右侧两枚动作（导出、删除）。 */
+/** 一行会话：点行打开，右侧动作（详情、导出、删除；已归档的多一枚「取消归档」）。 */
 @Composable
 private fun ConversationRow(
     title: String,
     subtitle: String,
     onOpen: () -> Unit,
+    onInfo: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
+    /** 只有已归档的行给这个动作：取消归档（归档的入口在抽屉的行菜单里）。 */
+    onUnarchive: (() -> Unit)? = null,
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -2059,6 +2191,23 @@ private fun ConversationRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            IconButton(onClick = onInfo) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_info),
+                    contentDescription = "详情",
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            // 取消归档排在导出之前：它是这一行唯一的「把会话放回抽屉」的动作，最常用。
+            onUnarchive?.let { unarchive ->
+                IconButton(onClick = unarchive) {
+                    Icon(
+                        imageVector = ImageVector.vectorResource(R.drawable.ic_folder_open),
+                        contentDescription = "取消归档",
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
             IconButton(onClick = onExport) {
                 Icon(
@@ -2092,6 +2241,66 @@ private fun exportFileName(title: String): String {
         .trim('_')
         .take(40)
     return "${base.ifBlank { "会话" }}.json"
+}
+
+/**
+ * 会话文件的白盒信息（用户：「会话管理要有会话的文件，可以看详细日志、大小等等」）。
+ * [tail] 是原始 JSON 的尾部——排查「这一轮到底存了什么」时尾部就是最新那几条消息。
+ */
+private data class ChatFileInfo(
+    val path: String,
+    val bytes: Long,
+    val modifiedAt: Long,
+    val tail: String,
+)
+
+private fun readChatFileInfo(context: android.content.Context, id: String): ChatFileInfo? =
+    runCatching {
+        val file = File(context.filesDir, "chats/$id.json")
+        if (!file.exists()) return null
+        val text = file.readText()
+        ChatFileInfo(
+            path = file.absolutePath,
+            bytes = file.length(),
+            modifiedAt = file.lastModified(),
+            tail = text.takeLast(4000),
+        )
+    }.getOrNull()
+
+/** 字节数用人话：1.2 KB / 3.4 MB。 */
+private fun humanBytes(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+    else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+}
+
+/** 会话详情弹窗：文件三要素 + 原始 JSON 尾部（可滚动、等宽）。 */
+@Composable
+private fun ChatInfoDialog(info: ChatFileInfo?, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("会话文件") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (info == null) {
+                    Text("这个会话在磁盘上没有对应的文件（可能还没落盘）。")
+                } else {
+                    Text("路径：${info.path}", style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        "大小：${humanBytes(info.bytes)} · 修改：${lastUpdated(info.modifiedAt)}",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("原始记录（尾部 4000 字）：", style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        text = info.tail,
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }
 
 /** A labelled control: the label and the why-line above it, the way the cards stacked them. */
@@ -2245,9 +2454,12 @@ private fun ModelPickerDialog(
     enabled: List<String>,
     /** Per-model context windows, keyed by model name; 0 or missing means 不限. */
     contexts: Map<String, Int>,
+    /** Per-model max output tokens, keyed by model name; 0 or missing means 模型默认. */
+    maxTokensMap: Map<String, Int> = emptyMap(),
     /** The provider the list belongs to: names and aliases are per provider. */
     provider: ProviderConfig,
     onContext: (String, Int) -> Unit,
+    onMaxTokens: (String, Int) -> Unit = { _, _ -> },
     /** Rename one model for this provider; a blank name drops the alias. */
     onAlias: (String, String) -> Unit,
     /** Add a model id the endpoint did not list. */
@@ -2320,10 +2532,12 @@ private fun ModelPickerDialog(
                                     label = provider.displayModel(id),
                                     checked = id in picked,
                                     contextWindow = contexts[id] ?: 0,
+                                    maxTokens = maxTokensMap[id] ?: 0,
                                     onToggle = {
                                         picked = if (id in picked) picked - id else picked + id
                                     },
                                     onContext = { onContext(id, it) },
+                                    onMaxTokens = { onMaxTokens(id, it) },
                                     onAlias = { aliasing = id },
                                     onRemove = { onRemove(id) },
                                 )
@@ -2412,15 +2626,22 @@ private fun ModelCheckRow(
     label: String,
     checked: Boolean,
     contextWindow: Int,
+    /** 按模型的最大输出 tokens；0/缺席＝模型默认（用户：「跟上下文窗口一样可设置」）。 */
+    maxTokens: Int = 0,
     onToggle: () -> Unit,
     onContext: (Int) -> Unit,
+    onMaxTokens: (Int) -> Unit = {},
     onAlias: () -> Unit,
     onRemove: () -> Unit,
 ) {
     var editing by remember { mutableStateOf(false) }
+    var editingMax by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var draft by remember(editing) {
         mutableStateOf(if (contextWindow > 0) contextWindow.toString() else "")
+    }
+    var draftMax by remember(editingMax) {
+        mutableStateOf(if (maxTokens > 0) maxTokens.toString() else "")
     }
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -2480,6 +2701,30 @@ private fun ModelCheckRow(
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
             }
+            Spacer(Modifier.width(6.dp))
+            // 第二枚 chip：按模型的最大输出（与上下文窗口同一行、同一套内联编辑）。
+            Surface(
+                onClick = { editingMax = !editingMax },
+                shape = CircleShape,
+                color = if (maxTokens > 0) {
+                    MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHigh
+                },
+            ) {
+                Text(
+                    text = if (maxTokens > 0) "出${maxTokens / 1000}k" else "出默认",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (maxTokens > 0) {
+                        MaterialTheme.colorScheme.secondary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
         }
         if (editing) {
             OutlinedTextField(
@@ -2504,6 +2749,26 @@ private fun ModelCheckRow(
                 },
                 // 这是 chip 行里的内联编辑器（自带 start/end/bottom 的紧凑内边距），高度同样收到
                 // 52dp：与其它单行输入框一致，多出来的 4dp 只是让这一行略高一点。
+                modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp)
+                    .padding(start = 12.dp, end = 8.dp, bottom = 6.dp),
+            )
+        }
+        if (editingMax) {
+            OutlinedTextField(
+                textStyle = settingsFieldText,
+                value = draftMax,
+                onValueChange = { raw -> draftMax = raw.filter { it.isDigit() }.take(6) },
+                label = { Text("最大输出 tokens（留空 = 模型默认）") },
+                placeholder = { Text("例如 4096") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                shape = MaterialTheme.shapes.small,
+                trailingIcon = {
+                    TextButton(onClick = {
+                        onMaxTokens(draftMax.toIntOrNull() ?: 0)
+                        editingMax = false
+                    }) { Text("保存") }
+                },
                 modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp)
                     .padding(start = 12.dp, end = 8.dp, bottom = 6.dp),
             )

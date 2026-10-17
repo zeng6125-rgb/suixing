@@ -1,12 +1,28 @@
 package com.suixing.agent.capability
-
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
+import java.io.File
 import java.lang.reflect.Method
 import java.util.concurrent.TimeUnit
+
+/** seccomp 杀死进程时的退出码：128 + SIGSYS(31)。 */
+internal const val SECCOMP_SIGSYS_EXIT = 159
+
+/**
+ * 自带 bash 被 seccomp 拦下、自动改用系统 sh 时写在输出最前面的一行。
+ *
+ * 不列举"哪些特性不可用"：Android 的系统 sh 是 mksh，`[[ ]]`、`set -A` 这些其实有，
+ * 列清单只会让模型据此猜错。只陈述已经发生的事，让模型自己验证。
+ */
+internal const val SECCOMP_FALLBACK_NOTE =
+    "[随行] 自带 bash 被系统的 seccomp 过滤器拦下（exit 159 / SIGSYS），这条命令已改用系统 sh 执行；" +
+        "bash 专有语法在这条命令里可能不可用，需要时请改用 POSIX 写法。\n"
+
+/** 这个退出码是不是「被 seccomp 杀掉」的信号。 */
+internal fun looksLikeSeccompKill(exitCode: Int): Boolean = exitCode == SECCOMP_SIGSYS_EXIT
 
 data class ShellResult(
     val ok: Boolean,
@@ -46,6 +62,37 @@ object Shell {
     private const val DEFAULT_TIMEOUT_MS = 45_000L
     private const val ROOT_PROBE_TIMEOUT_MS = 8_000L
 
+    /**
+     * 随 APK 分发的静态 bash / busybox 所在目录（`nativeLibraryDir`，由 `Core.init` 写入）。
+     *
+     * 为什么放 nativeLibraryDir 而不是 filesDir：Android 10 起 targetSdk≥29 的 app **不能执行**
+     * 自己数据目录里的文件（W^X），而 nativeLibraryDir 里的 `lib*.so` 是可执行的。所以两个二进制
+     * 以 `jniLibs/arm64-v8a/libbash.so`、`libbusybox.so` 的形式随包分发，并由
+     * `packaging.jniLibs.useLegacyPackaging = true` 保证它们被**解压到磁盘**（AGP 默认把 .so
+     * 直接 mmap 在 APK 里，那样 execve 拿不到路径，只能给链接器加载）。
+     */
+    @Volatile
+    private var binDir: String = ""
+
+    fun initBinaries(nativeLibraryDir: String) {
+        binDir = nativeLibraryDir
+    }
+
+    /** 自带的 bash 路径；没打包或不可执行时返回 null（调用方退回系统 sh）。 */
+    fun bundledBash(): String? = bundled("libbash.so")
+
+    /** 自带的 busybox 路径。它按 `argv[0]` 分派 applet，所以要用 `"$BB" <applet>` 调。 */
+    fun bundledBusybox(): String? = bundled("libbusybox.so")
+
+    private fun bundled(name: String): String? = binDir
+        .takeIf { it.isNotEmpty() }
+        ?.let { File(it, name) }
+        ?.takeIf { it.canExecute() }
+        ?.absolutePath
+
+    /** POSIX 单引号包裹：内部单引号写成 `'\''`，这样整串能安全地作为单个参数交给 sh。 */
+    private fun quote(text: String): String = "'" + text.replace("'", "'\\''") + "'"
+
     /** How often a wait re-checks: short enough that a stop is noticed in a fraction of a second. */
     private const val POLL_MS = 200L
 
@@ -74,7 +121,29 @@ object Shell {
         }.getOrNull()
     }
 
-    suspend fun local(command: String): ShellResult = run(arrayOf("sh", "-c", command))
+    suspend fun local(command: String, shell: String = "auto"): ShellResult {
+        // 自带 bash 时优先用它：Android 只有 toybox 的 sh，连 `[[ ]]`、数组、`$(<file)` 都没有。
+        // shell="sh" 是显式要求退回系统 sh（对照/排错用）。
+        val bash = bundledBash()
+        if (bash == null || shell == "sh") return run(arrayOf("sh", "-c", command))
+        val env = buildMap {
+            // 自带 busybox 以 $BB 暴露（applet 名要靠 argv[0]，所以不放进 PATH 当命令名用）：
+            // 命令里写 `"$BB" grep -n foo *.kt` 即可拿到完整的 coreutils 级工具。
+            bundledBusybox()?.let { put("BB", it) }
+            put("PATH", "$binDir:/system/bin:/system/xbin")
+            put("TERM", "dumb")
+        }
+        val result = run(arrayOf(bash, "-lc", command), env)
+        // 自带 bash 在本进程里可能被系统的 seccomp 过滤器杀掉（exit 159 = 128+SIGSYS）：app 派生的
+        // 子进程**继承**那份过滤器，而 su 起的是另一棵进程树、不继承，所以只有 local 档会中招。
+        //
+        // **只对这一条命令回退，不做进程级永久降级**：被拦的往往是 bash 用到的某个新 syscall，
+        // 哪些命令会踩到无法事先知道 —— 永久降级会让本来能跑的命令也无故失去 bash 能力。
+        // 代价只是失败时多一个瞬间退出的子进程（毫秒级）。
+        if (!looksLikeSeccompKill(result.exitCode)) return result
+        val retry = run(arrayOf("sh", "-c", command))
+        return retry.copy(stdout = SECCOMP_FALLBACK_NOTE + retry.stdout)
+    }
 
     suspend fun shizuku(command: String): ShellResult {
         val method = newProcess
@@ -92,7 +161,21 @@ object Shell {
     }
 
     suspend fun root(command: String): ShellResult = runCatching {
-        collect(ProcessBuilder("su", "-c", command).start())
+        // root 档也走随包 bash（用户要求）：su 起来后由自带 bash 解释命令，环境与 local 档对齐
+        // （PATH 带 binDir、BusyBox 以 $BB 暴露）。没有自带 bash（未打包或不可执行）时退回原形态：
+        // su -c 直接交给系统 sh。命令与路径都过 [quote]，避免二次分词。
+        val bash = bundledBash()
+        val line = if (bash == null) {
+            command
+        } else {
+            val prelude = buildString {
+                append("PATH=").append(quote("$binDir:/system/bin:/system/xbin")).append(' ')
+                bundledBusybox()?.let { append("BB=").append(quote(it)).append(' ') }
+                append("TERM=dumb ")
+            }
+            prelude + quote(bash) + " -lc " + quote(command)
+        }
+        collect(ProcessBuilder("su", "-c", line).start())
     }.getOrElse { error ->
         if (error is CancellationException) throw error
         ShellResult(false, "", "无法获取 root：${error.message ?: error.javaClass.simpleName}", -1)
@@ -127,12 +210,13 @@ object Shell {
         false
     }
 
-    private suspend fun run(command: Array<String>): ShellResult = runCatching {
-        collect(ProcessBuilder(*command).start())
-    }.getOrElse { error ->
-        if (error is CancellationException) throw error
-        ShellResult(false, "", error.message ?: error.javaClass.simpleName, -1)
-    }
+    private suspend fun run(command: Array<String>, env: Map<String, String> = emptyMap()): ShellResult =
+        runCatching {
+            collect(ProcessBuilder(*command).apply { environment().putAll(env) }.start())
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            ShellResult(false, "", error.message ?: error.javaClass.simpleName, -1)
+        }
 
     private suspend fun collect(process: Process): ShellResult {
         val stdout = StringBuilder()

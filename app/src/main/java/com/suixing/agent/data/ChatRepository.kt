@@ -71,6 +71,8 @@ class ChatRepository(private val context: Context) {
             val stamped = conversation.copy(
                 updatedAt = System.currentTimeMillis(),
                 pinned = onDisk?.pinned ?: conversation.pinned,
+                // 归档位同理（第六个）：不继承的话，归档过的会话只要再落一次盘就自己回到列表里。
+                archived = onDisk?.archived ?: conversation.archived,
             )
             write(stamped)
             val rest = _conversations.value.filterNot { it.id == stamped.id }
@@ -109,6 +111,19 @@ class ChatRepository(private val context: Context) {
         lock.withLock {
             val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
             val next = current.copy(title = clean)
+            write(next)
+            _conversations.value = _conversations.value.map { if (it.id == id) next else it }
+        }
+    }
+
+    /**
+     * 归档 / 取消归档。与 [setPinned] 同一条规矩：只改这一位，**不动 `updatedAt`**（归档是标签，
+     * 不是一次内容变更），列表顺序也不在这里动（抽屉自己过滤与排序）。
+     */
+    suspend fun setArchived(id: String, archived: Boolean) = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
+            val next = current.copy(archived = archived)
             write(next)
             _conversations.value = _conversations.value.map { if (it.id == id) next else it }
         }

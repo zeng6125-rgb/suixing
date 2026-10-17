@@ -70,18 +70,26 @@ class ShellTools(
 
     override val tier: String = TIER_SHELL
 
+    override val group: String = "Shell"
+
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             "run_shell",
-            "执行一条 shell 命令并返回输出。mode=auto 时会自动使用当前可用的最高权限" +
-                "（root > Shizuku(shell) > 本应用），可用 am/pm/input/screencap/dumpsys/cat/ls 等命令。",
+            "Run a shell command and return its output. mode=auto picks the highest privilege available " +
+                "(root > shizuku > app). The app tier runs the bundled GNU bash, not Android's toybox sh — " +
+                "[[ ]], arrays and process substitution work; the bundled BusyBox is \$BB " +
+                "(e.g. \"\$BB\" grep -rn foo .).",
             Schema.objectOf(
                 properties = listOf(
-                    "command" to Schema.string("要执行的命令，如 `ls -l /sdcard/Download`"),
+                    "command" to Schema.string("Command to run, e.g. ls -l /sdcard/Download"),
+                    "shell" to Schema.string(
+                        "Shell used by the app tier: auto (bundled bash when present) | bash | sh (system toybox).",
+                        enumValues = listOf("auto", "bash", "sh"),
+                        default = "auto",
+                    ),
                     "mode" to Schema.string(
-                        "权限档位：auto（默认）/ local（本应用）/ shizuku（shell 用户）/ root。" +
-                            "这是请求，不能超过用户在「能力」页固定的执行档次——" +
-                            "实际跑在哪个通道看输出前缀（[local(app)] / [shizuku(shell)] / [root]）。",
+                        "Privilege tier: auto | local (app uid) | shizuku (shell uid) | root. A request only — " +
+                            "it cannot exceed the tier fixed in Settings; the output prefix says which ran.",
                         enumValues = listOf("auto", "local", "shizuku", "root"),
                         default = "auto",
                     ),
@@ -91,19 +99,18 @@ class ShellTools(
         ),
         ToolSpec(
             "app_action",
-            "对某个应用执行特权操作：启动、强停、清除数据、卸载、禁用、启用、查看信息或权限、安装 APK。" +
-                "除 info/permissions 外通常需要 Shizuku 或 root。",
+            "Privileged operation on an installed app. Needs Shizuku or root except for info/permissions.",
             Schema.objectOf(
                 properties = listOf(
-                    "package" to Schema.string("目标应用包名"),
+                    "package" to Schema.string("Target package name"),
                     "action" to Schema.string(
-                        "操作类型",
+                        "Operation",
                         enumValues = listOf(
                             "start", "force_stop", "clear_data", "uninstall",
                             "disable", "enable", "info", "permissions", "install",
                         ),
                     ),
-                    "apk_path" to Schema.string("action=install 时必填，APK 文件路径"),
+                    "apk_path" to Schema.string("Required when action=install: path to the APK"),
                 ),
                 required = listOf("package", "action"),
             ),
@@ -120,19 +127,27 @@ class ShellTools(
         val command = args.str("command")?.trim().orEmpty()
         if (command.isEmpty()) return@withContext ToolResult.failure("缺少参数 command")
         val mode = args.str("mode")?.trim()?.lowercase() ?: "auto"
+        val shell = args.str("shell")?.trim()?.lowercase() ?: "auto"
         drawInputFx(command, tool = "run_shell")
         val state = capabilities.state.value
         if (mode == "root" && !state.rootProbed) capabilities.probeRoot()
         val chosen = shellChannel(mode, capabilities.shellTier())
+        // shell 只在 local 档有意义：root/shizuku 用的是系统里的 sh（那两个身份本来就能跑任何
+        // 系统命令）；local 档默认优先用随包分发的静态 bash（见 Shell.local）。
         val result: ShellResult = when (chosen) {
             "root" -> Shell.root(command)
             "shizuku" -> Shell.shizuku(command)
-            else -> Shell.local(command)
+            else -> Shell.local(command, shell = shell)
         }
         val label = when (chosen) {
-            "root" -> "root"
+            // root 档现在也走随包 bash（见 Shell.root），前缀照实标出来：没接上时仍写 root。
+            "root" -> if (Shell.bundledBash() != null) "root+bash" else "root"
             "shizuku" -> "shizuku(shell)"
-            else -> "local(app)"
+            else -> if (chosen == "local" && Shell.bundledBash() != null && shell != "sh") {
+                "local(app)+bash"
+            } else {
+                "local(app)"
+            }
         }
         val prefix = "[$label] exit=${result.exitCode}\n"
         if (result.ok) {

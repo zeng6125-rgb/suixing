@@ -18,17 +18,24 @@ object ManifestValidator {
     /** api_version 只比 major：`1.x` 都能装，`2.0` 拒装。 */
     const val SUPPORTED_API_MAJOR = 1
 
-    /** 官方 id：`^[a-z][a-z0-9-]*$`。 */
+    /**
+     * 官方 id：`^[a-z][a-z0-9-]*$`，且**总长 ≤32、不含点号**（0.8.107 硬规则）。
+     *
+     * 点号为什么必须禁：注册名是 `<id>_<tool>`，要发给模型网关；deepseek 网关按
+     * `^[a-zA-Z0-9_-]+$` 校验工具名，带点号的整批拒收（11152）。两段式命名空间（`acme.github`）
+     * 因此一并取消 —— 命名空间用横杠写（`acme-github`）。
+     */
     private val ID_OFFICIAL = Regex("^[a-z][a-z0-9-]*$")
 
-    /** 第三方 id：两段式命名空间 `^[a-z0-9-]+\\.[a-z0-9-]+$`（开放问题#3 拍板：两种都接受）。 */
-    private val ID_NAMESPACED = Regex("^[a-z0-9-]+\\.[a-z0-9-]+$")
-
     private val TOOL_NAME = Regex("^[a-z][a-z0-9_]*$")
+
+    /** id 与工具名的长度上限：注册名 `<id>_<tool>` 要进网关的工具表，简洁是硬要求。 */
+    private const val MAX_ID_LEN = 32
+    private const val MAX_TOOL_NAME_LEN = 32
     private val ENV_NAME = Regex("^[A-Z][A-Z0-9_]*$")
 
     /** `{{x}}` 与 `{{env.NAME}}`：变量名允许点号，`env.` 前缀由调用方区分。 */
-    private val TEMPLATE_VAR = Regex("""\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*}}""")
+    private val TEMPLATE_VAR = Regex("""\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}""")
 
     /** context 模板变量白名单（开放问题#4 拍板：先用文档那 5 个）。 */
     val CONTEXT_VARS = setOf(
@@ -106,7 +113,7 @@ object ManifestValidator {
         }
 
         // 2. id 格式 + 与目录名一致
-        val idOk = ID_OFFICIAL.matches(spec.id) || ID_NAMESPACED.matches(spec.id)
+        val idOk = ID_OFFICIAL.matches(spec.id) && spec.id.length <= MAX_ID_LEN
         if (!idOk) {
             issues += issue(
                 ReasonCode.ID_MISMATCH, Severity.ERROR,
@@ -114,7 +121,8 @@ object ManifestValidator {
                 // `` `标识符` `` 模板（反引号是合法的 Kotlin 标识符起始符），于是正则末尾的 `$`
                 // 会把后面的中文一起吞掉，报成「Unresolved reference '（官方）…'」——编译错误里
                 // 那个乱码就是这么来的，文件编码没问题。正则里的 `$` 一律写成 `\$`。
-                "id「${spec.id}」不符合 `^[a-z][a-z0-9-]*\$`（官方）或 `^[a-z0-9-]+\\.[a-z0-9-]+\$`（第三方）",
+                "id「${spec.id}」不符合命名规则：`^[a-z][a-z0-9-]*\$`、总长 ≤$MAX_ID_LEN、" +
+                    "**不含点号**（注册名要发给模型网关，网关只收字母数字下划线横杠）",
             )
         }
         if (spec.id != dirName) {
@@ -125,21 +133,28 @@ object ManifestValidator {
         }
 
         // 3. 工具名 + 重名
-        if (spec.tools.isEmpty()) {
-            issues += issue(ReasonCode.TOOL_NAME_INVALID, Severity.ERROR, "至少要声明一个工具（tools 为空）")
+        // 守卫型插件（能力全在 hooks 里，如 cmd-guard）允许 tools 为空：逼它挂 noop 占位工具只会
+        // 让模型看到一个什么都不能做的工具。两者都空才是真的什么都没提供。
+        if (spec.tools.isEmpty() && spec.hooks.isEmpty()) {
+            issues += issue(
+                ReasonCode.TOOL_NAME_INVALID, Severity.ERROR,
+                "至少要声明一个工具或一条钩子（tools 与 hooks 都为空）",
+            )
         }
         val seenTools = mutableSetOf<String>()
         for (tool in spec.tools) {
-            if (!TOOL_NAME.matches(tool.name)) {
+            if (!TOOL_NAME.matches(tool.name) || tool.name.length > MAX_TOOL_NAME_LEN) {
                 issues += issue(
                     ReasonCode.TOOL_NAME_INVALID, Severity.ERROR,
-                    "工具名「${tool.name}」不符合 `^[a-z][a-z0-9_]*\$`",
+                    "工具名「${tool.name}」不符合 `^[a-z][a-z0-9_]*\$` 或超过 $MAX_TOOL_NAME_LEN 字",
                 )
             }
             if (!seenTools.add(tool.name)) {
                 issues += issue(ReasonCode.NAME_CONFLICT, Severity.ERROR, "工具名「${tool.name}」在同一个插件里重复")
             }
-            val registered = "${spec.id}.${tool.name}"
+            // 注册名分隔符是**下划线**（0.8.107）：注册名要发给模型网关，deepseek 网关只收
+            // `^[a-zA-Z0-9_-]+$`，点号整批拒收（11152）。与 PluginRuntime 的拼接保持一致。
+            val registered = "${spec.id}_${tool.name}"
             if (registered in builtinToolNames || registered in installedToolNames) {
                 issues += issue(ReasonCode.NAME_CONFLICT, Severity.ERROR, "注册名「$registered」已被占用")
             }
@@ -288,7 +303,10 @@ object ManifestValidator {
         if (spec.deps.isNotEmpty()) {
             issues += issue(
                 ReasonCode.DEPS_DISABLED, Severity.WARNING,
-                "deps 在 v1 不安装，依赖它的工具会被禁用（${spec.deps.size} 条）",
+                // 0.8.107 起 deps 不再禁用工具（闸门误杀自带产物的插件，如 video-frame）：
+                // 文案必须与运行时一致，不再承诺「工具会被禁用」。
+                "deps 在 v1 不自动安装（${spec.deps.size} 条）：请确认依赖产物已随插件附带，" +
+                    "否则相关工具运行时会报依赖缺失",
             )
         }
         if (spec.enabledByDefault) {
@@ -367,7 +385,7 @@ object ManifestValidator {
         description = spec.description,
         author = spec.author,
         homepage = spec.homepage,
-        toolNames = spec.tools.map { "${spec.id}.${it.name}" },
+        toolNames = spec.tools.map { "${spec.id}_${it.name}" },
         envNames = spec.env.map { it.name },
         hookCount = spec.hooks.size,
         contextCount = spec.context.size,

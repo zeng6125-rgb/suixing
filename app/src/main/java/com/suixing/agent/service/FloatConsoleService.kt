@@ -32,6 +32,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -43,7 +44,6 @@ import com.suixing.agent.R
 import com.suixing.agent.agent.AgentEngine
 import com.suixing.agent.agent.AgentEvent
 import com.suixing.agent.agent.RunState
-import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.Roles
@@ -106,8 +106,20 @@ class FloatConsoleService : Service() {
         private const val PANEL_MIN_DP = 200
         private const val PANEL_MAX_DP = 420
 
+        /**
+         * 面板高度的可拖范围（dp）。用户拖过手柄后，面板从「随内容自适应」切成这个固定高度，
+         * 内部主体包在 ScrollView 里 —— 拖得比内容矮也能滚到 stop / 发送，不会裁掉。
+         * 0（默认）＝自适应，不写死高度，idle 时保持紧凑。
+         */
+        private const val PANEL_MIN_HEIGHT_DP = 160
+        private const val PANEL_MAX_HEIGHT_DP = 640
+
         /** How much of a message the panel's summary keeps, per line. */
-        private const val MESSAGE_PREVIEW_CHARS = 56
+        /** 每条消息在悬浮窗里最多截多少字（内容区可滚后放宽，长答也能看个大概）。 */
+        private const val MESSAGE_PREVIEW_CHARS = 160
+
+        /** 悬浮窗最多回显最近几条会话消息（内容区可滚，用户拖高就能看全这几条）。 */
+        private const val RECENT_MESSAGE_COUNT = 6
 
         /** The engine publishes a running tool as 「🔧 name…」 on [AgentEngine.RunHandle.liveLine]. */
         private const val TOOL_LIVE_PREFIX = "🔧 "
@@ -196,10 +208,16 @@ class FloatConsoleService : Service() {
     private lateinit var statsText: TextView
     private lateinit var conversationText: TextView
     private lateinit var recentText: TextView
+
+    /** 会话内容的可滚容器：手柄纵向拖动改的就是它的高度（用户拖高＝多看内容）。 */
+    private lateinit var contentScroll: ScrollView
     private lateinit var steerInput: EditText
     private lateinit var sendButton: TextView
     private lateinit var stopArea: LinearLayout
     private lateinit var feedbackText: TextView
+
+    /** 底部动作行的「停止」按钮：单 run 时显示在「回到对话」右侧，多 run 时隐藏（改走标题行）。 */
+    private lateinit var stopButton: TextView
 
     private var attached = false
     private var dotPulse: ValueAnimator? = null
@@ -214,6 +232,10 @@ class FloatConsoleService : Service() {
     private var resizeStartX = 0f
     private var resizeStartWidth = 0
 
+    /** 同一手柄的纵向分量：落点与当时的高（0＝自适应模式下从当前实测高度起算）。 */
+    private var resizeStartY = 0f
+    private var resizeStartHeight = 0
+
     /**
      * The three settings this service reads synchronously, kept as one readable copy.
      *
@@ -226,6 +248,7 @@ class FloatConsoleService : Service() {
         val resident: Boolean = false,
         val whileRunning: Boolean = true,
         val widthDp: Int = 0,
+        val heightDp: Int = 0,
     )
 
     private var consoleSettings = ConsoleSettings()
@@ -318,6 +341,8 @@ class FloatConsoleService : Service() {
         if (!::root.isInitialized) return
         trace("config width=${newConfig.screenWidthDp}dp")
         applyPanelWidth()
+        // 旋转/分屏后窗口高也变了：用户拖的固定高度可能超出新窗口，重新夹一次。
+        applyPanelHeight()
         clampX(panelWidth())
         if (attached) runCatching { windowManager.updateViewLayout(root, params) }
     }
@@ -510,6 +535,47 @@ class FloatConsoleService : Service() {
         minOf(dp(PANEL_MAX_DP), windowWidthPx() - dp(24)).coerceAtLeast(panelMinWidth())
 
     /**
+     * 内容区高度：用户拖过就是那个固定值（夹在窗口高内），没拖过（0）就是 WRAP_CONTENT 随内容
+     * 自适应 —— 面板默认保持紧凑，只有用户主动拖高才写死。
+     */
+    private fun contentHeightPx(): Int {
+        val stored = consoleSettings.heightDp
+        return if (stored <= 0) {
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        } else {
+            dp(stored).coerceIn(contentMinHeight(), contentMaxHeight())
+        }
+    }
+
+    /** The content area's height, re-applied whenever the stored one changes under it. */
+    private fun applyPanelHeight() {
+        (contentScroll.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
+            val height = contentHeightPx()
+            if (layout.height == height) return
+            layout.height = height
+            contentScroll.layoutParams = layout
+        }
+    }
+
+    private fun contentMinHeight(): Int = dp(PANEL_MIN_HEIGHT_DP)
+
+    /** The tallest the handle may drag: the ceiling, or the window, whichever is smaller. */
+    private fun contentMaxHeight(): Int =
+        minOf(dp(PANEL_MAX_HEIGHT_DP), windowHeightPx() - dp(24)).coerceAtLeast(contentMinHeight())
+
+    /** The height of the window the console floats in, in px — see [windowWidthPx]. */
+    @Suppress("DEPRECATION")
+    private fun windowHeightPx(): Int {
+        val manager = getSystemService(WindowManager::class.java)
+            ?: return resources.displayMetrics.heightPixels
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val height = runCatching { manager.currentWindowMetrics.bounds.height() }.getOrDefault(0)
+            if (height > 0) return height
+        }
+        return resources.displayMetrics.heightPixels
+    }
+
+    /**
      * The width of the window the console floats in, in px — not the display's own.
      *
      * `resources.displayMetrics` reports the whole screen, so in split screen it hands the panel a
@@ -650,11 +716,29 @@ class FloatConsoleService : Service() {
         recentText = TextView(context).apply {
             setTextColor(palette.muted)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(2), 0, dp(8))
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
+            // 顶部留 6dp：截图里内容首行紧贴会话名、像被裁掉半行，就是这里没有呼吸空间。
+            setPadding(0, dp(6), 0, dp(8))
+            // 不再 maxLines=2：内容现在包在可滚容器里，用户拖高面板就能多看 —— 这正是「悬浮窗
+            // 最主要的是显示内容给用户」要的效果。行数交给高度，而不是写死两行截断。
         }
-        addView(recentText)
+        // 会话内容包进 ScrollView：默认随内容自适应（WRAP_CONTENT），用户拖手柄纵向把它固定成
+        // 某个高度，内容超出就滚 —— 拖矮也不会把下面的输入框/停止按钮顶出去（它们在这个滚动容器
+        // 之外）。这就是「高度可调」的落点，也是原注释里「固定高度会裁掉 stop 行」那个顾虑的正解。
+        contentScroll = ScrollView(context).apply {
+            isFillViewport = true
+            addView(
+                recentText,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                contentHeightPx(),
+            )
+        }
+        addView(contentScroll)
 
         steerInput = EditText(context).apply {
             // Neutral on purpose: this one box both steers a run and opens the next turn.
@@ -684,21 +768,32 @@ class FloatConsoleService : Service() {
             },
         )
 
-        addView(
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(actionButton("回到对话") { openChat() })
-            },
-        )
-        // Filled in by [renderStopArea] once the run set is known: one run keeps the plain stop
-        // button, several get a titled row each, because a single button could only guess which
-        // conversation the user meant.
+        // 底部动作行：「回到对话」居左、「停止」居右，**同一行对齐**（截图反馈：原来「回到对话」
+        // 独占一行、停止孤悬在下一行右下角，中间一大块死空间）。单 run 时停止按钮就落在这行右侧；
+        // 多 run 时这行只留「回到对话」，带标题的停止行进上面的 [stopArea]。
         stopArea = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
         addView(stopArea)
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(actionButton("回到对话") { openChat() })
+                addView(
+                    View(context).apply {
+                        layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+                    },
+                )
+                stopButton = actionButton("停止", accent = true) {
+                    // 单 run 时这枚就是那个停止键：停最新的那个 run（与面板跟随的是同一个）。
+                    Core.engine.newestRun()?.let { stopRun(it) }
+                }
+                stopButton.visibility = View.GONE
+                addView(stopButton)
+            },
+        )
         // The panel's other lines are rewritten from the run's state on every change, so the
         // confirmation of a stop needs a line of its own to still be there when the run it
         // named has already left the list.
@@ -717,8 +812,9 @@ class FloatConsoleService : Service() {
     /**
      * The panel's resize handle: drag sideways to widen or narrow the card.
      *
-     * Width only. The height follows the content — the stop area grows a row per run in flight,
-     * and a fixed height would cut exactly those rows off.
+     * 二维（0.8.108 起）：横向拖改宽度，纵向拖改内容区高度。高度落在 [contentScroll] 这个可滚
+     * 容器上，拖矮也不会裁掉输入框/停止按钮（它们在容器之外）—— 所以「固定高度会裁掉 stop 行」
+     * 那个老顾虑不再成立，用户要的「能调高度」就落在这里。默认（没拖过）高度仍随内容自适应。
      */
     private fun resizeHandle(): View = View(this).apply {
         background = GradientDrawable().apply {
@@ -743,6 +839,9 @@ class FloatConsoleService : Service() {
         MotionEvent.ACTION_DOWN -> {
             resizeStartX = event.rawX
             resizeStartWidth = panel.width
+            resizeStartY = event.rawY
+            // 从自适应起步时，用当前实测高度当锚点，这样第一下拖动是连续的、不会跳。
+            resizeStartHeight = contentScroll.height
             true
         }
 
@@ -753,11 +852,19 @@ class FloatConsoleService : Service() {
                 layout.width = width
                 panel.layoutParams = layout
             }
+            // 纵向：手柄在底部，手指往下拖＝要看更多内容＝内容区变高。夹在 [min,max] 内。
+            val height = (resizeStartHeight + (event.rawY - resizeStartY)).toInt()
+                .coerceIn(contentMinHeight(), contentMaxHeight())
+            (contentScroll.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
+                layout.height = height
+                contentScroll.layoutParams = layout
+            }
             true
         }
 
         MotionEvent.ACTION_UP -> {
             rememberPanelWidth(panel.width)
+            rememberPanelHeight()
             // A wider panel may no longer fit where a narrower one did, so the window is pulled
             // back inside the screen with the width it just got.
             clampX(panelWidth())
@@ -773,6 +880,20 @@ class FloatConsoleService : Service() {
         val widthDp = (px / resources.displayMetrics.density).roundToInt()
         Core.appScope.launch {
             Core.settings.update { it.copy(consoleWidthDp = widthDp.coerceIn(PANEL_MIN_DP, PANEL_MAX_DP)) }
+        }
+    }
+
+    /**
+     * Remembers the dragged content height in dp, same reason as the width.
+     *
+     * 存的是 [contentScroll] 的高度；重启后 [contentHeightPx] 把它读回来，面板保持用户拖的高度。
+     */
+    private fun rememberPanelHeight() {
+        val heightDp = (contentScroll.height / resources.displayMetrics.density).roundToInt()
+        Core.appScope.launch {
+            Core.settings.update {
+                it.copy(consoleHeightDp = heightDp.coerceIn(PANEL_MIN_HEIGHT_DP, PANEL_MAX_HEIGHT_DP))
+            }
         }
     }
 
@@ -904,10 +1025,14 @@ class FloatConsoleService : Service() {
                     val handle = runs.values.maxByOrNull { it.startedAt }
                     val state = handle?.state?.value ?: RunState.Idle
                     stateText.text = consoleStatus(state, handle)
-                    statsText.text = state.detail()
+                    showStats(state.detail())
                     // The live line is re-read on every state, and the engine ticks its state
                     // while a run is in flight, so this stays current without a second stream.
-                    liveText.text = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
+                    // 空时整行收起：截图里「正在执行」与会话名之间那条空白带，就是空的 liveText
+                    // 仍占着一行行高。有内容才显示。
+                    val live = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
+                    liveText.text = live
+                    liveText.visibility = if (live.isBlank()) View.GONE else View.VISIBLE
                     // One button, two meanings, decided by the same question the label answers:
                     // while something is running a line typed here joins that run, and with
                     // nothing running it opens the conversation's next turn. The chat composer
@@ -937,9 +1062,11 @@ class FloatConsoleService : Service() {
                     resident = stored.floatingConsole,
                     whileRunning = stored.consoleWhileRunning,
                     widthDp = stored.consoleWidthDp,
+                    heightDp = stored.consoleHeightDp,
                 )
-                trace("settings resident=${stored.floatingConsole} whileRunning=${stored.consoleWhileRunning} width=${stored.consoleWidthDp}")
+                trace("settings resident=${stored.floatingConsole} whileRunning=${stored.consoleWhileRunning} width=${stored.consoleWidthDp} height=${stored.consoleHeightDp}")
                 applyPanelWidth()
+                applyPanelHeight()
                 refreshVisibility()
             }
         }
@@ -969,6 +1096,18 @@ class FloatConsoleService : Service() {
      * be typing into a chat they cannot see. With nothing running it falls back to the top of the
      * list, which is the conversation the app itself would open.
      */
+    /**
+     * 设置第三行的文案；空串时把这一行整个收起（GONE），而不是留一条空行。
+     *
+     * Running/Done 时 [detail] 返回空 ⇒ 这行消失，那一格空间让给 [liveText]（正在生成的内容）与
+     * [contentScroll]（会话内容）—— 就是用户要的「悬浮窗最主要显示内容，不刷统计」。瞬态反馈
+     * （已发送/已插话/发送失败）非空，照常显示。
+     */
+    private fun showStats(text: String) {
+        statsText.text = text
+        statsText.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+    }
+
     private fun renderConversation() {
         val conversations = Core.chats.conversations.value
         val running = Core.engine.newestRun()?.chatId
@@ -980,11 +1119,15 @@ class FloatConsoleService : Service() {
             return
         }
         conversationText.text = conversation.title.ifBlank { "新会话" }
-        val recent = conversation.messages.takeLast(2)
+        // 只留有正文的行：工具消息（role=TOOL、text=""）与失败回执等以前会显示成一条空的
+        // 「随行：」，占位却没内容。内容区可滚后回显最近 6 条，拖高就能多看。
+        val recent = conversation.messages
+            .filter { it.text.isNotBlank() }
+            .takeLast(RECENT_MESSAGE_COUNT)
         recentText.text = if (recent.isEmpty()) {
             "这个会话还没有消息"
         } else {
-            recent.joinToString("\n") { message ->
+            recent.joinToString("\n\n") { message ->
                 val speaker = if (message.role == Roles.USER) "你：" else "随行："
                 speaker + message.text.replace('\n', ' ').trim().take(MESSAGE_PREVIEW_CHARS)
             }
@@ -1021,23 +1164,16 @@ class FloatConsoleService : Service() {
      */
     private fun renderStopArea(handles: List<AgentEngine.RunHandle>) {
         stopArea.removeAllViews()
-        stopArea.visibility = if (handles.isEmpty()) View.GONE else View.VISIBLE
-        if (handles.isEmpty()) return
-        if (handles.size == 1) {
-            stopArea.addView(
-                LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(
-                        View(context).apply {
-                            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-                        },
-                    )
-                    addView(actionButton("停止", accent = true) { stopRun(handles.first()) })
-                },
-            )
+        if (handles.size <= 1) {
+            // 单 run（或没有）：停止键就落在底部动作行「回到对话」的右侧（[stopButton]），
+            // 不再单独占一行 —— 截图里那行孤悬右下角的停止按钮和它上面的死空间就是这么来的。
+            stopArea.visibility = View.GONE
+            stopButton.visibility = if (handles.isEmpty()) View.GONE else View.VISIBLE
             return
         }
+        // 两个以上：每个 run 一条带标题的行（一个按钮猜不出用户想停哪个），底部那枚隐藏。
+        stopArea.visibility = View.VISIBLE
+        stopButton.visibility = View.GONE
         for (handle in handles) {
             stopArea.addView(
                 LinearLayout(this).apply {
@@ -1102,16 +1238,16 @@ class FloatConsoleService : Service() {
             val queued = Core.engine.steer(handle.chatId, UUID.randomUUID().toString(), text)
             if (queued) {
                 steerInput.setText("")
-                statsText.text = "已插话，模型下一轮就能看到"
+                showStats("已插话，模型下一轮就能看到")
                 hideKeyboard()
             } else {
-                statsText.text = "这句话没有发出：任务刚好结束了"
+                showStats("这句话没有发出：任务刚好结束了")
             }
             return
         }
         steerInput.setText("")
         hideKeyboard()
-        statsText.text = "已发送，正在等回答…"
+        showStats("已发送，正在等回答…")
         val chatId = Core.chats.conversations.value.firstOrNull()?.id
         // On the app's own scope, not the service's: the answer outlives the panel being collapsed
         // or the console being taken down, and the run has to keep writing its transcript.
@@ -1121,7 +1257,7 @@ class FloatConsoleService : Service() {
             runCatching { startRunFor(chatId, text) }.onFailure { error ->
                 // 失败必须说出来：输入框已经被清空，用户只能靠这一行知道消息没发出去。
                 val reason = error.message ?: error::class.java.simpleName
-                scope.launch { statsText.text = "发送失败：$reason" }
+                scope.launch { showStats("发送失败：$reason") }
             }
         }
     }
@@ -1291,37 +1427,18 @@ private fun RunState.title(): String = when (this) {
     is RunState.Failed -> "失败"
 }
 
-/** The second line: how fast, how long, or what went wrong. */
+/**
+ * The second line: what went wrong, or a short idle note.
+ *
+ * 悬浮窗**不再刷 token/tps 统计**（用户：「悬浮窗不用显示这些，最主要的是显示内容给用户」）。
+ * 那些数字属于聊天页的统计卡与圆环；悬浮窗这一行只保留真正有用的话——失败原因、中断、空闲提示。
+ * Running/Done 时返回空串，[statsText] 随之隐藏，把空间让给 liveText（正在生成的内容）。
+ */
 private fun RunState.detail(): String = when (this) {
     is RunState.Idle -> "没有进行中的任务"
-    is RunState.Running -> stats.line()
-    is RunState.Done -> stats.line()
-    is RunState.Cancelled -> "已中断 · ${stats.line()}"
+    is RunState.Running -> ""
+    is RunState.Done -> ""
+    is RunState.Cancelled -> "已中断"
     is RunState.Failed -> message
 }
 
-/**
- * The third line: what went in, what came out, how fast, how long, how full the context
- * is, or what went wrong.
- *
- * The context figure is the endpoint's own prompt-token count, which makes it the one
- * number here that is not an estimate. The note rides along because the console is the
- * only place a compression can be seen while it is still news.
- */
-private fun StreamStats.line(): String = buildString {
-    append(
-        String.format(
-            Locale.US,
-            "入 %d · 出 %d · 思考 %d · %.1f tok/s · %.1fs",
-            lastPromptTokens,
-            tokensOut,
-            thinkingTokens,
-            tokPerSec,
-            elapsedMs / 1000.0,
-        ),
-    )
-    if (lastPromptTokens > 0) {
-        append(String.format(Locale.US, " · 上下文 %.1fk", lastPromptTokens / 1000.0))
-    }
-    if (note.isNotEmpty()) append(" · ").append(note)
-}

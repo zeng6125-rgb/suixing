@@ -160,6 +160,9 @@ val REASONING_LEVELS: List<Pair<String, String>> = listOf(
     "medium" to "中",
     "high" to "高",
     "xhigh" to "xhigh",
+    // 用户要的 max 档（2026-10-13）：wire 值就是 "max"。与 xhigh 同待遇——仅部分模型/网关
+    // 支持，不支持的忽略（设置页 hint 已说明）。
+    "max" to "max",
 )
 
 /**
@@ -566,6 +569,13 @@ val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
  * invalidate the whole provided subtree (the entire NavHost) instead of just its readers.
  */
 val LocalHeldImePx = compositionLocalOf { 0 }
+
+/**
+ * 外壳的 IME clamp 冻结开关（0.8.107）：聊天页在「按下到抬手后守护窗」期间置 true，
+ * 外壳就不接受任何 IME inset 变化 —— 抬手时选择手柄/菜单把高度报进 inset、输入框底垫暴涨，
+ * 正是用户拍到的「抬起时对话框与输入法高度变得很大」。shell 提供、ChatScreen 写。
+ */
+val LocalSetSelectionActive = compositionLocalOf<((Boolean) -> Unit)?> { null }
 
 /**
  * The bar for a page that is not a top-level destination: a back button instead of the

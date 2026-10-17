@@ -82,6 +82,13 @@ internal fun Map<String, Int>.withContextWindow(model: String, tokens: Int): Map
     if (tokens <= 0 || model.isBlank()) this - model else this + (model to tokens)
 
 /**
+ * 同 [withContextWindow] 的键规则（裸模型 id、≤0 删键＝「不说/默认」），用于按模型的最大输出表
+ * [AppSettings.modelMaxTokens]。别名只为读的人知道这张表存的是什么。
+ */
+internal fun Map<String, Int>.withMaxTokens(model: String, tokens: Int): Map<String, Int> =
+    withContextWindow(model, tokens)
+
+/**
  * Fills in the windows the endpoint advertised for its models, leaving every window the user
  * set untouched: a key that is already here is never overwritten, so 自定义 wins over 上游 and
  * re-fetching the list cannot undo a choice. Blank ids and non-positive counts are ignored —

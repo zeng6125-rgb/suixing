@@ -56,21 +56,43 @@ interface Tool {
     suspend fun run(args: JsonObject): ToolResult
 }
 
+/**
+ * 把「只有 spec」的虚拟工具包装成 [Tool]，好让它出现在工具页里。
+ *
+ * 用于引擎自己在分发前拦截的工具（例如 `compress_context`）：它没有要跑的实现、也不在注册表里，
+ * 但模型看得到它，所以设置页也该列出来。它的 [run] 永远不会被调用 —— 引擎在分发前就返回了。
+ */
+fun virtualTool(spec: ToolSpec): Tool = object : Tool {
+    override val spec: ToolSpec = spec
+    override val tier: String = TIER_NONE
+    override suspend fun run(args: JsonObject): ToolResult =
+        ToolResult.failure("这个工具由引擎在分发前拦截，不会走到这里。")
+}
+
 /** A bundle of related tools sharing state (context, capabilities). */
 abstract class ToolGroup {
     abstract val specs: List<ToolSpec>
 
     open val tier: String = TIER_NONE
 
+    /**
+     * 设置页里这一组显示的名字（中文可以）。**由工具包自己声明**，界面不再维护一张
+     * 名字→分组的表：加了工具就自动出现在它那一组，组头的人数也跟着变。
+     * 空串＝未声明，界面归到「其他」。
+     */
+    open val group: String = ""
+
     abstract suspend fun execute(name: String, args: JsonObject): ToolResult
 }
 
 /** Small builders so tool schemas stay readable. */
 object Schema {
+    // 描述是**可选**的：`"description":""` 也要占十几个字符，而属性名常常已经说明一切（path、from、x…）。
+    // 传空串就整条不发 —— 每次请求都付这份钱，能省则省（实测口径见 ToolSchemaBudgetTest）。
     fun string(description: String, enumValues: List<String>? = null, default: String? = null): JsonObject =
         buildJsonObject {
             put("type", "string")
-            put("description", description)
+            if (description.isNotBlank()) put("description", description)
             if (enumValues != null) put("enum", JsonArray(enumValues.map { JsonPrimitive(it) }))
             if (default != null) put("default", default)
         }
@@ -82,7 +104,7 @@ object Schema {
         maximum: Int? = null,
     ): JsonObject = buildJsonObject {
         put("type", "integer")
-        put("description", description)
+        if (description.isNotBlank()) put("description", description)
         if (default != null) put("default", default)
         if (minimum != null) put("minimum", minimum)
         if (maximum != null) put("maximum", maximum)
@@ -90,7 +112,7 @@ object Schema {
 
     fun boolean(description: String, default: Boolean? = null): JsonObject = buildJsonObject {
         put("type", "boolean")
-        put("description", description)
+        if (description.isNotBlank()) put("description", description)
         if (default != null) put("default", default)
     }
 
@@ -128,6 +150,9 @@ class ToolRegistry private constructor() {
     private val builtin = LinkedHashMap<String, Tool>()
     private val dynamic = LinkedHashMap<String, Tool>()
 
+    /** 工具名 → 分组名，由 [add] 在注册时记下（见 [groupOf]）。 */
+    private val groups = LinkedHashMap<String, String>()
+
     /** Tool names this view hides; empty for the registry the app builds at startup. */
     private var hidden: Set<String> = emptySet()
 
@@ -153,6 +178,7 @@ class ToolRegistry private constructor() {
         add(SkillTools(skills))
         add(WebTools(context, settings))
         add(VoiceTools(speaker))
+        add(AssistantTools())
     }
 
     fun add(group: ToolGroup) {
@@ -163,8 +189,15 @@ class ToolRegistry private constructor() {
                 override val tier: String = group.tier
                 override suspend fun run(args: JsonObject): ToolResult = group.execute(spec.name, args)
             }
+            groups[spec.name] = group.group
         }
     }
+
+    /** 这个名字属于哪一组（工具包自己声明的）；空串＝没声明，界面归到「其他」。 */
+    fun groupOf(name: String): String = groups[name].orEmpty()
+
+    /** 组的出现顺序：按注册顺序，自动跟着工具包走，界面不用再排。 */
+    fun groupOrder(): List<String> = groups.values.filter { it.isNotBlank() }.distinct()
 
     /**
      * Replaces every runtime-contributed tool whose name starts with [prefix].

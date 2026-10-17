@@ -147,6 +147,47 @@ fun AboutScreen(onBack: () -> Unit) {
                 )
             }
 
+            // 随包分发的 GPL 组件（自带 shell）。GPL 要求分发二进制时给出对应源码的获取途径，
+            // 这一页就是那个"书面承诺"的落点：组件、版本、许可、以及**本应用的源码仓库**
+            // （仓库里 app/src/main/jniLibs/arm64-v8a/ 下的两个文件就是这两个二进制的原样拷贝，
+            // 上游源码与构建方式一并写在下面）。
+            SuixingCard {
+                Text(
+                    text = "随包分发的开源组件（GPL）",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "为了在手机上有一个完整的 shell，本应用自带两个静态编译的 AArch64 二进制" +
+                        "（随 APK 分发，不是下载的）：",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "· bash 5.3 —— GPL-3.0-or-later（来自 Debian bash-static）\n" +
+                        "· BusyBox 1.38.0 —— GPL-2.0-only（来自 Debian busybox-static）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "对应源码：https://salsa.debian.org/debian/bash 与 " +
+                        "https://salsa.debian.org/debian/busybox（或任一 Debian 镜像的 " +
+                        "bash-static / busybox-static 源码包）。如需书面提供源码，按仓库里的 " +
+                        "issue 或邮件索取即可。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                AboutLink(
+                    title = "本应用源码",
+                    subtitle = "GPL 组件与构建脚本都在这个仓库里",
+                    url = "https://github.com/zeng6125-rgb/suixing",
+                )
+            }
+
         }
     }
 }

@@ -131,6 +131,7 @@ import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
 import com.suixing.agent.ui.components.LocalHeldImePx
+import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
@@ -327,7 +328,12 @@ fun SuixingApp() {
     val imeRawPx = WindowInsets.ime.getBottom(rootDensity)
     var heldImePx by remember { mutableIntStateOf(0) }
     var imeDir by remember { mutableIntStateOf(0) }
-    LaunchedEffect(imeRawPx) {
+    // 长按/选择期间冻结 clamp（用户：「抬起时对话框与输入法的高度有时变得很大」）：抬手那一刻
+    // 选择手柄/菜单出现，这台 ROM 把它的高度报进 IME inset，clamp 一接受、输入框底垫就暴涨。
+    // 守护窗（按下到抬手后 400ms）里不接受任何 inset 变化；窗口外照常。
+    var selectionActive by remember { mutableStateOf(false) }
+    LaunchedEffect(imeRawPx, selectionActive) {
+        if (selectionActive) return@LaunchedEffect
         val delta = imeRawPx - heldImePx
         if (delta == 0) return@LaunchedEffect
         val dir = if (delta > 0) 1 else -1
@@ -352,6 +358,7 @@ fun SuixingApp() {
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
         LocalHeldImePx provides heldImePx,
+        LocalSetSelectionActive provides { active -> selectionActive = active },
     ) {
         // 用户明确要求保留这一段（2026-10-11：先被自审删掉，用户看到键盘后面那块颜色变了，要求回退）。
         // 把窗口底色刷成主题 surface：键盘圆角/键盘后面那条缝露的就是这个颜色；删掉之后窗口是透明的，
@@ -438,6 +445,13 @@ fun SuixingApp() {
                         onTogglePin = { conversation ->
                             scope.launch {
                                 Core.chats.setPinned(conversation.id, !conversation.pinned)
+                            }
+                        },
+                        // 归档 = 纯标签（不动 updatedAt，也不动列表顺序）：抽屉不再显示它，
+                        // 已归档的那份在「设置 → 会话管理」里翻出来取消归档。
+                        onToggleArchive = { conversation ->
+                            scope.launch {
+                                Core.chats.setArchived(conversation.id, !conversation.archived)
                             }
                         },
                         onNavigate = open,
@@ -535,7 +549,19 @@ fun SuixingApp() {
                             // （「蒙版由深到没有」）。进页不受影响 —— 它是上面那条 0.8.91 的滑入。
                             popEnterTransition = { EnterTransition.None },
                             popExitTransition = {
-                                fadeOut(tween(NAV_FADE_MS, easing = FastOutSlowInEasing))
+                                // 用户再三强调的规则（0.8.98 立过、0.8.106 统一动画时被我一并盖掉，
+                                // 这轮恢复）：**从侧边栏点进的那一页，返回不要动画**（瞬时揭开出发页）；
+                                // 设置里的子页（push 进的）返回仍走淡出。判据用 drawerTarget：open()
+                                // 置位、结算块在 route 离开它时清掉，所以 pop 那一刻它仍指向被退的页。
+                                // 这条 lambda 是接收者形式（AnimatedContentTransitionScope），被退的
+                                // 目的地在 initialState 上，不是 lambda 参数。
+                                if (drawerTarget != null &&
+                                    initialState.destination.route == drawerTarget
+                                ) {
+                                    ExitTransition.None
+                                } else {
+                                    fadeOut(tween(NAV_FADE_MS, easing = FastOutSlowInEasing))
+                                }
                             },
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
@@ -564,6 +590,8 @@ fun SuixingApp() {
                                 // 会话管理：数据页那行「会话管理」指过来（打开/导出/删除聊天记录）。
                                 "settings/chats",
                                 "settings/usage",
+                                // 性能页：设置 →「数据与关于」里那行「性能」指过来。
+                                "settings/perf",
                             ).forEach { route ->
                                 composable(route) {
                                     SettingsPageRoute(
@@ -710,6 +738,7 @@ private fun Drawer(
     onDeleteConversation: (Conversation) -> Unit,
     onRenameConversation: (Conversation, String) -> Unit,
     onTogglePin: (Conversation) -> Unit,
+    onToggleArchive: (Conversation) -> Unit,
     consoleOn: Boolean,
     onToggleConsole: () -> Unit,
     onNavigate: (String) -> Unit,
@@ -825,11 +854,14 @@ private fun Drawer(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
             ) {
                 // 置顶只在抽屉里排：仓库那份列表仍是时间序（会话管理页与「上次打开」都吃它），
-                // 这里换的是展示顺序，不是数据的顺序。
-                val ordered = conversations.sortedWith(
-                    compareByDescending<Conversation> { it.pinned }
-                        .thenByDescending { it.updatedAt },
-                )
+                // 这里换的是展示顺序，不是数据的顺序。已归档的不显示（归档就是把它从这份列表里
+                // 收起来，数据仍在，去「设置 → 会话管理」取消归档）。
+                val ordered = conversations
+                    .filterNot { it.archived }
+                    .sortedWith(
+                        compareByDescending<Conversation> { it.pinned }
+                            .thenByDescending { it.updatedAt },
+                    )
                 items(ordered, key = { it.id }) { conversation ->
                     ConversationRow(
                         conversation = conversation,
@@ -850,6 +882,10 @@ private fun Drawer(
                         onTogglePin = {
                             menuFor = null
                             onTogglePin(conversation)
+                        },
+                        onToggleArchive = {
+                            menuFor = null
+                            onToggleArchive(conversation)
                         },
                         onCopyTitle = {
                             menuFor = null
@@ -1011,6 +1047,7 @@ private fun ConversationRow(
     onRename: () -> Unit,
     onDelete: () -> Unit,
     onTogglePin: () -> Unit,
+    onToggleArchive: () -> Unit,
     onCopyTitle: () -> Unit,
     onExport: () -> Unit,
 ) {
@@ -1090,6 +1127,11 @@ private fun ConversationRow(
             DropdownMenuItem(
                 text = { Text(if (conversation.pinned) "取消置顶" else "置顶") },
                 onClick = onTogglePin,
+            )
+            // 归档：从抽屉列表里收起来，数据留着；取消归档在「设置 → 会话管理」那一页。
+            DropdownMenuItem(
+                text = { Text(if (conversation.archived) "取消归档" else "归档") },
+                onClick = onToggleArchive,
             )
             DropdownMenuItem(text = { Text("复制标题") }, onClick = onCopyTitle)
             DropdownMenuItem(text = { Text("导出") }, onClick = onExport)

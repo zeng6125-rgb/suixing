@@ -14,7 +14,7 @@ import org.junit.Test
  * M2 读管道（HOST-DEV §5 接线点 A）与 M3 执行管道里**不碰磁盘的那一半**的纯逻辑回归网。
  *
  * 覆盖：[PluginRuntime.toolsFor] / [toolSpecs] / [resolve] / [contextsFor]（工具表里有没有
- * `github.repo_search` 的全部判据）、[preExecute]（hook 裁决：三个条件 AND、只能收紧、坏 regex
+ * `github_repo_search` 的全部判据）、[preExecute]（hook 裁决：三个条件 AND、只能收紧、坏 regex
  * 跳过）、[render]（模板求值与缺值上报）、[shape] / [pickPath]（`pick` 与 `max_chars`）。
  *
  * 没覆盖的只有真的发 http / 跑 shell / 读 `env.json` 那一段：它们要 `Core` 与网络，只能在真机上验。
@@ -66,7 +66,7 @@ class PluginRuntimeTest {
     @Test
     fun `注册名带插件前缀`() {
         val specs = listOf(spec("github", "repo_search"))
-        assertEquals(listOf("github.repo_search"), PluginRuntime.toolSpecs(specs, emptySet()).map { it.name })
+        assertEquals(listOf("github_repo_search"), PluginRuntime.toolSpecs(specs, emptySet()).map { it.name })
     }
 
     @Test
@@ -81,7 +81,7 @@ class PluginRuntimeTest {
     fun `与内置工具重名时跳过且不覆盖`() {
         // 内置里已经有 run_shell：一个插件不能靠重名顶掉它。
         val specs = listOf(spec("evil", "run_shell"))
-        val out = PluginRuntime.toolSpecs(specs, setOf("evil.run_shell"))
+        val out = PluginRuntime.toolSpecs(specs, setOf("evil_run_shell"))
         assertTrue(out.isEmpty())
     }
 
@@ -90,16 +90,16 @@ class PluginRuntimeTest {
         val specs = listOf(spec("a", "x"), spec("b", "y"))
         // taken 里没有 a.x，但第二个插件若也叫 a.x 就会被跳过（这里用同 id 模拟）
         val out = PluginRuntime.toolSpecs(specs, emptySet())
-        assertEquals(listOf("a.x", "b.y"), out.map { it.name })
+        assertEquals(listOf("a_x", "b_y"), out.map { it.name })
     }
 
     @Test
     fun `resolve 按注册名反查`() {
         val specs = listOf(spec("github", "repo_search", "code_search"))
-        val hit = PluginRuntime.resolve(specs, "github.code_search")
+        val hit = PluginRuntime.resolve(specs, "github_code_search")
         assertEquals("github", hit?.first?.id)
         assertEquals("code_search", hit?.second?.name)
-        assertNull(PluginRuntime.resolve(specs, "github.nope"))
+        assertNull(PluginRuntime.resolve(specs, "github_nope"))
     }
 
     @Test
@@ -144,26 +144,17 @@ class PluginRuntimeTest {
     }
 
     @Test
-    fun `声明了 deps 的工具不进工具表`() {
-        // v1 不装依赖：白盒页写的「依赖它的工具会被禁用」在执行管道接通之后必须真的兑现。
+    fun `声明了 deps 的工具仍进工具表`() {
+        // 0.8.107 起 deps 不再禁用工具：闸门误杀了自带产物的插件（video-frame 的 bin/ 里就躺着
+        // ffmpeg）。依赖真缺时 shell 自己的报错更真。
         val specs = listOf(
             spec("withdeps", "x", deps = listOf(DepDecl(id = "ffmpeg", url = "https://x/f", sha256 = "a", install = "true"))),
             spec("plain", "y"),
         )
-        assertEquals(listOf("plain.y"), PluginRuntime.toolSpecs(specs, emptySet()).map { it.name })
-    }
-
-    @Test
-    fun `blockedByDeps 说出是哪个依赖`() {
-        val specs = listOf(
-            spec("withdeps", "x", deps = listOf(DepDecl(id = "ffmpeg", url = "https://x/f", sha256 = "a", install = "true"))),
-            spec("plain", "y"),
+        assertEquals(
+            listOf("withdeps_x", "plain_y"),
+            PluginRuntime.toolSpecs(specs, emptySet()).map { it.name },
         )
-        val blocked = PluginRuntime.blockedByDeps(specs[0])
-        assertNotNull("deps 插件必须被拦住", blocked)
-        assertTrue("拦住的原因要能对上：$blocked", blocked!!.contains("ffmpeg"))
-        assertTrue("拦住的原因要能对上：$blocked", blocked.contains("v1"))
-        assertNull(PluginRuntime.blockedByDeps(specs[1]))
     }
 
     // ---------------------------------------------------------------- M3 hooks
@@ -187,7 +178,7 @@ class PluginRuntimeTest {
     fun `when_tool 只对那个工具生效`() {
         val hooks = listOf(spec("github", "x") to hook(action = "deny", tool = "run_shell"))
         assertTrue(PluginRuntime.preExecute(hooks, "run_shell", "{}", null).deny)
-        assertFalse(PluginRuntime.preExecute(hooks, "github.x", "{}", null).deny)
+        assertFalse(PluginRuntime.preExecute(hooks, "github_x", "{}", null).deny)
     }
 
     @Test
@@ -203,15 +194,15 @@ class PluginRuntimeTest {
         // 要拦内置工具得用 when.tool + when.regex。
         val hooks = listOf(spec("github", "x") to hook(action = "deny", minRisk = "high"))
         assertFalse(PluginRuntime.preExecute(hooks, "run_shell", "{}", risk = null).deny)
-        assertFalse(PluginRuntime.preExecute(hooks, "github.x", "{}", risk = "medium").deny)
-        assertTrue(PluginRuntime.preExecute(hooks, "github.x", "{}", risk = "high").deny)
+        assertFalse(PluginRuntime.preExecute(hooks, "github_x", "{}", risk = "medium").deny)
+        assertTrue(PluginRuntime.preExecute(hooks, "github_x", "{}", risk = "high").deny)
     }
 
     @Test
     fun `tool 与 regex 是 AND 关系`() {
         val hooks = listOf(spec("github", "x") to hook(action = "deny", tool = "run_shell", regex = "pm clear"))
         assertFalse(PluginRuntime.preExecute(hooks, "run_shell", """{"command":"ls"}""", null).deny)
-        assertFalse(PluginRuntime.preExecute(hooks, "github.x", """{"command":"pm clear a"}""", null).deny)
+        assertFalse(PluginRuntime.preExecute(hooks, "github_x", """{"command":"pm clear a"}""", null).deny)
         assertTrue(PluginRuntime.preExecute(hooks, "run_shell", """{"command":"pm clear a"}""", null).deny)
     }
 
@@ -221,7 +212,7 @@ class PluginRuntimeTest {
             spec("a", "x") to hook(action = "require_confirm"),
             spec("b", "y") to hook(action = "log"),
         )
-        val verdict = PluginRuntime.preExecute(hooks, "github.x", "{}", null)
+        val verdict = PluginRuntime.preExecute(hooks, "github_x", "{}", null)
         assertTrue(verdict.requireConfirm)
         assertFalse(verdict.deny)
     }
@@ -234,7 +225,7 @@ class PluginRuntimeTest {
             spec("a", "x") to hook(action = "deny", regex = "([unclosed"),
             spec("b", "y") to hook(action = "require_confirm"),
         )
-        val verdict = PluginRuntime.preExecute(hooks, "github.x", "{}", null)
+        val verdict = PluginRuntime.preExecute(hooks, "github_x", "{}", null)
         assertFalse(verdict.deny)
         assertTrue(verdict.requireConfirm)
     }

@@ -20,102 +20,133 @@ class FileTools(private val context: Context) : ToolGroup() {
 
     private val workspace: File get() = context.getExternalFilesDir(null) ?: context.filesDir
 
+    override val group: String = "文件"
+
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             "read_file",
-            "读取文本文件内容（可按行截取）。相对路径基于工作目录，绝对路径按原样使用。",
+            "Read a text file (optionally a line range). Relative paths resolve against the working " +
+                "directory; absolute paths are used as given.",
             Schema.objectOf(
                 properties = listOf(
-                    "path" to Schema.string("文件路径，如 note.txt 或 /sdcard/Download/a.md"),
-                    "offset" to Schema.integer("从第几行开始，默认 1", default = 1, minimum = 1),
-                    "limit" to Schema.integer("最多读多少行，默认 400", default = 400, minimum = 1, maximum = 5000),
+                    "path" to Schema.string("File path, e.g. note.txt or /sdcard/Download/a.md"),
+                    "offset" to Schema.integer("First line to read, default 1", default = 1, minimum = 1),
+                    "limit" to Schema.integer(
+                        "Maximum lines to read, default 400",
+                        default = 400,
+                        minimum = 1,
+                        maximum = 5000,
+                    ),
                 ),
                 required = listOf("path"),
             ),
         ),
         ToolSpec(
             "write_file",
-            "写入文本文件（自动创建上级目录），可选择追加。",
+            "Write a text file (parent directories are created), optionally appending.",
             Schema.objectOf(
                 properties = listOf(
-                    "path" to Schema.string("文件路径"),
-                    "content" to Schema.string("要写入的文本内容"),
-                    "append" to Schema.boolean("是否追加到文件末尾，默认覆盖", default = false),
+                    "path" to Schema.string("File path"),
+                    "content" to Schema.string("Text to write"),
+                    "append" to Schema.boolean("Append to the end of the file instead of overwriting", default = false),
                 ),
                 required = listOf("path", "content"),
             ),
         ),
         ToolSpec(
-            "list_dir",
-            "列出目录内容（目录在前，含大小）。",
+            "edit_file",
+            "Replace a span of a text file in place: the reliable way to change part of a file without " +
+                "rewriting all of it. old_string must match the file character for character (spaces and " +
+                "newlines included) and must be unique — when it occurs more than once the edit is refused " +
+                "and the matching lines are reported, so nothing is changed blindly. Pass replace_all=true " +
+                "to replace every occurrence.",
             Schema.objectOf(
                 properties = listOf(
-                    "path" to Schema.string("目录路径，默认工作目录", default = "~"),
-                    "limit" to Schema.integer("最多列出多少项，默认 200", default = 200, minimum = 1, maximum = 1000),
+                    "path" to Schema.string("File path"),
+                    "old_string" to Schema.string("Exact text to replace; include surrounding lines to make it unique"),
+                    "new_string" to Schema.string("Replacement text"),
+                    "replace_all" to Schema.boolean("Replace every occurrence, default false", default = false),
+                ),
+                required = listOf("path", "old_string", "new_string"),
+            ),
+        ),
+        ToolSpec(
+            "list_dir",
+            "List a directory (directories first, with sizes).",
+            Schema.objectOf(
+                properties = listOf(
+                    "path" to Schema.string("Directory path, default the working directory", default = "~"),
+                    "limit" to Schema.integer("Maximum entries, default 200", default = 200, minimum = 1, maximum = 1000),
                 ),
             ),
         ),
         ToolSpec(
             "make_dir",
-            "创建目录（含所有上级目录）。",
+            "Create a directory, including any missing parents.",
             Schema.objectOf(
-                properties = listOf("path" to Schema.string("要创建的目录路径")),
+                properties = listOf("path" to Schema.string("Directory path to create")),
                 required = listOf("path"),
             ),
         ),
         ToolSpec(
             "stat_path",
-            "查看路径的详细信息：是否存在、类型、大小、修改时间、可读可写。",
+            "Inspect a path: whether it exists, its type, size, modification time and read/write access.",
             Schema.objectOf(
-                properties = listOf("path" to Schema.string("文件或目录路径")),
+                properties = listOf("path" to Schema.string("File or directory path")),
                 required = listOf("path"),
             ),
         ),
         ToolSpec(
             "move_path",
-            "移动或重命名文件/目录。",
+            "Move or rename a file or directory.",
             Schema.objectOf(
                 properties = listOf(
-                    "from" to Schema.string("源路径"),
-                    "to" to Schema.string("目标路径"),
+                    "from" to Schema.string("Source path"),
+                    "to" to Schema.string("Destination path"),
                 ),
                 required = listOf("from", "to"),
             ),
         ),
         ToolSpec(
             "delete_path",
-            "删除文件或目录（目录默认不递归：非空目录会被拒绝，确认要整树删除时传 recursive=true）。这是不可逆操作。",
+            "Delete a file or directory. Directories are not recursive by default: a non-empty " +
+                "directory is refused, and deleting the whole tree needs recursive=true. This cannot be undone.",
             Schema.objectOf(
                 properties = listOf(
-                    "path" to Schema.string("要删除的路径"),
-                    "recursive" to Schema.boolean("目录是否递归删除，默认 false", default = false),
+                    "path" to Schema.string("Path to delete"),
+                    "recursive" to Schema.boolean("Delete a directory tree recursively, default false", default = false),
                 ),
                 required = listOf("path"),
             ),
         ),
         ToolSpec(
             "find_files",
-            "按名称在目录树中查找文件。",
+            "Find files by name anywhere under a directory tree.",
             Schema.objectOf(
                 properties = listOf(
-                    "root" to Schema.string("起始目录，默认工作目录", default = "~"),
-                    "name" to Schema.string("文件名包含的关键字（不区分大小写）"),
-                    "max_depth" to Schema.integer("最大搜索深度，默认 8", default = 8, minimum = 1, maximum = 30),
-                    "limit" to Schema.integer("最多返回多少个，默认 60", default = 60, minimum = 1, maximum = 500),
+                    "root" to Schema.string("Starting directory, default the working directory", default = "~"),
+                    "name" to Schema.string("Case-insensitive substring of the file name"),
+                    "max_depth" to Schema.integer("Maximum search depth, default 8", default = 8, minimum = 1, maximum = 30),
+                    "limit" to Schema.integer("Maximum results, default 60", default = 60, minimum = 1, maximum = 500),
                 ),
                 required = listOf("name"),
             ),
         ),
         ToolSpec(
             "search_in_files",
-            "在目录下的文本文件里搜索内容，返回「文件:行号: 内容」。",
+            "Search the text files under a directory and return matches as 「path:line: text」.",
             Schema.objectOf(
                 properties = listOf(
-                    "root" to Schema.string("起始目录，默认工作目录", default = "~"),
-                    "query" to Schema.string("要搜索的文本或正则"),
-                    "regex" to Schema.boolean("是否按正则解释 query，默认 false", default = false),
-                    "max_files" to Schema.integer("最多扫描多少个文件，默认 400", default = 400, minimum = 1, maximum = 5000),
-                    "limit" to Schema.integer("最多返回多少条命中，默认 60", default = 60, minimum = 1, maximum = 500),
+                    "root" to Schema.string("Starting directory, default the working directory", default = "~"),
+                    "query" to Schema.string("Text or regular expression to search for"),
+                    "regex" to Schema.boolean("Treat query as a regular expression, default false", default = false),
+                    "max_files" to Schema.integer(
+                        "Maximum files to scan, default 400",
+                        default = 400,
+                        minimum = 1,
+                        maximum = 5000,
+                    ),
+                    "limit" to Schema.integer("Maximum matches, default 60", default = 60, minimum = 1, maximum = 500),
                 ),
                 required = listOf("query"),
             ),
@@ -125,6 +156,7 @@ class FileTools(private val context: Context) : ToolGroup() {
     override suspend fun execute(name: String, args: JsonObject): ToolResult = when (name) {
         "read_file" -> readFile(args)
         "write_file" -> writeFile(args)
+        "edit_file" -> editFile(args)
         "list_dir" -> listDir(args)
         "make_dir" -> makeDir(args)
         "stat_path" -> statPath(args)
@@ -186,6 +218,73 @@ class FileTools(private val context: Context) : ToolGroup() {
             ToolResult.failure("写入失败：${error.message ?: error.javaClass.simpleName}")
         }
     }
+
+    /**
+     * 按原文替换一段（用户：「不要整篇重写，只改那一处」）。三条防线，宁可拒绝也不盲改：
+     * 找不到就说清楚要逐字符一致；多处命中就拒绝并报出行号；成功时给出改动的行预览。
+     */
+    private suspend fun editFile(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        try {
+            val path = args.str("path")
+            if (path.isNullOrBlank()) return@withContext ToolResult.failure("缺少参数 path")
+            val old = args.str("old_string").orEmpty()
+            if (old.isEmpty()) return@withContext ToolResult.failure("缺少参数 old_string")
+            val new = args.str("new_string").orEmpty()
+            val replaceAll = args.bool("replace_all", false)
+            val file = resolve(path)
+            if (!file.exists()) return@withContext ToolResult.failure("文件不存在：${file.absolutePath}")
+            if (file.isDirectory) return@withContext ToolResult.failure("${file.absolutePath} 是目录，请改用 list_dir")
+            if (file.length() > MAX_TEXT_BYTES) {
+                return@withContext ToolResult.failure("文件过大（${humanSize(file.length())}），请改用 read_file 分段处理后重写")
+            }
+            val text = file.readText()
+            val hits = occurrences(text, old)
+            if (hits.isEmpty()) {
+                return@withContext ToolResult.failure(
+                    "文件里找不到 old_string：${file.absolutePath}。它必须与文件内容**逐字符一致**" +
+                        "（空格、缩进、换行都要一样）；先用 read_file 看一眼原文再改。",
+                )
+            }
+            if (hits.size > 1 && !replaceAll) {
+                val lines = hits.map { lineOf(text, it) }.joinToString("、")
+                return@withContext ToolResult.failure(
+                    "old_string 在文件里出现 ${hits.size} 次（第 $lines 行），拒绝盲改：" +
+                        "把 old_string 写长一点（带上前后行）让它唯一，或传 replace_all=true 全部替换。",
+                )
+            }
+            val changed = if (replaceAll) text.replace(old, new) else {
+                text.substring(0, hits.first()) + new + text.substring(hits.first() + old.length)
+            }
+            file.writeText(changed)
+            val preview = buildString {
+                appendLine("- ${old.lines().first()}")
+                appendLine("+ ${new.lines().first()}")
+                if (old.lines().size > 1 || new.lines().size > 1) {
+                    appendLine("（共替换 ${old.lines().size} 行 → ${new.lines().size} 行）")
+                }
+            }.trim()
+            ToolResult.success(
+                "已修改 ${file.absolutePath}（第 ${lineOf(text, hits.first())} 行，替换 ${hits.size} 处）：\n$preview",
+            )
+        } catch (error: Exception) {
+            ToolResult.failure("修改失败：${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    /** 非重叠命中位置；空 needle 不算命中。 */
+    private fun occurrences(haystack: String, needle: String): List<Int> {
+        if (needle.isEmpty()) return emptyList()
+        val out = mutableListOf<Int>()
+        var at = haystack.indexOf(needle)
+        while (at >= 0) {
+            out += at
+            at = haystack.indexOf(needle, at + needle.length)
+        }
+        return out
+    }
+
+    /** 1-based 行号：该偏移之前有多少个换行。 */
+    private fun lineOf(text: String, index: Int): Int = text.substring(0, index).count { it == '\n' } + 1
 
     private suspend fun listDir(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         try {

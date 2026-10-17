@@ -140,7 +140,11 @@ fun PluginsSection(onNotify: (String) -> Unit) {
             if (loaded) {
                 EmptyState(
                     title = "还没有可安装的插件",
-                    subtitle = "插件的形态还在确定中，定下来之后会出现在这里。",
+                    subtitle = "选一个插件包（zip）安装。\n\n" +
+                        "命名规则（硬规则，不符会被拒装）：\n" +
+                        "· id 与工具名：小写字母开头，只含小写字母、数字、横杠（id）或下划线（工具名）\n" +
+                        "· id 不含点号、总长 ≤32；工具名 ≤32\n" +
+                        "· 注册名＝<id>_<tool>，要发给模型网关，网关只收字母数字下划线横杠",
                 )
             }
         } else {
@@ -405,13 +409,17 @@ private fun PluginDetailDialog(
                         Text("env", style = MaterialTheme.typography.titleSmall)
                         spec.env.forEach { decl ->
                             val value = env[decl.name]
+                            // 展示按「env.json 值 > manifest.defaultValue > （未填）」合并
+                            // （FEEDBACK-v0.8.97 #5）：执行侧早就是这个优先级，展示侧之前只读 env.json，
+                            // 声明了 defaultValue 的字段会显示「（未填）」，看着像没生效。
+                            val shown = when {
+                                !value.isNullOrEmpty() -> if (decl.secret) "••••••" else value
+                                !decl.defaultValue.isNullOrEmpty() ->
+                                    if (decl.secret) "••••••（默认值）" else "${decl.defaultValue}（默认值）"
+                                else -> "（未填）"
+                            }
                             Text(
-                                text = decl.name + if (decl.required) "（必填）" else "" +
-                                    " = " + when {
-                                        value.isNullOrEmpty() -> "（未填）"
-                                        decl.secret -> "••••••"
-                                        else -> value
-                                    },
+                                text = decl.name + (if (decl.required) "（必填）" else "") + " = " + shown,
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
@@ -473,6 +481,15 @@ private fun InstallConfirmDialog(
                             result.level?.name,
                             summary?.risk,
                         ).joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    // 命名规则常驻说明（用户：「插件自行创建的命名规则要求，简洁不允许带点号；
+                    // 创建插件的流程要有指令工具提供」）：每次安装确认都看得到，拒装时上面的
+                    // issues 会指出具体哪一条不符。
+                    Text(
+                        text = "命名规则：id 小写字母开头、只含小写字母/数字/横杠、≤32 字、不含点号；" +
+                            "工具名同规则但可含下划线；注册名＝<id>_<tool>（发给模型网关，只收字母数字下划线横杠）",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

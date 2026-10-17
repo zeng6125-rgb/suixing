@@ -4,10 +4,12 @@ import android.content.Context
 import com.suixing.agent.agent.AgentEngine
 import com.suixing.agent.agent.ApprovalGate
 import com.suixing.agent.capability.CapabilityHub
+import com.suixing.agent.capability.Shell
 import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.McpStore
 import com.suixing.agent.data.MemoryStore
+import com.suixing.agent.data.PerfMonitor
 import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.TodoStore
@@ -47,6 +49,10 @@ object Core {
         private set
 
     lateinit var appContext: Context
+        private set
+
+    /** 性能记录（有界落盘）。设置里的「性能」页与调试都读它，见 [PerfMonitor]。 */
+    lateinit var perf: PerfMonitor
         private set
     lateinit var settings: SettingsRepository
         private set
@@ -123,6 +129,8 @@ object Core {
         synchronized(this) {
             if (initialized) return
             appContext = context.applicationContext
+            // 自带 bash/busybox 的目录（见 Shell.initBinaries 的注释）：只读一次，工具里同步取用。
+            Shell.initBinaries(appContext.applicationInfo.nativeLibraryDir)
             settings = SettingsRepository(appContext)
             chats = ChatRepository(appContext)
             memory = MemoryStore(appContext)
@@ -135,6 +143,7 @@ object Core {
             schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))
             plugins = PluginStore(File(appContext.filesDir, "plugins"))
             usage = UsageStore(appContext)
+            perf = PerfMonitor(File(appContext.filesDir, "perf.json")).apply { load() }
             tools = ToolRegistry(
                 appContext, capabilities, skills, speaker, settings, memory, profile, jobs, todos,
                 schedules,
@@ -154,6 +163,31 @@ object Core {
             // Alarms are dropped when the app is updated or force-stopped, so aiming the next
             // one on every launch is what keeps a reminder set weeks ago from going quiet.
             SchedulerService.arm(appContext)
+            // 插件链路 clinit 探针（FEEDBACK v0.8.112 P0#1 / 真机 ExceptionInInitializerError）：
+            // 启动时主动碰一次两个门面类，clinit 炸就把 cause 链写进 plugin-trace.log —— 这台真机
+            // logcat 读不出来，不主动记就永远拿不到真凶。探针只读不写业务状态，失败也只落日志。
+            appScope.launch {
+                for (probe in listOf(
+                    { com.suixing.agent.plugins.ManifestValidator.rank("low") },
+                    { com.suixing.agent.plugins.PluginRuntime.probeClinit() },
+                )) {
+                    runCatching { probe() }.exceptionOrNull()?.let { error ->
+                        val chain = buildString {
+                            append(error::class.java.simpleName)
+                            error.message?.let { append("(").append(it).append(")") }
+                            var cause = error.cause
+                            var depth = 0
+                            while (cause != null && depth < 4) {
+                                append(" ← ").append(cause::class.java.simpleName)
+                                cause.message?.let { append("(").append(it).append(")") }
+                                cause = cause.cause
+                                depth++
+                            }
+                        }
+                        runCatching { com.suixing.agent.plugins.appendPluginTrace("clinit 探针失败：$chain") }
+                    }
+                }
+            }
             initialized = true
         }
     }

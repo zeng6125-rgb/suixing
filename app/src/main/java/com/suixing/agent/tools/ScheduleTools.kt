@@ -32,47 +32,53 @@ class ScheduleTools(
 
     private val zone: ZoneId get() = ZoneId.systemDefault()
 
+    override val group: String = "定时提醒"
+
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             "schedule_create",
-            "建一个定时提醒：到点后随行会在一个新会话里执行 prompt，并发一条通知。" +
-                "三个时机参数只能给一个：at（某个时刻）/ every_seconds（每隔多久）/ daily（每天几点）。",
+            "Create a timed reminder: when it fires, 随行 runs the prompt in a new conversation and " +
+                "posts a notification. Give exactly one timing argument: at (a point in time) / " +
+                "every_seconds (an interval) / daily (a time of day).",
             Schema.objectOf(
                 properties = listOf(
-                    "title" to Schema.string("提醒的名字，也是通知标题和新会话标题"),
-                    "prompt" to Schema.string("到点要让随行做什么，例如「把今天的待办念一遍」"),
-                    "at" to Schema.string("一次性：本地时间 \"yyyy-MM-dd HH:mm\"，例如 2026-10-09 07:30"),
-                    "every_seconds" to Schema.integer("重复：间隔秒数，最小 60", minimum = 60),
-                    "daily" to Schema.string("每天：本地时间 \"HH:mm\"，例如 07:30"),
+                    "title" to Schema.string("Name of the reminder; also the notification and conversation title"),
+                    "prompt" to Schema.string(
+                        "What 随行 should do when it fires, e.g. \"read today's to-dos out loud\"",
+                    ),
+                    "at" to Schema.string("One-shot: local time \"yyyy-MM-dd HH:mm\", e.g. 2026-10-09 07:30"),
+                    "every_seconds" to Schema.integer("Repeating: interval in seconds, minimum 60", minimum = 60),
+                    "daily" to Schema.string("Daily: local time \"HH:mm\", e.g. 07:30"),
                 ),
                 required = listOf("title", "prompt"),
             ),
         ),
         ToolSpec(
             "schedule_list",
-            "列出所有定时提醒：id、名字、时机、下一次触发时间。",
+            "List every timed reminder: id, name, timing and the next trigger time.",
             Schema.objectOf(properties = emptyList()),
         ),
         ToolSpec(
             "schedule_update",
-            "改一个已有提醒：可以只改名字、只改 prompt，或换一个时机参数（同样只能给一个）。",
+            "Change an existing reminder: the name only, the prompt only, or a new timing argument " +
+                "(again exactly one).",
             Schema.objectOf(
                 properties = listOf(
-                    "id" to Schema.string("schedule_list 里的 id"),
-                    "title" to Schema.string("新名字，不改就留空"),
-                    "prompt" to Schema.string("新的执行内容，不改就留空"),
-                    "at" to Schema.string("改成一次性时刻 \"yyyy-MM-dd HH:mm\""),
-                    "every_seconds" to Schema.integer("改成固定间隔，最小 60", minimum = 60),
-                    "daily" to Schema.string("改成每天 \"HH:mm\""),
+                    "id" to Schema.string("The id from schedule_list"),
+                    "title" to Schema.string("New name; leave empty to keep the current one"),
+                    "prompt" to Schema.string("New instruction; leave empty to keep the current one"),
+                    "at" to Schema.string("Switch to a one-shot time \"yyyy-MM-dd HH:mm\""),
+                    "every_seconds" to Schema.integer("Switch to a fixed interval, minimum 60", minimum = 60),
+                    "daily" to Schema.string("Switch to daily \"HH:mm\""),
                 ),
                 required = listOf("id"),
             ),
         ),
         ToolSpec(
             "schedule_delete",
-            "删掉一个定时提醒，同时撤掉它的闹钟。",
+            "Delete a timed reminder and cancel its alarm.",
             Schema.objectOf(
-                properties = listOf("id" to Schema.string("schedule_list 里的 id")),
+                properties = listOf("id" to Schema.string("The id from schedule_list")),
                 required = listOf("id"),
             ),
         ),

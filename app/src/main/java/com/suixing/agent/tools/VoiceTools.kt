@@ -9,18 +9,20 @@ import kotlinx.serialization.json.JsonObject
  */
 class VoiceTools(private val speaker: Speaker) : ToolGroup() {
 
+    override val group: String = "语音"
+
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             name = "speak",
-            description = "用手机朗读一段文字（走系统语音引擎，支持中文）。",
+            description = "Read text aloud through the phone's system speech engine (Chinese is supported).",
             parameters = Schema.objectOf(
-                listOf("text" to Schema.string("要朗读的内容，建议控制在 500 字以内")),
+                listOf("text" to Schema.string("Text to read aloud; keep it under about 500 characters.")),
                 listOf("text"),
             ),
         ),
         ToolSpec(
             name = "stop_speaking",
-            description = "立即停止正在进行的朗读。",
+            description = "Stop the current read-aloud immediately.",
             parameters = Schema.objectOf(emptyList()),
         ),
     )
@@ -30,17 +32,17 @@ class VoiceTools(private val speaker: Speaker) : ToolGroup() {
     override suspend fun execute(name: String, args: JsonObject): ToolResult = when (name) {
         "speak" -> {
             val text = args.str("text")?.trim().orEmpty()
-            if (text.isEmpty()) ToolResult.failure("缺少参数 text") else {
+            if (text.isEmpty()) ToolResult.failure("Missing argument: text") else {
                 speaker.speak(text)
-                ToolResult.success("已开始朗读。")
+                ToolResult.success("Started reading aloud.")
             }
         }
 
         "stop_speaking" -> {
             speaker.stop()
-            ToolResult.success("已停止朗读。")
+            ToolResult.success("Stopped reading aloud.")
         }
 
-        else -> ToolResult.failure("未知语音工具：$name")
+        else -> ToolResult.failure("Unknown voice tool: $name")
     }
 }

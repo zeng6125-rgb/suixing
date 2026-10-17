@@ -16,6 +16,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -69,6 +70,35 @@ object PluginRuntime {
      * ParallelRun 共 7 条用例全挂在 `UninitializedPropertyAccessException`）。读插件失败或未初始化
      * 时返回空表：没有插件工具，这一轮照常跑。
      */
+    /**
+     * 兜底点的取证日志（FEEDBACK v0.8.112 P0#1）：clinit 类 Error（ExceptionInInitializerError /
+     * NoClassDefFoundError）的 message 常为 null，真因在 cause 链里。引擎在 resolve/risk/preExecute
+     * 三处兜底吞掉异常时调这里，把链写进插件日志 —— 下次真机复现一次就能点名是哪个类的静态初始化炸了。
+     */
+    fun logPluginError(where: String, error: Throwable) {
+        val chain = buildString {
+            append(error::class.java.simpleName)
+            error.message?.let { append("(").append(it).append(")") }
+            var cause = error.cause
+            var depth = 0
+            while (cause != null && depth < 4) {
+                append(" ← ")
+                append(cause::class.java.simpleName)
+                cause.message?.let { append("(").append(it).append(")") }
+                cause = cause.cause
+                depth++
+            }
+        }
+        PluginLog.skip("plugin-error", "$where：$chain")
+    }
+
+    /**
+     * clinit 探针的靶子（Core.init 启动时碰一次）：引用本门面的两个 lazy 与一个正则，触发
+     * `PluginRuntimeKt` 的类初始化。炸了就由探针把 cause 链记进 plugin-trace.log。
+     */
+    fun probeClinit(): Int =
+        HOOK_REGEX.size + TEMPLATE_VAR.pattern.length + JSON_MEDIA_TYPE.toString().length
+
     suspend fun enabledPlugins(): List<PluginSpec> = runCatching {
         Core.plugins.list().filter { it.state.enabled }.mapNotNull { it.spec }
     }.getOrDefault(emptyList())
@@ -83,18 +113,18 @@ object PluginRuntime {
      * [taken] 是已经在表里的名字（内置工具名，以及前面已经加进去的插件注册名）。内置优先 ——
      * 一个插件不能靠重名顶掉 `run_shell` 这类工具；跳过的名字写一条日志，别静默消失。
      *
-     * 声明了 deps 的插件的工具也跳过（[blockedByDeps]）：一个必然失败的工具出现在表里，模型就会
-     * 一轮轮去调它，把整轮时间花在注定拿不到结果的调用上。
+     * deps 不再拦工具（0.8.107 起）：闸门误杀了自带产物的插件（video-frame 的 bin/ 里就躺着
+     * ffmpeg/ffprobe，声明 deps 只是描述「怎么装」，不代表没装）。依赖真缺时 shell 自己的报错
+     * 比闸门文案更真；白盒页的提示也同步改成了「v1 不自动安装，请确认产物已随插件附带」。
      */
     fun toolSpecs(specs: List<PluginSpec>, taken: Set<String>): List<ToolSpec> {
         val added = mutableSetOf<String>()
         val out = mutableListOf<ToolSpec>()
         for ((spec, decl) in toolsFor(specs)) {
-            val name = "${spec.id}.${decl.name}"
-            if (blockedByDeps(spec) != null) {
-                PluginLog.skip(name, "声明了 deps（v1 不安装依赖），工具已禁用")
-                continue
-            }
+            // 注册名分隔符是**下划线**（0.8.107）：这个名字要发给模型网关，deepseek 网关按
+            // `^[a-zA-Z0-9_-]+$` 校验工具名，点号整批拒收（11152）。校验器、PluginStore 的
+            // 查重、hooks 的 when.tool 都用同一条拼接。
+            val name = "${spec.id}_${decl.name}"
             if (name in taken || !added.add(name)) {
                 PluginLog.skip(name, if (name in taken) "与已有工具重名" else "同一个插件里重复")
                 continue
@@ -102,34 +132,44 @@ object PluginRuntime {
             out += ToolSpec(
                 name = name,
                 description = decl.description,
-                // schema 透传（v1 只做合法性检查，不解释它）。
-                parameters = decl.parameters ?: JsonObject(emptyMap()),
+                // schema 透传前先归一化（见 [normalizeSchema]）。
+                parameters = normalizeSchema(decl.parameters),
             )
         }
         return out
     }
 
-    /** 按注册名反查 —— M3 执行管道用它找 `(插件, 工具)`。 */
-    fun resolve(specs: List<PluginSpec>, toolName: String): Pair<PluginSpec, ToolDecl>? =
-        toolsFor(specs).firstOrNull { (spec, decl) -> "${spec.id}.${decl.name}" == toolName }
-
     /**
-     * v1 不装 deps，所以声明了 deps 的插件的工具**一律禁用**：跑它会拿本应用的身份去执行一条
-     * 依赖没装上的命令，失败信息还会是一句和真实原因无关的报错。
+     * 工具参数 schema 归一化 —— 用户报的 11129「invalid function call parameters」根因实锤。
      *
-     * 校验器在安装白盒页上早就这么写了（`DEPS_DISABLED`：「deps 在 v1 不安装，依赖它的工具会被
-     * 禁用」）—— M3 之前调用无论如何都会失败，那句话是空口承诺也无害；执行管道接通之后它就成了
-     * 必须兑现的闸门，否则白盒页说的话和实际行为对不上。
+     * 取证（files/last-http-error.json，真机）：插件 `ctx-health_check` 的 parameters 既没有
+     * `type` 也没有 `properties`（清单里漏写/写空 ⇒ 我们发的是 `{}`），网关判定「工具定义不符合
+     * 模型要求」，**整个请求**被拒（那一批 55 个工具全废，内置工具也一起被连坐）。
      *
-     * 返回 null ＝ 可以跑；返回字符串 ＝ 给模型看的失败原因。
+     * 所以任何来源的 schema 都要补成合法的 JSON Schema：非对象/缺 type/缺 properties 一律补
+     * `type=object` 与 `properties={}`；已经是合法对象原样放行（其余关键字如 required/enum 保留）。
      */
-    internal fun blockedByDeps(spec: PluginSpec): String? =
-        if (spec.deps.isEmpty()) {
-            null
-        } else {
-            "插件「${spec.displayName.zh}」声明了 ${spec.deps.size} 条依赖（deps），" +
-                "v1 还不安装依赖，它的工具已被禁用：${spec.deps.joinToString("、") { it.id }}"
+    private fun normalizeSchema(raw: JsonObject?): JsonObject {
+        val empty = JsonObject(emptyMap())
+        val obj = raw ?: return buildJsonObject {
+            put("type", JsonPrimitive("object"))
+            put("properties", empty)
         }
+        val props = obj["properties"] as? JsonObject
+        val typed = (obj["type"] as? JsonPrimitive)?.content == "object"
+        if (typed && props != null) return obj
+        return buildJsonObject {
+            obj.forEach { (key, value) ->
+                if (key != "type" && key != "properties") put(key, value)
+            }
+            put("type", JsonPrimitive("object"))
+            put("properties", props ?: empty)
+        }
+    }
+
+    /** 按注册名反查 —— M3 执行管道用它找 `(插件, 工具)`。注册名 `<id>_<tool>`（下划线，见 toolSpecs）。 */
+    fun resolve(specs: List<PluginSpec>, toolName: String): Pair<PluginSpec, ToolDecl>? =
+        toolsFor(specs).firstOrNull { (spec, decl) -> "${spec.id}_${decl.name}" == toolName }
 
     /**
      * context 求值：`static` 原样返回；`template` 用 [vars] 替换白名单变量。
@@ -204,7 +244,10 @@ object PluginRuntime {
         for ((spec, hook) in hooks) {
             if (hook.on != HOOK_EVENT) continue
             val condition = hook.`when`
-            if (condition.tool != null && condition.tool != toolName) continue
+            // when.tool 归一化（FEEDBACK-v0.8.97 #1 连带）：存量 manifest 里的 hook 引用是点号形式
+            // （`apk-forensics.strings_hunt`），注册名 0.8.107 起是下划线形式 —— 把引用里的点号
+            // 转成下划线再比，两边写法都认。
+            if (condition.tool != null && condition.tool.replace('.', '_') != toolName) continue
             val minRisk = condition.minRisk
             if (minRisk != null && (risk == null || riskRank(risk) < riskRank(minRisk))) continue
             val pattern = condition.regex
@@ -240,10 +283,8 @@ object PluginRuntime {
      * 渲染后的 url / header / command —— 那里面可能正躺着凭据。
      */
     suspend fun execute(spec: PluginSpec, decl: ToolDecl, args: JsonObject): ToolResult {
-        val depsBlocked = blockedByDeps(spec)
-        if (depsBlocked != null) return ToolResult.failure(depsBlocked)
         val store = runCatching { Core.plugins }.getOrNull()
-            ?: return ToolResult.failure("插件系统还没初始化，${spec.id}.${decl.name} 现在跑不了。")
+            ?: return ToolResult.failure("插件系统还没初始化，${spec.id}_${decl.name} 现在跑不了。")
         val dir = store.dirOf(spec.id)
         // 存下来的 env 覆盖 manifest 里的默认值；两者都没有的**不放进表**，好让渲染时报「没值」
         // 而不是悄悄发一个空 token 出去。
@@ -476,11 +517,18 @@ object PluginRuntime {
     }
 }
 
-/** `{{x}}` / `{{env.NAME}}` —— 与校验器同一套写法。 */
-private val TEMPLATE_VAR = Regex("""\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*}}""")
+/**
+ * `{{x}}` / `{{env.NAME}}` —— 与校验器同一套写法。
+ *
+ * **by lazy**（真机 0.8.112/113 复测）：非 lazy 的顶层 val 进门面类 `PluginRuntimeKt` 的
+ * `<clinit>`；clinit 里任何一步抛异常就把这个类**永久毒化**（首错 ExceptionInInitializerError、
+ * 之后每次引用 NoClassDefFoundError，截图实锤）。lazy 把初始化推迟到第一次真正用它的调用点 ——
+ * 那些点全在 runCatching 兜底里（preExecute/render/http），炸了只是一次工具失败，类不被毒化。
+ */
+private val TEMPLATE_VAR by lazy { Regex("""\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}""") }
 
-/** hook 的 `when.regex` 编译缓存：同一条 pattern 只编译一次。 */
-private val HOOK_REGEX = ConcurrentHashMap<String, Regex>()
+/** hook 的 `when.regex` 编译缓存：同一条 pattern 只编译一次。同 [TEMPLATE_VAR] 的理由 by lazy。 */
+private val HOOK_REGEX by lazy { ConcurrentHashMap<String, Regex>() }
 
 private const val HOOK_EVENT = "tools/pre-execute"
 
@@ -518,9 +566,24 @@ private val HTTP_CLIENT by lazy {
 private object PluginLog {
     fun skip(name: String, why: String) {
         android.util.Log.w("SuixingPlugins", "跳过 $name：$why")
+        // 这台真机 logcat 读不出来（adb logcat 报 read failure），兜底的 cause 链只写 logcat
+        // 就等于没写 —— 同 fx-trace/scroll-diag 一样落文件，复现一次就能拉出来点名真凶。
+        runCatching { appendPluginTrace("跳过 $name：$why") }
     }
 
     fun hook(pluginId: String, message: String) {
         android.util.Log.i("SuixingPlugins", "hook（$pluginId）：$message")
+        runCatching { appendPluginTrace("hook（$pluginId）：$message") }
     }
+}
+
+/** 插件链路的取证日志（有界、循环截断），与 fx-trace.log 同级同格式习惯。 */
+internal fun appendPluginTrace(line: String) {
+    val app = Core.appContext
+    val file = java.io.File(app.filesDir, "plugin-trace.log")
+    val stamp = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+        .format(java.util.Date())
+    val text = if (file.exists()) file.readText() else ""
+    val next = (text + "$stamp $line\n")
+    file.writeText(next.takeLast(64 * 1024))
 }
