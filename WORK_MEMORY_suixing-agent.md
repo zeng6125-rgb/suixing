@@ -526,3 +526,81 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 - **硬规矩（新会话必须守）**：只在用户说「打包」时出包；出包前 aapt 核 versionName；push 直连必失败 ⇒ 代理 127.0.0.1:7890 重试并报、release 附件按字节大小核对；**不用 adb 操作用户手机**（点击/截屏/录屏都禁止），证据靠用户发图或本地 ffmpeg（suixing/video/node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe）逐帧分析用户录屏；观感类一次只改一处、先给代码/数值证据；**禁止脚本批量写文件**（曾删掉 6 个文件输入框）；团队 8 名额满且用户要求清队 ⇒ **剩余活自己干、不派单**。
 - **动画基线（勿再动）**：＝0.8.91（966b186）：进页 slideIn(+1/12, 200ms)、exit None；返回 popEnter None + popExit fadeOut(200ms)；抽屉点行/点会话 snapTo(Closed)+UNDISPATCHED、返回来源页 snapTo(Open)。**否掉清单**：fadeIn 残影、opaque+delay、close() 滑出、±9dp 补偿、子页淡入 —— 见「★ 已实测否掉」表。
 - **关键锚点**：转场 SuixingApp.kt:518-530、抽屉 :255/:287/:305；顶栏结构性对齐 Common.kt PageTopBar（Box+align(CenterStart)，副标题已全站删除）；长按冻结 ChatScreen.kt:979-991；插话单一写入者 ChatViewModel.kt:563-565；插件 M1/M2 plugins/。
+
+## 8. 0.8.175 → 0.8.195：上下文治理 / 性能页 / 聊天页拆分（2026-10-18 追加）
+
+> 本会话把聊天页从单文件 7880 行拆成 9 个文件，并做了上下文与性能治理。行号以当前工作树为准。
+
+### 8.1 已落地（都有单测保护）
+
+| 模块 | 文件 | 要点 |
+|---|---|---|
+| 图片预算 | agent/RequestImages.kt | 只降级**工具截图**（ChatMessage.toolScreenshot），**用户上传附件不动**；超 MAX_REQUEST_IMAGE_CHARS=2MiB 才动；最老先降；占位给出 ui_screenshot path= 取回 |
+| 工具输出落盘 | agent/ToolOutputSpill.kt | 超 MAX_TOOL_OUTPUT=8000 全文落 filesDir/toolout/*.txt；wire 留头部+路径+read_file offset/limit+「不要重跑」；写失败也如实说；只留 40 个 |
+| 压缩切法 | agent/CompactionPlan.kt | 末 6 条不动、切点不落 tool 消息、摘要里每条工具结果取前 2000 字符 |
+| 无 run 压缩 | AgentEngine.compressNow + ChatViewModel.compressNow() | 按已落盘历史压一次 → ContextCheckpoint → 转录里出现压缩块 |
+| 性能记录 | data/PerfMonitor.kt + Core.perf | 有界 200 条、落盘 perf.json；每轮结束从**最后一条 assistant 消息**取 ttft/tokens/cached（StoredMessage 自带），不估算 |
+| 性能页 | ui/settings/PerfScreen.kt + SuixingApp.kt 路由 settings/perf | 顶部均值 + 最近 20 轮；没采集到的项显示「—」 |
+| seccomp 兜底 | capability/Shell.kt | exit 159 = 128+SIGSYS ⇒ **逐条命令**回退 sh -c 并写明原因（**不做**进程级永久降级） |
+
+### 8.2 聊天页拆分与当前间距（改动前先读这里）
+
+- 文件：ChatScreen / ChatComposer / ChatContext / ChatTopBar / ChatBlocks / TurnScrubber / ChatRows（纯函数模型层）/ ChatScroll / VoiceOverlay + ChatViewModel
+- 让位：stackFootprint = composerH + COMPOSER_BOTTOM_PAD + navBarPad(heldIme) + (运行12/空闲16dp)
+- **part 之间 6dp**（ChatTopBar.kt 7 处 Spacer，原 10dp；EmptyHero 的两处本来就是 6dp，未动）
+- 折叠块内：内容区 top **0**、args 上 **6**、args→分割线 **6**、分割线→「输出」**2**、内容区 bottom **6**
+- ToolDetail：虚拟列表 + 命令不截断 + 输出逐行 + heightIn(max=180dp)；「输出」行 CenterVertically
+- 追底：ChatScroll 用 snapshotFlow 盯「离底多少」增量滚动；折叠块展开用 expandVertically，LocalReadingPinned 时 0 时长
+
+### 8.3 提示词语言规则
+
+- **模型可见 → 英文**：系统提示词四段、COMPRESS_PROMPT、COMPRESS_CONTEXT_SPEC.description
+- **必须保留 answer the user in Chinese**，否则模型改用英文回答
+- **用户可见 → 中文**：ui/settings/ToolCopy.kt；分组由 ToolGroup.group 自声明，页面自动生成
+
+### 8.4 本会话新增的坑
+
+1. **禁止用脚本批量改源码**：-replace 参数写错导致 9 个工具文件被清成 0 字节，git checkout 恢复后仍丢了未提交的 edit_file。**只用 read+edit。**
+2. **新路由必须注册**：SuixingApp.kt 有显式 listOf("settings/...") 路由表，漏了会**点进就崩**。
+3. **Modifier.padding 没有 (horizontal, top, bottom) 重载**，要用 (start, top, end, bottom)。
+4. **replace_all 会波及其他位置**：改前先 grep 全部命中并核对归属（曾把 EmptyHero 的两处 6dp 误报为改动）。
+5. **git diff 对未跟踪文件无效**：本会话拆出来的 ChatTopBar.kt 等是新建未跟踪文件，回溯只能看改动前的 grep 输出。
+6. **压缩工具会拒**：区间被 active blocks 覆盖时返回 Range contains no compressible messages，先用 acp_status 取可用区间。
+7. **push 直连不通**：github.com:443 超时（codeload.github.com 通），需代理。
+
+### 8.5 状态与待办
+
+- 工作树：编译 0 错误、单测 **503/503**；已装 **0.8.195(206)**；本地提交 4df6de8（**未推送**）
+- **例外未验证**：用量文案 入/出 → 输入/输出（ChatBlocks.kt 6 处）已改但未编译
+- **待办**：① 编译验证上述文案并出包 ② 工具完成→下次响应的本地阻塞（候选：breakTools 每轮序列化全量 schema、每轮整份会话 JSON 落盘、PluginRuntime.enabledPlugins()/skills.list() 每轮读盘；需性能页数据支撑）③ 真机验收性能页/多工具块/手动压缩/seccomp 提示 ④ 推送
+
+### 8.6 模型设置页改造（0.8.196 装机）
+
+1. **提供方分组移到页面顶部**（原在第 822 行的 item 移到 LazyColumn 首位）
+2. **提供方可见「删除」**（「新建」旁新增 chip；只剩一个时禁用；与长按菜单同一条 deleteProvider 路径）
+3. **移除「系统提示词」编辑器**（助手页改；引擎读 assistant.systemPrompt 优先、全局兜底，Settings.kt:579）
+4. **provider 不再默认指定模型**（删掉 onConfirm 里的 form.model = picked.first()）
+5. 获取模型列表 → 勾选即进 provider.enabled（原有行为，已核实）
+6. **上下文窗口 / 最大输出 token 只在 ModelPickerDialog 里按模型设置**（页面级「上下文窗口」整块已删）
+7. **DEFAULT_CONTEXT_WINDOW = 256_000**（Settings.kt:55）；`contextWindowFor = modelContexts[model]?.takeIf{>0} ?: 256_000`（Settings.kt:422）
+
+### 8.7 折叠块首行间距：三次返工与当前状态
+
+- 曾用 `BLOCK_CONTENT_TOP = 6.dp`（ChatBlocks.kt:803）统一思考块/工具块首行间距
+- 思考块先后试过：容器 6dp → 2dp → 0dp → 列表 `contentPadding(top=6dp)`（0.8.201）
+- `thinkingStyle()` 已加 `includeFontPadding=false` + `LineHeightStyle(trim = FirstLineTop)`（去字体 padding 与首行半截行距）
+- **未解决**：用户报「思考块分割线下方有空白条，列表滑下去它还在」。**关键矛盾**：0.8.200 里思考块已无任何容器内边距，空白仍在 ⇒ 归因于容器 padding 与事实不符，**尚未定位真因**
+- 下一步必须先确认：用户测的是哪一版（设置→关于）+ 展开并滑动后的截图（看分割线到首行距离是否随滚动变化）
+
+### 8.8 版本与提交
+
+- 已装机轨迹：0.8.195(206) → 0.8.196(207) → 0.8.197(208) → 0.8.198(209) → 0.8.199(210) → 0.8.200(211) → **0.8.201(212)**
+- 本地提交 `4df6de8`（75 files）之后的新改动**未提交**；`git push` 因 `github.com:443` 不通失败（`codeload.github.com` 通）
+- 单测基线：**503/503**（每次改动后清 test-results 重跑确认）
+
+### 8.9 本轮新增的坑
+
+8. **「空白条滑不走」≠ 一定是容器 padding**：容器 padding 确实在滚动区外，但 0.8.200 已无容器 padding 而空白仍在 ⇒ 未定位前不要宣称根因。
+9. **PowerShell here-string 里的反引号会截断**：Markdown 代码块含反引号时必须用单引号 here-string `@'...'@`，否则报 ParserError 且中文乱码。
+10. **`PlatformTextStyle(includeFontPadding=false)` 不能去掉 lineHeight 的行距**，必须配 `LineHeightStyle(trim = FirstLineTop)`。
+11. **改完源码要清 `app/build/test-results/testDebugUnitTest`** 再跑，否则会读到上一轮缓存的「全绿」。
