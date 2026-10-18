@@ -693,4 +693,8 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 - 产物：`app/build/outputs/apk/release/app-release.apk`，15,599,841 B @ 12:16:56；`aapt dump badging` 实测 versionCode=213 / versionName=0.8.202 / label=随行。
 - 装机：`adb -s adb-d2e1026e-PZkPcd._adb-tls-connect._tcp install -r` → Success；`dumpsys package com.suixing.agent` 实测 versionCode=213 / versionName=0.8.202 / lastUpdateTime=2026-10-18 12:17:08。
 - 这一包相对 0.8.201 的四批改动：① 展开/长高瞬移修复（ChatScreen.kt:826-857 短按即撤守护）② 性能页设备实时+会话健康（LiveMetrics.kt/PerfMonitor.kt PerfHealth/PerfScreen.kt）③ 打字机效果 + 外观开关（Typewriter.kt/Settings.typewriter）④ 缓存命中率全局两位小数（SessionStats/PerfRecord/PerfSummary/PerfHealth 全改 Double，显示层 %.2f%%）。
-- 验证：编译 0 错误、单测 511/511。**仍未 git commit / push**（工作树 8 个改动文件 + 新增 2 个文件；push 需要代理 127.0.0.1:7890）。
+- 验证：编译 0 错误、单测 511/511。
+- **提交并推送（2026-10-18 13:5x）**：`git add WORK_MEMORY_suixing-agent.md app/build.gradle.kts app/src/main/java app/src/test/java`（**只加源码，不加截图/视频产物**）⇒ 暂存 **19 个文件（16 M + 3 A：LiveMetrics.kt、Typewriter.kt、PerfHealthTest.kt）**，`+865 / -244`，提交 `f918e06`「随行 0.8.202：展开瞬移修复、性能页设备实时、打字机效果、缓存命中两位小数」。
+- 推送：`git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin main` → `0910753..f918e06`；随后 `git ls-remote` 实测远端 main = `f918e060a2e07ee3c268b1ceef2674a60527a2e9`，`origin/main..main` 与 `main..origin/main` 均为 0。
+- **本次 push 一并推走了此前 4 个本地未推提交**（远端原在 `0910753`）：`3d5c79b`（0.8.106）、`ad4783b`（wip: 删除前的当前聊天页状态 0.8.175）、`4df6de8`（chore: 0.8.195 存档）、`e649939`（docs(memory)）。不是只推了 0.8.202。
+- 未跟踪产物（**故意没提交**）：`.playwright-mcp/`、`desktop-now.png`、`gap-after.png`、`gap-now.png`、`gpt-contact-16.png`、`gpt-transitions.png`、`measure.png`、`phone-now.png`、`phone-popup.png`、`phone-popup2.png`、`video/`。是否加进 `.gitignore` 待用户定。
