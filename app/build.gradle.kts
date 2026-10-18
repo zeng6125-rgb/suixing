@@ -13,8 +13,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 206
-        versionName = "0.8.195"
+        versionCode = 213
+        versionName = "0.8.202"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -112,6 +112,12 @@ dependencies {
     // constructors, which is what makes engine-level tests possible on the JVM.
     testImplementation("io.mockk:mockk:1.13.13")
 }
+
+
+
+
+
+
 
 
 

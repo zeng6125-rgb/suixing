@@ -45,9 +45,17 @@ val ApprovalMode.label: String
  * model ids like `deepseek/deepseek-chat` or `openai/gpt-4o`, which is why the
  * picker groups by [modelGroupOf].
  */
+/**
+ * 全局默认上下文窗口：**上游没给出这个模型的窗口时**才用它（用户：「全局的模型上下文窗口设置为
+ * 256k，也就是说上游没有给出模型上下文窗口时才使用此值」）。
+ *
+ * 取值理由：256k 是当前主流长上下文模型的下界附近，压缩只在估算超过它的 80% 时触发，所以短会话
+ * 完全不受影响；而它又足以让压缩阈值在超长会话里真正生效（0 会让阈值失效、永远不压）。
+ */
+const val DEFAULT_CONTEXT_WINDOW = 256_000
+
 @Serializable
-data class ProviderConfig(
-    val id: String,
+data class ProviderConfig(    val id: String,
     val name: String = "",
     val baseUrl: String = "",
     val apiKey: String = "",
@@ -308,6 +316,14 @@ data class AppSettings(
     val cornerScale: Int = 1,
     /** 是否在气泡下方显示时间 */
     val showTimestamps: Boolean = true,
+    /**
+     * 打字机效果：**正在流式**的正文与思考逐字放出来，而不是每 80ms 整块跳一次
+     * （节拍见 ChatViewModel 的 `DELTA_PUBLISH_MS`、放字逻辑见 ui/chat/Typewriter.kt）。
+     *
+     * 只影响显示：已经结束的一轮、以及落盘的消息，都是一次性给全文。默认开——关掉时
+     * 文本一收到就整块出现。放在类中间并带默认值，老 JSON 没有这个键时读出来就是 true。
+     */
+    val typewriter: Boolean = true,
     /** 工具调用卡片默认展开 */
     val expandTools: Boolean = false,
     /**
@@ -403,8 +419,16 @@ data class AppSettings(
     /** The active model with its provider prefix stripped, for display. */
     val shortModel: String get() = model.substringAfter('/')
 
-    /** The context ceiling for [model]; 0 when the user never set one for it. */
-    fun contextWindowFor(model: String): Int = modelContexts[model] ?: 0
+    /**
+     * The context ceiling for [model].
+     *
+     * 顺序：用户为这个模型设的值 → 上游 `/models` 报过并落进 [modelContexts] 的值 → 全局默认
+     * [DEFAULT_CONTEXT_WINDOW]。用户要求：「全局的模型上下文窗口设置为 256k，也就是说上游没有
+     * 给出模型上下文窗口时才使用此值」。所以它**不再是 0**：0 会让压缩阈值失效，而 256k 是一个
+     * 保守的上界 —— 压缩只在估算超过 80% 时才触发，短会话完全不受影响。
+     */
+    fun contextWindowFor(model: String): Int =
+        modelContexts[model]?.takeIf { it > 0 } ?: DEFAULT_CONTEXT_WINDOW
 
     /**
      * 最大输出 tokens **按模型**（用户：「取消全局性的最大输出，改用各个模型默认的，然后可以

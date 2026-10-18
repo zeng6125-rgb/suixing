@@ -77,7 +77,7 @@ class SessionStatsTest {
             answer("a1", prompt = 40_000_000, completion = 1_000, cached = 30_000_000),
         )
         val stats = SessionStats.of(messages, contextWindow = 200_000)!!
-        assertEquals(75, stats.cachePercent)
+        assertEquals(75.0, stats.cachePercent, 0.0001)
     }
 
     @Test

@@ -77,7 +77,7 @@ class PerfMonitorTest {
         // 注意：这里必须是已记录过数据的 monitor 实例，不是工厂新建的空实例。
         val summary = monitor.summary()
 
-        assertEquals("没报 prompt 的那条不能算成一个 0% 的样本", 40, summary.avgCachePercent)
+        assertEquals("没报 prompt 的那条不能算成一个 0% 的样本", 40.0, summary.avgCachePercent, 1e-9)
     }
 
     @Test

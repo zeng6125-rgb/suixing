@@ -292,7 +292,7 @@ data class SessionStats(
     val turns: Int,
     val steps: Int,
     val tokens: Int,
-    val cachePercent: Int,
+    val cachePercent: Double,
     val perSecond: Double,
     val contextTokens: Int,
     val contextWindow: Int,
@@ -316,12 +316,12 @@ data class SessionStats(
                 turns = turns,
                 steps = steps,
                 tokens = tokens,
-                // The ratio is worked out in Long and rounded, not `cached * 100 / prompt` on
-                // Int: that multiplication overflows on a conversation whose cached tokens pass
+                // The ratio is worked out in Long and kept unrounded, not `cached * 100 / prompt`
+                // on Int: that multiplication overflows on a conversation whose cached tokens pass
                 // 21,474,837, and the negative percentage it produced was drawn as no line at
-                // all — the user saw 「缓存命中」 vanish. Whole percent, because the ring has
-                // room for three digits and a decimal point would not be one of them.
-                cachePercent = if (prompt > 0) (cached.toLong() * 100.0 / prompt).roundToInt() else 0,
+                // all — the user saw 「缓存命中」 vanish. 两位小数是**显示层**的事（ChatComposer 的
+                // 「缓存命中」行按 %.2f 格式化）：这里一旦取整，后面就再也补不回来了。
+                cachePercent = if (prompt > 0) cached.toLong() * 100.0 / prompt else 0.0,
                 perSecond = Tps.of(completion, decode),
                 contextTokens = newest?.promptTokens ?: 0,
                 contextWindow = contextWindow,

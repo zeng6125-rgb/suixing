@@ -924,7 +924,7 @@ internal fun ContextRing(
     /** How many questions that tally was built from, so 「累计」 cannot read as 「本轮」. */
     sessionTurns: Int,
     sessionPerSecond: Double,
-    sessionCachePercent: Int,
+    sessionCachePercent: Double,
     sessionElapsedMs: Long,
     live: StreamStats?,
     /**
@@ -1095,7 +1095,7 @@ internal fun ContextRingCard(
     sessionSplit: SessionSplit,
     sessionTurns: Int,
     sessionPerSecond: Double,
-    sessionCachePercent: Int,
+    sessionCachePercent: Double,
     sessionElapsedMs: Long,
     live: StreamStats?,
 ) {
@@ -1160,7 +1160,14 @@ internal fun ContextRingCard(
             // out at zero, and the user — who had asked for this reading by name — read the
             // missing row as the reading having been dropped. A priced session with no cache
             // hits yet is a 0%, not a gap.
-            RingDetail("缓存命中", "$sessionCachePercent%")
+            // 两位小数：整百分比在几千 token 的会话里几乎不动，四舍五入之后看不出缓存到底在不在
+            // 起作用。数值本身不取整（SessionStats.cachePercent 是 Double），格式只在这里决定。
+            RingDetail(
+                "缓存命中",
+                remember(sessionCachePercent) {
+                    String.format(Locale.getDefault(), "%.2f%%", sessionCachePercent)
+                },
+            )
             // The rows below are in three groups, in this order: 上下文 (the two above) →
             // 本会话累计 → 速度与时间. They used to be stacked in the order the features landed,
             // which put 「输出速度」 above the total and the two per-round lines at the very bottom

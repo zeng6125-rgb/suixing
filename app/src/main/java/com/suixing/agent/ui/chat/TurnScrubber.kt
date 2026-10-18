@@ -599,7 +599,7 @@ internal fun Composer(
     sessionTurns: Int,
     /** The session's own output speed, cache hit rate and wall clock, for the ring's card. */
     sessionPerSecond: Double,
-    sessionCachePercent: Int,
+    sessionCachePercent: Double,
     sessionElapsedMs: Long,
     /** This conversation's own model pick, or null while it follows persona/defaults. */
     conversationProviderId: String?,

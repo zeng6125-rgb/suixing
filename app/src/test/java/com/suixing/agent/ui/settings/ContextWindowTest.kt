@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.settings
 
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.DEFAULT_CONTEXT_WINDOW
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -24,8 +25,9 @@ class ContextWindowTest {
             AppSettings(modelContexts = windows).contextWindowFor("qwen3.8-flash"),
         )
         assertEquals(
-            "a window filed under the display name would never be read",
-            0,
+            // 未登记的模型不再返回 0：0 会让压缩阈值失效，现在落回全局默认 256k。
+            "an unregistered model falls back to the global default",
+            DEFAULT_CONTEXT_WINDOW,
             AppSettings(modelContexts = windows).contextWindowFor("Qwen3.8-Flash"),
         )
         assertTrue(

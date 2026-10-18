@@ -177,6 +177,7 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
@@ -291,6 +292,13 @@ internal const val PROCESS_EXPAND_MS = 180
 
 /** 阅读锚活着（人停在历史里）时为 true：折叠动画改即时完成，避免动画每帧推内容+闸门每帧拉回的抖动。 */
 internal val LocalReadingPinned = compositionLocalOf { false }
+
+/**
+ * 外观 → 打字机效果（默认开）。只落在**两个**流式渲染点上：正文的 Markdown 与思考块。
+ * 用 composition local 而不是逐层传参，是因为这两点离设置有好几层，而参数要穿过折叠卡片、
+ * 工具块、轮次渲染器。
+ */
+internal val LocalTypewriter = compositionLocalOf { true }
 
 /**
  * 卡片级可点块的按下反馈：**整块背景压暗**，不用涟漪。
@@ -647,12 +655,17 @@ internal fun ReasoningBlock(
                     // Configurable in 外观: a chain of thought is context, and the
                     // answer has to stay on screen while it is being read.
                     .heightIn(max = maxHeight),
+                // 首行上边距放在**列表内部**（contentPadding），不是容器上：容器内边距在滚动区
+                // 外面，滑到哪它都留在那儿 —— 用户说的「列表滑下去那个空白条还在」就是它。
+                // contentPadding 属于可滚动内容，第一行滚上去时这段空白一起滚走。
+                contentPadding = PaddingValues(top = BLOCK_CONTENT_TOP),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 items(lines.size) { index ->
                     val line = lines[index]
                     if (line.isBlank()) {
-                        Spacer(Modifier.height(4.dp))
+                        // 首行是空行时不占位：那 4dp 就是「分割线下面还有一点空白」的来源。
+                        if (index > 0) Spacer(Modifier.height(4.dp))
                     } else {
                         MarkdownText(
                             text = line,
@@ -660,6 +673,10 @@ internal fun ReasoningBlock(
                             // thought is read, not skimmed.
                             style = thinkingStyle(),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            // 不再额外加上边距：thinkingStyle 是 13sp 字号配 20sp 行高
+                            // （ChatBlocks.thinkingStyle），首行上方已经有约 3.5dp 的半行距，
+                            // 再叠 padding 就成了用户看到的那点「空白」。
+                            modifier = Modifier,
                         )
                     }
                     if (index == lines.lastIndex && streaming) BlinkingCursor()
@@ -765,7 +782,9 @@ internal fun ReasoningBlock(
             ) {
                 // 虚拟列表照旧（用户：「展开还是虚拟列表啊」）：chain 内部就是 LazyColumn，
                 // 逐行虚拟化 + heightIn(max = 外观里的思考块高度) 上限。
-                Column(Modifier.padding(start = 44.dp, top = 4.dp)) { chain() }
+                // top 归 0：首行边距已经放进 chain 内部列表的 contentPadding（会随滚动消失），
+                // 这里再留一层就是固定不动的空白条。
+                Column(Modifier.padding(start = 44.dp, top = 0.dp)) { chain() }
             }
         }
     } else {
@@ -782,16 +801,41 @@ internal fun ReasoningBlock(
             },
             trailing = status,
         ) {
+            // 思考块**不加**首行间距：正文自带行高，再加一条就是用户看到的那道空白
+            // （用户：「思考块分割线下面那个空白」）。工具块仍用 BLOCK_CONTENT_TOP ——
+            // 那边是等宽命令/输出，字符本身贴得紧，需要一点 padding。
             chain()
         }
     }
 }
 
+/**
+ * 折叠块展开后，**内容第一行**与折叠条分割线之间的间距 —— 所有块共用这一个值。
+ *
+ * 为什么必须是一个常量：思考块（13sp/20sp 行高）、工具块的命令（12sp 等宽）、「输出」行
+ * 原本各自用自己的内边距或行高凑间距，于是三个块展开后首行上方的空隙互不相同
+ * （用户：「所有块基本的东西都要保持一致」）。现在统一取它。
+ */
+internal val BLOCK_CONTENT_TOP = 6.dp
+
 /** 13sp / 20sp leading, scaled off bodySmall so 字号 still applies to both. */
 @Composable
 internal fun thinkingStyle(): TextStyle {
     val body = MaterialTheme.typography.bodySmall
-    return body.copy(lineHeight = body.fontSize * (20f / 13f))
+    return body.copy(
+        lineHeight = body.fontSize * (20f / 13f),
+        // 两个补偿缺一不可：
+        //  · includeFontPadding = false 去掉**字体自带**的上下 padding；
+        //  · Trim.FirstLineTop 去掉**首行**分摊到的那半截行距（20sp 行高配 13sp 字号，
+        //    首行上方原本还有约 3.5dp）。
+        // 少了第二条，思考块的首行空隙就是 BLOCK_CONTENT_TOP + 3.5dp，而工具块只有
+        // BLOCK_CONTENT_TOP —— 仍然是「不一致」，只是数值换了。
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+        lineHeightStyle = LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.FirstLineTop,
+        ),
+    )
 }
 
 /**
@@ -908,7 +952,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                     // 上 6dp：卡片内容区顶部现在是 0，命令直接贴着折叠条分割线太挤
                     // （用户：「输入那个指令就相当于贴边了」）。只给 args 自己留，不给整块内容区留 ——
                     // 这样「只有输出」的卡片上方仍然是干净的 2dp。
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = BLOCK_CONTENT_TOP),
                 )
             }
         }
@@ -932,7 +976,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                     verticalAlignment = Alignment.CenterVertically,
                     // 卡片内容区上方已经是 0dp，所以这里固定 2dp：有输入时距分割线 2dp、
                     // 只有输出时距卡片分割线也是 2dp —— 两种卡片看起来一样。
-                    modifier = Modifier.padding(top = 2.dp),
+                    modifier = Modifier.padding(top = BLOCK_CONTENT_TOP),
                 ) {
                     if (!line.ok) {
                         // A failed call's output is the evidence; the bar marks it as such.

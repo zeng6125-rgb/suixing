@@ -269,7 +269,7 @@ internal fun TopBarContextEntry(
     sessionSplit: SessionSplit,
     sessionTurns: Int,
     sessionPerSecond: Double,
-    sessionCachePercent: Int,
+    sessionCachePercent: Double,
     sessionElapsedMs: Long,
     live: StreamStats?,
 ) {

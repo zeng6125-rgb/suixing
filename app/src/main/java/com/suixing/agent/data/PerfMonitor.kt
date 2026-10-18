@@ -25,8 +25,15 @@ data class PerfRecord(
     /** 出站请求体的字符数（裁剪之后真正发出去的那一份）。 */
     val wireChars: Int = 0,
 ) {
-    /** 缓存命中率（0..100）；端点没报缓存时是 0。 */
-    val cachePercent: Int get() = if (promptTokens <= 0) 0 else cachedTokens * 100 / promptTokens
+    /**
+     * 缓存命中率（0..100）；端点没报缓存时是 0。
+     *
+     * 不取整：与 [SessionStats.cachePercent][com.suixing.agent.ui.chat.SessionStats] 同一条规矩 ——
+     * 精度在数据层留着，两位小数由显示层格式化（性能页的「缓存命中（均值）」与每轮明细）。
+     * 用 Long 相乘，避开 cachedTokens 超过 21,474,837 时的 Int 溢出。
+     */
+    val cachePercent: Double
+        get() = if (promptTokens <= 0) 0.0 else cachedTokens.toLong() * 100.0 / promptTokens
 
     /** 每秒输出 token；没有 completion 或没有耗时就是 0，不编数。 */
     val tokensPerSecond: Double
@@ -39,7 +46,7 @@ data class PerfSummary(
     val count: Int = 0,
     val avgTtftMs: Long = 0,
     val avgTotalMs: Long = 0,
-    val avgCachePercent: Int = 0,
+    val avgCachePercent: Double = 0.0,
     val avgTokensPerSecond: Double = 0.0,
 )
 
@@ -110,7 +117,7 @@ class PerfMonitor(private val file: File) {
                 if (it.isNaN()) 0L else it.toLong()
             },
             avgCachePercent = window.filter { it.promptTokens > 0 }.map { it.cachePercent }.average().let {
-                if (it.isNaN()) 0 else it.toInt()
+                if (it.isNaN()) 0.0 else it
             },
             avgTokensPerSecond = window.filter { it.tokensPerSecond > 0 }.map { it.tokensPerSecond }.average().let {
                 if (it.isNaN()) 0.0 else it
@@ -133,6 +140,67 @@ class PerfMonitor(private val file: File) {
             tmp.writeText(json.encodeToString(PerfRecord.serializer().let { kotlinx.serialization.builtins.ListSerializer(it) }, records.toList()))
             if (file.exists() && !file.delete()) return@runCatching
             tmp.renameTo(file)
+        }
+    }
+}
+
+/**
+ * 一段记录的"健康度"：**分位数**，不是只有均值。
+ *
+ * 均值会被一轮 40s 的慢轮拉走，而"卡不卡"是尾部决定的 —— 用户感觉到的是 p90，不是平均。
+ * 所以这一组数字里既有 p50/p90，也有 [jitter]（p90/p50）：1.0 说明这一段的耗时很平，
+ * 2.0 说明有一半的轮次拖到了中位数的两倍。
+ */
+data class PerfHealth(
+    val runs: Int = 0,
+    val ttftP50: Long = 0,
+    val ttftP90: Long = 0,
+    val totalP50: Long = 0,
+    val totalP90: Long = 0,
+    val cachePercent: Double = 0.0,
+    val tokensPerSecond: Double = 0.0,
+    /** 端点没回报 usage 的轮数：这些轮拿不到 token 数，速度也算不出来。 */
+    val noUsageRuns: Int = 0,
+    /** 整轮超过 [SLOW_MS] 的轮数。 */
+    val slowRuns: Int = 0,
+) {
+    /** 尾部/中位倍数；1.0 表示这一段很平。没有中位数时是 0（页面画成「—」）。 */
+    val jitter: Double get() = if (totalP50 <= 0L) 0.0 else totalP90.toDouble() / totalP50
+
+    companion object {
+        /** 一轮超过这么久，人已经能明显感觉到"卡住了"。 */
+        const val SLOW_MS = 60_000L
+
+        fun of(records: List<PerfRecord>): PerfHealth {
+            if (records.isEmpty()) return PerfHealth()
+            // 0 在这里的含义是「没有采集到」（纯工具轮没有首字、没有 usage），不进分位数。
+            val ttft = records.map { it.ttftMs }.filter { it > 0 }
+            val total = records.map { it.totalMs }.filter { it > 0 }
+            return PerfHealth(
+                runs = records.size,
+                ttftP50 = percentile(ttft, 0.50),
+                ttftP90 = percentile(ttft, 0.90),
+                totalP50 = percentile(total, 0.50),
+                totalP90 = percentile(total, 0.90),
+                cachePercent = records.filter { it.promptTokens > 0 }
+                    .map { it.cachePercent }
+                    .takeIf { it.isNotEmpty() }
+                    ?.average() ?: 0.0,
+                tokensPerSecond = records.map { it.tokensPerSecond }
+                    .filter { it > 0.0 }
+                    .takeIf { it.isNotEmpty() }
+                    ?.average() ?: 0.0,
+                noUsageRuns = records.count { it.promptTokens <= 0 },
+                slowRuns = records.count { it.totalMs > SLOW_MS },
+            )
+        }
+
+        /** 最近秩（nearest-rank）分位：样本少的时候也不插值编数。 */
+        internal fun percentile(values: List<Long>, p: Double): Long {
+            if (values.isEmpty()) return 0L
+            val sorted = values.sorted()
+            val index = kotlin.math.ceil(p * sorted.size).toInt().coerceIn(1, sorted.size) - 1
+            return sorted[index]
         }
     }
 }

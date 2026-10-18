@@ -1040,11 +1040,14 @@ internal fun AssistantRow(
                             // A settled reply keeps its thinking inside the summary card
                             // alone: a second copy beside the answer is what made one
                             // answer read as a stack of blocks. Live it still streams here.
+                            // 正在长的那一块才走打字机；已经结束的思考块一次给全（关掉开关时
+                            // rememberTypedText 直接原样返回，这条分支等于不存在）。
+                            val thinkingLive = streaming && last
                             ReasoningBlock(
-                                text = part.text,
+                                text = rememberTypedText(part.text, thinkingLive),
                                 // A live block is the one still growing; a settled round's
                                 // thinking is complete even while the run continues.
-                                streaming = streaming && last,
+                                streaming = thinkingLive,
                                 // A live block keeps its slot for the whole run, and the
                                 // stored copy of the same run answers to the same key.
                                 blockId = thinkSlot(parts, index, "live"),
@@ -1105,8 +1108,10 @@ internal fun AssistantRow(
                                 withFrameNanos { }
                                 selectable = true
                             }
+                            // 流式时逐字放（外观 → 打字机效果）；settled 直接全文，选区也用全文。
+                            val shown = rememberTypedText(part.text, streaming)
                             if (streaming || !selectable) {
-                                MarkdownText(text = part.text)
+                                MarkdownText(text = shown)
                             } else {
                                 SelectionContainer { MarkdownText(text = part.text) }
                             }

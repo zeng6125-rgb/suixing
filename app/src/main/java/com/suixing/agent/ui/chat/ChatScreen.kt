@@ -809,7 +809,10 @@ fun ChatScreen(
                         EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
                     }
                 } else {
-                    CompositionLocalProvider(LocalReadingPinned provides !scroll.stickToBottom) {
+                    CompositionLocalProvider(
+                        LocalReadingPinned provides !scroll.stickToBottom,
+                        LocalTypewriter provides settings.typewriter,
+                    ) {
                     LazyColumn(
                         state = listState,
                         // **顶锚**（标准画法）：内容往末尾追加，读上面时视口天然不动；追底＝在底就
@@ -823,8 +826,10 @@ fun ChatScreen(
                                         val down = awaitPointerEvent(PointerEventPass.Initial)
                                         if (down.changes.none { it.pressed }) continue
                                         val downY = down.changes.first().position.y
+                                        val downAt = SystemClock.uptimeMillis()
                                         pressed = true
                                         pressGuardOn = true
+                                        var moved = false
                                         var released = false
                                         while (!released) {
                                             val next = awaitPointerEvent(PointerEventPass.Initial)
@@ -838,11 +843,21 @@ fun ChatScreen(
                                                 (dy > CANCEL_FOLLOW_PX || dy < -CANCEL_FOLLOW_PX)
                                             ) {
                                                 scroll.stickToBottom = false
+                                                moved = true
                                             }
                                             released = next.changes.none { it.pressed }
                                         }
                                         pressed = false
                                         pressUpAt = SystemClock.uptimeMillis()
+                                        // 短按（没移动、也没到长按阈值）= 点折叠条/点按钮这类点击：抬手即放行追底。
+                                        // 守护窗口是给"长按选文字"的（400ms 内不许列表自己动，否则选区跟着跑），
+                                        // 但展开动画只有 180ms（PROCESS_EXPAND_MS）：不区分的话整个展开都落在守护窗口里，
+                                        // 列表一动不动、等守护撤了再一次性补上整段高度 —— 这就是"卡片长高后被瞬移到上面"。
+                                        if (!moved && SystemClock.uptimeMillis() - downAt <
+                                            viewConfiguration.longPressTimeoutMillis
+                                        ) {
+                                            pressGuardOn = false
+                                        }
                                     }
                                 }
                             },
@@ -1080,7 +1095,7 @@ fun ChatScreen(
                         sessionSplit = sessionSplit,
                         sessionTurns = sessionTurns,
                         sessionPerSecond = session?.perSecond ?: 0.0,
-                        sessionCachePercent = session?.cachePercent ?: 0,
+                        sessionCachePercent = session?.cachePercent ?: 0.0,
                         sessionElapsedMs = sessionElapsedMs,
                         live = state.stats,
                     )
@@ -1152,7 +1167,7 @@ fun ChatScreen(
                     sessionSplit = sessionSplit,
                     sessionTurns = sessionTurns,
                     sessionPerSecond = session?.perSecond ?: 0.0,
-                    sessionCachePercent = session?.cachePercent ?: 0,
+                    sessionCachePercent = session?.cachePercent ?: 0.0,
                     sessionElapsedMs = sessionElapsedMs,
                     conversationProviderId = state.providerId,
                     conversationModel = state.model,

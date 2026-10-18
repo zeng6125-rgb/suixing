@@ -649,177 +649,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 }
             }
             item {
-                OutlinedTextField(
-                    // 15sp 走比例式而不是 `15.sp`：写死 sp 会关掉「外观 → 字号」的缩放（规范第 6 条），
-                    // 详见文件底部 settingsFieldText 的 KDoc。
-                    textStyle = settingsFieldText,
-                    value = form.baseUrl,
-                    onValueChange = { value ->
-                        form = form.copy(baseUrl = value)
-                            .mapProvider(selected?.id) { it.copy(baseUrl = value) }
-                    },
-                    // 设置页输入框的统一规格（本文件其余十几处同此，不重复注释）：
-                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。**别再压死高度**——写死
-                    // height(48.dp) 会在「外观 → 字号」放大时裁掉汉字下缘（工具页搜索框就是这么
-                    // 出事的，那段注释在 ToolsScreen.kt:524-527）；矮是字号给的，不是把盒子压扁来的。
-                    label = { Text("接口地址") },
-                    // 明文 http 是刻意留着的（局域网里的 Ollama / LM Studio 就只有 http），但
-                    // key 会跟着明文走——这一句是用户敲下那个地址之前唯一的提醒。
-                    supportingText = {
-                        Text(
-                            "例如 https://api.deepseek.com/v1\n" +
-                                "填 http:// 地址时，API Key 会明文传输，仅建议在可信局域网内使用。",
-                        )
-                    },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                )
-            }
-            item {
-                // The provider's own name, editable in place: the chip row's long-press
-                // rename stays, but the name is read every day and typed once a month.
-                OutlinedTextField(
-                    // 单行输入框的统一规格（本文件其余十几处同此，不重复注释）：
-                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。
-                    //
-                    // **为什么看起来「没变矮」**（写给下一轮，别再试 `height(...)`）：
-                    // material3 1.3.1 的 `OutlinedTextField` 自带 **56dp 最小高度**
-                    // （TextFieldDefaults.MinHeight），而且**没有 `contentPadding` 参数**
-                    // （OutlinedTextFieldDefaults.contentPadding() 只服务自绘 decoration）
-                    // ⇒ 在不裁字的前提下**压不到 56dp 以下**；写死 `height(52.dp)` 是把 56dp 的
-                    // 容器硬压扁，会裁掉汉字下缘（工具页搜索框就是这么出过事的）。要真的更矮，
-                    // 只能手绘输入框 —— 那是另一个量级的活。所以这里用 min：跟着字号长、永不裁字。
-                    textStyle = settingsFieldText,
-                    value = selected?.name.orEmpty(),
-                    onValueChange = { value ->
-                        form = form.mapProvider(selected?.id) { it.copy(name = value) }
-                        // 只改草稿：每敲一键写一次盘，会让所有观察 settings 的地方跟着重组，
-                        // 内容区那一行「有未保存的改动」一闪一灭，看起来就是那行字在抖。停手后再落盘。
-                        pendingName = selected?.id?.takeIf { it.isNotEmpty() }?.let { it to value }
-                    },
-                    label = { Text("提供方名称") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                )
-            }
-            item {
-                SettingRow(
-                    title = "允许自签名证书",
-                    subtitle = "接口是 https 且证书自签时打开。局域网上的反代（例如 " +
-                        "https://192.168.0.50:8914/v1）基本都要开，开了就不再校验证书与域名。",
-                    control = {
-                        Switch(
-                            checked = form.allowInsecureTls,
-                            onCheckedChange = { form = form.copy(allowInsecureTls = it) },
-                        )
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
-            item {
-                OutlinedTextField(
-                    textStyle = settingsFieldText,
-                    value = form.apiKey,
-                    onValueChange = { value ->
-                        form = form.copy(apiKey = value)
-                            .mapProvider(selected?.id) { it.copy(apiKey = value) }
-                    },
-                    label = { Text("API Key") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                )
-            }
-            item {
-                // The raw id, not the alias: what is typed here is what goes on the wire, so
-                // a display name typed or pasted in would be sent as the model and 404. The
-                // alias stays read-only, under the field and on the picker's chips.
-                val alias = selected?.aliases?.get(form.model)
-                OutlinedTextField(
-                    textStyle = settingsFieldText,
-                    value = form.model,
-                    onValueChange = { form = form.copy(model = it) },
-                    label = { Text("当前模型") },
-                    supportingText = if (alias != null) {
-                        { Text("别名：$alias") }
-                    } else {
-                        null
-                    },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                )
-            }
-            item {
-                // 模型列表里那枚 chip 要先进对话框、再展开输入框才能改一个数；当前模型
-                // 的窗口是天天要调的，所以在页面上直接给一档预设。
-                val model = form.model
-                // The page names the model by its alias everywhere else, so the hint does too;
-                // the raw id is still what the window is filed under in modelContexts.
-                val modelLabel = selected?.displayModel(model) ?: model
-                val window = form.contextWindowFor(model)
-                var customOpen by remember { mutableStateOf(false) }
-                val presetIndex = CONTEXT_PRESETS.indexOfFirst { it.first == window }
-                LabeledBlock(
-                    label = "上下文窗口",
-                    hint = "默认取自上游模型信息（拉取模型列表时写入）；可自定义；留空＝不限。" +
-                        "只影响当前模型（$modelLabel），填了它，聊天页输入框左边的圆环才会按占用比例显示。",
-                ) {
-                    SegmentedPill(
-                        options = CONTEXT_PRESETS.map { it.second } + "自定义",
-                        // 存了个预设之外的值时停在「自定义」，下面那行把真实值说出来。
-                        selectedIndex = if (presetIndex >= 0) presetIndex else CONTEXT_PRESETS.size,
-                        onSelect = { index ->
-                            if (index == CONTEXT_PRESETS.size) {
-                                customOpen = true
-                                return@SegmentedPill
-                            }
-                            val tokens = CONTEXT_PRESETS[index].first
-                            // Draft first, disk second: the window belongs to the model and
-                            // lands immediately, but routing it through the draft keeps
-                            // whatever else is unsaved on this page intact.
-                            form = form.copy(modelContexts = form.modelContexts.withContextWindow(model, tokens))
-                            scope.persist { it.copy(modelContexts = form.modelContexts) }
-                        },
-                    )
-                    if (window > 0 && CONTEXT_PRESETS.none { it.first == window }) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = "自定义：$window",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    // 上游声明的值只代表「网关愿意承认的长度」：用户那个网关声明 180k 却
-                    // 实际接受 574k。这里不写死数字——手改过之后它就不再是「上游声明」，
-                    // 而且非预设值上面那行已经把真实值说出来了。
-                    Text(
-                        text = "上游声明的值可能小于网关实际支持的长度，可以改大；填小了会提前触发压缩。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (customOpen) {
-                    // The raw id goes in, not the alias: the suggestion is matched against the
-                    // model's own name, and the id is what the window is filed under.
-                    ContextWindowDialog(
-                        model = model,
-                        current = window,
-                        onDismiss = { customOpen = false },
-                        onConfirm = { tokens ->
-                            customOpen = false
-                            form = form.copy(modelContexts = form.modelContexts.withContextWindow(model, tokens))
-                            scope.persist { it.copy(modelContexts = form.modelContexts) }
-                        },
-                    )
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
-            item {
                 // The provider row: one chip per endpoint, the active one filled, plus
                 // 新建. Renaming and deleting ride each chip's own long-press menu, so
                 // the row stays a row. It sits after the context presets, in the field
@@ -932,9 +761,139 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                 )
                             },
                         )
+                        // 删除原来只藏在「长按 chip」里（onLongClick），用户找不到 —— 这里给一个
+                        // 可见入口，删的是**当前选中的**提供方；只剩一个时禁用（删完会没有接口可用，
+                        // deleteProvider 也要求至少留一个）。
+                        val current = form.providers.firstOrNull { it.id == selected?.id }
+                        if (current != null) {
+                            Spacer(Modifier.width(8.dp))
+                            AssistChip(
+                                enabled = form.providers.size > 1,
+                                onClick = {
+                                    if (endpointEdited) {
+                                        pendingDelete = current.id
+                                    } else {
+                                        deleteProvider(current)
+                                    }
+                                },
+                                label = { Text("删除") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = ImageVector.vectorResource(R.drawable.ic_x),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                },
+                            )
+                        }
                     }
                     Spacer(Modifier.height(8.dp))
                 }
+            }
+            item {
+                OutlinedTextField(
+                    // 15sp 走比例式而不是 `15.sp`：写死 sp 会关掉「外观 → 字号」的缩放（规范第 6 条），
+                    // 详见文件底部 settingsFieldText 的 KDoc。
+                    textStyle = settingsFieldText,
+                    value = form.baseUrl,
+                    onValueChange = { value ->
+                        form = form.copy(baseUrl = value)
+                            .mapProvider(selected?.id) { it.copy(baseUrl = value) }
+                    },
+                    // 设置页输入框的统一规格（本文件其余十几处同此，不重复注释）：
+                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。**别再压死高度**——写死
+                    // height(48.dp) 会在「外观 → 字号」放大时裁掉汉字下缘（工具页搜索框就是这么
+                    // 出事的，那段注释在 ToolsScreen.kt:524-527）；矮是字号给的，不是把盒子压扁来的。
+                    label = { Text("接口地址") },
+                    // 明文 http 是刻意留着的（局域网里的 Ollama / LM Studio 就只有 http），但
+                    // key 会跟着明文走——这一句是用户敲下那个地址之前唯一的提醒。
+                    supportingText = {
+                        Text(
+                            "例如 https://api.deepseek.com/v1\n" +
+                                "填 http:// 地址时，API Key 会明文传输，仅建议在可信局域网内使用。",
+                        )
+                    },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                )
+            }
+            item {
+                // The provider's own name, editable in place: the chip row's long-press
+                // rename stays, but the name is read every day and typed once a month.
+                OutlinedTextField(
+                    // 单行输入框的统一规格（本文件其余十几处同此，不重复注释）：
+                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。
+                    //
+                    // **为什么看起来「没变矮」**（写给下一轮，别再试 `height(...)`）：
+                    // material3 1.3.1 的 `OutlinedTextField` 自带 **56dp 最小高度**
+                    // （TextFieldDefaults.MinHeight），而且**没有 `contentPadding` 参数**
+                    // （OutlinedTextFieldDefaults.contentPadding() 只服务自绘 decoration）
+                    // ⇒ 在不裁字的前提下**压不到 56dp 以下**；写死 `height(52.dp)` 是把 56dp 的
+                    // 容器硬压扁，会裁掉汉字下缘（工具页搜索框就是这么出过事的）。要真的更矮，
+                    // 只能手绘输入框 —— 那是另一个量级的活。所以这里用 min：跟着字号长、永不裁字。
+                    textStyle = settingsFieldText,
+                    value = selected?.name.orEmpty(),
+                    onValueChange = { value ->
+                        form = form.mapProvider(selected?.id) { it.copy(name = value) }
+                        // 只改草稿：每敲一键写一次盘，会让所有观察 settings 的地方跟着重组，
+                        // 内容区那一行「有未保存的改动」一闪一灭，看起来就是那行字在抖。停手后再落盘。
+                        pendingName = selected?.id?.takeIf { it.isNotEmpty() }?.let { it to value }
+                    },
+                    label = { Text("提供方名称") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                )
+            }
+            item {
+                SettingRow(
+                    title = "允许自签名证书",
+                    subtitle = "接口是 https 且证书自签时打开。局域网上的反代（例如 " +
+                        "https://192.168.0.50:8914/v1）基本都要开，开了就不再校验证书与域名。",
+                    control = {
+                        Switch(
+                            checked = form.allowInsecureTls,
+                            onCheckedChange = { form = form.copy(allowInsecureTls = it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
+                OutlinedTextField(
+                    textStyle = settingsFieldText,
+                    value = form.apiKey,
+                    onValueChange = { value ->
+                        form = form.copy(apiKey = value)
+                            .mapProvider(selected?.id) { it.copy(apiKey = value) }
+                    },
+                    label = { Text("API Key") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                )
+            }
+            item {
+                // The raw id, not the alias: what is typed here is what goes on the wire, so
+                // a display name typed or pasted in would be sent as the model and 404. The
+                // alias stays read-only, under the field and on the picker's chips.
+                val alias = selected?.aliases?.get(form.model)
+                OutlinedTextField(
+                    textStyle = settingsFieldText,
+                    value = form.model,
+                    onValueChange = { form = form.copy(model = it) },
+                    label = { Text("当前模型") },
+                    supportingText = if (alias != null) {
+                        { Text("别名：$alias") }
+                    } else {
+                        null
+                    },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                )
             }
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1052,27 +1011,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             }
             // 「最大工具轮数」与「显示思考过程」搬到了「对话配置」页：一个是它一次任务能跑几轮、
             // 一个是对话里显示什么，都不属于模型端点本身。字段与存储没动。
-            item {
-                LabeledBlock(
-                    label = "系统提示词",
-                    hint = "模型的人设与工作方式，每次请求都会带上。",
-                ) {
-                    OutlinedTextField(
-                        // 多行编辑器（内容区）不在"文本框收紧"的范围里：字号保持 bodyMedium，
-                        // 高度也不加约束——用户说的是「文本框不用那么高那么大」。
-                        textStyle = MaterialTheme.typography.bodyMedium,
-                        value = form.systemPrompt,
-                        onValueChange = { form = form.copy(systemPrompt = it) },
-                        minLines = 6,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(
-                        onClick = { form = form.copy(systemPrompt = AppSettings().systemPrompt) },
-                    ) { Text("恢复默认") }
-                }
-            }
+            //
+            // 「系统提示词」编辑器已从这里移除（用户：「模型设置页不再支持修改系统提示词，
+            // 反正助手页可更改」）：人设属于助手，改人设去「助手」页；这里再放一个全局编辑框，
+            // 等于同一个东西有两个出处。settings.systemPrompt 字段本身保留 —— 引擎每轮仍然
+            // 把它拼进请求（AgentEngine.systemPrompt 的第一段），助手页写的就是它。
             // Sampling lives behind a fold: these three are set once and then never
             // touched, and they were the rows pushing the daily switches off the screen.
             item {
@@ -1231,9 +1174,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             },
             onConfirm = { picked ->
                 form = form.mapProvider(selected.id) { it.copy(enabled = picked) }
-                if (form.model.isBlank() && picked.isNotEmpty()) {
-                    form = form.copy(model = picked.first())
-                }
+                // provider 不再默认指定模型（用户：「对于 provider 不再默认指定模型」）：
+                // 勾选只是把模型加进这个提供方的可用清单，用哪个由聊天页的模型选择器决定。
                 pickerOpen = false
             },
             onDismiss = { pickerOpen = false },
@@ -1780,6 +1722,19 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
+            item {
+                LabeledBlock(
+                    label = "打字机效果",
+                    hint = "正在生成的正文与思考逐字显示；关掉则一收到就整块出现。已结束的回答不受影响。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("开", "关"),
+                        selectedIndex = if (stored.typewriter) 0 else 1,
+                        onSelect = { index -> scope.persist { it.copy(typewriter = index == 0) } },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             // 思考块与「看到什么」的六项搬到了「对话配置」页：它们是对话内容的显示方式，不是
             // 主题/排版。字段与存储没动。
             item {
@@ -1814,9 +1769,10 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 fontScale = defaults.fontScale,
                                 bubbleWidth = defaults.bubbleWidth,
                                 cornerScale = defaults.cornerScale,
-                                // 这一页现在是六项：新加的提示条时长也在「恢复默认外观」里，
+                                // 这一页现在是七项：新加的提示条时长与打字机效果也在「恢复默认外观」里，
                                 // 否则按了恢复却留着上一轮的设置，用户会以为按钮坏了。
                                 bannerSeconds = defaults.bannerSeconds,
+                                typewriter = defaults.typewriter,
                             )
                         }
                     },

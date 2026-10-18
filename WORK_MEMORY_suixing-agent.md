@@ -570,9 +570,9 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 
 ### 8.5 状态与待办
 
-- 工作树：编译 0 错误、单测 **503/503**；已装 **0.8.195(206)**；本地提交 4df6de8（**未推送**）
-- **例外未验证**：用量文案 入/出 → 输入/输出（ChatBlocks.kt 6 处）已改但未编译
-- **待办**：① 编译验证上述文案并出包 ② 工具完成→下次响应的本地阻塞（候选：breakTools 每轮序列化全量 schema、每轮整份会话 JSON 落盘、PluginRuntime.enabledPlugins()/skills.list() 每轮读盘；需性能页数据支撑）③ 真机验收性能页/多工具块/手动压缩/seccomp 提示 ④ 推送
+- 工作树：编译 0 错误、单测 **503/503**；已装 **0.8.201(212)**（`dumpsys package com.suixing.agent` 实测：versionName=0.8.201 / versionCode=212 / lastUpdateTime=2026-10-18 03:37:57；`app/build/outputs/apk/release/app-release.apk` 15,588,753 B @03:37:59）；本地 HEAD `e649939`（**未推送，领先 origin/main 4 个提交**：e649939 / 4df6de8 / ad4783b / 3d5c79b）
+- **用量文案已编译验证**：`ChatBlocks.kt` 的「输入 / 输出」（`:1181`、`:1186-1187`、`:1285-1286`）mtime 03:37:10 **早于** APK 03:37:59 ⇒ 装机版就是用这份工作树构建的（旧记「已改但未编译」作废）。工作树仍有 5 个未提交改动：`app/build.gradle.kts`(212/0.8.201)、`data/Settings.kt`、`ui/chat/ChatBlocks.kt`、`ui/settings/SettingsScreen.kt`、`ui/settings/ContextWindowTest.kt`
+- **待办**：① ~~编译验证文案并出包~~ 已完成（0.8.201 已装、已由用户验收）② 工具完成→下次响应的本地阻塞（候选：breakTools 每轮序列化全量 schema、每轮整份会话 JSON 落盘、PluginRuntime.enabledPlugins()/skills.list() 每轮读盘；需性能页数据支撑）③ 真机验收性能页/多工具块/手动压缩/seccomp 提示 ④ 推送（4 个提交，直连不通，需代理 127.0.0.1:7890）⑤ 0.8.201 这批改动是否提交（等用户放行，不自行 commit）
 
 ### 8.6 模型设置页改造（0.8.196 装机）
 
@@ -589,8 +589,11 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 - 曾用 `BLOCK_CONTENT_TOP = 6.dp`（ChatBlocks.kt:803）统一思考块/工具块首行间距
 - 思考块先后试过：容器 6dp → 2dp → 0dp → 列表 `contentPadding(top=6dp)`（0.8.201）
 - `thinkingStyle()` 已加 `includeFontPadding=false` + `LineHeightStyle(trim = FirstLineTop)`（去字体 padding 与首行半截行距）
-- **未解决**：用户报「思考块分割线下方有空白条，列表滑下去它还在」。**关键矛盾**：0.8.200 里思考块已无任何容器内边距，空白仍在 ⇒ 归因于容器 padding 与事实不符，**尚未定位真因**
-- 下一步必须先确认：用户测的是哪一版（设置→关于）+ 展开并滑动后的截图（看分割线到首行距离是否随滚动变化）
+- **已解决（0.8.201；用户 2026-10-18 03:4x 亲口确认「已经好了」）**。0.8.201 同批改了四处：① 首行边距进 chain 的 LazyColumn：`contentPadding = PaddingValues(top = BLOCK_CONTENT_TOP)`（`ChatBlocks.kt:654`，属滚动内容）② ProcessCard 内容区 top 保持 0（`:455`）③ `thinkingStyle()` 加 `PlatformTextStyle(includeFontPadding = false)` + `LineHeightStyle(trim = FirstLineTop)`（`:816-830`）④ 首行是空行时不再占 4dp（`:659-661`）。**未逐条归因**：0.8.200 已无容器 padding 而空白仍在 ⇒ 更可能是首行文字盒内的半截行距/字体 padding（③），但这是推断不是实测，别当结论
+- **三张旧截图（gap-now / gap-after / measure，2026-10-16，0.8.2xx 之前的构建）不是这道 bug 的证据**：`dist/analyze_gap.py` 的「分割线 → 下一行墨迹」是启发式；`dist/bands.py` 复核实测那三张里的候选线都是**整幅宽 0..1156 的面板级发丝线**（gap-after `y=2096/2101 med=244`、gap-now `y=1002 med=231`），不是卡片分割线（卡片线约 `med=224` 且只跨卡片宽）；gap-after 那条 110px「空白」其实是列表底部到 composer 边缘。**`gap-now.png` 本身不是正常聊天界面截图**：`y 0..793` 是一整块整幅宽的近黑区域（采样像素 19% 亮度 <30，modal 色 `(16,16,32)` 13% + `(0,0,0)` 6%），band 结构只有 7 段就是这块黑区造成的。**别再拿它们量化这道空白**
+- **修复的验收证据只有一条**：用户 2026-10-18 在 0.8.201 上亲口「已经好了」；截图为旧版本、且不可用，不构成验收证据
+- **不要再动这块的数值**：用户已验收，无新证据前不改 `BLOCK_CONTENT_TOP`(6dp) / `thinkingStyle` 行高 / 内容区内边距
+- 顺带事实：`ReasoningBlock` 的两个调用点都是 `nested = false`（`ChatBlocks.kt:1253`、`ChatTopBar.kt:1043` 走默认值）⇒ 聊天页永远走 ProcessCard 那条路；`nested = true` 分支（`:701-782`，start=44dp）在聊天页是死路，改它不会有观感变化
 
 ### 8.8 版本与提交
 
@@ -604,3 +607,90 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 9. **PowerShell here-string 里的反引号会截断**：Markdown 代码块含反引号时必须用单引号 here-string `@'...'@`，否则报 ParserError 且中文乱码。
 10. **`PlatformTextStyle(includeFontPadding=false)` 不能去掉 lineHeight 的行距**，必须配 `LineHeightStyle(trim = FirstLineTop)`。
 11. **改完源码要清 `app/build/test-results/testDebugUnitTest`** 再跑，否则会读到上一轮缓存的「全绿」。
+
+### 8.10 展开/流式长高被"瞬移"：真因是 400ms 守护窗口盖住 180ms 动画（2026-10-18 修，未打包）
+
+**用户描述**：卡片底部的块展开都向下展 ⇒ 卡片变高 ⇒ 因追底锚定被瞬移到上面；流式时块/卡片长高同理，间接造成残影。要求"追底锚定态下展开为向上展"。
+
+**真因（代码 + 数值证据，不是推测）**：
+- 展开动画时长 `PROCESS_EXPAND_MS = 180`（`ChatBlocks.kt:291`），走 `tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS)`（`:438-442`、`:770-774`、`:1118-1121`）。
+- `LocalReadingPinned provides !scroll.stickToBottom`（`ChatScreen.kt:812`）⇒ 贴底时是 **180ms 动画**，读上面时才是 0。
+- 但手指一按下就把 `pressGuardOn = true`（`ChatScreen.kt:826-827`），抬手后守护要等 `LONG_PRESS_SETTLE_MS = 400`（`ChatContext.kt:1138`）才撤（`ChatScreen.kt:672-686`）。
+- 追底判据里 `guard` 一栏为真就不滑（`ChatScroll.kt:108-112`）⇒ **点折叠条这一下把整段 180ms 展开动画关在守护窗口里**，列表一动不动；400ms 到点守护撤、`below` 一次性补齐整段高度 = 用户看到的"瞬移"。180 < 400 是硬冲突。
+- 次要项（本次未改）：`dragging = listState.isScrollInProgress`（`ChatScroll.kt:106`）把程序自己发起的 `scrollBy` 也当成"用户在滚"，理论上会隔帧挡住一次；本次实测未单独验证。
+
+**改动（`ChatScreen.kt` 指针循环，只动这一处观感逻辑）**：记录 `downAt` 与 `moved`（`moved` 由原 `stickToBottom = false` 分支置位）；抬手时若"没移动且按住时间 < `viewConfiguration.longPressTimeoutMillis`"（= 短按/点击）就立刻 `pressGuardOn = false`。长按选文字的行为不变（守护仍保留）。
+
+**为什么这就是"向上展"**：顶锚列表贴底时，内容长多少、追底就滚多少 ⇒ 卡片底边不动、顶边上移，视觉上就是向上展。被挡住的从来不是方向，而是这 400ms。
+
+**验证**：`compileDebugKotlin` 通过；单测 **510/510**（503 原有 + 7 新增）。**真机未验**（未打包，等用户说"打包"）。
+
+### 8.11 性能页加"设备实时"+"会话健康"（同一批，未打包）
+
+- 新文件 `data/LiveMetrics.kt`：`data class LiveMetrics`（processCpu/systemCpu/javaHeap/javaHeapMax/pss/threads/gpuPercent/gpuFreqMhz，**读不到一律 null**）+ `class LiveSampler`（自己记住上次读数算增量）。数据源：`Process.getElapsedCpuTime()`、`/proc/stat` 首行、`/proc/self/status` 的 `Threads:`、`Debug.getPss()`、`Runtime`、GPU 节点 `/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage` / `gpuclk` / `devfreq/*/cur_freq`。**Android 没有公开 GPU 利用率 API**，机型不给节点就显示「—」。
+- `data/PerfMonitor.kt` 追加 `data class PerfHealth`：runs / ttftP50,p90 / totalP50,p90 / cachePercent / tokensPerSecond / noUsageRuns / slowRuns(>60s) / `jitter = p90/p50`；`percentile()` 用最近秩、不插值，空集返回 0。
+- `ui/settings/PerfScreen.kt` 三段：设备实时（1s 采样，`LaunchedEffect` 随页面销毁自动停；帧率用 `Choreographer.postFrameCallback` 取最近 60 帧均值与 p90）、会话健康（最近 20 轮分位数）、每轮明细（原样）。
+- 新增测试 `app/src/test/java/com/suixing/agent/data/PerfHealthTest.kt`（7 例：最近秩、单样本、空集、0 值不入分位、jitter、慢轮/无 usage 计数、空窗口）。`LiveMetrics` 依赖 android.os，JVM 单测跑不了，靠装机后页面自证。
+
+**坑（新）**：**Kotlin 支持嵌套块注释** —— 在 KDoc 里写 `/sys/class/kgsl/*` 会开一个嵌套注释，编译报 `Syntax error: Unclosed comment` 且报在文件末尾（141:1），看着像"文件被截断"，其实是注释没配对。注释里别写 `/*`。
+
+### 8.12 打字机效果（外观开关，默认开；2026-10-18，未打包）
+
+**用户要求**：思考的流式用打字机效果，正文也行；外观页加开关，默认开。
+
+**落点（只碰"正在流式"的那一段，已结束的一轮一律全文）**：
+- `data/Settings.kt`：`val typewriter: Boolean = true`（紧跟 `showTimestamps`，类中间带默认值 ⇒ 老 JSON 没有这个键读出来就是 true）。
+- `ui/chat/Typewriter.kt`（新）：`@Composable internal fun rememberTypedText(text, enabled): String`。节拍 `TYPE_TICK_MS = 40`（25 次/秒，**不是每帧**：正文每换一次前缀就要整段重解 Markdown，60fps 会翻一倍多），每拍放 `max(2, ceil(backlog/4))` 个字 ⇒ 稳态落后约 4 拍 ≈ **160ms**，积压越大放得越快，**永远不会追不上**。文本变短（换块/换段）立刻对齐，不回放。
+- `ui/chat/ChatBlocks.kt`：`internal val LocalTypewriter = compositionLocalOf { true }`（挨着 `LocalReadingPinned:294`）。
+- `ui/chat/ChatScreen.kt:812`：`CompositionLocalProvider(LocalReadingPinned …, LocalTypewriter provides settings.typewriter)`。
+- `ui/chat/ChatTopBar.kt` 两个渲染点：`Part.Thinking` 改 `text = rememberTypedText(part.text, thinkingLive)`、`streaming = thinkingLive`；`Part.Text` 加 `val shown = rememberTypedText(part.text, streaming)`，流式分支用 `shown`，settled 分支仍用 `part.text`（选区要全文）。
+- `ui/settings/SettingsScreen.kt` 外观页：`LabeledBlock("打字机效果")` + `SegmentedPill(开/关)`，并加进「恢复默认外观」。
+
+**为什么默认开**：这是显示层效果，关掉零成本、开错也只是"多看一眼动画"；但**前提是它不许落后**（见上面的追赶公式）——固定速度的逐字机在快端点上会积成一条永远追不上的尾巴，那比整块跳更糟。
+
+**验证**：`compileDebugKotlin` 通过；单测 **510/510**。真机未验（未打包）。
+
+**坑**：`edit` 的 `old_string` 里我照抄提示语时漏了一个「的」（"屏幕的宽度比例"写成"屏幕宽度的比例"），edit 直接报 not found；**改前必须重读目标区间再抄**，不要凭上一次的阅读记忆手打中文。
+
+### 8.13 会话统计的「缓存命中」改成两位小数（2026-10-18，未打包）
+
+**用户要求**：标题的会话统计数据里的缓存命中率要精确到两位小数。
+
+**改法**：把「算的时候取整」改成「显示的时候格式化」——`SessionStats.cachePercent` 由 `Int`（roundToInt）改成 `Double`（不取整），只在渲染点 `String.format("%.2f%%")`。若继续在数据层取整，后面再想加精度就补不回来了。
+
+- `ChatViewModel.kt:295` `val cachePercent: Double`；`:324` `if (prompt > 0) cached.toLong() * 100.0 / prompt else 0.0`（仍用 Long 避免 21,474,837 以上的 Int 溢出）。
+- 参数链 5 处 `sessionCachePercent: Int` → `Double`：`ChatComposer.kt:927`、`ChatComposer.kt:1098`、`ChatContext.kt:272`、`TurnScrubber.kt:602`（另 `ChatContext.kt:348`、`TurnScrubber.kt:1263` 是原样转发，类型跟着变）。
+- `ChatScreen.kt:1098`、`:1170` 两处调用改 `?: 0.0`。
+- 渲染：`ChatComposer.kt:1163` 由 `"$sessionCachePercent%"` 改成 `remember(...) { String.format(Locale.getDefault(), "%.2f%%", …) }`。
+- 测试：`SessionStatsTest.kt:80` `assertEquals(75, …)` → `assertEquals(75.0, stats.cachePercent, 0.0001)`。
+
+**没动**：性能页 `PerfScreen.kt:127` 的「缓存命中（均值）」仍是整数（那是每轮比率的均值，另一套口径）；标题里的**单轮**卡片 `ChatTopBar.kt:861-870` 本来就是 `%.2f%%`。
+
+**验证**：编译通过、单测 **510/510**，未打包。
+
+### 8.14 缓存命中率全局统一两位小数（2026-10-18，未打包）
+
+用户：「统一口径，都保留两位小数」。至此**四类显示全部两位小数**，且都遵循同一条规矩——**数据层不取整，只在该显示的字符串上格式化**：
+
+1. 标题的单轮卡片「缓存命中」：`ChatTopBar.kt:861-870`，本来就地 `%.2f%%`（cached/prompt 现算），未动。
+2. 标题的会话统计「缓存命中」：§8.13，`SessionStats.cachePercent: Double`。
+3. 性能页「缓存命中（均值）」两处：`PerfScreen.kt:94`（summary 段，读 `PerfSummary.avgCachePercent`）、`:127`（会话健康段，读 `PerfHealth.cachePercent`）——**是两行两个数据源，不是同一行改两次**。
+4. 性能页每轮明细：`PerfScreen.kt:257` 的「· 缓存 xx.xx%」。
+
+**数据层改动（PerfMonitor.kt）**：
+- `PerfRecord.cachePercent`：`Int`（`cachedTokens * 100 / promptTokens` 整除）→ `Double`，改 `cachedTokens.toLong() * 100.0 / promptTokens`（顺带修掉 21,474,837 以上的 Int 溢出）。
+- `PerfSummary.avgCachePercent`：`Int` → `Double`（`.average()` 后不再 `.toInt()`）。
+- `PerfHealth.cachePercent`：`Int` → `Double`（同上）。三个字段都仍被读取：`avgCachePercent` 由 `PerfScreen.kt:94` 与 `PerfMonitorTest.kt:80` 使用，未成死字段。
+- `PerfScreen.kt` 新增 `private fun cacheText(percent: Double)`（0 ⇒「—」，否则 `%.2f%%`），两处均值行共用。
+
+**测试**：新增 1 例 `PerfHealthTest.the cache ratio keeps its fraction until the screen formats it`（钉住"数据层不取整"）；既有断言只做类型迁移、期望值不变：`SessionStatsTest` 75→75.0、`PerfMonitorTest` 40→40.0。最近秩/抖动的语义没动。
+
+**验证**：编译通过、单测 **511/511**（510 + 1 新增），未打包。
+
+### 8.15 0.8.202(213) 已打包并装机（2026-10-18 12:17）
+
+- 版本：`app/build.gradle.kts` versionCode **213** / versionName **0.8.202**（原 212/0.8.201）。
+- 产物：`app/build/outputs/apk/release/app-release.apk`，15,599,841 B @ 12:16:56；`aapt dump badging` 实测 versionCode=213 / versionName=0.8.202 / label=随行。
+- 装机：`adb -s adb-d2e1026e-PZkPcd._adb-tls-connect._tcp install -r` → Success；`dumpsys package com.suixing.agent` 实测 versionCode=213 / versionName=0.8.202 / lastUpdateTime=2026-10-18 12:17:08。
+- 这一包相对 0.8.201 的四批改动：① 展开/长高瞬移修复（ChatScreen.kt:826-857 短按即撤守护）② 性能页设备实时+会话健康（LiveMetrics.kt/PerfMonitor.kt PerfHealth/PerfScreen.kt）③ 打字机效果 + 外观开关（Typewriter.kt/Settings.typewriter）④ 缓存命中率全局两位小数（SessionStats/PerfRecord/PerfSummary/PerfHealth 全改 Double，显示层 %.2f%%）。
+- 验证：编译 0 错误、单测 511/511。**仍未 git commit / push**（工作树 8 个改动文件 + 新增 2 个文件；push 需要代理 127.0.0.1:7890）。
