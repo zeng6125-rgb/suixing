@@ -241,6 +241,7 @@ import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -681,6 +682,13 @@ fun ChatScreen(
     var pressed by remember { mutableStateOf(false) }
     var pressUpAt by remember { mutableLongStateOf(0L) }
     var pressGuardOn by remember { mutableStateOf(false) }
+    /**
+     * 这一次按下里手指移动过没有（issue #14）。
+     *
+     * 守护协程要用它区分「长按选字」和「按住拖动」：前者要锁住列表，后者锁住就是跟手指打架。
+     * 以前 `moved` 只是 pointerInput 里的局部变量，外面看不到。
+     */
+    var pressMoved by remember { mutableStateOf(false) }
     // composition local 只能在组合里读：先在组合层捕获，守护协程里用这个引用。
     val setSelectionActive = LocalSetSelectionActive.current
     // **临时诊断（查完就删）**：长按复制会跳位置，且只有本次进程第一次出现。
@@ -706,8 +714,21 @@ fun ChatScreen(
         if (!pressGuardOn) return@LaunchedEffect
         scrollTrace("guard-on")
         setSelectionActive?.invoke(true)
+        // **长按选字期间锁住列表**（issue #14）：`SelectionContainer` 建立选区时会让 Compose 重排，
+        // 底锚随即按 key 重新锚定 —— 于是「长按复制，位置变了」。这里记下按下那一刻的锚点，
+        // 每帧发现被推走就按 key 拉回；绝对定位，不累积误差（与 #11/#13 同一方向）。
+        // 手指移动过（`pressMoved`）就不再锁：那是用户在滚，锁住会跟手指打架。
+        val lockKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
+        val lockOffset = listState.firstVisibleItemScrollOffset
         try {
             while (pressGuardOn) {
+                if (lockKey != null && !pressMoved) {
+                    val idx = listState.layoutInfo.visibleItemsInfo
+                        .indexOfFirst { it.key == lockKey }
+                    if (idx >= 0 && idx != listState.firstVisibleItemIndex) {
+                        listState.scrollToItem(idx, lockOffset)
+                    }
+                }
                 if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
                     pressGuardOn = false
                 }
@@ -730,12 +751,26 @@ fun ChatScreen(
     )
     // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
     var liveHeight by remember { mutableIntStateOf(0) }
-    // 切换会话时给转录一个 180ms 的淡入（issue #12）。**不做 crossfade**：那会同时持有两份
+    // 切换会话时给转录一个淡入（issue #12）。**不做 crossfade**：那会同时持有两份
     // composition，大会话的内存峰值翻倍。切走的那一刻 snapTo(0) 再淡入，读起来是「落定」而不是「跳」。
+    // 180ms 用户实测「太快」⇒ 320ms。**只动时长，缓动保持默认**（`tween` 的默认 easing 就是
+    // `FastOutSlowInEasing`）：两个变量一起改，验收时分不清是哪一个起作用（§4 第 29 条）。
+    //
+    // 两处修正（issue #12 的补充评论）：
+    //  · 首次组合不淡入（`lastFaded` 初值就是当前会话，冷启动不该闪一下）；
+    //  · **等列表量完再淡入**：`openConversation` 是一帧内换 state，LazyColumn 要几帧才量完，
+    //    以前在 conversationId 变化的那一帧就开始 fade，等量完 alpha 已经到 1 —— 淡入被测量吃掉，
+    //    看起来还是「突然」。现在等 itemCount > 0 再让出两帧。
     val switchAlpha = remember { androidx.compose.animation.core.Animatable(1f) }
-    LaunchedEffect(state.conversationId) {
+    var lastFaded by remember { mutableStateOf(state.conversationId) }
+    LaunchedEffect(state.conversationId, itemCount) {
+        if (state.conversationId == lastFaded) return@LaunchedEffect
+        if (itemCount <= 0) return@LaunchedEffect
+        lastFaded = state.conversationId
+        withFrameNanos { }
+        withFrameNanos { }
         switchAlpha.snapTo(0f)
-        switchAlpha.animateTo(1f, tween(180))
+        switchAlpha.animateTo(1f, tween(320))
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
@@ -745,28 +780,36 @@ fun ChatScreen(
     //  · 钉住高度（0.8.236）：高度不变就不抖，但 `heightIn(max)` + 裁剪把后续输出全裁掉 —— 死路。
     //  · 现在：**内容照常长**，只在「停下、不在底部、锚点真的偏了」时用 `scrollToItem` 绝对定位纠一次。
     //    key 是消息 id，不受 index 翻转 / live 开关影响；`scrollToItem` 不消耗 offset，不会累积误差。
-    var anchorKey by remember { mutableStateOf<Any?>(null) }
-    var anchorOffset by remember { mutableIntStateOf(0) }
-    // 手指停下时记锚点；回到贴底就把锚点丢掉（贴底由底锚跟随，不需要纠）。
+    // **锚点必须按会话隔离**（issue #15）：以前是两个全局 `remember`，切到 B 时还拿着 A 的 key。
+    // 消息 id 不撞，`?: return` 挡得住；但 `load-earlier` / `live-status:` 这类**非消息 key** 会撞上，
+    // 于是拿 A 的位置去滚 B —— #4 的「串味」就这么回来了。
+    val anchors = remember { mutableStateMapOf<String, Pair<Any?, Int>>() }
+    val anchorKey: Any? = anchors[state.conversationId]?.first
+    val anchorOffset: Int = anchors[state.conversationId]?.second ?: 0
+    // 记锚点：**不能看 `isScrollInProgress`**（issue #11 补充评论）。流式内容长高时 LazyColumn 的
+    // 内部重排会被算成「正在滚动」，于是这个值在流式期间一直是 true —— 锚点永远记不下来，
+    // 纠正逻辑也就永远检测不到 drift（用户实测：「抖动没了，但位置仍会持续漂移」）。
+    // 现在改成「**位置稳定 120ms 才记**」：流式每 40ms 推一次，debounce 一直被打断，锚点保持不动；
+    // 用户松手、惯性停下之后位置不动了，才把当时的首可见项记成锚点。
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress to scroll.stickToBottom }
-            .collect { (scrolling, stick) ->
-                if (stick) {
-                    anchorKey = null
-                } else if (!scrolling) {
-                    listState.layoutInfo.visibleItemsInfo.firstOrNull()?.let { first ->
-                        anchorKey = first.key
-                        anchorOffset = listState.firstVisibleItemScrollOffset
-                    }
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collectLatest {
+                delay(120)
+                // 恢复位置的那几帧不记：那时首可见项还是上一个会话留下的布局（issue #15）。
+                if (scroll.stickToBottom || pressed || scroll.restoring) return@collectLatest
+                listState.layoutInfo.visibleItemsInfo.firstOrNull()?.let { first ->
+                    anchors[state.conversationId] = first.key to listState.firstVisibleItemScrollOffset
                 }
             }
     }
     // 流式行每长高一次就检查一遍：锚点还在屏幕上、但我们看到的位置偏了，就纠回去。
     // 2px 以内不纠（issue 里提的容差）—— 否则每一帧都在写滚动位置，反而会抖。
+    // 跳过条件同样**不能看 `isScrollInProgress`**（同一个坑）：只看「贴底」和「手指按着」。
     LaunchedEffect(listState) {
         snapshotFlow { liveHeight }.collect {
             val key = anchorKey ?: return@collect
-            if (scroll.stickToBottom || listState.isScrollInProgress) return@collect
+            // 恢复位置的那几帧不纠（issue #15）：那时列表还在按 spots 定位，插一脚只会打架。
+            if (scroll.stickToBottom || pressed || scroll.restoring) return@collect
             val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }
                 ?: return@collect
             val drift = if (target.index == listState.firstVisibleItemIndex) {
@@ -797,7 +840,11 @@ fun ChatScreen(
             lastConvId = state.conversationId
         }
     }
-    var openedPinned by rememberSaveable(state.conversationId) { mutableStateOf(false) }
+    // **不能是 `rememberSaveable`**（issue #15）：它把值写进 SaveableStateRegistry，切走再切回同一个
+    // 会话时 registry 会把 `true` 恢复回来 ⇒ `if (openedPinned) return` 直接跳过恢复 ——
+    // 于是「切回 A，位置不是离开时的地方」。#4 分析里的「链路 3」，当时没修。
+    // 换成普通 `remember(key)`：切走时实例丢弃，切回是全新的 `false`，恢复逻辑会真的跑一次。
+    var openedPinned by remember(state.conversationId) { mutableStateOf(false) }
     LaunchedEffect(state.conversationId, itemCount, openedPinned) {
         if (openedPinned || itemCount <= 0) return@LaunchedEffect
         openedPinned = true
@@ -821,6 +868,9 @@ fun ChatScreen(
                 listState.scrollToItem(fedIndexOf(idx), saved.second)
                 withFrameNanos { }
                 withFrameNanos { }
+                // **两套机制对齐**（issue #15 第 3 条）：恢复出来的位置就是这一轮的锚点。
+                // 不写的话，流式纠正会拿着「切走前那个会话的旧锚点」或空锚点去纠，和恢复打架。
+                anchors[state.conversationId] = saved.first to saved.second
             } finally {
                 scroll.restoring = false
             }
@@ -948,6 +998,7 @@ fun ChatScreen(
                                         val downAt = SystemClock.uptimeMillis()
                                         pressed = true
                                         pressGuardOn = true
+                                        pressMoved = false
                                         var moved = false
                                         var released = false
                                         while (!released) {
@@ -963,6 +1014,7 @@ fun ChatScreen(
                                             ) {
                                                 scroll.stickToBottom = false
                                                 moved = true
+                                                pressMoved = true
                                             }
                                             released = next.changes.none { it.pressed }
                                         }

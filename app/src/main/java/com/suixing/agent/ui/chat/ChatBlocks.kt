@@ -399,6 +399,14 @@ private fun RevealHeight(
             }
             if (t >= 1f) break
         }
+        // **收尾对账**（issue #13）：`px` 是动画开始**之前**量的高度，动画期间内容可能又长高了
+        // （嵌套块展开、流式输出）。那部分增长没有被逐帧补偿过，于是「动画一结束，整体往下移一段」——
+        // 正是用户报的现象。这里把「实际长出来的」和「已经补掉的」对一次账，差多少补多少。
+        // 内容没变时 residual 为 0，这段是空操作。
+        if (outer != null && outer.canScrollBackward) {
+            val residual = (natural[0] - px) * target
+            if (residual != 0f) outer.dispatchRawDelta(residual)
+        }
     }
 
     Layout(
