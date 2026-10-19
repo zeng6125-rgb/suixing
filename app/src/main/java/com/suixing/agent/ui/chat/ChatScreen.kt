@@ -140,7 +140,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -731,22 +730,53 @@ fun ChatScreen(
     )
     // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
     var liveHeight by remember { mutableIntStateOf(0) }
-    // **读历史时把流式行的高度钉住**（issue #10）。
-    //
-    // v0.8.233~235 用的是逐帧补偿（`dispatchRawDelta(delta)`），条件里带
-    // `firstVisibleItemIndex == 0` 与 `!isScrollInProgress`：这两个值在流式期间每帧都可能翻转，
-    // 补偿于是「开一帧、关一帧」，表现就是 1~2px 的颤；而且它和 `RevealHeight` 抢同一份列表。
-    //
-    // 现在换一条根本不同的路：**不让它长**。底锚下这一行是首可见项时，它长高一像素就把上面推一像素；
-    // 只要它的高度在阅读期间不变，就没有东西需要补偿，也就不可能抖。
-    //  - 停止贴底的那一刻记下当时的高度，`heightIn(max = …)` 封顶 + 裁剪；
-    //  - 回到贴底时撤掉封顶，一次跳到真实高度 —— 此时底锚钉住底边，看不到跳。
-    // 未测量过（0）就不封顶，免得把整行裁没。
-    var frozenLiveHeight by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(scroll.stickToBottom) {
-        frozenLiveHeight = if (scroll.stickToBottom) null else liveHeight.takeIf { it > 0 }
+    // 切换会话时给转录一个 180ms 的淡入（issue #12）。**不做 crossfade**：那会同时持有两份
+    // composition，大会话的内存峰值翻倍。切走的那一刻 snapTo(0) 再淡入，读起来是「落定」而不是「跳」。
+    val switchAlpha = remember { androidx.compose.animation.core.Animatable(1f) }
+    LaunchedEffect(state.conversationId) {
+        switchAlpha.snapTo(0f)
+        switchAlpha.animateTo(1f, tween(180))
     }
-    val frozenLiveMax = frozenLiveHeight?.let { with(LocalDensity.current) { it.toDp() } }
+    // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
+    //
+    // 走过的三条路，都记在这里免得下次再试一遍：
+    //  · 逐帧 `dispatchRawDelta(delta)`（0.8.233~235）：条件里 `firstVisibleItemIndex == 0` 与
+    //    `!isScrollInProgress` 每帧翻转，补偿一开一关 ⇒ 1~2px 的颤；且会消耗 offset。
+    //  · 钉住高度（0.8.236）：高度不变就不抖，但 `heightIn(max)` + 裁剪把后续输出全裁掉 —— 死路。
+    //  · 现在：**内容照常长**，只在「停下、不在底部、锚点真的偏了」时用 `scrollToItem` 绝对定位纠一次。
+    //    key 是消息 id，不受 index 翻转 / live 开关影响；`scrollToItem` 不消耗 offset，不会累积误差。
+    var anchorKey by remember { mutableStateOf<Any?>(null) }
+    var anchorOffset by remember { mutableIntStateOf(0) }
+    // 手指停下时记锚点；回到贴底就把锚点丢掉（贴底由底锚跟随，不需要纠）。
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to scroll.stickToBottom }
+            .collect { (scrolling, stick) ->
+                if (stick) {
+                    anchorKey = null
+                } else if (!scrolling) {
+                    listState.layoutInfo.visibleItemsInfo.firstOrNull()?.let { first ->
+                        anchorKey = first.key
+                        anchorOffset = listState.firstVisibleItemScrollOffset
+                    }
+                }
+            }
+    }
+    // 流式行每长高一次就检查一遍：锚点还在屏幕上、但我们看到的位置偏了，就纠回去。
+    // 2px 以内不纠（issue 里提的容差）—— 否则每一帧都在写滚动位置，反而会抖。
+    LaunchedEffect(listState) {
+        snapshotFlow { liveHeight }.collect {
+            val key = anchorKey ?: return@collect
+            if (scroll.stickToBottom || listState.isScrollInProgress) return@collect
+            val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }
+                ?: return@collect
+            val drift = if (target.index == listState.firstVisibleItemIndex) {
+                listState.firstVisibleItemScrollOffset - anchorOffset
+            } else {
+                Int.MAX_VALUE
+            }
+            if (abs(drift) > 2) listState.scrollToItem(target.index, anchorOffset)
+        }
+    }
     // 一轮结束（实时行 → 存储行）那一帧里同时发生四件事：实时行被替换、状态行消失、指标行出现、
     // 让位 12→16dp。贴底协程跑在布局定型之前，读到的还是旧高度 ⇒ 结束后停在离底部差一截的地方
     // （用户：「输出完，滚动位置还是不对，应该跟空闲一样」）。等两帧让新布局落地，再补贴一次。
@@ -902,6 +932,12 @@ fun ChatScreen(
                         reverseLayout = true,
                         modifier = Modifier
                             .fillMaxSize()
+                            // **切换会话的淡入**（issue #12）：`openConversation` 是一帧内把整个
+                            // state 换掉（没有 loading 态可等），所以只能给新内容一个入场。
+                            // 用 graphicsLayer 而不是 alpha 修饰符：alpha 在 layer 块里读，动画期间
+                            // 不触发重组；也不做 AnimatedContent —— 那会同时持有两份 composition，
+                            // 对 30MB 的会话内存峰值翻倍（issue 自己提的第 4 点）。
+                            .graphicsLayer { alpha = switchAlpha.value }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {
@@ -967,21 +1003,9 @@ fun ChatScreen(
                             // whatever the previous one had left in that slot.
                             item(key = "streaming:${state.conversationId}") {
                                 // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
-                                // 往上翻着读旧内容时这是最烦人的漂移。补偿在 [liveHeight] 那个
-                                // 效应里做，这里只负责量高度。
-                                Column(
-                                    Modifier
-                                        .onSizeChanged { liveHeight = it.height }
-                                        // 读历史时封顶（见上面 frozenLiveMax 的说明）：高度不再变化，
-                                        // 上面就不会被推走，也不需要任何逐帧补偿。
-                                        .then(
-                                            if (frozenLiveMax != null) {
-                                                Modifier.heightIn(max = frozenLiveMax).clipToBounds()
-                                            } else {
-                                                Modifier
-                                            },
-                                        ),
-                                ) {
+                                // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
+                                // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
+                                Column(Modifier.onSizeChanged { liveHeight = it.height }) {
                                     AssistantRow(
                                         parts = state.liveParts.mapNotNull { part ->
                                             when (part) {
