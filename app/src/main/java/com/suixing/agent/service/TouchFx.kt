@@ -398,10 +398,19 @@ object TouchFx {
         if (watchingSettings) return
         watchingSettings = true
         settingsScope.launch {
-            Core.settings.flow.collect { s ->
-                val changed = edgeLightOn != s.edgeLight
-                edgeLightOn = s.edgeLight
-                if (changed) apply("settings")
+            // **收集器不能静默死掉**（issue #9 第 3 条）：`settings.flow` 是 DataStore 的冷流，
+            // 读盘失败会抛；没有 catch 的话 SupervisorJob 不会重启它，外观设置从此不生效，
+            // 而且没有任何迹象。失败就写一行 trace，让人能从日志里看出来。
+            runCatching {
+                Core.settings.flow.collect { s ->
+                    val changed = edgeLightOn != s.edgeLight
+                    edgeLightOn = s.edgeLight
+                    if (changed) apply("settings")
+                }
+            }.onFailure { error ->
+                appContext?.let {
+                    trace(it, "entry=settings-collect-failed ${error.javaClass.simpleName}: ${error.message}")
+                }
             }
         }
     }

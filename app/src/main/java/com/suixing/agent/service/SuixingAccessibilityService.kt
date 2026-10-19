@@ -198,12 +198,28 @@ class SuixingAccessibilityService : AccessibilityService() {
             visited++
             val label = node.text?.toString()?.trim().orEmpty()
             val description = node.contentDescription?.toString()?.trim().orEmpty()
+            // 命中就交出去：**不能回收**，调用方还要拿它去点击。
             if (labelMatches(label, needle, exact) || labelMatches(description, needle, exact)) return node
             for (index in 0 until node.childCount) {
                 node.getChild(index)?.let { queue.addLast(it) }
             }
+            // 没命中、子节点也已经入队：这个实例用完就还（issue #9）。API 33 起 recycle 是空操作，
+            // 旧设备上才是真的释放 —— 所以按版本判断，避免在新系统上调用已废弃的 API。
+            node.recycleIfLegacy()
         }
+        // 提前收尾（节点数上限）时队列里还剩一堆，一并还掉。
+        while (queue.isNotEmpty()) queue.removeFirst().recycleIfLegacy()
         return null
+    }
+
+    /**
+     * API < 33 才需要手动回收 `AccessibilityNodeInfo`；33 起系统自己管理，调用已废弃的
+     * `recycle()` 没有意义（也容易在后续版本变成异常）。issue #9 第 2 条。
+     */
+    private fun AccessibilityNodeInfo.recycleIfLegacy() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
+        @Suppress("DEPRECATION")
+        runCatching { recycle() }
     }
 
     private fun labelMatches(label: String, needle: String, exact: Boolean): Boolean {

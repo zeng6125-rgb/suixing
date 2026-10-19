@@ -874,17 +874,17 @@ internal fun ReasoningBlock(
             ProcessStatus(item)
         }
         if (streaming) {
-            // **左右等距**（用户：「运行中的 icon 左右间距不一致」）：spinner 是 13dp 的圆、
-            // 文字是 12sp 的方块字，直接贴 8dp 会显得左侧挤、右侧松。放进一个与文字行高对齐的
-            // 方槽里居中，槽的左右各 7dp（与 meta 项之间的 7dp 同一套间距）。
-            Spacer(Modifier.width(7.dp))
+            // 用户口径两次叠加：先「运行中的 icon 左右间距不一致」⇒ 放进方槽居中；后「左右边距小一点」
+            // ⇒ 槽外 7dp 收紧到 4dp。**这一处故意不再跟 meta 项的 7dp 走**：spinner 是图标不是文字，
+            // 和「256 tokens」读成一组反而更松；meta 项之间仍是 7dp。
+            Spacer(Modifier.width(4.dp))
             Box(
                 modifier = Modifier.size(14.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 ProcessSpinner(MaterialTheme.colorScheme.primary)
             }
-            Spacer(Modifier.width(7.dp))
+            Spacer(Modifier.width(4.dp))
         }
     }
     if (nested) {

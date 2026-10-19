@@ -224,13 +224,13 @@ object Shell {
                 break
             }
             if (!currentCoroutineContext().isActive) {
-                process.destroy()
+                process.killAndReap()
                 throw CancellationException("已停止")
             }
             if (System.currentTimeMillis() >= deadline) break
         }
         if (!finished) {
-            process.destroy()
+            process.killAndReap()
             false
         } else {
             val text = process.inputStream.bufferedReader().readText()
@@ -281,13 +281,13 @@ object Shell {
                 // Plain destroy, like the timeout below: SIGTERM is enough for the commands
                 // this runs. It reaches the process we started, not its children, so a
                 // pipeline's other end can outlive it — SIGKILL would have the same limit.
-                process.destroy()
+                process.killAndReap()
                 throw CancellationException("已停止")
             }
             if (System.currentTimeMillis() >= deadline) break
         }
         if (!finished) {
-            process.destroy()
+            process.killAndReap()
             outThread.join(500)
             errThread.join(500)
             return ShellResult(
@@ -317,6 +317,22 @@ object Shell {
         } else {
             target.toString() + "\n…（输出过长已截断：只保留前 $MAX_OUTPUT_CHARS 字符，完整输出共约 $total 字节）"
         }
+
+    /**
+     * 杀掉并**回收**一个子进程（issue #9）。
+     *
+     * `destroy()` 只是发 SIGTERM：不 `waitFor()` 就拿不到退出码，三个管道也不会关闭 ——
+     * 每次超时/取消泄漏 3 个 fd + 1 个进程句柄，长期跑自动化会耗光 fd。
+     * 先等 2 秒，不走就 `destroyForcibly()`，最后无论如何把三条流关掉。
+     */
+    private fun Process.killAndReap() {
+        runCatching { destroy() }
+        val reaped = runCatching { waitFor(2, TimeUnit.SECONDS) }.getOrDefault(false)
+        if (!reaped) runCatching { destroyForcibly() }
+        runCatching { inputStream.close() }
+        runCatching { errorStream.close() }
+        runCatching { outputStream.close() }
+    }
 
     /**
      * Drains [reader] into [target], keeping at most [MAX_OUTPUT_CHARS] characters, and returns

@@ -140,6 +140,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -730,27 +731,22 @@ fun ChatScreen(
     )
     // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
     var liveHeight by remember { mutableIntStateOf(0) }
-    // **流式上翻不再漂**（用户：「流式的时候，以往的信息会被底下的流式内容一直改变位置」）。
-    // 底锚下 index 0 长高本来就向上长：只要视口锚在 (0, offset)，它长 Δ 上面就整体上移 Δ。
-    // 这里只补偿**增量**、且三个条件同时成立才动：
-    //  · `!stickToBottom` —— 贴底时由底锚跟随，补了会打架（前四版的"抖/锁"就是抢这份列表）；
-    //  · `firstVisibleItemIndex == 0` —— 锚点已经是更上面的消息时，它在 index 0 之上，本来就不动；
-    //  · `!isScrollInProgress` —— 手指/惯性在滚时不抢。
-    // 与那四版的区别：不读偏移去"纠正"，只把这一帧长出来的 Δ 推回去，误差不会累积；
-    // 且在 snapshotFlow 的协程里 dispatch（不在 onSizeChanged 的布局期，避开必崩的那条路）。
-    // 残余：补偿会消耗 offset，offset 吃完（回到 (0,0)）后漂移会重新开始。
-    LaunchedEffect(listState) {
-        var lastH = 0
-        snapshotFlow { liveHeight }.collect { h ->
-            val delta = h - lastH
-            lastH = h
-            if (delta > 0 && !scroll.stickToBottom &&
-                listState.firstVisibleItemIndex == 0 && !listState.isScrollInProgress
-            ) {
-                listState.dispatchRawDelta(delta.toFloat())
-            }
-        }
+    // **读历史时把流式行的高度钉住**（issue #10）。
+    //
+    // v0.8.233~235 用的是逐帧补偿（`dispatchRawDelta(delta)`），条件里带
+    // `firstVisibleItemIndex == 0` 与 `!isScrollInProgress`：这两个值在流式期间每帧都可能翻转，
+    // 补偿于是「开一帧、关一帧」，表现就是 1~2px 的颤；而且它和 `RevealHeight` 抢同一份列表。
+    //
+    // 现在换一条根本不同的路：**不让它长**。底锚下这一行是首可见项时，它长高一像素就把上面推一像素；
+    // 只要它的高度在阅读期间不变，就没有东西需要补偿，也就不可能抖。
+    //  - 停止贴底的那一刻记下当时的高度，`heightIn(max = …)` 封顶 + 裁剪；
+    //  - 回到贴底时撤掉封顶，一次跳到真实高度 —— 此时底锚钉住底边，看不到跳。
+    // 未测量过（0）就不封顶，免得把整行裁没。
+    var frozenLiveHeight by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(scroll.stickToBottom) {
+        frozenLiveHeight = if (scroll.stickToBottom) null else liveHeight.takeIf { it > 0 }
     }
+    val frozenLiveMax = frozenLiveHeight?.let { with(LocalDensity.current) { it.toDp() } }
     // 一轮结束（实时行 → 存储行）那一帧里同时发生四件事：实时行被替换、状态行消失、指标行出现、
     // 让位 12→16dp。贴底协程跑在布局定型之前，读到的还是旧高度 ⇒ 结束后停在离底部差一截的地方
     // （用户：「输出完，滚动位置还是不对，应该跟空闲一样」）。等两帧让新布局落地，再补贴一次。
@@ -973,7 +969,19 @@ fun ChatScreen(
                                 // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
                                 // 往上翻着读旧内容时这是最烦人的漂移。补偿在 [liveHeight] 那个
                                 // 效应里做，这里只负责量高度。
-                                Column(Modifier.onSizeChanged { liveHeight = it.height }) {
+                                Column(
+                                    Modifier
+                                        .onSizeChanged { liveHeight = it.height }
+                                        // 读历史时封顶（见上面 frozenLiveMax 的说明）：高度不再变化，
+                                        // 上面就不会被推走，也不需要任何逐帧补偿。
+                                        .then(
+                                            if (frozenLiveMax != null) {
+                                                Modifier.heightIn(max = frozenLiveMax).clipToBounds()
+                                            } else {
+                                                Modifier
+                                            },
+                                        ),
+                                ) {
                                     AssistantRow(
                                         parts = state.liveParts.mapNotNull { part ->
                                             when (part) {
