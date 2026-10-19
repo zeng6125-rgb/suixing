@@ -1,0 +1,125 @@
+name: Issue Bot
+
+# 新 issue 自动分类 + 中文回复。
+#
+# 两种运行模式（由仓库 Secrets 决定，不需要改这个文件）：
+#   1. 配了 `DEEPSEEK_API_KEY` → 调 DeepSeek 读 issue 正文，给出标签 + 一条中文分析回复；
+#   2. 没配 key → 只按关键词打标签，**不回复**（不拿模板话术刷屏），workflow 不会失败。
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 里加：
+#   DEEPSEEK_API_KEY   （可选；不配就走第 2 种模式）
+#   DEEPSEEK_BASE_URL  （可选，默认 https://api.deepseek.com/v1）
+#   DEEPSEEK_MODEL     （可选，默认 deepseek-chat）
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Triage the issue
+        uses: actions/github-script@v7
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue = context.payload.issue;
+            const number = issue.number;
+            const title = issue.title || "";
+            const body = issue.body || "";
+            const text = `${title}\n\n${body}`;
+
+            // ---- 关键词兜底：没有 key 时也能分类，且永不失败 ----
+            const rules = [
+              { label: "bug",         re: /崩溃|闪退|crash|exception|报错|错误|失败|不工作|无法|异常|anr|卡死|白屏/i },
+              { label: "enhancement", re: /建议|希望|能不能|支持|新增|添加|改进|优化|feature|request|idea/i },
+              { label: "question",    re: /怎么|如何|为什么|请问|求助|how\s|why\s|\?/i },
+            ];
+            const keywordLabels = rules.filter(r => r.re.test(text)).map(r => r.label);
+
+            // ---- AI 分析：只在配了 key 时 ----
+            let aiLabels = [];
+            let aiReply = "";
+            const key = process.env.DEEPSEEK_API_KEY;
+            if (key) {
+              const base = (process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1").replace(/\/+$/, "");
+              const model = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+              const prompt = [
+                "你是随行（suixing）Android App 仓库的 issue 助手。随行是一个 Kotlin/Compose 写的手机智能体应用。",
+                "请阅读下面的 issue，只输出一个 JSON 对象，不要任何解释文字、不要 markdown 代码块：",
+                '{"labels": ["bug" 或 "enhancement" 或 "question" 中最贴切的一到两个],',
+                ' "reply": "给作者看的中文分析，120 字以内：复现要点 + 最可能的排查方向"}',
+                "",
+                "规则：",
+                "- labels 只能从 bug / enhancement / question 三个里选；",
+                "- 信息不足以判断时，labels 给 question；",
+                "- reply 用中文，直接说结论，不要客套，不要复述 issue 原文。",
+                "",
+                "issue 标题：" + title,
+                "issue 正文：" + body.slice(0, 6000),
+              ].join("\n");
+
+              try {
+                const res = await fetch(`${base}/chat/completions`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${key}`,
+                  },
+                  body: JSON.stringify({
+                    model,
+                    messages: [{ role: "user", content: prompt }],
+                    temperature: 0.2,
+                    max_tokens: 500,
+                  }),
+                });
+                if (res.ok) {
+                  const data = await res.json();
+                  const raw = data?.choices?.[0]?.message?.content || "";
+                  // 模型偶尔会包一层 ```json，先剥掉再解析。
+                  const cleaned = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+                  const start = cleaned.indexOf("{");
+                  const end = cleaned.lastIndexOf("}");
+                  if (start >= 0 && end > start) {
+                    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+                    const allowed = ["bug", "enhancement", "question"];
+                    aiLabels = (parsed.labels || []).filter(l => allowed.includes(l)).slice(0, 2);
+                    aiReply = String(parsed.reply || "").trim();
+                  }
+                } else {
+                  core.warning(`DeepSeek 返回 ${res.status}，本次只用关键词标签`);
+                }
+              } catch (e) {
+                core.warning(`DeepSeek 调用失败：${e.message}，本次只用关键词标签`);
+              }
+            } else {
+              core.info("没有配置 DEEPSEEK_API_KEY：只按关键词打标签，不回复。");
+            }
+
+            const labels = [...new Set([...aiLabels, ...keywordLabels])].slice(0, 3);
+            if (labels.length) {
+              try {
+                await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels });
+              } catch (e) {
+                core.warning(`打标签失败（标签可能还没在仓库里创建）：${e.message}`);
+              }
+            }
+
+            // 没有 key 就不回复：模板话术比不说话更烦人。
+            if (aiReply) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: number,
+                body: aiReply,
+              });
+            }
