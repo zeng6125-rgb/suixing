@@ -250,12 +250,12 @@ private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
  * The flash says "something just happened"; the faint breath of the same rainbow ring that
  * [noteDriving] switches on says "it is still happening". Only driving earns the breath — a run
  * that reads the screen or only answers in words shows nothing, because the user asked to see
- * their phone being operated, not to be told that someone is looking at it. 随行自己在前台时也
- * 不亮（用户口径：在前台一律不显示）—— 用户正看着 App 的时候，光没有要传达的信息。
+ * their phone being operated, not to be told that someone is looking at it. 随行自己在前台时**也亮**
+ * （issue #6，用户：「随行自己在前台时也要显示」）：前台不再是熄灭条件，亮不亮只看这一轮驱动过
+ * 屏幕的 run 还活不活着。
  *
- * 亮的语义是**一次 UI 自动化回合正在进行**（spec v2 §1）：任意 UI 操作（含读屏）开启/续期它，静默
- * [EPISODE_QUIET_MS] 或整轮 run 结束就灭，非 UI 工具是中性的。回合的判定见 [armEpisode] /
- * [episodeEnd] / [apply]。
+ * 亮的语义是**一次 UI 自动化回合正在进行**（spec v2 §1）：任意 UI 操作（含读屏）开启/续期它，
+ * 整轮 run 结束就灭，非 UI 工具是中性的。回合的判定见 [armEpisode] / [episodeEnd] / [apply]。
  *
  * Nothing here steers anything: the accessibility service calls it after it has decided
  * to dispatch a gesture, so the drawing can never claim something the phone did not do.
@@ -690,12 +690,10 @@ object TouchFx {
         // 现在熄灭只有一条路：驱动过屏幕的 run 全部离场（ticker 把 drivingIds 与 running 取交集）。
         // 单一亮度，没有暗档 —— 暗档正是「看着像中断」的来源。
         val sessionAlive = drivingAlive
-        val target = when {
-            // 随行在前台一律不亮（用户原话）。
-            inForeground -> 0f
-            sessionAlive -> FX_ALPHA_HOT
-            else -> 0f
-        }
+        // **前台不再是熄灭条件**（issue #6，用户：「随行自己在前台时也要显示」）：
+        // 亮不亮只看这一轮驱动过屏幕的 run 还活不活着，前台/后台一视同仁。
+        // `inForeground` 仍然照常传给 [traceLight]，日志里的 `fg=self|other` 不丢。
+        val target = if (sessionAlive) FX_ALPHA_HOT else 0f
         traceLight(app, reason, target, sessionAlive, running, now, inForeground)
         // 目标值而不是开关：view 自己逐帧缓动逼近，所以亮起/熄灭都是斜坡，不会「啪」地闪。
         (if (target > 0f) overlay(app) else view)?.setTarget(target)
@@ -738,7 +736,7 @@ object TouchFx {
     }
 
     /**
-     * 随行自己在前台吗 —— 与悬浮球同一条口径（用户：「在前台一律不显示」）。
+     * 随行自己在前台吗 —— **只服务日志与自动返回**，不再是亮灯的门（issue #6 拆掉了那道门）。
      *
      * 进程级判定，所以无障碍服务和前台服务都不会让它保持 STARTED：STARTED 就是「用户正看着
      * 随行」，而不是「随行在跑」。Main thread only.
@@ -1067,11 +1065,8 @@ object TouchFx {
         // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
         // 与 [apply] 同一条会话判定（issue #2）：驱动过屏幕的 run 还活着就亮，静默和非 UI 工具都不参与。
         val sessionAlive = drivingIds.any { it in running }
-        val target = when {
-            inForeground -> 0f
-            sessionAlive -> FX_ALPHA_HOT
-            else -> 0f
-        }
+        // 前台不压制（issue #6）：与 [apply] 同一口径，窗口重建后不能又暗下去。
+        val target = if (sessionAlive) FX_ALPHA_HOT else 0f
         traceLight(context, "overlay", target, sessionAlive, running, now, inForeground)
         fx.setTarget(target)
         return fx

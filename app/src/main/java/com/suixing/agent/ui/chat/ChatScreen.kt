@@ -1103,6 +1103,23 @@ fun ChatScreen(
                                     // 读作一行独立的抬头，又不会散开成两个东西。
                                     Spacer(Modifier.height(6.dp))
                                 }
+                                // 稳定引用（issue #5）：每次重组新建 lambda ⇒ `MessageRow` 的 equals
+                                // 恒为 false ⇒ Compose 的跳过优化失效，每个可见项每帧都重组。
+                                val onBranch = remember(viewModel) {
+                                    { turnId: String, runId: String -> viewModel.switchBranch(turnId, runId) }
+                                }
+                                val onRegenerate = remember(viewModel) {
+                                    { viewModel.regenerate() }
+                                }
+                                val onEdit = remember {
+                                    { message: StoredMessage -> editing = message }
+                                }
+                                // 「提供方 / 模型」也按模型缓存：原来每帧每个可见项都新建一个 String。
+                                val engineLabel = remember(row.message.model, providerOfModel) {
+                                    providerOfModel[row.message.model]
+                                        ?.let { "${it.label} / ${it.displayModel(row.message.model)}" }
+                                        ?: row.message.model
+                                }
                                 MessageRow(
                                     row = row,
                                     assistantName = assistant?.label ?: "随行",
@@ -1120,13 +1137,11 @@ fun ChatScreen(
                                     // one line: a message keeps the id it ran on, and the
                                     // owner is looked up from it. Just the id when no endpoint
                                     // claims it — a stale pick is not worth a wrong name.
-                                    engineLabel = providerOfModel[row.message.model]
-                                        ?.let { "${it.label} / ${it.displayModel(row.message.model)}" }
-                                        ?: row.message.model,
+                                    engineLabel = engineLabel,
                                     reasoningExpansion = reasoningExpansion,
-                                    onBranch = { turnId, runId -> viewModel.switchBranch(turnId, runId) },
-                                    onRegenerate = { viewModel.regenerate() },
-                                    onEdit = { editing = it },
+                                    onBranch = onBranch,
+                                    onRegenerate = onRegenerate,
+                                    onEdit = onEdit,
                                 )
                                 // 中断/截断/失败的原因不再挂在这里：错误提醒统一画在列表最底
                                 // （回执行 + 无回执时的实时红字），同一次失败只通知一次。

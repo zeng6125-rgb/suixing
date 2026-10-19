@@ -274,7 +274,12 @@ internal data class ChatRow(
      */
     val rounds: List<StoredMessage> = listOf(message),
 ) {
-    val usage: Usage? get() = Usage.of(rounds)
+    /**
+     * 这一轮的总用量。**算一次就够**（issue #5）：原来是 `get() = Usage.of(rounds)`，
+     * 每次读都跑 1 次 `none` + 4 次 `sumOf` 全量遍历；`MessageRow` 每次重组都读它，
+     * 120Hz 滚动时每个可见项每帧都在重算。
+     */
+    val usage: Usage? by lazy { Usage.of(rounds) }
 }
 
 /**
