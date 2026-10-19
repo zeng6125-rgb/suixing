@@ -1361,3 +1361,23 @@ HTTPS_PROXY=http://127.0.0.1:7890 gh release create ...   # gh 同理
 ```
 
 代理端口 7890（Clash Verge 在跑）。`gh auth status` 显示已登录但推送仍会失败，别被它误导。
+
+### 8.52 2026-10-20 凌晨续：issue #7/#8/#9/#10 + 边缘光开关（0.8.233 → 0.8.236）
+
+| 版本 | code | 内容 | 装机 |
+|---|---|---|---|
+| 0.8.233 | 244 | 外观页「边缘光」开关（默认开，`AppSettings.edgeLight`）；`ChatRow` 标 `@Immutable` 让 `MessageRow` 能跳过 | 未单独装，被 0.8.234 覆盖 |
+| 0.8.234 | 245 | #7：`setTarget` 短路改 `next==targetAlpha && drawnAlpha==next`；`FxView.reset()`；`apply()` 停摆兜底 `FX_STALL_MS=2000`；ticker 停表条件加 `stillVisible` | 装过 |
+| 0.8.235 | 246 | #8：`release()` 的 `removeView` 失败不再静默并**保留引用**；新增 `windowUp`（只有 removeView 成功才置假）；ticker 改 `lit \|\| windowUp \|\| 有驱动 run`，常驻窗口降到 `FX_IDLE_TICK_MS=5000`；停摆兜底改成**直接 `release()` 拆窗口** | 装过，用户「暂时验收完成」 |
+| 0.8.236 | 247 | #10：删掉 `liveHeight` 的 `dispatchRawDelta` 补偿，改成**停贴底时 `heightIn(max=当时高度)` + `clipToBounds`**（高度不变就没有东西要补）；#9 四条；spinner 间距 7dp→4dp | 装过，用户「暂时验收完成」（#9） |
+
+**#8 实机复测数据（0.8.235）**：`reason=tick` 心跳每 10s 一条（ticker 不再停表，核心修复生效）；
+`entry=stalled-reset` **0 次**（卡住没复现）；`target=0.0 alpha=1.0` 出现 1 次且是淡出首帧，10 秒后已 `alpha=0.0`。
+
+**#9 四条**：①`Shell.kt` 新增 `Process.killAndReap()`（destroy → waitFor(2s) → destroyForcibly → 关三条流），4 处替换；②`findNodeByText` 的 BFS 没命中的节点用完回收（`recycleIfLegacy()`，只在 API<33 调；**命中返回的那个不回收**）；③`settingsScope` 收集器加 `runCatching` + `entry=settings-collect-failed`；④`scrollTrace` **未删**（等「长按复制跳位置」确认解决）。
+
+**#10 的取舍（重要）**：没有修补偿条件，而是**去掉补偿、改成钉住高度**。读历史期间流式气泡停在当时高度、新内容不再展开。若用户之后要「继续长但不抖」，得回到建议 2 的 `scrollToItem` 绝对定位路线。
+
+**验收状态（2026-10-20 02:4x）**：#2/#3/#4/#6/#7/#8/#9 用户已「暂时验收完成」；**#10 未验收**（流式上翻抖动的实机确认还没做）。
+
+**gh 命令注意**：`gh release create/edit` 前要 `export HTTPS_PROXY=http://127.0.0.1:7890`，否则可能 HTTP 500 / EOF。
