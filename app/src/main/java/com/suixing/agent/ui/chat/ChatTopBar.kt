@@ -517,6 +517,7 @@ internal fun EmptyHero(onPick: (String) -> Unit, assistant: Assistant? = null) {
     }
 }
 
+
 @Composable
 internal fun ErrorCard(message: String, onDismiss: () -> Unit) {
     Surface(

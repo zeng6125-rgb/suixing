@@ -344,6 +344,10 @@ fun ChatScreen(
     // （用户要恒定）。原来用「列表底 − 输入框顶」两个节点的测量值相减，两个 onGloballyPositioned
     // 不同帧到位 ⇒ 动画中间态抖动。
     val stackFootprint = with(LocalDensity.current) {
+        // `composerH` 是**内边距以内**的高度：`onSizeChanged` 挂在
+        // `.padding(bottom = COMPOSER_BOTTOM_PAD)` **之后**（TurnScrubber.kt:757-758），
+        // Compose 的修饰符顺序让 padding 先吃掉空间，所以测到的不含这 12dp。
+        // 这里把它加回来才是输入框真实的占位 —— **不要删**（我删过一次，是错的）。
         composerH + COMPOSER_BOTTOM_PAD + navBarPad(heldIme).toDp() +
             if (state.runningHere) 12.dp else 16.dp
     }
@@ -830,31 +834,25 @@ fun ChatScreen(
                     // whatever space the keyboard leaves, instead of the list's top
                     // padding shoving the hero off the top of the screen.
                     //
-                    // **放不下时可以滚**（用户：「输入框顶上来把页面内容挡住了」）：原来是一个
-                    // `Box(contentAlignment = Center)`，内容高于可用高度时既不缩也不滚，超出
-                    // 的那截（最后一行「首次使用…」提示）就落到 Box 外面、被后画的输入框盖住。
-                    // 现在：`heightIn(min = 可用高度)` 保证放得下时仍然垂直居中，放不下时由
-                    // `verticalScroll` 接管 —— 内容不会再被挡住，用户也能滚到最底那行。
-                    BoxWithConstraints(
+                    // **新会话页有它自己的底部让位**（用户：「新会话页为什么要和聊天页重复」）：
+                    // 聊天页的 `stackFootprint` 里带着 12/16dp 的"转录与输入框之间的空气"，
+                    // 那是转录需要的，空状态不需要 —— 照搬它就会在输入框上方多出一段空白。
+                    // 这里只保留输入框的**真实占位**：内容高度 + 它自己的下内边距 + 手势条。
+                    val heroBottom = with(LocalDensity.current) {
+                        composerH + COMPOSER_BOTTOM_PAD + navBarPad(heldIme).toDp()
+                    }
+                    Box(
                         Modifier
                             .fillMaxSize()
                             .padding(
                                 top = with(LocalDensity.current) {
                                     WindowInsets.statusBars.getTop(this).toDp()
                                 } + 60.dp,
-                                bottom = stackFootprint + 40.dp,
+                                bottom = heroBottom,
                             ),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .verticalScroll(rememberScrollState())
-                                .heightIn(min = maxHeight),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
-                        }
+                        EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
                     }
                 } else {
                     CompositionLocalProvider(
@@ -935,42 +933,10 @@ fun ChatScreen(
                             // as it is on screen, and a switch used to hand the next chat
                             // whatever the previous one had left in that slot.
                             item(key = "streaming:${state.conversationId}") {
-                                // 这一行是喂序 index 0（视觉最底）：流式长高向上、底边不动，
-                                // 滚动层只在锚点被新行顶走时补一次（见 ChatScroll 的 FollowWant）。
-                                // **用户往上翻看旧内容时，这一行变高会把上面整体顶走**
-                                // （用户：「滑动到上方已输出内容查看，位置会因为卡片流式输出
-                                // 不断变高而不断变化」）。底锚下唯一的办法是反向补偿：
-                                // 记录上一帧高度，长高多少就把列表滚回多少，读的位置因此不动。
-                                //
-                                // **绝对不能在这里直接滚**（0.8.218 闪退）：
-                                // `onSizeChanged` 的回调发生在**测量布局过程中**，此时
-                                // `dispatchRawDelta` 会要求重新测量，Compose 直接抛
-                                // `IllegalArgumentException: performMeasureAndLayout called
-                                // during measure layout` —— 不可恢复，进程崩。
-                                // 正确做法：回调里只**记下**增量，真正的滚动留到下一帧的
-                                // 协程里做（那时布局已经结束）。
-                                var liveH by remember { mutableIntStateOf(0) }
-                                var pending by remember { mutableIntStateOf(0) }
-                                // 真正的滚动在这里做：协程在**布局结束后**才跑，且再让一帧，
-                                // 彻底离开测量阶段。
-                                LaunchedEffect(Unit) {
-                                    snapshotFlow { pending }.collect { delta ->
-                                        if (delta == 0) return@collect
-                                        pending = 0
-                                        withFrameNanos { }
-                                        if (listState.canScrollBackward) {
-                                            listState.dispatchRawDelta(delta.toFloat())
-                                        }
-                                    }
-                                }
-                                Column(
-                                    Modifier.onSizeChanged { size ->
-                                        val delta = size.height - liveH
-                                        liveH = size.height
-                                        // 只累加，不滚。
-                                        if (delta != 0) pending += delta
-                                    },
-                                ) {
+                                // **不做任何补偿滚动**（四版都没成：闪退 / 抖 / 锁）。
+                                // 贴底时由底锚跟随；往上翻时内容长高会让视图缓慢上移，
+                                // 但不会锁住、也不会抖 —— 这是刻意选择的取舍。
+                                Column {
                                     AssistantRow(
                                         parts = state.liveParts.mapNotNull { part ->
                                             when (part) {

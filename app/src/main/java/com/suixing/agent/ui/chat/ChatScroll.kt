@@ -119,6 +119,38 @@ fun rememberChatScroll(
         }
     }
 
+    // **阅读锚**（用户：「微信里别人在底下发消息，我看上面的内容位置不会变」）：
+    // 底锚下 index 0（视觉最底那条）长高会把上面全部顶走 —— 流式时就是你正在读的内容
+    // 一直在动。修法不是"补底部的增量"（那四版都失败了：崩 / 抖 / 锁），而是**换锚点**：
+    // 不在底部时，把「用户正在看的那条可见项」钉在它原来的视口位置；
+    // 它挪了多少就补多少，绝大多数帧挪动是 0 ⇒ 不抖；补偿后位置复原 ⇒ 不会连续补 ⇒ 不锁。
+    LaunchedEffect(listState) {
+        var anchorKey: Any? = null
+        var anchorOffset = 0
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()
+            Triple(first?.key, first?.offset ?: 0, scroll.stickToBottom)
+        }.collect { (key, offset, stick) ->
+            if (stick) {
+                // 在底部：由追底负责，锚点作废。
+                anchorKey = null
+                return@collect
+            }
+            if (anchorKey == null || anchorKey != key) {
+                // 换了锚（刚往上翻 / 切换会话）：以当前状态为准，不做补偿。
+                anchorKey = key
+                anchorOffset = offset
+            } else if (kotlin.math.abs(offset - anchorOffset) > 1) {
+                // 锚点被顶走了：补回差额。正向 delta 会让内容下移（reverseLayout 下
+                // index 越大越靠上），所以差额取反。
+                val fix = (anchorOffset - offset).toFloat()
+                anchorOffset = offset + fix.toInt()
+                listState.dispatchRawDelta(fix)
+            }
+        }
+    }
+
     // 阅读位置：手指停下那一刻记首可见项。底锚下"首可见"是视觉最底那条（滚动起点）。
     // 位置取 firstVisibleItemScrollOffset —— 它正是 scrollToItem(index, offset) 的第二个参数；
     // layoutInfo 里那条项的 offset 是含负偏移的视口坐标，直接回填会把位置修正掉。

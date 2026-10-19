@@ -808,6 +808,13 @@ internal fun ReasoningBlock(
             ) {
                 items(lines.size) { index ->
                     // 底锚：index 0 是**最新一行**（视觉最底），越往上 index 越大。
+                    // 光标挂在最新的一条**非空**行上：末行是空行时顺延，避免光标消失一帧。
+                    val cursorAt = lines.indices
+                        .asSequence()
+                        .map { lines.lastIndex - it }
+                        .firstOrNull { lines[it].isNotBlank() }
+                        ?.let { lines.lastIndex - it }
+                        ?: 0
                     val line = lines[lines.lastIndex - index]
                     if (line.isBlank()) {
                         // 视觉首行（倒序里的最后一条）是空行时不占位：那 4dp 就是「分割线
@@ -824,9 +831,15 @@ internal fun ReasoningBlock(
                             // （ChatBlocks.thinkingStyle），首行上方已经有约 3.5dp 的半行距，
                             // 再叠 padding 就成了用户看到的那点「空白」。
                             modifier = Modifier,
+                            // **光标直接拼在这一行的末字符后面**（用户：「根本没有跟在思考链
+                            // 的后面」）：以前是一个独立的 `BlinkingCursor()` 跟在 item 后面，
+                            // 它自成一行、位置和文字对不上。现在作为 AnnotatedString 的尾段，
+                            // 换行和对齐都跟着正文走。
+                            // 挂在**最新一行**（index 0），空行时顺延到第一条非空行。
+                            cursor = streaming && index == cursorAt,
                         )
                     }
-                    if (index == 0 && streaming) BlinkingCursor()
+                    // 光标已内联进上一段 MarkdownText（见 cursor 参数），这里不再另起一行。
                 }
             }
         }

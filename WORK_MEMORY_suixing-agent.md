@@ -1189,3 +1189,24 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 **同时保留的 SSE 改进**：多行 `data:` 事件拼接、单行即时解析、流尾未收尾事件不丢、
 解析失败计数并报错；`if (!sawDone && stream.finishReason == null) throw CutFailure()` **保留**
 （掐流重试的唯一判据，不要删）。
+
+### 8.46 0.8.212→0.8.224 滚动史与未解问题（2026-10-19 下午）
+
+**已装机**：0.8.224(235)，lastUpdateTime 2026-10-19 16:50 之后。工作树未提交（相对 91f62fe）。
+
+**版本轨迹**：0.8.212/213(223/224) 底锚重构 → 0.8.215(226) d1api tool_calls 空名修复 → 0.8.216(227) 诊断包 → 0.8.217(228) 滚动 lastSeen + 插件 shell 字段 → 0.8.218(229) 15 个插件标注 sh → 0.8.219(230) 修 0.8.218 闪退 → 0.8.220(231) 抖动判据 stickToBottom → 0.8.222(233) 手势期间丢弃 pending → 0.8.223(234) 新会话页 heroBottom → 0.8.224(235) 删除补偿。
+
+**关键代码位置**
+- `ChatScreen.kt`：`stackFootprint`（底部让位，**未改动**）；空状态 `bottom = heroBottom`（新会话页自己的占位，去掉了原来的 `+40.dp`）；live item 现在**无任何滚动补偿**（已删）。
+- `ChatScroll.kt`：`stickToBottom` / `spots` / `lastSeen`（每帧刷新阅读位）；追底 collector：`if (stick && !pressed && !guard && (index!=0||offset!=0)) scrollToItem(0)`。
+- `ChatBlocks.kt`：`RevealHeight`（高度动画，`dispatchRawDelta` 仅此一处安全用法，在 withFrameNanos 内）。
+
+**今日踩过的坑（勿重犯）**
+1. `onSizeChanged` 里直接 `dispatchRawDelta` → `performMeasureAndLayout called during measure layout` **必崩**（0.8.218 实测）。
+2. 用 `canScrollBackward` 判"在底"→ 每帧振荡 = 抖动；要用 `stickToBottom`（意图）。
+3. 手势期间只挡 dispatch 不够，`pending` 累加会在松手时一次性结算 → "被锁回原位"；必须手势期间清零。
+4. `stackFootprint` 里的 `COMPOSER_BOTTOM_PAD` **不能删**：`onSizeChanged` 挂在 padding 之后，测得的是内边距以内的高度（TurnScrubber.kt:757-758 注释已说明）。
+5. 新会话页不要复用聊天页的 `stackFootprint`（带 12/16dp 转录空气），用 `heroBottom`。
+6. 不要动 composer 的阴影（`TurnScrubber.kt:900`，8dp/25%）——那是要的。
+
+**未解决（核心）**：底锚下流式内容在视口内长高仍会把上方内容顶走（"往上翻位置一直变/抖/锁"）。四版补偿全部失败。**正确方向（用户点明）**：保持底部锚定，但把锚点从"index 0"改成"**用户正在看的那条可见项**"——它挪了多少就补多少，大多数帧挪动为 0，因此不抖不锁。用户明确拒绝"改回顶部锚定"和"暂停渲染"两种方案。
