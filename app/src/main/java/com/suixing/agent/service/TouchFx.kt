@@ -176,6 +176,14 @@ private val FX_SHELL_UI_RE = Regex(
 private const val FX_FADE_STEP = 0.05f
 
 /**
+ * 「目标已经归零，但亮度还挂在上面」多久算停摆（issue #7）。
+ *
+ * 正常淡出 0.8 秒走完，所以 2 秒足够区分「还在淡」和「onDraw 根本没跑」。超过就强制清零：
+ * 窗口脱离窗口树之后 `postInvalidateDelayed` 不再排帧，`drawnAlpha` 会永远停在最后一帧。
+ */
+private const val FX_STALL_MS = 2000L
+
+/**
  * The screen's own shape: a radius the size of a modern panel's corners.
  *
  * 52px read as 「不符合手机边缘」 on a 1080p panel whose corners are nearer 100px. It is only the
@@ -355,6 +363,12 @@ object TouchFx {
 
     /** 设置收集只开一次。 */
     private var watchingSettings = false
+
+    /**
+     * 目标第一次归零的时刻，用来判「停摆」（issue #7）。0 = 现在不是归零状态。
+     * Main thread only（只在 [apply] 里读写）。
+     */
+    private var targetZeroAt = 0L
 
     /** 收集设置的协程作用域：进程级，服务停了也不用取消（对象本来就是单例）。 */
     private val settingsScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
@@ -735,7 +749,21 @@ object TouchFx {
         val target = if (sessionAlive && edgeLightOn) FX_ALPHA_HOT else 0f
         traceLight(app, reason, target, sessionAlive, running, now, inForeground)
         // 目标值而不是开关：view 自己逐帧缓动逼近，所以亮起/熄灭都是斜坡，不会「啪」地闪。
-        (if (target > 0f) overlay(app) else view)?.setTarget(target)
+        val fx = (if (target > 0f) overlay(app) else view)
+        fx?.setTarget(target)
+        // **停摆兜底**（issue #7）：窗口脱离窗口树之后 `postInvalidateDelayed` 不再排帧，
+        // `onDraw` 停摆、`drawnAlpha` 冻在最后一帧 —— 日志里 `target=0.0 alpha=1.0` 挂几分钟就是它。
+        // 正常淡出 0.8 秒，所以「目标归零超过 [FX_STALL_MS] 还亮着」只能是没在画，直接清零。
+        if (target > 0f) {
+            targetZeroAt = 0L
+        } else {
+            if (targetZeroAt == 0L) targetZeroAt = now
+            if (fx != null && now - targetZeroAt > FX_STALL_MS && fx.edgeAlpha > 0.01f) {
+                val stuck = fx.edgeAlpha
+                fx.reset()
+                trace(app, "entry=stalled-reset alpha=$stuck 停了 ${now - targetZeroAt}ms")
+            }
+        }
         return target > 0f
     }
 
@@ -834,7 +862,10 @@ object TouchFx {
             val lit = apply("tick")
             // 亮着就还要人熄灯（静默 3 秒），前台里虽然不亮、但活着的驱动 run 还等着离场（自动返回
             // 就靠这一 tick 发现），所以两种都要继续；只有「灭 + 没有活着的驱动 run」才停表。
-            if (lit || drivingIds.any { it in running }) {
+            // **还看得见光就不许停表**（issue #7）：目标归零、run 也结束了，但 `drawnAlpha` 还挂在
+            // 1.0（窗口停摆）时，如果这里停表，就再也没有 apply 去发现它 —— 灯会一直亮到用户重进 App。
+            val stillVisible = (view?.edgeAlpha ?: 0f) > 0.01f
+            if (lit || stillVisible || drivingIds.any { it in running }) {
                 main.postDelayed(this, FX_BREATH_TICK_MS)
             } else {
                 main.removeCallbacks(this)
@@ -1252,8 +1283,29 @@ private class FxView(
      */
     fun setTarget(value: Float) {
         val next = value.coerceIn(0f, 1f)
-        if (next == targetAlpha) return
+        // **短路必须看两个值**（issue #7）：只看 target 时，一旦出现「target 已经是 0、drawnAlpha
+        // 还冻在 1.0」（窗口停摆的那段），之后每次 apply 都在这里 return，再也没有任何一帧去
+        // 把它降下来 —— 灯就那么亮着几分钟。
+        if (next == targetAlpha && drawnAlpha == next) return
         targetAlpha = next
+        invalidate()
+    }
+
+    /**
+     * 把这块画布的状态清干净（issue #7）。
+     *
+     * 窗口脱离窗口树之后 `postInvalidateDelayed` 不再生效，`onDraw` 停摆，`drawnAlpha` 会永久
+     * 冻结在最后一帧的值上 —— 日志里 `target=0.0 alpha=1.0` 挂 4 分半就是这么来的。
+     * 新实例本来就是干净的，所以这里也负责「窗口被系统收走、我们又拿回同一个实例」的情形。
+     */
+    fun reset() {
+        targetAlpha = 0f
+        drawnAlpha = 0f
+        rings.clear()
+        trails.clear()
+        // 0 让 edgeElapsed 变成极大值 ⇒ 不再画那圈扩散的边光。
+        edgeStart = 0L
+        litStart = SystemClock.uptimeMillis()
         invalidate()
     }
 
