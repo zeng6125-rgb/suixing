@@ -130,6 +130,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -727,6 +728,29 @@ fun ChatScreen(
         // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
         conversationId = state.conversationId,
     )
+    // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
+    var liveHeight by remember { mutableIntStateOf(0) }
+    // **流式上翻不再漂**（用户：「流式的时候，以往的信息会被底下的流式内容一直改变位置」）。
+    // 底锚下 index 0 长高本来就向上长：只要视口锚在 (0, offset)，它长 Δ 上面就整体上移 Δ。
+    // 这里只补偿**增量**、且三个条件同时成立才动：
+    //  · `!stickToBottom` —— 贴底时由底锚跟随，补了会打架（前四版的"抖/锁"就是抢这份列表）；
+    //  · `firstVisibleItemIndex == 0` —— 锚点已经是更上面的消息时，它在 index 0 之上，本来就不动；
+    //  · `!isScrollInProgress` —— 手指/惯性在滚时不抢。
+    // 与那四版的区别：不读偏移去"纠正"，只把这一帧长出来的 Δ 推回去，误差不会累积；
+    // 且在 snapshotFlow 的协程里 dispatch（不在 onSizeChanged 的布局期，避开必崩的那条路）。
+    // 残余：补偿会消耗 offset，offset 吃完（回到 (0,0)）后漂移会重新开始。
+    LaunchedEffect(listState) {
+        var lastH = 0
+        snapshotFlow { liveHeight }.collect { h ->
+            val delta = h - lastH
+            lastH = h
+            if (delta > 0 && !scroll.stickToBottom &&
+                listState.firstVisibleItemIndex == 0 && !listState.isScrollInProgress
+            ) {
+                listState.dispatchRawDelta(delta.toFloat())
+            }
+        }
+    }
     // 一轮结束（实时行 → 存储行）那一帧里同时发生四件事：实时行被替换、状态行消失、指标行出现、
     // 让位 12→16dp。贴底协程跑在布局定型之前，读到的还是旧高度 ⇒ 结束后停在离底部差一截的地方
     // （用户：「输出完，滚动位置还是不对，应该跟空闲一样」）。等两帧让新布局落地，再补贴一次。
@@ -738,6 +762,9 @@ fun ChatScreen(
     }
     // 切换会话前存位置；打开时有记忆回记忆、没有回底。
     var lastConvId by remember { mutableStateOf(state.conversationId) }
+    // 把当前会话 id 同步给滚动层：它在**每次滚动停下**时直接写 `spots[该会话]`，
+    // 不依赖"切走那一刻"再存（那时 id 已经变了，会存错会话）。
+    SideEffect { scroll.conversationId = state.conversationId }
     LaunchedEffect(state.conversationId) {
         if (lastConvId != state.conversationId) {
             scroll.saveSpot(lastConvId)
@@ -748,6 +775,8 @@ fun ChatScreen(
     LaunchedEffect(state.conversationId, itemCount, openedPinned) {
         if (openedPinned || itemCount <= 0) return@LaunchedEffect
         openedPinned = true
+        // 显式对齐一次：下面的读写都按"当前会话"取键，不能等 SideEffect 的时序（issue #4）。
+        scroll.conversationId = state.conversationId
         val saved = scroll.takeSpot(state.conversationId)
         val idx = if (saved?.first != null) {
             visible.indexOfFirst { it.message.id == saved.first }
@@ -755,11 +784,20 @@ fun ChatScreen(
             -1
         }
         if (idx >= 0 && saved != null) {
-            scroll.stickToBottom = false
-            scroll.spotKey = saved.first
-            scroll.spotOffset = saved.second
-            // 喂序索引＝底锚倒序里 visible 第 idx 行的位置；offset 即 firstVisibleItemScrollOffset。
-            listState.scrollToItem(fedIndexOf(idx), saved.second)
+            // 恢复期间挂上闸：`scrollToItem` 之后布局还没定型，`canScrollBackward` 会短暂为假，
+            // "滚到底就把贴底打开"的 collector 会立刻把下面这个 false 改回 true（链路 4）。
+            scroll.restoring = true
+            try {
+                scroll.stickToBottom = false
+                scroll.spotKey = saved.first
+                scroll.spotOffset = saved.second
+                // 喂序索引＝底锚倒序里 visible 第 idx 行的位置；offset 即 firstVisibleItemScrollOffset。
+                listState.scrollToItem(fedIndexOf(idx), saved.second)
+                withFrameNanos { }
+                withFrameNanos { }
+            } finally {
+                scroll.restoring = false
+            }
         } else {
             scroll.stickToBottom = true
             scroll.toBottom()
@@ -900,7 +938,7 @@ fun ChatScreen(
                                         pressUpAt = SystemClock.uptimeMillis()
                                         // 短按（没移动、也没到长按阈值）= 点折叠条/点按钮这类点击：抬手即放行追底。
                                         // 守护窗口是给"长按选文字"的（400ms 内不许列表自己动，否则选区跟着跑），
-                                        // 但展开动画只有 180ms（PROCESS_EXPAND_MS）：不区分的话整个展开都落在守护窗口里，
+                                        // 但展开动画只有 220ms（PROCESS_EXPAND_MS）：不区分的话整个展开都落在守护窗口里，
                                         // 列表一动不动、等守护撤了再一次性补上整段高度 —— 这就是"卡片长高后被瞬移到上面"。
                                         if (!moved && SystemClock.uptimeMillis() - downAt <
                                             viewConfiguration.longPressTimeoutMillis
@@ -932,10 +970,10 @@ fun ChatScreen(
                             // as it is on screen, and a switch used to hand the next chat
                             // whatever the previous one had left in that slot.
                             item(key = "streaming:${state.conversationId}") {
-                                // **不做任何补偿滚动**（四版都没成：闪退 / 抖 / 锁）。
-                                // 贴底时由底锚跟随；往上翻时内容长高会让视图缓慢上移，
-                                // 但不会锁住、也不会抖 —— 这是刻意选择的取舍。
-                                Column {
+                                // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
+                                // 往上翻着读旧内容时这是最烦人的漂移。补偿在 [liveHeight] 那个
+                                // 效应里做，这里只负责量高度。
+                                Column(Modifier.onSizeChanged { liveHeight = it.height }) {
                                     AssistantRow(
                                         parts = state.liveParts.mapNotNull { part ->
                                             when (part) {

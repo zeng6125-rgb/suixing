@@ -142,8 +142,8 @@ private const val FX_BREATH_DEPTH = 0.10f
  * 一直亮（用户报的「一直显示」）。会话制下：控制就亮、不控制就灭、一轮控制内不中断 —— 与 Operit
  * 把光绑在「接管会话」生命周期上的思路一致（它是模式状态机加/移除光窗口，我们用会话 latch）。
  *
- * 桥接窗 [EPISODE_QUIET_MS] 要跨过模型两次操作之间的思考间隔（真机日志实测最大 ~19s），否则
- * 控制序列中途会灭一下再亮。
+ * 桥接窗 [EPISODE_QUIET_MS] 只用来划日志里的回合边界（真机实测 UI→UI 间隔 p50=18.9s、
+ * 最长 191.7s —— 任何超时窗都追不上这条长尾，所以它**不再决定灯亮不亮**，见 [apply]）。
  */
 private const val EPISODE_QUIET_MS = 20000L
 
@@ -332,19 +332,6 @@ object TouchFx {
     @Volatile
     private var lastUiAt = 0L
 
-    /**
-     * 上一次 UI 操作之后，是否已经有**非 UI 工具**开跑（v3 会话制的显式结束信号）。
-     *
-     * 真机日志实测：控制序列里两次 UI 操作的间隔 p50=18.9s、最长 191.7s —— 超时窗追不上这条长尾
-     * （追就会变回「一直亮」）。所以长间隔交给「驱动 run 还活着」兜住（模型思考 190s 仍属这一轮
-     * 控制），而「agent 转去干别的」由这个标记显式收尾：run_shell / read_file / web_search 等任一
-     * 非 UI 工具开跑就置真、灯灭；下一次 UI 操作（[armEpisode]）清零、灯重新亮。
-     *
-     * Volatile：工具派发线程写，主线程读。
-     */
-    @Volatile
-    private var nonUiSinceLastUi = false
-
     /** 最近一次已知的前台状态，只服务日志里的 `fg=self|other` —— 见 [trace]。主线程写。 */
     @Volatile
     private var lastForeground = false
@@ -529,14 +516,19 @@ object TouchFx {
         val triggers = tool in FX_UI_EPISODE_TOOLS ||
             (tool == "run_shell" && detail?.let { FX_SHELL_UI_RE.containsMatchIn(it) } == true)
         if (triggers) {
+            // **读屏也要登记成"驱动"**（issue #2）：改判据之后灯由 [drivingIds] 决定，
+            // 只 arm 不登记的话，一轮只做 ui_dump / ui_screenshot 的任务永远点不亮
+            // （issue 的时间线里 21:08:35 那次 reason=tool=ui_dump 就是这种情况）。
+            // 与 [noteDriving] 同一条口径：这一轮碰过屏幕，灯就归它。
+            val running = Core.engine.runsFlow.value.keys
+            synchronized(drivingLock) { drivingIds = drivingIds + running }
             armEpisode(context, "tool=$tool")
             return
         }
-        // v3：非 UI 工具（含只读 run_shell / read_file / web_search …）= 控制会话的**显式结束**。
-        // 置标记后 [apply] 会把目标算成 0（灯灭）—— 这就是「不控制就不显示」的信号，取代 v2 靠
-        // 3 秒静默猜的做法（猜不准：真机控制间隔 p50=18.9s、最长 191.7s）。下一次 UI 操作会清零。
-        if (lastUiAt != 0L) nonUiSinceLastUi = true
-        trace(context, "entry=neutral-end tool=$tool")
+        // **非 UI 工具是中性事件**（issue #2）：read_file / web_search / 只读 run_shell / list_dir
+        // 只说明「这一次不是 UI 操作」，不说明「控制结束了」—— agent 在两次点击之间读文件、跑命令、
+        // 等模型推理都是常态。灯由 [apply] 按「驱动过屏幕的 run 还活着」决定，这里什么也不改。
+        trace(context, "entry=neutral tool=$tool")
     }
 
     /**
@@ -557,7 +549,6 @@ object TouchFx {
         // 按灯判定会把同一段回合里的每次动作都写成 `start`，日志于是出现一串没有 `end` 的 start。
         val wasLive = episodeLive(SystemClock.uptimeMillis())
         lastUiAt = SystemClock.uptimeMillis()
-        nonUiSinceLastUi = false
         main.post {
             val app = appContext ?: return@post
             watchForeground()
@@ -577,10 +568,15 @@ object TouchFx {
     }
 
     /**
-     * 回合的静默收尾：最后一次 UI 操作之后 [EPISODE_QUIET_MS] 内没有新的 UI 操作 ⇒ 灭。
+     * 静默到点：**只划日志边界，不灭灯**（issue #2）。
      *
-     * 每次 [armEpisode] 都会重排它，所以这里只需回答「真的静默够久了吗」；不够就按剩余时间再排一次，
-     * 而不是重新数满 3 秒。Main thread only.
+     * 20 秒没有新的 UI 操作只说明「最近没碰屏幕」，不说明这一轮控制结束了 —— 真机实测两次
+     * UI 操作之间 p50=18.9s、最长 191.7s，agent 读文件/跑命令/等推理都在这段间隔里。灯亮不亮
+     * 由 [apply] 按「驱动过屏幕的 run 还活着」决定，所以这里把回合 latch 归零、写一行
+     * `episode=quiet`，灯不动。
+     *
+     * 每次 [armEpisode] 都会重排它，所以这里只需回答「真的静默够久了吗」；不够就按剩余时间再排一次。
+     * Main thread only.
      */
     private val episodeEnd = object : Runnable {
         override fun run() {
@@ -589,36 +585,41 @@ object TouchFx {
                 main.postDelayed(this, EPISODE_QUIET_MS - quiet)
                 return
             }
-            endEpisode("quiet")
+            endEpisode("quiet", traceEnd = false)
         }
     }
 
     /**
-     * 回合收尾：灭灯（view 自己淡出）+ 停表。整轮 run 结束与静默超时都走这里。
+     * 回合收尾：清续期基准 + 写日志。整轮 run 结束走这里；静默到点也走，但那时 [traceEnd] 为假，
+     * 只写 `episode=quiet`（不写 `end`，因为灯可能还亮着 —— 见 [episodeEnd]）。
      *
-     * Main thread only. 已经灭着就不重复写日志 —— 这个函数会被 ticker 每秒问一次。
+     * Main thread only. 已经收过尾的回合不重复写日志 —— 这个函数会被 ticker 每秒问一次。
      */
-    private fun endEpisode(reason: String) {
+    private fun endEpisode(reason: String, traceEnd: Boolean = true) {
         main.removeCallbacks(episodeEnd)
         val app = appContext ?: return
-        // v3：会话真的结束了 —— 清掉续期基准与非 UI 标记，否则下一轮 run 会被上一轮残留的
-        // lastUiAt / nonUiSinceLastUi 误判（前者让灯误亮、后者让灯误灭）。
+        // 清掉续期基准，否则下一轮 run 会被上一轮残留的 lastUiAt 误判成「还在同一个回合里」。
         lastUiAt = 0L
-        nonUiSinceLastUi = false
         // 判据是「这一回合有没有被记过」，不是「灯亮没亮」：前台抑制期间灯全程灭着而回合确实开了又收，
         // 按灯判定就永远不写 `end`（见 [episodeTraced]）。已经收过尾的回合不重复写 —— 这个函数每秒
         // 都会被 ticker 问一次。
         if (!episodeTraced) return
+        // 静默到点只写一行 `episode=quiet`，**回合不关**（[episodeTraced] 保持为真）：灯这时可能
+        // 还亮着（驱动 run 没结束），真正收尾的那一行留给 run 结束时的 `end reason=run-idle`。
+        if (!traceEnd) {
+            traceEpisode(app, "quiet", reason)
+            return
+        }
         episodeTraced = false
         traceEpisode(app, "end", reason)
         apply("episode-end", app)
     }
 
     /**
-     * 回合还活着吗：最后一次 UI 操作在 [EPISODE_QUIET_MS] 之内。
+     * 回合 latch 还活着吗：最后一次 UI 操作在 [EPISODE_QUIET_MS] 之内。
      *
-     * 纯判断，不看 view、不看 run、不看窗口 —— 每个会改变输入的路径（[apply]）都重问一遍，
-     * 窗口被重建也不会留下一块暗着的画布。
+     * **它不再决定灯亮不亮**（issue #2）：只用来在日志里分辨 `episode=start` 与 `extend`。
+     * 亮不亮由 [apply] 按「驱动过屏幕的 run 还活着」回答。
      */
     private fun episodeLive(now: Long): Boolean =
         lastUiAt != 0L && now - lastUiAt < EPISODE_QUIET_MS
@@ -630,8 +631,7 @@ object TouchFx {
 
     /**
      * The light mirrors a state that lives in the engine, so it is polled rather than pushed — and
-     * every path that changes one of its inputs re-asks [episodeLive] through [apply] instead of
-     * waiting for the next tick.
+     * every path that changes one of its inputs re-asks [apply] instead of waiting for the next tick.
      *
      * Nothing has to switch it off, which is the point: a run that dies without telling anyone
      * cannot leave the light on, because the next tick sees that its id is gone. The ticker
@@ -639,8 +639,8 @@ object TouchFx {
      * the agent is idle — a dark ticker with a run still in flight is the one that watches for
      * the departure that brings the user back to the app.
      *
-     * 亮不亮由 [episodeLive] 回答，而那个答案是回合状态推出来的：所以每一 tick 都重新问
-     * 一遍，窗口中途被重建（跳转 / 服务重连）也不会留下一块暗着的画布。
+     * 亮不亮由 [apply] 按「驱动过屏幕的 run 还活着」回答：所以每一 tick 都重新问一遍，窗口中途被
+     * 重建（跳转 / 服务重连）也不会留下一块暗着的画布。
      */
     /**
      * How long the way home is held back after the last driving run ends.
@@ -680,14 +680,16 @@ object TouchFx {
         val running = Core.engine.runsFlow.value.keys
         val inForeground = foreground()
         lastForeground = inForeground
-        val live = episodeLive(now)
-        val sinceUi = if (lastUiAt == 0L) Long.MAX_VALUE else now - lastUiAt
         // 「这个 run 驱动过手机，而且整轮还没结束」—— 用来兜住控制序列里的**长**思考间隔
         // （真机实测 UI→UI 间隔 p50=18.9s、最长 191.7s，任何超时窗都追不上；追就会变回一直亮）。
         val drivingAlive = drivingIds.any { it in running }
-        // v3 会话制：亮 = 控制会话还活着。会话在「非 UI 工具开跑」时显式结束（[nonUiSinceLastUi]），
-        // 在桥接窗超时或驱动 run 离场时自然结束。单一亮度，没有暗档 —— 暗档正是「看着像中断」的来源。
-        val sessionAlive = !nonUiSinceLastUi && (live || drivingAlive)
+        // **亮 = 这一轮驱动过屏幕的 run 还活着**（issue #2）。两个旧条件都删了：
+        //  · 静默超时（[episodeLive]）—— p50 已 18.9s，20 秒窗会在一半的控制间隔里误灭；
+        //  · 非 UI 工具（原 nonUiSinceLastUi）—— read_file / web_search 只是「不是 UI 操作」，
+        //    不是「控制结束了」，把它们当熄灭信号会让一次连续任务亮灭十几次。
+        // 现在熄灭只有一条路：驱动过屏幕的 run 全部离场（ticker 把 drivingIds 与 running 取交集）。
+        // 单一亮度，没有暗档 —— 暗档正是「看着像中断」的来源。
+        val sessionAlive = drivingAlive
         val target = when {
             // 随行在前台一律不亮（用户原话）。
             inForeground -> 0f
@@ -703,11 +705,10 @@ object TouchFx {
     /**
      * 判死用的一行：回合的输入 + 结论 + 是谁问的。
      *
-     * `live` 是回合 latch（[episodeLive]），`lit` 是最终显示与否（还要过前台门）；`sinceUi` 是距上次
-     * UI 操作的毫秒数，`quiet=3000ms` 是同一行的对照值 —— 用户再报「判定错误」时，对着这一行就能分辨
-     * 是哪个输入不对（`live=true` 而 `sinceUi` 远超 `quiet` ⇒ 定时器没排上；`fg=self` 却 `light=on`
-     * ⇒ 前台门失效）。`drivingAlive` 只为对照：它 true 而 `light=off` 是**正常**的（任务在跑，但此刻
-     * 没在操作手机）。
+     * `session` 是**真正决定灯亮不亮的那个判据**（驱动过屏幕的 run 还活着），不是 20 秒静默窗 ——
+     * 两者从 issue #2 起就不是同一件事，日志里写错一个就会把下一次排查引到错的分支上。`sinceUi` 是
+     * 距上次 UI 操作的毫秒数、`quiet=20000ms` 是同一行的对照值（它现在只划日志边界，见 [episodeEnd]）。
+     * `drivingAlive` 与 `session` 同源，留着只为对照 `running` / `drivingIds` 两个集合的大小。
      *
      * 变化时必写，另外每 [FX_LIGHT_TRACE_MS] 写一次心跳 —— 一次复现就能看出「谁把灯点亮的」和
      * 「谁没把它熄掉」。Main thread only, like [apply].
@@ -716,7 +717,7 @@ object TouchFx {
         app: Context,
         reason: String,
         target: Float,
-        live: Boolean,
+        session: Boolean,
         running: Set<String>,
         now: Long,
         foreground: Boolean,
@@ -728,9 +729,9 @@ object TouchFx {
             app,
             // target/alpha 一起写：target 是"该多亮"，alpha 是"现在多亮"。两者分开才看得出缓动在不在
             // 走 —— 只写一个的话，「目标一直是 0.26 却看着在闪」这种报障没有判据。
-            "target=$target alpha=${view?.edgeAlpha ?: 0f} session=$live reason=$reason " +
+            "target=$target alpha=${view?.edgeAlpha ?: 0f} session=$session reason=$reason " +
                 "foreground=$foreground sinceUi=${if (lastUiAt == 0L) "-" else "${now - lastUiAt}ms"} " +
-                "quiet=${EPISODE_QUIET_MS}ms nonUi=$nonUiSinceLastUi " +
+                "quiet=${EPISODE_QUIET_MS}ms " +
                 "drivingAlive=${drivingIds.any { it in running }} running=${running.size} " +
                 "drivingIds=${drivingIds.size}",
         )
@@ -1064,9 +1065,8 @@ object TouchFx {
         // 新画布，「该多亮」不是：窗口被收走 / 服务重连 / 跳转重建之后新 view 的灯是关的，只有按
         // 当前状态立刻对一遍，光才不会跟着旧画布一起消失。这里直接算、直接给目标（不经过 [apply]，
         // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
-        val sinceUi = if (lastUiAt == 0L) Long.MAX_VALUE else now - lastUiAt
-        // 与 [apply] 同一条会话判定（v3）：非 UI 工具开跑就灭；桥接窗或驱动 run 兜住长思考间隔。
-        val sessionAlive = !nonUiSinceLastUi && (sinceUi < EPISODE_QUIET_MS || drivingIds.any { it in running })
+        // 与 [apply] 同一条会话判定（issue #2）：驱动过屏幕的 run 还活着就亮，静默和非 UI 工具都不参与。
+        val sessionAlive = drivingIds.any { it in running }
         val target = when {
             inForeground -> 0f
             sessionAlive -> FX_ALPHA_HOT

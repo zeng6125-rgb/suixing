@@ -419,17 +419,31 @@ fun SuixingApp() {
             // 页面只能在抽屉面板**下面**滑入 —— 用户看到的还是抽屉。现在抽屉不再关（见 open()），
             // 新页从右侧滑进来时压着它，滑完就把抽屉盖住；返回时揭开的就是那份仍开着的抽屉。
             Scaffold(
-                modifier = Modifier.padding(bottom = with(rootDensity) { heldImePx.toDp() }),
-                // surface, not background: the scaffold covers the strip behind the keyboard, and
-                // its white container was exactly the pale seam the keyboard's rounded corners
-                // revealed against the chat canvas.
-                containerColor = MaterialTheme.colorScheme.surface,
+                // **外壳不再按 IME 上缩**（用户：「侧边栏还是被顶起来」）：
+                // 这里原来是 `Modifier.padding(bottom = heldImePx)`，它把整个外壳 ——
+                // 包括 ModalNavigationDrawer 的抽屉面板 —— 一起顶上去，抽屉就被键盘挤短了。
+                // 现在键盘让位只作用在**聊天内容**上（见下面 ChatScreen 外层），
+                // 抽屉保持整屏高度。
+                // **底色不在这里铺**（见下面 Box 里那条背景）：0.8.229 把外壳改成整屏之后，
+                // 这里的 surface 会把键盘后面那条缝也涂上，键盘圆角里就露出一个比画布更白的色块。
+                containerColor = Color.Transparent,
                 // Screens own their top inset (their headers paint behind the status
                 // bar) and the composer owns the bottom one, so the scaffold reserves
                 // nothing for itself.
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
             ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
+            // **底色只铺到键盘顶边为止**（0.8.229 的回归）：外壳改成整屏之后，Scaffold 的
+            // containerColor 会把键盘后面那条缝一起涂上，键盘圆角里于是露出一个比画布更白的
+            // 色块（用户：「输入法的圆角 色块怎么又回来了」）。这里把 surface 铺到画布底边
+            // （= 屏高 − IME）为止，下面那条缝留给根节点的渐变 —— 和 0.8.229 之前
+            // （外壳被 IME 顶起、那条缝根本不画）逐像素一致；键盘收起时 heldImePx=0，铺满全屏。
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .padding(bottom = with(rootDensity) { heldImePx.toDp() })
+                    .background(MaterialTheme.colorScheme.surface),
+            )
             // 推进时下面那层（抽屉 + 聊天）跟着往左让 10%：**两层一起动**才读成"推上来"，
             // 只让新页动会像贴上去。只用位移、不做透明度 —— 淡化会露出下面一层，就是残影。
             Box(
@@ -513,7 +527,10 @@ fun SuixingApp() {
                 // 三处 rememberSaveable 只救了状态、救不了重建。所以 chat 移出 NavHost、永远
                 // 留在组合里，其余页面改成**盖在它上面的覆盖层**：进设置是往覆盖层 push，
                 // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
-                ChatScreen(viewModel = chat, onOpenSettings = { open("settings") })
+                // 键盘让位只作用在聊天内容上（抽屉不再被顶起，见上面 Scaffold 的说明）。
+                Box(Modifier.padding(bottom = with(rootDensity) { heldImePx.toDp() })) {
+                    ChatScreen(viewModel = chat, onOpenSettings = { open("settings") })
+                }
             }
             }
             NavHost(

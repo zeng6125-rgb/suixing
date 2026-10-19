@@ -769,7 +769,11 @@ fun MarkdownBlocks(
 ) {
     val scheme = MaterialTheme.colorScheme
     val palette = MarkdownPalette(
-        codeBackground = scheme.surfaceContainerHigh,
+        // **半透明**（用户：「有底色的地方，复制没有选中高亮」）：
+        // 代码片段的底色是 SpanStyle.background，Compose 把它画在**选中高亮之上**，
+        // 不透明就会把高亮整个盖掉 —— 普通文字选中会变绿，代码块却毫无反应。
+        // 降到 60% 后绿色能透出来，不选中时视觉几乎不变。
+        codeBackground = scheme.surfaceContainerHigh.copy(alpha = 0.6f),
         codeColor = scheme.onSurfaceVariant,
         linkColor = scheme.primary,
         codeFontSize = MaterialTheme.typography.bodySmall.fontSize,

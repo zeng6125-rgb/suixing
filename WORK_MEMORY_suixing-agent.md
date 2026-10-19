@@ -346,6 +346,12 @@ bump `versionCode`/`versionName` → 写 `dist/notes/release-notes-<ver>.md` →
 30. **⚠️ 不再用 adb 操作用户的手机**（截图 / 点击 / 录屏**都算**）：需要证据就让用户发**截图或录屏**，本地用 `D:\dsh\fixbug\suixing\video\node_modules\@ffmpeg-installer\win32-x64\ffmpeg.exe` **逐帧分析**。
 31. **⚠️ 流程纪律（lead 自述的三条错）**：①「**频繁出包**」被用户明确批评 ⇒ **只在用户说「打包」时才打包**；②多次把「**派单**」说成「**已改**」；③把**推测当结论**（如把「框架选择机制滚动」当成我们的路径，直到真机日志才定位）。⇒ 汇报只报**可核验状态**（改没改、跑没跑、谁在飞），推测一律标注为推测。
 32. **`notes` 不是每版都有**：0.8.91~0.8.97 **没有** `dist/notes/release-notes-0.8.9x.md`（只有 0.8.90 及以前）⇒ 事后只能靠 commit 正文；**要留档就当场写 notes**（正文里的关键数字——阈值、px、dp、测试条数——是唯一线索）。
+33. **⚠️ 本机没有 `gradlew`，gradle 也不在 PATH**（2026-10-19 实测：`which gradle` / `where.exe gradle` / `gradle --version` 全空，项目里只有 `.gradle/` 缓存目录）。用的是**另一个项目**的发行版：
+    `D:\android\.gradle-pi\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1\bin\gradle.bat`，
+    并且必须 `$env:GRADLE_USER_HOME = 'D:\android\.gradle-pi'` + `$env:JAVA_HOME = 'D:\dsh\fixbug\_toolchain\jdk\jdk-17.0.20.1+1'`。
+    完整命令见 §8.49。**别再花时间「找 gradle」**（本会话为此浪费了 10 分钟，`find -maxdepth 7` 差一层就是找不到）。
+34. **⚠️ 本仓库全是 CRLF，`sed -i` 会把整文件转成 LF**（0.8.229 会话 ChatScreen.kt 被转、本会话 ChatTopBar.kt 又被转了一次，diff 从 4 行变成 2924 行）。改代码**只用 read + edit**；真要 sed，先 `git checkout -- <file>` 兜底，改完用 `git diff --stat` 核对行数。
+    另：**这个 bash 里 `grep -c $'\r' file` 是错的** —— `$'\r'` 被吃成空串，等于 grep 空模式，所有行都命中，看起来「CRLF 都在」。判断换行只能用 `od -c` 或 `git diff --stat`。
 
 ---
 
@@ -1238,3 +1244,95 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 - 新会话页不要复用 `stackFootprint`，用 `heroBottom`
 - composer 阴影（`TurnScrubber.kt:900` 8dp/25%）是要的，别动
 - `EmptyHero` 不要加 compact/横滑等布局改动（用户明确拒绝）
+
+### 8.48 选中/复制这一摊（2026-10-19 22:50，0.8.229 已装机）
+
+**已做**
+- `Theme.kt:40-52` 显式给 `LocalTextSelectionColors`：`handleColor = primary`，`backgroundColor = primary 32%`
+- `MarkdownText.kt:772` 行内代码底色改半透明 `surfaceContainerHigh.copy(alpha = 0.6f)` —— 原来不透明，
+  Compose 把 SpanStyle.background 画在选中高亮之上，导致代码片段选中无高亮（用户实测已好转：「有了点」）
+- 思考链每行、工具命令/输出都包了 `SelectionContainer`
+
+**仍未解决（用户当前卡点）**
+- **长按复制**：用户反馈仍不理想。可疑方向：
+  1. `SelectionContainer` 只包了 `MarkdownText`，气泡外层的 `Column`/`AssistantRow` 没包 ⇒ 跨块选不了
+  2. 多行代码块 `CodeBlock` 的容器底色可能同样盖住高亮（这次只改了行内 span，**没验证**）
+  3. 自定义「复制」按钮走的是 `LocalClipboardManager.setText(AnnotatedString(text))`，复制出去是纯文本，
+     代码块的灰底/缩进会丢
+- **验证方式**：必须在真机上长按选中一段**含代码块**的回复，看高亮是否连续、复制出来的内容是否保留换行与缩进
+
+**注意**：本会话上下文已耗尽（350K+），继续改容易「改一处坏一处」。新会话请从本节 + §8.47 接手。
+
+---
+
+### 8.49 ★ 构建 / 打包 / 安装手册（2026-10-19 用户口述，**照抄执行，别自己找 gradle**）
+
+> 2026-10-19 本会话实测：`:app:compileDebugKotlin` **BUILD SUCCESSFUL in 21s**、`:app:testDebugUnitTest` **525 用例 0 失败**。
+
+**PowerShell，每条命令前先设这三行**
+
+```powershell
+cd D:\dsh\fixbug\suixing
+$env:JAVA_HOME = 'D:\dsh\fixbug\_toolchain\jdk\jdk-17.0.20.1+1'
+$env:GRADLE_USER_HOME = 'D:\android\.gradle-pi'
+$g = 'D:\android\.gradle-pi\wrapper\dists\gradle-8.11.1-bin\bpt9gzteqjrbo1mjrsomdt32c\gradle-8.11.1\bin\gradle.bat'
+```
+
+| 目的 | 命令 | 备注 |
+|---|---|---|
+| 只查语法 | `& $g :app:compileDebugKotlin --console=plain` | 约 20s，**只证明能编译**，不证明行为对 |
+| 跑单测 | 先 `Remove-Item -Recurse -Force app\build\test-results\testDebugUnitTest -ErrorAction SilentlyContinue`<br>再 `& $g :app:testDebugUnitTest --console=plain` | **不删旧结果会读到上一轮缓存的「全绿」** |
+| 打包（**只在用户说「打包」时**） | `& $g :app:assembleRelease --console=plain` | 版本号刚改完第一次可能因文件锁失败，**原样重跑一次** |
+| 核对 APK 版本 | `D:\android\_build_tools\android-sdk\build-tools\35.0.0\aapt.exe dump badging app\build\outputs\apk\release\app-release.apk \| Select-String "^package:"` | 与源码不一致就别装 |
+| 安装（**只在用户说「安装」时**） | `adb -s <ip:port> install -r app\build\outputs\apk\release\app-release.apk` | adb 在 `D:\dsh\fixbug\_toolchain\sdk\platform-tools\adb.exe` |
+| 装机后核对 | `adb -s <ip:port> shell dumpsys package com.suixing.agent \| Select-String "versionName="` | **别信 aapt 单方面** |
+| adb 连不上 | `adb kill-server` → `adb start-server` → `adb mdns services` 找 `_adb-tls-connect._tcp` 的 `<ip:port>` → `adb connect <ip:port>` | 设备 IP 会变 |
+
+**测试结果统计**
+
+```powershell
+$t=0;$f=0
+Get-ChildItem app\build\test-results\testDebugUnitTest\*.xml | ForEach-Object {
+  $x=[xml](Get-Content -Raw -Encoding UTF8 $_.FullName)
+  $t+=[int]$x.testsuite.tests; $f+=[int]$x.testsuite.failures
+}
+"TESTS: $t 失败 $f"
+```
+
+**红线**
+- 不许用 adb 截图 / `uiautomator dump` 量 UI（`install`、`dumpsys` 读版本**可以**）
+- 不许用脚本批量改源码（只 read + edit）
+- 不许自行打包 / 安装 / commit / push，除非用户明说
+
+**基线（2026-10-19 核对）**：手册原文写「当前基线 503 / 0」，但 **HEAD 里 `@Test` 已是 525 个**（`git grep -h "@Test" HEAD -- app/src/test | wc -l` = 525；最近一次改测试是 `5a4edc6` 0.8.219，+14）。实测 525/0 ⇒ 22 个差异是**基线过期**，不是跑错 task。以后报数请以实测 XML 统计为准。
+
+### 8.50 2026-10-19 夜：三处 UI + issue #2（**已编译通过、525 单测 0 失败；未打包、未装机**）
+
+1. **键盘圆角色块回归**（0.8.229 引入）：把外壳 IME 让位从 `Scaffold` 挪到 `ChatScreen` 外层后，Scaffold 变整屏 + `containerColor=surface`，把键盘后面那条缝也涂成纯 surface（比画布底边白）。
+   **修法**（`SuixingApp.kt`）：`containerColor = Color.Transparent`，内容里垫一层 `matchParentSize().padding(bottom = heldImePx).background(surface)`，只铺到「屏高 − IME」，缝留给根渐变（终点色 = 画布底边色）。键盘收起时 `heldImePx=0`，与改动前逐像素一致。
+2. **嵌套展开全都向上展**（用户：「第一层没问题，嵌套的折叠条展开基本都是向上」）：第一层 `ProcessCard` 走 `RevealHeight`（每帧 `dispatchRawDelta` 反向补偿），嵌套的 `ReasoningBlock` 与 `ToolRow` 用的是 `AnimatedVisibility(expandVertically)` —— **只改高度、不碰列表**，底锚下长出来的部分只能往上顶。
+   **修法**（`ChatBlocks.kt`）：两处都换成 `RevealHeight(visible = expanded, durationMs = PROCESS_EXPAND_MS)`，删掉这两处专属的 `fadeIn/fadeOut` 与 `expandVertically`/`shrinkVertically` 两个 import。**仍受 `canScrollBackward` 约束**：贴底时物理上补不了（第一层同理）。
+3. **issue #2 边缘光中断**（`TouchFx.kt`）：判据 `!nonUiSinceLastUi && (live || drivingAlive)` → `sessionAlive = drivingAlive`（驱动过屏幕的 run 还活着）。
+   - 删 `nonUiSinceLastUi` 字段及全部引用；`noteToolActivity` 非 UI 分支改成只写 `entry=neutral`
+   - 静默到点只写 `episode=quiet`、**不关回合**，真正的 `end reason=run-idle` 留给 run 结束（`endEpisode(reason, traceEnd)`)
+   - **补了一条 issue 没写但必须有的**：`noteToolActivity` 命中触发集时也把 `runsFlow.keys` 并进 `drivingIds` —— 否则一轮只做 `ui_dump`/`ui_screenshot` 永远点不亮（issue 时间线里 `21:08:35 reason=tool=ui_dump` 就是这种）
+   - `traceLight` 的参数 `live` 改名 `session`：日志里的 `session=` 必须是真正决定灯的那个判据
+   - 未做 issue 里的可选项「暗档呼吸」
+4. **流式上翻位置漂移**（用户：「流式的时候，我看以往的信息，会被底下的流式内容一直改变位置」）：**已改**。`ChatScreen.kt` 给 streaming item 加 `Modifier.onSizeChanged { liveHeight = it.height }`，再用一个 `LaunchedEffect` 收 `snapshotFlow { liveHeight }`：只在 `delta > 0 && !stickToBottom && firstVisibleItemIndex == 0 && !isScrollInProgress` 时 `dispatchRawDelta(delta)`。
+   **与死掉四版的区别**：①不读偏移去「纠正」，只把这一帧长出来的 Δ 推回去（误差不累积）；②dispatch 在 snapshotFlow 协程里，不在 `onSizeChanged` 的布局期（那必崩：`performMeasureAndLayout called during measure layout`）。
+   **残余**：补偿会消耗 offset，offset 吃完（回到 (0,0)）后漂移重新开始 —— 这是已知上限，不是回归。
+5. **长按选中/复制三件**：①**已改** —— `ChatTopBar.kt` 里 ASSISTANT 行与 else 分支的 `AssistantRow` 外面包了 `SelectionContainer`（只对 `streaming = false` 的落地行；流式行的守卫 `ChatTopBar.kt:1114` 不动）。②③**未动**：
+   - ② `CodeBlock` 的 `Surface(surfaceContainerHighest)` 是否盖住选中高亮，**只能真机看**；改底色属于「观感类」，按 §4 第 29 条一次只动一个变量。
+   - ③ 复制按钮 `ChatTopBar.kt:694` 复制的是 `message.text`（**原始 markdown**，代码围栏与缩进都在），所以「缩进会丢」在代码里找不到对应路径 —— 需要用户说明是哪个复制按钮（气泡下的「复制」/ 代码块自己的复制 / 系统选择菜单的「复制」）。
+6. **展开/折叠动画手感**（用户：「慢一点点，不要太生硬即可」）：`ChatBlocks.kt:291` `PROCESS_EXPAND_MS` **180 → 220**；`RevealHeight` 的缓动 `FastOutSlowInEasing` → `LinearOutSlowInEasing`（前者起手就是最快的一档，点下去先窜一下再刹住，用户说的「生硬」多半是这一下）。`ChatScreen.kt:907` 注释里的 180ms 同步改成 220ms。
+   **约束**：220 必须仍明显短于长按守护窗 `LONG_PRESS_SETTLE_MS`（400ms），否则短按展开会整个落在守护窗里、卡片长高后被瞬移到上面（见 ChatScreen 手势段注释）。再调时长别越过 400。
+7. **issue #3 模型列表只增不减**（网关 46 个 vs 面板 103 个）：`SettingsScreen.kt:934` 的 `merged = (fetched + selected.models).distinct()` → **`merged = fetched`**（上游说了算）；同时 `enabled = enabled.filter { it in merged }`（picker 读的是 enabled，不清它消失的模型还在）。
+   **`withUpstreamDefaults` 没有按 issue 建议改**：`modelContexts` 是**全局** Map（多 provider 共用），如果改成「按上游 keys 过滤」，拉一次 A 就会把 B 的窗口全删掉。改法是在调用点按**所有 provider 的并集**清：`form.modelContexts.withUpstreamDefaults(windows).filterKeys { it in allModels }`，`allModels = providers.flatMap { it.models }.toSet()`。
+8. **issue #4 跨会话滚动位置串味**（`ChatScroll` 全局单例）：**已改，未打包**。把四个全局字段改成**按 `conversationId` 取键**，对外 API 不变（`stickToBottom` / `spotKey` / `spotOffset` / `lastSeen` 都变成自定义 get/set，背后是 `mutableStateMapOf`）：
+   - `stickToBottom` → `stickByConversation`（链路 3：A 里翻过，B 不该一进来就不贴底）
+   - `lastSeen` → `lastSeenByConversation`（链路 2：B 的位置不再被写进 A 的槽）
+   - `spotKey`/`spotOffset` → `spotByConversation`（链路 1）
+   - `conversationId` 改成 `by mutableStateOf("")` —— **必须**，否则 `snapshotFlow` 感知不到切换，追底 collector 还拿着上一个会话的判定
+   - `saveSpot(conversationId)` 改成**显式按参数 id 读**：调用点在 `conversationId` 已换成新会话之后才跑
+   - 链路 4：新增 `internal var restoring`，恢复期间 collector 不许把 `stickToBottom` 翻回 true；`ChatScreen` 恢复块里 `restoring = true` → `scrollToItem` → 等两帧 → finally 复位
+   - 链路 5（保存的 key 可能是 `streaming:`/`load-earlier` 这类非消息项）**未处理**：`indexOfFirst { it.message.id == saved.first }` 找不到就回底，是安全兜底

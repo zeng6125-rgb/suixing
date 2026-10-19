@@ -31,8 +31,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
@@ -45,7 +43,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -289,8 +287,14 @@ internal fun BranchArrow(
  */
 internal val PROCESS_TITLE_MAX = 160.dp
 
-/** 折叠块展开/收起的高度动画时长：够看出"展开"这个动作，又不至于等。 */
-internal const val PROCESS_EXPAND_MS = 180
+/**
+ * 折叠块展开/收起的高度动画时长。
+ *
+ * 180 → 220（用户：「慢一点点，不要太生硬即可」）：180ms 对整块卡片来说收得太急，末尾像"啪"地
+ * 停住；220ms 仍明显短于长按守护窗 [LONG_PRESS_SETTLE_MS]（400ms），所以短按点折叠条时
+ * 整段动画依然落在「抬手即放行追底」之前（见 ChatScreen 的手势段注释）。
+ */
+internal const val PROCESS_EXPAND_MS = 220
 
 /** 阅读锚活着（人停在历史里）时为 true：折叠动画改即时完成，避免动画把正在读的内容推走。 */
 internal val LocalReadingPinned = compositionLocalOf { false }
@@ -383,7 +387,9 @@ private fun RevealHeight(
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
             val oldH = px * progress
-            progress = start + (target - start) * FastOutSlowInEasing.transform(t)
+            // 缓动：`FastOutSlowIn` 起手就是最快的一档，点下去先"窜"一下再刹住 —— 用户说的
+            // 「生硬」多半是这一下。`LinearOutSlowIn` 匀速起、收尾缓，配上 220ms 读起来更软。
+            progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
             // **不在底部时反向补偿**（用户：「不在追底位置时，展开应该往下走」）：
             // 底锚下块长高 Δ，块顶边会上移 Δ；这里把内容整体下移 Δ 抵消掉 ⇒ 顶边不动、
             // 内容向下展开，折叠时同理。在底部时（canScrollBackward=false）不补偿：
@@ -944,19 +950,11 @@ internal fun ReasoningBlock(
                     modifier = Modifier.size(18.dp),
                 )
             }
-            // 展开体走高度动画，和 ProcessCard 同一条规则：**在底时动画**——每帧只长一点点，
-            // 追底每帧跟上 ⇒ 卡片底边不动、内容往上展；正在读上面时用 0 时长，动画会把读着的
-            // 内容推走。裸 if 是一帧长满、下一帧才追底，看起来就是"拉高再被拉回"。
-            AnimatedVisibility(
-                visible = expanded,
-                // 同样一律有动画（见 RevealHeight 的说明）：不再按"是否在底"切成 0 时长。
-                enter = expandVertically(
-                    tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-                ) + fadeIn(tween(PROCESS_EXPAND_MS / 2)),
-                exit = shrinkVertically(
-                    tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-                ) + fadeOut(tween(PROCESS_EXPAND_MS / 2)),
-            ) {
+            // 和第一层（ProcessCard）走同一条路径（用户：「第一层折叠能自适应，多个工具展开
+            // 就全都往上展」）：`AnimatedVisibility(expandVertically)` 只改高度、不碰列表，
+            // 底锚下长出来的那一截只能往上顶；RevealHeight 每帧把增长量反向补进列表，块顶边
+            // 才不动。淡入淡出随之取消 —— 第一层本来就没有，两层的观感才一致。
+            RevealHeight(visible = expanded, durationMs = PROCESS_EXPAND_MS) {
                 // 虚拟列表照旧（用户：「展开还是虚拟列表啊」）：chain 内部就是 LazyColumn，
                 // 逐行虚拟化 + heightIn(max = 外观里的思考块高度) 上限。
                 // top 归 0：首行边距已经放进 chain 内部列表的 contentPadding（会随滚动消失），
@@ -1296,16 +1294,8 @@ internal fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
                 modifier = Modifier.size(16.dp),
             )
         }
-        // 一律有动画（同上）：不再按"是否在底"切成 0 时长。
-        AnimatedVisibility(
-            visible = expanded,
-            enter = expandVertically(
-                tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-            ),
-            exit = shrinkVertically(
-                tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-            ),
-        ) {
+        // 同 ReasoningBlock：和第一层一样走 RevealHeight，展开时块顶边不动、内容往下长。
+        RevealHeight(visible = expanded, durationMs = PROCESS_EXPAND_MS) {
             // 与「单个工具」同一套边距：这里**不加** 44dp 缩进 —— 那是多工具独有的、用户
             // 明确指出的多余边距（「要像单个工具一样没有边距」）。
             Column(Modifier.fillMaxWidth()) {

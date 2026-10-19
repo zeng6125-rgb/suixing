@@ -931,15 +931,35 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                 runCatching { client.listModelDetails(form) }.fold(
                                     onSuccess = { details ->
                                         val fetched = details.map { it.id }
-                                        val merged = (fetched + selected?.models.orEmpty()).distinct()
+                                        // **上游说了算**（issue #3）：原来这里是
+                                        // `(fetched + selected?.models.orEmpty()).distinct()` —— 和上一次
+                                        // 保存的清单做并集，网关删掉的模型一个都不会消失（面板 103 个 vs
+                                        // 网关 46 个）。这个 App 没有手填模型的入口，`/models` 就是唯一
+                                        // 来源，并集没有任何东西需要保护，只会让上游的删除失效。
+                                        val merged = fetched
                                         // 上游声明的窗口只在用户没设过时填入（withUpstreamDefaults：
                                         // 键已存在就一个字都不动），并和清单在同一事务里落盘。
                                         val windows = details.mapNotNull { model ->
                                             model.contextLength?.let { model.id to it }
                                         }.toMap()
+                                        val providers = form.mapProvider(selected?.id) {
+                                            it.copy(
+                                                models = merged,
+                                                // picker 读的是 `enabled` 而不是 `models`：不同步清掉的话，
+                                                // 从清单里消失的模型仍会留在选择器里（issue #3 第 3 条）。
+                                                enabled = it.enabled.filter { id -> id in merged },
+                                            )
+                                        }.providers
+                                        // 上下文窗口表是**全局**的（多 provider 共用一个 Map），所以只能按
+                                        // 「所有 provider 的并集」清 —— 按这一个 provider 的清单清，拉一次
+                                        // A 就会把 B 的窗口一起删掉。
+                                        val allModels = providers.flatMap { it.models }.toSet()
                                         form = form.copy(
-                                            modelContexts = form.modelContexts.withUpstreamDefaults(windows),
-                                        ).mapProvider(selected?.id) { it.copy(models = merged) }
+                                            providers = providers,
+                                            modelContexts = form.modelContexts
+                                                .withUpstreamDefaults(windows)
+                                                .filterKeys { it in allModels },
+                                        )
                                         // 拉到的清单属于提供方结构，同样点选即落盘。
                                         scope.persist {
                                             it.copy(

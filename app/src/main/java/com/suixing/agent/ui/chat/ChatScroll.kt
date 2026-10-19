@@ -22,33 +22,80 @@ import androidx.compose.runtime.snapshotFlow
  * 读历史时增长同样不动视口：视口钉在首可见项上，增长发生在它哪一侧都不挪它。
  */
 class ChatScroll internal constructor(internal val listState: LazyListState) {
-    /** 在底就追新内容。只由两件事改变：手指轻扫（关）、真滚到底（开）。内容增长不改它。 */
-    var stickToBottom by mutableStateOf(true)
-
-    /** 每个会话的阅读位置：首可见项 key + 它离滚动起点的 px。切走存、切回恢复。 */
-    val spots = mutableStateMapOf<String, Pair<Any?, Int>>()
-    var spotKey by mutableStateOf<Any?>(null)
-        internal set
-    var spotOffset by mutableStateOf(0)
+    /**
+     * 当前正在显示的会话 id，由 ChatScreen 在**内容切换之前**写入（`SideEffect`，布局前）。
+     *
+     * **是 state 而不是普通 var**（issue #4）：下面那些"按会话存"的字段都靠它取键，
+     * 切换会话必须让 `snapshotFlow` 重新发一次 —— 否则追底 collector 还拿着上一个会话的
+     * 判定在跑。普通 var 读不到变化。
+     */
+    var conversationId: String by mutableStateOf("")
         internal set
 
     /**
-     * 最近一次「停下且不在底部」时看到的首可见项。
+     * **贴底意图按会话存**（issue #4 链路 3）：`ChatScroll` 是全局单例（`listState` 全应用共用），
+     * 以前 A 里往上翻一下，切到 B 时 B 一进来就是"不贴底"、新消息不再自动滚。现在每个会话各一份，
+     * 缺省 true。
+     */
+    private val stickByConversation = mutableStateMapOf<String, Boolean>()
+    /** 在底就追新内容。只由两件事改变：手指轻扫（关）、真滚到底（开）。内容增长不改它。 */
+    var stickToBottom: Boolean
+        get() = stickByConversation[conversationId] ?: true
+        set(value) {
+            stickByConversation[conversationId] = value
+        }
+
+    /** 每个会话的阅读位置：首可见项 key + 它离滚动起点的 px。切走存、切回恢复。 */
+    val spots = mutableStateMapOf<String, Pair<Any?, Int>>()
+
+    /** 恢复中：这几帧不许"滚到底就把贴底打开"的 collector 把 [stickToBottom] 翻回去（链路 4）。 */
+    internal var restoring by mutableStateOf(false)
+
+    /** 每个会话各自的恢复目标（链路 1）：切回 A 时不能读到 B 恢复时的临时值。 */
+    private val spotByConversation = mutableStateMapOf<String, Pair<Any?, Int>>()
+    var spotKey: Any?
+        get() = spotByConversation[conversationId]?.first
+        internal set(value) {
+            spotByConversation[conversationId] = value to (spotByConversation[conversationId]?.second ?: 0)
+        }
+    var spotOffset: Int
+        get() = spotByConversation[conversationId]?.second ?: 0
+        internal set(value) {
+            spotByConversation[conversationId] = spotByConversation[conversationId]?.first to value
+        }
+
+    /**
+     * 最近一次「停下且不在底部」时看到的首可见项，**按会话存**（链路 2）。
      *
      * **为什么要有它**（用户：「切换会话之后有些情况滚动位置不是离开前的状态」）：
      * 以前只在「一次滚动结束」那一刻写 [spotKey]，切会话时再从 [spotKey] 落进 [spots]。
      * 只要中间有过一次不产生滚动结束事件的动作（轻点、程序化滚动、会话内容先变），
      * 写进去的就是上一次滚动的旧值 —— 于是「有些情况」不还原。
      * 现在每一帧只要停在非底部就刷新它，切走时直接取，不存在过期值。
+     *
+     * 按会话存是 issue #4 的修法：以前它是全局的，在 B 里翻过之后切回 A，`saveSpot(A)`
+     * 会把 **B 的位置**写进 A 的槽。
      */
-    internal var lastSeen: Pair<Any?, Int>? by mutableStateOf(null)
+    private val lastSeenByConversation = mutableStateMapOf<String, Pair<Any?, Int>>()
+    internal var lastSeen: Pair<Any?, Int>?
+        get() = lastSeenByConversation[conversationId]
+        set(value) {
+            if (value == null) lastSeenByConversation.remove(conversationId)
+            else lastSeenByConversation[conversationId] = value
+        }
 
     /** 底锚：滚不到更早（index 0 且没有偏移）就是贴着底；与给输入框的底 padding 无关。 */
     val atBottom by derivedStateOf { !listState.canScrollBackward }
 
+    /**
+     * 切走时把**那个会话**的位置落盘。参数必须显式给 id：调用点是在 `conversationId`
+     * 已经换成新会话之后才跑的（`SideEffect` 先写），按"当前会话"取会存到新会话名下。
+     */
     internal fun saveSpot(conversationId: String) {
-        if (stickToBottom) return
-        val seen = lastSeen ?: spotKey?.let { it to spotOffset } ?: return
+        if (stickByConversation[conversationId] ?: true) return
+        val seen = lastSeenByConversation[conversationId]
+            ?: spotByConversation[conversationId]
+            ?: return
         spots[conversationId] = seen
     }
 
@@ -96,7 +143,10 @@ fun rememberChatScroll(
     LaunchedEffect(listState) {
         snapshotFlow { listState.canScrollBackward to listState.isScrollInProgress }
             .collect { (canBack, scrolling) ->
-                if (!scrolling && !canBack) scroll.stickToBottom = true
+                // **恢复位置的那几帧不许翻回 true**（issue #4 链路 4）：`scrollToItem` 之后布局
+                // 还没定型，`canScrollBackward` 会短暂为假，collector 于是把刚设的 false 改回去，
+                // 位置立刻被追底拉到底。
+                if (!scrolling && !canBack && !scroll.restoring) scroll.stickToBottom = true
             }
     }
 
@@ -124,12 +174,11 @@ fun rememberChatScroll(
         }
     }
 
-    // **不做任何阅读锚/补偿**（用户：「滑一下就飞到天上去了，还滑不回来」）：
+    // **这里仍然不做任何阅读锚/偏移纠正**（用户：「滑一下就飞到天上去了，还滑不回来」）：
     // 任何"看到偏移就纠正"的做法都会和手指/惯性滚动抢同一份列表，一旦判断有偏差
-    // 就会连续纠正、越滚越远。这里彻底不干预：
-    //  · 在底部 → 由底锚天然跟随；
-    //  · 往上翻 → 内容长高会让视图缓慢上移，但不会锁住、也不会飞。
-    // 已知代价：流式时上翻读旧内容，位置会随内容增长而漂。这是刻意选择的取舍。
+    // 就会连续纠正、越滚越远。流式长高造成的漂移改由 ChatScreen 里的**增量补偿**处理
+    // （只补 liveHeight 的 Δ，不读偏移；见那边的 LaunchedEffect）。
+    // 已知代价：补偿会消耗 offset，offset 吃完（回到 (0,0)）后漂移会重新开始。
 
     // 阅读位置：手指停下那一刻记首可见项。底锚下"首可见"是视觉最底那条（滚动起点）。
     // 位置取 firstVisibleItemScrollOffset —— 它正是 scrollToItem(index, offset) 的第二个参数；
@@ -148,6 +197,11 @@ fun rememberChatScroll(
                 scroll.lastSeen = key to offset
                 scroll.spotKey = key
                 scroll.spotOffset = offset
+                // **同时直接落到当前会话名下**：切走时 `state.conversationId` 已经变了，
+                // 那一刻再 saveSpot 可能取到新会话布局的值 —— 这里落盘就没有时序问题。
+                if (scroll.conversationId.isNotEmpty()) {
+                    scroll.spots[scroll.conversationId] = key to offset
+                }
             }
             wasScrolling = scrolling
         }

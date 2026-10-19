@@ -582,30 +582,35 @@ internal fun MessageRow(
             MessageActions(message = row.message, onEdit = onEdit)
         }
 
-        Roles.ASSISTANT -> AssistantRow(
-            // The setting hides thinking entirely; everything else keeps its place in
-            // the sequence either way.
-            parts = if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking },
-            streaming = false,
-            name = assistantName,
-            face = assistantFace,
-            avatarPath = assistantAvatarPath,
-            branch = row.branch,
-            usage = row.usage,
-            contextWindow = contextWindow,
-            runElapsedMs = runElapsedMs,
-            engineLabel = engineLabel,
-            message = row.message,
-            expandTools = expandTools,
-            expandReasoning = expandReasoning,
-            reasoningMaxHeight = reasoningMaxHeight,
-            followReasoning = followReasoning,
-            bubbleMaxWidth = bubbleMaxWidth,
-            reasoningExpansion = reasoningExpansion,
-            onBranch = onBranch,
-            onRegenerate = onRegenerate,
-            onEdit = onEdit,
-        )
+        // 整张卡片包一层 SelectionContainer（用户：「气泡外层没包」）：只包 MarkdownText 时，
+        // 从回答拖到思考块/工具块就断在边界上。**只对已落地的行**加 —— 流式行的守卫见
+        // AssistantRow 里 Part.Text 分支的注释（实时气泡每帧重测会闪），那一处不动。
+        Roles.ASSISTANT -> SelectionContainer {
+            AssistantRow(
+                // The setting hides thinking entirely; everything else keeps its place in
+                // the sequence either way.
+                parts = if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking },
+                streaming = false,
+                name = assistantName,
+                face = assistantFace,
+                avatarPath = assistantAvatarPath,
+                branch = row.branch,
+                usage = row.usage,
+                contextWindow = contextWindow,
+                runElapsedMs = runElapsedMs,
+                engineLabel = engineLabel,
+                message = row.message,
+                expandTools = expandTools,
+                expandReasoning = expandReasoning,
+                reasoningMaxHeight = reasoningMaxHeight,
+                followReasoning = followReasoning,
+                bubbleMaxWidth = bubbleMaxWidth,
+                reasoningExpansion = reasoningExpansion,
+                onBranch = onBranch,
+                onRegenerate = onRegenerate,
+                onEdit = onEdit,
+            )
+        }
 
         // 失败回执：run 最终失败时 VM 落盘的一条 system 消息。它不是模型的回答，所以不带头像、
         // 不带操作行 —— 一条全宽的红色小卡，像气泡一样留在会话里，重开还在。
@@ -615,14 +620,16 @@ internal fun MessageRow(
         // `row.parts` rather than the row's own message: once this card is the run's open
         // bubble, the calls that followed it — and a 插话 typed while they ran — live in the
         // parts, and rebuilding from the message alone would draw only the first of them.
-        else -> AssistantRow(
-            parts = row.parts,
-            streaming = false,
-            face = assistantFace,
-            avatarPath = assistantAvatarPath,
-            bubbleMaxWidth = bubbleMaxWidth,
-            reasoningExpansion = reasoningExpansion,
-        )
+        else -> SelectionContainer {
+            AssistantRow(
+                parts = row.parts,
+                streaming = false,
+                face = assistantFace,
+                avatarPath = assistantAvatarPath,
+                bubbleMaxWidth = bubbleMaxWidth,
+                reasoningExpansion = reasoningExpansion,
+            )
+        }
     }
 }
 
