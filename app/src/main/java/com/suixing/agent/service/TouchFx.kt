@@ -184,6 +184,14 @@ private const val FX_FADE_STEP = 0.05f
 private const val FX_STALL_MS = 2000L
 
 /**
+ * 窗口常驻、没有会话时 ticker 的间隔（issue #8）。
+ *
+ * 不能停表：`apply()` 里的停摆兜底只有在 `apply()` 被调用时才有效，停表就等于让它变成死代码。
+ * 5 秒一跳，代价可以忽略，却能把「目标归零却还亮着」和「removeView 失败留下的孤儿窗口」捞回来。
+ */
+private const val FX_IDLE_TICK_MS = 5000L
+
+/**
  * The screen's own shape: a radius the size of a modern panel's corners.
  *
  * 52px read as 「不符合手机边缘」 on a 1080p panel whose corners are nearer 100px. It is only the
@@ -290,6 +298,14 @@ object TouchFx {
 
     private var view: FxView? = null
     private var manager: WindowManager? = null
+
+    /**
+     * 我们**相信**屏幕上还挂着一块窗口 —— 只有 `removeView` 真的成功才置假（issue #8）。
+     *
+     * 与 `view != null` 不是一回事：`release()` 以前不管删没删成都把 `view` 置空，于是「窗口还在、
+     * 代码以为它没了」。ticker 的停表条件必须看这个标记，而不是 `view.edgeAlpha`。
+     */
+    private var windowUp = false
     private var lastEdgeFlashAt = 0L
 
     /**
@@ -466,12 +482,24 @@ object TouchFx {
         val fx = view ?: return
         val windowManager = manager
         val app = appContext
-        view = null
-        manager = null
         // Through the captured WindowManager rather than fx.context: this runs on service
         // disconnect, when asking the service for its system services again may find a context
         // that is already being torn down. The manager that added the view can always remove it.
-        runCatching { windowManager?.removeView(fx) }
+        val error = runCatching { windowManager?.removeView(fx) }.exceptionOrNull()
+        if (error != null) {
+            // **失败不能静默**（issue #8）：`removeView` 失败时窗口还留在系统里，而以前这里照样把
+            // `view` 置空 —— 那块还亮着的窗口就成了孤儿，`view.edgeAlpha` 读到的是别的实例（或 0），
+            // ticker 于是判「看不见」停表，`apply()` 的兜底再也等不到执行。
+            // 现在：引用留着，下一次 release 重试；并且写一行带异常的日志。
+            noteOverlay(
+                app ?: return,
+                "released（$reason）**FAILED**: ${error.javaClass.simpleName}: ${error.message}",
+            )
+            return
+        }
+        view = null
+        manager = null
+        windowUp = false
         if (app != null) noteOverlay(app, "released（$reason）")
     }
 
@@ -761,6 +789,10 @@ object TouchFx {
             if (fx != null && now - targetZeroAt > FX_STALL_MS && fx.edgeAlpha > 0.01f) {
                 val stuck = fx.edgeAlpha
                 fx.reset()
+                // **拆窗口，不只是清 alpha**（issue #8 建议 4）：`onDraw` 都停摆了，`reset()` 里那句
+                // `invalidate()` 同样不会触发重绘 —— 光留在屏幕上。拆掉之后下一次要亮时
+                // `overlay()` 会建一块新画布，那是唯一保证「状态与屏幕一致」的路径。
+                release("目标归零后 ${now - targetZeroAt}ms 仍未熄灭（alpha=$stuck）")
                 trace(app, "entry=stalled-reset alpha=$stuck 停了 ${now - targetZeroAt}ms")
             }
         }
@@ -862,11 +894,15 @@ object TouchFx {
             val lit = apply("tick")
             // 亮着就还要人熄灯（静默 3 秒），前台里虽然不亮、但活着的驱动 run 还等着离场（自动返回
             // 就靠这一 tick 发现），所以两种都要继续；只有「灭 + 没有活着的驱动 run」才停表。
-            // **还看得见光就不许停表**（issue #7）：目标归零、run 也结束了，但 `drawnAlpha` 还挂在
-            // 1.0（窗口停摆）时，如果这里停表，就再也没有 apply 去发现它 —— 灯会一直亮到用户重进 App。
-            val stillVisible = (view?.edgeAlpha ?: 0f) > 0.01f
-            if (lit || stillVisible || drivingIds.any { it in running }) {
+            // **停表条件不能看 `view.edgeAlpha`**（issue #8）：屏幕上可能挂着一块孤儿窗口，而 `view`
+            // 指向的是另一个实例 —— 读到 0 就停表，`apply()` 的停摆兜底从此成了死代码。
+            // 现在只要**相信窗口还在**（[windowUp]）就继续跳；1 秒一跳的代价可以忽略。
+            if (lit || drivingIds.any { it in running }) {
                 main.postDelayed(this, FX_BREATH_TICK_MS)
+            } else if (windowUp) {
+                // 窗口常驻、没有会话：放慢到 5 秒一跳。跳的意义只有一个 —— 让 [apply] 还有机会
+                // 发现「目标归零却还亮着」（issue #7 的兜底）和「removeView 失败留下的孤儿窗口」。
+                main.postDelayed(this, FX_IDLE_TICK_MS)
             } else {
                 main.removeCallbacks(this)
             }
@@ -1123,6 +1159,7 @@ object TouchFx {
         }
         manager = windowManager
         view = fx
+        windowUp = true
         // 新画布，「该不该亮」不是：窗口被收走 / 服务重连 / 跳转重建之后新 view 的灯是关的，只有按
         // 当前回合状态立刻对一遍，光才不会跟着旧画布一起消失。这里直接算、直接点亮（不经过 [apply]，
         // 免得 [apply] → 建窗 → 再 [apply] 绕回来），所以 ticker 停了也照样亮。
