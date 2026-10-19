@@ -1780,6 +1780,20 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
+            item {
+                LabeledBlock(
+                    label = "边缘光",
+                    hint = "agent 在操作这台手机时，屏幕四周亮起一圈彩虹光。关掉只是不显示，" +
+                        "自动化、自动返回与诊断日志全都照旧。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("开", "关"),
+                        selectedIndex = if (stored.edgeLight) 0 else 1,
+                        onSelect = { index -> scope.persist { it.copy(edgeLight = index == 0) } },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             // 思考块与「看到什么」的六项搬到了「对话配置」页：它们是对话内容的显示方式，不是
             // 主题/排版。字段与存储没动。
             item {
@@ -1814,10 +1828,11 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 fontScale = defaults.fontScale,
                                 bubbleWidth = defaults.bubbleWidth,
                                 cornerScale = defaults.cornerScale,
-                                // 这一页现在是七项：新加的提示条时长与打字机效果也在「恢复默认外观」里，
+                                // 这一页现在是八项：提示条时长、打字机效果与边缘光也在「恢复默认外观」里，
                                 // 否则按了恢复却留着上一轮的设置，用户会以为按钮坏了。
                                 bannerSeconds = defaults.bannerSeconds,
                                 typewriter = defaults.typewriter,
+                                edgeLight = defaults.edgeLight,
                             )
                         }
                     },

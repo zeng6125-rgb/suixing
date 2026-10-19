@@ -116,6 +116,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -258,7 +259,14 @@ import java.util.concurrent.Executors
 /**
  * One bubble of the transcript: the message that owns it, the parts of the reply in the
  * order they arrived, and whether it opens a new time bucket.
+ *
+ * **@Immutable 是为了让 `MessageRow` 能被跳过**（issue #5）：这个类只装值（`List` 由构建处
+ * 重新生成、从不原地改），但编译器把 `List` 判成 unstable，`ChatRow` 于是也 unstable，
+ * `MessageRow` 的跳过优化就永远不生效 —— 每个可见项每帧都重组。`visible` 是 `remember` 出来的，
+ * 行的**实例身份**在输入没变时保持不变，data class 的 equals 首行是 `this === other`，
+ * 所以跳过判定是 O(1)。
  */
+@Immutable
 internal data class ChatRow(
     val message: StoredMessage,
     val showTimeLabel: Boolean,

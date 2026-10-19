@@ -26,6 +26,11 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -338,6 +343,38 @@ object TouchFx {
 
     /** The last answer handed to the view, so the trace writes a line when it flips. Main thread. */
     private var lastTarget = -1f
+
+    /**
+     * 外观页的「边缘光」开关（`AppSettings.edgeLight`，默认开）。关掉只是不显示：
+     * 驱动判定、自动返回、`fx-trace.log` 全都照旧。
+     *
+     * Volatile：设置收集协程写（主线程），[apply] 读（主线程）。
+     */
+    @Volatile
+    private var edgeLightOn = true
+
+    /** 设置收集只开一次。 */
+    private var watchingSettings = false
+
+    /** 收集设置的协程作用域：进程级，服务停了也不用取消（对象本来就是单例）。 */
+    private val settingsScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
+
+    /**
+     * 跟着外观页的开关走。第一次 [apply] 时开一次，之后常驻。
+     *
+     * 关掉的那一刻要**立刻**熄灯，不能等下一次 tick（最长一秒）—— 所以收集到变化就重算一次。
+     */
+    private fun watchSettings() {
+        if (watchingSettings) return
+        watchingSettings = true
+        settingsScope.launch {
+            Core.settings.flow.collect { s ->
+                val changed = edgeLightOn != s.edgeLight
+                edgeLightOn = s.edgeLight
+                if (changed) apply("settings")
+            }
+        }
+    }
 
     /**
      * 这一回合是否已经写过 `episode=` 的转折行 —— 收尾时据此决定要不要写 `end`。Main thread only.
@@ -676,6 +713,7 @@ object TouchFx {
     private fun apply(reason: String, context: Context? = null): Boolean {
         val app = appContext ?: context ?: return false
         watchForeground()
+        watchSettings()
         val now = SystemClock.uptimeMillis()
         val running = Core.engine.runsFlow.value.keys
         val inForeground = foreground()
@@ -693,7 +731,8 @@ object TouchFx {
         // **前台不再是熄灭条件**（issue #6，用户：「随行自己在前台时也要显示」）：
         // 亮不亮只看这一轮驱动过屏幕的 run 还活不活着，前台/后台一视同仁。
         // `inForeground` 仍然照常传给 [traceLight]，日志里的 `fg=self|other` 不丢。
-        val target = if (sessionAlive) FX_ALPHA_HOT else 0f
+        // 外观页的开关是最后一道门：关掉只是不显示，驱动判定与自动返回照旧。
+        val target = if (sessionAlive && edgeLightOn) FX_ALPHA_HOT else 0f
         traceLight(app, reason, target, sessionAlive, running, now, inForeground)
         // 目标值而不是开关：view 自己逐帧缓动逼近，所以亮起/熄灭都是斜坡，不会「啪」地闪。
         (if (target > 0f) overlay(app) else view)?.setTarget(target)
@@ -1066,7 +1105,8 @@ object TouchFx {
         // 与 [apply] 同一条会话判定（issue #2）：驱动过屏幕的 run 还活着就亮，静默和非 UI 工具都不参与。
         val sessionAlive = drivingIds.any { it in running }
         // 前台不压制（issue #6）：与 [apply] 同一口径，窗口重建后不能又暗下去。
-        val target = if (sessionAlive) FX_ALPHA_HOT else 0f
+        // 外观页开关同理（关掉时窗口重建也不该亮）。
+        val target = if (sessionAlive && edgeLightOn) FX_ALPHA_HOT else 0f
         traceLight(context, "overlay", target, sessionAlive, running, now, inForeground)
         fx.setTarget(target)
         return fx

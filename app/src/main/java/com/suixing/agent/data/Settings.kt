@@ -341,6 +341,13 @@ data class AppSettings(
     /** 是否在气泡下方显示时间 */
     val showTimestamps: Boolean = true,
     /**
+     * 边缘光特效：agent 在操作这台手机时，屏幕四周那一圈彩虹光（见 `service/TouchFx.kt`）。
+     *
+     * 默认开。关掉之后只是不再显示 —— 驱动判定、自动返回、`fx-trace.log` 全都照旧，
+     * 所以关掉不等于停掉自动化。带默认值放在类中间：老 JSON 没有这个键时读出来就是 true。
+     */
+    val edgeLight: Boolean = true,
+    /**
      * 打字机效果：**正在流式**的正文与思考逐字放出来，而不是每 80ms 整块跳一次
      * （节拍见 ChatViewModel 的 `DELTA_PUBLISH_MS`、放字逻辑见 ui/chat/Typewriter.kt）。
      *
