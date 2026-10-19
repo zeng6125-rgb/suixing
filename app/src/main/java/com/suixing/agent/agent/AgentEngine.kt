@@ -119,6 +119,22 @@ sealed interface AgentEvent {
         /** The HTTP status that failed; null for a transport failure. For the trace, not the UI. */
         val code: Int? = null,
     ) : AgentEvent
+
+    /**
+     * 这一轮作废重来：已经流到屏幕上的内容不算数了。
+     *
+     * 只在"收到内容之后流断了、还能重试"时发出（[LlmClient][com.suixing.agent.llm.LlmClient] 的
+     * `onRestart`）。界面收到它就把本段 live parts 撤掉，否则重发的那一轮会把同一段开头再画一遍。
+     */
+    data object RoundRestarted : AgentEvent
+
+    /**
+     * 压缩摘要正在生成（true＝开始，false＝结束）。
+     *
+     * 没有它，压缩那几秒里状态行停在上一句（「正在调用 xxx」），看着像卡住 —— 用户要求
+     * run 中的压缩也要在状态行里说「正在压缩上下文」。
+     */
+    data class Compressing(val on: Boolean) : AgentEvent
 }
 
 /**
@@ -1149,6 +1165,12 @@ class AgentEngine(
         // can say so. Reset per round: the number is about the attempt that finally failed, not
         // about how unlucky the whole run was.
         var retriesThisRound = 0
+        // 最近一次重试的原因（「服务器限流（429）」「网络中断」…），与 [retriesThisRound] 同生共死：
+        // 这一轮最终成功落盘时，两者一起写成消息上的 [StoredMessage.traceNote]，画成过程块。
+        var lastRetryReason = ""
+        // 这一轮「已经收到内容、只是流被切断」时的一句话；和重试一起合成 [StoredMessage.traceNote]。
+        // null＝没被切断。每轮开头清空，理由同 [retriesThisRound]。
+        var cutNote: String? = null
 
         /**
          * 把一条工具结果**回写**进 run 级状态：transcript、wire、spans、openCalls、live 行与事件。
@@ -1222,11 +1244,18 @@ class AgentEngine(
                 // context to be folded away, not for the answer in flight to be cut short.
                 val asked = compressNow
                 compressNow = false
-                compressContext(wire, spans, settings, onCheckpoint, asked)
+                compressContext(
+                    wire, spans, settings, onCheckpoint, asked,
+                    // 摘要要再发一次模型请求，这几秒里状态行必须说"在压缩"，否则看起来像卡死
+                    // （用户：「run 的时候状态行也跟上」）。false 时清掉，下一句会覆盖它。
+                    onBusy = { onEvent(AgentEvent.Compressing(it)) },
+                )
                 // Cleared with the round: whatever the last one ended with is over, and a
                 // line that outlives its step reads as a stall.
                 liveLine = ""
                 retriesThisRound = 0
+                lastRetryReason = ""
+                cutNote = null
                 if (cancelled.get()) {
                     finishCancelled(onEvent, streamed, reasoning, openCalls)
                     return produced
@@ -1301,6 +1330,7 @@ class AgentEngine(
                         // "it is thinking" and "it is stuck".
                         onRetry = { notice ->
                             retriesThisRound = notice.attempt
+                            lastRetryReason = notice.reason
                             liveLine = "第 ${notice.attempt} 次重试（${notice.delayMs / 1000}s 后）· ${notice.reason}"
                             // And out to the screen: the console's live line is not where the user
                             // is looking. Without this, a retrying run looks like one that simply
@@ -1314,6 +1344,15 @@ class AgentEngine(
                                     code = notice.code,
                                 ),
                             )
+                        },
+                        // 收到内容之后流断了、而且还能重试：这一轮作废重来。先把这一轮已经
+                        // 流出去的字清干净（缓冲 + 屏幕），再让客户端重发 —— 否则同一段开头会
+                        // 在气泡里出现两遍。屏幕那一半靠 RoundRestarted，VM 把本段 live parts 撤掉。
+                        onRestart = {
+                            streamed = StringBuilder()
+                            reasoning = StringBuilder()
+                            openCalls = emptyList()
+                            onEvent(AgentEvent.RoundRestarted)
                         },
                     )
                 } catch (error: IOException) {
@@ -1401,7 +1440,11 @@ class AgentEngine(
                 // 切断成 FINISH_CUT，不加这道判定就会给"用户刚按下的按钮"发一张错误回执；每停一次
                 // 一张，连停五次就是截图里那五条一模一样的红卡。
                 if (turn.finishReason == FINISH_CUT && !cancelled.get()) {
-                    onEvent(AgentEvent.Failed("连接中断，这一轮的回答可能不完整。"))
+                    // 流在已经收到内容之后被切断：这一轮**是成功的**（回答是真的、也保留），只是没说完。
+                    // 以前这里发 `Failed` —— 那会落一张红色回执卡，等于告诉用户"这轮失败了"；用户明确
+                    // 要求「整轮对话是成功的话 就不要有 错误提示卡片存在」。现在它和重试一样，变成
+                    // 消息上的过程留痕（[StoredMessage.traceNote]），画成过程块。
+                    cutNote = "连接中断，这一轮的回答可能不完整"
                 }
                 if (turn.toolCalls.isEmpty()) {
                     val assistant = StoredMessage(
@@ -1409,6 +1452,7 @@ class AgentEngine(
                         role = Roles.ASSISTANT,
                         text = turn.text,
                         reasoning = thinking,
+                        traceNote = traceNoteOf(retriesThisRound, lastRetryReason, cutNote),
                     ).withUsage(usage, elapsed, settings.model, firstTokenMs)
                     produced += assistant
                     onEvent(AgentEvent.AssistantMessage(assistant))
@@ -1434,6 +1478,7 @@ class AgentEngine(
                     text = turn.text,
                     reasoning = thinking,
                     toolCalls = turn.toolCalls.map { StoredToolCall(it.id, it.name, it.arguments) },
+                    traceNote = traceNoteOf(retriesThisRound, lastRetryReason, cutNote),
                 ).withUsage(usage, elapsed, settings.model, firstTokenMs)
                 produced += assistant
                 onEvent(AgentEvent.AssistantMessage(assistant))
@@ -1558,6 +1603,28 @@ class AgentEngine(
      * like the first attempt failed, and the retry setting looks like it did nothing.
      */
     private fun retryNote(retries: Int): String = if (retries > 0) "（已重试 $retries 次）" else ""
+
+    /**
+     * 这一轮**成功**、但中途重试过时，留在消息上的那条过程记录。
+     *
+     * 与 [retryNote] 的分工：那条是失败回执的一部分（「已重试 2 次」说明为什么这轮这么久），
+     * 这条是**成功**的过程块（用户：「重试成功要在过程态中留痕……整轮成功就不要有错误提示卡片」）。
+     * 没有重试就返回 null —— 不留空块。
+     */
+    private fun retryTraceNote(retries: Int, reason: String): String? = when {
+        retries <= 0 -> null
+        reason.isBlank() -> "自动重试 $retries 次后成功"
+        else -> "自动重试 $retries 次 · $reason"
+    }
+
+    /**
+     * 一轮里可能同时发生两件事：先重试，最后又被上游切断。块只有一行，两件事都得说，
+     * 所以按发生顺序用「；」连起来；都没有就是 null（不留空块）。
+     */
+    private fun traceNoteOf(retries: Int, reason: String, cut: String?): String? =
+        listOfNotNull(retryTraceNote(retries, reason), cut)
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString("；")
 
     /**
      * Publishes the end of a stopped run.
@@ -1717,6 +1784,13 @@ class AgentEngine(
         settings: AppSettings,
         onCheckpoint: (ContextCheckpoint) -> Unit,
         asked: Boolean,
+        /**
+         * 摘要生成期间的忙碌通知：true＝开始、false＝结束。
+         *
+         * 状态行据此显示「正在压缩上下文」—— 压缩要再发一次模型请求，几秒钟里什么都不写，
+         * 看起来和卡死一样（用户：「run 的时候状态行也跟上」）。
+         */
+        onBusy: (Boolean) -> Unit = {},
     ) {
         val window = settings.contextWindowFor(settings.model)
         // A request from the menu needs neither a ceiling nor the automatic switch: the user asked
@@ -1745,6 +1819,7 @@ class AgentEngine(
         if (older.isEmpty()) return
 
         val summary = try {
+            onBusy(true)
             // The whole span, system notes included: the summary this one replaces has to be folded
             // into it. Otherwise the rebuild that resumes from the checkpoint — which can only carry
             // one summary — would drop the older one and its context with it.
@@ -1756,6 +1831,7 @@ class AgentEngine(
             throw error
         } finally {
             inFlight = null
+            onBusy(false)
         }
         if (summary.isBlank()) return
 
@@ -2218,68 +2294,54 @@ class AgentEngine(
         memory: Map<String, MemoryEntry>,
         profile: String,
     ): String = buildString {
-        append(settings.systemPrompt.trim())
-        append("\n\n## 可用工具\n")
+        // 顺序是固定的，**按当前次序编号**（旧文档里的「1 人设」是移动前的号，别再按旧号找）：
+        //   0 底座（一句话 + 工作规则）→ 1 工具表 → 2 插件 → 3 禁工具 → 4 技能
+        //   → 5 人设 → 6 画像 → 7 记忆
+        // 0-4 是产品对模型的硬要求，排在**人设之前**：不该被换一个人设就丢掉，也不该随人设的
+        // 语言变；5-7 是「用户自己的文字」，保持原语言。
+        append(SYSTEM_PROMPT_BASE)
+        append("\n\n## Available tools\n")
         append(registry.promptSummary())
         // 接线点 A（HOST-DEV §5）：让模型知道插件工具也能调，命名与内置一致。
         // 这句是**固定文案**：插件列表是实时变的，而 systemPrompt() 不是 suspend（读盘要 suspend），
         // 所以不在这里读插件；没有启用插件时多说一句也无害（模型看不到那个名字就不会去调）。
-        append("\n\n用户启用了插件提供的扩展工具（`id.tool` 命名），调用方式与内置工具一致。")
+        // 英文是刻意的：固定文案的语言不随插件作者的语言变（插件描述本身是什么语言就照原样出现）。
+        append(
+            "\n\nThe user has enabled plugin-provided tools (named `id.tool`); " +
+                "call them the same way as built-in tools.",
+        )
         // 禁止档下每一次调用都必然失败（[request] 直接返回 false，模型只会拿到「用户拒绝了
         // 这次调用。」），而上面那张工具表照旧列着。不在这里说明，模型就会一轮轮撞墙、把整轮
         // 时间花在被拒的调用上，而不是直接回答用户。
         if (settings.approvalMode == ApprovalMode.DENY) {
-            append("\n\n注意：用户当前已禁止工具调用，你这一轮无法执行任何工具。请直接用文字回答，不要尝试调用工具。")
+            append(
+                "\n\nNote: the user has disabled tool calls. You cannot run any tool this round. " +
+                    "Answer with text only, and do not attempt to call a tool.",
+            )
         }
         if (skillCatalog.isNotBlank()) {
             append("\n\n")
             append(skillCatalog)
+        }
+        // 人设。空则整段不出现（只剩底座），不留一个空行。
+        val persona = settings.systemPrompt.trim()
+        if (persona.isNotEmpty()) {
+            append("\n\n")
+            append(persona)
+        }
+        // 画像在记忆**之前**（用户：「画像 在记忆前面吧」）：先交代"这是谁"，再说"我记得什么"。
+        // 两段都是模型该知道的事，但一段是用户写的、一段是模型自己写的，分开才不会让模型把自己的
+        // 笔记当成用户的自述。空画像整段不出现，不留一个空标题。
+        val about = profile.trim()
+        if (about.isNotBlank()) {
+            append("\n\n## 关于用户（画像）\n")
+            append(about)
         }
         val remembered = memoryBlock(memory)
         if (remembered.isNotBlank()) {
             append("\n\n## 你记得的事\n")
             append(remembered)
         }
-        // 画像紧跟在记忆之后：两段都是模型该知道的事，但一段是模型自己写的、一段是用户写的，
-        // 分开才不会让模型把自己的笔记当成用户的自述。空画像整段不出现，不留一个空标题。
-        val about = profile.trim()
-        if (about.isNotBlank()) {
-            append("\n\n## 关于用户（画像）\n")
-            append(about)
-        }
-        append(
-            "\n\nTool calls: arguments must be a valid JSON object, and several tools may be called in " +
-                "parallel. When a tool fails, read the error and adjust — do not repeat the same call. " +
-                "When the work is done, answer the user in Chinese, briefly saying what you did and " +
-                "what happened.",
-        )
-        // The board is the one piece of state that outlives the context window, so the prompt
-        // has to say so: a model that keeps its plan in its head loses it the first time the
-        // history is summarised.
-        append(
-            "\nPlanning: for multi-step work, call todo_write first and rewrite the complete list after " +
-                "each step (rewrite, not append) — your context may be compacted, the board will not be.",
-        )
-        // 工具参数一律计入**输出**：它是 assistant 的 tool-call 参数，也就是 completion tokens
-        // （LlmClient.kt:416 累加、:486 append）。write_file 之所以常见，是因为它的参数就是"整份文件
-        // 的内容"—— 大小完全由模型一次写多少决定，别的工具的参数通常只有几个字段。所以这条规则针对
-        // write_file，但同样的道理对任何"一次吐很大一段参数"的调用都成立（例如 todo_write 重写整张
-        // 清单、run_shell 带一大段脚本）。
-        // 约 200 行 / 8KB 的量级依据：代码约 4 字符/token ⇒ 8KB ≈ 2k tokens，在常见的 4k–8k 输出上限
-        // 里留得下同一轮的工具调用与说明文字；再小会让模型频繁分块、每块都要一次往返。
-        append(
-            "\nWriting files: use write_file. For content over roughly 200 lines or 8KB, write it in " +
-                "parts — the head first, then append with `append: true`; do not emit a whole large file " +
-                "in one call (that hits the model's own output limit and the round gets truncated).",
-        )
-        // 压缩工具的存在要告诉模型，否则它不知道自己手里有这把刀（用户：「要有压缩上下文的
-        // 指令工具」）。触发时机写清楚：长任务跑到中后段、或用户说上下文太长/太慢时。
-        append(
-            "\nContext: when it gets long (a long run, or the user says responses are slow or the " +
-                "context is too long), call $COMPRESS_CONTEXT_TOOL — the oldest span is folded into a " +
-                "summary and later requests carry that summary plus the recent messages. The current " +
-                "round continues normally.",
-        )
     }
 
     /**
@@ -2372,6 +2434,31 @@ private const val IMAGE_TOKENS = 1000
  * 请求的工具表（接线点 A 追加 [COMPRESS_CONTEXT_SPEC]），模型才调得到它。
  */
 const val COMPRESS_CONTEXT_TOOL = "compress_context"
+
+/**
+ * 第 0 段：内置底座，**一句话 + 工作规则**，永远排在用户人设之前。
+ *
+ * 顺序：先说自己是谁（一句话），再说这个产品对模型的硬要求（工作规则）。
+ * 为什么规则并进这一段而不是单列一段：它们是同一件事 —— 产品默认的、不随人设变的那部分；
+ * 分开写只会在两段之间多一个空段落，读起来像两条互不相干的声明。
+ *
+ * 英文且固定：与人设用什么语言写无关；用户自己的文字（人设、记忆、画像）仍按原语言出现。
+ * 规则内容是原「Tool calls / Planning / Writing files / Context」四段合成的 —— 怎么调工具、
+ * 怎么规划、怎么写大文件、什么时候压缩上下文；拆成四段只是历史上一次一条加进来的结果。
+ */
+private const val SYSTEM_PROMPT_BASE = "You are a helpful software engineer assistant.\n\n" +
+    "## Working rules\n" +
+    "- Tool calls: arguments must be a valid JSON object, and several tools may be called in parallel. " +
+    "When a tool fails, read the error and adjust — do not repeat the same call. " +
+    "When the work is done, answer the user in Chinese, briefly saying what you did and what happened.\n" +
+    "- Planning: for multi-step work, call todo_write first and rewrite the complete list after each step " +
+    "(rewrite, not append) — your context may be compacted, the board will not be.\n" +
+    "- Writing files: use write_file. For content over roughly 200 lines or 8KB, write it in parts — " +
+    "the head first, then append with `append: true`; do not emit a whole large file in one call " +
+    "(that hits the model's own output limit and the round gets truncated).\n" +
+    "- Context: when it gets long (a long run, or the user says responses are slow or the context is " +
+    "too long), call " + COMPRESS_CONTEXT_TOOL + " — the oldest span is folded into a summary and later " +
+    "requests carry that summary plus the recent messages. The current round continues normally."
 
 /** 虚拟工具的规格：无参数。schema 用 OpenAI 的 object 形状，与 [com.suixing.agent.tools.Schema] 同款。 */
 internal val COMPRESS_CONTEXT_SPEC = com.suixing.agent.tools.ToolSpec(

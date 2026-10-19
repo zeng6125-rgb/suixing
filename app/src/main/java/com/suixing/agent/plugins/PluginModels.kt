@@ -63,6 +63,16 @@ data class ExecDecl(
     val cwd: String? = null,
     /** true → root 通道，且强制 risk=high（开放问题#5 已拍板）。 */
     val needsRoot: Boolean = false,
+    /**
+     * 用哪个解释器跑 [command]：缺省/`auto` = 先试随包 bash，被 seccomp 拦下再退回系统 sh；
+     * `sh` = 直接系统 sh，不试探。
+     *
+     * **为什么需要它**（用户实测 free-search 每次调用都卡）：那条命令本身全是 POSIX
+     * （`case/esac` + 显式 `sh xxx.sh`），外层用 bash 没有收益，却要多付一次
+     * 「起 bash → 被 SIGSYS 杀 → 再起 sh」。插件作者知道脚本是 POSIX 时写
+     * `"shell": "sh"`，就能省掉这一次。
+     */
+    val shell: String? = null,
 )
 
 @Serializable

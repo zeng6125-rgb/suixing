@@ -623,6 +623,11 @@ internal fun Composer(
     onSteer: (String, List<String>) -> Boolean,
     /** Asks the live run to fold the conversation at its next turn boundary. */
     onRequestCompress: () -> Boolean,
+    /**
+     * **没有 run 时**直接压一次（按已落盘历史）。菜单项在 [onRequestCompress] 返回 false
+     * 时改走这条 —— 以前这条根本没接，于是"点了没反应"（用户报的正是这个）。
+     */
+    onCompressNow: () -> Unit,
     /** Lines queued for the run that is going, oldest first. */
     pendingSteers: List<PendingSteer>,
     /**
@@ -1091,15 +1096,14 @@ internal fun Composer(
                                 onClick = {
                                     menuOpen = false
                                     val asked = onRequestCompress()
-                                    Toast.makeText(
-                                        ctx,
-                                        if (asked) {
-                                            "已请求压缩，本轮结束后生效"
-                                        } else {
-                                            "正在压缩较早的上下文…"
-                                        },
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
+                                    if (asked) {
+                                        Toast.makeText(ctx, "已请求压缩，本轮结束后生效", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        // 没有 run：**真的压一次**，并且状态行会显示「正在压缩上下文」。
+                                        // 以前这里只弹一句 toast，什么也没压（用户：「点了没反应」）。
+                                        onCompressNow()
+                                        Toast.makeText(ctx, "正在压缩上下文…", Toast.LENGTH_SHORT).show()
+                                    }
                                 },
                             )
                         }

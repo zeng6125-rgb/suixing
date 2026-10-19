@@ -123,9 +123,23 @@ object Shell {
 
     suspend fun local(command: String, shell: String = "auto"): ShellResult {
         // 自带 bash 时优先用它：Android 只有 toybox 的 sh，连 `[[ ]]`、数组、`$(<file)` 都没有。
-        // shell="sh" 是显式要求退回系统 sh（对照/排错用）。
+        //
+        // 三个档位（插件清单的 `shell` 字段与 run_shell 的 `shell` 参数都走这里）：
+        //   auto（缺省）＝先试 bash，被 seccomp 拦下再退回 sh —— 双接口；
+        //   sh          ＝直接用系统 sh，不试探（纯 POSIX 命令省掉一次进程创建）；
+        //   bash        ＝**只用 bash**：bash 不可用或被 seccomp 杀掉就明确失败，不偷偷换 sh。
+        //                 写 `[[ ]]`、数组的插件必须用这一档 —— 一旦静默回退，sh 会以
+        //                 看不懂的语法错误收场，比直接报错更难查。
         val bash = bundledBash()
-        if (bash == null || shell == "sh") return run(arrayOf("sh", "-c", command))
+        val wantBash = shell == "bash"
+        if (bash == null) {
+            return if (wantBash) {
+                ShellResult(false, "", "这个构建没有随包 bash，无法按 shell=bash 执行", -1)
+            } else {
+                run(arrayOf("sh", "-c", command))
+            }
+        }
+        if (shell == "sh") return run(arrayOf("sh", "-c", command))
         val env = buildMap {
             // 自带 busybox 以 $BB 暴露（applet 名要靠 argv[0]，所以不放进 PATH 当命令名用）：
             // 命令里写 `"$BB" grep -n foo *.kt` 即可拿到完整的 coreutils 级工具。
@@ -141,6 +155,15 @@ object Shell {
         // 哪些命令会踩到无法事先知道 —— 永久降级会让本来能跑的命令也无故失去 bash 能力。
         // 代价只是失败时多一个瞬间退出的子进程（毫秒级）。
         if (!looksLikeSeccompKill(result.exitCode)) return result
+        if (wantBash) {
+            return ShellResult(
+                false,
+                "",
+                "自带 bash 被系统的 seccomp 过滤器拦下（exit 159 / SIGSYS），而调用方要求 shell=bash，" +
+                    "所以没有改用 sh 重试。把 shell 改成 auto 可以自动回退。",
+                result.exitCode,
+            )
+        }
         val retry = run(arrayOf("sh", "-c", command))
         return retry.copy(stdout = SECCOMP_FALLBACK_NOTE + retry.stdout)
     }

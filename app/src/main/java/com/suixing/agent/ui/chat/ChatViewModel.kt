@@ -141,6 +141,13 @@ data class ChatUiState(
      * screen's business: nothing here locks, refuses or narrates them.
      */
     val runningHere: Boolean = false,
+    /**
+     * 没有 run 时手动压缩的开始时刻（毫秒）；0＝没在压。
+     *
+     * 状态行要能说「正在压缩上下文，用时 xx」—— 没有这一位，点了压缩屏幕上没有任何反应
+     * （用户：「无 run 的时候手动点压缩，啥响应也没有」）。
+     */
+    val compressingSince: Long = 0L,
     val status: String = "",
     /** The tool the run is inside right now; the tool card names it live. */
     val runningTool: String? = null,
@@ -251,6 +258,23 @@ sealed interface LivePart {
      * had nowhere to appear until the run ended.
      */
     data class Steer(val message: StoredMessage) : LivePart
+
+    /**
+     * 过程留痕（重试）：运行中就要看得见。
+     *
+     * 这一轮的落盘消息在流式期间被藏在转录之外（live 气泡画的就是它们），所以没有这个 part，
+     * 「刚才重试过」要等整轮结束才出现 —— 用户要的恰恰是过程态里的留痕。
+     */
+    data class Trace(val note: String) : LivePart
+
+    /**
+     * 运行中发生的一次上下文压缩。
+     *
+     * 它必须成为过程区的一个块，而不是气泡下面一行提示：压缩是"这一轮里发生的事"，位置就在
+     * 它发生的地方（思考 → 工具 → 压缩 → 继续）。运行结束后转录里另有一张按旧行定位的
+     * CheckpointCard 负责回看。
+     */
+    data class Compress(val checkpoint: ContextCheckpoint) : LivePart
 }
 private data class RunSession(
     val chatId: String,
@@ -1427,6 +1451,8 @@ class ChatViewModel : ViewModel() {
         if (jobs.containsKey(chatId)) return
         if (compressing.contains(chatId)) return
         compressing += chatId
+        // 状态行要立刻有反应：开始时刻进状态，ChatScreen 据此画「正在压缩上下文 · 用时 xx」。
+        _state.update { it.copy(compressingSince = System.currentTimeMillis()) }
         viewModelScope.launch {
             try {
                 val base = Core.settings.current()
@@ -1438,14 +1464,25 @@ class ChatViewModel : ViewModel() {
                     baseUrl = choice.baseUrl,
                     apiKey = choice.apiKey,
                     model = choice.model,
+                    // 协议跟着这条链走：会话/人设选了哪个端点，就按那个端点说的话发。
+                    protocol = choice.protocol,
                     reasoningEffort = shown.reasoningEffort ?: persona.reasoningEffort,
                 )
                 val history = sessions[chatId]?.messages ?: shown.messages
+                // **锚点也要能在没有 run 时成立**：单独压缩时没有 live 会话，退回当前转录的
+                // 最后一条消息 —— 否则压缩块会按"被折叠的最后一条"落到旧历史里（看不见）。
+                val anchorId = sessions[chatId]?.messages?.lastOrNull()?.id
+                    ?: shown.messages.lastOrNull()?.id.orEmpty()
                 Core.engine.compressNow(history, settings) { checkpoint ->
-                    recordCheckpoint(chatId, checkpoint)
+                    recordCheckpoint(chatId, checkpoint.copy(anchorId = anchorId))
+                }?.let { reason ->
+                    // 压缩没成就把原因说出来（消息太少 / 网络失败 / 模型没给摘要）——
+                    // 以前这里把返回值丢了，用户看到的就是"点了没反应"。
+                    _state.update { it.copy(error = reason) }
                 }
             } finally {
                 compressing -= chatId
+                _state.update { it.copy(compressingSince = 0L) }
             }
         }
     }
@@ -1475,6 +1512,7 @@ class ChatViewModel : ViewModel() {
                 baseUrl = choice.baseUrl,
                 apiKey = choice.apiKey,
                 model = choice.model,
+                protocol = choice.protocol,
                 reasoningEffort = shown.reasoningEffort ?: persona.reasoningEffort,
             )
             val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
@@ -1595,6 +1633,9 @@ class ChatViewModel : ViewModel() {
                     baseUrl = choice.baseUrl,
                     apiKey = choice.apiKey,
                     model = choice.model,
+                    // 协议也走这条链：这条会话落在哪个端点，就按那个端点的格式发。
+                    // 少了它，Anthropic/Responses 端点会收到 OpenAI 形状的请求体。
+                    protocol = choice.protocol,
                     // The level follows the same chain as the model: this chat's own pick
                     // wins, then whatever the persona's provider declared, then the
                     // app-wide default the persona already carries.
@@ -1780,9 +1821,9 @@ class ChatViewModel : ViewModel() {
         val base = applyPending(live, pendingText, pendingReasoning)
         val next = when (event) {
             // Already folded into `base` above.
-            is AgentEvent.TextDelta -> base
+            is AgentEvent.TextDelta -> base.clearRetryStatus()
 
-            is AgentEvent.ReasoningDelta -> base
+            is AgentEvent.ReasoningDelta -> base.clearRetryStatus()
 
             // The round is stored, but it is not drawn from the transcript: the live
             // bubble keeps drawing it until the run lands, so the reply stays one bubble
@@ -1888,14 +1929,34 @@ class ChatViewModel : ViewModel() {
                         "received=0 cancelled=0",
                 )
                 base.copy(
-                    status = "连接失败，${event.delayMs / 1000} 秒后重试（第 ${event.attempt} 次）· ${event.reason}",
+                    status = RETRY_STATUS_PREFIX +
+                        "，${event.delayMs / 1000} 秒后重试（第 ${event.attempt} 次）· ${event.reason}",
+                    // 过程块：连续重试更新同一块（「自动重试 1 次」→「自动重试 2 次」），不叠成两行。
+                    parts = base.parts.traceRetry("自动重试 ${event.attempt} 次 · ${event.reason}"),
                 )
             }
 
             is AgentEvent.Finished -> {
                 retriesThisRun = 0
-                live
+                // 这一轮成功了：屏幕上不该再挂着任何错误。重试成功的轮次走的是过程留痕
+                // （StoredMessage.traceNote），从不设 error；这里清一次是给所有成功路径的保证
+                // （用户：「整轮对话是成功的话 就不要有 错误提示卡片存在」）。
+                live.copy(error = null)
             }
+
+            // 这一轮作废重来（收到内容之后流断了、而且还能重试）：把本段已经流出去的内容撤掉，
+            // 否则重发的那一轮会在气泡里把同一段开头再画一遍。
+            AgentEvent.RoundRestarted -> base.copy(
+                parts = base.parts.take(base.segmentStart.coerceIn(0, base.parts.size)),
+                streaming = "",
+                reasoning = "",
+            )
+
+            // 压缩摘要正在生成：状态行改说这件事（run 中也要有，用户要求）。结束就清空，
+            // 下一句状态由后续事件覆盖。
+            is AgentEvent.Compressing -> base.copy(
+                status = if (event.on) "正在压缩上下文" else "",
+            )
 
             // The model has the line now: it leaves the queue and becomes a message in the
             // same breath, so a queued line is never both. Marked `steer` so the transcript
@@ -2021,6 +2082,16 @@ class ChatViewModel : ViewModel() {
         val part = this[idx] as LivePart.Text
         return take(idx) + part.copy(text = part.text + delta) + drop(idx + 1)
     }
+
+    /**
+     * 重试留痕：连续重试只更新同一块（「自动重试 1 次」→「自动重试 2 次」），不叠成两行。
+     */
+    private fun List<LivePart>.traceRetry(note: String): List<LivePart> =
+        if (lastOrNull() is LivePart.Trace) {
+            dropLast(1) + LivePart.Trace(note)
+        } else {
+            this + LivePart.Trace(note)
+        }
 
     /** 同 [appendText]：同一段里思考只持一个块，交错流不再劈开。 */
     private fun List<LivePart>.appendThinking(delta: String, segmentStart: Int): List<LivePart> {
@@ -2270,12 +2341,31 @@ class ChatViewModel : ViewModel() {
         val live = sessions[chatId]
         val shown = _state.value.takeIf { it.conversationId == chatId }
         val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }
+        // **锚点＝压缩发生那一刻最后一条已落盘消息**（用户：「运行时有这个块，会话完成一折叠就
+        // 没有了」）：以前转录里那张卡按「被折叠的最后一条」定位，那是旧历史，跑完就滚到屏幕上方
+        // 看不见了。锚在当下，它才和运行中看到的那一块在同一个位置。
+        // 调用方**已经给过锚点**（无 run 的手动压缩，:1475）就用它的 —— 以前这里无条件覆盖成
+        // `live?.messages…orEmpty()`，无 run 时把好锚点抹成空串，卡片又落回旧历史。
+        val anchored = if (checkpoint.anchorId.isNotEmpty()) {
+            checkpoint
+        } else {
+            checkpoint.copy(anchorId = live?.messages?.lastOrNull()?.id.orEmpty())
+        }
         val current = live?.checkpoints ?: shown?.checkpoints ?: stored?.checkpoints.orEmpty()
-        val next = (current + checkpoint).distinctBy { it.id }.takeLast(MAX_CHECKPOINTS)
+        val next = (current + anchored).distinctBy { it.id }.takeLast(MAX_CHECKPOINTS)
         // Mirrored onto every live copy first, so the next save carries it whether the run
         // is still going or has just landed.
         if (shown != null) _state.update { it.copy(checkpoints = next) }
-        live?.let { putSession(it.copy(checkpoints = next)) }
+        live?.let {
+            // 运行中的压缩要在过程区**原地**留一个块（用户：「在哪个部分进行的就在哪个部分渲染」：
+            // 思考 → 工具 → 压缩 → 继续）。跑完之后由转录里那张 CheckpointCard 接管，锚点见上。
+            putSession(
+                it.copy(
+                    checkpoints = next,
+                    parts = it.parts + LivePart.Compress(anchored),
+                ),
+            )
+        }
         viewModelScope.launch {
             // Read-modify-write of the checkpoints field alone: the run's own copy of the
             // messages is still growing, and saving it here would write a half-finished
@@ -2550,6 +2640,19 @@ private const val DELTA_PUBLISH_MS = 80L
  * run. Long enough for that to finish, short enough that the user does not see a gap.
  */
 private const val RETRY_TURN_MS = 300L
+
+/**
+ * 重试行写在状态行上的开头。
+ *
+ * 写和清是同一件事的两端：`AgentEvent.Retrying` 把「连接失败，N 秒后重试（第 K 次）· 原因」
+ * 放进状态行，内容一到就由 [clearRetryStatus] 抹掉 —— 重试已经成功了，这一行再挂着，读起来
+ * 就像这一轮仍在出错（用户：「整轮对话是成功的话 就不要有 错误提示卡片存在」）。
+ */
+private const val RETRY_STATUS_PREFIX = "连接失败"
+
+/** 见 [RETRY_STATUS_PREFIX]：重试成功、内容已经到达，那一行就该让位给真正的回答。 */
+private fun RunSession.clearRetryStatus(): RunSession =
+    if (status.startsWith(RETRY_STATUS_PREFIX)) copy(status = "") else this
 
 /**
  * Where the retry diagnostic goes, and how it is kept from growing without bound.

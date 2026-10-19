@@ -52,7 +52,7 @@ class SystemTools(
         ),
         ToolSpec(
             "open_app",
-            "Open an app: by package name first, or by its display name (e.g. 微信).",
+            "Open an app: by package name first, or by its display name (e.g. WeChat).",
             Schema.objectOf(
                 properties = listOf("target" to Schema.string("Package name or app name")),
                 required = listOf("target"),

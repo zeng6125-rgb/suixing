@@ -381,7 +381,13 @@ object PluginRuntime {
         val full = "cd $cwd && $command"
         val result = try {
             withTimeout(exec.timeoutSeconds.coerceIn(1, 600) * 1000L) {
-                if (exec.needsRoot) Shell.root(full) else Shell.local(full)
+                if (exec.needsRoot) {
+                    Shell.root(full)
+                } else {
+                    // 插件清单可以声明解释器：`sh` 直接走系统 sh（跳过"先试 bash 被 seccomp
+                    // 杀掉再回退"的那一次），缺省仍是 auto = 双接口（先 bash、失败退 sh）。
+                    Shell.local(full, shell = exec.shell?.trim()?.lowercase().orEmpty().ifBlank { "auto" })
+                }
             }
         } catch (timeout: TimeoutCancellationException) {
             // 必须在这里翻成普通失败：TimeoutCancellationException 也是 CancellationException，

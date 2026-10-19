@@ -156,6 +156,8 @@ class SteerRenderTest {
                     is Part.Steer -> "插话 " + it.message.id
                     is Part.Text -> it.text
                     is Part.Thinking -> "思考"
+                    is Part.Trace -> "留痕 " + it.note
+                    is Part.Compress -> "压缩"
                 }
             },
         )

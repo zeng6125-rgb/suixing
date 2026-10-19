@@ -352,6 +352,22 @@ internal sealed interface Part {
      * the transcript does not read as though the model volunteered something.
      */
     data class Steer(val message: StoredMessage) : Part
+
+    /**
+     * 一条过程留痕：这一轮**成功了**，但中途重试过（「自动重试 1 次 · 服务器限流（429）」）。
+     *
+     * 画在过程区、和思考块/工具块并排，而不是画成红色回执卡 —— 卡片的意思是"这轮失败了"，
+     * 而这一轮恰恰是成功的（用户：「这轮对话是成功的，只是中间触发重试了而已」）。
+     */
+    data class Trace(val note: String) : Part
+
+    /**
+     * 一次上下文压缩，画在它发生的位置（思考 → 工具 → 压缩 → 继续）。
+     *
+     * 与转录里那张 [CheckpointCard] 是同一件事的两种形态：那张按"被折叠的最后一条消息"定位，
+     * 用来回看；这一块属于正在跑的这轮，位置就是它真正发生的那一刻。
+     */
+    data class Compress(val checkpoint: ContextCheckpoint) : Part
 }
 
 /**
@@ -520,6 +536,8 @@ internal fun groupRows(
                 // Thinking first, then the words: that is the order they arrived in, and
                 // a round that only thought contributes only a thinking part.
                 val arrived = buildList {
+                    // 重试留痕在最前：它发生在这一轮产出任何字之前，排在思考/正文前面才是它真正的位置。
+                    message.traceNote?.takeIf { it.isNotBlank() }?.let { add(Part.Trace(it)) }
                     message.reasoning?.trim()?.takeIf { it.isNotEmpty() }?.let {
                         add(Part.Thinking(it, message.reasoningTokens, message.elapsedMs, run))
                     }

@@ -87,10 +87,39 @@ class GroupRowsTest {
         assertEquals(listOf("m1", "a4"), card.rounds.map { it.id })
     }
 
+    /**
+     * 重试留痕排在这一轮的最前面：它发生在这一轮产出任何字之前。用户的要求是"重试成功要在
+     * 过程态中留痕"—— 一块和思考/工具并排的记录，而不是一张说这轮失败了的红卡。
+     */
+    @Test
+    fun `a retry trace is the first part of the round that retried`() {
+        val messages = listOf(
+            question("q1"),
+            round("a1", "r1", "正文", "想过").copy(traceNote = "自动重试 1 次 · 服务器限流（429）"),
+        )
+
+        val card = group(messages)[1]
+
+        assertEquals(
+            listOf("留痕", "思考", "正文"),
+            card.parts.map {
+                when (it) {
+                    is Part.Trace -> "留痕"
+                    is Part.Thinking -> "思考"
+                    is Part.Text -> "正文"
+                    else -> "其他"
+                }
+            },
+        )
+        assertEquals(
+            "自动重试 1 次 · 服务器限流（429）",
+            (card.parts.first() as Part.Trace).note,
+        )
+    }
+
     /** The card a run's first result opens is the card the run's later rounds fold into. */
     @Test
-    fun `the first tool result of a run opens the card the run keeps using`() {
-        val messages = listOf(
+    fun `the first tool result of a run opens the card the run keeps using`() {        val messages = listOf(
             question("q1"),
             silentRound("a1", "r1", "t1"), result("m1", "r1", "t1"),
             silentRound("a2", "r1", "t2"), result("m2", "r1", "t2"),

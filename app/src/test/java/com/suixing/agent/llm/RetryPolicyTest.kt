@@ -114,6 +114,59 @@ class RetryPolicyTest {
         assertFalse(retry(status = 500, receivedAnyOutput = true, cancelled = true))
     }
 
+    // ------------------------------------------------------------------ 中途断流
+
+    /**
+     * 例外的那个口子：内容已经收到、连接断了（局域网重启、上游抖动、网关掐流）。
+     *
+     * 调用方会先把已经流出去的那一轮撤掉（`LlmClient` 的 `onRestart`），所以这里允许重试 ——
+     * 否则用户看到的就是「停在中途那个节点，再也不动」。撤回这件事做不到时（`midStream=false`），
+     * 规则仍然是"不重试"：同一段开头打印两遍比停住更糟。
+     */
+    @Test
+    fun `a stream that breaks after output is retried only when the caller can discard it`() {
+        assertTrue(
+            shouldRetry(
+                status = null,
+                attempt = 1,
+                maxAttempts = 2,
+                receivedAnyOutput = true,
+                cancelled = false,
+                midStream = true,
+            ),
+        )
+        assertFalse(
+            shouldRetry(
+                status = null,
+                attempt = 1,
+                maxAttempts = 2,
+                receivedAnyOutput = true,
+                cancelled = false,
+            ),
+        )
+        // 预算用尽 / 用户停手，照旧不重试。
+        assertFalse(
+            shouldRetry(
+                status = null,
+                attempt = 3,
+                maxAttempts = 2,
+                receivedAnyOutput = true,
+                cancelled = false,
+                midStream = true,
+            ),
+        )
+        assertFalse(
+            shouldRetry(
+                status = null,
+                attempt = 1,
+                maxAttempts = 2,
+                receivedAnyOutput = true,
+                cancelled = true,
+                midStream = true,
+            ),
+        )
+    }
+
     // ------------------------------------------------------------------ Retry-After
 
     @Test

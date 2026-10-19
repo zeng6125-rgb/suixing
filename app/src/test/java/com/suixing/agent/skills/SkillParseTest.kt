@@ -93,8 +93,8 @@ class SkillParseTest {
                 Skill(id = "checkin", name = "每日签到", description = "签到用", body = "", path = "p"),
             ),
         )
-        assertTrue(catalog.contains("## 可用技能"))
-        assertTrue(catalog.contains("- 每日签到（id: checkin）：签到用"))
+        assertTrue(catalog.contains("## Available skills"))
+        assertTrue(catalog.contains("- 每日签到 (id: checkin): 签到用"))
     }
 
     @Test

@@ -53,6 +53,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -83,7 +84,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -562,9 +562,13 @@ fun ChatScreen(
         val indexOf = visible.withIndex().associate { (index, row) -> row.message.id to index }
         val orphanToTop = mutableListOf<ContextCheckpoint>()
         val placed = state.checkpoints.mapNotNull { checkpoint ->
-            val owner = byId[checkpoint.toMessageId]
+            // **锚点是压缩发生的位置**（anchorId），不是被折叠掉的最后一条（toMessageId）：
+            // 按后者定位，压缩块会跑到旧历史里，跑完这一轮就"消失"在屏幕上方（用户反馈）。
+            // 旧盘没有 anchorId（空串）⇒ 回落到 toMessageId，行为与以前一致。
+            val anchor = checkpoint.anchorId.ifEmpty { checkpoint.toMessageId }
+            val owner = byId[anchor]
                 ?: visible.firstOrNull { row ->
-                    row.rounds.any { it.id == checkpoint.toMessageId }
+                    row.rounds.any { it.id == anchor }
                 }
             if (owner == null) {
                 // 锚点落在当前页窗口之外（转录按页后缀加载）：旧行为是**丢掉不画** —— 用户看到
@@ -586,12 +590,12 @@ fun ChatScreen(
         }
         placed
     }
-    // 压缩的告知就是转录里那条记录行本身（用户：「不需要 toast/snackbar，有对话里类似状态条的
-    val statsNote = state.stats?.note.orEmpty()
-    val liveStatusText = statsNote.ifEmpty {
+    // 压缩的告知就是过程区里那一块（[CompressionBlock]，位置就是它发生的地方），不再往气泡
+    // 下面塞一行提示（用户：「不需要这种在卡片下的提示」）。
+    val liveStatusText = state.status.ifBlank {
         // No ellipsis: 「正在思考…」 was read as a truncation of something longer. The line
         // already says the state, and the clock that follows says how long it has held.
-        state.status.ifBlank { "正在思考中" }
+        "正在思考中"
     }
     // When the live run began, remembered per run so a switch away and back does not
     // restart the caption's clock. Written in an effect, never during composition.
@@ -632,9 +636,10 @@ fun ChatScreen(
     // say "turn 2 of 5" and jump between them without the engine knowing anything about it.
     // Steered lines ride inside the turn they steer, so counting them would draw one
     // landmark per interjection — a question plus two steers is still one turn.
-    // The indices are the list's own, [rowOffset] included, because that is what the strip
-    // jumps to; the drawn turns are the tail of the conversation, which is why the labels
-    // that name them are numbered from [TurnPage.earlier] rather than from one.
+    // The indices are visible coordinates with [rowOffset] included; [fedIndexOf] turns them
+    // into the bottom-anchored list's feed indices when the strip jumps. The drawn turns are
+    // the tail of the conversation, which is why the labels that name them are numbered from
+    // [TurnPage.earlier] rather than from one.
     // Keyed on the drawn rows' shape rather than on the rows: this walk reads each row's role and
     // steer flag and nothing else, while `remember(visible, …)` would compare every row — and a
     // row carries its message, screenshot and all. The two ids catch a list that was rebuilt with
@@ -651,26 +656,54 @@ fun ChatScreen(
             }
             .map { it + rowOffset }
     }
-    // 喂序（顶锚正序）：load-earlier? → visible → errorLine? → live?；增长在末尾，读上面时视口不动。
-    fun fedIndexOf(oldVisible: Int) = rowOffset + oldVisible
+    // 喂序（底锚倒序，视觉从下往上）：live? → compress-status? → error? → visible 倒序 → load-earlier?。
+    // 所以 visible 第 i 行的喂序索引 = 前缀项数 + (visible.size - 1 - i)。
+    val feedPrefix = (if (live || state.runningHere) 1 else 0) +
+        (if (!state.runningHere && state.compressingSince > 0L) 1 else 0) +
+        (if (errorLine) 1 else 0)
+    fun fedIndexOf(oldVisible: Int) = feedPrefix + (visible.size - 1 - oldVisible)
 
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
-    // 顶锚下 firstVisibleItemIndex 就是喂序索引；减掉前缀（load-earlier）即 visible 坐标。
-    val firstVisibleOld = (firstVisible - rowOffset)
+    // 底锚下 firstVisibleItemIndex 是**视觉最底**那条的喂序索引：倒着换回 visible 坐标。
+    val firstVisibleOld = (visible.size - 1 - (firstVisible - feedPrefix))
         .coerceIn(0, (visible.size - 1).coerceAtLeast(0))
     val currentTurn = turnIndices.indexOfLast { it <= firstVisibleOld + rowOffset }
         .coerceAtLeast(0) + 1
 
-    // ===== 滚动与阅读位置：顶锚列表，逻辑全在 ChatScroll.kt =====
-    // 顶锚下内容往末尾追加 ⇒ 读上面时视口天然不动；追底＝在底就贴底；取消＝手指上拖 4dp。
+    // ===== 滚动与阅读位置：底锚列表，逻辑全在 ChatScroll.kt =====
+    // 底锚（index 0 = 视觉最底）下长高向上、底边不动；追底＝回到 index 0；取消＝手指轻扫 4dp。
     // 这一层没有任何"纠正"代码。
     var pressed by remember { mutableStateOf(false) }
     var pressUpAt by remember { mutableLongStateOf(0L) }
     var pressGuardOn by remember { mutableStateOf(false) }
     // composition local 只能在组合里读：先在组合层捕获，守护协程里用这个引用。
     val setSelectionActive = LocalSetSelectionActive.current
+    // **临时诊断（查完就删）**：长按复制会跳位置，且只有本次进程第一次出现。
+    // 记下"按下 / 抬手 / 守护撤销"几个时刻的滚动坐标，就能看出那次跳动是程序滚的、
+    // 还是列表自己重新锚定的。
+    val traceCtx = LocalContext.current
+    // **只在可调试构建里写**（项目没开 buildConfig，用 ApplicationInfo 判）：
+    // 诊断日志绝不能出现在用户装上的 release 包里。
+    val traceEnabled = remember(traceCtx) {
+        (traceCtx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }
+    fun scrollTrace(tag: String) {
+        if (!traceEnabled) return
+        runCatching {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()
+            val line = "${System.currentTimeMillis()} $tag " +
+                "first=${first?.key}@${first?.offset} " +
+                "idx=${listState.firstVisibleItemIndex}/${listState.firstVisibleItemScrollOffset} " +
+                "canBack=${listState.canScrollBackward} total=${info.totalItemsCount}\n"
+            val f = java.io.File(traceCtx.filesDir, "scroll-jump.log")
+            if (f.length() > 128 * 1024) f.writeText("")
+            f.appendText(line)
+        }
+    }
     LaunchedEffect(pressGuardOn) {
         if (!pressGuardOn) return@LaunchedEffect
+        scrollTrace("guard-on")
         setSelectionActive?.invoke(true)
         try {
             while (pressGuardOn) {
@@ -681,6 +714,7 @@ fun ChatScreen(
             }
         } finally {
             // 组合被带走（切会话/退页）也要解冻，否则外壳的 IME clamp 永远停摆。
+            scrollTrace("guard-off")
             setSelectionActive?.invoke(false)
         }
     }
@@ -697,7 +731,7 @@ fun ChatScreen(
         if (live || itemCount <= 0 || !scroll.stickToBottom) return@LaunchedEffect
         withFrameNanos { }
         withFrameNanos { }
-        if (scroll.stickToBottom && !pressed) scroll.toBottom(itemCount)
+        if (scroll.stickToBottom && !pressed) scroll.toBottom()
     }
     // 切换会话前存位置；打开时有记忆回记忆、没有回底。
     var lastConvId by remember { mutableStateOf(state.conversationId) }
@@ -721,11 +755,11 @@ fun ChatScreen(
             scroll.stickToBottom = false
             scroll.spotKey = saved.first
             scroll.spotOffset = saved.second
-            // 喂序索引 = rowOffset（load-earlier 占 index0）+ visible 内下标。
-            listState.scrollToItem(rowOffset + idx, saved.second)
+            // 喂序索引＝底锚倒序里 visible 第 idx 行的位置；offset 即 firstVisibleItemScrollOffset。
+            listState.scrollToItem(fedIndexOf(idx), saved.second)
         } else {
             scroll.stickToBottom = true
-            scroll.toBottom(itemCount)
+            scroll.toBottom()
         }
     }
     // 外观 → 气泡宽度. Measured against the screen, which is what the setting promises
@@ -739,7 +773,7 @@ fun ChatScreen(
         scope.launch {
             scroll.stickToBottom = true
             if (itemCount > 0) {
-                scroll.toBottom(itemCount)
+                scroll.toBottom()
             }
         }
     }
@@ -795,7 +829,13 @@ fun ChatScreen(
                     // Outside the list on purpose: an empty conversation recentres in
                     // whatever space the keyboard leaves, instead of the list's top
                     // padding shoving the hero off the top of the screen.
-                    Box(
+                    //
+                    // **放不下时可以滚**（用户：「输入框顶上来把页面内容挡住了」）：原来是一个
+                    // `Box(contentAlignment = Center)`，内容高于可用高度时既不缩也不滚，超出
+                    // 的那截（最后一行「首次使用…」提示）就落到 Box 外面、被后画的输入框盖住。
+                    // 现在：`heightIn(min = 可用高度)` 保证放得下时仍然垂直居中，放不下时由
+                    // `verticalScroll` 接管 —— 内容不会再被挡住，用户也能滚到最底那行。
+                    BoxWithConstraints(
                         Modifier
                             .fillMaxSize()
                             .padding(
@@ -804,19 +844,31 @@ fun ChatScreen(
                                 } + 60.dp,
                                 bottom = stackFootprint + 40.dp,
                             ),
-                        contentAlignment = Alignment.Center,
                     ) {
-                        EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                                .heightIn(min = maxHeight),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
+                        }
                     }
                 } else {
                     CompositionLocalProvider(
                         LocalReadingPinned provides !scroll.stickToBottom,
                         LocalTypewriter provides settings.typewriter,
+                        // 不在底部时展开要"向下展开"（块顶边钉住），需要摸到主列表状态。
+                        LocalChatListState provides listState,
                     ) {
                     LazyColumn(
                         state = listState,
-                        // **顶锚**（标准画法）：内容往末尾追加，读上面时视口天然不动；追底＝在底就
-                        // 滚到末尾。旧底锚（reverseLayout）把增长放在布局起点，是"乱飞/抖/拉回"的根源。
+                        // **底锚**（reverseLayout + 数据倒序喂）：index 0 就是视觉最底，最后一张卡片
+                        // 长高向上、底边不动 ⇒ 不再需要任何逐帧同步滚动。旧底锚失败在它还在用
+                        // dispatchRawDelta 逐帧纠正，两处抢同一份列表，才"乱飞/抖/拉回"。
+                        reverseLayout = true,
                         modifier = Modifier
                             .fillMaxSize()
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
@@ -869,32 +921,172 @@ fun ChatScreen(
                                 WindowInsets.statusBars.getTop(this).toDp()
                             } + 76.dp,
                             // *composer 的让位走 contentPadding，不走列表项**（真机日志实锤：
+                            // reverseLayout 下 top/bottom 的**视觉**归属不变（Compose 只是把
+                            // before/after 的内部名对调：before=bottom padding），所以让位仍在
+                            // 输入框这一侧。
                             bottom = stackFootprint,
                         ),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        // 内容不满一屏时也压到底：默认的 top 排列在倒序里会把短对话顶到上面，
+                        // 最后一张卡片长高就还是往下长。内容溢出后 arrangement 不参与。
+                        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Bottom),
                     ) {
-                        // 顶锚：「加载更早」在**小索引端**（视觉顶部）。往它前面追加更老的轮次时
-                        // 现有 item 的索引整体后移，但 LazyColumn 按 key 钉住首可见项 ⇒ 阅读位不动。
-                        if (page.hasEarlier) {
-                            item(key = "load-earlier") {
-                                Box(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    contentAlignment = Alignment.Center,
+                        if (live) {
+                            // Keyed by conversation: the live row keeps its slot for as long
+                            // as it is on screen, and a switch used to hand the next chat
+                            // whatever the previous one had left in that slot.
+                            item(key = "streaming:${state.conversationId}") {
+                                // 这一行是喂序 index 0（视觉最底）：流式长高向上、底边不动，
+                                // 滚动层只在锚点被新行顶走时补一次（见 ChatScroll 的 FollowWant）。
+                                // **用户往上翻看旧内容时，这一行变高会把上面整体顶走**
+                                // （用户：「滑动到上方已输出内容查看，位置会因为卡片流式输出
+                                // 不断变高而不断变化」）。底锚下唯一的办法是反向补偿：
+                                // 记录上一帧高度，长高多少就把列表滚回多少，读的位置因此不动。
+                                //
+                                // **绝对不能在这里直接滚**（0.8.218 闪退）：
+                                // `onSizeChanged` 的回调发生在**测量布局过程中**，此时
+                                // `dispatchRawDelta` 会要求重新测量，Compose 直接抛
+                                // `IllegalArgumentException: performMeasureAndLayout called
+                                // during measure layout` —— 不可恢复，进程崩。
+                                // 正确做法：回调里只**记下**增量，真正的滚动留到下一帧的
+                                // 协程里做（那时布局已经结束）。
+                                var liveH by remember { mutableIntStateOf(0) }
+                                var pending by remember { mutableIntStateOf(0) }
+                                // 真正的滚动在这里做：协程在**布局结束后**才跑，且再让一帧，
+                                // 彻底离开测量阶段。
+                                LaunchedEffect(Unit) {
+                                    snapshotFlow { pending }.collect { delta ->
+                                        if (delta == 0) return@collect
+                                        pending = 0
+                                        withFrameNanos { }
+                                        if (listState.canScrollBackward) {
+                                            listState.dispatchRawDelta(delta.toFloat())
+                                        }
+                                    }
+                                }
+                                Column(
+                                    Modifier.onSizeChanged { size ->
+                                        val delta = size.height - liveH
+                                        liveH = size.height
+                                        // 只累加，不滚。
+                                        if (delta != 0) pending += delta
+                                    },
                                 ) {
-                                    TextButton(
-                                        onClick = {
-                                            shownTurns += PAGE_TURNS
+                                    AssistantRow(
+                                        parts = state.liveParts.mapNotNull { part ->
+                                            when (part) {
+                                                is LivePart.Thinking ->
+                                                    if (settings.showReasoning) {
+                                                        Part.Thinking(
+                                                            text = part.text,
+                                                            tokens = part.tokens,
+                                                            elapsedMs = part.elapsedMs,
+                                                            // The run this block belongs to:
+                                                            // the saved message carries the
+                                                            // same id, so the block keeps its
+                                                            // identity when the live row is
+                                                            // replaced by the stored one.
+                                                            runId = state.liveRunId,
+                                                        )
+                                                    } else {
+                                                        null
+                                                    }
+
+                                                is LivePart.Tools ->
+                                                    Part.Tools(part.calls.map(ToolLine::of))
+
+                                                is LivePart.Text -> Part.Text(part.text)
+
+                                                // The stored copy of this line is hidden for as
+                                                // long as the run streams, so the live part is
+                                                // what puts it on screen the moment it is handed
+                                                // over. Same widget either way, which is why the
+                                                // bubble does not move when the run settles.
+                                                is LivePart.Steer -> Part.Steer(part.message)
+
+                                                // 重试留痕：这一轮的落盘消息在流式期间是藏起来的，
+                                                // 只有这里画了，用户才不用等整轮结束才知道刚才重试过。
+                                                is LivePart.Trace -> Part.Trace(part.note)
+
+                                                // 压缩块：运行中就画在它发生的位置，不再用气泡下面
+                                                // 那一行提示（用户：「在哪个部分进行的就在哪个部分
+                                                // 渲染」——思考 → 工具 → 压缩 → 继续）。
+                                                is LivePart.Compress -> Part.Compress(part.checkpoint)
+                                            }
                                         },
-                                    ) {
-                                        Text(
-                                            text = "加载更早的 $PAGE_TURNS 轮 · 上面还有 ${page.earlier} 轮",
-                                            style = MaterialTheme.typography.labelLarge,
+                                        streaming = true,
+                                        // The live bubble is the persona's reply too:
+                                        // without these two it fell back to the brand name
+                                        // and feather while every stored bubble showed the
+                                        // persona.
+                                        name = assistant?.label ?: "随行",
+                                        face = assistant?.face ?: "",
+                                        avatarPath = assistant?.avatarPath ?: "",
+                                        runningTool = state.runningTool,
+                                        liveStats = state.stats,
+                                        contextWindow = contextWindow,
+                                        expandTools = settings.expandTools,
+                                        expandReasoning = settings.expandReasoning,
+                                        reasoningMaxHeight = settings.reasoningHeight.dp,
+                                        followReasoning = settings.followReasoning,
+                                        bubbleMaxWidth = bubbleMaxWidth,
+                                        reasoningExpansion = reasoningExpansion,
+                                    )
+                                    // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
+                                    // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
+                                    if (state.runningHere) {
+                                        RunStatusLine(
+                                            text = liveStatusText,
+                                            startedAt = runStartedAt[runKey] ?: 0L,
+                                            // 压缩不再占用这一行（它有自己的过程块），所以时钟一直走。
+                                            timed = true,
+                                            modifier = Modifier.padding(
+                                                start = 4.dp,
+                                                top = 12.dp,
+                                                bottom = 0.dp,
+                                            ),
                                         )
                                     }
                                 }
                             }
+                        } else if (state.runningHere) {
+                            // Sent, not yet answered: the line holds the place the bubble is
+                            // about to fill, so the reply lands where the user is already
+                            // looking. It is also the only caption the user sees while the
+                            // model is still thinking, which is why its clock starts at the
+                            // send rather than at the first token.
+                            item(key = "live-status:${state.conversationId}") {
+                                RunStatusLine(
+                                    text = liveStatusText,
+                                    startedAt = runStartedAt[runKey] ?: 0L,
+                                    timed = true,
+                                    // 上下都 12dp（用户：「状态行的空隙也是错的，12dp 啊」）：
+                                    // 下 = contentPadding(12dp) 直接给；上 = 16dp 项间距 − lift 4dp。
+                                    modifier = Modifier
+                                        .liftIntoGap(4.dp)
+                                        .padding(start = 4.dp, top = 0.dp, bottom = 0.dp),
+                                )
+                            }
                         }
-                        itemsIndexed(visible, key = { _, row -> row.message.id }) { _, row ->
+                        // 没有 run 时手动压缩：状态行说「正在压缩上下文 · 用时 xx」。
+                        // 没有这一行，点了压缩屏幕上什么都没有（用户：「啥响应也没有」）。
+                        if (!state.runningHere && state.compressingSince > 0L) {
+                            item(key = "compress-status:${state.conversationId}") {
+                                RunStatusLine(
+                                    text = "正在压缩上下文",
+                                    startedAt = state.compressingSince,
+                                    timed = true,
+                                    modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 12.dp),
+                                )
+                            }
+                        }
+                        // 没有回执的实时失败（发送阶段错误等）画在最后一轮下面；有回执的失败由
+                        // 回执自己跟在那一轮后面（内联），同文案不重复画。
+                        if (errorLine) {
+                            item(key = "error:${state.conversationId}") {
+                                RunReasonLine(state.error.orEmpty())
+                            }
+                        }
+                        items(visible.asReversed(), key = { it.message.id }) { row ->
                             // One placeable per item: the list's own 16dp spacing applies
                             // between the placeables of a single item as well, which is what
                             // held the timestamp a full 16dp above the bubble it belongs to.
@@ -952,105 +1144,25 @@ fun ChatScreen(
                                 }
                             }
                         }
-                        // 没有回执的实时失败（发送阶段错误等）画在最后一轮下面；有回执的失败由
-                        // 回执自己跟在那一轮后面（内联），同文案不重复画。
-                        if (errorLine) {
-                            item(key = "error:${state.conversationId}") {
-                                RunReasonLine(state.error.orEmpty())
-                            }
-                        }
-                        if (live) {
-                            // Keyed by conversation: the live row keeps its slot for as long
-                            // as it is on screen, and a switch used to hand the next chat
-                            // whatever the previous one had left in that slot.
-                            item(key = "streaming:${state.conversationId}") {
-                                // 追底不再需要逐帧量这一行的高度：滚动层直接盯"离底还有多少"，
-                                // 任何布局变化都会触发（见 ChatScroll 的 FollowWant）。
-                                Column {
-                                    AssistantRow(
-                                        parts = state.liveParts.mapNotNull { part ->
-                                            when (part) {
-                                                is LivePart.Thinking ->
-                                                    if (settings.showReasoning) {
-                                                        Part.Thinking(
-                                                            text = part.text,
-                                                            tokens = part.tokens,
-                                                            elapsedMs = part.elapsedMs,
-                                                            // The run this block belongs to:
-                                                            // the saved message carries the
-                                                            // same id, so the block keeps its
-                                                            // identity when the live row is
-                                                            // replaced by the stored one.
-                                                            runId = state.liveRunId,
-                                                        )
-                                                    } else {
-                                                        null
-                                                    }
-
-                                                is LivePart.Tools ->
-                                                    Part.Tools(part.calls.map(ToolLine::of))
-
-                                                is LivePart.Text -> Part.Text(part.text)
-
-                                                // The stored copy of this line is hidden for as
-                                                // long as the run streams, so the live part is
-                                                // what puts it on screen the moment it is handed
-                                                // over. Same widget either way, which is why the
-                                                // bubble does not move when the run settles.
-                                                is LivePart.Steer -> Part.Steer(part.message)
-                                            }
+                        // 底锚：「加载更早」在**大索引端**（视觉顶部）。更老的轮次追加在喂序末尾，
+                        // 现有 item 的索引不动，LazyColumn 按 key 钉住首可见项 ⇒ 阅读位不动。
+                        if (page.hasEarlier) {
+                            item(key = "load-earlier") {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    TextButton(
+                                        onClick = {
+                                            shownTurns += PAGE_TURNS
                                         },
-                                        streaming = true,
-                                        // The live bubble is the persona's reply too:
-                                        // without these two it fell back to the brand name
-                                        // and feather while every stored bubble showed the
-                                        // persona.
-                                        name = assistant?.label ?: "随行",
-                                        face = assistant?.face ?: "",
-                                        avatarPath = assistant?.avatarPath ?: "",
-                                        runningTool = state.runningTool,
-                                        liveStats = state.stats,
-                                        contextWindow = contextWindow,
-                                        expandTools = settings.expandTools,
-                                        expandReasoning = settings.expandReasoning,
-                                        reasoningMaxHeight = settings.reasoningHeight.dp,
-                                        followReasoning = settings.followReasoning,
-                                        bubbleMaxWidth = bubbleMaxWidth,
-                                        reasoningExpansion = reasoningExpansion,
-                                    )
-                                    // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
-                                    // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
-                                    if (state.runningHere) {
-                                        RunStatusLine(
-                                            text = liveStatusText,
-                                            startedAt = runStartedAt[runKey] ?: 0L,
-                                            timed = statsNote.isEmpty(),
-                                            modifier = Modifier.padding(
-                                                start = 4.dp,
-                                                top = 12.dp,
-                                                bottom = 0.dp,
-                                            ),
+                                    ) {
+                                        Text(
+                                            text = "加载更早的 $PAGE_TURNS 轮 · 上面还有 ${page.earlier} 轮",
+                                            style = MaterialTheme.typography.labelLarge,
                                         )
                                     }
                                 }
-                            }
-                        } else if (state.runningHere) {
-                            // Sent, not yet answered: the line holds the place the bubble is
-                            // about to fill, so the reply lands where the user is already
-                            // looking. It is also the only caption the user sees while the
-                            // model is still thinking, which is why its clock starts at the
-                            // send rather than at the first token.
-                            item(key = "live-status:${state.conversationId}") {
-                                RunStatusLine(
-                                    text = liveStatusText,
-                                    startedAt = runStartedAt[runKey] ?: 0L,
-                                    timed = statsNote.isEmpty(),
-                                    // 上下都 12dp（用户：「状态行的空隙也是错的，12dp 啊」）：
-                                    // 下 = contentPadding(12dp) 直接给；上 = 16dp 项间距 − lift 4dp。
-                                    modifier = Modifier
-                                        .liftIntoGap(4.dp)
-                                        .padding(start = 4.dp, top = 0.dp, bottom = 0.dp),
-                                )
                             }
                         }
                     }
@@ -1211,17 +1323,16 @@ fun ChatScreen(
                     onStop = { viewModel.stop() },
                     onSteer = { text, images -> viewModel.steer(text, images) },
                     onRequestCompress = {
-                        // run 中：请引擎在轮次边界折；空闲：立刻按已有历史压一次（压缩块随后出现在
-                        // 它覆盖的那一段位置上）。
-                        val requested = viewModel.requestCompress()
-                        if (!requested) viewModel.compressNow()
-                        requested
+                        // run 中：请引擎在轮次边界折。**空闲时不在这里压** —— 菜单会改走
+                        // onCompressNow（两条路径分开，压缩过程才画得出状态行）。
+                        viewModel.requestCompress()
                     },
+                    onCompressNow = { viewModel.compressNow() },
                     onFocused = {
-                        // 顶锚：只有本来就在底的转录才跟着键盘走；停在会话中段的不动（首可见项
+                        // 底锚：只有本来就在底的转录才跟着键盘走；停在会话中段的不动（首可见项
                         // 被 LazyColumn 钉住，键盘挤压视口不会挪阅读位）。回到底＝贴底。
                         if (scroll.stickToBottom && itemCount > 0) {
-                            scope.launch { scroll.toBottom(itemCount) }
+                            scope.launch { scroll.toBottom() }
                         }
                     },
                     onMic = {

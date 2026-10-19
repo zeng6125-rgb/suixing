@@ -37,14 +37,14 @@ class ScheduleTools(
     override val specs: List<ToolSpec> = listOf(
         ToolSpec(
             "schedule_create",
-            "Create a timed reminder: when it fires, 随行 runs the prompt in a new conversation and " +
+            "Create a timed reminder: when it fires, Suixing runs the prompt in a new conversation and " +
                 "posts a notification. Give exactly one timing argument: at (a point in time) / " +
                 "every_seconds (an interval) / daily (a time of day).",
             Schema.objectOf(
                 properties = listOf(
                     "title" to Schema.string("Name of the reminder; also the notification and conversation title"),
                     "prompt" to Schema.string(
-                        "What 随行 should do when it fires, e.g. \"read today's to-dos out loud\"",
+                        "What Suixing should do when it fires, e.g. \"read today's to-dos out loud\"",
                     ),
                     "at" to Schema.string("One-shot: local time \"yyyy-MM-dd HH:mm\", e.g. 2026-10-09 07:30"),
                     "every_seconds" to Schema.integer("Repeating: interval in seconds, minimum 60", minimum = 60),

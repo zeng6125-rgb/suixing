@@ -139,6 +139,9 @@ fun AppSettings.profileEndpoint(): AppSettings {
         baseUrl = choice.baseUrl,
         apiKey = choice.apiKey,
         model = choice.model,
+        // 手动总结也走用户配的那个端点，所以协议必须跟着一起解析：
+        // 少这一行，Anthropic 的端点会收到 OpenAI 形状的请求。
+        protocol = choice.protocol,
     )
 }
 

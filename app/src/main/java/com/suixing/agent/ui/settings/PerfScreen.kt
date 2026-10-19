@@ -1,23 +1,23 @@
 package com.suixing.agent.ui.settings
 
 import android.view.Choreographer
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -28,14 +28,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.LiveMetrics
 import com.suixing.agent.data.LiveSampler
 import com.suixing.agent.data.PerfHealth
 import com.suixing.agent.data.PerfRecord
 import com.suixing.agent.data.PerfSummary
+import com.suixing.agent.ui.components.PageTopBar
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
 
@@ -51,40 +56,50 @@ import kotlin.math.roundToInt
  */
 @Composable
 internal fun PerfScreen(onBack: () -> Unit) {
-    // 一次进入读一次：这是诊断页，不需要实时刷新；退出再进就是最新数据。
-    val summary = remember { Core.perf.summary(limit = 20) }
-    val records = remember { Core.perf.recent(limit = 20) }
+    // 进页面读一次，退出再进就是最新数据 —— 但**读盘与算分位数都不在主线程**：那是几十 KB 的
+    // JSON 加一次排序，放在主线程会让刚进页面的那一帧掉帧，而这页恰恰是拿来量掉帧的。
+    var summary by remember { mutableStateOf(PerfSummary()) }
+    var records by remember { mutableStateOf<List<PerfRecord>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        val loaded = withContext(Dispatchers.IO) {
+            Core.perf.summary(limit = 20) to Core.perf.recent(limit = 20)
+        }
+        summary = loaded.first
+        records = loaded.second
+    }
     val health = remember(records) { PerfHealth.of(records) }
 
     // 设备实时：采样器自己记着上一帧的读数，所以第一秒的 CPU 是「—」（没有可比的前一次）。
+    // **采样在 IO 线程**：一秒里要读 /proc/stat、/proc/self/status、PSS 与几个 sysfs 节点，全是
+    // 阻塞 IO，放主线程就是每秒卡一下。
+    // **页面不在前台就停**（[ProcessLifecycleOwner]）：协程随组合销毁只覆盖"离开这一页"，
+    // 覆盖不到"按了 home 键"—— 那之后还每秒读一遍 /proc 就纯属浪费电。
     val sampler = remember { LiveSampler() }
     var live by remember { mutableStateOf<LiveMetrics?>(null) }
     LaunchedEffect(sampler) {
+        val owner = ProcessLifecycleOwner.get()
         while (true) {
-            live = sampler.sample()
+            if (owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                val next = withContext(Dispatchers.IO) { sampler.sample() }
+                live = next
+            }
             delay(1000)
         }
     }
     val frame = rememberFrameStat()
 
-    // 必须自己铺底色：其他设置页是 Scaffold(containerColor = background)，这里只有一个 Column
-    // 时会直接透出 NavHost 的底（用户看到的「成透明的了」）。状态栏也要自己让开。
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .statusBarsPadding(),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = { PageTopBar(title = "性能", onBack = onBack) },
+    ) { padding ->
+        LazyColumn(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp),
         ) {
-            TextButton(onClick = onBack) { Text("返回") }
-            Spacer(Modifier.width(4.dp))
-            Text("性能", style = MaterialTheme.typography.titleMedium)
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             item(key = "summary") {
                 Column(Modifier.padding(vertical = 12.dp)) {
                     Text("最近 ${summary.count} 轮", style = MaterialTheme.typography.labelLarge)
@@ -109,7 +124,12 @@ internal fun PerfScreen(onBack: () -> Unit) {
                     MetricRow("CPU（整机）", percentText(metrics?.systemCpuPercent))
                     MetricRow("GPU", gpuText(metrics))
                     MetricRow("帧率", frame?.let { "${it.fps} fps · p90 ${it.p90Ms} ms" } ?: "采样中…")
-                    MetricRow("内存（PSS）", metrics?.pssMb?.let { "$it MB" } ?: "—")
+                    // PSS 的间隔读常量（见 LiveSampler.PSS_INTERVAL_SECONDS）：标签写死"5 秒"，
+                    // 而间隔以后一改就变成一句假话。
+                    MetricRow(
+                        "内存（PSS · ${LiveSampler.PSS_INTERVAL_SECONDS} 秒一采）",
+                        metrics?.pssMb?.let { "$it MB" } ?: "—",
+                    )
                     val heap = metrics?.javaHeapMb
                     val heapMax = metrics?.javaHeapMaxMb
                     MetricRow("Java 堆", if (heap != null && heapMax != null) "$heap / $heapMax MB" else "—")
@@ -208,15 +228,26 @@ private fun rememberFrameStat(): FrameStat? {
     LaunchedEffect(Unit) {
         val choreographer = Choreographer.getInstance()
         val intervals = ArrayDeque<Long>()
-        var last = 0L
+        val owner = ProcessLifecycleOwner.get()
         while (true) {
-            val now = suspendCancellableCoroutine<Long> { cont ->
-                choreographer.postFrameCallback { cont.resume(it) }
-            }
-            if (last > 0L) {
-                intervals.addLast((now - last).coerceAtLeast(0L))
-                while (intervals.size > 60) intervals.removeFirst()
-                if (intervals.size >= 20) {
+            // **采一秒、停一秒**：逐帧 postFrameCallback 会让 Choreographer 一直出帧，页面开着就
+            // 等于自己把机器焐热、也把上面那两行 CPU 读数抬上去 —— 这页要量的正是这两样。
+            // 一秒窗口足够算 fps 与 p90；页面不在前台时整轮跳过。
+            if (owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                intervals.clear()
+                val until = System.nanoTime() + 1_000_000_000L
+                var last = 0L
+                while (System.nanoTime() < until) {
+                    val now = suspendCancellableCoroutine<Long> { cont ->
+                        choreographer.postFrameCallback { cont.resume(it) }
+                    }
+                    if (last > 0L) {
+                        intervals.addLast((now - last).coerceAtLeast(0L))
+                        while (intervals.size > 60) intervals.removeFirst()
+                    }
+                    last = now
+                }
+                if (intervals.size >= 10) {
                     val mean = intervals.average()
                     val sorted = intervals.sorted()
                     stat = FrameStat(
@@ -225,7 +256,7 @@ private fun rememberFrameStat(): FrameStat? {
                     )
                 }
             }
-            last = now
+            delay(1000)
         }
     }
     return stat

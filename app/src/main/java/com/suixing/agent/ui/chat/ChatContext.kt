@@ -756,13 +756,16 @@ internal fun RunReasonLine(reason: String) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 4.dp, top = 6.dp, end = 4.dp),
-        verticalAlignment = Alignment.Top,
+        // 垂直居中而不是顶对齐：顶对齐 + 图标自己再 padding(top = 1dp) 会把 14dp 的图标
+        // 压成 12dp 并整条偏上 —— 用户看到的「错误提示和 icon 没有对齐」。
+        // 居中之后图标、文字行、右侧复制按钮在同一条中线上。
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
             contentDescription = null,
             tint = scheme.error,
-            modifier = Modifier.size(14.dp).padding(top = 1.dp),
+            modifier = Modifier.size(14.dp),
         )
         Spacer(Modifier.width(6.dp))
         Text(

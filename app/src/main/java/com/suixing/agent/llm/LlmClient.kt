@@ -1,6 +1,10 @@
 package com.suixing.agent.llm
 
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.PROTOCOL_ANTHROPIC
+import com.suixing.agent.data.PROTOCOL_OPENAI
+import com.suixing.agent.data.PROTOCOL_RESPONSES
+import com.suixing.agent.data.Roles
 import com.suixing.agent.tools.ToolSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -155,9 +159,17 @@ internal fun shouldRetry(
     maxAttempts: Int,
     receivedAnyOutput: Boolean,
     cancelled: Boolean,
+    /**
+     * 流**在已经收到内容之后**断掉（局域网重启、上游抖动、连接被掐）。
+     *
+     * 与"什么都没收到就失败"不同：这种情况下重试要先撤回已经流出去的那半截（调用方通过
+     * `onRestart` 清掉这一轮），否则屏幕上会出现两遍同样的开头。用户明确要的是"断了就自动重试"，
+     * 而不是停在中途那个节点上不动。
+     */
+    midStream: Boolean = false,
 ): Boolean {
     if (cancelled) return false
-    if (receivedAnyOutput) return false
+    if (receivedAnyOutput && !midStream) return false
     if (attempt > maxAttempts) return false
     return when {
         status == null -> true
@@ -225,6 +237,15 @@ private class AttemptFailure(
     val failure: Throwable,
 ) : Exception(failure.message, failure)
 
+/**
+ * 流在说完之前就断了：既没有 `[DONE]`，也没有 `finish_reason`。
+ *
+ * 它不代表端点报错，只代表连接没了（局域网重启、上游抖动、网关掐流）。重试规则对"没有状态码"
+ * 的处理正是它该走的那条（见 [shouldRetry]）；之所以单独一个类型，是为了让重试提示能说
+ * 「连接中断」而不是笼统的「网络中断」。
+ */
+private class CutFailure : Exception("连接中断，这一轮的回答不完整。")
+
 /** Short, user-facing reason for a retryable status. */
 private fun retryReason(code: Int?): String = when {
     code == 429 -> "服务器限流（429）"
@@ -257,9 +278,16 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
      */
     suspend fun listModels(settings: AppSettings): List<String> = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url(modelsEndpoint(settings.baseUrl))
+            .url(modelsEndpoint(settings.baseUrl, settings.protocol))
             .header("Accept", "application/json")
-            .apply { if (settings.apiKey.isNotBlank()) header("Authorization", "Bearer ${settings.apiKey}") }
+            .apply {
+                if (settings.protocol == PROTOCOL_ANTHROPIC) {
+                    if (settings.apiKey.isNotBlank()) header("x-api-key", settings.apiKey)
+                    header("anthropic-version", ANTHROPIC_VERSION)
+                } else if (settings.apiKey.isNotBlank()) {
+                    header("Authorization", "Bearer ${settings.apiKey}")
+                }
+            }
             // 自定义头同样要带（高级参数）：网关若靠特殊头鉴权，/models 不带就是 401。
             .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
@@ -278,9 +306,16 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
      */
     suspend fun listModelDetails(settings: AppSettings): List<ProviderModel> = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url(modelsEndpoint(settings.baseUrl))
+            .url(modelsEndpoint(settings.baseUrl, settings.protocol))
             .header("Accept", "application/json")
-            .apply { if (settings.apiKey.isNotBlank()) header("Authorization", "Bearer ${settings.apiKey}") }
+            .apply {
+                if (settings.protocol == PROTOCOL_ANTHROPIC) {
+                    if (settings.apiKey.isNotBlank()) header("x-api-key", settings.apiKey)
+                    header("anthropic-version", ANTHROPIC_VERSION)
+                } else if (settings.apiKey.isNotBlank()) {
+                    header("Authorization", "Bearer ${settings.apiKey}")
+                }
+            }
             .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
             .build()
@@ -311,31 +346,22 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
          * always has.
          */
         onRetry: (RetryNotice) -> Unit = {},
+        /**
+         * 这一轮要**重新生成**：已经流给屏幕的内容作废，调用方把它从界面和缓冲里撤掉。
+         *
+         * 只在"收到内容之后流断了、而且还能重试"时调用（见 [shouldRetry] 的 `midStream`）。
+         * 没有它，重发就会把同一段开头打印两遍。
+         */
+        onRestart: () -> Unit = {},
     ): AssistantTurn = withContext(Dispatchers.IO) {
-        val url = endpoint(settings.baseUrl)
-        val payload = buildJsonObject {
-            put("model", JsonPrimitive(settings.model))
-            put("messages", JsonArray(messages.map { encodeMessage(it) }))
-            put("stream", JsonPrimitive(true))
-            put("temperature", JsonPrimitive(settings.temperature))
-            // Ask for the usage block on the last chunk; endpoints that do not know
-            // the flag ignore it, and the ones that do stop guessing.
-            put("stream_options", buildJsonObject { put("include_usage", JsonPrimitive(true)) })
-            if (settings.maxTokens > 0) put("max_tokens", JsonPrimitive(settings.maxTokens))
-            if (settings.topP in 0.01f..0.99f) put("top_p", JsonPrimitive(settings.topP))
-            if (settings.reasoningEffort.isNotBlank()) {
-                put("reasoning_effort", JsonPrimitive(settings.reasoningEffort))
-            }
-            if (tools.isNotEmpty()) {
-                put("tools", JsonArray(tools.map { encodeTool(it) }))
-                put("tool_choice", JsonPrimitive("auto"))
-            }
-        }
+        val protocol = settings.protocol
+        val url = endpoint(settings.baseUrl, protocol)
+        val payload = requestBody(settings, messages, tools, protocol)
         val builder = Request.Builder()
             .url(url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("Authorization", "Bearer ${settings.apiKey}")
+            .apply { authHeaders(this, settings, protocol) }
         // 自定义请求头最后加（设置→高级参数）：同名时用户的值赢过上面的默认头。
         settings.requestHeaders.forEach { (name, value) ->
             if (name.isNotBlank()) builder.header(name, value)
@@ -357,6 +383,9 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             // arrived on this one does — the endpoint has already been paid for it and the user has
             // already seen it, so resending would duplicate both.
             var received = false
+            // 这一轮是否真的见到了流结束标记（`[DONE]`）。没见到就说明连接是被掐断的，
+            // 而不是模型说完了 —— 见下面 `stream.toTurn()` 之后的判定。
+            var sawDone = false
             val call = clientFor(settings).newCall(request)
             onCall(call)
             // The turn this attempt has assembled so far, kept outside the block below: a stream
@@ -388,21 +417,24 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                             failure = LlmException(friendlyHttp(response.code, errBody)),
                         )
                     }
-                    val stream = StreamTurn().also { partial = it }
+                    val stream = StreamTurn(protocol).also { partial = it }
                     val source = body.source()
-                    while (true) {
-                        val line = source.readUtf8Line() ?: break
-                        if (line.isEmpty()) continue
-                        if (!line.startsWith("data:")) continue
-                        val data = line.removePrefix("data:").trim()
-                        if (data.isEmpty()) continue
-                        // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
-                        // connection open afterwards would otherwise leave this loop blocked until the
-                        // read timeout — or the 10-minute call cap — with the answer already in hand.
-                        if (data == "[DONE]") break
-                        val chunk = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
+                    // **SSE 事件可以跨多行 `data:`**（规范：同一事件的多行用 "\n" 连接，空行结束）。
+                    // 旧代码把每一行 `data:` 都当成完整 JSON、解析失败就 `?: continue` 静默丢掉 ——
+                    // 网关把一条事件拆成两行（长思考/长正文时很常见）时，那段内容会凭空消失，
+                    // 表现就是「思考块一结束就停住」（用户判断：是 SSE 的问题）。
+                    // 现在两派都兼容：单行能解析就当场解析；解析不了就先攒着，碰到空行再拼起来。
+                    val pending = StringBuilder()
+                    var unparsed = 0
+                    fun acceptPayload(payload: String) {
+                        val chunk = runCatching { Json.parseToJsonElement(payload).jsonObject }.getOrNull()
+                        if (chunk == null) {
+                            unparsed++
+                            return
+                        }
                         chunk["error"]?.let { error ->
-                            val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content ?: error.toString()
+                            val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content
+                                ?: error.toString()
                             throw LlmException("接口返回错误：$message")
                         }
                         stream.accept(
@@ -416,32 +448,116 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         // answered, and a second round of tool calls on top of it.
                         if (stream.hasToolCalls()) received = true
                     }
-                    stream.toTurn()
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (line.isEmpty()) {
+                            // 事件边界：把攒着的多行 data 拼成一条再解析。
+                            if (pending.isNotEmpty()) {
+                                acceptPayload(pending.toString())
+                                pending.clear()
+                            }
+                            continue
+                        }
+                        if (!line.startsWith("data:")) continue
+                        val data = line.removePrefix("data:").trim()
+                        if (data.isEmpty()) continue
+                        // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
+                        // connection open afterwards would otherwise leave this loop blocked until the
+                        // read timeout — or the 10-minute call cap — with the answer already in hand.
+                        if (data == "[DONE]") {
+                            sawDone = true
+                            break
+                        }
+                        if (
+                            pending.isEmpty() &&
+                            runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull() != null
+                        ) {
+                            acceptPayload(data)
+                            continue
+                        }
+                        if (pending.isNotEmpty()) pending.append('\n')
+                        pending.append(data)
+                        if (
+                            runCatching { Json.parseToJsonElement(pending.toString()).jsonObject }
+                                .getOrNull() != null
+                        ) {
+                            acceptPayload(pending.toString())
+                            pending.clear()
+                        }
+                    }
+                    // 流尾没有空行收尾的那条事件也别丢。
+                    if (pending.isNotEmpty()) {
+                        acceptPayload(pending.toString())
+                        pending.clear()
+                    }
+                    // 一个字符都没收到、却有解析不了的载荷：那是端点 SSE 格式不兼容，
+                    // 不是"模型没说话"——明确报出来，别再静默收场。
+                    if (!received && unparsed > 0 && !sawDone && stream.finishReason == null) {
+                        throw LlmException("流式响应无法解析（$unparsed 段），端点返回的 SSE 格式不兼容")
+                    }
+                    val turn = stream.toTurn()
+                    // 结束判定：见到 `[DONE]`，或端点给了 `finish_reason`，才算这一轮正常说完。
+                    // 两者都没有 ⇒ 流是被掐断的（网关抖动、局域网断、上游掐流）。
+                    //
+                    // 这条必须保留：它正是「运行中被掐流就重试」的唯一判据，去掉就等于把半截
+                    // 回答当完整回答交出去（用户：「那上游掐流又不行了？你这不是扯淡吗」）。
+                    //
+                    // 那 d1api 为什么以前会停？**不是因为这条太严，是因为解析漏了 chunk**：
+                    // 旧代码把每个 `data:` 行都当完整 JSON、解析失败 `?: continue` 静默丢掉，
+                    // 端点把长事件拆成多行时，最后那个带 `finish_reason` 的块就被吞了 ⇒
+                    // 这里判定"没结束" ⇒ 重试 ⇒ onRestart 清空 ⇒ 看起来"思考完就停"。
+                    // 修的是上面那段多行拼接，不是把这里的判据拆掉。
+                    // DSH 用的 pi-ai 也是同一条规矩（openai-completions.js: "Stream ended
+                    // without finish_reason" 直接抛错）。
+                    if (!sawDone && stream.finishReason == null) throw CutFailure()
+                    turn
                 }
             }
             outcome.getOrNull()?.let { return@withContext it }
             val failure = outcome.exceptionOrNull() ?: error("runCatching without a value")
-            // Output already arrived, so this round ends as **success with what came in** — never as
-            // a failure, and never as a retry. The endpoint has been paid for those tokens and the
-            // user is already reading them: reporting a failure would end the run on an answer that
-            // is on screen, and resending would print it twice. A stream that stops early is marked
-            // with [FINISH_CUT] so the caller can say the answer looks unfinished without calling
-            // the whole round a failure.
-            if (received) {
-                partial?.toTurn()?.let { return@withContext it.copy(finishReason = FINISH_CUT) }
-            }
             val code = (failure as? AttemptFailure)?.code
             // OkHttp reports a cancelled call as an IOException, so the call's own flag is the
             // reliable way to tell "the user stopped this" from "the network broke".
             val cancelled = call.isCanceled() || !isActive
+            val serverSeconds = (failure as? AttemptFailure)?.retryAfterSeconds
+            val seconds = serverSeconds
+                ?: settings.retryDelaySeconds.coerceIn(MIN_RETRY_DELAY_SECONDS, MAX_RETRY_DELAY_SECONDS)
+
+            // 内容已经到手、流却断了：**重新生成这一轮**。
+            // 先让调用方撤回已经流到屏幕上的那半截（[onRestart]），再按同一份重试预算重发 ——
+            // 用户要的是"断了就自动重试"，而不是停在中途那个节点不动。重试用尽时仍把收到的
+            // 内容交回去（标 [FINISH_CUT]），不会白丢。
+            if (received) {
+                if (
+                    shouldRetry(
+                        status = code,
+                        attempt = attempt,
+                        maxAttempts = maxRetries,
+                        receivedAnyOutput = true,
+                        cancelled = cancelled,
+                        midStream = true,
+                    )
+                ) {
+                    onRestart()
+                    onRetry(
+                        RetryNotice(
+                            attempt = attempt,
+                            maxAttempts = maxRetries,
+                            delayMs = seconds * 1000L,
+                            reason = if (failure is CutFailure) "连接中断" else retryReason(code),
+                            code = code,
+                        ),
+                    )
+                    delay(seconds * 1000L)
+                    continue
+                }
+                partial?.toTurn()?.let { return@withContext it.copy(finishReason = FINISH_CUT) }
+            }
             if (!shouldRetry(code, attempt, maxRetries, received, cancelled)) {
                 // The original failure is what callers have always seen: an LlmException with the
                 // friendly message for a status, or the raw IOException for a transport failure.
                 throw (failure as? AttemptFailure)?.failure ?: failure
             }
-            val serverSeconds = (failure as? AttemptFailure)?.retryAfterSeconds
-            val seconds = serverSeconds
-                ?: settings.retryDelaySeconds.coerceIn(MIN_RETRY_DELAY_SECONDS, MAX_RETRY_DELAY_SECONDS)
             onRetry(
                 RetryNotice(
                     attempt = attempt,
@@ -475,10 +591,12 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
      * non-streaming-shaped `message` chunks. Here the shape handling is a function of a chunk,
      * so it can be tested against fixtures instead of against a live provider.
      */
-    internal class StreamTurn {
+    internal class StreamTurn(private val protocol: String = PROTOCOL_OPENAI) {
         private val text = StringBuilder()
         private val thinking = StringBuilder()
         private val calls = LinkedHashMap<Int, MutableToolCall>()
+        /** Responses addresses its argument deltas by item id, not by list index. */
+        private val callsByItem = HashMap<String, Int>()
 
         var finishReason: String? = null
             private set
@@ -486,6 +604,45 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             private set
 
         fun accept(chunk: JsonObject, onDelta: (String) -> Unit, onReasoning: (String) -> Unit) {
+            when (protocol) {
+                PROTOCOL_ANTHROPIC -> acceptAnthropic(chunk, onDelta, onReasoning)
+                PROTOCOL_RESPONSES -> acceptResponses(chunk, onDelta, onReasoning)
+                else -> acceptChatCompletions(chunk, onDelta, onReasoning)
+            }
+        }
+
+        // ---- the accumulator every protocol writes into (one copy, three readers) ----
+
+        private fun emitText(piece: String?, onDelta: (String) -> Unit) {
+            if (piece.isNullOrEmpty()) return
+            text.append(piece)
+            onDelta(piece)
+        }
+
+        private fun emitThinking(piece: String?, onReasoning: (String) -> Unit) {
+            if (piece.isNullOrBlank()) return
+            thinking.append(piece)
+            onReasoning(piece)
+        }
+
+        /**
+         * One tool call under construction. Id and name are only overwritten by a non-blank
+         * value: several gateways repeat `""` on every argument chunk, and blanking the name
+         * there is what used to erase the call entirely (see the note on the chat-completions
+         * reader below).
+         */
+        private fun appendCall(index: Int, id: String?, name: String?, arguments: String?) {
+            val call = calls.getOrPut(index) { MutableToolCall() }
+            id?.takeIf { it.isNotBlank() }?.let { call.id = it }
+            name?.takeIf { it.isNotBlank() }?.let { call.name = it }
+            arguments?.let { call.arguments.append(it) }
+        }
+
+        private fun acceptChatCompletions(
+            chunk: JsonObject,
+            onDelta: (String) -> Unit,
+            onReasoning: (String) -> Unit,
+        ) {
             // The usage block rides on a chunk whose `choices` array is empty, so it has to be
             // read before the choice lookup bails out.
             chunk["usage"]?.let { element ->
@@ -503,10 +660,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             val delta = choice["delta"] as? JsonObject
             val message = choice["message"] as? JsonObject
 
-            reasoningOf(chunk, choice, delta, message)?.let { piece ->
-                thinking.append(piece)
-                onReasoning(piece)
-            }
+            reasoningOf(chunk, choice, delta, message)?.let { piece -> emitThinking(piece, onReasoning) }
 
             // Blank pieces are kept here: a streamed "\n\n" is markdown paragraph spacing, and
             // dropping it would run the answer together.
@@ -515,10 +669,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             } else {
                 message?.get("content").textOf()
             }
-            if (content != null) {
-                text.append(content)
-                onDelta(content)
-            }
+            if (content != null) emitText(content, onDelta)
 
             val rawCalls = if (delta != null && delta.containsKey("tool_calls")) {
                 delta["tool_calls"]
@@ -528,12 +679,158 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             (rawCalls as? JsonArray)?.forEach { element ->
                 val item = element as? JsonObject ?: return@forEach
                 val index = item["index"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                val call = calls.getOrPut(index) { MutableToolCall() }
-                item["id"]?.let { if (it !is JsonNull) call.id = it.jsonPrimitive.content }
                 val function = item["function"] as? JsonObject ?: return@forEach
-                function["name"]?.let { if (it !is JsonNull) call.name = it.jsonPrimitive.content }
-                function["arguments"]?.let { if (it !is JsonNull) call.arguments.append(it.jsonPrimitive.content) }
+                // **只在非空时覆盖**。d1api（以及不少 OpenAI 兼容端点）在后续每个参数增量块里
+                // 都会带上 `"name": ""`、`"id": ""` —— 无条件赋值会把第一个块里真正的函数名
+                // 抹成空串 ⇒ `hasToolCalls()` 为 false、`toTurn()` 把这个调用过滤掉 ⇒
+                // 这一轮变成"只有思考、没有正文、也没有工具调用"⇒ 界面停在思考块。
+                // 真机抓包确认过：第一个块 name=run_shell，随后 80+ 个参数块 name=""。
+                // 这条规则现在收在 appendCall 里，三种协议共用。
+                appendCall(
+                    index = index,
+                    id = (item["id"] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content,
+                    name = (function["name"] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content,
+                    arguments = (function["arguments"] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content,
+                )
             }
+        }
+
+        /**
+         * Anthropic Messages (`/v1/messages`). Every payload carries its own `type`, so the
+         * reader switches on that rather than on the SSE `event:` line — proxies drop or
+         * rewrite `event:` often, and the body is still self-describing.
+         *
+         * The thinking is `thinking_delta` (blank ones dropped, same as everywhere else) and a
+         * tool call is opened by `content_block_start` (`type: tool_use`, carrying id+name) then
+         * fed by `input_json_delta.partial_json`. `stop_reason` is mapped onto the OpenAI
+         * spelling because that is what the engine branches on ("length" in particular).
+         */
+        private fun acceptAnthropic(
+            chunk: JsonObject,
+            onDelta: (String) -> Unit,
+            onReasoning: (String) -> Unit,
+        ) {
+            when ((chunk["type"] as? JsonPrimitive)?.content) {
+                "message_start" -> usageOf(chunk["message"] as? JsonObject)?.let { usage = it }
+                "content_block_start" -> {
+                    val block = (chunk["content_block"] as? JsonObject) ?: return
+                    if ((block["type"] as? JsonPrimitive)?.content == "tool_use") {
+                        val index = chunk["index"].intOrNull() ?: 0
+                        appendCall(
+                            index = index,
+                            id = block["id"].stringOrNull(),
+                            name = block["name"].stringOrNull(),
+                            // A tool with no parameters is announced as `{}` here rather than
+                            // as deltas; keeping it means toTurn() has real arguments.
+                            arguments = block["input"]?.takeIf { it !is JsonNull && it.toString() != "{}" }?.toString(),
+                        )
+                    }
+                    emitText(block["text"].stringOrNull(), onDelta)
+                }
+                "content_block_delta" -> {
+                    val delta = (chunk["delta"] as? JsonObject) ?: return
+                    when ((delta["type"] as? JsonPrimitive)?.content) {
+                        "text_delta" -> emitText(delta["text"].stringOrNull(), onDelta)
+                        "thinking_delta" -> emitThinking(delta["thinking"].stringOrNull(), onReasoning)
+                        // signature_delta is bookkeeping for replaying thinking; it is not prose.
+                        "input_json_delta" -> appendCall(
+                            index = chunk["index"].intOrNull() ?: 0,
+                            id = null,
+                            name = null,
+                            arguments = delta["partial_json"].stringOrNull(),
+                        )
+                    }
+                }
+                "message_delta" -> {
+                    ((chunk["delta"] as? JsonObject)?.get("stop_reason")).stringOrNull()
+                        ?.let { finishReason = it.toFinishReason() }
+                    // The output count and the reasoning split ride here, after the turn is done;
+                    // the input count already arrived on message_start, so the two are added.
+                    (chunk["usage"] as? JsonObject)?.let { mergeUsage(it) }
+                }
+                // `message_stop` is the end of the turn: Anthropic never sends `[DONE]`, so
+                // without a finish reason here every turn would look cut and be retried.
+                "message_stop" -> if (finishReason == null) finishReason = "stop"
+            }
+        }
+
+        /**
+         * OpenAI Responses (`/responses`). Deltas name their own event, and a function call is
+         * matched by `item_id` rather than by list index, which is why [callsByItem] exists.
+         */
+        private fun acceptResponses(
+            chunk: JsonObject,
+            onDelta: (String) -> Unit,
+            onReasoning: (String) -> Unit,
+        ) {
+            val type = (chunk["type"] as? JsonPrimitive)?.content
+            when (type) {
+                "response.output_item.added" -> {
+                    val item = (chunk["item"] as? JsonObject) ?: return
+                    if ((item["type"] as? JsonPrimitive)?.content != "function_call") return
+                    val itemId = item["id"].stringOrNull() ?: item["call_id"].stringOrNull() ?: return
+                    val index = callsByItem.getOrPut(itemId) { calls.size }
+                    appendCall(
+                        index = index,
+                        id = item["call_id"].stringOrNull() ?: itemId,
+                        name = item["name"].stringOrNull(),
+                        arguments = item["arguments"].stringOrNull(),
+                    )
+                }
+                "response.function_call_arguments.delta" -> {
+                    // Only the arguments arrive here. The id must **not** be overwritten with
+                    // `item_id`: `output_item.added` already stored the `call_id`, and that is
+                    // the handle the API expects echoed back on the following function_call_output.
+                    val itemId = chunk["item_id"].stringOrNull() ?: return
+                    val index = callsByItem.getOrPut(itemId) { calls.size }
+                    appendCall(index = index, id = null, name = null, arguments = chunk["delta"].stringOrNull())
+                }
+                "response.output_text.delta" -> emitText(chunk["delta"].stringOrNull(), onDelta)
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+                -> emitThinking(chunk["delta"].stringOrNull(), onReasoning)
+                "response.completed", "response.incomplete" -> {
+                    val response = chunk["response"] as? JsonObject
+                    usageOf(response)?.let { usage = it }
+                    // `incomplete_details.reason` is where a token ceiling shows up; the engine
+                    // only distinguishes "length" from everything else.
+                    val incomplete = ((response?.get("incomplete_details") as? JsonObject)
+                        ?.get("reason")).stringOrNull()
+                    finishReason = if (incomplete != null) {
+                        incomplete.toFinishReason()
+                    } else if (calls.values.any { it.name.isNotBlank() }) {
+                        "tool_calls"
+                    } else {
+                        "stop"
+                    }
+                }
+            }
+        }
+
+        /** `message_start` nests its usage under `message`; Responses nests it under `response`. */
+        private fun usageOf(container: JsonObject?): Usage? =
+            (container?.get("usage") as? JsonObject)?.let { parseUsage(it) }
+
+        /** Anthropic splits the counts across two events, so a later block is added, not set. */
+        private fun mergeUsage(block: JsonObject) {
+            val parsed = parseUsage(block) ?: return
+            val existing = usage
+            if (existing == null) {
+                usage = parsed
+                return
+            }
+            // **Latest non-zero wins, never a sum.** Anthropic splits the counts across two
+            // events — message_start carries input_tokens, message_delta carries output_tokens —
+            // but the latter is *cumulative*, so adding the two would report the answer twice.
+            // Each field therefore takes the newer value when the newer event has one, and keeps
+            // what it had otherwise.
+            fun pick(newest: Int, previous: Int) = if (newest > 0) newest else previous
+            usage = Usage(
+                promptTokens = pick(parsed.promptTokens, existing.promptTokens),
+                completionTokens = pick(parsed.completionTokens, existing.completionTokens),
+                reasoningTokens = pick(parsed.reasoningTokens, existing.reasoningTokens),
+                cachedTokens = pick(parsed.cachedTokens, existing.cachedTokens),
+            )
         }
 
         /** Whether this attempt has asked for a tool yet — output the retry decision must count. */
@@ -551,6 +848,285 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                 }
             return AssistantTurn(text.toString(), requests, finishReason, thinking.toString(), usage)
         }
+    }
+
+    /**
+     * The request body for one turn, in the shape [protocol] speaks.
+     *
+     * The three **must not share a builder**: they disagree on where the system prompt goes,
+     * whether `max_tokens` is optional, and what a tool definition looks like. What they do
+     * share is every message converter below, and the accumulator the answers land in.
+     */
+    private fun requestBody(
+        settings: AppSettings,
+        messages: List<ChatMessage>,
+        tools: List<ToolSpec>,
+        protocol: String,
+    ): JsonObject = when (protocol) {
+        PROTOCOL_ANTHROPIC -> anthropicBody(settings, messages, tools)
+        PROTOCOL_RESPONSES -> responsesBody(settings, messages, tools)
+        else -> chatCompletionsBody(settings, messages, tools)
+    }
+
+    private fun chatCompletionsBody(
+        settings: AppSettings,
+        messages: List<ChatMessage>,
+        tools: List<ToolSpec>,
+    ): JsonObject = buildJsonObject {
+        put("model", JsonPrimitive(settings.model))
+        put("messages", JsonArray(messages.map { encodeMessage(it) }))
+        put("stream", JsonPrimitive(true))
+        put("temperature", JsonPrimitive(settings.temperature))
+        // Ask for the usage block on the last chunk; endpoints that do not know
+        // the flag ignore it, and the ones that do stop guessing.
+        put("stream_options", buildJsonObject { put("include_usage", JsonPrimitive(true)) })
+        if (settings.maxTokens > 0) put("max_tokens", JsonPrimitive(settings.maxTokens))
+        if (settings.topP in 0.01f..0.99f) put("top_p", JsonPrimitive(settings.topP))
+        if (settings.reasoningEffort.isNotBlank()) {
+            put("reasoning_effort", JsonPrimitive(settings.reasoningEffort))
+        }
+        if (tools.isNotEmpty()) {
+            put("tools", JsonArray(tools.map { encodeTool(it) }))
+            put("tool_choice", JsonPrimitive("auto"))
+        }
+    }
+
+    /**
+     * Anthropic Messages.
+     *
+     * Three differences that matter: the system prompt is a **top-level `system` string**, not
+     * a message (Anthropic rejects a `system` role); `max_tokens` is **required**, so a caller
+     * that left it at 0 gets [DEFAULT_ANTHROPIC_MAX_TOKENS] rather than a 400; and a tool result
+     * travels as a `user` message whose content is a `tool_result` block, not as a `tool` role.
+     */
+    private fun anthropicBody(
+        settings: AppSettings,
+        messages: List<ChatMessage>,
+        tools: List<ToolSpec>,
+    ): JsonObject = buildJsonObject {
+        put("model", JsonPrimitive(settings.model))
+        put("max_tokens", JsonPrimitive(if (settings.maxTokens > 0) settings.maxTokens else DEFAULT_ANTHROPIC_MAX_TOKENS))
+        put("stream", JsonPrimitive(true))
+        put("temperature", JsonPrimitive(settings.temperature))
+        if (settings.topP in 0.01f..0.99f) put("top_p", JsonPrimitive(settings.topP))
+        val system = messages.filter { it.role == Roles.SYSTEM }
+            .joinToString("\n\n") { it.text }
+            .trim()
+        if (system.isNotEmpty()) put("system", JsonPrimitive(system))
+        put("messages", anthropicMessages(messages))
+        if (tools.isNotEmpty()) {
+            put("tools", JsonArray(tools.map { encodeAnthropicTool(it) }))
+            put("tool_choice", buildJsonObject { put("type", JsonPrimitive("auto")) })
+        }
+    }
+
+    /**
+     * OpenAI Responses. `instructions` carries the system prompt; the rest is `input` items.
+     *
+     * The `store: false` is deliberate: these runs carry the user's whole conversation, and
+     * the Responses API otherwise keeps it server-side for 30 days by default.
+     */
+    private fun responsesBody(
+        settings: AppSettings,
+        messages: List<ChatMessage>,
+        tools: List<ToolSpec>,
+    ): JsonObject = buildJsonObject {
+        put("model", JsonPrimitive(settings.model))
+        put("stream", JsonPrimitive(true))
+        put("store", JsonPrimitive(false))
+        put("temperature", JsonPrimitive(settings.temperature))
+        if (settings.maxTokens > 0) put("max_output_tokens", JsonPrimitive(settings.maxTokens))
+        if (settings.topP in 0.01f..0.99f) put("top_p", JsonPrimitive(settings.topP))
+        if (settings.reasoningEffort.isNotBlank()) {
+            put("reasoning", buildJsonObject { put("effort", JsonPrimitive(settings.reasoningEffort)) })
+        }
+        val instructions = messages.filter { it.role == Roles.SYSTEM }
+            .joinToString("\n\n") { it.text }
+            .trim()
+        if (instructions.isNotEmpty()) put("instructions", JsonPrimitive(instructions))
+        put(
+            "input",
+            JsonArray(messages.filter { it.role != Roles.SYSTEM }.flatMap { encodeResponseItems(it) }),
+        )
+        if (tools.isNotEmpty()) {
+            put("tools", JsonArray(tools.map { encodeResponseTool(it) }))
+            put("tool_choice", JsonPrimitive("auto"))
+        }
+    }
+
+    /**
+     * The conversation as Anthropic accepts it: **consecutive messages of the same role are
+     * merged into one**, because Anthropic requires them to alternate and rejects the request
+     * otherwise.
+     *
+     * This is not a nicety. The engine appends one `tool` message per call — so two tools used
+     * in one round produce two `tool` messages in a row, and a tool screenshot appends a `user`
+     * message straight after. Both are ordinary OpenAI history and both are a 400 here. Merging
+     * turns them into a single `user` turn holding several `tool_result` blocks, which is the
+     * shape Anthropic documents for parallel tool use.
+     */
+    private fun anthropicMessages(messages: List<ChatMessage>): JsonArray {
+        val merged = mutableListOf<JsonObject>()
+        // Role and already-collected blocks of the message currently being extended.
+        var role = ""
+        var blocks = mutableListOf<JsonElement>()
+        fun flush() {
+            if (role.isEmpty()) return
+            merged += buildJsonObject {
+                put("role", JsonPrimitive(role))
+                put("content", JsonArray(blocks))
+            }
+            blocks = mutableListOf<JsonElement>()
+        }
+        for (message in messages) {
+            if (message.role == Roles.SYSTEM) continue
+            val encoded = encodeAnthropicMessage(message)
+            val nextRole = encoded["role"]?.stringOrNull() ?: continue
+            val content = encoded["content"] as? JsonArray
+            if (nextRole != role) {
+                flush()
+                role = nextRole
+            }
+            // addAll, not `+=`: JsonArray is both a JsonElement and a List<JsonElement>, and
+            // `+=` resolves to the single-element overload — the whole array would be nested.
+            if (content != null) blocks.addAll(content)
+        }
+        flush()
+        return JsonArray(merged)
+    }
+
+    /**
+     * One message as Anthropic content blocks.
+     *
+     * The shape Anthropic requires, and the reason this is not [encodeMessage]: an assistant
+     * turn that used tools must carry `tool_use` blocks (with the id echoed back verbatim),
+     * and the reply to each must be a `tool_result` block in a **user** message.
+     */
+    private fun encodeAnthropicMessage(message: ChatMessage): JsonObject = buildJsonObject {
+        when (message.role) {
+            Roles.TOOL -> {
+                put("role", JsonPrimitive(Roles.USER))
+                put(
+                    "content",
+                    buildJsonArray {
+                        add(buildJsonObject {
+                            put("type", JsonPrimitive("tool_result"))
+                            put("tool_use_id", JsonPrimitive(message.toolCallId.orEmpty()))
+                            put("content", JsonPrimitive(message.text))
+                        })
+                    },
+                )
+                return@buildJsonObject
+            }
+        }
+        put("role", JsonPrimitive(if (message.role == Roles.ASSISTANT) Roles.ASSISTANT else Roles.USER))
+        val images = message.allImages
+        val blocks = buildJsonArray {
+            if (images.isNotEmpty()) {
+                if (message.text.isNotBlank()) {
+                    add(buildJsonObject {
+                        put("type", JsonPrimitive("text"))
+                        put("text", JsonPrimitive(message.text))
+                    })
+                }
+                images.forEach { image ->
+                    add(buildJsonObject {
+                        put("type", JsonPrimitive("image"))
+                        put(
+                            "source",
+                            buildJsonObject {
+                                put("type", JsonPrimitive("base64"))
+                                put("media_type", JsonPrimitive("image/jpeg"))
+                                put("data", JsonPrimitive(image))
+                            },
+                        )
+                    })
+                }
+            } else if (message.text.isNotEmpty() || message.toolCalls.isEmpty()) {
+                add(buildJsonObject {
+                    put("type", JsonPrimitive("text"))
+                    put("text", JsonPrimitive(message.text))
+                })
+            }
+            message.toolCalls.forEach { call ->
+                add(buildJsonObject {
+                    put("type", JsonPrimitive("tool_use"))
+                    put("id", JsonPrimitive(call.id))
+                    put("name", JsonPrimitive(call.name))
+                    put("input", call.arguments.toJsonObjectOrEmpty())
+                })
+            }
+        }
+        put("content", blocks)
+    }
+
+    /**
+     * One message as Responses input items. Unlike chat completions, a tool call and its result
+     * are **top-level items** (`function_call` / `function_call_output`), not fields on a
+     * message, so one message may expand to several items.
+     */
+    private fun encodeResponseItems(message: ChatMessage): List<JsonObject> {
+        if (message.role == Roles.TOOL) {
+            return listOf(
+                buildJsonObject {
+                    put("type", JsonPrimitive("function_call_output"))
+                    put("call_id", JsonPrimitive(message.toolCallId.orEmpty()))
+                    put("output", JsonPrimitive(message.text))
+                },
+            )
+        }
+        val items = mutableListOf<JsonObject>()
+        // A screenshot is an `input_image` item with a data URL; text rides beside it.
+        val images = message.allImages
+        if (images.isNotEmpty()) {
+            val content = buildJsonArray {
+                if (message.text.isNotBlank()) {
+                    add(buildJsonObject {
+                        put("type", JsonPrimitive("input_text"))
+                        put("text", JsonPrimitive(message.text))
+                    })
+                }
+                images.forEach { image ->
+                    add(buildJsonObject {
+                        put("type", JsonPrimitive("input_image"))
+                        put("image_url", JsonPrimitive("data:image/jpeg;base64,$image"))
+                    })
+                }
+            }
+            items += buildJsonObject {
+                put("role", JsonPrimitive(message.role))
+                put("content", content)
+            }
+        } else if (message.text.isNotEmpty() || message.toolCalls.isEmpty()) {
+            items += buildJsonObject {
+                put("role", JsonPrimitive(message.role))
+                put("content", JsonPrimitive(message.text))
+            }
+        }
+        message.toolCalls.forEach { call ->
+            items += buildJsonObject {
+                put("type", JsonPrimitive("function_call"))
+                put("call_id", JsonPrimitive(call.id))
+                put("name", JsonPrimitive(call.name))
+                put("arguments", JsonPrimitive(call.arguments.ifBlank { "{}" }))
+            }
+        }
+        return items
+    }
+
+    /** `{name, description, input_schema}` — Anthropic's tool shape, schema not wrapped. */
+    private fun encodeAnthropicTool(spec: ToolSpec): JsonObject = buildJsonObject {
+        put("name", JsonPrimitive(spec.name))
+        put("description", JsonPrimitive(spec.description))
+        put("input_schema", spec.parameters.normalizedSchema() as JsonElement)
+    }
+
+    /** Responses takes the flat function shape, with the schema under `parameters`. */
+    private fun encodeResponseTool(spec: ToolSpec): JsonObject = buildJsonObject {
+        put("type", JsonPrimitive("function"))
+        put("name", JsonPrimitive(spec.name))
+        put("description", JsonPrimitive(spec.description))
+        put("parameters", spec.parameters.normalizedSchema() as JsonElement)
     }
 
     private fun encodeMessage(message: ChatMessage): JsonObject = buildJsonObject {
@@ -634,24 +1210,76 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         }
     }
 
-    private fun endpoint(baseUrl: String): String {
+    /**
+     * Where one turn is posted, per wire.
+     *
+     * The address rule stays what the settings page teaches ("填到 /v1 即可") and what every
+     * existing config already holds: the path suffix is appended to the base. A user who pasted
+     * the *full* endpoint instead is not punished for it — each branch accepts its own complete
+     * path — and a baseUrl that already ends in `/v1` gets `/messages` rather than `/v1/messages`
+     * twice, which is the difference between a 200 and a 404 on Anthropic.
+     */
+    private fun endpoint(baseUrl: String, protocol: String): String {
         val trimmed = baseUrl.trim().trimEnd('/')
         if (trimmed.isEmpty()) throw LlmException("请先在「设置」里填写接口地址")
-        return if (trimmed.endsWith("/chat/completions")) trimmed else "$trimmed/chat/completions"
+        return when (protocol) {
+            PROTOCOL_ANTHROPIC -> when {
+                trimmed.endsWith("/messages") -> trimmed
+                // Anthropic's path lives *under* /v1; a bare host or a custom prefix gets "/v1".
+                trimmed.endsWith("/v1") -> "$trimmed/messages"
+                else -> "$trimmed/v1/messages"
+            }
+            PROTOCOL_RESPONSES -> when {
+                trimmed.endsWith("/responses") -> trimmed
+                else -> "$trimmed/responses"
+            }
+            else -> if (trimmed.endsWith("/chat/completions")) trimmed else "$trimmed/chat/completions"
+        }
     }
 
-    private fun modelsEndpoint(baseUrl: String): String {
+    /**
+     * The auth headers for [protocol].
+     *
+     * Anthropic does not read `Authorization`; it wants `x-api-key` plus a version pin, and it
+     * rejects a request that carries neither. The OpenAI branches are unchanged.
+     */
+    private fun authHeaders(builder: Request.Builder, settings: AppSettings, protocol: String) {
+        if (protocol == PROTOCOL_ANTHROPIC) {
+            if (settings.apiKey.isNotBlank()) builder.header("x-api-key", settings.apiKey)
+            builder.header("anthropic-version", ANTHROPIC_VERSION)
+        } else {
+            builder.header("Authorization", "Bearer ${settings.apiKey}")
+        }
+    }
+
+    private fun modelsEndpoint(baseUrl: String, protocol: String = PROTOCOL_OPENAI): String {
         val trimmed = baseUrl.trim().trimEnd('/')
         if (trimmed.isEmpty()) throw LlmException("请先在「设置」里填写接口地址")
+        // Anthropic serves the list next to the messages path; the other two use /models.
+        if (protocol == PROTOCOL_ANTHROPIC) {
+            val root = when {
+                trimmed.endsWith("/messages") -> trimmed.removeSuffix("/messages")
+                trimmed.endsWith("/v1") -> trimmed
+                else -> "$trimmed/v1"
+            }
+            return "$root/models"
+        }
         return when {
             trimmed.endsWith("/models") -> trimmed
             trimmed.endsWith("/chat/completions") -> trimmed.removeSuffix("/chat/completions") + "/models"
+            trimmed.endsWith("/responses") -> trimmed.removeSuffix("/responses") + "/models"
             else -> "$trimmed/models"
         }
     }
 
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+        /** Anthropic requires `max_tokens`; this is what an unset budget becomes there. */
+        internal const val DEFAULT_ANTHROPIC_MAX_TOKENS = 4096
+
+        /** The wire version Anthropic pins every request to. */
+        internal const val ANTHROPIC_VERSION = "2023-06-01"
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -716,6 +1344,8 @@ internal fun parseUsage(usage: JsonObject): Usage? {
         "completion_thinking_tokens",
         "reasoning_tokens",
         "thinking_tokens",
+        // Anthropic's spelling: the thinking share sits under output_tokens_details.
+        "output_tokens_details.thinking_tokens",
     )
     val cached = number(
         "prompt_tokens_details.cached_tokens",
@@ -845,6 +1475,45 @@ private fun JsonElement?.textOf(): String? = when (this) {
     is JsonPrimitive -> contentOrNull
     is JsonArray -> mapNotNull { it.textOf() }.joinToString("").ifEmpty { null }
     is JsonObject -> (this["text"] ?: this["thinking"] ?: this["content"]).textOf()
+}
+
+/**
+ * The string this element holds, or null when it holds nothing usable.
+ *
+ * Null-tolerant on purpose: Anthropic and Responses both send explicit `null`s (a
+ * `stop_reason: null` on the first delta, an empty `content_block`), and `jsonPrimitive` on a
+ * JsonNull throws — which would abort an answer that is otherwise arriving fine.
+ */
+private fun JsonElement?.stringOrNull(): String? =
+    (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.contentOrNull
+
+private fun JsonElement?.intOrNull(): Int? =
+    (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.contentOrNull?.toIntOrNull()
+
+/**
+ * A tool's arguments as a JSON object, which is what Anthropic's `tool_use.input` must be.
+ *
+ * A stored call that is blank or is not an object falls back to `{}`: Anthropic rejects the
+ * whole request over a malformed historical tool call, and sending an empty object is what a
+ * no-argument tool means anyway.
+ */
+private fun String.toJsonObjectOrEmpty(): JsonObject =
+    runCatching { Json.parseToJsonElement(ifBlank { "{}" }) as? JsonObject }.getOrNull()
+        ?: JsonObject(emptyMap())
+
+/**
+ * Both non-OpenAI wires name a token-limit stop differently from OpenAI, and the engine
+ * branches on the OpenAI spelling: `length` is what draws the "跑满了" note. Mapping here
+ * keeps that comparison in one place instead of teaching the engine three vocabularies.
+ */
+private fun String.toFinishReason(): String = when (this) {
+    "max_tokens", "max_output_tokens" -> "length"
+    // Anthropic names the two ordinary endings differently; `end_turn` is exactly OpenAI's
+    // `stop`, and `tool_use` is `tool_calls`. Neither affects the engine's tool dispatch (it
+    // runs off `turn.toolCalls`), but the transcript note and the "跑满了" branch read the name.
+    "end_turn" -> "stop"
+    "tool_use" -> "tool_calls"
+    else -> this
 }
 
 /**

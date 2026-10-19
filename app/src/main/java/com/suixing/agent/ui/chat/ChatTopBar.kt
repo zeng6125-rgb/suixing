@@ -1133,6 +1133,20 @@ internal fun AssistantRow(
                             }
                             if (!last) Spacer(Modifier.height(6.dp))
                         }
+
+                        // 重试留痕：与思考块/工具块同一套栅格（36dp 行高 + 24dp 图标槽 + 8dp +
+                        // labelMedium），所以图标与标题左边线和它们对齐；间距只用 part 之间
+                        // 那 6dp，不再自己加边距、也不做位移。
+                        is Part.Trace -> {
+                            TraceBlock(part.note)
+                            if (!last) Spacer(Modifier.height(6.dp))
+                        }
+
+                        // 压缩块：位置就是它发生的地方。
+                        is Part.Compress -> {
+                            CompressionBlock(part.checkpoint)
+                            if (!last) Spacer(Modifier.height(6.dp))
+                        }
                     }
                 }
             }

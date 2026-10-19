@@ -37,14 +37,49 @@ data class LiveMetrics(
  */
 class LiveSampler {
 
-    private companion object {
-        const val MB = 1024L * 1024L
+    companion object {
+        /**
+         * PSS 的采样间隔（秒）。**公开**：性能页那行标签直接读它，改这里界面文案跟着变，
+         * 不会出现"代码 5 秒、界面写着 3 秒"这种对不上的承诺。
+         */
+        const val PSS_INTERVAL_SECONDS = 5
+
+        private const val MB = 1024L * 1024L
+
+        /**
+         * PSS 每隔 [PSS_INTERVAL_SECONDS] 秒量一次，中间沿用上次的数。
+         *
+         * `Debug.getPss()` 要读整份 `/proc/self/smaps`，是这一组读数里最贵的一个；而 PSS 本来
+         * 也不会在一秒里明显变化。每秒量一次等于把"看性能"变成"制造性能问题"。
+         */
+        private val PSS_INTERVAL_MS = PSS_INTERVAL_SECONDS * 1000L
+
+        /** GPU 利用率/频率的候选节点（各家芯片不同）。 */
+        private val GPU_BUSY_PATHS = listOf("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage")
+        private val GPU_FREQ_PATHS = listOf(
+            "/sys/class/kgsl/kgsl-3d0/gpuclk",
+            "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq",
+        )
     }
 
     private var lastWallMs = 0L
     private var lastProcessCpuMs = -1L
     private var lastSysTotal = 0L
     private var lastSysIdle = 0L
+
+    /** PSS 的节流状态。 */
+    private var lastPssAt = 0L
+    private var lastPssMb: Int? = null
+
+    /**
+     * GPU 节点**只探一次**。
+     *
+     * 探测本身要 `canRead()` 几个固定路径，读不到时还要 `listFiles()` 扫 `/sys/class/devfreq`。
+     * 一台不暴露 GPU 节点的机器上，每秒重做一遍就是每秒一次无用 IO —— 探到没有就记住没有。
+     */
+    private var gpuProbed = false
+    private var gpuBusyPath: String? = null
+    private var gpuFreqPath: String? = null
 
     fun sample(): LiveMetrics {
         val wall = System.nanoTime() / 1_000_000L
@@ -65,7 +100,7 @@ class LiveSampler {
             },
             javaHeapMb = ((runtime.totalMemory() - runtime.freeMemory()) / MB).toInt(),
             javaHeapMaxMb = (runtime.maxMemory() / MB).toInt(),
-            pssMb = pssMb(),
+            pssMb = pssMb(wall),
             threads = threadCount(),
             gpuPercent = gpuBusyPercent(),
             gpuFreqMhz = gpuFreqMhz(),
@@ -101,8 +136,13 @@ class LiveSampler {
             if (parts.size < 5) null else parts.sum() to (parts[3] + parts[4])
         }
 
-    @Suppress("DEPRECATION")
-    private fun pssMb(): Int? = runCatching { (Debug.getPss() / 1024).toInt() }.getOrNull()
+    /** 见 [PSS_INTERVAL_SECONDS]：贵的那个按这个间隔量，中间沿用上次的数。 */
+    private fun pssMb(wall: Long): Int? {
+        if (lastPssAt > 0L && wall - lastPssAt < PSS_INTERVAL_MS) return lastPssMb
+        lastPssAt = wall
+        lastPssMb = runCatching { (Debug.getPss() / 1024).toInt() }.getOrNull()
+        return lastPssMb
+    }
 
     /** /proc/self/status 的 Threads 是准数；读不到退回 Java 的近似值。 */
     private fun threadCount(): Int? = runCatching {
@@ -111,18 +151,35 @@ class LiveSampler {
         }?.substringAfter(':')?.trim()?.toIntOrNull()
     }.getOrNull() ?: Thread.activeCount()
 
-    private fun gpuBusyPercent(): Int? =
-        readFirstInt("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage")?.coerceIn(0, 100)
-
-    /** 频率单位统一按 Hz 处理，最后换 MHz；节点名各家不同，逐个试。 */
-    private fun gpuFreqMhz(): Int? {
-        val hz = readFirstInt("/sys/class/kgsl/kgsl-3d0/gpuclk")
-            ?: readFirstInt("/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq")
-            ?: devfreqGpuFreq()
-        return hz?.let { (it / 1_000_000).takeIf { mhz -> mhz > 0 } }
+    /** 见 [gpuProbed]：只探一次，之后只读已确认可读的那个节点。 */
+    private fun probeGpu() {
+        if (gpuProbed) return
+        gpuProbed = true
+        gpuBusyPath = GPU_BUSY_PATHS.firstOrNull { runCatching { File(it).canRead() }.getOrDefault(false) }
+        gpuFreqPath = GPU_FREQ_PATHS.firstOrNull { runCatching { File(it).canRead() }.getOrDefault(false) }
+            ?: devfreqGpuFreqPath()
     }
 
-    private fun devfreqGpuFreq(): Int? = runCatching {
+    private fun gpuBusyPercent(): Int? {
+        probeGpu()
+        val path = gpuBusyPath ?: return null
+        return readFirstInt(path)?.coerceIn(0, 100)
+    }
+
+    /** 频率单位统一按 Hz 处理，最后换 MHz。 */
+    private fun gpuFreqMhz(): Int? {
+        probeGpu()
+        val hz = gpuFreqPath?.let { readFirstInt(it) } ?: return null
+        return (hz / 1_000_000).takeIf { mhz -> mhz > 0 }
+    }
+
+    /**
+     * devfreq 下按 `name` 找 GPU 的 `cur_freq`。
+     *
+     * 只在探测时调用一次：`listFiles()` 扫一个动态目录比读一个固定文件贵得多，而节点路径
+     * 在进程生命周期里不会变。
+     */
+    private fun devfreqGpuFreqPath(): String? = runCatching {
         File("/sys/class/devfreq").listFiles()
             ?.firstOrNull { dir ->
                 runCatching { File(dir, "name").readText() }.getOrDefault("")
@@ -130,7 +187,7 @@ class LiveSampler {
             }
             ?.let { File(it, "cur_freq") }
             ?.takeIf { it.canRead() }
-            ?.readText()?.trim()?.toLongOrNull()?.toInt()
+            ?.absolutePath
     }.getOrNull()
 
     private fun readFirstInt(path: String): Int? = runCatching {

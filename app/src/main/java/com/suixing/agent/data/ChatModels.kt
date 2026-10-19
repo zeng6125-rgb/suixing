@@ -54,6 +54,14 @@ data class StoredMessage(
     /** True once the user edited the text by hand, so the UI can say so. */
     val edited: Boolean = false,
     /**
+     * 一条**过程留痕**：「自动重试 1 次 · 服务器限流（429）」。只挂在 assistant 消息上。
+     *
+     * 为什么不走 [AgentEvent.Failed][com.suixing.agent.agent.AgentEvent.Failed]：那一路会写红色回执卡，
+     * 而触发重试的这一轮**最后是成功的** —— 用户看到的应该是一块过程记录（和思考块、工具块并排），
+     * 不是一张说这轮失败了的卡片。null＝这一轮没发生过值得记的事。
+     */
+    val traceNote: String? = null,
+    /**
      * True for a user message that was injected mid-run as a steer, not asked as a
      * new question. It draws as a user bubble but must not open a new turn, or one
      * engine pass would be split across two bubbles.
@@ -101,6 +109,16 @@ data class ContextCheckpoint(
     val messages: Int,
     /** Prompt tokens of the wire as it was before compressing, for the usage line. */
     val promptTokens: Int,
+    /**
+     * 这张记录在转录里挂在**哪条消息之后**。
+     *
+     * 与 [toMessageId] 的区别：那个是"被折叠掉的最后一条"，属于**旧历史**——按它定位，压缩块会
+     * 出现在很早以前的位置（用户：「运行的时候有这个块，会话完成一折叠就没有了」：运行时看到的是
+     * 过程区里那一块，跑完它回到旧历史里，屏幕上看不见）。
+     * 这里记的是**压缩发生那一刻最后一条已落盘消息**，也就是它真正发生的位置。
+     * 旧盘上没有这一位（空串）⇒ 回落到 [toMessageId]，行为与以前一致。
+     */
+    val anchorId: String = "",
 )
 
 @Serializable

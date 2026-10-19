@@ -94,6 +94,9 @@ import com.suixing.agent.llm.MAX_RETRY_ATTEMPTS
 import com.suixing.agent.llm.MAX_RETRY_DELAY_SECONDS
 import com.suixing.agent.llm.MIN_RETRY_DELAY_SECONDS
 import com.suixing.agent.data.ProviderConfig
+import com.suixing.agent.data.PROTOCOL_ANTHROPIC
+import com.suixing.agent.data.PROTOCOL_OPENAI
+import com.suixing.agent.data.PROTOCOL_RESPONSES
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
@@ -788,6 +791,28 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         }
                     }
                     Spacer(Modifier.height(8.dp))
+                }
+            }
+            item {
+                // 协议在地址之上：换了协议，同一个地址要拼的路径、要带鉴权头都不一样，
+                // 所以用户是先选「这个端点说哪种话」，再填地址。
+                ProtocolPicker(
+                    protocol = selected?.protocol.orEmpty(),
+                    onPick = { picked ->
+                        form = form.mapProvider(selected?.id) { it.copy(protocol = picked) }
+                        // 结构性选择（同「独立采样参数」）：点选即落盘，不留草稿。
+                        scope.persist { it.copy(providers = form.providers) }
+                    },
+                )
+                // Anthropic 的提示只在这个协议下出现：默认地址栏那句「填到 /v1 即可」
+                // 对它的意义最具体 —— 路径由客户端补 /messages。
+                if (selected?.protocol == PROTOCOL_ANTHROPIC) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "地址填到 /v1 即可，/messages 会自动补上。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             item {
@@ -2737,6 +2762,65 @@ private fun ModelCheckRow(
                     onRemove()
                 },
             )
+        }
+    }
+}
+
+/**
+ * The wire this endpoint speaks, as a dropdown.
+ *
+ * Hand-rolled from a Surface + DropdownMenu, which is how this file already does its one other
+ * menu: `ExposedDropdownMenuBox` needs `menuAnchor` typing that this Material3 version shapes
+ * differently, and reusing the existing pattern keeps the ripple and the corner radius the same.
+ *
+ * Blank is  [PROTOCOL_OPENAI]: every config written before this existed means exactly that, so
+ * the default entry is the one an old file already implies.
+ */
+@Composable
+private fun ProtocolPicker(protocol: String, onPick: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val options = listOf(
+        PROTOCOL_OPENAI to "OpenAI 兼容",
+        PROTOCOL_ANTHROPIC to "Anthropic",
+        PROTOCOL_RESPONSES to "OpenAI Responses",
+    )
+    val label = options.firstOrNull { it.first == protocol }?.second ?: options.first().second
+    Column {
+        Text("接口协议", style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(6.dp))
+        Box {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp)
+                    .suixingClickable(MaterialTheme.shapes.small) { open = true },
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Icon(
+                        imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                options.forEach { (value, text) ->
+                    DropdownMenuItem(
+                        text = { Text(text) },
+                        onClick = {
+                            open = false
+                            onPick(value)
+                        },
+                    )
+                }
+            }
         }
     }
 }

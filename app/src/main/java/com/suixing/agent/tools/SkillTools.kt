@@ -47,7 +47,7 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
             name = "skill_save",
             description = "Save a reusable procedure as a skill. It takes effect **immediately** " +
                 "(enabled by default): it joins the skill catalogue, so skill_list and skill_read " +
-                "see it at once; the user can switch it off on the 「设置 → 工具 → 技能」page.",
+                "see it at once; the user can switch it off on the Settings → Tools → Skills page.",
             parameters = Schema.objectOf(
                 listOf(
                     "name" to Schema.string("Skill id (ASCII is best; it becomes the directory name)"),

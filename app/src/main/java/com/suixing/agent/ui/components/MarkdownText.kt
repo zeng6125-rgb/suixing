@@ -32,8 +32,14 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +50,8 @@ import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -649,9 +657,19 @@ fun MarkdownText(
     style: TextStyle = markdownBody(),
     color: Color = Color.Unspecified,
     onUrlClick: ((String) -> Unit)? = null,
+    /**
+     * 在**最后一个字符之后**画一个闪烁光标（流式输出用）。
+     *
+     * 光标必须内联进文本：以前它是一个独立的 `Text("▍")`，于是会自成一行或挤到块外
+     * （用户截图里那根竖条悬在正文下方）。这里把它作为 `AnnotatedString` 的最后一段追加，
+     * 换行、对齐都跟着正文走。
+     *
+     * 只在 `Paragraph` 上追加：标题/列表/代码追加光标会让排版变怪，而流式正文几乎总是段落。
+     */
+    cursor: Boolean = false,
 ) {
     val blocks = rememberGrowingMarkdown(text)
-    MarkdownBlocks(blocks, modifier, style, color, onUrlClick)
+    MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
 }
 
 /**
@@ -746,6 +764,8 @@ fun MarkdownBlocks(
     style: TextStyle = markdownBody(),
     color: Color = Color.Unspecified,
     onUrlClick: ((String) -> Unit)? = null,
+    /** 见 [MarkdownText] 的 `cursor`：只有最后一个段落会带上它。 */
+    cursor: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
     val palette = MarkdownPalette(
@@ -754,12 +774,21 @@ fun MarkdownBlocks(
         linkColor = scheme.primary,
         codeFontSize = MaterialTheme.typography.bodySmall.fontSize,
     )
+    // 光标挂在**最后一个 block 是段落**时；否则不画（列表/代码块尾部挂光标排版会怪）。
+    val cursorAt = if (cursor) blocks.indexOfLast { it is MdBlock.Paragraph } else -1
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
             if (index > 0) {
                 Spacer(Modifier.height(gapBetween(blocks[index - 1], block)))
             }
-            MarkdownBlock(block, style, color, palette, onUrlClick)
+            MarkdownBlock(
+                block = block,
+                style = style,
+                color = color,
+                palette = palette,
+                onUrlClick = onUrlClick,
+                cursor = index == cursorAt && cursorAt == blocks.lastIndex,
+            )
         }
     }
 }
@@ -798,10 +827,11 @@ private fun MarkdownBlock(
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
+    cursor: Boolean = false,
 ) {
     when (block) {
         is MdBlock.Heading -> HeadingBlock(block, color, palette, onUrlClick)
-        is MdBlock.Paragraph -> InlineText(block.text, style, color, palette, onUrlClick)
+        is MdBlock.Paragraph -> InlineText(block.text, style, color, palette, onUrlClick, cursor = cursor)
         is MdBlock.Bullet -> BulletBlock(block, style, color, palette, onUrlClick)
         is MdBlock.Code -> CodeBlock(block)
         is MdBlock.Quote -> QuoteBlock(block, style, color, palette, onUrlClick)
@@ -834,6 +864,13 @@ private fun InlineText(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
+    /**
+     * 在**这段文本的最后一个字符后面**追加一个闪烁光标。
+     *
+     * 追加发生在 `InlineScanner.scan()` **之后**，所以 markdown 的解析边界完全不受影响：
+     * `▍` 不会被当成语法的一部分，也不会打断行内代码/链接的配对。
+     */
+    cursor: Boolean = false,
 ) {
     // 路径回调从 CompositionLocal 就地读（叶子层），调用点与中间层零改动。URL 仍走 onUrlClick。
     val pathClick = LocalPathClick.current
@@ -850,12 +887,46 @@ private fun InlineText(
             codeFontSize = palette.codeFontSize,
         ).scan()
     }
+    // 光标：解析完成后再往末尾追加，markdown 边界不受影响（见 cursor 的说明）。
+    // 用 AnnotatedString 拼接而不是外面再放一个 Text —— 后者会自成一行或挤出块外。
+    val alpha = if (cursor) blinkingCursorAlpha() else 1f
+    val shown = if (cursor) {
+        remember(annotated, alpha) {
+            buildAnnotatedString {
+                append(annotated)
+                withStyle(SpanStyle(color = palette.linkColor.copy(alpha = alpha))) {
+                    append(CURSOR_GLYPH)
+                }
+            }
+        }
+    } else {
+        annotated
+    }
     Text(
-        text = annotated,
+        text = shown,
         modifier = modifier,
         style = style,
         color = color,
     )
+}
+
+/** 光标字符：细竖条，和正文同一行高。 */
+private const val CURSOR_GLYPH = "▍"
+
+/** 与 [com.suixing.agent.ui.chat.BlinkingCursor] 同一节奏（480ms 往返），但作用于文字颜色。 */
+@Composable
+private fun blinkingCursorAlpha(): Float {
+    val transition = rememberInfiniteTransition(label = "inlineCursor")
+    val alpha by transition.animateFloat(
+        initialValue = 0.15f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 480),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "inlineCursorAlpha",
+    )
+    return alpha
 }
 
 @Composable

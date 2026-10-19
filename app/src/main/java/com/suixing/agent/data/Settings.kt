@@ -54,6 +54,15 @@ val ApprovalMode.label: String
  */
 const val DEFAULT_CONTEXT_WINDOW = 256_000
 
+/**
+ * The three wires an endpoint may speak. [PROTOCOL_OPENAI] is the empty string so that a
+ * settings file written before the field existed — which deserialises to "" — keeps taking
+ * the path it always took, and so that `protocol` being blank is never ambiguous.
+ */
+const val PROTOCOL_OPENAI = ""
+const val PROTOCOL_ANTHROPIC = "anthropic"
+const val PROTOCOL_RESPONSES = "openai-responses"
+
 @Serializable
 data class ProviderConfig(    val id: String,
     val name: String = "",
@@ -72,6 +81,15 @@ data class ProviderConfig(    val id: String,
     val ownSampling: Boolean = false,
     /** Display names for model ids; the wire id sent to the API never changes. */
     val aliases: Map<String, String> = emptyMap(),
+    /**
+     * Which wire this endpoint speaks: [PROTOCOL_OPENAI] (blank, the default that every
+     * settings file written before this field existed means), [PROTOCOL_ANTHROPIC] or
+     * [PROTOCOL_RESPONSES].
+     *
+     * Blank rather than "openai" on purpose: an old file deserialises to "" and keeps
+     * behaving exactly as it did, with no migration step to get wrong.
+     */
+    val protocol: String = "",
 ) {
     fun displayModel(id: String): String = aliases[id]?.takeIf { it.isNotBlank() } ?: id
     val label: String get() = name.ifBlank { baseUrl.ifBlank { "未命名" } }
@@ -142,6 +160,12 @@ data class AppSettings(
      * ignore it either way.
      */
     val reasoningEffort: String = "",
+    /**
+     * The wire the resolved endpoint speaks — see [ProviderConfig.protocol], which is where
+     * the user sets it. It lives here too because [forAssistant] and the chat's per-conversation
+     * pick both resolve to a plain [AppSettings] before the client ever sees a request.
+     */
+    val protocol: String = "",
     /**
      * Per-model context window in tokens, keyed by model name. 0 (or absent) sends
      * everything; anything else drops the oldest turns until the estimate fits.
@@ -604,6 +628,10 @@ fun AppSettings.forAssistant(assistant: Assistant?): AppSettings {
         model = assistant.model.ifBlank { model },
         baseUrl = provider?.baseUrl?.ifBlank { null } ?: baseUrl,
         apiKey = provider?.apiKey?.ifBlank { null } ?: apiKey,
+        // The wire, not a sampling knob: it follows the provider unconditionally, the same way
+        // the address and the key do. A persona pointing at an Anthropic endpoint must not be
+        // sent OpenAI-shaped JSON because the provider did not tick 独立采样参数.
+        protocol = provider?.protocol?.ifBlank { null } ?: protocol,
         temperature = assistant.temperature ?: own?.temperature ?: temperature,
         topP = own?.topP ?: topP,
         // 最大输出**按模型**（用户：「取消全局性的，改用各模型默认＋可自定义，跟上下文窗口一样」）：
@@ -619,6 +647,11 @@ data class LlmChoice(
     val baseUrl: String,
     val apiKey: String,
     val model: String,
+    /**
+     * The wire this pick speaks. Last and defaulted so every existing positional
+     * `LlmChoice(...)` keeps compiling and meaning exactly what it meant.
+     */
+    val protocol: String = "",
 )
 
 /**
@@ -634,16 +667,16 @@ fun AppSettings.choiceFor(
 ): LlmChoice {
     val own = conversationProviderId?.let { id -> providers.firstOrNull { it.id == id } }
     if (own != null && !conversationModel.isNullOrBlank()) {
-        return LlmChoice(own.id, own.baseUrl, own.apiKey, conversationModel)
+        return LlmChoice(own.id, own.baseUrl, own.apiKey, conversationModel, own.protocol)
     }
     val pinned = assistant?.providerId?.takeIf { it.isNotBlank() }
         ?.let { id -> providers.firstOrNull { it.id == id } }
     val pinnedModel = assistant?.model?.takeIf { it.isNotBlank() }
     if (pinned != null) {
-        return LlmChoice(pinned.id, pinned.baseUrl, pinned.apiKey, pinnedModel ?: model)
+        return LlmChoice(pinned.id, pinned.baseUrl, pinned.apiKey, pinnedModel ?: model, pinned.protocol)
     }
     if (pinnedModel != null) {
-        return LlmChoice(activeProvider()?.id, baseUrl, apiKey, pinnedModel)
+        return LlmChoice(activeProvider()?.id, baseUrl, apiKey, pinnedModel, activeProvider()?.protocol.orEmpty())
     }
-    return LlmChoice(activeProvider()?.id, baseUrl, apiKey, model)
+    return LlmChoice(activeProvider()?.id, baseUrl, apiKey, model, activeProvider()?.protocol.orEmpty())
 }

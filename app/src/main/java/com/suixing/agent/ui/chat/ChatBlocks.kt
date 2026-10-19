@@ -47,7 +47,6 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.gestures.animateScrollBy
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -81,7 +80,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -96,6 +94,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -125,6 +124,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -136,6 +136,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -290,8 +292,14 @@ internal val PROCESS_TITLE_MAX = 160.dp
 /** 折叠块展开/收起的高度动画时长：够看出"展开"这个动作，又不至于等。 */
 internal const val PROCESS_EXPAND_MS = 180
 
-/** 阅读锚活着（人停在历史里）时为 true：折叠动画改即时完成，避免动画每帧推内容+闸门每帧拉回的抖动。 */
+/** 阅读锚活着（人停在历史里）时为 true：折叠动画改即时完成，避免动画把正在读的内容推走。 */
 internal val LocalReadingPinned = compositionLocalOf { false }
+
+/**
+ * 主转录的滚动状态：折叠块展开/收起时，若**不在底部**，要按高度增量反向补偿，
+ * 才能让块顶边钉住、内容向下展开（见 [RevealHeight]）。
+ */
+internal val LocalChatListState = compositionLocalOf<androidx.compose.foundation.lazy.LazyListState?> { null }
 
 /**
  * 外观 → 打字机效果（默认开）。只落在**两个**流式渲染点上：正文的 Markdown 与思考块。
@@ -328,6 +336,79 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
             },
         )
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+}
+
+/**
+ * 折叠块的展开/收起：**纯高度动画**。
+ *
+ * 不用 `AnimatedVisibility(expandVertically)` 是因为这里要按内容自然高度逐帧写 progress，
+ * 且展开与收起共用一套裁剪。滚动不在这里做 —— 转录是底锚（reverseLayout），index 0 的
+ * 卡片长高天然向上、底边不动；旧版在这里逐帧 `dispatchRawDelta` 同步列表，两处抢同一份
+ * 列表才是"先向下、再向上"回弹的来源，已随底锚一起删掉。
+ *
+ * 正在读历史（[LocalReadingPinned]）时不做动画：内容原地展开，不推着正在读的内容走。
+ */
+@Composable
+private fun RevealHeight(
+    visible: Boolean,
+    durationMs: Int,
+    content: @Composable () -> Unit,
+) {
+    var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
+    // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
+    val natural = remember { intArrayOf(0) }
+    val pinned = LocalReadingPinned.current
+    val outer = LocalChatListState.current
+
+    LaunchedEffect(visible, pinned) {
+        val target = if (visible) 1f else 0f
+        val start = progress
+        if (start == target) return@LaunchedEffect
+        // 展开的第一帧还没量过内容：先让出一帧让 Layout 量一次，再决定怎么动。
+        var px = natural[0]
+        if (px <= 0) {
+            withFrameNanos { }
+            px = natural[0]
+        }
+        val dur = if (pinned) 0 else durationMs
+        if (dur <= 0 || px <= 0) {
+            progress = target
+            return@LaunchedEffect
+        }
+        val begin = withFrameNanos { it }
+        while (true) {
+            val now = withFrameNanos { it }
+            val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
+            val oldH = px * progress
+            progress = start + (target - start) * FastOutSlowInEasing.transform(t)
+            // **不在底部时反向补偿**（用户：「不在追底位置时，展开应该往下走」）：
+            // 底锚下块长高 Δ，块顶边会上移 Δ；这里把内容整体下移 Δ 抵消掉 ⇒ 顶边不动、
+            // 内容向下展开，折叠时同理。在底部时（canScrollBackward=false）不补偿：
+            // 底锚天然让底边不动，多滚一次就会顶上去。
+            if (outer != null && outer.canScrollBackward) {
+                outer.dispatchRawDelta(px * progress - oldH)
+            }
+            if (t >= 1f) break
+        }
+    }
+
+    Layout(
+        content = content,
+        modifier = Modifier
+            .fillMaxWidth()
+            // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
+            .clipToBounds(),
+    ) { measurables, constraints ->
+        // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
+        if (!visible && progress <= 0f) {
+            layout(constraints.maxWidth, 0) { }
+        } else {
+            val placeable = measurables.first().measure(constraints.copy(minHeight = 0))
+            natural[0] = placeable.height
+            val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
+            layout(constraints.maxWidth, h) { placeable.place(0, 0) }
+        }
+    }
 }
 
 /**
@@ -437,17 +518,12 @@ internal fun ProcessCard(
                     modifier = Modifier.size(18.dp),
                 )
             }
-            // 展开体走高度动画（用户：「点折叠块卡片闪一下，不自然展开」——原来是裸 if，内容一帧
-            AnimatedVisibility(
-                visible = expanded,
-                // *动态展开**（用户：「展开方向要动态展开啊」）：回到 Compose 的默认方向 ——
-                enter = expandVertically(
-                    tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-                ) + fadeIn(tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS / 2)),
-                exit = shrinkVertically(
-                    tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-                ) + fadeOut(tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS / 2)),
-            ) {
+            // 展开体：高度动画由 [RevealHeight] 驱动（滚动交给底锚，不再逐帧同步列表）。
+            // 前两版都没成：只用 expandVertically + 追底＝两套逐帧动画，谁先谁后不确定，总会
+            // 露出一帧位移；干脆不做高度动画＝不闪，但"啪"地出现，生硬（用户：「还是会闪一下
+            // ……动画也生硬」）。这一版只做高度：逐帧把进度写进 progress，卡片底边由底锚
+            // 钉住，长高只向上。
+            RevealHeight(visible = expanded, durationMs = PROCESS_EXPAND_MS) {
                 Column {
                     // Header and content are one card; the hairline is their only seam.
                     HorizontalDivider(color = scheme.outlineVariant)
@@ -498,6 +574,81 @@ internal fun ProcessSpinner(tone: Color) {
         strokeWidth = 2.dp,
         color = tone,
     )
+}
+
+/**
+ * 一条过程留痕（「自动重试 1 次 · 服务器限流（429）」）。
+ *
+ * 刻意只做**一行小字 + 图标**，不是 [ProcessCard]：它没有可展开的内容，也不该看起来像一次
+ * 工具调用。但它必须留在转录里 —— 这一轮是成功的，用户回头要能看出"这次慢是因为重试过"，
+ * 而不是只看到一张说这轮失败了的红卡（用户：「重试成功要在过程态中留痕……整轮成功就不要有
+ * 错误提示卡片」）。
+ *
+ * **[modifier] 由调用方给，块自己不带任何上下留白。** 两条渲染路径的间距来源不一样：流式那条
+ * 每个 part 之间已经有 6dp 的 Spacer，转录那条没有、靠各 part 自己的内边距。写死在这里，两边的
+ * 上下边距必然有一边对不上（用户截的就是这个：重试行贴着上面、离下面远）。
+ */
+@Composable
+internal fun TraceBlock(note: String, modifier: Modifier = Modifier) {
+    // **与折叠条同一套栅格**（用户：「你把它改成和思考块 工具块这种不行吗？这样的嵌入 icon
+    // 标题什么都没有对齐」）：36dp 行高、图标居中在 24dp 槽里（16dp）、8dp 之后接标题，
+    // 标题用 labelMedium —— 与 ProcessCard 的表头逐项相同，所以思考块 / 工具块 / 重试留痕
+    // 三者的图标和文字左边线在一条竖线上。
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(36.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = Icons.Rounded.Refresh,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = note,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * 运行中的一次上下文压缩：画成过程块，位置就是它发生的那一刻。
+ *
+ * 与转录里那张 [CheckpointCard] 是同一件事的两种形态 —— 那张按"被折叠的最后一条消息"定位，
+ * 负责回看；这一块属于正在跑的这轮，所以出现在「思考 → 工具 → 压缩 → 继续」的顺序里。
+ * 不再往气泡下面塞一行提示（用户：「不需要这种在卡片下的提示」）。
+ */
+@Composable
+internal fun CompressionBlock(checkpoint: ContextCheckpoint) {
+    var expanded by remember { mutableStateOf(false) }
+    ProcessCard(
+        icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+        title = "已压缩上下文",
+        expanded = expanded,
+        onToggle = { expanded = !expanded },
+        preview = "${checkpoint.messages} 条消息 → 摘要 · 压缩前约 ${shortTokens(checkpoint.promptTokens)}",
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 200.dp)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            Text(
+                text = checkpoint.summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
 }
 
 /**
@@ -611,16 +762,16 @@ internal fun ReasoningBlock(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            // *顶锚正序**（与主转录同一套标准画法，用户：「思维链那个列表也是一直自己会动的」）：
+            // *底锚倒序**（与主转录同一套画法）：index 0 是视觉最底，贴尾＝scrollToItem(0)。
             val inner = rememberLazyListState()
-            // 追尾开关：手指往上拖就停跟，真滚到底再跟回来。**不能用 !canScrollForward 当判据** ——
-            // 顶锚下内容一长高它就变真，追一次就再也不追（用户：「思维链的追底呢」）。
+            // 追尾开关：手指往上拖就停跟，真滚到底再跟回来。底锚下判据是 canScrollBackward ——
+            // 顶锚时内容一长高 canScrollForward 就变真，追一次就再也不追（用户：「思维链的追底呢」）。
             var innerFollow by remember { mutableStateOf(true) }
             var innerWasScrolling by remember { mutableStateOf(false) }
             LaunchedEffect(inner) {
-                snapshotFlow { inner.isScrollInProgress to inner.canScrollForward }
-                    .collect { (scrolling, canForward) ->
-                        if (!canForward) {
+                snapshotFlow { inner.isScrollInProgress to inner.canScrollBackward }
+                    .collect { (scrolling, canBack) ->
+                        if (!canBack) {
                             innerFollow = true
                         } else if (innerWasScrolling && !scrolling) {
                             // 一次滚动结束在非底部 ⇒ 用户拖上去的（程序化贴底只会停在底部）。
@@ -629,27 +780,21 @@ internal fun ReasoningBlock(
                         innerWasScrolling = scrolling
                     }
             }
-            // 逐帧追底用**增量**滚动（和主转录同一个道理）：思维链每多一行就滑那一行的距离，
-            // 不再"先长一截、再猛跳一下"。两段式 pinToBottom 只用于真正的跳到底。
+            // 追尾：底锚下最新一行长高向上、底边不动，不逐帧滚；只有新行插在最前把锚点
+            // 顶离 (0, 0) 时才补一次。
             LaunchedEffect(inner, expanded, followReasoning) {
                 if (!expanded || !followReasoning) return@LaunchedEffect
                 snapshotFlow {
-                    val info = inner.layoutInfo
-                    val last = info.visibleItemsInfo.lastOrNull()
-                    val below = if (last == null) {
-                        0
-                    } else {
-                        (last.offset + last.size) - info.viewportEndOffset + info.afterContentPadding
-                    }
-                    below to innerFollow
-                }.collect { (below, follow) ->
-                    if (follow && below > 0 && !inner.isScrollInProgress) {
-                        inner.scrollBy(below.toFloat())
-                    }
+                    val offBottom =
+                        inner.firstVisibleItemIndex != 0 || inner.firstVisibleItemScrollOffset != 0
+                    offBottom to innerFollow
+                }.collect { (offBottom, follow) ->
+                    if (follow && offBottom) inner.scrollToItem(0)
                 }
             }
             LazyColumn(
                 state = inner,
+                reverseLayout = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     // Configurable in 外观: a chain of thought is context, and the
@@ -662,10 +807,12 @@ internal fun ReasoningBlock(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 items(lines.size) { index ->
-                    val line = lines[index]
+                    // 底锚：index 0 是**最新一行**（视觉最底），越往上 index 越大。
+                    val line = lines[lines.lastIndex - index]
                     if (line.isBlank()) {
-                        // 首行是空行时不占位：那 4dp 就是「分割线下面还有一点空白」的来源。
-                        if (index > 0) Spacer(Modifier.height(4.dp))
+                        // 视觉首行（倒序里的最后一条）是空行时不占位：那 4dp 就是「分割线
+                        // 下面还有一点空白」的来源。
+                        if (index < lines.lastIndex) Spacer(Modifier.height(4.dp))
                     } else {
                         MarkdownText(
                             text = line,
@@ -679,7 +826,7 @@ internal fun ReasoningBlock(
                             modifier = Modifier,
                         )
                     }
-                    if (index == lines.lastIndex && streaming) BlinkingCursor()
+                    if (index == 0 && streaming) BlinkingCursor()
                 }
             }
         }
@@ -687,6 +834,7 @@ internal fun ReasoningBlock(
     val toggle = {
         // Written to the table, not to a local: the choice has to survive the hand-over
         // from the live block to the stored one.
+        // 贴底这件事不在这里做：底锚下卡片长高天然向上、底边不动，这里再滚一次就会滚两倍。
         expansion.set(blockId, !expanded)
     }
     val status: @Composable () -> Unit = {
@@ -701,8 +849,17 @@ internal fun ReasoningBlock(
             ProcessStatus(item)
         }
         if (streaming) {
-            Spacer(Modifier.width(8.dp))
-            ProcessSpinner(MaterialTheme.colorScheme.primary)
+            // **左右等距**（用户：「运行中的 icon 左右间距不一致」）：spinner 是 13dp 的圆、
+            // 文字是 12sp 的方块字，直接贴 8dp 会显得左侧挤、右侧松。放进一个与文字行高对齐的
+            // 方槽里居中，槽的左右各 7dp（与 meta 项之间的 7dp 同一套间距）。
+            Spacer(Modifier.width(7.dp))
+            Box(
+                modifier = Modifier.size(14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                ProcessSpinner(MaterialTheme.colorScheme.primary)
+            }
+            Spacer(Modifier.width(7.dp))
         }
     }
     if (nested) {
@@ -794,11 +951,9 @@ internal fun ReasoningBlock(
             expanded = expanded,
             onToggle = toggle,
             preview = firstLine.takeIf { it.isNotEmpty() },
-            previewTail = if (streaming && firstLine.isNotEmpty()) {
-                { BlinkingCursor() }
-            } else {
-                null
-            },
+            // **折叠条不再挂光标**（用户截图里同一屏出现两个光标）：展开体里已经有那个
+            // 跟在末字符后面的光标了，折叠条这个纯属重复。
+            previewTail = null,
             trailing = status,
         ) {
             // 思考块**不加**首行间距：正文自带行高，再加一条就是用户看到的那道空白
@@ -1284,6 +1439,12 @@ internal fun TurnSummary(
                         ) {
                             UserBubble(message = part.message, onEdit = onEdit)
                         }
+
+                        // 重试留痕：与思考块/工具块同一套栅格（见 TraceBlock），留白不再自己加。
+                        is Part.Trace -> TraceBlock(part.note)
+
+                        // 压缩块：位置就是它发生的地方（思考 → 工具 → 压缩 → 继续）。
+                        is Part.Compress -> CompressionBlock(part.checkpoint)
                     }
                 }
             }
