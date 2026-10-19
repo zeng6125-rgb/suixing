@@ -1336,3 +1336,28 @@ Get-ChildItem app\build\test-results\testDebugUnitTest\*.xml | ForEach-Object {
    - `saveSpot(conversationId)` 改成**显式按参数 id 读**：调用点在 `conversationId` 已换成新会话之后才跑
    - 链路 4：新增 `internal var restoring`，恢复期间 collector 不许把 `stickToBottom` 翻回 true；`ChatScreen` 恢复块里 `restoring = true` → `scrollToItem` → 等两帧 → finally 复位
    - 链路 5（保存的 key 可能是 `streaming:`/`load-earlier` 这类非消息项）**未处理**：`indexOfFirst { it.message.id == saved.first }` 找不到就回底，是安全兜底
+
+### 8.51 发布记录 0.8.231 / 0.8.232（2026-10-20 凌晨）
+
+| 版本 | versionCode | 内容 | 状态 |
+|---|---|---|---|
+| 0.8.230 | 241 | 键盘圆角色块、嵌套展开 RevealHeight、展开 220ms、流式上翻补偿、整卡可选中、issue #2、issue #3 | **已装机** |
+| 0.8.231 | 242 | issue #4 跨会话滚动隔离（`git e851245`，release v0.8.231） | 已发布，未装机 |
+| 0.8.232 | 243 | issue #6 前台也亮、issue #5 三个热路径（`git 68114ab`，release v0.8.232） | 已发布，未装机 |
+
+issue #2 / #3 / #4 / #5 / #6 全部已关闭（2026-10-20）。
+
+**issue #5 只做了三条**：`ChatRow.usage` 改 `by lazy`、`MessageRow` 三个回调改 `remember`、`engineLabel` 缓存。
+**没做** item 4（条件包 Column）：`showTimeLabel` 每行算出，翻转时 `MessageRow` 会在 Column 内/外换位置，
+**内部 remember 状态会被重建**（展开的卡片自己合上）—— 要做必须先把时间戳拆成列表的 sticky 或独立 item。
+**掉帧是否改善未验证**，装机后按 issue 里的 `dumpsys SurfaceFlinger --latency` 复测（先清后台）。
+
+**⚠️ 新的坑：这台机器上 `git push` 直连不通，必须走本地代理**（`curl https://api.github.com` 反而 200，
+只有 git 连不上，`http.sslbackend=schannel`）：
+
+```bash
+git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin HEAD
+HTTPS_PROXY=http://127.0.0.1:7890 gh release create ...   # gh 同理
+```
+
+代理端口 7890（Clash Verge 在跑）。`gh auth status` 显示已登录但推送仍会失败，别被它误导。
