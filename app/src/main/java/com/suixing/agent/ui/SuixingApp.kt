@@ -847,9 +847,11 @@ private fun Drawer(
                 .fillMaxHeight()
                 .statusBarsPadding()
                 .windowInsetsPadding(WindowInsets.navigationBars.exclude(WindowInsets.ime))
-                // The keyboard can be up when the drawer is opened mid-sentence: the
-                // panel keeps clear of it the same way the shell does.
-                .imePadding()
+                // **不要 imePadding()**（issue #1：长按改名弹窗拉起输入法时，背后侧边栏变空）：
+                // manifest 是 adjustNothing（窗口不随键盘缩放），但 IME inset 仍会报给 Activity，
+                // `imePadding()` 于是给这个 fillMaxHeight 的抽屉底部垫上整块键盘高度
+                // （约 1000px）⇒ 内容区被压到接近 0 ⇒ 列表看起来被清空。
+                // 抽屉是整高的侧边面板，键盘盖住底部时列表本身可以滚，不需要让位。
                 .padding(vertical = 18.dp),
         ) {
             Row(

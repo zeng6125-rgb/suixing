@@ -99,8 +99,29 @@ object PluginRuntime {
     fun probeClinit(): Int =
         HOOK_REGEX.size + TEMPLATE_VAR.pattern.length + JSON_MEDIA_TYPE.toString().length
 
+    /**
+     * 已启用的插件清单，**带 2 秒 TTL 缓存**。
+     *
+     * 原来每轮工具调用都读一次目录 + 解析 JSON（引擎每轮都要拼工具表）。热插拔只需要
+     * 「装完很快能看到」，不需要每轮都扫盘 —— 2 秒既够快，又把每轮的磁盘 IO 省掉。
+     * 装/卸/启用这类写操作之后会 [invalidateEnabled] 主动失效，所以感知是即时的。
+     */
+    @Volatile private var enabledCache: List<PluginSpec>? = null
+    @Volatile private var enabledCachedAt = 0L
+    private const val ENABLED_TTL_MS = 2_000L
+
+    fun invalidateEnabled() {
+        enabledCache = null
+        enabledCachedAt = 0L
+    }
+
     suspend fun enabledPlugins(): List<PluginSpec> = runCatching {
-        Core.plugins.list().filter { it.state.enabled }.mapNotNull { it.spec }
+        val now = System.currentTimeMillis()
+        enabledCache?.takeIf { now - enabledCachedAt < ENABLED_TTL_MS }?.let { return@runCatching it }
+        val fresh = Core.plugins.list().filter { it.state.enabled }.mapNotNull { it.spec }
+        enabledCache = fresh
+        enabledCachedAt = now
+        fresh
     }.getOrDefault(emptyList())
 
     /** `(插件, 工具声明)` 的平铺列表 —— 注册名由调用方拼成 `<id>.<tool>`。 */
@@ -376,17 +397,23 @@ object PluginRuntime {
         if (missing.isNotEmpty()) return missingFailure(spec, decl, missing)
 
         val label = if (exec.needsRoot) "root" else "local(app)"
-        // 固定 local 档，只有 needsRoot 才走 root（引擎那边已经按 TIER_ROOT 把过关）。cwd 用
-        // `cd` 前缀实现：capability/Shell 的三条通道都不收工作目录参数，不去动它。
-        val full = "cd $cwd && $command"
+        // 固定 local 档，只有 needsRoot 才走 root（引擎那边已经按 TIER_ROOT 把过关）。
+        // **工作目录交给 ProcessBuilder**（Shell.local 的 cwd 参数），不再拼 `cd X &&`：
+        // 少一层命令拼接，命令本身直接进 shell。
+        val workDir = java.io.File(cwd.trim().trim('\'').trim('"'))
         val result = try {
             withTimeout(exec.timeoutSeconds.coerceIn(1, 600) * 1000L) {
                 if (exec.needsRoot) {
-                    Shell.root(full)
+                    // root 通道没有 cwd 参数，仍用 cd 前缀（su 起的是另一棵进程树）。
+                    Shell.root("cd $cwd && $command")
                 } else {
                     // 插件清单可以声明解释器：`sh` 直接走系统 sh（跳过"先试 bash 被 seccomp
                     // 杀掉再回退"的那一次），缺省仍是 auto = 双接口（先 bash、失败退 sh）。
-                    Shell.local(full, shell = exec.shell?.trim()?.lowercase().orEmpty().ifBlank { "auto" })
+                    Shell.local(
+                        command,
+                        shell = exec.shell?.trim()?.lowercase().orEmpty().ifBlank { "auto" },
+                        cwd = workDir,
+                    )
                 }
             }
         } catch (timeout: TimeoutCancellationException) {

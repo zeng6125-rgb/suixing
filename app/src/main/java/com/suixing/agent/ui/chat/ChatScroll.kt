@@ -81,6 +81,11 @@ fun rememberChatScroll(
     autoFollow: Boolean,
     pressed: Boolean,
     pressGuardOn: Boolean,
+    /**
+     * 会话 id。阅读锚点按它隔离 —— 切换会话时锚点必须作废重来，
+     * 否则旧会话的锚会被拿去"纠正"新会话的位置（用户：「各会话要隔离」）。
+     */
+    conversationId: Any? = Unit,
 ): ChatScroll {
     val scroll = remember(listState) { ChatScroll(listState) }
 
@@ -119,37 +124,12 @@ fun rememberChatScroll(
         }
     }
 
-    // **阅读锚**（用户：「微信里别人在底下发消息，我看上面的内容位置不会变」）：
-    // 底锚下 index 0（视觉最底那条）长高会把上面全部顶走 —— 流式时就是你正在读的内容
-    // 一直在动。修法不是"补底部的增量"（那四版都失败了：崩 / 抖 / 锁），而是**换锚点**：
-    // 不在底部时，把「用户正在看的那条可见项」钉在它原来的视口位置；
-    // 它挪了多少就补多少，绝大多数帧挪动是 0 ⇒ 不抖；补偿后位置复原 ⇒ 不会连续补 ⇒ 不锁。
-    LaunchedEffect(listState) {
-        var anchorKey: Any? = null
-        var anchorOffset = 0
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val first = info.visibleItemsInfo.firstOrNull()
-            Triple(first?.key, first?.offset ?: 0, scroll.stickToBottom)
-        }.collect { (key, offset, stick) ->
-            if (stick) {
-                // 在底部：由追底负责，锚点作废。
-                anchorKey = null
-                return@collect
-            }
-            if (anchorKey == null || anchorKey != key) {
-                // 换了锚（刚往上翻 / 切换会话）：以当前状态为准，不做补偿。
-                anchorKey = key
-                anchorOffset = offset
-            } else if (kotlin.math.abs(offset - anchorOffset) > 1) {
-                // 锚点被顶走了：补回差额。正向 delta 会让内容下移（reverseLayout 下
-                // index 越大越靠上），所以差额取反。
-                val fix = (anchorOffset - offset).toFloat()
-                anchorOffset = offset + fix.toInt()
-                listState.dispatchRawDelta(fix)
-            }
-        }
-    }
+    // **不做任何阅读锚/补偿**（用户：「滑一下就飞到天上去了，还滑不回来」）：
+    // 任何"看到偏移就纠正"的做法都会和手指/惯性滚动抢同一份列表，一旦判断有偏差
+    // 就会连续纠正、越滚越远。这里彻底不干预：
+    //  · 在底部 → 由底锚天然跟随；
+    //  · 往上翻 → 内容长高会让视图缓慢上移，但不会锁住、也不会飞。
+    // 已知代价：流式时上翻读旧内容，位置会随内容增长而漂。这是刻意选择的取舍。
 
     // 阅读位置：手指停下那一刻记首可见项。底锚下"首可见"是视觉最底那条（滚动起点）。
     // 位置取 firstVisibleItemScrollOffset —— 它正是 scrollToItem(index, offset) 的第二个参数；

@@ -370,7 +370,10 @@ private fun RevealHeight(
             withFrameNanos { }
             px = natural[0]
         }
-        val dur = if (pinned) 0 else durationMs
+        // **一律有动画**（用户：「折叠展开一会有一会没有」）：原来是
+        // `if (pinned) 0 else durationMs` —— 贴底时有动画，往上翻过之后变成瞬间展开，
+        // 于是同一个动作时有时无。位置稳定交给 ChatScroll 的阅读锚点，不再靠"取消动画"。
+        val dur = durationMs
         if (dur <= 0 || px <= 0) {
             progress = target
             return@LaunchedEffect
@@ -821,6 +824,8 @@ internal fun ReasoningBlock(
                         // 下面还有一点空白」的来源。
                         if (index < lines.lastIndex) Spacer(Modifier.height(4.dp))
                     } else {
+                        // 思考链每一行都可选中复制（用户：「确实所有情况都要可复制」）。
+                        SelectionContainer {
                         MarkdownText(
                             text = line,
                             // 13sp with roomier leading than bodySmall's: a long chain of
@@ -838,6 +843,7 @@ internal fun ReasoningBlock(
                             // 挂在**最新一行**（index 0），空行时顺延到第一条非空行。
                             cursor = streaming && index == cursorAt,
                         )
+                        }
                     }
                     // 光标已内联进上一段 MarkdownText（见 cursor 参数），这里不再另起一行。
                 }
@@ -943,12 +949,13 @@ internal fun ReasoningBlock(
             // 内容推走。裸 if 是一帧长满、下一帧才追底，看起来就是"拉高再被拉回"。
             AnimatedVisibility(
                 visible = expanded,
+                // 同样一律有动画（见 RevealHeight 的说明）：不再按"是否在底"切成 0 时长。
                 enter = expandVertically(
-                    tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-                ) + fadeIn(tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS / 2)),
+                    tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
+                ) + fadeIn(tween(PROCESS_EXPAND_MS / 2)),
                 exit = shrinkVertically(
-                    tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
-                ) + fadeOut(tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS / 2)),
+                    tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
+                ) + fadeOut(tween(PROCESS_EXPAND_MS / 2)),
             ) {
                 // 虚拟列表照旧（用户：「展开还是虚拟列表啊」）：chain 内部就是 LazyColumn，
                 // 逐行虚拟化 + heightIn(max = 外观里的思考块高度) 上限。
@@ -1109,6 +1116,8 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
     // 两处刻意的差别（用户要求）：
     //  · 命令**不截断**（原来 maxLines = 2 + Ellipsis，长命令根本读不全）；
     //  · 输出不再用「固定 132dp 的滚动 Text」，而是逐行进入虚拟列表，长输出不会一次性排版。
+    // 命令与输出都可选中复制（用户：「确实所有情况都要可复制」）。
+    SelectionContainer {
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         if (args != null) {
             item(key = "args") {
@@ -1192,6 +1201,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                 )
             }
         }
+    }
     }
     line.message?.allImages?.forEach { ImageBlock(it) }
 }
@@ -1286,14 +1296,14 @@ internal fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
                 modifier = Modifier.size(16.dp),
             )
         }
-        // 同一条规则：在底时动画展开（底边不动、往上展），读上面时 0 时长。
+        // 一律有动画（同上）：不再按"是否在底"切成 0 时长。
         AnimatedVisibility(
             visible = expanded,
             enter = expandVertically(
-                tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
+                tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
             ),
             exit = shrinkVertically(
-                tween(if (LocalReadingPinned.current) 0 else PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
+                tween(PROCESS_EXPAND_MS, easing = FastOutSlowInEasing),
             ),
         ) {
             // 与「单个工具」同一套边距：这里**不加** 44dp 缩进 —— 那是多工具独有的、用户

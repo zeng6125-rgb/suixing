@@ -36,7 +36,20 @@ fun SuixingTheme(
     // so the two of them are keyed on the setting instead of running every recomposition.
     val typography = remember(fontScale) { suixingTypography(fontScale) }
     val shapes = remember(cornerScale) { suixingShapes(cornerScale) }
-    CompositionLocalProvider(LocalDarkTheme provides darkTheme) {
+    // **选中高亮必须自己给**（用户：「有些地方长按复制没有底色，看不出选了哪儿」）：
+    // 全项目此前没有设置 `LocalTextSelectionColors`，用的是 Compose 默认值 ——
+    // 它由 primary 派生、透明度很低，浅色画布上几乎看不见。
+    // 这里显式给一个明显的底色（primary 32%）和手柄色，全应用统一。
+    val selectionColors = remember(scheme.primary) {
+        androidx.compose.foundation.text.selection.TextSelectionColors(
+            handleColor = scheme.primary,
+            backgroundColor = scheme.primary.copy(alpha = 0.32f),
+        )
+    }
+    CompositionLocalProvider(
+        LocalDarkTheme provides darkTheme,
+        androidx.compose.foundation.text.selection.LocalTextSelectionColors provides selectionColors,
+    ) {
         MaterialTheme(
             colorScheme = scheme,
             typography = typography,

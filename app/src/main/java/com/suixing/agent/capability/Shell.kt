@@ -121,7 +121,15 @@ object Shell {
         }.getOrNull()
     }
 
-    suspend fun local(command: String, shell: String = "auto"): ShellResult {
+    suspend fun local(
+        command: String,
+        shell: String = "auto",
+        /**
+         * 工作目录。**有它就省掉 `cd X &&` 前缀**：命令直接交给 shell，
+         * 目录由 ProcessBuilder 设定 —— 插件调用因此少一层命令拼接。
+         */
+        cwd: java.io.File? = null,
+    ): ShellResult {
         // 自带 bash 时优先用它：Android 只有 toybox 的 sh，连 `[[ ]]`、数组、`$(<file)` 都没有。
         //
         // 三个档位（插件清单的 `shell` 字段与 run_shell 的 `shell` 参数都走这里）：
@@ -136,10 +144,10 @@ object Shell {
             return if (wantBash) {
                 ShellResult(false, "", "这个构建没有随包 bash，无法按 shell=bash 执行", -1)
             } else {
-                run(arrayOf("sh", "-c", command))
+                run(arrayOf("sh", "-c", command), cwd = cwd)
             }
         }
-        if (shell == "sh") return run(arrayOf("sh", "-c", command))
+        if (shell == "sh") return run(arrayOf("sh", "-c", command), cwd = cwd)
         val env = buildMap {
             // 自带 busybox 以 $BB 暴露（applet 名要靠 argv[0]，所以不放进 PATH 当命令名用）：
             // 命令里写 `"$BB" grep -n foo *.kt` 即可拿到完整的 coreutils 级工具。
@@ -147,7 +155,7 @@ object Shell {
             put("PATH", "$binDir:/system/bin:/system/xbin")
             put("TERM", "dumb")
         }
-        val result = run(arrayOf(bash, "-lc", command), env)
+        val result = run(arrayOf(bash, "-lc", command), env, cwd = cwd)
         // 自带 bash 在本进程里可能被系统的 seccomp 过滤器杀掉（exit 159 = 128+SIGSYS）：app 派生的
         // 子进程**继承**那份过滤器，而 su 起的是另一棵进程树、不继承，所以只有 local 档会中招。
         //
@@ -164,7 +172,7 @@ object Shell {
                 result.exitCode,
             )
         }
-        val retry = run(arrayOf("sh", "-c", command))
+        val retry = run(arrayOf("sh", "-c", command), cwd = cwd)
         return retry.copy(stdout = SECCOMP_FALLBACK_NOTE + retry.stdout)
     }
 
@@ -233,9 +241,16 @@ object Shell {
         false
     }
 
-    private suspend fun run(command: Array<String>, env: Map<String, String> = emptyMap()): ShellResult =
+    private suspend fun run(
+        command: Array<String>,
+        env: Map<String, String> = emptyMap(),
+        /** 工作目录：直接交给 ProcessBuilder，省掉命令里的 `cd X &&` 前缀（少一层 shell）。 */
+        cwd: java.io.File? = null,
+    ): ShellResult =
         runCatching {
-            collect(ProcessBuilder(*command).apply { environment().putAll(env) }.start())
+            val builder = ProcessBuilder(*command).apply { environment().putAll(env) }
+            if (cwd != null && cwd.isDirectory) builder.directory(cwd)
+            collect(builder.start())
         }.getOrElse { error ->
             if (error is CancellationException) throw error
             ShellResult(false, "", error.message ?: error.javaClass.simpleName, -1)

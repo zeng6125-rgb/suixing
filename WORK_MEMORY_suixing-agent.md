@@ -1210,3 +1210,31 @@ eedsRoot；M2 接线在 AgentEngine.kt:1056-1063）② 0.8.99 沉浸验证 ③ *
 6. 不要动 composer 的阴影（`TurnScrubber.kt:900`，8dp/25%）——那是要的。
 
 **未解决（核心）**：底锚下流式内容在视口内长高仍会把上方内容顶走（"往上翻位置一直变/抖/锁"）。四版补偿全部失败。**正确方向（用户点明）**：保持底部锚定，但把锚点从"index 0"改成"**用户正在看的那条可见项**"——它挪了多少就补多少，大多数帧挪动为 0，因此不抖不锁。用户明确拒绝"改回顶部锚定"和"暂停渲染"两种方案。
+
+### 8.47 交接快照（2026-10-19 21:45，0.8.227 已装机）
+
+**当前装机**：0.8.227(238)，lastUpdateTime 2026-10-19 21:39:36。工作树未提交（相对 2426caf）。
+
+**本轮已做且已装机**
+- 选中底色：`ui/theme/Theme.kt` 加 `LocalTextSelectionColors`（primary 32%）——原来用默认值几乎看不见
+- 思考链每行、工具命令/输出包进 `SelectionContainer`（`ChatBlocks.kt` 思考链 `MarkdownText` 外层、`ToolDetail` 的 `LazyColumn` 外层）
+- `scrollTrace` 改为 release 也写（`files/scroll-jump.log`），查「长按复制跳位置」用；查完要删
+- issue #1：抽屉去掉 `.imePadding()`（`SuixingApp.kt` 抽屉 Column）
+- 展开动画统一：三处 `tween(if (LocalReadingPinned.current) 0 else …)` 全改成恒定时长（`ChatBlocks.kt` 的 `RevealHeight` + 两处 `AnimatedVisibility`）
+- 插件：`Shell.local(command, shell, cwd)` 新增 cwd → `ProcessBuilder.directory()`，插件不再拼 `cd X &&`；`PluginRuntime.enabledPlugins()` 加 2 秒 TTL + `invalidateEnabled()`
+- `AgentEngine` 的 `breakTools` 按工具名签名缓存（不再每轮序列化所有 schema）
+- **阅读锚点整块删除**（`ChatScroll.kt`）——五版全败：补偿四版（崩/抖/锁/飞）+ 锚点一版（滑一下就飞、滑不回来）
+
+**三件未修（新会话从这里开始）**
+1. **抽屉仍被 IME 顶起**：`SuixingApp.kt:421` 的 `Scaffold(modifier = Modifier.padding(bottom = heldImePx.toDp()))` 把整个外壳（含抽屉）顶上去。要修必须把 `ModalNavigationDrawer` 移到这层 padding **之外**（抽屉在外、Scaffold 在抽屉的 content 里）。
+2. **切换会话滚动位置不隔离**：`ChatScroll.spots` 存 `(key, firstVisibleItemScrollOffset)`，恢复用 `scrollToItem(fedIndexOf(idx), saved.second)`；内容高度变化后 offset 不准。
+3. **流式时上翻位置漂移**：底锚固有（index 0 长高顶走上面）。任何"看到偏移就纠正"的方案都会和手势抢滚动，前五版全败在这里。若重做，唯一可行方向是**只在 `!isScrollInProgress && !pressed` 时纠正一次并立即更新锚点**，且必须有真机验证。
+
+**今日踩过的坑（勿重犯）**
+- `onSizeChanged` 里直接 `dispatchRawDelta` → `performMeasureAndLayout called during measure layout` 必崩
+- 用 `canScrollBackward` 判"在底"→ 每帧振荡
+- 手势期间只挡 dispatch 不丢累积 → 松手被拉回
+- `stackFootprint` 的 `COMPOSER_BOTTOM_PAD` 不能删（`onSizeChanged` 挂在 padding 之后，测的是内边距以内）
+- 新会话页不要复用 `stackFootprint`，用 `heroBottom`
+- composer 阴影（`TurnScrubber.kt:900` 8dp/25%）是要的，别动
+- `EmptyHero` 不要加 compact/横滑等布局改动（用户明确拒绝）

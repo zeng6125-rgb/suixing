@@ -820,6 +820,9 @@ class AgentEngine(
         @Volatile
         private var breakTools = 0
 
+        /** [breakTools] 是按哪一组工具算出来的：工具集变了就重算（插件热插拔会改它）。 */
+        private var breakToolsSig: String? = null
+
         @Volatile
         private var breakHistory = 0
 
@@ -1275,9 +1278,17 @@ class AgentEngine(
                 // 调用都过一遍 [PluginRuntime.preExecute] —— 每轮读一次目录是刻意的（热插拔），
                 // 每条调用查一次 hook 是纯函数、不碰磁盘。
                 val hooks = PluginRuntime.hooksFor(pluginSpecs)
-                breakTools = toolSpecs.sumOf {
-                    it.name.length + it.description.length + it.parameters.toString().length
-                } / 4
+                // **工具集没变就不重算**：这一行会把每个工具的 parameters（JsonObject）
+                // 完整序列化成字符串、只为取长度 —— 二十来个工具、每轮一次，纯浪费。
+                // 但工具集**是会变的**（插件热插拔），所以用「工具名序列」当缓存键：
+                // 名字集合相同 ⇒ 表没变 ⇒ 沿用上次的计数；变了就重算。
+                val toolSig = toolSpecs.joinToString(",") { it.name }
+                if (breakToolsSig != toolSig) {
+                    breakToolsSig = toolSig
+                    breakTools = toolSpecs.sumOf {
+                        it.name.length + it.description.length + it.parameters.toString().length
+                    } / 4
+                }
                 // 三个数字都来自同一份 wire：一次遍历算完，别为每个数字各扫一遍
                 // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
                 var historyChars = 0

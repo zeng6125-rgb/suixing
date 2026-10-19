@@ -686,13 +686,9 @@ fun ChatScreen(
     // 记下"按下 / 抬手 / 守护撤销"几个时刻的滚动坐标，就能看出那次跳动是程序滚的、
     // 还是列表自己重新锚定的。
     val traceCtx = LocalContext.current
-    // **只在可调试构建里写**（项目没开 buildConfig，用 ApplicationInfo 判）：
-    // 诊断日志绝不能出现在用户装上的 release 包里。
-    val traceEnabled = remember(traceCtx) {
-        (traceCtx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-    }
+    // **临时诊断，release 也写**（用户明确要求：「写到 release 啊，到时候再删了」）：
+    // 用来抓「长按复制跳位置」。查完连这个函数一起删。
     fun scrollTrace(tag: String) {
-        if (!traceEnabled) return
         runCatching {
             val info = listState.layoutInfo
             val first = info.visibleItemsInfo.firstOrNull()
@@ -727,6 +723,9 @@ fun ChatScreen(
         autoFollow = settings.autoFollow,
         pressed = pressed,
         pressGuardOn = pressGuardOn,
+        // `listState` 来自 `rememberLazyListState()`（第 273 行），**全应用共用一个实例**，
+        // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
+        conversationId = state.conversationId,
     )
     // 一轮结束（实时行 → 存储行）那一帧里同时发生四件事：实时行被替换、状态行消失、指标行出现、
     // 让位 12→16dp。贴底协程跑在布局定型之前，读到的还是旧高度 ⇒ 结束后停在离底部差一截的地方
