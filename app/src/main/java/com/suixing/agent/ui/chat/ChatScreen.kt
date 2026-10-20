@@ -730,10 +730,23 @@ fun ChatScreen(
                 withFrameNanos { }
             }
         } finally {
-            if (lockKey != null) {
+            // **只测量，不改行为**：现在无法判断这段纠正在用户报的场景里到底有没有触发。
+            // `guard-off` 那行写在 `scrollToItem` 之后，而它是挂起函数 ⇒ 读到的 idx 可能是
+            // 纠正前也可能是纠正后，日志自己说不清（issue #14 要求"先定位再改"，正是这个意思）。
+            // 这里把决策本身写清楚：纠到了哪儿 / 为什么没纠。查完删。
+            if (lockKey == null) {
+                scrollTrace("lock-skip reason=no-key")
+            } else {
                 val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == lockKey }
-                if (target != null && target.index != listState.firstVisibleItemIndex) {
-                    listState.scrollToItem(target.index, lockOffset)
+                when {
+                    target == null -> scrollTrace("lock-skip reason=offscreen lock=$lockKey")
+                    target.index == listState.firstVisibleItemIndex ->
+                        scrollTrace("lock-skip reason=same idx=${target.index}")
+                    else -> {
+                        // `scrollTrace` 自己会带上当前的 idx，所以这里只标"要纠"和纠正目标。
+                        scrollTrace("lock-correct to=${target.index}/$lockOffset")
+                        listState.scrollToItem(target.index, lockOffset)
+                    }
                 }
             }
             // 组合被带走（切会话/退页）也要解冻，否则外壳的 IME clamp 永远停摆。
@@ -752,29 +765,44 @@ fun ChatScreen(
     )
     // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
     var liveHeight by remember { mutableIntStateOf(0) }
-    // 切换会话时给转录一个淡入（issue #12）。**不做 crossfade**：那会同时持有两份
-    // composition，大会话的内存峰值翻倍。切走的那一刻 snapTo(0) 再淡入，读起来是「落定」而不是「跳」。
-    // 180ms 用户实测「太快」⇒ 320ms。**只动时长，缓动保持默认**（`tween` 的默认 easing 就是
-    // `FastOutSlowInEasing`）：两个变量一起改，验收时分不清是哪一个起作用（§4 第 29 条）。
+    // 切换会话时给转录一个入场（issue #12）。**不做 crossfade**：那会同时持有两份
+    // composition，大会话的内存峰值翻倍。
     //
-    // 两处修正（issue #12 的补充评论）：
-    //  · 首次组合不淡入（`lastFaded` 初值就是当前会话，冷启动不该闪一下）；
-    //  · **等列表量完再淡入**：`openConversation` 是一帧内换 state，LazyColumn 要几帧才量完，
-    //    以前在 conversationId 变化的那一帧就开始 fade，等量完 alpha 已经到 1 —— 淡入被测量吃掉，
-    //    看起来还是「突然」。现在等 itemCount > 0 再让出两帧。
-    val switchAlpha = remember { androidx.compose.animation.core.Animatable(1f) }
-    var lastFaded by remember { mutableStateOf(state.conversationId) }
-    LaunchedEffect(state.conversationId, itemCount) {
-        if (state.conversationId == lastFaded) return@LaunchedEffect
-        if (itemCount <= 0) return@LaunchedEffect
-        lastFaded = state.conversationId
-        withFrameNanos { }
-        withFrameNanos { }
-        // 用户实测两次：320ms 纯 alpha「怪」（那是显影不是过渡），100ms「太快、恶心」。
-        // 现在 graphicsLayer 里已经有位移 + 缩放（形态对了），所以时长要回到能看清动作的区间：
-        // 260ms + LinearOutSlowIn（匀速起、收尾缓），比 FastOutSlowIn 的"先窜后刹"更稳。
-        switchAlpha.snapTo(0f)
-        switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
+    // 病根先说清楚：被否掉的三版（320ms 纯 alpha「怪」/ 100ms「太快、恶心」/
+    // 260ms + 24dp 位移 + 0.97「还是不行」）**全跑在同一个有缺陷的实现上** ——
+    // `snapTo(0f)` 之前先 `withFrameNanos` 等两帧，而这两帧 alpha 仍然是 1，新内容已经按
+    // 全不透明画出来了，之后才归零重演一遍。用户原话「切会话你为什么还要显示一下旧会话的页
+    // 然后再显示动画」，指的就是这两帧。只要「先满不透明、再归零」还在，任何形态都会被看成
+    // 「先闪一下再动」—— 所以那三次差评**不能算对形态的判决**。
+    //
+    // 修法：Animatable **按会话重建、初值在组合期直接取 0** —— 不经过协程、不等帧，
+    // 换会话的第一帧 alpha 必然是 0，不可能先露出内容。（`snapTo` 是 suspend，调用它必然
+    // 晚一帧，这就是上一版怎么调数值都改不掉那个毛病的原因。）
+    // 冷启动那次给 1：`conversationId` 从 `""` 变成真实 id 不算切会话，骨架屏 → 内容
+    // 已经有它自己的过渡，再叠一层淡入就是注释里骂过的「开了个新会话又跳过去」。
+    //
+    // 形态：沿用**本仓库已有的入场约定**，不另造一套 ——
+    // `ChatComposer.kt:334` 的弹层入场就是 `fadeIn(tween(160)) + scaleIn(tween(160),
+    // initialScale = 0.92f)`，即「淡入 + 0.92 缩放落定」。会话切换同样是整块内容换掉、
+    // 新旧之间没有空间连续关系，属同一类，所以照它的形态：
+    //  · alpha 0 → 1 **加** scale 0.92 → 1.0：缩放给「落定感」，纯 alpha 只剩「蒙层在消失」；
+    //  · **去掉 translationY**：整块转录上下平移会跟钉住的顶栏和输入框打架，读起来是
+    //    「中间那一块在滑」而不是「换了一页」—— 上一版 24dp 位移的毛病正在这里；
+    //  · 210ms 夹在被否的 100 / 320 之间，且贴近本仓库结构性变化的既有时长
+    //    （`PROCESS_EXPAND_MS` = 220、`KEYBOARD_ANIM_MS` = 220，见 ChatBlocks/ChatContext）；
+    //  · `LinearOutSlowInEasing` 实测为 CubicBezierEasing(0, 0, 0.2, 1)（decelerate，
+    //    从 animation-core 1.7.5 字节码核对），本仓库的展开补偿 `ChatBlocks.kt:404` 也用它。
+    // alpha / scale 只写在 graphicsLayer 里 = 只改绘制，不触发重组，也不动布局与滚动。
+    val alphaHistory = remember { booleanArrayOf(state.conversationId.isNotEmpty()) }
+    val switchAlpha = remember(state.conversationId) {
+        val coldStart = state.conversationId.isNotEmpty() && !alphaHistory[0]
+        if (state.conversationId.isNotEmpty()) alphaHistory[0] = true
+        androidx.compose.animation.core.Animatable(if (coldStart) 1f else 0f)
+    }
+    LaunchedEffect(state.conversationId) {
+        // 初值已经是 0，这里只负责把它推到 1：从 0 起跑，不需要 `snapTo`，
+        // 也就没有「snapTo 生效之前先露一帧」的窗口。
+        switchAlpha.animateTo(1f, tween(210, easing = LinearOutSlowInEasing))
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
@@ -1013,13 +1041,16 @@ fun ChatScreen(
                             // 不触发重组；也不做 AnimatedContent —— 那会同时持有两份 composition，
                             // 对 30MB 的会话内存峰值翻倍（issue 自己提的第 4 点）。
                             .graphicsLayer {
-                                // **形态而不仅是时长**（issue #12 方案 A）：纯 alpha 淡入读起来是
-                                // 「蒙层闪一下」—— 没有位移就没有方向感，没有缩放就没有层次。
-                                // 这里补两样：从下方 24dp 升起 + 97% 放到 100%。
+                                // 形态 = **淡入 + 0.92 缩放落定**，与本仓库弹层的入场
+                                // （`ChatComposer.kt:334` 的 `fadeIn + scaleIn(0.92f)`）一致。
+                                //
+                                // 上一版这里的 24dp `translationY` 已删：整块转录上下平移时，
+                                // 钉住的顶栏与输入框一动不动，画面读起来是「中间那一块在滑」
+                                // 而不是「换了一页」，这正是用户说「还是不行」的那一版。
+                                // 缩放负责层次（内容由远及近落定），alpha 负责显隐，两者同步。
                                 val p = switchAlpha.value
                                 alpha = p
-                                translationY = (1f - p) * 24.dp.toPx()
-                                val s = 0.97f + 0.03f * p
+                                val s = 0.92f + 0.08f * p
                                 scaleX = s
                                 scaleY = s
                             }
