@@ -786,6 +786,34 @@ fun ChatScreen(
     )
     // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
     var liveHeight by remember { mutableIntStateOf(0) }
+    // **上翻时冻结流式卡的渲染**（issue #17）。
+    //
+    // 三版「事后纠正」全失败（dispatchRawDelta / 冻结高度 / anchorKey+scrollToItem），因为对手是
+    // **持续的推力**：底锚下流式卡（喂序 index 0）只要还在视口里，长高就必然把上方内容顶上去。
+    // 检测-纠正永远慢一帧，而冻结高度会把后续输出裁掉。
+    // 本方案不纠正、而是**消除漂移源**：离开底部的那一刻把流式内容拍成快照，高度不再变 ⇒
+    // 没有任何东西能推动上方内容；滑回底部时切回实时，新内容一次性补上。
+    // 代价（issue 自己列过，用户已知）：上翻期间看不到新输出 —— 但那时他本来就在读旧内容。
+    var frozenLiveParts by remember(state.conversationId) {
+        mutableStateOf<List<LivePart>>(emptyList())
+    }
+    LaunchedEffect(scroll.stickToBottom) {
+        // 离开底部 = 冻结此刻；回到贴底 = 解冻（一次性追平）。
+        frozenLiveParts = if (scroll.stickToBottom) emptyList() else state.liveParts
+    }
+    // 边界：离开底部时还没有任何内容，之后才到的第一块也要冻住，否则它会一边长一边推。
+    LaunchedEffect(state.liveParts.isNotEmpty()) {
+        if (!scroll.stickToBottom && frozenLiveParts.isEmpty() && state.liveParts.isNotEmpty()) {
+            frozenLiveParts = state.liveParts
+        }
+    }
+    // **渲染用哪一份**（issue #17 细节 5）：一轮结束时 `state.liveParts` 变空，冻结快照就过期了 ——
+    // 那时流式行本该消失（内容已落进存储消息），不能拿旧快照继续画。
+    val livePartsToRender = when {
+        scroll.stickToBottom -> state.liveParts
+        state.liveParts.isEmpty() -> emptyList()
+        else -> frozenLiveParts
+    }
     // 切换会话时给转录一个入场（issue #12）。**不做 crossfade**：那会同时持有两份
     // composition，大会话的内存峰值翻倍。
     //
@@ -1174,7 +1202,7 @@ fun ChatScreen(
                                 // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
                                 Column(Modifier.onSizeChanged { liveHeight = it.height }) {
                                     AssistantRow(
-                                        parts = state.liveParts.mapNotNull { part ->
+                                        parts = livePartsToRender.mapNotNull { part ->
                                             when (part) {
                                                 is LivePart.Thinking ->
                                                     if (settings.showReasoning) {
