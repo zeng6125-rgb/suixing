@@ -1440,3 +1440,32 @@ release 发布也算一次动作，不跟「打包」混为一谈（用户没说
 **结果**：提交 `a47f087`（只改 `app/build.gradle.kts:16-17`）；`compileDebugKotlin --no-build-cache` 0 warning（`^w: ` 计数 0，唯一告警是 test worker 的 OpenJDK bootclasspath 提示）；`testDebugUnitTest` **525/0/0/0**（XML 时间戳 22:15，本次真跑）；`assembleRelease` 成功 41s；`aapt` = `vc269 / 0.8.258`；**装机 Success**，`dumpsys` = `269 / 0.8.258`（覆盖升级，数据保留）；APK 归档 `dist/suixing-0.8.258.apk`（15,642,525 B，sha256 `65d50e22a5ac2a17…d1bf3`，证书同 sideload `9a33761b…aa8ee`）。
 
 **用户当轮授权**：「打包安装」= 出包 + 装机两件事一起放行（这是 §4 第 26/31 条要求的口径：每轮单独说）。
+
+### 8.56 #14 定因并修复：选区 bring-into-view（2026-10-21 00:2x，`session-40b7b69c…`）
+
+**真机日志坐实根因**（`filesDir/scroll-jump.log`，取日志：`adb exec-out "su -c 'cat /data/data/com.suixing.agent/files/scroll-jump.log'"`，注意 Git Bash 要 `MSYS_NO_PATHCONV=1`）：
+
+```
+guard-on             idx=0/0  canBack=false
+hold-move 0/148 d=148 moved=false inProg=true     ← 按下后 365ms 开始
+hold-move 0/285 d=137 …
+hold-move 0/621 d=1
+lock-would-correct offset-drift=621
+biv off=-20 size=2507 container=2510 want=-621 → -473 → -336 → … → -1
+```
+
+⇒ **Compose 为选区做的 `bringIntoView` 把 LazyColumn 滚走 621px**，手指全程 `moved=false`；被选中的消息几乎整屏高（2507/2510），框架试图整条露出。**不是抖动、不是 IME/让位**（那类变化不改写 `firstVisibleItemScrollOffset`，也不会让 `canScrollBackward` 翻转）。
+
+**排除法记录**：`ChatScreen.kt` 无 `scrollBy`/`animateScrollBy` 调用点（只有 import）；`ChatBlocks.kt:428/430/446` 的 `dispatchRawDelta` 要求 `canScrollBackward==true`，起步 false ⇒ 非点火者。
+
+**修法（`ChatScreen.kt`，0.8.260/vc271，提交 `d4a2a64`）**：
+- `revealGuardSpec`（`LocalBringIntoViewSpec provides`）——按下起 `calculateScrollDistance` 返回 `0f`；
+- **安静期**：每次被挡请求刷新时间戳，请求停止 **500ms** 才放行（请求逐帧到达，只挡到抬手动画收尾仍会滚）；
+- 不拦时**严格等价转发**（`calculateScrollDistance` + `scrollAnimationSpec` 两个成员都要转发，漏后者会落到接口默认实现）；
+- 取证日志保留：`hold-move`（变化帧）、`biv-block`（被拦请求）。
+- 取舍：选区贴边时列表不再自动露出选区（松手 500ms 后恢复）。
+
+**验收数字**：compile `w:` 0 条；单测 **525/0/0/0**（XML 00:29 真跑）；assembleRelease 59s；`aapt` 271/0.8.260；装机 Success，`dumpsys` 271/0.8.260；APK `dist/suixing-0.8.260.apk`（sha256 `8a7dfc19…`）。
+
+**取日志的完整可用写法**（本轮实测，`adb devices` 空 ⇒ 无线调试断，等 daemon 重启或 `adb mdns services` 重发现；设备自行恢复过一次）：
+`MSYS_NO_PATHCONV=1 adb exec-out "su -c 'cat /data/data/com.suixing.agent/files/scroll-jump.log'" > dist/scroll-jump.log`，随后把 CRLF 归一成 LF 再读。
