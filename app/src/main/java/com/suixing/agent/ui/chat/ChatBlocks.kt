@@ -435,6 +435,14 @@ private fun RevealHeight(
             layout(constraints.maxWidth, 0) { }
         } else {
             val placeable = measurables.first().measure(constraints.copy(minHeight = 0))
+            // **注意：不能用 `constraints.maxHeight` 钳**（issue #24 情况 A 在这里不成立）。
+            // `LazyColumn` 测量子项时，滚动方向给的是 `Constraints.Infinity` —— 两层 RevealHeight
+            // 都嵌在 LazyColumn 的 item 里，所以拿到的 maxHeight 都是无穷大，钳了等于没钳（实测
+            // 加过这行、是空操作，已撤回）。320dp 的 `heightIn` 在**内容里**（`ChatBlocks.kt:1117`），
+            // 约束不会传进本函数。
+            // ⇒ 真正要修 #22，必须让嵌套层知道「父容器实际长了多少」：给那个 320dp 的 LazyColumn
+            //   挂 `onSizeChanged` 并经 CompositionLocal 传下来，嵌套 RevealHeight 按**父高度增量**
+            //   补偿（顶到 320dp 时父高度不变 ⇒ 补 0）。这一版先不动，见 issue #24 问题 3 的情况 B。
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
             layout(constraints.maxWidth, h) { placeable.place(0, 0) }

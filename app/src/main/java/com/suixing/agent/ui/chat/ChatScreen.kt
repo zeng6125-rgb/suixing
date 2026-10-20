@@ -243,6 +243,7 @@ import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -742,8 +743,17 @@ fun ChatScreen(
                 val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == lockKey }
                 when {
                     target == null -> scrollTrace("lock-skip reason=offscreen lock=$lockKey")
-                    target.index == listState.firstVisibleItemIndex ->
-                        scrollTrace("lock-skip reason=same idx=${target.index}")
+                    // **同 index 也要比 offset**（issue #24 问题 2）：上一版只比 index 就判「same」，
+                    // 而 SelectionContainer 建立选区造成的布局微调**通常正是 offset 级变化**，
+                    // 于是 #14 的位移全被这一步当成「不用纠」跳过、日志里也看不见。
+                    target.index == listState.firstVisibleItemIndex -> {
+                        val drift = listState.firstVisibleItemScrollOffset - lockOffset
+                        if (abs(drift) > 1) {
+                            scrollTrace("lock-would-correct offset-drift=$drift")
+                        } else {
+                            scrollTrace("lock-skip reason=same-position")
+                        }
+                    }
                     else -> {
                         // **只记录，不执行**（用户：「滑上一点，就滚下来一点，滑多了就不会」）。
                         //
@@ -853,11 +863,18 @@ fun ChatScreen(
     // 位置稳定 120ms 才会写一次。流式期间位置每 40ms 变一次 ⇒ collectLatest 一直取消 ⇒
     // **锚点不会被更新**（它不是"永远是 null"：用户停手之后仍会写一次；但如果他只在流式期间
     // 滚动过，就可能一次都没写上）。用 `pressed` 的下降沿触发，与位置变化频率无关。
+    // 锚点在「**手指没按 + 不在滚（含惯性）**」时才记（issue #24）。
+    // 上一版只看 `pressed`：松手那一刻就记，但**惯性滚动才刚开始**，还会滚 200px ——
+    // 锚点记的是惯性"开始前"的位置，切回当然不对。`combine` 没有 debounce，不会被流式打断。
     LaunchedEffect(listState) {
-        snapshotFlow { pressed }.collect { isPressed ->
-            if (isPressed) return@collect
-            // 恢复位置的那几帧不记：那时首可见项还是上一个会话留下的布局（issue #15）。
-            if (scroll.stickToBottom || scroll.restoring) return@collect
+        combine(
+            snapshotFlow { pressed },
+            snapshotFlow { listState.isScrollInProgress },
+        ) { isPressed, scrolling -> isPressed to scrolling }
+            .collect { (isPressed, scrolling) ->
+                if (isPressed || scrolling) return@collect
+                // 恢复位置的那几帧不记：那时首可见项还是上一个会话留下的布局（issue #15）。
+                if (scroll.stickToBottom || scroll.restoring) return@collect
             // **只记消息行**：首可见项常是 `load-earlier` / `streaming:` 这类临时行，
             // 它们的 key 切回来时找不到对应消息（issue #16 的核心）。
             val first = listState.layoutInfo.visibleItemsInfo
