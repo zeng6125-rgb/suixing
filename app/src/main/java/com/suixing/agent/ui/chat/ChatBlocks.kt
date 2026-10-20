@@ -305,6 +305,18 @@ internal val LocalReadingPinned = compositionLocalOf { false }
 internal val LocalChatListState = compositionLocalOf<androidx.compose.foundation.lazy.LazyListState?> { null }
 
 /**
+ * 外层**有高度上限的滚动容器**自己的高度（issue #22）。
+ *
+ * 工具列表是 `LazyColumn(heightIn(max = 320dp))`，里面的 [RevealHeight] 长高时，只有当这个
+ * 容器还在**上限以下**才会真的把主列表顶上去；一旦顶到 320dp，容器高度不再变、主列表也不动，
+ * 但 [RevealHeight] 仍按自己的自然高度补 ⇒ 多补，动画结束再一次性拉回（用户的「被动画拉回」）。
+ *
+ * 所以嵌套层不能按「自己长了多少」补，要按**这个容器长了多少**补：顶到上限时它的增量为 0，
+ * 补偿自然是 0。为 null 表示外面没有这样的容器（第一层），按原来的自然高度补。
+ */
+internal val LocalExpansionParentHeight = compositionLocalOf<androidx.compose.runtime.State<Int>?> { null }
+
+/**
  * 外观 → 打字机效果（默认开）。只落在**两个**流式渲染点上：正文的 Markdown 与思考块。
  * 用 composition local 而不是逐层传参，是因为这两点离设置有好几层，而参数要穿过折叠卡片、
  * 工具块、轮次渲染器。
@@ -362,6 +374,8 @@ private fun RevealHeight(
     val natural = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
     val outer = LocalChatListState.current
+    // 组合期读取（CompositionLocal 不能在 LaunchedEffect 里读）：外层有上限的滚动容器高度。
+    val parentHeightState = LocalExpansionParentHeight.current
     // **这个块在根坐标系里的 y**（issue #22）：补偿量不再靠"推算长了多少"，而是量
     // "动画前后这个块实际移动了多少"。任何布局约束（`heightIn(max)`、嵌套滚动、`weight`）
     // 让实际高度 ≠ 自然高度时，推算都会错，测量不会。
@@ -397,13 +411,24 @@ private fun RevealHeight(
         //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
         // 所以逐帧回到原来的写法（对第一层已验证有效），把"被钳位吃掉的量"交给 ③ 的收尾对账。
         val begin = withFrameNanos { it }
+        // **嵌套在有上限的容器里时，按容器高度增量补**（issue #22）：顶到 320dp 后容器不再长，
+        // 增量就是 0，自然不补 —— 这正是「钳位时不要多补」的正解，不用去猜约束。
+        val parentH = parentHeightState
+        var lastParent = parentH?.value ?: -1
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
             val oldH = px * progress
             progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
             if (outer != null && outer.canScrollBackward) {
-                outer.dispatchRawDelta(px * progress - oldH)
+                if (parentH != null) {
+                    val cur = parentH.value
+                    val delta = if (lastParent < 0) 0 else cur - lastParent
+                    lastParent = cur
+                    if (delta != 0) outer.dispatchRawDelta(delta.toFloat())
+                } else {
+                    outer.dispatchRawDelta(px * progress - oldH)
+                }
             }
             if (t >= 1f) break
         }
@@ -1111,10 +1136,17 @@ internal fun ToolBundle(
         } else {
             // Same family as the thinking block: bounded at 320dp with its own lazy list,
             // so a run of twenty calls does not stretch the bubble past the screen.
+            //
+            // **把本容器的高度供下去**（issue #22）：里面的 ToolRow/RevealHeight 展开时，
+            // 只有本容器还在 320dp 以下才会真的把主列表顶上去；顶到上限后本高度不变 ⇒
+            // 嵌套层按这个增量补，补 0，不再「多补再拉回」。
+            val toolListHeight = remember { mutableIntStateOf(0) }
+            CompositionLocalProvider(LocalExpansionParentHeight provides toolListHeight) {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 320.dp),
+                    .heightIn(max = 320.dp)
+                    .onSizeChanged { toolListHeight.intValue = it.height },
                 // 不再加 8dp 行距：多工具里每个工具点开后的样子必须和「单个工具」一致，
                 // 多一层间距就是多一层它没有的边距。
             ) {
@@ -1132,6 +1164,7 @@ internal fun ToolBundle(
                         },
                     )
                 }
+            }
             }
         }
     }
