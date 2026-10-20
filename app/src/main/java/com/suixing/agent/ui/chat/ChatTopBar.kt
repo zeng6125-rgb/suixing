@@ -163,7 +163,6 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -175,7 +174,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -692,13 +690,14 @@ internal fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit)
 /** The small 复制 / 编辑 row under a bubble. */
 @Composable
 internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> Unit) {
-    val clipboard = LocalClipboardManager.current
+    // 复制走 [rememberCopyToClipboard]：写剪贴板 + Toast（用户：「复制后给个提示」）。
+    val copy = rememberCopyToClipboard()
     Row(
         modifier = Modifier.padding(top = 2.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TinyAction(ImageVector.vectorResource(R.drawable.ic_copy), "复制") {
-            clipboard.setText(AnnotatedString(message.text))
+            copy(message.text)
         }
         TinyAction(ImageVector.vectorResource(R.drawable.ic_square_pen), "修改") { onEdit(message) }
     }

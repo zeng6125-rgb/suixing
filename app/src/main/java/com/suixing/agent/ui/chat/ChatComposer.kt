@@ -362,6 +362,15 @@ internal val POPUP_EDGE = 8.dp
 /** 取消追底的手指位移阈值（用户：「取消的最小方法就是往上移动一点就需要取消」）。 */
 internal const val CANCEL_FOLLOW_PX = 4f
 
+/**
+ * 阅读锚点「还算漂移」的上限（issue #11/#15，设计 A）。
+ *
+ * 帧回调里每帧对一次账：偏差在这以内 ⇒ 当成内容长高造成的漂移，直接补掉；
+ * 超过它 ⇒ 是用户自己滚了，把锚点跟上去而不是把人拽回原处。
+ * 200px 大约是一整张卡片的高度，正常的长高不会一帧跳这么多。
+ */
+internal const val USER_SCROLL_PX = 200
+
 /** 弹窗离屏幕边缘的**呼吸感**（用户：「弹窗位置不要贴屏幕边缘，留点呼吸感」）。 */
 internal val POPUP_EDGE_AIR = 16.dp
 

@@ -163,7 +163,6 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -175,7 +174,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.TextStyle
@@ -882,17 +880,17 @@ internal fun ReasoningBlock(
             ProcessStatus(item)
         }
         if (streaming) {
-            // 用户口径两次叠加：先「运行中的 icon 左右间距不一致」⇒ 放进方槽居中；后「左右边距小一点」
-            // ⇒ 槽外 7dp 收紧到 4dp。**这一处故意不再跟 meta 项的 7dp 走**：spinner 是图标不是文字，
-            // 和「256 tokens」读成一组反而更松；meta 项之间仍是 7dp。
-            Spacer(Modifier.width(4.dp))
+            // 用户口径三次叠加：先「运行中的 icon 左右间距不一致」⇒ 放进方槽居中；
+            // 再「左右边距小一点」⇒ 7dp → 4dp；再「再小一点」⇒ 4dp → 2dp。
+            // **这一处故意不跟 meta 项的 7dp 走**：spinner 是图标不是文字，和「256 tokens」读成一组太松。
+            Spacer(Modifier.width(2.dp))
             Box(
                 modifier = Modifier.size(14.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 ProcessSpinner(MaterialTheme.colorScheme.primary)
             }
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(2.dp))
         }
     }
     if (nested) {
@@ -1034,7 +1032,12 @@ internal fun ToolBundle(
     startExpanded: Boolean = false,
 ) {
     var expanded by remember { mutableStateOf(startExpanded) }
-    var openTool by remember { mutableStateOf<String?>(null) }
+    // **每个工具独立展开**（issue #20）：原来是单个 `String?`，展开 B 会覆盖 A ——
+    // 想同时对照「第 1 个的输入」和「第 3 个的输出」就得来回点。用 Set 记住所有打开的，
+    // 展开新的不影响已开的。
+    // 代价（issue #20 自己提的）：多个 `RevealHeight` 会同时跑动画，位置补偿的负载上升，
+    // 与 #13 是同一处风险 —— 若实测位置跳动更明显，再考虑限制「最多同时开 N 个」。
+    var openTools by remember { mutableStateOf(emptySet<String>()) }
     val failures = tools.count { it.done && !it.ok }
     // One call is its own name; several are a count, because the names are what the
     // expanded list is for.
@@ -1093,13 +1096,16 @@ internal fun ToolBundle(
             ) {
                 items(tools.size) { index ->
                     // 每个工具**各自**点开（用户：「不是点击多个工具马上平铺各个工具」），
+                    // 但彼此**不互斥**：展开第二个不会收起第一个（issue #20）。
                     // 展开后的内容与单个工具同一套（ToolRow 内部不再加缩进）。
                     val tool = tools[index]
                     val key = tool.message?.id ?: "live-$index"
                     ToolRow(
                         line = tool,
-                        expanded = openTool == key,
-                        onToggle = { openTool = if (openTool == key) null else key },
+                        expanded = key in openTools,
+                        onToggle = {
+                            openTools = if (key in openTools) openTools - key else openTools + key
+                        },
                     )
                 }
             }
@@ -1117,7 +1123,8 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
     val scheme = MaterialTheme.colorScheme
     val args = line.args.takeIf { it.isNotBlank() && it != "{}" }
     val output = line.message?.toolOutput?.takeIf { it.isNotBlank() }
-    val clip = LocalClipboardManager.current
+    // 工具输出的「复制」：写剪贴板 + Toast（用户：「复制后给个提示」）。
+    val copyOutput = rememberCopyToClipboard()
     // 与思考块同一套形态：**虚拟列表 + 高度上限**，内容比上限短时按真实高度渲染。
     // 两处刻意的差别（用户要求）：
     //  · 命令**不截断**（原来 maxLines = 2 + Ellipsis，长命令根本读不全）；
@@ -1181,7 +1188,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                     )
                     Spacer(Modifier.weight(1f))
                     IconButton(
-                        onClick = { clip.setText(AnnotatedString(output)) },
+                        onClick = { copyOutput(output) },
                         modifier = Modifier.size(28.dp),
                     ) {
                         Icon(

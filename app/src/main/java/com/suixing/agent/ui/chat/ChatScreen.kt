@@ -46,6 +46,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.transformable
@@ -714,21 +715,14 @@ fun ChatScreen(
         if (!pressGuardOn) return@LaunchedEffect
         scrollTrace("guard-on")
         setSelectionActive?.invoke(true)
-        // **长按选字期间锁住列表**（issue #14）：`SelectionContainer` 建立选区时会让 Compose 重排，
-        // 底锚随即按 key 重新锚定 —— 于是「长按复制，位置变了」。这里记下按下那一刻的锚点，
-        // 每帧发现被推走就按 key 拉回；绝对定位，不累积误差（与 #11/#13 同一方向）。
-        // 手指移动过（`pressMoved`）就不再锁：那是用户在滚，锁住会跟手指打架。
-        val lockKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
-        val lockOffset = listState.firstVisibleItemScrollOffset
+        // **这里不再锁滚动**（issue #18，v0.8.238 的严重回归已撤）：
+        // 上一版写了 `visibleItemsInfo.indexOfFirst { … }` 当 item index 用 —— 那是**数组下标**，
+        // 而 `scrollToItem` 要的是全局 index。两者几乎永不相等 ⇒ 任何一次按下都会在 400ms 守护窗口里
+        // 每帧 `scrollToItem(0..5, …)`，把列表甩到最底部附近 —— 用户看到的就是「没流式也乱飘」。
+        // #14 本来也没被验证通过，所以整段撤掉，而不是修下标：留着一个没证明有效的机制、
+        // 又每帧写滚动位置，风险远大于收益。
         try {
             while (pressGuardOn) {
-                if (lockKey != null && !pressMoved) {
-                    val idx = listState.layoutInfo.visibleItemsInfo
-                        .indexOfFirst { it.key == lockKey }
-                    if (idx >= 0 && idx != listState.firstVisibleItemIndex) {
-                        listState.scrollToItem(idx, lockOffset)
-                    }
-                }
                 if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
                     pressGuardOn = false
                 }
@@ -769,8 +763,12 @@ fun ChatScreen(
         lastFaded = state.conversationId
         withFrameNanos { }
         withFrameNanos { }
+        // **只做「防闪烁」，不做过渡**（issue #12 方向 1，用户实测 320ms「还是怪」）。
+        // 320ms 的纯 alpha 本质是「显影」不是「过渡」：内容早就在位，只是从看不见变得看得见，
+        // 看起来像蒙层在消失。IM 类应用的会话切换是瞬间的，加长动画反而增加负担。
+        // 留 100ms 只为避免硬切的闪一下，肉眼几乎察觉不到。
         switchAlpha.snapTo(0f)
-        switchAlpha.animateTo(1f, tween(320))
+        switchAlpha.animateTo(1f, tween(100))
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
@@ -785,7 +783,11 @@ fun ChatScreen(
     // 于是拿 A 的位置去滚 B —— #4 的「串味」就这么回来了。
     val anchors = remember { mutableStateMapOf<String, Pair<Any?, Int>>() }
     val anchorKey: Any? = anchors[state.conversationId]?.first
-    val anchorOffset: Int = anchors[state.conversationId]?.second ?: 0
+    // **只记「消息行」的 key**（issue #15 的失败原因之一）：首可见项经常是 `load-earlier`、
+    // `streaming:<id>`、`live-status:<id>` 这类临时行，它们的 key 在切回来时**找不到对应消息**
+    // （`visible.indexOfFirst { it.message.id == saved.first }` 恒为 -1），于是恢复直接掉回底部。
+    // 现在记锚点时跳过这些行，取第一个真正的消息 id。
+    val messageIds = remember(visible) { visible.mapTo(HashSet()) { it.message.id } }
     // 记锚点：**不能看 `isScrollInProgress`**（issue #11 补充评论）。流式内容长高时 LazyColumn 的
     // 内部重排会被算成「正在滚动」，于是这个值在流式期间一直是 true —— 锚点永远记不下来，
     // 纠正逻辑也就永远检测不到 drift（用户实测：「抖动没了，但位置仍会持续漂移」）。
@@ -797,29 +799,28 @@ fun ChatScreen(
                 delay(120)
                 // 恢复位置的那几帧不记：那时首可见项还是上一个会话留下的布局（issue #15）。
                 if (scroll.stickToBottom || pressed || scroll.restoring) return@collectLatest
-                listState.layoutInfo.visibleItemsInfo.firstOrNull()?.let { first ->
-                    anchors[state.conversationId] = first.key to listState.firstVisibleItemScrollOffset
+                val first = listState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.key in messageIds } ?: return@collectLatest
+                // 如果它就是首可见项，偏移量照实记；如果它被上面那些临时行压着，就记 0
+                // （`scrollToItem` 的 offset 不能为负，记 0 等于"把这条顶到视口顶部"，稳定可复现）。
+                val offset = if (first.index == listState.firstVisibleItemIndex) {
+                    listState.firstVisibleItemScrollOffset
+                } else {
+                    0
                 }
+                anchors[state.conversationId] = first.key to offset
             }
     }
-    // 流式行每长高一次就检查一遍：锚点还在屏幕上、但我们看到的位置偏了，就纠回去。
-    // 2px 以内不纠（issue 里提的容差）—— 否则每一帧都在写滚动位置，反而会抖。
-    // 跳过条件同样**不能看 `isScrollInProgress`**（同一个坑）：只看「贴底」和「手指按着」。
-    LaunchedEffect(listState) {
-        snapshotFlow { liveHeight }.collect {
-            val key = anchorKey ?: return@collect
-            // 恢复位置的那几帧不纠（issue #15）：那时列表还在按 spots 定位，插一脚只会打架。
-            if (scroll.stickToBottom || pressed || scroll.restoring) return@collect
-            val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }
-                ?: return@collect
-            val drift = if (target.index == listState.firstVisibleItemIndex) {
-                listState.firstVisibleItemScrollOffset - anchorOffset
-            } else {
-                Int.MAX_VALUE
-            }
-            if (abs(drift) > 2) listState.scrollToItem(target.index, anchorOffset)
-        }
-    }
+    // **设计 A 的每帧对账：暂时停用**（issue #18 之后）。
+    //
+    // 它每帧都在 `dispatchRawDelta` —— 那是目前唯一还会在「用户没动」时写滚动位置的地方。
+    // v0.8.238 已经证明：这类"看到偏差就纠"的逻辑一旦判断有误，表现就是乱飘，而且无法归因。
+    // 现在把它整段停掉，让列表回到「只有用户在滚、只有底锚在跟」的状态：
+    // 静止时没有任何东西会动它，先把「不乱飘」这个基线拿回来，再谈漂移怎么修。
+    //
+    // 流式上翻的漂移因此**回到未修状态**（#11 仍未解决），但那是已知的、可接受的代价 ——
+    // 比"静止也乱飘"轻得多。下一版若要重做，方向是 issue #17 说的：不要"检测偏差→纠正"，
+    // 而是在布局前把锚点钉住（例如给流式行预留高度 / 用 LazyColumn 的 key 锚定重建）。
     // 一轮结束（实时行 → 存储行）那一帧里同时发生四件事：实时行被替换、状态行消失、指标行出现、
     // 让位 12→16dp。贴底协程跑在布局定型之前，读到的还是旧高度 ⇒ 结束后停在离底部差一截的地方
     // （用户：「输出完，滚动位置还是不对，应该跟空闲一样」）。等两帧让新布局落地，再补贴一次。
@@ -850,33 +851,47 @@ fun ChatScreen(
         openedPinned = true
         // 显式对齐一次：下面的读写都按"当前会话"取键，不能等 SideEffect 的时序（issue #4）。
         scroll.conversationId = state.conversationId
-        val saved = scroll.takeSpot(state.conversationId)
-        val idx = if (saved?.first != null) {
-            visible.indexOfFirst { it.message.id == saved.first }
-        } else {
-            -1
-        }
-        if (idx >= 0 && saved != null) {
-            // 恢复期间挂上闸：`scrollToItem` 之后布局还没定型，`canScrollBackward` 会短暂为假，
-            // "滚到底就把贴底打开"的 collector 会立刻把下面这个 false 改回 true（链路 4）。
-            scroll.restoring = true
-            try {
-                scroll.stickToBottom = false
-                scroll.spotKey = saved.first
-                scroll.spotOffset = saved.second
-                // 喂序索引＝底锚倒序里 visible 第 idx 行的位置；offset 即 firstVisibleItemScrollOffset。
-                listState.scrollToItem(fedIndexOf(idx), saved.second)
-                withFrameNanos { }
-                withFrameNanos { }
-                // **两套机制对齐**（issue #15 第 3 条）：恢复出来的位置就是这一轮的锚点。
-                // 不写的话，流式纠正会拿着「切走前那个会话的旧锚点」或空锚点去纠，和恢复打架。
-                anchors[state.conversationId] = saved.first to saved.second
-            } finally {
-                scroll.restoring = false
-            }
-        } else {
+        // **以 `anchors` 为准**（issue #15）：它是按会话存、按消息 id 记的，切走时不用再存一次
+        // （`ChatScroll.spots` 那条路要求「切走那一刻」正好读对，容易被时序坑到）。
+        // 两条都查，是为了兼容本次改动之前已经存进 spots 的位置。
+        val saved = anchors[state.conversationId] ?: scroll.takeSpot(state.conversationId)
+        val savedKey = saved?.first
+        if (savedKey == null) {
+            // 没有记忆就回底 —— 这是**唯一**该回底的分支（issue #16）。
             scroll.stickToBottom = true
             scroll.toBottom()
+            return@LaunchedEffect
+        }
+        // 恢复期间挂上闸：`scrollToItem` 之后布局还没定型，`canScrollBackward` 会短暂为假，
+        // "滚到底就把贴底打开"的 collector 会立刻把下面这个 false 改回 true（链路 4）。
+        scroll.restoring = true
+        try {
+            scroll.stickToBottom = false
+            scroll.spotKey = savedKey
+            scroll.spotOffset = saved.second
+            // ① 粗定位：`fedIndexOf` 只是起点，允许差一两项。
+            val approx = visible.indexOfFirst { it.message.id == savedKey }
+            if (approx >= 0) {
+                listState.scrollToItem(fedIndexOf(approx), saved.second)
+                withFrameNanos { }
+            }
+            // ② 精确校正：按 **key** 在 layoutInfo 里找全局 index（issue #16 第三步）。
+            //    `target.index` 是 LazyColumn 自己给的，不需要任何 feedPrefix 换算 ——
+            //    存/取时 prefix 不同（流式开始/结束）也不会影响最终位置。
+            withFrameNanos { }
+            val target = listState.layoutInfo.visibleItemsInfo
+                .firstOrNull { it.key == savedKey }
+            if (target != null) {
+                listState.scrollToItem(target.index, saved.second)
+                withFrameNanos { }
+                anchors[state.conversationId] = savedKey to saved.second
+            } else {
+                // key 完全找不到（消息被删 / 分支切换）：只能回底，别停在随机位置。
+                scroll.stickToBottom = true
+                scroll.toBottom()
+            }
+        } finally {
+            scroll.restoring = false
         }
     }
     // 外观 → 气泡宽度. Measured against the screen, which is what the setting promises
@@ -1045,9 +1060,15 @@ fun ChatScreen(
                             // 输入框这一侧。
                             bottom = stackFootprint,
                         ),
-                        // 内容不满一屏时也压到底：默认的 top 排列在倒序里会把短对话顶到上面，
-                        // 最后一张卡片长高就还是往下长。内容溢出后 arrangement 不参与。
-                        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Bottom),
+                        // **内容不满一屏时贴顶**（issue #19，用户：「新会话气泡就应该在上面，然后再流式
+                        // 长下来，旧内容不就往上推了」）。底锚（reverseLayout）已经负责"满了之后"：
+                        // index 0 钉在底部、新内容向上长、旧内容被推上去；arrangement 只在内容不满一屏时
+                        // 参与，所以这里改一个词就够，不需要混合判断。
+                        //
+                        // 风险（issue 自己提的）：当年从 Top 改回 Bottom，注释写的是「短对话被顶到上面、
+                        // 最后一张卡片长高就还是往下长」—— 那正是用户现在要的行为，所以大概率是当年
+                        // 判断反了。若满屏那一刻有跳变，退回 `Alignment.Bottom` + offset 方案。
+                        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Top),
                     ) {
                         if (live) {
                             // Keyed by conversation: the live row keeps its slot for as long
@@ -1349,7 +1370,15 @@ fun ChatScreen(
                     // A jump to a turn that is no longer drawn is a no-op, never a crash.
                     // 底锚：turnIndices 是 visible 坐标（含 rowOffset），换算成喂序索引再跳。
                     turnIndices.getOrNull(turn)?.let { index ->
-                        scope.launch { listState.animateScrollToItem(fedIndexOf(index - rowOffset)) }
+                        scope.launch {
+                            // **跳历史必须先关追底**（issue #21）：否则 ChatScroll 的追底逻辑
+                            // （`if (want.stick && …) scrollToItem(0)`）会在同一帧把列表拉回底部，
+                            // animateScrollToItem 被打断 —— 用户看到的就是「点了没反应」。
+                            // 用户实测「不在追底就不会」，正好印证触发条件就是 stickToBottom。
+                            // 跳完保持 false：跳到历史本来就是为了读旧内容，不该被新内容拉回去。
+                            scroll.stickToBottom = false
+                            listState.animateScrollToItem(fedIndexOf(index - rowOffset))
+                        }
                     }
                 },
             )
