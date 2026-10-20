@@ -1467,5 +1467,12 @@ biv off=-20 size=2507 container=2510 want=-621 → -473 → -336 → … → -1
 
 **验收数字**：compile `w:` 0 条；单测 **525/0/0/0**（XML 00:29 真跑）；assembleRelease 59s；`aapt` 271/0.8.260；装机 Success，`dumpsys` 271/0.8.260；APK `dist/suixing-0.8.260.apk`（sha256 `8a7dfc19…`）。
 
+**真机验收通过（同一套日志，2026-10-21 00:35）**：
+```
+修复前 0.8.259： guard-on 0/0 → hold-move d=148 → 137 → 59 … → 1 → offset-drift=621
+修复后 0.8.260： guard-on 0/0 → biv-block off=-621 (want 被钳 0) → lock-skip reason=same-position → guard-off
+```
+连续两次长按均为 `same-position`、零 `hold-move`、`canBack` 始终 false ⇒ 列表一次都没被推走。
+
 **取日志的完整可用写法**（本轮实测，`adb devices` 空 ⇒ 无线调试断，等 daemon 重启或 `adb mdns services` 重发现；设备自行恢复过一次）：
 `MSYS_NO_PATHCONV=1 adb exec-out "su -c 'cat /data/data/com.suixing.agent/files/scroll-jump.log'" > dist/scroll-jump.log`，随后把 CRLF 归一成 LF 再读。
