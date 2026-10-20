@@ -1476,3 +1476,28 @@ biv off=-20 size=2507 container=2510 want=-621 → -473 → -336 → … → -1
 
 **取日志的完整可用写法**（本轮实测，`adb devices` 空 ⇒ 无线调试断，等 daemon 重启或 `adb mdns services` 重发现；设备自行恢复过一次）：
 `MSYS_NO_PATHCONV=1 adb exec-out "su -c 'cat /data/data/com.suixing.agent/files/scroll-jump.log'" > dist/scroll-jump.log`，随后把 CRLF 归一成 LF 再读。
+
+### 8.57 #16 收口：三处修复（2026-10-21 01:3x，`session-40b7b69c…`）
+
+提交 `97675fc`（0.8.264 / vc275）。三处修复都在 `ChatScreen.kt` / `ChatScroll.kt`：
+
+1. **锚点从来没写进去** → `messageIds` 用 `rememberUpdatedState` 进收集器。
+   取证：35 次 `anchor-eval` / **0 次 `anchor-set`**。`LaunchedEffect(listState)` 只启动一次，闭包捕获首帧
+   （会话未加载）那份空集合，`firstOrNull { it.key in messageIds }` 永远 null。
+2. **偏移量语义错** → 锚点记 `-first.offset`。依据是日志实测恒等式：`scrollToItem(i, x)` 之后 item i 的
+   offset 恰为 `-x`（`idx=0/0`⇒`@0`；`idx=0/606`⇒`@-606`）。旧代码「不是首可见项就记 0」把"已滚过几千 px"
+   抹成 0 ⇒ 用户「第一次就偏了」。
+   验收：切走 `off=3429` → 切回 `restore-fine landed=2/139`，与离开时 `fv=2/139` 完全一致。
+3. **贴底离开不清旧位置** → `wasFollowing(conv)` 为真时清三个存储点（`anchors` + ChatScroll 新增
+   `forgetSpot()`：`spots`/`lastSeen`/`spotKey`+`spotOffset`），`saveSpot` 的贴底分支也改调 `forgetSpot`。
+   取证：上翻到 X(6589) → 点「回到最新」→ 切走 → 切回，日志 `restore-begin src=anchors off=6589`（跳回 X）。
+   ⚠️ **只清一处不够**：`spots` 那份同样是 X（它在"停住且不底部"时每帧写）。这条是用户复现后才发现的，
+   第一版修法（只清 anchors）必然复发。
+   验收（真机）：A 流程（追底后切回）落在底部 ✓；B 流程（普通上翻后切回）回到 Y ✓。
+
+**证据文件**（本地 `dist/`，已 gitignore）：`scroll-jump4.log`（0 次 anchor-set）、`scroll-jump5.log`（off=0 错值）、
+`scroll-jump6.log`（off=3429 正确）、`scroll-jump7.log`（贴底后仍读旧 X）。取日志命令见 §8.56。
+
+**诊断日志已全部删除**（`biv-block` / `hold-move` / `anchor-*` / `restore-begin|coarse|fine`）；
+沿用的 `scrollTrace` 基础设施（`guard-on/off`、`lock-*`、`stick=true reason=…`、`restore-no-saved`）保留未动，
+#17/#23 还会用。
