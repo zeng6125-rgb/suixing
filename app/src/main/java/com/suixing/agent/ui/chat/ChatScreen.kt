@@ -244,6 +244,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -926,8 +927,14 @@ fun ChatScreen(
     // 写成 true，它一在 key 里，这一写就让旧协程在第一个挂起点被取消 —— 于是下面「按 key 的精确
     // 校正」几乎从不执行，真正决定位置的只剩依赖 `feedPrefix` 的粗定位。它只是闸门，不当 key。
     var openedPinned by remember(state.conversationId) { mutableStateOf(false) }
-    LaunchedEffect(state.conversationId, itemCount) {
-        if (openedPinned || itemCount <= 0) return@LaunchedEffect
+    // **`itemCount` 不能进 key**（issue #16 的最后一环）：恢复流程里有 `withFrameNanos` 等挂起点，
+    // 而切会话/内容落地那一刻 itemCount 一定会变 —— key 一变协程立刻被取消，正好停在
+    // 「粗定位已做、按 key 精确校正还没做」的中间态，表现就是「恢复到大差不差的位置、但不是原位」。
+    // 改成在体内等 itemCount 就绪，协程只随 conversationId 重建。
+    LaunchedEffect(state.conversationId) {
+        if (openedPinned) return@LaunchedEffect
+        snapshotFlow { itemCount }.first { it > 0 }
+        if (openedPinned) return@LaunchedEffect
         openedPinned = true
         // 显式对齐一次：下面的读写都按"当前会话"取键，不能等 SideEffect 的时序（issue #4）。
         scroll.conversationId = state.conversationId

@@ -1187,13 +1187,10 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
     //  · 命令**不截断**（原来 maxLines = 2 + Ellipsis，长命令根本读不全）；
     //  · 输出不再用「固定 132dp 的滚动 Text」，而是逐行进入虚拟列表，长输出不会一次性排版。
     // 命令与输出都可选中复制（用户：「确实所有情况都要可复制」）。
-    // **不再用 SelectionContainer 包住整个 LazyColumn**（issue #14）：三层「可滚 + 可选中」
-    // 容器叠在一起时，长按建立选区会和内层列表抢手势，选区重排还会把主列表位置推走。
-    // 改成**每段文字各自一个 SelectionContainer**：仍可选中复制，但不包住滚动容器。
+    SelectionContainer {
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         if (args != null) {
             item(key = "args") {
-                SelectionContainer {
                 Text(
                     text = args,
                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
@@ -1204,7 +1201,6 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                     // 这样「只有输出」的卡片上方仍然是干净的 2dp。
                     modifier = Modifier.fillMaxWidth().padding(top = BLOCK_CONTENT_TOP),
                 )
-                }
             }
         }
         if (output != null) {
@@ -1264,7 +1260,6 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
             val rows = output.lines()
             // 逐行进虚拟列表：行数再多也只排版可见的那些。
             items(rows.size, key = { index -> "out-$index" }) { index ->
-                SelectionContainer {
                 Text(
                     text = rows[index],
                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
@@ -1274,9 +1269,9 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                         .fillMaxWidth()
                         .padding(start = if (line.ok) 0.dp else 11.dp),
                 )
-                }
             }
         }
+    }
     }
     line.message?.allImages?.forEach { ImageBlock(it) }
 }
