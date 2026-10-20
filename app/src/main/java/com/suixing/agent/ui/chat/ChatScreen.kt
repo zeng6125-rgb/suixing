@@ -743,9 +743,18 @@ fun ChatScreen(
                     target.index == listState.firstVisibleItemIndex ->
                         scrollTrace("lock-skip reason=same idx=${target.index}")
                     else -> {
-                        // `scrollTrace` 自己会带上当前的 idx，所以这里只标"要纠"和纠正目标。
-                        scrollTrace("lock-correct to=${target.index}/$lockOffset")
-                        listState.scrollToItem(target.index, lockOffset)
+                        // **只记录，不执行**（用户：「滑上一点，就滚下来一点，滑多了就不会」）。
+                        //
+                        // 这条纠正拿的是**按下那一刻**的 lockKey/lockOffset。正常上滑后
+                        // `firstVisibleItemIndex` 变了、而按下时那条 item 仍在屏幕内 ⇒ 它把你
+                        // 纠回按下时的位置 = 把刚滑的那段原样撤回；滑得够远时那条 item 已滚出
+                        // 屏幕、`target == null` ⇒ 不纠 → 所以「滑多了反而正常」。
+                        // 用户报的两半现象（小滑回弹 / 大滑正常）正是这一条的行为。
+                        //
+                        // 去掉执行 ≠ 放弃 #14：这里把「本来会纠到哪」写进 scroll-jump.log，
+                        // 真机长按复制时读日志即可判定 SelectionContainer 重排到底移了多少 ——
+                        // 那才是 issue #14 要求的第一步（先定位，再决定用哪种机制）。
+                        scrollTrace("lock-would-correct to=${target.index}/$lockOffset")
                     }
                 }
             }
