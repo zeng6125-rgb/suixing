@@ -715,6 +715,16 @@ fun ChatScreen(
             f.appendText(line)
         }
     }
+    val scroll = rememberChatScroll(
+        listState = listState,
+        autoFollow = settings.autoFollow,
+        pressed = pressed,
+        pressGuardOn = pressGuardOn,
+        // `listState` 来自 `rememberLazyListState()`（第 273 行），**全应用共用一个实例**，
+        // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
+        conversationId = state.conversationId,
+        trace = { scrollTrace(it) },
+    )
     LaunchedEffect(pressGuardOn) {
         if (!pressGuardOn) return@LaunchedEffect
         scrollTrace("guard-on")
@@ -751,6 +761,14 @@ fun ChatScreen(
                         val drift = listState.firstVisibleItemScrollOffset - lockOffset
                         if (abs(drift) > 1) {
                             scrollTrace("lock-would-correct offset-drift=$drift")
+                            // **关掉追底，而不是把位置纠回去**（issue #14，真机日志证据）：
+                            // 长按选字时选区重排把位置推走（手指没动，pressMoved=false），
+                            // 但 `stickToBottom` 仍是 true；守护一撤，追底立刻 scrollToItem(0)
+                            // 把它拉回底部 —— 日志里 guard-off @624 → 123ms 后 @0，中间没有
+                            // 任何 stick=true 标记，正是追底自己干的。
+                            // 纠正位置会把用户刚滚的那段撤回（0.8.242 的教训），关追底则只是
+                            // 「别再自动贴底」，位置留在选区所在处。
+                            if (!pressMoved) scroll.stickToBottom = false
                         } else {
                             scrollTrace("lock-skip reason=same-position")
                         }
@@ -768,6 +786,7 @@ fun ChatScreen(
                         // 真机长按复制时读日志即可判定 SelectionContainer 重排到底移了多少 ——
                         // 那才是 issue #14 要求的第一步（先定位，再决定用哪种机制）。
                         scrollTrace("lock-would-correct to=${target.index}/$lockOffset")
+                        if (!pressMoved) scroll.stickToBottom = false
                     }
                 }
             }
@@ -776,16 +795,6 @@ fun ChatScreen(
             setSelectionActive?.invoke(false)
         }
     }
-    val scroll = rememberChatScroll(
-        listState = listState,
-        autoFollow = settings.autoFollow,
-        pressed = pressed,
-        pressGuardOn = pressGuardOn,
-        // `listState` 来自 `rememberLazyListState()`（第 273 行），**全应用共用一个实例**，
-        // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
-        conversationId = state.conversationId,
-        trace = { scrollTrace(it) },
-    )
     // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
     var liveHeight by remember { mutableIntStateOf(0) }
     // 切换会话时给转录一个入场（issue #12）。**不做 crossfade**：那会同时持有两份
