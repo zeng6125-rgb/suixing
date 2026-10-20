@@ -38,13 +38,17 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -267,6 +271,7 @@ internal val SUGGESTIONS = listOf(
     "打开设置看看还剩多少存储空间",
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel = viewModel(),
@@ -686,7 +691,10 @@ fun ChatScreen(
     // 这一层没有任何"纠正"代码。
     var pressed by remember { mutableStateOf(false) }
     var pressUpAt by remember { mutableLongStateOf(0L) }
-    var pressGuardOn by remember { mutableStateOf(false) }
+    // 用 `mutableStateOf` 持有而不是 `by remember`：守护标记还要被下面的 bring-into-view 规格读到
+    // （它不在组合里跑，只能拿状态对象）。
+    val pressGuardState = remember { mutableStateOf(false) }
+    var pressGuardOn by pressGuardState
     /**
      * 这一次按下里手指移动过没有（issue #14）。
      *
@@ -725,9 +733,71 @@ fun ChatScreen(
         conversationId = state.conversationId,
         trace = { scrollTrace(it) },
     )
+    // **#14 的根因（真机日志 2026-10-21 00:25 坐实，不是推断）**：
+    // 长按建立选区后，框架会为「把选中的内容滚进视口」发起一次 bring-into-view，走的就是
+    // `LocalBringIntoViewSpec`。日志证据：`guard-on` 在 0/0，365ms 后开始逐帧位移
+    // （d=148/137/59/52/44/36/30 … 1），同期请求序列 `want=-621 → -473 → -336 → … → -1`，
+    // 合计 621px，与 `lock-would-correct offset-drift=621` 完全吻合；全程 `moved=false`（手指没动）。
+    // `size=2507 / container=2510` —— 被选中的消息几乎有整屏高，框架试图把它整个露出来。
+    //
+    // 修法是**在源头拒绝**，不是事后纠回去（事后纠会先跳一下再跳回来）：
+    // 按下期间让「要滚多远」恒为 0，选区的 bring-into-view 就推不动列表。
+    //
+    // 为什么还要一段「安静期」：请求是逐帧来的，只挡到抬手的话动画还没收完，
+    // 之后的帧照样把剩下的距离滚掉。所以每次被挡的请求都续期，请求停止 500ms 后才放行。
+    val revealBlocked = remember { mutableStateOf(false) }
+    val lastRevealRequestAt = remember { mutableLongStateOf(0L) }
+    val defaultBringIntoView = LocalBringIntoViewSpec.current
+    val revealGuardSpec = remember(defaultBringIntoView) {
+        // **严格等价**：不拦的时候，两个成员都原样转发 —— 位移量 `calculateScrollDistance`
+        // 与动画规格 `scrollAnimationSpec`。少转发后者会落到接口默认实现上，
+        // 只要原规格用的不是接口默认，滚动动画就变了。
+        object : BringIntoViewSpec {
+            private var wasBlocked = false
+            private var loggedThisWindow = false
+
+            override val scrollAnimationSpec: AnimationSpec<Float>
+                get() = defaultBringIntoView.scrollAnimationSpec
+
+            override fun calculateScrollDistance(
+                offset: Float,
+                size: Float,
+                containerSize: Float,
+            ): Float {
+                val blocked = revealBlocked.value
+                if (blocked != wasBlocked) {
+                    wasBlocked = blocked
+                    loggedThisWindow = false
+                }
+                if (!blocked) {
+                    return defaultBringIntoView.calculateScrollDistance(offset, size, containerSize)
+                }
+                lastRevealRequestAt.longValue = SystemClock.uptimeMillis()
+                if (!loggedThisWindow) {
+                    loggedThisWindow = true
+                    scrollTrace("biv-block off=$offset size=$size container=$containerSize")
+                }
+                return 0f
+            }
+        }
+    }
+    // 安静期：请求停止 500ms（远长于 60fps 的一帧）才放行，避免动画收尾时把剩下的距离滚掉。
+    LaunchedEffect(revealBlocked.value) {
+        if (!revealBlocked.value) return@LaunchedEffect
+        while (revealBlocked.value) {
+            delay(100)
+            if (SystemClock.uptimeMillis() - lastRevealRequestAt.longValue > 500L) {
+                revealBlocked.value = false
+            }
+        }
+    }
     LaunchedEffect(pressGuardOn) {
         if (!pressGuardOn) return@LaunchedEffect
         scrollTrace("guard-on")
+        // 按下就开始拦「把选中内容滚进视口」的请求（#14）：框架的这次滚动是为了露出选区，
+        // 而用户按住的正是眼前这段文字，露出它没有意义，只会把列表推走。
+        lastRevealRequestAt.longValue = SystemClock.uptimeMillis()
+        revealBlocked.value = true
         setSelectionActive?.invoke(true)
         // **只在结束时纠一次**（issue #14 建议）：v0.8.238 那版是逐帧纠 + 用数组下标当 item index，
         // 把列表甩到了底部。这里三个关键区别：
@@ -736,8 +806,22 @@ fun ChatScreen(
         //  · 不判断 `pressMoved` —— 选区扩展也是手指移动，那种情况同样需要纠。
         val lockKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
         val lockOffset = listState.firstVisibleItemScrollOffset
+        // **逐帧记一次「什么时候变的」**（#14 取证）：只记发生变化的帧，一行一个 delta，
+        // 从日志能直接分辨「一帧被瞬移」（程序滚动）还是「连续几十帧缓慢累积」（拖动/动画）。
+        var seenIdx = listState.firstVisibleItemIndex
+        var seenOff = listState.firstVisibleItemScrollOffset
         try {
             while (pressGuardOn) {
+                val curIdx = listState.firstVisibleItemIndex
+                val curOff = listState.firstVisibleItemScrollOffset
+                if (curIdx != seenIdx || curOff != seenOff) {
+                    scrollTrace(
+                        "hold-move ${curIdx}/${curOff} d=${curOff - seenOff} " +
+                            "moved=$pressMoved inProg=${listState.isScrollInProgress}",
+                    )
+                    seenIdx = curIdx
+                    seenOff = curOff
+                }
                 if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
                     pressGuardOn = false
                 }
@@ -1088,6 +1172,9 @@ fun ChatScreen(
                         LocalTypewriter provides settings.typewriter,
                         // 不在底部时展开要"向下展开"（块顶边钉住），需要摸到主列表状态。
                         LocalChatListState provides listState,
+                        // **不改变行为**，只记录「守护窗内有没有人请求把内容滚进视口」（#14 取证用，
+                        // 查完删）。若日志里出现 `biv … want=N`，它就是那次位移的点火者。
+                        LocalBringIntoViewSpec provides revealGuardSpec,
                     ) {
                     LazyColumn(
                         state = listState,
