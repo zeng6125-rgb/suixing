@@ -411,13 +411,15 @@ fun ChatScreen(
     // turned into rows in full on every state change, however far back the reader was —
     // the whole transcript priced on every streamed round. What is drawn instead is a
     // suffix, in whole turns: always the newest ones, so a streaming answer keeps its place
-    // in it, and 加载更早 only ever grows it. The count resets with the conversation: the
-    // window is a property of the chat being read, not of the screen that reads it.
-    // Saved for the same reason as the scroll position and the follow below: a visit to the
-    // settings page disposes this composition, and a plain `remember` would collapse the transcript
-    // back to the newest page — the reader's 加载更早 taps undone, which reads as the page having
-    // reloaded. The key still resets it when the conversation really changes.
-    var shownTurns by rememberSaveable(state.conversationId) { mutableIntStateOf(PAGE_TURNS) }
+    // in it, and 加载更早 only ever grows it. The window is a property of the chat being read,
+    // so the count is kept **per conversation** (issue #16): `rememberSaveable(key)` did not
+    // keep one per chat, it re-initialised on every switch — coming back to A collapsed it to
+    // the newest page, the saved scroll index then pointed past the end of a much shorter
+    // transcript, and LazyColumn clamped it to the top. Kept saveable for the same reason as
+    // before: the composition can be rebuilt (activity recreation) and the reader's 加载更早
+    // taps must survive it.
+    var shownTurnsByConversation by rememberSaveable { mutableStateOf(emptyMap<String, Int>()) }
+    val shownTurns = shownTurnsByConversation[state.conversationId] ?: PAGE_TURNS
     // What every derivation below is keyed on: which conversation, how many rows it has, and which
     // row is last.
     //
@@ -903,8 +905,11 @@ fun ChatScreen(
     // 会话时 registry 会把 `true` 恢复回来 ⇒ `if (openedPinned) return` 直接跳过恢复 ——
     // 于是「切回 A，位置不是离开时的地方」。#4 分析里的「链路 3」，当时没修。
     // 换成普通 `remember(key)`：切走时实例丢弃，切回是全新的 `false`，恢复逻辑会真的跑一次。
+    // **也不能放进 `LaunchedEffect` 的 key**（issue #16 根因 1）：函数体第一行就把 `openedPinned`
+    // 写成 true，它一在 key 里，这一写就让旧协程在第一个挂起点被取消 —— 于是下面「按 key 的精确
+    // 校正」几乎从不执行，真正决定位置的只剩依赖 `feedPrefix` 的粗定位。它只是闸门，不当 key。
     var openedPinned by remember(state.conversationId) { mutableStateOf(false) }
-    LaunchedEffect(state.conversationId, itemCount, openedPinned) {
+    LaunchedEffect(state.conversationId, itemCount) {
         if (openedPinned || itemCount <= 0) return@LaunchedEffect
         openedPinned = true
         // 显式对齐一次：下面的读写都按"当前会话"取键，不能等 SideEffect 的时序（issue #4）。
@@ -1349,7 +1354,9 @@ fun ChatScreen(
                                 ) {
                                     TextButton(
                                         onClick = {
-                                            shownTurns += PAGE_TURNS
+                                            shownTurnsByConversation =
+                                                shownTurnsByConversation +
+                                                    (state.conversationId to shownTurns + PAGE_TURNS)
                                         },
                                     ) {
                                         Text(

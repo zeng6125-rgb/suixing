@@ -37,7 +37,7 @@
 |---|---|---|---|---|
 | W1 | `ChatScroll.kt:112-114` `pinToBottom()` | `scrollToItem(0)` | 被下面 W2/W3 及 `toBottom()` 调用 | 底锚贴底的基础原语 |
 | W2 | `ChatScroll.kt:169-174` 追底 collector | `scrollToItem(0)` | `stickToBottom && !pressed && !pressGuardOn && (index≠0 ‖ offset≠0)` | #21 曾在此与导航条跳转抢列表 |
-| W3 | `ChatScreen.kt:723-736` | `scrollToItem(target.index, lockOffset)` | 长按守护结束的 `finally`，**一次性** | #14（现版本形态） |
+| ~~W3~~ | ~~`ChatScreen.kt:723-736`~~ | ~~`scrollToItem(target.index, lockOffset)`~~ | **已删除**（`e1a6184`），换成 `scrollTrace("lock-would-correct …")` 只记录 | 删它是因为它伤害正常滑动，详见 §4 #14 |
 | W4 | `ChatScreen.kt:885` | `scrollToItem(fedIndexOf(approx), saved.second)` | 切回会话，**粗定位** | **#16 的主要嫌疑** |
 | W5 | `ChatScreen.kt:895` | `scrollToItem(target.index, saved.second)` | 切回会话，按 key 精确校正 | #16 的修法，但**基本跑不到**（§2.1） |
 | W6 | `ChatScreen.kt:1400` | `animateScrollToItem(fedIndexOf(index - rowOffset))` | 点导航条跳轮次 | #23 / #21 |
@@ -229,9 +229,19 @@ var shownTurns by rememberSaveable(state.conversationId) { mutableIntStateOf(PAG
 
 - **#17（流式上翻漂）**：建议按 issue 自己的结论走**方案 3「上翻时冻结」**（不在底部就不把新内容渲进 `visible`），这是唯一不靠「检测-纠正」的路。它和候选 A 有协同：冻结只影响渲染，不影响 state。**但它会改变交互**（上翻期间看不到新输出），需要用户单独点头。
 - **#14（长按位置变）**：建议 **`ChatBlocks.kt:1150` 的 `ToolDetail` 内层 `LazyColumn` → `Column + verticalScroll`**（嵌套滚动层 3→2）。
-  守护 W3（一次性 `finally` + `target.index`）**逻辑是对的，保留即可**；不要恢复逐帧版本。
-  提醒：写作期间 `ui-motion` 曾越界删掉 W3（已丢弃，§9）。**删它并不能修 #14**，只会让 #14 从
-  「有缓解但可能过纠」变成「完全无缓解」—— 若将来有人再提这个删除，必须与「内层列表去嵌套」同时做。
+  守护 W3 **已被删除**（`e1a6184`）：它拿的是**按下那一刻**的 lockKey/lockOffset，正常上滑后
+  index 变了而那行仍在屏内 ⇒ 把你纠回按下点（用户：「滑上一点，就滚下来一点」）；滑得够远时
+  那行已出屏、`target == null` ⇒ 不纠（「滑多了反而正常」）。两半现象完全吻合，所以删它是**止血**，
+  不是「修 #14」。**不要把它装回来。**
+  代价：**#14 现在是「零缓解」** —— 长按选字时位置仍可能变，这是已知代价，不是回归。
+  真正修 #14 仍需上面那条「内层列表去嵌套」。
+
+  **本节结论的核实依据**（2026-10-20，供后来者判断这是新证据而非改写）：
+  - `git show e1a6184 --stat` → 该提交即「修『滑上一点就滚下来一点』：pressGuard 的位置纠正改为只记录不执行」
+  - `grep -n 'scrollToItem(target.index, lockOffset)' app/src/main/java/com/suixing/agent/ui/chat/ChatScreen.kt` → **无结果**
+  - 同文件现在只剩 4 行 `scrollTrace("lock-skip …" / "lock-would-correct …")`（:740 / :744 / :746 / :759）
+  - 因此本文 §1.1 的 W3 行、§9 的「给 lead 的建议」都同步标为**已过期/已落地**；旧结论
+    「W3 逻辑是对的，保留即可」「应与去嵌套一起做、不要单独落地」**已被这次事实推翻**，留档在 §9。
 - **#23（导航条换级抖）**：**机制未证实**，见 §7-①。不建议在本批里改。
 
 ---
@@ -328,4 +338,7 @@ var shownTurns by rememberSaveable(state.conversationId) { mutableIntStateOf(PAG
   **但它删 W3 并不能修 #14**（它自己也这么写了）—— 只删不补，等于让 #14 从「有缓解但可能过纠」变成「完全无缓解」。
 - 若之后有人重新引入这次改动，**本文 §1 的 W3 行、§4 的 #14 条目就要同步改**，否则文档会与代码脱节。
 
-**给 lead 的建议**：#12 的 `switchAlpha` 改动可以单独评审；**W3 的删除应与「去嵌套」一起做，不要单独落地**。
+**给 lead 的建议（2026-10-20 更新：已过期）**：W3 的删除**已经单独落地**（`e1a6184`），理由见 §4 #14 ——
+它是「滑上一点就滚回来」的直接原因，先删止血，用户已亲口确认这个现象被骂了很久。
+**#14 因此变成零缓解**，下一步必须做「去嵌套」。任何人若要恢复 W3，先读 §4 #14 的机理推演：
+装回去会把用户骂掉的回弹原样复现。
