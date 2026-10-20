@@ -135,6 +135,8 @@ fun rememberChatScroll(
      * 否则旧会话的锚会被拿去"纠正"新会话的位置（用户：「各会话要隔离」）。
      */
     conversationId: Any? = Unit,
+    /** 诊断回调（issue #14）：谁把 `stickToBottom` 翻回 true。查完删。 */
+    trace: (String) -> Unit = {},
 ): ChatScroll {
     val scroll = remember(listState) { ChatScroll(listState) }
 
@@ -162,6 +164,7 @@ fun rememberChatScroll(
                     !scroll.restoring
                 ) {
                     scroll.stickToBottom = true
+                    trace("stick=true reason=canBack-false")
                 }
             }
     }

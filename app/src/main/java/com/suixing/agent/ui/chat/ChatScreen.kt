@@ -784,6 +784,7 @@ fun ChatScreen(
         // `listState` 来自 `rememberLazyListState()`（第 273 行），**全应用共用一个实例**，
         // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
         conversationId = state.conversationId,
+        trace = { scrollTrace(it) },
     )
     // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
     var liveHeight by remember { mutableIntStateOf(0) }
@@ -946,6 +947,7 @@ fun ChatScreen(
         if (savedKey == null) {
             // 没有记忆就回底 —— 这是**唯一**该回底的分支（issue #16）。
             scroll.stickToBottom = true
+            scrollTrace("stick=true reason=restore-no-saved")
             scroll.toBottom()
             return@LaunchedEffect
         }
@@ -975,6 +977,7 @@ fun ChatScreen(
             } else {
                 // key 完全找不到（消息被删 / 分支切换）：只能回底，别停在随机位置。
                 scroll.stickToBottom = true
+                scrollTrace("stick=true reason=restore-key-not-found")
                 scroll.toBottom()
             }
         } finally {
@@ -991,6 +994,7 @@ fun ChatScreen(
     fun jumpToLatest() {
         scope.launch {
             scroll.stickToBottom = true
+            scrollTrace("stick=true reason=restore-target-missing")
             if (itemCount > 0) {
                 scroll.toBottom()
             }
@@ -1551,6 +1555,7 @@ fun ChatScreen(
                         viewModel.send(body, images)
                         // 发送 = 明确要回到最新：先放行追底再跳，并清掉阅读位置记忆。
                         scroll.stickToBottom = true
+                        scrollTrace("stick=true reason=send")
                         scroll.spotKey = null
                         jumpToLatest()
                     },
