@@ -1501,3 +1501,21 @@ biv off=-20 size=2507 container=2510 want=-621 → -473 → -336 → … → -1
 **诊断日志已全部删除**（`biv-block` / `hold-move` / `anchor-*` / `restore-begin|coarse|fine`）；
 沿用的 `scrollTrace` 基础设施（`guard-on/off`、`lock-*`、`stick=true reason=…`、`restore-no-saved`）保留未动，
 #17/#23 还会用。
+
+### 8.58 #12 入场动效 260ms + 首发 Release v0.8.265（2026-10-21 01:4x）
+
+提交 `7e8c743`，Release **`v0.8.265`**（tag → `7e8c743`，附件 `suixing-0.8.265.apk`，非 draft，01:43 发布）。
+
+- **#12**：切会话入场动效 **210ms → 260ms**（用户定）。唯一时长来源是 `ChatScreen.kt` 的
+  `switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))`；同一段 `graphicsLayer` 里还有
+  位移 24dp 与缩放 0.92→1.0，冷启动不播（初值 1f）。
+  ⚠️ issue 原文要的是「骨架屏/加载态」，实际提供的是**内容入场动画** —— 切会话不走 `loading`
+  （`openConversation` 一帧内整体替换 `_state`）。真要做 skeleton 需让 `openConversation` 暴露可观测加载态。
+- **发版事实**：GitHub Release 此前停在 `v0.8.237`，**0.8.238–0.8.264 只出过包、没发 Release**；
+  `v0.8.265` 是跳版首发，notes 里已注明它一并包含 0.8.264 的 #14/#16 修复。
+- 验证：compile `w:` 0 条、单测 **525/0/0/0**（XML 01:38 真跑）、`assembleRelease` 40s、
+  `aapt` = `vc276 / 0.8.265`、APK `dist/suixing-0.8.265.apk`（15,644,113 B，sha256 前缀 `6f8ea80362d8517d`）。
+- **踩坑记录（时序判读）**：构建未结束时读 `app/build/outputs/apk/release/app-release.apk` 的 `aapt`
+  会读到**上一次的旧包**（本次就出现：中途读到 275/0.8.264，被监督当成版本号没写进 gradle）。
+  正确判据三件套一起看：① `ledger.json` 最后一条 `exit 0` 且 `elapsed` 合理；② `000N.log` 结尾
+  `BUILD SUCCESSFUL`；③ APK 的**文件 mtime** 晚于本次构建启动时间。三者齐了再读 `aapt`。
