@@ -37,7 +37,7 @@
 |---|---|---|---|---|
 | W1 | `ChatScroll.kt:112-114` `pinToBottom()` | `scrollToItem(0)` | 被下面 W2/W3 及 `toBottom()` 调用 | 底锚贴底的基础原语 |
 | W2 | `ChatScroll.kt:169-174` 追底 collector | `scrollToItem(0)` | `stickToBottom && !pressed && !pressGuardOn && (index≠0 ‖ offset≠0)` | #21 曾在此与导航条跳转抢列表 |
-| ~~W3~~ | ~~`ChatScreen.kt:723-736`~~ | ~~`scrollToItem(target.index, lockOffset)`~~ | **已删除**（`e1a6184`），换成 `scrollTrace("lock-would-correct …")` 只记录 | 删它是因为它伤害正常滑动，详见 §4 #14 |
+| ~~W3~~ | ~~`ChatScreen.kt:723-736`~~ | ~~`scrollToItem(target.index, lockOffset)`~~ | **已禁用**（`e1a6184`）：分支仍在，但只写 `scrollTrace("lock-would-correct …")`，不再执行 | 禁用它是因为它伤害正常滑动，详见 §4 #14 |
 | W4 | `ChatScreen.kt:885` | `scrollToItem(fedIndexOf(approx), saved.second)` | 切回会话，**粗定位** | **#16 的主要嫌疑** |
 | W5 | `ChatScreen.kt:895` | `scrollToItem(target.index, saved.second)` | 切回会话，按 key 精确校正 | #16 的修法，但**基本跑不到**（§2.1） |
 | W6 | `ChatScreen.kt:1400` | `animateScrollToItem(fedIndexOf(index - rowOffset))` | 点导航条跳轮次 | #23 / #21 |
@@ -229,18 +229,25 @@ var shownTurns by rememberSaveable(state.conversationId) { mutableIntStateOf(PAG
 
 - **#17（流式上翻漂）**：建议按 issue 自己的结论走**方案 3「上翻时冻结」**（不在底部就不把新内容渲进 `visible`），这是唯一不靠「检测-纠正」的路。它和候选 A 有协同：冻结只影响渲染，不影响 state。**但它会改变交互**（上翻期间看不到新输出），需要用户单独点头。
 - **#14（长按位置变）**：建议 **`ChatBlocks.kt:1150` 的 `ToolDetail` 内层 `LazyColumn` → `Column + verticalScroll`**（嵌套滚动层 3→2）。
-  守护 W3 **已被删除**（`e1a6184`）：它拿的是**按下那一刻**的 lockKey/lockOffset，正常上滑后
-  index 变了而那行仍在屏内 ⇒ 把你纠回按下点（用户：「滑上一点，就滚下来一点」）；滑得够远时
-  那行已出屏、`target == null` ⇒ 不纠（「滑多了反而正常」）。两半现象完全吻合，所以删它是**止血**，
-  不是「修 #14」。**不要把它装回来。**
+  守护 W3 **已被禁用**（`e1a6184`，分支保留但只写日志、不再调 `scrollToItem`）：
+  它拿的是**按下那一刻**的 `lockKey`/`lockOffset`（`ChatScreen.kt:725-726`，在守护开始时捕获；
+  守护在每次按下都会挂），正常上滑后 index 变了而那行仍在屏内 ⇒ 会把你纠回按下点
+  （用户：「滑上一点，就滚下来一点」）；滑得够远时那行已出屏、`target == null` ⇒ 不纠
+  （「滑多了反而正常」）。两半现象完全吻合，所以禁用它只是**止血**，不是「修 #14」。
+  **不要把它重新启用。**
   代价：**#14 现在是「零缓解」** —— 长按选字时位置仍可能变，这是已知代价，不是回归。
   真正修 #14 仍需上面那条「内层列表去嵌套」。
 
-  **本节结论的核实依据**（2026-10-20，供后来者判断这是新证据而非改写）：
-  - `git show e1a6184 --stat` → 该提交即「修『滑上一点就滚下来一点』：pressGuard 的位置纠正改为只记录不执行」
-  - `grep -n 'scrollToItem(target.index, lockOffset)' app/src/main/java/com/suixing/agent/ui/chat/ChatScreen.kt` → **无结果**
-  - 同文件现在只剩 4 行 `scrollTrace("lock-skip …" / "lock-would-correct …")`（:740 / :744 / :746 / :759）
-  - 因此本文 §1.1 的 W3 行、§9 的「给 lead 的建议」都同步标为**已过期/已落地**；旧结论
+  **本节结论的核实依据**（2026-10-20；区分「读代码确认」与「grep 定位」两类证据）：
+  - **读代码确认（机理）**：`ChatScreen.kt:725-726` 在守护开始时捕获 `lockKey`/`lockOffset`；
+    `:742` 用 `lockKey` 在当前可见项里找 `target`；`:745-746` index 相同则跳过；
+    `:747-760` 其余情况原本 `scrollToItem(target.index, lockOffset)`，现在只留一行 `scrollTrace`。
+    ⇒ 「纠回按下点」的机理是读出来确认的，不只是行号对得上。
+  - **grep 定位（现状）**：`grep -n 'scrollToItem(target.index, lockOffset)' ChatScreen.kt` **无结果**；
+    但**分支仍然存在**（`:739-762` 的 `if/when` + 4 处 `scrollTrace`：`:740`/`:744`/`:746`/`:759`）。
+    ⇒ 准确说法是**已禁用（只记录不执行）**，不是「代码路径已删除」。
+  - `git show e1a6184 --stat` → 提交标题即「pressGuard 的位置纠正改为只记录不执行」。
+  - 因此本文 §1.1 的 W3 行、§9 的「给 lead 的建议」同步标为**已过期/已落地**；旧结论
     「W3 逻辑是对的，保留即可」「应与去嵌套一起做、不要单独落地」**已被这次事实推翻**，留档在 §9。
 - **#23（导航条换级抖）**：**机制未证实**，见 §7-①。不建议在本批里改。
 
@@ -335,10 +342,11 @@ var shownTurns by rememberSaveable(state.conversationId) { mutableIntStateOf(PAG
 
 - `ui-motion` 有此行为，说明**它认为删 W3 是对的**（理由写在它自己的注释里：lockKey 会把正常滑动纠回去、`!pressMoved` 打补丁会挡掉拖选）。
   这个理由**在机理上说得通**，本文 §4 对 #14 的建议（去掉 `ToolDetail` 内层 `LazyColumn`）与它方向一致、且更彻底。
-  **但它删 W3 并不能修 #14**（它自己也这么写了）—— 只删不补，等于让 #14 从「有缓解但可能过纠」变成「完全无缓解」。
+  **但它禁用 W3 并不能修 #14**（它自己也这么写了）—— 只禁用不补新机制，等于让 #14 从「有缓解但可能过纠」变成「完全无缓解」。
 - 若之后有人重新引入这次改动，**本文 §1 的 W3 行、§4 的 #14 条目就要同步改**，否则文档会与代码脱节。
+  （2026-10-20：已经发生过一次 —— W3 被禁用并落地，§1.1 与 §4 已按事实改写，见那里的核实依据。）
 
-**给 lead 的建议（2026-10-20 更新：已过期）**：W3 的删除**已经单独落地**（`e1a6184`），理由见 §4 #14 ——
-它是「滑上一点就滚回来」的直接原因，先删止血，用户已亲口确认这个现象被骂了很久。
-**#14 因此变成零缓解**，下一步必须做「去嵌套」。任何人若要恢复 W3，先读 §4 #14 的机理推演：
-装回去会把用户骂掉的回弹原样复现。
+**给 lead 的建议（2026-10-20 更新：已过期）**：W3 **已被禁用**并单独落地（`e1a6184`，分支保留、只写日志），
+理由见 §4 #14 —— 它是「滑上一点就滚回来」的直接原因，先禁用止血，用户已确认这个现象困扰很久。
+**#14 因此变成零缓解**，下一步必须做「去嵌套」。任何人若要恢复 W3 的执行，先读 §4 #14 的机理推演：
+启用回去会把用户骂掉的回弹原样复现。
