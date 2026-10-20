@@ -904,7 +904,9 @@ fun ChatScreen(
     LaunchedEffect(state.conversationId) {
         // 初值已经是 0，这里只负责把它推到 1：从 0 起跑，不需要 `snapTo`，
         // 也就没有「snapTo 生效之前先露一帧」的窗口。
-        switchAlpha.animateTo(1f, tween(210, easing = LinearOutSlowInEasing))
+        // 260ms（用户 2026-10-21 定）：210ms 显得赶，260ms 的淡入+上浮更从容；
+        // 这是**唯一的时长来源**，改这里就够（位移 24dp / 缩放 0.92 在同一段的 graphicsLayer 里）。
+        switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
