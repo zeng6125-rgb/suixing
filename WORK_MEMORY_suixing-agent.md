@@ -1432,3 +1432,11 @@ release 发布也算一次动作，不跟「打包」混为一谈（用户没说
 **新增环境事实（下次直接用）**：本机无 gradlew；gradle-run skill 要求 `--root` 在 OS 临时目录内、命令首 token 必须是 `gradle`/`gradlew*` ⇒ 在 `C:/Users/User/AppData/Local/Temp/gradle-run/gradlew.bat` 放一行转发（`call "…\gradle-8.11.1\bin\gradle.bat" %*`），用持久终端 `pty-1`（已 export `JAVA_HOME` / `GRADLE_USER_HOME` / `HTTPS_PROXY=127.0.0.1:7890`）。**warning 口径**：ledger 的 `warning_fingerprints` 里那条 `OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes…` 是 **test worker 的 JVM 提示**，不是 Kotlin 编译告警（后者格式 `w: 文件:行:列`）；日志 `^w: ` 计数为 0 才算 0 warning。
 
 **待办**：① 真机验收 #17（贴底/上翻两种）、#16（结束不闪 + 贴底位置 + 切会话回原位）、#23（导航条不跳级）、键盘起落、压缩状态行、错误行位置（**证据由用户给截图/录屏，我不用 adb**）；② 上翻漂移能否接受 —— 不能则上「冻结托盘预留高度」；③ **#14 一行未动**：形态已确认是「选中那一刻跳一下」，下一步读 `filesDir/scroll-jump.log` 里 `guard-off` 前后判因（`same-position` ⇒ 让位/IME clamp 变；`offset-drift=N` ⇒ 选区重排；都没有 ⇒ 追底重新接管）。
+
+### 8.55 0.8.258（vc269）：回退重出包并装机（2026-10-20 22:1x）
+
+**为什么要抬版本号**：`git revert 673986f` 把 `app/src` 退回 `90a6b3f` 原样，但手机上是重构版 **vc268**、回退代码是 **vc267** ⇒ Android 拒绝降级（`INSTALL_FAILED_VERSION_DOWNGRADE`），而 `adb install -d` 允许降级**只对 debuggable 包有效**，release 不适用；卸载重装会清会话与设置。**所以只把版本号抬到 269 / 0.8.258，代码零改动**（`git diff --stat 90a6b3f HEAD -- app/src` 无输出）。以后回退某版遇到「版本号比手机低」时直接照这条做。
+
+**结果**：提交 `a47f087`（只改 `app/build.gradle.kts:16-17`）；`compileDebugKotlin --no-build-cache` 0 warning（`^w: ` 计数 0，唯一告警是 test worker 的 OpenJDK bootclasspath 提示）；`testDebugUnitTest` **525/0/0/0**（XML 时间戳 22:15，本次真跑）；`assembleRelease` 成功 41s；`aapt` = `vc269 / 0.8.258`；**装机 Success**，`dumpsys` = `269 / 0.8.258`（覆盖升级，数据保留）；APK 归档 `dist/suixing-0.8.258.apk`（15,642,525 B，sha256 `65d50e22a5ac2a17…d1bf3`，证书同 sideload `9a33761b…aa8ee`）。
+
+**用户当轮授权**：「打包安装」= 出包 + 装机两件事一起放行（这是 §4 第 26/31 条要求的口径：每轮单独说）。
