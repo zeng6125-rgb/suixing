@@ -715,12 +715,13 @@ fun ChatScreen(
         if (!pressGuardOn) return@LaunchedEffect
         scrollTrace("guard-on")
         setSelectionActive?.invoke(true)
-        // **这里不再锁滚动**（issue #18，v0.8.238 的严重回归已撤）：
-        // 上一版写了 `visibleItemsInfo.indexOfFirst { … }` 当 item index 用 —— 那是**数组下标**，
-        // 而 `scrollToItem` 要的是全局 index。两者几乎永不相等 ⇒ 任何一次按下都会在 400ms 守护窗口里
-        // 每帧 `scrollToItem(0..5, …)`，把列表甩到最底部附近 —— 用户看到的就是「没流式也乱飘」。
-        // #14 本来也没被验证通过，所以整段撤掉，而不是修下标：留着一个没证明有效的机制、
-        // 又每帧写滚动位置，风险远大于收益。
+        // **只在结束时纠一次**（issue #14 建议）：v0.8.238 那版是逐帧纠 + 用数组下标当 item index，
+        // 把列表甩到了底部。这里三个关键区别：
+        //  · 只在 `finally` 里纠正一次，不逐帧写滚动位置；
+        //  · 用 `target.index`（LazyColumn 给的全局 index），不是 `indexOfFirst` 的数组下标；
+        //  · 不判断 `pressMoved` —— 选区扩展也是手指移动，那种情况同样需要纠。
+        val lockKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
+        val lockOffset = listState.firstVisibleItemScrollOffset
         try {
             while (pressGuardOn) {
                 if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
@@ -729,6 +730,12 @@ fun ChatScreen(
                 withFrameNanos { }
             }
         } finally {
+            if (lockKey != null) {
+                val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == lockKey }
+                if (target != null && target.index != listState.firstVisibleItemIndex) {
+                    listState.scrollToItem(target.index, lockOffset)
+                }
+            }
             // 组合被带走（切会话/退页）也要解冻，否则外壳的 IME clamp 永远停摆。
             scrollTrace("guard-off")
             setSelectionActive?.invoke(false)
@@ -763,12 +770,11 @@ fun ChatScreen(
         lastFaded = state.conversationId
         withFrameNanos { }
         withFrameNanos { }
-        // **只做「防闪烁」，不做过渡**（issue #12 方向 1，用户实测 320ms「还是怪」）。
-        // 320ms 的纯 alpha 本质是「显影」不是「过渡」：内容早就在位，只是从看不见变得看得见，
-        // 看起来像蒙层在消失。IM 类应用的会话切换是瞬间的，加长动画反而增加负担。
-        // 留 100ms 只为避免硬切的闪一下，肉眼几乎察觉不到。
+        // 用户实测两次：320ms 纯 alpha「怪」（那是显影不是过渡），100ms「太快、恶心」。
+        // 现在 graphicsLayer 里已经有位移 + 缩放（形态对了），所以时长要回到能看清动作的区间：
+        // 260ms + LinearOutSlowIn（匀速起、收尾缓），比 FastOutSlowIn 的"先窜后刹"更稳。
         switchAlpha.snapTo(0f)
-        switchAlpha.animateTo(1f, tween(100))
+        switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
@@ -791,25 +797,29 @@ fun ChatScreen(
     // 记锚点：**不能看 `isScrollInProgress`**（issue #11 补充评论）。流式内容长高时 LazyColumn 的
     // 内部重排会被算成「正在滚动」，于是这个值在流式期间一直是 true —— 锚点永远记不下来，
     // 纠正逻辑也就永远检测不到 drift（用户实测：「抖动没了，但位置仍会持续漂移」）。
-    // 现在改成「**位置稳定 120ms 才记**」：流式每 40ms 推一次，debounce 一直被打断，锚点保持不动；
-    // 用户松手、惯性停下之后位置不动了，才把当时的首可见项记成锚点。
+    //
+    // 现在改成「**手指抬起那一刻记**」（issue #16 的建议）。上一版是
+    // `snapshotFlow(位置).collectLatest { delay(120); … }` 的 debounce：
+    // 位置稳定 120ms 才会写一次。流式期间位置每 40ms 变一次 ⇒ collectLatest 一直取消 ⇒
+    // **锚点不会被更新**（它不是"永远是 null"：用户停手之后仍会写一次；但如果他只在流式期间
+    // 滚动过，就可能一次都没写上）。用 `pressed` 的下降沿触发，与位置变化频率无关。
     LaunchedEffect(listState) {
-        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-            .collectLatest {
-                delay(120)
-                // 恢复位置的那几帧不记：那时首可见项还是上一个会话留下的布局（issue #15）。
-                if (scroll.stickToBottom || pressed || scroll.restoring) return@collectLatest
-                val first = listState.layoutInfo.visibleItemsInfo
-                    .firstOrNull { it.key in messageIds } ?: return@collectLatest
-                // 如果它就是首可见项，偏移量照实记；如果它被上面那些临时行压着，就记 0
-                // （`scrollToItem` 的 offset 不能为负，记 0 等于"把这条顶到视口顶部"，稳定可复现）。
-                val offset = if (first.index == listState.firstVisibleItemIndex) {
-                    listState.firstVisibleItemScrollOffset
-                } else {
-                    0
-                }
-                anchors[state.conversationId] = first.key to offset
+        snapshotFlow { pressed }.collect { isPressed ->
+            if (isPressed) return@collect
+            // 恢复位置的那几帧不记：那时首可见项还是上一个会话留下的布局（issue #15）。
+            if (scroll.stickToBottom || scroll.restoring) return@collect
+            // **只记消息行**：首可见项常是 `load-earlier` / `streaming:` 这类临时行，
+            // 它们的 key 切回来时找不到对应消息（issue #16 的核心）。
+            val first = listState.layoutInfo.visibleItemsInfo
+                .firstOrNull { it.key in messageIds } ?: return@collect
+            // 它就是首可见项就照实记偏移；被上面临时行压着就记 0（`scrollToItem` 的 offset 不能为负）。
+            val offset = if (first.index == listState.firstVisibleItemIndex) {
+                listState.firstVisibleItemScrollOffset
+            } else {
+                0
             }
+            anchors[state.conversationId] = first.key to offset
+        }
     }
     // **设计 A 的每帧对账：暂时停用**（issue #18 之后）。
     //
@@ -1002,7 +1012,17 @@ fun ChatScreen(
                             // 用 graphicsLayer 而不是 alpha 修饰符：alpha 在 layer 块里读，动画期间
                             // 不触发重组；也不做 AnimatedContent —— 那会同时持有两份 composition，
                             // 对 30MB 的会话内存峰值翻倍（issue 自己提的第 4 点）。
-                            .graphicsLayer { alpha = switchAlpha.value }
+                            .graphicsLayer {
+                                // **形态而不仅是时长**（issue #12 方案 A）：纯 alpha 淡入读起来是
+                                // 「蒙层闪一下」—— 没有位移就没有方向感，没有缩放就没有层次。
+                                // 这里补两样：从下方 24dp 升起 + 97% 放到 100%。
+                                val p = switchAlpha.value
+                                alpha = p
+                                translationY = (1f - p) * 24.dp.toPx()
+                                val s = 0.97f + 0.03f * p
+                                scaleX = s
+                                scaleY = s
+                            }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {

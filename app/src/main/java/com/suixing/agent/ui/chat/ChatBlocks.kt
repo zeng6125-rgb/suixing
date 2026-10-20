@@ -163,6 +163,7 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -361,6 +362,10 @@ private fun RevealHeight(
     val natural = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
     val outer = LocalChatListState.current
+    // **这个块在根坐标系里的 y**（issue #22）：补偿量不再靠"推算长了多少"，而是量
+    // "动画前后这个块实际移动了多少"。任何布局约束（`heightIn(max)`、嵌套滚动、`weight`）
+    // 让实际高度 ≠ 自然高度时，推算都会错，测量不会。
+    var topInRoot by remember { mutableFloatStateOf(Float.NaN) }
 
     LaunchedEffect(visible, pinned) {
         val target = if (visible) 1f else 0f
@@ -380,30 +385,40 @@ private fun RevealHeight(
             progress = target
             return@LaunchedEffect
         }
+        // ① 先让一帧落地，记下动画开始前的真实位置。
+        withFrameNanos { }
+        val beforeTop = topInRoot
+        // ② 高度动画 + 逐帧补偿，**恢复成原来的 `px * progress` 增量式**。
+        //
+        // 上一版改成"逐帧按实测位移补"，结果第一层也偏了 —— 原因有两个：
+        //  · 丢了 `canScrollBackward` 这个门：贴底时（底锚天然钉住底边）本来就不该补，
+        //    现在照补，于是第一层一展开就把画面推下去；
+        //  · `topInRoot` 是 `onGloballyPositioned` 在**布局之后**写的，动画循环里读到的是
+        //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
+        // 所以逐帧回到原来的写法（对第一层已验证有效），把"被钳位吃掉的量"交给 ③ 的收尾对账。
         val begin = withFrameNanos { it }
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
             val oldH = px * progress
-            // 缓动：`FastOutSlowIn` 起手就是最快的一档，点下去先"窜"一下再刹住 —— 用户说的
-            // 「生硬」多半是这一下。`LinearOutSlowIn` 匀速起、收尾缓，配上 220ms 读起来更软。
             progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
-            // **不在底部时反向补偿**（用户：「不在追底位置时，展开应该往下走」）：
-            // 底锚下块长高 Δ，块顶边会上移 Δ；这里把内容整体下移 Δ 抵消掉 ⇒ 顶边不动、
-            // 内容向下展开，折叠时同理。在底部时（canScrollBackward=false）不补偿：
-            // 底锚天然让底边不动，多滚一次就会顶上去。
             if (outer != null && outer.canScrollBackward) {
                 outer.dispatchRawDelta(px * progress - oldH)
             }
             if (t >= 1f) break
         }
-        // **收尾对账**（issue #13）：`px` 是动画开始**之前**量的高度，动画期间内容可能又长高了
-        // （嵌套块展开、流式输出）。那部分增长没有被逐帧补偿过，于是「动画一结束，整体往下移一段」——
-        // 正是用户报的现象。这里把「实际长出来的」和「已经补掉的」对一次账，差多少补多少。
-        // 内容没变时 residual 为 0，这段是空操作。
-        if (outer != null && outer.canScrollBackward) {
-            val residual = (natural[0] - px) * target
-            if (residual != 0f) outer.dispatchRawDelta(residual)
+        // ③ **收尾按实测位移对账**（issue #22 的核心）：逐帧补偿用的是推算高度，遇到
+        // `heightIn(max = 320dp)` 这类钳位就会多补 —— 第二层每多开一个累积偏一段。
+        // 这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时它接近 0（空操作），
+        // 被钳位时它正好是那份多补的量。
+        withFrameNanos { }
+        withFrameNanos { }
+        val afterTop = topInRoot
+        if (outer != null && outer.canScrollBackward &&
+            !beforeTop.isNaN() && !afterTop.isNaN()
+        ) {
+            val drift = afterTop - beforeTop
+            if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
         }
     }
 
@@ -412,7 +427,8 @@ private fun RevealHeight(
         modifier = Modifier
             .fillMaxWidth()
             // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
-            .clipToBounds(),
+            .clipToBounds()
+            .onGloballyPositioned { coords -> topInRoot = coords.positionInRoot().y },
     ) { measurables, constraints ->
         // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
         if (!visible && progress <= 0f) {
