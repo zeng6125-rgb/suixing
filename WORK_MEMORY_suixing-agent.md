@@ -1519,3 +1519,11 @@ biv off=-20 size=2507 container=2510 want=-621 → -473 → -336 → … → -1
   会读到**上一次的旧包**（本次就出现：中途读到 275/0.8.264，被监督当成版本号没写进 gradle）。
   正确判据三件套一起看：① `ledger.json` 最后一条 `exit 0` 且 `elapsed` 合理；② `000N.log` 结尾
   `BUILD SUCCESSFUL`；③ APK 的**文件 mtime** 晚于本次构建启动时间。三者齐了再读 `aapt`。
+
+**#23 状态标注（2026-10-21 01:5x）**：用户复测「暂时不会了」，**issue 保持 OPEN**，已在
+[#23 评论](https://github.com/zeng6125-rgb/suixing/issues/23#issuecomment-6297392316) 记录代码侧依据：
+`TurnScrubber(...).align(Alignment.CenterEnd)` 是 Box 浮层（`ChatScreen.kt:1538-1543`）⇒ 高度不参与布局；
+`currentTurn` 只喂 `TurnScrubber(current=…)`（`:1539`）纯显示；`feedPrefix` 只剩两处一次性换算
+（恢复 `:1045`、点击跳转 `:1572`），滚动每帧不再经过。**保留观察点**：流式中跨级（`live` 翻转 ⇒ `feedPrefix` 变）。
+⚠️ 另注意：仓库里新增了 **#26「滚动掉帧 p50=17ms：`currentTurn` 未用 `derivedStateOf` 导致整页重组 + 边缘光每帧全屏 Path.op」**
+（2026-10-21 00:49 建），与本节 `currentTurn` 的读法直接相关，做性能时一起看。
