@@ -273,15 +273,7 @@ fun ChatScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
-    // **每个会话一个自己的 LazyListState**（issue #16 评论里的「拆掉重装」）。
-    //
-    // 以前全应用共用一个 `listState`，于是「记住每个会话看到哪」只能靠手写：`spots` / `anchors` /
-    // `spotKey` / `lastSeen` / `restoring` / `openedPinned` 六套机制 + key ↔ feedIndex 换算，
-    // 任何一处时序错就回底或串味（#4 / #15 / #16 反复回归）。
-    // 改成「一会话一 state」之后，位置由 `LazyListState` 自己保存 —— 切回来就是离开时那个
-    // firstVisibleItemIndex/offset，不需要保存、不需要恢复、也没有换算。
-    val listStates = remember { ChatListStates() }
-    val listState = listStates.forConversation(state.conversationId)
+    val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     // 顶层拿一次剪贴板：文件路径菜单的「复制」用（见 [PathActionSheet] 接线处）。
@@ -770,26 +762,18 @@ fun ChatScreen(
     //  · **等列表量完再淡入**：`openConversation` 是一帧内换 state，LazyColumn 要几帧才量完，
     //    以前在 conversationId 变化的那一帧就开始 fade，等量完 alpha 已经到 1 —— 淡入被测量吃掉，
     //    看起来还是「突然」。现在等 itemCount > 0 再让出两帧。
-    // **每个会话一个全新的 Animatable，初值 0**（用户：「切会话为什么还要先显示一下旧页面再动画」）。
-    //
-    // 上一版的顺序是「等两帧 → snapTo(0) → 淡入`：那两帧里 alpha 还是 1，**内容已经以全不透明
-    // 画出来了**，然后才归零重来 —— 用户看到的就是"闪一下再淡入"。
-    // 把 Animatable 绑到 `conversationId` 上，切会话的**第一帧**它就已经是 0f，不存在那一闪。
-    // 冷启动（第一次组合）给 1f：首屏不该淡入。
-    var seenFirst by remember { mutableStateOf(false) }
-    val switchAlpha = remember(state.conversationId) {
-        androidx.compose.animation.core.Animatable(if (seenFirst) 0f else 1f)
-    }
-    LaunchedEffect(state.conversationId) {
-        if (!seenFirst) {
-            seenFirst = true
-            return@LaunchedEffect
-        }
-        // 等列表量完再开始：alpha 已经是 0，这几帧是空白而不是"露一下内容"。
+    val switchAlpha = remember { androidx.compose.animation.core.Animatable(1f) }
+    var lastFaded by remember { mutableStateOf(state.conversationId) }
+    LaunchedEffect(state.conversationId, itemCount) {
+        if (state.conversationId == lastFaded) return@LaunchedEffect
+        if (itemCount <= 0) return@LaunchedEffect
+        lastFaded = state.conversationId
         withFrameNanos { }
         withFrameNanos { }
-        // 260ms + LinearOutSlowIn：100ms「太快、恶心」、320ms 纯 alpha「怪」都是实测反馈；
-        // 现在 graphicsLayer 里已有位移 + 缩放（形态对了），时长取中间值。
+        // 用户实测两次：320ms 纯 alpha「怪」（那是显影不是过渡），100ms「太快、恶心」。
+        // 现在 graphicsLayer 里已经有位移 + 缩放（形态对了），所以时长要回到能看清动作的区间：
+        // 260ms + LinearOutSlowIn（匀速起、收尾缓），比 FastOutSlowIn 的"先窜后刹"更稳。
+        switchAlpha.snapTo(0f)
         switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
@@ -867,8 +851,59 @@ fun ChatScreen(
             lastConvId = state.conversationId
         }
     }
-    // **位置保存/恢复整段删除**（issue #16）：每个会话有自己的 [LazyListState]，
-    // 位置由它自己持有，切回来就是离开时那里 —— 不需要 spots / anchors / restoring / openedPinned。
+    // **不能是 `rememberSaveable`**（issue #15）：它把值写进 SaveableStateRegistry，切走再切回同一个
+    // 会话时 registry 会把 `true` 恢复回来 ⇒ `if (openedPinned) return` 直接跳过恢复 ——
+    // 于是「切回 A，位置不是离开时的地方」。#4 分析里的「链路 3」，当时没修。
+    // 换成普通 `remember(key)`：切走时实例丢弃，切回是全新的 `false`，恢复逻辑会真的跑一次。
+    var openedPinned by remember(state.conversationId) { mutableStateOf(false) }
+    LaunchedEffect(state.conversationId, itemCount, openedPinned) {
+        if (openedPinned || itemCount <= 0) return@LaunchedEffect
+        openedPinned = true
+        // 显式对齐一次：下面的读写都按"当前会话"取键，不能等 SideEffect 的时序（issue #4）。
+        scroll.conversationId = state.conversationId
+        // **以 `anchors` 为准**（issue #15）：它是按会话存、按消息 id 记的，切走时不用再存一次
+        // （`ChatScroll.spots` 那条路要求「切走那一刻」正好读对，容易被时序坑到）。
+        // 两条都查，是为了兼容本次改动之前已经存进 spots 的位置。
+        val saved = anchors[state.conversationId] ?: scroll.takeSpot(state.conversationId)
+        val savedKey = saved?.first
+        if (savedKey == null) {
+            // 没有记忆就回底 —— 这是**唯一**该回底的分支（issue #16）。
+            scroll.stickToBottom = true
+            scroll.toBottom()
+            return@LaunchedEffect
+        }
+        // 恢复期间挂上闸：`scrollToItem` 之后布局还没定型，`canScrollBackward` 会短暂为假，
+        // "滚到底就把贴底打开"的 collector 会立刻把下面这个 false 改回 true（链路 4）。
+        scroll.restoring = true
+        try {
+            scroll.stickToBottom = false
+            scroll.spotKey = savedKey
+            scroll.spotOffset = saved.second
+            // ① 粗定位：`fedIndexOf` 只是起点，允许差一两项。
+            val approx = visible.indexOfFirst { it.message.id == savedKey }
+            if (approx >= 0) {
+                listState.scrollToItem(fedIndexOf(approx), saved.second)
+                withFrameNanos { }
+            }
+            // ② 精确校正：按 **key** 在 layoutInfo 里找全局 index（issue #16 第三步）。
+            //    `target.index` 是 LazyColumn 自己给的，不需要任何 feedPrefix 换算 ——
+            //    存/取时 prefix 不同（流式开始/结束）也不会影响最终位置。
+            withFrameNanos { }
+            val target = listState.layoutInfo.visibleItemsInfo
+                .firstOrNull { it.key == savedKey }
+            if (target != null) {
+                listState.scrollToItem(target.index, saved.second)
+                withFrameNanos { }
+                anchors[state.conversationId] = savedKey to saved.second
+            } else {
+                // key 完全找不到（消息被删 / 分支切换）：只能回底，别停在随机位置。
+                scroll.stickToBottom = true
+                scroll.toBottom()
+            }
+        } finally {
+            scroll.restoring = false
+        }
+    }
     // 外观 → 气泡宽度. Measured against the screen, which is what the setting promises
     // in its own words: 标准 (0.94) stays wider than the transcript's own 16dp margins,
     // so the default leaves every card exactly as wide as it has always been, and only

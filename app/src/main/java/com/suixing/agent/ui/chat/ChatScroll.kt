@@ -208,23 +208,3 @@ fun rememberChatScroll(
     }
     return scroll
 }
-
-/**
- * 每个会话一个自己的 [LazyListState]（issue #16）。
- *
- * 共用一份 state 时，「记住每个会话看到哪」只能手写保存/恢复，而保存时机、key 归一化、
- * feedIndex 换算任何一步出错都会变成「切回来回到底部」。让它自己保存就没有这些问题：
- * `LazyListState` 天然持有 firstVisibleItemIndex / offset，切回来即原样。
- *
- * 会话被删除时用 [forget] 丢掉对应 state，避免无限增长（正常使用下每会话几百字节）。
- */
-internal class ChatListStates {
-    private val states = mutableMapOf<String, LazyListState>()
-
-    /** 组合期调用：同一个 id 永远拿到同一个实例。 */
-    fun forConversation(id: String): LazyListState = states.getOrPut(id) { LazyListState() }
-
-    fun forget(id: String) {
-        states.remove(id)
-    }
-}
