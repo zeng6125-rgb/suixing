@@ -790,19 +790,30 @@ fun ChatScreen(
     // 冷启动那次给 1：`conversationId` 从 `""` 变成真实 id 不算切会话，骨架屏 → 内容
     // 已经有它自己的过渡，再叠一层淡入就是注释里骂过的「开了个新会话又跳过去」。
     //
-    // 形态：沿用**本仓库已有的入场约定**，不另造一套 ——
-    // `ChatComposer.kt:334` 的弹层入场就是 `fadeIn(tween(160)) + scaleIn(tween(160),
-    // initialScale = 0.92f)`，即「淡入 + 0.92 缩放落定」。会话切换同样是整块内容换掉、
-    // 新旧之间没有空间连续关系，属同一类，所以照它的形态：
-    //  · alpha 0 → 1 **加** scale 0.92 → 1.0：缩放给「落定感」，纯 alpha 只剩「蒙层在消失」；
-    //  · **去掉 translationY**：整块转录上下平移会跟钉住的顶栏和输入框打架，读起来是
-    //    「中间那一块在滑」而不是「换了一页」—— 上一版 24dp 位移的毛病正在这里；
+    // 形态：按 issue #12 评论 5 的方案 A —— **淡入 + 从下方 24dp 升起 + 缩放落定**，
+    // 三样同时跑。纯 alpha 之所以被骂「不优雅、动画效果烂」，是缺位移（没有方向感）
+    // 和缺缩放（没有层次），不是时长问题（评论 5 自己纠正过这一点）。
+    //  · alpha 0 → 1；
+    //  · translationY 24dp → 0：内容从下方升上来；
+    //  · scale 0.92 → 1.0：起点取**本仓库自己的**入场约定 —— `ChatComposer.kt:334` 的弹层
+    //    就是 `fadeIn + scaleIn(initialScale = 0.92f)`，不另造一套数值；上一版的 0.97
+    //    没有来源，且 3% 的形变量肉眼几乎读不出来；
     //  · 210ms 夹在被否的 100 / 320 之间，且贴近本仓库结构性变化的既有时长
     //    （`PROCESS_EXPAND_MS` = 220、`KEYBOARD_ANIM_MS` = 220，见 ChatBlocks/ChatContext）；
     //  · `LinearOutSlowInEasing` 实测为 CubicBezierEasing(0, 0, 0.2, 1)（decelerate，
     //    从 animation-core 1.7.5 字节码核对），本仓库的展开补偿 `ChatBlocks.kt:404` 也用它。
-    // alpha / scale 只写在 graphicsLayer 里 = 只改绘制，不触发重组，也不动布局与滚动。
-    val alphaHistory = remember { booleanArrayOf(state.conversationId.isNotEmpty()) }
+    // alpha / translationY / scale 只写在 graphicsLayer 里 = 只改绘制，不触发重组，
+    // 也不动布局与滚动（滚动核心是冻结的）。
+    //
+    // 一个待真机验证的保留意见：24dp 位移是整块转录在动，而顶栏与输入框钉着不动，
+    // 画面可能读成「中间那块在滑」而不是「换了一页」。若如此，把 translationY 那行删掉
+    // 即可退回纯「淡入 + 缩放」，其余不受影响。
+    //
+    // 冷启动判据必须**无条件从 false 起**：这段 `remember` 在 `if (state.loading)` 之外，
+    // 首次组合时 conversationId 可能已经是恢复出来的真实 id（不是 ""），拿
+    // `isNotEmpty()` 当初始值会把那一次误判成「已经见过」以外的东西，判据就不成立了。
+    // BooleanArray 而不是 mutableStateOf：组合期写它不触发快照通知，不会引起重组循环。
+    val alphaHistory = remember { booleanArrayOf(false) }
     val switchAlpha = remember(state.conversationId) {
         val coldStart = state.conversationId.isNotEmpty() && !alphaHistory[0]
         if (state.conversationId.isNotEmpty()) alphaHistory[0] = true
@@ -1050,15 +1061,16 @@ fun ChatScreen(
                             // 不触发重组；也不做 AnimatedContent —— 那会同时持有两份 composition，
                             // 对 30MB 的会话内存峰值翻倍（issue 自己提的第 4 点）。
                             .graphicsLayer {
-                                // 形态 = **淡入 + 0.92 缩放落定**，与本仓库弹层的入场
-                                // （`ChatComposer.kt:334` 的 `fadeIn + scaleIn(0.92f)`）一致。
+                                // 形态 = **淡入 + 从下方 24dp 升起 + 缩放到 1.0**（issue #12
+                                // 评论 5 的方案 A，lead 定的方向）。纯 alpha 只有「蒙层在消失」，
+                                // 没有方向感也没有层次，用户说的「不优雅、动画效果烂」指的是这个。
                                 //
-                                // 上一版这里的 24dp `translationY` 已删：整块转录上下平移时，
-                                // 钉住的顶栏与输入框一动不动，画面读起来是「中间那一块在滑」
-                                // 而不是「换了一页」，这正是用户说「还是不行」的那一版。
-                                // 缩放负责层次（内容由远及近落定），alpha 负责显隐，两者同步。
+                                // 缩放取 0.92（不是上一版凭感觉的 0.97）：这是**本仓库自己的**
+                                // 入场约定 —— `ChatComposer.kt:334` 的弹层就是
+                                // `fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.92f)`。
                                 val p = switchAlpha.value
                                 alpha = p
+                                translationY = (1f - p) * 24.dp.toPx()
                                 val s = 0.92f + 0.08f * p
                                 scaleX = s
                                 scaleY = s

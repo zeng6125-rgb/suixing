@@ -345,9 +345,9 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
  * 折叠块的展开/收起：**纯高度动画**。
  *
  * 不用 `AnimatedVisibility(expandVertically)` 是因为这里要按内容自然高度逐帧写 progress，
- * 且展开与收起共用一套裁剪。滚动不在这里做 —— 转录是底锚（reverseLayout），index 0 的
- * 卡片长高天然向上、底边不动；旧版在这里逐帧 `dispatchRawDelta` 同步列表，两处抢同一份
- * 列表才是"先向下、再向上"回弹的来源，已随底锚一起删掉。
+ * 且展开与收起共用一套裁剪。位置补偿也在这里，**只在这个块不在底部时**：底锚
+ * （reverseLayout）下块长高只会把上方内容往上顶，要抵掉这份位移，块顶边才钉得住、
+ * 内容才向下展开。
  *
  * 正在读历史（[LocalReadingPinned]）时不做动画：内容原地展开，不推着正在读的内容走。
  */
@@ -360,6 +360,9 @@ private fun RevealHeight(
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
+    // 本块**这一帧落地**的高度（progress 乘完、且被外层约束裁过的值）。逐帧补偿用的就是它的
+    // 帧间差，所以必须是布局里写的这个数，不能是 `natural`（自然高度，看不见钳位）。
+    val shown = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
     val outer = LocalChatListState.current
     // **这个块在根坐标系里的 y**（issue #22）：补偿量不再靠"推算长了多少"，而是量
@@ -385,41 +388,57 @@ private fun RevealHeight(
             progress = target
             return@LaunchedEffect
         }
-        // ① 先让一帧落地，记下动画开始前的真实位置。
+        // ① 让一帧落地：本块**实际**的高度（`shown`）和顶边（`topInRoot`）就是逐帧差值的起点。
         withFrameNanos { }
-        val beforeTop = topInRoot
-        // ② 高度动画 + 逐帧补偿，**恢复成原来的 `px * progress` 增量式**。
+        var lastShown = shown[0]
+        var lastTop = topInRoot
+        // ② 高度动画 + 逐帧补偿：补偿量 = **本块这一帧真实长高了多少，且只算传出去的那部分**。
         //
-        // 上一版改成"逐帧按实测位移补"，结果第一层也偏了 —— 原因有两个：
-        //  · 丢了 `canScrollBackward` 这个门：贴底时（底锚天然钉住底边）本来就不该补，
-        //    现在照补，于是第一层一展开就把画面推下去；
-        //  · `topInRoot` 是 `onGloballyPositioned` 在**布局之后**写的，动画循环里读到的是
-        //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
-        // 所以逐帧回到原来的写法（对第一层已验证有效），把"被钳位吃掉的量"交给 ③ 的收尾对账。
+        // 两个量都在同一次布局里量到，没有推算：
+        //  · `grew` —— 本块自己落地的实际高度差；
+        //  · `up`   —— 本块顶边的实际位移（正 = 往上）。
+        // 为什么 `min(grew, up)` 就是"不多补"的量：主列表是底锚（reverseLayout），本块长高能否
+        // 推动上面的内容，完全看**外层有没有把这一截收下**。
+        //  · 没钳位：外层跟着长高 → 整个 item 变高 → 底边钉住、item 顶边（连同本块顶边）上移
+        //    恰好 `grew` ⇒ `up == grew` ⇒ 补满，和原来的 `px * progress` 等价（第一层已验证有效）。
+        //  · 被 `heightIn(max = 320dp)` 钳住：外层高度不变、主列表 item 高度不变 ⇒ 上面什么都没
+        //    被顶动，本块只是在**内层可滚范围**里变高 ⇒ `up == 0` ⇒ 补 0。
+        //    这正是原来按 `px`（自然高度）推算时多补的那一大段 —— 它根本没发生。
+        //  · 部分钳住：`up` 只有被收下的那一截 ⇒ `min` 正好是那一截。
+        // 多个块同时动画也不会重复：每个块只补**自己**传出去的量（同帧里上方的块顶边位移是下方
+        // 块的增长传导来的，那份增长由下方那个块自己补，`min` 把它挡在本块之外）。
+        //
+        // 时序与红线：
+        //  · `withFrameNanos` 在下一帧的动画阶段恢复 ⇒ 读到的 `shown`/`topInRoot` 是上一帧**布局
+        //    完成后**的值，两个量取自同一帧，不会读到中间态（0.8.244「补偿永远慢一拍」的坑）；
+        //  · `canScrollBackward` 这个门保留（0.8.246 实测：丢了它第一层就偏）；
+        //  · 只按本块真实增长补，绝不"看到偏差就把位置拽回去" —— 后者是 0.8.238 与 ChatScreen
+        //    里「每帧对账」被停用的原因（判断一错就乱飘、无法归因）。
         val begin = withFrameNanos { it }
+        val settle: () -> Unit = {
+            if (outer != null && outer.canScrollBackward && !lastTop.isNaN()) {
+                val grew = (shown[0] - lastShown).toFloat()
+                val up = lastTop - topInRoot
+                val transmitted = if (grew > 0f) up >= 0.5f else up <= -0.5f
+                if (grew != 0f && transmitted) {
+                    val push = if (grew > 0f) minOf(grew, up) else maxOf(grew, up)
+                    if (abs(push) > 0.5f) outer.dispatchRawDelta(push)
+                }
+            }
+            lastShown = shown[0]
+            lastTop = topInRoot
+        }
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
-            val oldH = px * progress
+            settle()
             progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
-            if (outer != null && outer.canScrollBackward) {
-                outer.dispatchRawDelta(px * progress - oldH)
-            }
             if (t >= 1f) break
         }
-        // ③ **收尾按实测位移对账**（issue #22 的核心）：逐帧补偿用的是推算高度，遇到
-        // `heightIn(max = 320dp)` 这类钳位就会多补 —— 第二层每多开一个累积偏一段。
-        // 这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时它接近 0（空操作），
-        // 被钳位时它正好是那份多补的量。
+        // ③ 收尾补最后一帧：上面最后一次写的 progress 还没落地，残差 = **一帧的增长量**（几 px）。
+        // 钳住时它本来就是 0 —— 所以这里不会再出现"整段拉回"（用户的「被动画拉回」）。
         withFrameNanos { }
-        withFrameNanos { }
-        val afterTop = topInRoot
-        if (outer != null && outer.canScrollBackward &&
-            !beforeTop.isNaN() && !afterTop.isNaN()
-        ) {
-            val drift = afterTop - beforeTop
-            if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
-        }
+        settle()
     }
 
     Layout(
@@ -432,11 +451,15 @@ private fun RevealHeight(
     ) { measurables, constraints ->
         // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
         if (!visible && progress <= 0f) {
+            shown[0] = 0
             layout(constraints.maxWidth, 0) { }
         } else {
             val placeable = measurables.first().measure(constraints.copy(minHeight = 0))
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
+            // 与 layout() 同一次测量写入（issue #22 评论的方案 C）：动画循环在下一帧的动画阶段
+            // 读它，拿到的正是这一帧落地的值，没有 `onGloballyPositioned` 那种慢一拍。
+            shown[0] = h
             layout(constraints.maxWidth, h) { placeable.place(0, 0) }
         }
     }
