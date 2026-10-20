@@ -753,9 +753,6 @@ fun ChatScreen(
         // 与动画规格 `scrollAnimationSpec`。少转发后者会落到接口默认实现上，
         // 只要原规格用的不是接口默认，滚动动画就变了。
         object : BringIntoViewSpec {
-            private var wasBlocked = false
-            private var loggedThisWindow = false
-
             override val scrollAnimationSpec: AnimationSpec<Float>
                 get() = defaultBringIntoView.scrollAnimationSpec
 
@@ -764,19 +761,11 @@ fun ChatScreen(
                 size: Float,
                 containerSize: Float,
             ): Float {
-                val blocked = revealBlocked.value
-                if (blocked != wasBlocked) {
-                    wasBlocked = blocked
-                    loggedThisWindow = false
-                }
-                if (!blocked) {
+                if (!revealBlocked.value) {
                     return defaultBringIntoView.calculateScrollDistance(offset, size, containerSize)
                 }
+                // 逐帧续期：被挡的请求还在来，说明这套 reveal 动画没结束，别提前放行。
                 lastRevealRequestAt.longValue = SystemClock.uptimeMillis()
-                if (!loggedThisWindow) {
-                    loggedThisWindow = true
-                    scrollTrace("biv-block off=$offset size=$size container=$containerSize")
-                }
                 return 0f
             }
         }
@@ -806,22 +795,8 @@ fun ChatScreen(
         //  · 不判断 `pressMoved` —— 选区扩展也是手指移动，那种情况同样需要纠。
         val lockKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
         val lockOffset = listState.firstVisibleItemScrollOffset
-        // **逐帧记一次「什么时候变的」**（#14 取证）：只记发生变化的帧，一行一个 delta，
-        // 从日志能直接分辨「一帧被瞬移」（程序滚动）还是「连续几十帧缓慢累积」（拖动/动画）。
-        var seenIdx = listState.firstVisibleItemIndex
-        var seenOff = listState.firstVisibleItemScrollOffset
         try {
             while (pressGuardOn) {
-                val curIdx = listState.firstVisibleItemIndex
-                val curOff = listState.firstVisibleItemScrollOffset
-                if (curIdx != seenIdx || curOff != seenOff) {
-                    scrollTrace(
-                        "hold-move ${curIdx}/${curOff} d=${curOff - seenOff} " +
-                            "moved=$pressMoved inProg=${listState.isScrollInProgress}",
-                    )
-                    seenIdx = curIdx
-                    seenOff = curOff
-                }
                 if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
                     pressGuardOn = false
                 }
@@ -949,6 +924,11 @@ fun ChatScreen(
     // （`visible.indexOfFirst { it.message.id == saved.first }` 恒为 -1），于是恢复直接掉回底部。
     // 现在记锚点时跳过这些行，取第一个真正的消息 id。
     val messageIds = remember(visible) { visible.mapTo(HashSet()) { it.message.id } }
+    // **必须经 `rememberUpdatedState` 进收集器**（issue #16 真机取证，2026-10-21）：
+    // 下面那个 `LaunchedEffect(listState)` 只启动一次，闭包里捕获的 `messageIds` 会永远停在
+    // **首次组合**那份 —— 而首帧会话往往还没加载完，那时集合是空的 ⇒ 过滤条件永不成立 ⇒
+    // 锚点一次都写不上。取证日志里就是「35 次 anchor-eval / 0 次 anchor-set」。
+    val messageIdsState = rememberUpdatedState(messageIds)
     // 记锚点：**不能看 `isScrollInProgress`**（issue #11 补充评论）。流式内容长高时 LazyColumn 的
     // 内部重排会被算成「正在滚动」，于是这个值在流式期间一直是 true —— 锚点永远记不下来，
     // 纠正逻辑也就永远检测不到 drift（用户实测：「抖动没了，但位置仍会持续漂移」）。
@@ -973,13 +953,14 @@ fun ChatScreen(
             // **只记消息行**：首可见项常是 `load-earlier` / `streaming:` 这类临时行，
             // 它们的 key 切回来时找不到对应消息（issue #16 的核心）。
             val first = listState.layoutInfo.visibleItemsInfo
-                .firstOrNull { it.key in messageIds } ?: return@collect
-            // 它就是首可见项就照实记偏移；被上面临时行压着就记 0（`scrollToItem` 的 offset 不能为负）。
-            val offset = if (first.index == listState.firstVisibleItemIndex) {
-                listState.firstVisibleItemScrollOffset
-            } else {
-                0
-            }
+                .firstOrNull { it.key in messageIdsState.value } ?: return@collect
+            // **偏移量要记「这条消息在视口里的位置」，不是「首可见项的滚动偏移」**（issue #16 二次取证）。
+            // 依据（真机日志里两次实测）：`scrollToItem(i, x)` 之后 item i 的 offset 恰好是 `-x`
+            // （`idx=0/0` ⇒ `@0`；`idx=0/606` ⇒ `@-606`）。所以锚点记 `-first.offset`。
+            // 以前对「锚点被上面临时行压着」的分支写死 0，等于把「这条消息已经被滚过几千 px」
+            // 抹成 0 —— 切回来就跳到这条消息的开头，正是用户说的「第一次就偏了」。
+            // `coerceAtLeast(0)`：消息在视口起点下方时 offset 为正，回填负值给 scrollToItem 没有意义。
+            val offset = (-first.offset).coerceAtLeast(0)
             anchors[state.conversationId] = first.key to offset
         }
     }
@@ -1009,6 +990,11 @@ fun ChatScreen(
     SideEffect { scroll.conversationId = state.conversationId }
     LaunchedEffect(state.conversationId) {
         if (lastConvId != state.conversationId) {
+            // **离开时贴着底，就把位置彻底忘掉**（真机日志 2026-10-21）：用户先在 A 里上翻到 X，
+            // 然后点「回到最新」贴到底，再切走 —— 贴底时锚点不再更新，X 一直留着，
+            // 切回来就跳回"点追底之前"的位置。`anchors` 在这里清，`spots`/`lastSeen` 由
+            // `saveSpot` 内部一起清（它拿到的是"离开的那个会话"的跟底状态）。
+            if (scroll.wasFollowing(lastConvId)) anchors.remove(lastConvId)
             scroll.saveSpot(lastConvId)
             lastConvId = state.conversationId
         }
@@ -1066,6 +1052,8 @@ fun ChatScreen(
             if (target != null) {
                 listState.scrollToItem(target.index, saved.second)
                 withFrameNanos { }
+                // 把实际落点写回锚点：这次恢复之后的"当前位置"就是它（下次切走时若没再滚过，
+                // 用的就是这一份）。
                 anchors[state.conversationId] = savedKey to saved.second
             } else {
                 // key 完全找不到（消息被删 / 分支切换）：只能回底，别停在随机位置。
@@ -1172,8 +1160,7 @@ fun ChatScreen(
                         LocalTypewriter provides settings.typewriter,
                         // 不在底部时展开要"向下展开"（块顶边钉住），需要摸到主列表状态。
                         LocalChatListState provides listState,
-                        // **不改变行为**，只记录「守护窗内有没有人请求把内容滚进视口」（#14 取证用，
-                        // 查完删）。若日志里出现 `biv … want=N`，它就是那次位移的点火者。
+                        // 按下期间拦住「把选中内容滚进视口」的请求（issue #14 的修法，见上面的说明）。
                         LocalBringIntoViewSpec provides revealGuardSpec,
                     ) {
                     LazyColumn(

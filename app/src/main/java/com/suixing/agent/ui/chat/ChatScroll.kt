@@ -93,8 +93,33 @@ class ChatScroll internal constructor(internal val listState: LazyListState) {
      * 切走时把**那个会话**的位置落盘。参数必须显式给 id：调用点是在 `conversationId`
      * 已经换成新会话之后才跑的（`SideEffect` 先写），按"当前会话"取会存到新会话名下。
      */
+    /**
+     * 离开某会话时，它当时是否处于「跟底」（贴底追最新）。
+     *
+     * 只读，给上层决定「要不要连 anchors 一起忘掉」：贴底离开 = 没有要记的位置。
+     */
+    internal fun wasFollowing(conversationId: String): Boolean =
+        stickByConversation[conversationId] ?: true
+
+    /**
+     * 把某会话记住的位置全部丢掉：`spots`、`lastSeen`、`spotKey/spotOffset`。
+     *
+     * **为什么必须三个一起清**（真机日志 2026-10-21）：在 A 里上翻到 X 之后点「回到最新」，
+     * 列表贴底但锚点停更在 X（贴底时不记），恢复时优先读 X ⇒ 切回来跳回"点追底之前"的位置。
+     * 只清 `spots` 不够、只清上层的 `anchors` 也不够 —— 两处都存着 X。
+     */
+    internal fun forgetSpot(conversationId: String) {
+        spots.remove(conversationId)
+        lastSeenByConversation.remove(conversationId)
+        spotByConversation.remove(conversationId)
+    }
+
     internal fun saveSpot(conversationId: String) {
-        if (stickByConversation[conversationId] ?: true) return
+        // 贴底离开：把旧位置丢掉，别留给下一次「切回来」—— 否则会跳回上翻时的 X。
+        if (stickByConversation[conversationId] ?: true) {
+            forgetSpot(conversationId)
+            return
+        }
         val seen = lastSeenByConversation[conversationId]
             ?: spotByConversation[conversationId]
             ?: return
