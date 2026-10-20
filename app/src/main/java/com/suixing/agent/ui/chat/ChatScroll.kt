@@ -11,6 +11,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 /**
  * 底锚列表的滚动层：贴底、取消贴底、阅读位置记忆。滚动相关的状态全在这里，
@@ -140,21 +142,33 @@ fun rememberChatScroll(
     // 那时重开追底会和手指打架 —— 用户：「往上轻微滑动，又被锁回来」）。
     // 底锚下判据就是 (0, 0)：底 padding 不参与 —— index 0 的底边本来就压在让位之上，
     // 不像顶锚那样会出现"看着在底、canScrollForward 仍为真"。
+    // 手指按着 / 长按守护期间的引用：先于 collector 声明（原来在下面）。
+    val downNow0 = rememberUpdatedState(pressed)
+    val guardNow0 = rememberUpdatedState(pressGuardOn)
     LaunchedEffect(listState) {
         snapshotFlow { listState.canScrollBackward to listState.isScrollInProgress }
-            .collect { (canBack, scrolling) ->
+            .collectLatest { (canBack, scrolling) ->
                 // **恢复位置的那几帧不许翻回 true**（issue #4 链路 4）：`scrollToItem` 之后布局
                 // 还没定型，`canScrollBackward` 会短暂为假，collector 于是把刚设的 false 改回去，
                 // 位置立刻被追底拉到底。
-                if (!scrolling && !canBack && !scroll.restoring) scroll.stickToBottom = true
+                if (scrolling || canBack || scroll.restoring) return@collectLatest
+                // **必须「持续」到底才算数**（issue #14，真机日志证据）：长按建立选区时布局会重排，
+                // `canScrollBackward` 会瞬时变成 false。原来一见到 false 就把 `stickToBottom` 翻回 true，
+                // 追底逻辑紧接着 `scrollToItem(0)` 把列表拉回底部 —— 日志里 `guard-off idx=0/624`，
+                // 两秒后 `guard-on idx=0/0`，中间没有任何手势。
+                // 250ms 的持续性是区分「用户真的滚到底」和「布局瞬闪」的关键。
+                delay(250)
+                if (!listState.canScrollBackward && !listState.isScrollInProgress &&
+                    !scroll.restoring
+                ) {
+                    scroll.stickToBottom = true
+                }
             }
     }
 
     // 追底：**不逐帧滚**。底锚下 index 0 长高本来就向上长（长高多少、底边都不动），
     // 只有滚动位置被顶离 (0, 0) 时才补一次：新行插在喂序最前（index 0）会让 LazyColumn
     // 按 key 把锚点挪到 index 1，这一帧补回 0 即可。手指按着/拖着时不抢。
-    val downNow = rememberUpdatedState(pressed)
-    val guardNow = rememberUpdatedState(pressGuardOn)
     LaunchedEffect(listState, autoFollow) {
         if (!autoFollow) return@LaunchedEffect
         snapshotFlow {
@@ -162,8 +176,8 @@ fun rememberChatScroll(
                 index = listState.firstVisibleItemIndex,
                 offset = listState.firstVisibleItemScrollOffset,
                 stick = scroll.stickToBottom,
-                pressed = downNow.value,
-                guard = guardNow.value,
+                pressed = downNow0.value,
+                guard = guardNow0.value,
             )
         }.collect { want ->
             if (want.stick && !want.pressed && !want.guard &&
