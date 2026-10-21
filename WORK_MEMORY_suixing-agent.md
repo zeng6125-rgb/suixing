@@ -1557,3 +1557,29 @@ biv off=-20 size=2507 container=2510 want=-621 → -473 → -336 → … → -1
 **验证**：compile `w:` **0 条**（含 MainActivity）、单测 **525/0/0/0**、assembleRelease 成功、
 `aapt` = 287/0.8.276、装机 Success、`dumpsys` = 287/0.8.276、归档 `dist/suixing-0.8.276.apk`
 （sha256 `6997fd1d313e4c81169f1e565d647fd9367af5239bbc53c59d56e797d2e7c5e0`）。
+
+### 8.60 #26 折叠块按需裁剪：唯一测出改善的一处（2026-10-21 14:1x）
+
+提交 **`8dd486c`**（0.8.277 / vc288，已 push）。改动只有一处：
+`ChatBlocks.kt` 的 `RevealHeight`：`.clipToBounds()` → `.graphicsLayer { clip = progress > 0f && progress < 1f }`。
+
+**原理**：`clipToBounds()` 给该节点建立**常驻离屏层**（saveLayer）；一屏 3–4 个折叠块就是 3–4 次离屏合成。
+裁剪只在 `0 < progress < 1`（动画 220ms）时必要 —— `progress==0` 高度 0 不画、
+`progress==1` 高度等于内容不溢出。
+
+**真机数据（SurfaceFlinger --latency，同一手法各取最后约 1 秒）**：
+
+| | 0.8.276 | 0.8.277 |
+|---|---|---|
+| 超 8.33ms | 13/123 = 10.6% | **8/124 = 6.5%** |
+| p95 | 16.65ms | **8.33ms**（回到 vsync 间隔） |
+| p99 | 41.64ms | 33.31ms |
+| max | 58.20ms | 58.28ms（**仍有偶发长帧，另因**） |
+
+**⚠️ 采样方法限制（重要，下次别再踩）**：`dumpsys SurfaceFlinger --latency` 的环形缓冲区约 128 条，
+120Hz 下 ≈ **最近 1 秒**。让用户滑 10 秒，拿到的只是尾部 1 秒 ⇒ **不能与 issue 里 51% 之类的长窗口基线直接比**，
+只能同协议做相对比较。另：`adb shell input swipe` 合成的滑动**测不出**真实卡顿（实测 0% 超预算），
+必须让用户真手指滑才能复现。
+
+**已被用户否定、不要再往那儿查的方向**：会话全量解析 / GC 压力（issue 26 的“原因二”）——
+用户明确说「不是会话解析和GC」。`max≈58ms` 的偶发长帧仍未定位。
