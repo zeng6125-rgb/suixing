@@ -179,6 +179,7 @@ class ToolRegistry private constructor() {
         add(WebTools(context, settings))
         add(VoiceTools(speaker))
         add(AssistantTools())
+        add(SessionTools())
     }
 
     fun add(group: ToolGroup) {

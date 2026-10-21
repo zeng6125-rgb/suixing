@@ -186,6 +186,24 @@ fun AboutScreen(onBack: () -> Unit) {
                     subtitle = "GPL 组件与构建脚本都在这个仓库里",
                     url = "https://github.com/zeng6125-rgb/suixing",
                 )
+                Spacer(Modifier.height(10.dp))
+                AboutLink(
+                    title = "版本发布与安装包",
+                    subtitle = "每个版本的 APK 与更新说明",
+                    url = "https://github.com/zeng6125-rgb/suixing/releases",
+                )
+                Spacer(Modifier.height(10.dp))
+                AboutLink(
+                    title = "问题反馈与已知缺陷",
+                    subtitle = "报 bug、看正在处理的问题",
+                    url = "https://github.com/zeng6125-rgb/suixing/issues",
+                )
+                Spacer(Modifier.height(10.dp))
+                AboutLink(
+                    title = "构建说明与文档",
+                    subtitle = "如何从源码自己编译出这个应用",
+                    url = "https://github.com/zeng6125-rgb/suixing#readme",
+                )
             }
 
         }
