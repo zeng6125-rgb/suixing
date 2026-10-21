@@ -446,15 +446,8 @@ private fun RevealHeight(
         // `heightIn(max = 320dp)` 这类钳位就会多补 —— 第二层每多开一个累积偏一段。
         // 这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时它接近 0（空操作），
         // 被钳位时它正好是那份多补的量。
-        withFrameNanos { }
-        withFrameNanos { }
-        val afterTop = topInRoot
-        if (revealDepth == 0 && outer != null && outer.canScrollBackward &&
-            !beforeTop.isNaN() && !afterTop.isNaN()
-        ) {
-            val drift = afterTop - beforeTop
-            if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
-        }
+        // **收尾对账已移除**（0.8.290）：绝对锚定每帧已经把视口钉在同一处，
+        // 再叠一次「按 positionInRoot 差值的相对补偿」只会在动画结束时制造一次跳变。
     }
 
     Layout(
