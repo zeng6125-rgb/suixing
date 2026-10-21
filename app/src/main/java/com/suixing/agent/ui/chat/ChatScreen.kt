@@ -960,6 +960,7 @@ fun ChatScreen(
     val driftCtx = LocalContext.current
     val NL = 10.toChar()
     val lastComp = remember { intArrayOf(0) }
+    val lastConsumed = remember { intArrayOf(0) }
     LaunchedEffect(listState) {
         val buf = StringBuilder()
         var tick = 0
@@ -967,13 +968,15 @@ fun ChatScreen(
         while (true) {
             withFrameNanos { }
             if (!laggingNow || lagNatural[0] <= 0) continue
-            if (tick++ % 3 != 0) continue
+            // **逐帧**记录：采样间隔与 Δnat/Δoff 必须同窗口，否则 d 无法与它们相加（上一轮的模型错在这）。
+            tick++
             buf.append(lagNatural[0]).append(' ')
                 .append(lagReported).append(' ')
                 .append(listState.firstVisibleItemIndex).append(' ')
                 .append(listState.firstVisibleItemScrollOffset).append(' ')
                 .append(if (listState.canScrollBackward) 1 else 0).append(' ')
-                .append(lastComp[0]).append(NL)
+                .append(lastComp[0]).append(' ')
+                .append(lastConsumed[0]).append(NL)
             val now = System.nanoTime()
             if (buf.length > 16_000 && now - lastFlush > 1_000_000_000L) {
                 val chunk = buf.toString()
@@ -1006,11 +1009,13 @@ fun ChatScreen(
             // dispatch(−δ) 会被加进漂移里（实测 doff ≈ dnat + d），所以这里统一补正量。
             // 期望值=0 时两种写法等价，所以增长路径的行为不变。
             val applied = if (delta < 0f) -delta else delta
-            lastComp[0] = if (laggingNow && listState.canScrollBackward) {
-                listState.dispatchRawDelta(applied)
-                applied.toInt()
+            if (laggingNow && listState.canScrollBackward) {
+                val consumed = listState.dispatchRawDelta(applied)
+                lastComp[0] = applied.toInt()      // 想补多少
+                lastConsumed[0] = consumed.toInt() // 实际被吃掉多少（0 = 列表拒绝）
             } else {
-                -999999
+                lastComp[0] = -999999
+                lastConsumed[0] = -999999
             }
         }
     }
