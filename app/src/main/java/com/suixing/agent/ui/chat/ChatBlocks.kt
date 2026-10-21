@@ -372,6 +372,9 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
+    // 方案 2（#13/#22）：把**自己实测的高度**广播给子块。内层改按「父容器真实高度增量」补偿，
+    // 被钳位时父高度不变 ⇒ 增量 0 ⇒ 一个像素都不多补（下面 parentH != null 分支）。
+    val myHeight = remember { mutableIntStateOf(0) }
     // 嵌套深度：**逐帧补偿照旧做**（否则内层展开时最外层没在动画，内层会往上长 —— 0.8.286 的教训）；
     // 只把「收尾按 positionInRoot 再补一次」限制在最外层，因为嵌套时内外层的 positionInRoot
     // 都会变，那份 drift 可能被补两遍（#13 的「展开后整屏下移」）。
@@ -455,7 +458,10 @@ private fun RevealHeight(
 
     Layout(
         content = {
-            CompositionLocalProvider(LocalRevealDepth provides revealDepth + 1) { content() }
+            CompositionLocalProvider(
+                LocalRevealDepth provides revealDepth + 1,
+                LocalExpansionParentHeight provides myHeight,
+            ) { content() }
         },
         modifier = Modifier
             .fillMaxWidth()
@@ -480,6 +486,7 @@ private fun RevealHeight(
             //   补偿（顶到 320dp 时父高度不变 ⇒ 补 0）。这一版先不动，见 issue #24 问题 3 的情况 B。
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
+            myHeight.intValue = h
             layout(constraints.maxWidth, h) { placeable.place(0, 0) }
         }
     }
