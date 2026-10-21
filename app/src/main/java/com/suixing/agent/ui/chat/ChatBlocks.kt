@@ -329,7 +329,22 @@ internal class ExpansionParentHeight(
     val height: androidx.compose.runtime.State<Int>,
     /** 高度上限（px）：容器到这个高度就不再跟着内容长。 */
     val maxHeight: Int,
-)
+) {
+    /**
+     * 容器**内容**的高度估计（px）：容器被上限钳住时，内容比容器高出多少就记在这里。
+     *
+     * 为什么需要它（0.8.297）：**跨过上限那一刻**容器高度的变化量，实测只有下一帧才知道
+     * （真机实测 0.8.296：那一帧差 6~7px ⇒ 块顶边跳一下）。有内容高度才能**当帧**算出
+     * 容器下一步会变成多少，跨上限那一帧也提前补上。
+     *
+     * -1 = 不可信：内容在「容器贴顶」期间被别的原因改过（来了新工具调用、某行变高），
+     * 这时退回按实测增量补（晚一帧，但不会补错）。
+     *
+     * 用 Float 而不是 Int：估计值每帧都要累加，用整数会每帧掉 0.5px，几十帧下来就偏出
+     * 好几 px（跟要修的那个误差同量级）。Float 累加没有这个损耗。
+     */
+    var contentEst: Float = -1f
+}
 
 internal val LocalExpansionParentHeight = compositionLocalOf<ExpansionParentHeight?> { null }
 
@@ -456,13 +471,21 @@ private fun RevealHeight(
             val comp = if (parentH != null) {
                 val h = parentH.height.value
                 val cap = parentH.maxHeight
-                val d = if (h < cap) {
-                    // 还没到上限：容器高度就是内容高度 ⇒ 变化量 = 这个块的增量（长到上限为止）
-                    if (growth >= 0f) minOf(growth, (cap - h).toFloat()) else growth
-                } else {
-                    // 已到上限：容器不再跟着内容长；只有内容缩回上限以下时它才变（实测值，
-                    // 那一帧晚一拍，误差有界）
+                val est = parentH.contentEst
+                val d = if (h >= cap && est < 0f) {
+                    // 内容高度不可信（容器贴顶期间内容被别的原因改过）⇒ 退回实测增量：
+                    // 晚一帧，但不会补错。
                     if (h < lastParent) (h - lastParent).toFloat() else 0f
+                } else {
+                    // 容器高度 = min(上限, 内容高度)。内容高度：容器贴顶时靠估计（见
+                    // [ExpansionParentHeight.contentEst]），否则就是容器高度本身（精确）。
+                    val content = if (h >= cap) est else h.toFloat()
+                    val contentNext = content + growth
+                    val hNext = minOf(cap.toFloat(), contentNext)
+                    // 下一帧的内容高度（贴顶时继续累积，没贴顶就是容器高度）
+                    parentH.contentEst = contentNext
+                    // 补「容器高度的变化量」：与高度变化同一帧 ⇒ 跨上限那一帧也算得出来
+                    hNext - h.toFloat()
                 }
                 lastParent = h
                 d
@@ -1217,10 +1240,21 @@ internal fun ToolBundle(
             val toolListHeight = remember { mutableIntStateOf(0) }
             // **上限也一起给下去**（0.8.297）：嵌套层改成「当帧预测」补，预测要知道还剩多少空间。
             val toolListMax = with(LocalDensity.current) { TOOL_LIST_MAX_HEIGHT.toPx().roundToInt() }
+            // **必须 remember**：这个对象带着「内容高度估计」这个跨帧状态，重建就丢了。
+            val parentInfo = remember { ExpansionParentHeight(toolListHeight, toolListMax) }
+            val toolListState = rememberLazyListState()
+            // 工具列表项数变了 ⇒ 内容高度变了（来了新的工具调用）⇒ 「内容高度估计」可能带偏。
+            // 只有「容器正贴着上限」时估计才真的用得上（容器没贴顶时，容器高度就是内容高度，
+            // 下一轮动画第一帧会拿实测高度把它刷新回来），这时才作废：退回按实测增量补
+            // （晚一帧，但不会补错）。
+            LaunchedEffect(toolListState.layoutInfo.totalItemsCount) {
+                if (parentInfo.height.value >= parentInfo.maxHeight) parentInfo.contentEst = -1f
+            }
             CompositionLocalProvider(
-                LocalExpansionParentHeight provides ExpansionParentHeight(toolListHeight, toolListMax)
+                LocalExpansionParentHeight provides parentInfo
             ) {
             LazyColumn(
+                state = toolListState,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = TOOL_LIST_MAX_HEIGHT)
