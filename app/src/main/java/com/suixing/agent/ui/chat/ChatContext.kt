@@ -822,16 +822,23 @@ internal fun FailureReceiptRow(text: String) {
                 modifier = Modifier.weight(1f),
             )
             // 同 [RunReasonLine]：回执也要能复制（排查要原文）。
+            //
+            // **图标与左边那枚同高**（用户：「这两个icon要跟第一行垂直居中啊，你这样都没有对齐」）：
+            // IconButton 会把图标在 26dp 的方框里**居中**，于是它比左边的告警图标低了 6dp ——
+            // 文字换行成两行时，两枚图标更不在同一条中线上。改成 26dp 的可点区域 + 顶部对齐，
+            // 图标自己补 1dp 上边距（与左边那枚一致，正文第一行的中线就在那儿）。
             val clip = LocalClipboardManager.current
-            IconButton(
-                onClick = { clip.setText(AnnotatedString(text)) },
-                modifier = Modifier.size(26.dp),
+            Box(
+                modifier = Modifier
+                    .size(26.dp)
+                    .clickable { clip.setText(AnnotatedString(text)) },
+                contentAlignment = Alignment.TopCenter,
             ) {
                 Icon(
                     imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
                     contentDescription = "复制错误提醒",
                     tint = scheme.error,
-                    modifier = Modifier.size(14.dp),
+                    modifier = Modifier.size(14.dp).padding(top = 1.dp),
                 )
             }
         }

@@ -1647,12 +1647,39 @@ fun ChatScreen(
                     }
                 },
             )
+            // **读历史时的新内容提示**（issue #17）：流式行在离开底部时被冻住，所以那一段输出
+            // 不会出现在列表里（回到底部才一次性出现）。用户问「新流式消息是不是不显示啊？
+            // 得回底部才显示？」—— 是的，所以给一条**不碰列表**的提示：它不改变列表高度，
+            // 只是告诉用户「它还在跑」。点它＝回到底部（解冻）。
+            if (!scroll.atBottom && live) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = composerH + 14.dp),
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) {
+                        Text(
+                            text = "正在生成… 点这里回到底部",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .clickable { jumpToLatest() }
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+            }
             // The composer floats over the transcript instead of owning a strip at the bottom:
             // content scrolls behind the pill, which is what makes it read as a floating input
-            // rather than a bar that cuts the conversation off. Not drawn while the
-            // conversation is still being opened: an input field with a "say something" hint
-            // is part of what made the loading frame look like a new chat.
-            if (!state.loading) {
+            // rather than a bar that cuts the conversation off.
+            //
+            // **常驻**（用户：「对话框可以一直在呀，这个常驻的，没必要跟着会话一起出现吧？」）：
+            // 以前 `if (!state.loading)` 把输入框藏到会话读完为止 —— 那段时间屏幕上只剩
+            // 「加载会话中…」，看着像应用没开起来。输入框是常驻件；代表"新会话"的是空会话页的
+            // 英雄区，两者不要混。
             Box(Modifier.align(Alignment.BottomCenter)) {
                 Composer(
                     input = input,
@@ -1774,7 +1801,6 @@ fun ChatScreen(
                             .padding(end = 24.dp),
                     )
                 }
-            }
             }
         }
         if (voiceOpen) {

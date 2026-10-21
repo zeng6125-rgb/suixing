@@ -1,6 +1,7 @@
 package com.suixing.agent.llm
 
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.SecretBox
 import com.suixing.agent.data.PROTOCOL_ANTHROPIC
 import com.suixing.agent.data.PROTOCOL_OPENAI
 import com.suixing.agent.data.PROTOCOL_RESPONSES
@@ -277,15 +278,16 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
      * server does reject the call the mapped message says so.
      */
     suspend fun listModels(settings: AppSettings): List<String> = withContext(Dispatchers.IO) {
+        val key = settings.plainApiKey()
         val request = Request.Builder()
             .url(modelsEndpoint(settings.baseUrl, settings.protocol))
             .header("Accept", "application/json")
             .apply {
                 if (settings.protocol == PROTOCOL_ANTHROPIC) {
-                    if (settings.apiKey.isNotBlank()) header("x-api-key", settings.apiKey)
+                    if (key.isNotBlank()) header("x-api-key", key)
                     header("anthropic-version", ANTHROPIC_VERSION)
-                } else if (settings.apiKey.isNotBlank()) {
-                    header("Authorization", "Bearer ${settings.apiKey}")
+                } else if (key.isNotBlank()) {
+                    header("Authorization", "Bearer $key")
                 }
             }
             // 自定义头同样要带（高级参数）：网关若靠特殊头鉴权，/models 不带就是 401。
@@ -305,15 +307,16 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
      * and its shape must not move, while the window is a bonus a caller may or may not want.
      */
     suspend fun listModelDetails(settings: AppSettings): List<ProviderModel> = withContext(Dispatchers.IO) {
+        val key = settings.plainApiKey()
         val request = Request.Builder()
             .url(modelsEndpoint(settings.baseUrl, settings.protocol))
             .header("Accept", "application/json")
             .apply {
                 if (settings.protocol == PROTOCOL_ANTHROPIC) {
-                    if (settings.apiKey.isNotBlank()) header("x-api-key", settings.apiKey)
+                    if (key.isNotBlank()) header("x-api-key", key)
                     header("anthropic-version", ANTHROPIC_VERSION)
-                } else if (settings.apiKey.isNotBlank()) {
-                    header("Authorization", "Bearer ${settings.apiKey}")
+                } else if (key.isNotBlank()) {
+                    header("Authorization", "Bearer $key")
                 }
             }
             .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
@@ -1244,13 +1247,23 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
      * rejects a request that carries neither. The OpenAI branches are unchanged.
      */
     private fun authHeaders(builder: Request.Builder, settings: AppSettings, protocol: String) {
+        val key = settings.plainApiKey()
         if (protocol == PROTOCOL_ANTHROPIC) {
-            if (settings.apiKey.isNotBlank()) builder.header("x-api-key", settings.apiKey)
+            if (key.isNotBlank()) builder.header("x-api-key", key)
             builder.header("anthropic-version", ANTHROPIC_VERSION)
         } else {
-            builder.header("Authorization", "Bearer ${settings.apiKey}")
+            builder.header("Authorization", "Bearer $key")
         }
     }
+
+    /**
+     * 真要用明文 Key 的地方（这里是唯一的请求出口）才解密。
+     *
+     * 为什么不放在设置流的读取路径上：AndroidKeyStore 每次冷启动要 ~150ms，放在那里会连累
+     * 设置的首个 emit ⇒ 会话列表迟迟不出（真机 A/B：冷启动 165ms → 340ms）。
+     * 解不开（换机 / 密钥失效）时 [SecretBox.decrypt] 返回空串 ⇒ 当作「没填」。
+     */
+    private fun AppSettings.plainApiKey(): String = SecretBox.decrypt(apiKey)
 
     private fun modelsEndpoint(baseUrl: String, protocol: String = PROTOCOL_OPENAI): String {
         val trimmed = baseUrl.trim().trimEnd('/')

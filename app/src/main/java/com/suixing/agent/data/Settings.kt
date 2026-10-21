@@ -586,8 +586,14 @@ class SettingsRepository(private val context: Context) {
         } else {
             runCatching { json.decodeFromString<AppSettings>(raw) }.getOrElse { AppSettings() }
         }
-        // **先解密再迁移**：迁移会把顶层的 Key 复制进第一个 provider，密文复制过去是错的。
-        return parsed.decrypted().migrated()
+        // **这里不解密**（2026-10-21 起）：AndroidKeyStore 每次冷启动要 ~150ms（provider 每次
+        // 进程重载），解密放在读路径上会连累**设置的首个 emit** ⇒ 会话列表迟迟不出
+        // （真机 A/B：冷启动 165ms → 340ms）。落盘里存的是密文，读出来也保持密文；
+        // 真要用明文的地方自己调 [SecretBox.decrypt]（发请求见 llm/LlmClient.kt，
+        // 显示 Key 见设置页与引导页）。
+        //
+        // 迁移把顶层的 Key 复制进第一个 provider：两个字段都是密文，复制过去是对的。
+        return parsed.migrated()
     }
 
     /**
@@ -620,8 +626,11 @@ private fun AppSettings.encrypted(): AppSettings = copy(
 
 /**
  * 读回后：把密文换回明文。解不开（换机 / 密钥失效）⇒ 当成「没填」，让用户重填。
+ *
+ * **不在设置流的读取路径上调用**（见 [SettingsRepository.decode] 的说明）：Keystore 每次冷
+ * 启动要 ~150ms，放在读路径上会拖住整个首屏。要用明文的地方自己调 [SecretBox.decrypt]。
  */
-private fun AppSettings.decrypted(): AppSettings = copy(
+internal fun AppSettings.decrypted(): AppSettings = copy(
     apiKey = SecretBox.decrypt(apiKey),
     providers = providers.map { it.copy(apiKey = SecretBox.decrypt(it.apiKey)) },
 )

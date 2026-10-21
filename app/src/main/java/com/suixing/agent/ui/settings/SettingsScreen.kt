@@ -61,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -84,6 +85,7 @@ import com.suixing.agent.R
 import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.decrypted
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.label
@@ -442,7 +444,15 @@ private fun CoroutineScope.persistProvider(id: String?, block: (ProviderConfig) 
  */
 @Composable
 private fun ModelSettingsPage(onBack: () -> Unit) {
-    val stored by Core.settings.flow.collectAsState(initial = AppSettings())
+    val raw by Core.settings.flow.collectAsState(initial = AppSettings())
+    // 仓库里存的是**密文**（Keystore 加密），页面里一律用**明文**：Key 框要显示它，
+    // 「有未保存的改动」的比对也要拿明文跟明文比（拿密文比会永远判定成改过）。
+    //
+    // 解密放 IO 线程：AndroidKeyStore 每次进程首次访问要 ~150ms，放主线程会掉一帧。
+    // 页面里的比较与保存都走这份明文副本，保存时由落盘层重新加密。
+    val stored by produceState(AppSettings(), raw) {
+        value = withContext(Dispatchers.IO) { raw.decrypted() }
+    }
     // The draft starts from whatever the repository holds at first emission. The flow's
     // initial value is the raw default (no providers yet — migration runs inside the
     // flow), so the draft is re-seeded once the migrated settings arrive; without that
