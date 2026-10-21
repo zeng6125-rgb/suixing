@@ -858,12 +858,23 @@ fun ChatScreen(
         if (state.conversationId.isNotEmpty()) alphaHistory[0] = true
         androidx.compose.animation.core.Animatable(if (coldStart) 1f else 0f)
     }
+    // **只在动画那 260ms 挂 graphicsLayer**（issue #27）：`graphicsLayer` 修饰符只要存在，
+    // 就会给整个 LazyColumn 创建一个常驻 RenderNode —— 静止时它仍要参与每帧合成，
+    // 哪怕 alpha/translation/scale 全是默认值。动画结束后摘掉，画面完全一样（三者都是恒等）。
+    var switching by remember { mutableStateOf(false) }
     LaunchedEffect(state.conversationId) {
         // 初值已经是 0，这里只负责把它推到 1：从 0 起跑，不需要 `snapTo`，
         // 也就没有「snapTo 生效之前先露一帧」的窗口。
         // 260ms（用户 2026-10-21 定）：210ms 显得赶，260ms 的淡入+上浮更从容；
         // 这是**唯一的时长来源**，改这里就够（位移 24dp / 缩放 0.92 在同一段的 graphicsLayer 里）。
-        switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
+        // 冷启动时 Animatable 初值就是 1f：不播动画，也不挂层。
+        if (switchAlpha.value >= 1f) return@LaunchedEffect
+        switching = true
+        try {
+            switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
+        } finally {
+            switching = false
+        }
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
@@ -1073,10 +1084,15 @@ fun ChatScreen(
         // starts below it, so nothing scrolls under a translucent band of controls.
         // The transcript and the jump button share one box: the button belongs to the
         // reading area, not to the composer, so it must not sit under the pill.
+        // **深色下不要再刷一遍整屏**（重复渲染清理）：`Scaffold(containerColor = background)`
+        // 已经把整屏涂成 `background`，而深色主题里 `background` 与 `surface` 是同一个色值
+        // （`theme/Color.kt` 都是 `0xFF0F1412`）⇒ 这层 `background(canvas)` 在深色下是纯重复绘制，
+        // 每帧多一次全屏填充、像素完全不变。
+        // 浅色下 `canvas` 是带一点品牌色的竖向渐变（不是纯色），必须保留。
         Box(
             Modifier
                 .fillMaxSize()
-                .background(canvas)
+                .then(if (LocalDarkTheme.current) Modifier else Modifier.background(canvas))
                 .padding(padding),
         ) {
             Column(Modifier.fillMaxSize()) {
@@ -1127,26 +1143,23 @@ fun ChatScreen(
                         reverseLayout = true,
                         modifier = Modifier
                             .fillMaxSize()
-                            // **切换会话的淡入**（issue #12）：`openConversation` 是一帧内把整个
-                            // state 换掉（没有 loading 态可等），所以只能给新内容一个入场。
-                            // 用 graphicsLayer 而不是 alpha 修饰符：alpha 在 layer 块里读，动画期间
-                            // 不触发重组；也不做 AnimatedContent —— 那会同时持有两份 composition，
-                            // 对 30MB 的会话内存峰值翻倍（issue 自己提的第 4 点）。
-                            .graphicsLayer {
-                                // 形态 = **淡入 + 从下方 24dp 升起 + 缩放到 1.0**（issue #12
-                                // 评论 5 的方案 A，lead 定的方向）。纯 alpha 只有「蒙层在消失」，
-                                // 没有方向感也没有层次，用户说的「不优雅、动画效果烂」指的是这个。
-                                //
-                                // 缩放取 0.92（不是上一版凭感觉的 0.97）：这是**本仓库自己的**
-                                // 入场约定 —— `ChatComposer.kt:334` 的弹层就是
-                                // `fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.92f)`。
-                                val p = switchAlpha.value
-                                alpha = p
-                                translationY = (1f - p) * 24.dp.toPx()
-                                val s = 0.92f + 0.08f * p
-                                scaleX = s
-                                scaleY = s
-                            }
+                            // 入场层只在动画期间存在（见上面 `switching` 的说明）。
+                            // 三者在动画结束后都是恒等值（alpha=1、位移=0、缩放=1），摘掉层像素不变。
+                            .then(
+                                if (!switching) {
+                                    Modifier
+                                } else {
+                                    Modifier.graphicsLayer {
+                                        // 形态 = 淡入 + 从下方 24dp 升起 + 缩放 0.92→1.0（issue #12）。
+                                        val p = switchAlpha.value
+                                        alpha = p
+                                        translationY = (1f - p) * 24.dp.toPx()
+                                        val sc = 0.92f + 0.08f * p
+                                        scaleX = sc
+                                        scaleY = sc
+                                    }
+                                },
+                            )
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {

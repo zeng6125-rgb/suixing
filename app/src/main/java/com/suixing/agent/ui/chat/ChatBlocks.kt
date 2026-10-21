@@ -370,6 +370,10 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
+    // **裁剪层只在动画期间挂**（issue #27）：`graphicsLayer` 修饰符只要存在，就会给这个节点
+    // 创建一个常驻 RenderNode，静止时仍然参与每帧合成。而内容只在 0<progress<1 时溢出。
+    // 用独立的 Boolean 做条件（不是 `progress`），避免动画期间每帧触发重组。
+    var clipping by remember { mutableStateOf(false) }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
@@ -411,6 +415,7 @@ private fun RevealHeight(
         //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
         // 所以逐帧回到原来的写法（对第一层已验证有效），把"被钳位吃掉的量"交给 ③ 的收尾对账。
         val begin = withFrameNanos { it }
+        clipping = true
         // **嵌套在有上限的容器里时，按容器高度增量补**（issue #22）：顶到 320dp 后容器不再长，
         // 增量就是 0，自然不补 —— 这正是「钳位时不要多补」的正解，不用去猜约束。
         val parentH = parentHeightState
@@ -438,6 +443,7 @@ private fun RevealHeight(
         // 被钳位时它正好是那份多补的量。
         withFrameNanos { }
         withFrameNanos { }
+        clipping = false
         val afterTop = topInRoot
         if (outer != null && outer.canScrollBackward &&
             !beforeTop.isNaN() && !afterTop.isNaN()
@@ -458,9 +464,7 @@ private fun RevealHeight(
             // progress==1 时高度恰好等于内容高度（不裁也不会画到下一行）。
             // 所以用 graphicsLayer 的 clip：只在动画那 220ms 里开，其余时间零开销。
             // 在 layer 块里读 progress 属于绘制阶段，不会触发重组。
-            .graphicsLayer {
-                clip = progress > 0f && progress < 1f
-            }
+            .then(if (clipping) Modifier.graphicsLayer { clip = true } else Modifier)
             .onGloballyPositioned { coords -> topInRoot = coords.positionInRoot().y },
     ) { measurables, constraints ->
         // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
