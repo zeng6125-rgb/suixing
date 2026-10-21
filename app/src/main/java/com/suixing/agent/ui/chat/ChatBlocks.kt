@@ -43,7 +43,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -294,6 +293,18 @@ internal val PROCESS_TITLE_MAX = 160.dp
  */
 internal const val PROCESS_EXPAND_MS = 220
 
+/**
+ * 折叠块展开/收起的缓动曲线（0.8.297）。
+ *
+ * 原来用 `LinearOutSlowInEasing`（= `CubicBezierEasing(0, 0, 0.2, 1)`）：它在 t=0 的斜率约 5，
+ * 动画**第一帧**就已经走到 12% ⇒ 展开时下方内容一帧内被推开整块高度的 12%（540px 的块 = 65px
+ * 一跳），收起时同理 —— 看起来就是「弹一下」。
+ *
+ * 换成 M3 的 standard 曲线（`CubicBezierEasing(0.2, 0, 0, 1)`）：起点斜率为 0，第一帧只走 1.2%
+ * （540px 的块 = 6px），展开是「慢慢长出来」、收尾也是慢慢合上，中间快 —— 头尾都不再跳。
+ */
+internal val REVEAL_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
 /** 阅读锚活着（人停在历史里）时为 true：折叠动画改即时完成，避免动画把正在读的内容推走。 */
 internal val LocalReadingPinned = compositionLocalOf { false }
 
@@ -313,7 +324,14 @@ internal val LocalChatListState = compositionLocalOf<androidx.compose.foundation
  * 所以嵌套层不能按「自己长了多少」补，要按**这个容器长了多少**补：顶到上限时它的增量为 0，
  * 补偿自然是 0。为 null 表示外面没有这样的容器（第一层），按原来的自然高度补。
  */
-internal val LocalExpansionParentHeight = compositionLocalOf<androidx.compose.runtime.State<Int>?> { null }
+internal class ExpansionParentHeight(
+    /** 实测高度（px）：`onSizeChanged` 写的，动画循环里读到的是**上一帧**的值。 */
+    val height: androidx.compose.runtime.State<Int>,
+    /** 高度上限（px）：容器到这个高度就不再跟着内容长。 */
+    val maxHeight: Int,
+)
+
+internal val LocalExpansionParentHeight = compositionLocalOf<ExpansionParentHeight?> { null }
 
 /**
  * 外观 → 打字机效果（默认开）。只落在**两个**流式渲染点上：正文的 Markdown 与思考块。
@@ -374,6 +392,8 @@ private fun RevealHeight(
     val animBuf = remember { StringBuilder() }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
+    // 本帧**实际布局出来**的高度（px）：埋点用（核对推算高度和真实高度差多少）。
+    val laid = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
     val outer = LocalChatListState.current
     // 组合期读取（CompositionLocal 不能在 LaunchedEffect 里读）：外层有上限的滚动容器高度。
@@ -413,30 +433,53 @@ private fun RevealHeight(
         //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
         // 所以逐帧回到原来的写法（对第一层已验证有效），把"被钳位吃掉的量"交给 ③ 的收尾对账。
         val begin = withFrameNanos { it }
-        // **嵌套在有上限的容器里时，按容器高度增量补**（issue #22）：顶到 320dp 后容器不再长，
-        // 增量就是 0，自然不补 —— 这正是「钳位时不要多补」的正解，不用去猜约束。
+        // **嵌套在有上限的容器里时，补的是「外层容器」的高度增量**（issue #22）：容器顶到上限后
+        // 就不再跟着内容长 ⇒ 增量 0 ⇒ 补 0（钳位不多补）。
+        // 0.8.297 起这个增量改成**当帧预测**（见下面），不再用上一帧的实测值。
         val parentH = parentHeightState
-        var lastParent = parentH?.value ?: -1
+        var lastParent = parentH?.height?.value ?: -1
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
             val oldH = px * progress
-            progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
-            if (outer != null && outer.canScrollBackward) {
-                if (parentH != null) {
-                    val cur = parentH.value
-                    val delta = if (lastParent < 0) 0 else cur - lastParent
-                    lastParent = cur
-                    if (delta != 0) outer.dispatchRawDelta(delta.toFloat())
+            progress = start + (target - start) * REVEAL_EASING.transform(t)
+            // **这一帧该补多少**（0.8.297）：必须和高度变化落在**同一帧**，晚一拍就一直在抖。
+            //
+            // 真机埋点（0.8.295，153 帧）实测：补偿晚一帧时，块顶边每帧正好偏「一帧的高度增量」
+            // （5~75px），最后靠收尾对账拉回来 ⇒ 观感就是「展开/收起时位置一直在变，最后位置是对的」。
+            // · 第一层：块自己的高度增量 —— 当帧就能算出来，和高度变化同一帧 ⇒ 补得准。
+            // · 第二层：外层容器的高度增量。容器高度是 `onSizeChanged` 写的**实测值**，只在布局
+            //   阶段才有 ⇒ 动画循环里读到的永远是**上一帧**的高度（晚两拍）。
+            //   改成**当帧预测**：没到上限时容器高度 == 内容高度，变化量就是这个块的增量（当帧可算）；
+            //   到上限后容器不再跟着内容长，补 0（钳位也不多补）。
+            val growth = px * progress - oldH
+            val comp = if (parentH != null) {
+                val h = parentH.height.value
+                val cap = parentH.maxHeight
+                val d = if (h < cap) {
+                    // 还没到上限：容器高度就是内容高度 ⇒ 变化量 = 这个块的增量（长到上限为止）
+                    if (growth >= 0f) minOf(growth, (cap - h).toFloat()) else growth
                 } else {
-                    outer.dispatchRawDelta(px * progress - oldH)
+                    // 已到上限：容器不再跟着内容长；只有内容缩回上限以下时它才变（实测值，
+                    // 那一帧晚一拍，误差有界）
+                    if (h < lastParent) (h - lastParent).toFloat() else 0f
                 }
+                lastParent = h
+                d
+            } else {
+                growth
+            }
+            if (outer != null && outer.canScrollBackward) {
+                if (comp != 0f) outer.dispatchRawDelta(comp)
             }
             // 只记录：这一帧补了多少、补前/补后的真实偏移
             if (outer != null) {
                 animBuf.append(System.currentTimeMillis()).append(" t=").append((t * 100).toInt())
                     .append(" prog=").append((progress * 100).toInt())
                     .append(" px=").append(px).append(" oldH=").append(oldH.toInt())
+                    .append(" h=").append(laid[0])
+                    .append(" ph=").append(parentH?.height?.value ?: -1)
+                    .append(" comp=").append(comp.toInt())
                     .append(" canBack=").append(outer.canScrollBackward)
                     .append(" fv=").append(outer.firstVisibleItemIndex).append("/")
                     .append(outer.firstVisibleItemScrollOffset)
@@ -492,11 +535,12 @@ private fun RevealHeight(
             // 都嵌在 LazyColumn 的 item 里，所以拿到的 maxHeight 都是无穷大，钳了等于没钳（实测
             // 加过这行、是空操作，已撤回）。320dp 的 `heightIn` 在**内容里**（`ChatBlocks.kt:1117`），
             // 约束不会传进本函数。
-            // ⇒ 真正要修 #22，必须让嵌套层知道「父容器实际长了多少」：给那个 320dp 的 LazyColumn
-            //   挂 `onSizeChanged` 并经 CompositionLocal 传下来，嵌套 RevealHeight 按**父高度增量**
-            //   补偿（顶到 320dp 时父高度不变 ⇒ 补 0）。这一版先不动，见 issue #24 问题 3 的情况 B。
+            // ⇒ #22 已修（0.8.297）：那个 320dp 的 LazyColumn 挂了 `onSizeChanged`，高度（连同上限）
+            //   经 CompositionLocal 传下来，嵌套 RevealHeight 按**容器高度增量**补偿；增量改为当帧
+            //   预测（未到上限时容器高度 == 内容高度），顶到 320dp 时补 0。
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
+            laid[0] = h
             layout(constraints.maxWidth, h) { placeable.place(0, 0) }
         }
     }
@@ -1073,6 +1117,9 @@ internal fun ReasoningBlock(
  */
 internal val BLOCK_CONTENT_TOP = 6.dp
 
+/** 工具列表（一个回合里的多次工具调用）的高度上限：超过就自己滚（issue #22）。 */
+internal val TOOL_LIST_MAX_HEIGHT = 320.dp
+
 /** 13sp / 20sp leading, scaled off bodySmall so 字号 still applies to both. */
 @Composable
 internal fun thinkingStyle(): TextStyle {
@@ -1168,11 +1215,15 @@ internal fun ToolBundle(
             // 只有本容器还在 320dp 以下才会真的把主列表顶上去；顶到上限后本高度不变 ⇒
             // 嵌套层按这个增量补，补 0，不再「多补再拉回」。
             val toolListHeight = remember { mutableIntStateOf(0) }
-            CompositionLocalProvider(LocalExpansionParentHeight provides toolListHeight) {
+            // **上限也一起给下去**（0.8.297）：嵌套层改成「当帧预测」补，预测要知道还剩多少空间。
+            val toolListMax = with(LocalDensity.current) { TOOL_LIST_MAX_HEIGHT.toPx().roundToInt() }
+            CompositionLocalProvider(
+                LocalExpansionParentHeight provides ExpansionParentHeight(toolListHeight, toolListMax)
+            ) {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 320.dp)
+                    .heightIn(max = TOOL_LIST_MAX_HEIGHT)
                     .onSizeChanged { toolListHeight.intValue = it.height },
                 // 不再加 8dp 行距：多工具里每个工具点开后的样子必须和「单个工具」一致，
                 // 多一层间距就是多一层它没有的边距。
