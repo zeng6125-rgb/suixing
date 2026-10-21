@@ -1142,23 +1142,17 @@ fun ChatScreen(
                         reverseLayout = true,
                         modifier = Modifier
                             .fillMaxSize()
-                            // 入场层只在动画期间存在（见上面 `switching` 的说明）。
-                            // 三者在动画结束后都是恒等值（alpha=1、位移=0、缩放=1），摘掉层像素不变。
-                            .then(
-                                if (!switching) {
-                                    Modifier
-                                } else {
-                                    Modifier.graphicsLayer {
-                                        // 形态 = 淡入 + 从下方 24dp 升起 + 缩放 0.92→1.0（issue #12）。
-                                        val p = switchAlpha.value
-                                        alpha = p
-                                        translationY = (1f - p) * 24.dp.toPx()
-                                        val sc = 0.92f + 0.08f * p
-                                        scaleX = sc
-                                        scaleY = sc
-                                    }
-                                },
-                            )
+                            // 常驻入场层（0.8.284 回退）：条件挂载会导致本列表的布局修饰符链在
+                            // `switching` 翻转时重建，展开/收起折叠块时出现残影（用户实测）。
+                            .graphicsLayer {
+                                // 形态 = 淡入 + 从下方 24dp 升起 + 缩放 0.92→1.0（issue #12）。
+                                val p = switchAlpha.value
+                                alpha = p
+                                translationY = (1f - p) * 24.dp.toPx()
+                                val sc = 0.92f + 0.08f * p
+                                scaleX = sc
+                                scaleY = sc
+                            }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {

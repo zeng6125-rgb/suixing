@@ -450,19 +450,10 @@ private fun RevealHeight(
         content = content,
         modifier = Modifier
             .fillMaxWidth()
-            // **只在动画中间裁**（issue #26，真机定位「经过大总结折叠块附近就抖」）：
-            // `clipToBounds()` 会为该节点建立一个**常驻离屏层**（saveLayer），
-            // 一屏 3–4 个折叠块就是 3–4 次离屏合成，滚动经过时 GPU 明显变重。
-            // 内容只在 0 < progress < 1 时溢出：progress==0 时布局高度 0（不画），
-            // progress==1 时高度恰好等于内容高度（不裁也不会画到下一行）。
-            // 所以用 graphicsLayer 的 clip：只在动画那 220ms 里开，其余时间零开销。
-            // 在 layer 块里读 progress 属于绘制阶段，不会触发重组。
-            // **常驻图层 + 绘制阶段决定是否裁**：之前试过「只在动画期间挂层」（按 Boolean 条件），
-            // 但修饰符要等下一帧重组才生效，动画第一帧会在无裁剪状态下绘制 ⇒ 内容溢出 ⇒ 残影。
-            // 这里回到常驻图层：`clip` 在 layer 块里读（绘制阶段），没有生效延迟，也不会触发重组。
-            .graphicsLayer {
-                clip = progress > 0f && progress < 1f
-            }
+            // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
+            // **0.8.285 回退**：0.8.277~0.8.284 曾改用 `graphicsLayer { clip = … }`（为了少一层
+            // saveLayer），但实测展开/收起会出现残影；这里回到最初的 `clipToBounds()`。
+            .clipToBounds()
             .onGloballyPositioned { coords -> topInRoot = coords.positionInRoot().y },
     ) { measurables, constraints ->
         // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
