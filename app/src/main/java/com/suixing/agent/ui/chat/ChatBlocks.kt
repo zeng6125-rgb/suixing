@@ -362,6 +362,9 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
  *
  * 正在读历史（[LocalReadingPinned]）时不做动画：内容原地展开，不推着正在读的内容走。
  */
+/** 折叠块嵌套深度（issue #13）：只有最外层做收尾对账，见 RevealHeight 内的说明。 */
+internal val LocalRevealDepth = compositionLocalOf { 0 }
+
 @Composable
 private fun RevealHeight(
     visible: Boolean,
@@ -369,6 +372,10 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
+    // 嵌套深度：**逐帧补偿照旧做**（否则内层展开时最外层没在动画，内层会往上长 —— 0.8.286 的教训）；
+    // 只把「收尾按 positionInRoot 再补一次」限制在最外层，因为嵌套时内外层的 positionInRoot
+    // 都会变，那份 drift 可能被补两遍（#13 的「展开后整屏下移」）。
+    val revealDepth = LocalRevealDepth.current
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
@@ -438,7 +445,7 @@ private fun RevealHeight(
         withFrameNanos { }
         withFrameNanos { }
         val afterTop = topInRoot
-        if (outer != null && outer.canScrollBackward &&
+        if (revealDepth == 0 && outer != null && outer.canScrollBackward &&
             !beforeTop.isNaN() && !afterTop.isNaN()
         ) {
             val drift = afterTop - beforeTop
@@ -447,7 +454,9 @@ private fun RevealHeight(
     }
 
     Layout(
-        content = content,
+        content = {
+            CompositionLocalProvider(LocalRevealDepth provides revealDepth + 1) { content() }
+        },
         modifier = Modifier
             .fillMaxWidth()
             // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
