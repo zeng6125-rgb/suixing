@@ -491,10 +491,70 @@ class ChatViewModel : ViewModel() {
      *
      * Two buffers, not one: the answer and the reasoning land in different parts of the live
      * bubble, and a single buffer would put half a thought into the answer.
+     *
+     * Concurrent on purpose, and guarded by [deltaLock] on top of that: the deltas arrive on
+     * the reader thread that delivers the stream (the endpoint is read in
+     * `Dispatchers.IO`), while the main thread handles the other events of the same run and
+     * flushes these very buffers. A plain map written from two of them does not only lose an
+     * update — it loses the **tail of an answer**, because the reader thread appends into a
+     * buffer the main thread has already taken out, and that text is never published.
      */
-    private val textBuffers = mutableMapOf<String, StringBuilder>()
-    private val reasoningBuffers = mutableMapOf<String, StringBuilder>()
-    private val lastPublishAt = mutableMapOf<String, Long>()
+    private val textBuffers = ConcurrentHashMap<String, StringBuilder>()
+    private val reasoningBuffers = ConcurrentHashMap<String, StringBuilder>()
+    private val lastPublishAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Guards the delta buffers **and** the live copy they are published into.
+     *
+     * One lock for both, because publishing is one step: the buffered text is taken out of
+     * the buffer and written into the live copy of the conversation, and the two must not
+     * come apart — a live copy written from a stale read throws the text away again.
+     *
+     * A plain monitor rather than a `Mutex`: the accessors are not suspending functions
+     * (the engine's event callback is a plain call), and a `Mutex` can only be taken from
+     * inside a coroutine. The same shape as [steersLock].
+     *
+     * Held for one event and nothing else: no suspending call, no callback into this class
+     * except the [removeSteer]/[publishSteers] pair of the 插话 event, which takes
+     * [steersLock] — always in that order, and [steersLock] is never held while this one
+     * is wanted, so there is no lock order to get wrong.
+     */
+    private val deltaLock = Any()
+
+    /**
+     * Appends a piece of the answer and of the thinking to the buffers of [chatId].
+     *
+     * **Caller holds [deltaLock].** A [StringBuilder] that one thread writes while another
+     * reads it out of the map is a garbled answer, and a buffer that is taken out of the map
+     * while a delta is being appended to it is a delta that is never published.
+     */
+    private fun appendDeltaLocked(chatId: String, text: String, reasoning: String) {
+        if (text.isNotEmpty()) textBuffers.getOrPut(chatId) { StringBuilder() }.append(text)
+        if (reasoning.isNotEmpty()) reasoningBuffers.getOrPut(chatId) { StringBuilder() }.append(reasoning)
+    }
+
+    /**
+     * Whether the buffered text may be published now. The clock is read and set in one step,
+     * so two threads cannot both decide that they may publish.
+     *
+     * **Caller holds [deltaLock].**
+     */
+    private fun mayPublishLocked(chatId: String, now: Long): Boolean {
+        if (now - (lastPublishAt[chatId] ?: 0L) < DELTA_PUBLISH_MS) return false
+        lastPublishAt[chatId] = now
+        return true
+    }
+
+    /**
+     * Takes the buffered text and thinking of [chatId] out and hands them over.
+     *
+     * **Caller holds [deltaLock]** — the take and the publish that follows it are one step.
+     */
+    private fun takeDeltasLocked(chatId: String): Pair<String, String> {
+        val text = textBuffers.remove(chatId)?.toString().orEmpty()
+        val reasoning = reasoningBuffers.remove(chatId)?.toString().orEmpty()
+        return text to reasoning
+    }
 
     /**
      * Queued lines per conversation, oldest first.
@@ -502,8 +562,48 @@ class ChatViewModel : ViewModel() {
      * Kept here rather than only in the on-screen state so a queue survives a look at
      * another chat: the run it belongs to keeps going while the user is away, and coming
      * back must still show what is waiting — and still offer to retract it.
+     *
+     * Concurrent on purpose, like [sessions]: the composer's callbacks and the run's event
+     * callback are not the same thread, and a plain map written from two of them does not
+     * only lose an update — it can lose entries of its own. Every access goes through the
+     * helpers below, which hold [steersLock] around the whole read-modify-write.
      */
-    private val steers = mutableMapOf<String, List<PendingSteer>>()
+    private val steers = ConcurrentHashMap<String, List<PendingSteer>>()
+
+    /**
+     * Guards the read-modify-write of [steers].
+     *
+     * A plain monitor rather than a `Mutex`: the accessors are not suspending functions
+     * (the composer's callbacks and the engine's event callback are both plain calls), and
+     * a `Mutex` can only be taken from inside a coroutine. The same shape as the steering
+     * queues in the engine, which the UI thread writes while the run's coroutine drains.
+     *
+     * Held for one map operation and nothing else: no suspending call, no callback into
+     * this class. [todoBoardsLock] is never held at the same time, so there is no lock
+     * order to get wrong.
+     */
+    private val steersLock = Any()
+
+    /** The queue of one conversation, read under [steersLock]. */
+    private fun steersOf(chatId: String): List<PendingSteer> =
+        synchronized(steersLock) { steers[chatId].orEmpty() }
+
+    /** Appends a line to a queue — the read and the write are one step. */
+    private fun enqueueSteer(chatId: String, line: PendingSteer) {
+        synchronized(steersLock) { steers[chatId] = steers[chatId].orEmpty() + line }
+    }
+
+    /** Takes a line off a queue by id — the read and the write are one step. */
+    private fun removeSteer(chatId: String, id: String) {
+        synchronized(steersLock) {
+            steers[chatId] = steers[chatId].orEmpty().filterNot { it.id == id }
+        }
+    }
+
+    /** Forgets a conversation's queue entirely. */
+    private fun clearSteers(chatId: String) {
+        synchronized(steersLock) { steers.remove(chatId) }
+    }
 
     /**
      * Turns typed while a run was going in 排队 mode, waiting for it to finish.
@@ -513,7 +613,7 @@ class ChatViewModel : ViewModel() {
      * in one chat cannot be sent into another, and drained when that chat's run reports itself
      * finished.
      */
-    private val pendingTurns = mutableMapOf<String, List<PendingTurn>>()
+    private val pendingTurns = ConcurrentHashMap<String, List<PendingTurn>>()
 
     /**
      * Conversations with a queued turn currently being handed to [send].
@@ -583,8 +683,28 @@ class ChatViewModel : ViewModel() {
      * `todo_write` 事件到达时用户在 B 会话，旧的全局一份把 A 的板子画到了 B 屏幕上（「其它会话的
      * 任务队列出现在另一个会话」）。缓存落后于别的会话的写入正是想要的隔离：一个会话只画自己
      * 的 run 写的计划。开跑时清空自己那格（不继承上一轮的计划），与旧的全局版同一个不变量。
+     *
+     * 并发容器 + [todoBoardsLock]：这份缓存由事件线程写（[refreshTodos] 跟着 todo 工具事件
+     * 回来）、由界面线程读（[openConversation] 画板子），和 [sessions] 一样不能是普通 map。
      */
-    private val todoBoards = mutableMapOf<String, List<TodoItem>>()
+    private val todoBoards = ConcurrentHashMap<String, List<TodoItem>>()
+
+    /**
+     * Guards the read-modify-write of [todoBoards].
+     *
+     * Never held at the same time as [steersLock], and never held across a suspending call
+     * or a callback into this class — see [steersLock] for why it is a plain monitor.
+     */
+    private val todoBoardsLock = Any()
+
+    /** The board of one conversation, read under [todoBoardsLock]. */
+    private fun todosOf(chatId: String): List<TodoItem> =
+        synchronized(todoBoardsLock) { todoBoards[chatId].orEmpty() }
+
+    /** Replaces the board of one conversation — the read and the write are one step. */
+    private fun setTodos(chatId: String, board: List<TodoItem>) {
+        synchronized(todoBoardsLock) { todoBoards[chatId] = board }
+    }
 
     /**
      * One live copy per running conversation, keyed by chat id. A single slot is what
@@ -839,10 +959,10 @@ class ChatViewModel : ViewModel() {
                 error = failure,
                 // The queue belongs to the run, not to the screen: coming back to it must
                 // still show what is waiting.
-                pendingSteers = steers[conversation.id].orEmpty(),
+                pendingSteers = steersOf(conversation.id),
                 // And so does the board: it is read from disk on tool events, so a state built
                 // here would otherwise be the one place it is missing. 只取这个会话自己那一格。
-                todos = todoBoards[conversation.id].orEmpty(),
+                todos = todosOf(conversation.id),
             )
         } else {
             // A conversation that never picked a persona keeps the one already on screen,
@@ -852,7 +972,7 @@ class ChatViewModel : ViewModel() {
                     error = failure,
                     // A run that ended with lines still queued keeps them: they are the
                     // user's words, and the rows say they never went out.
-                    pendingSteers = steers[conversation.id].orEmpty(),
+                    pendingSteers = steersOf(conversation.id),
                 )
             }
         }
@@ -999,7 +1119,7 @@ class ChatViewModel : ViewModel() {
         // next save write it straight back.
         if (sessions.containsKey(conversation.id)) return
         // Nothing left to hand a queued line to.
-        steers.remove(conversation.id)
+        clearSteers(conversation.id)
         viewModelScope.launch {
             Core.chats.delete(conversation.id)
             if (conversation.id != _state.value.conversationId) return@launch
@@ -1270,8 +1390,10 @@ class ChatViewModel : ViewModel() {
             // run ends. Its own id, because the row offers the same three actions a queued steer
             // does — 立即插入 (hand it to the run in flight), 编辑 (take it back to the field) and
             // 删除 — and all three have to name the line they act on.
-            pendingTurns[chatId] = pendingTurns[chatId].orEmpty() +
-                PendingTurn(UUID.randomUUID().toString().take(8), body, imagesBase64)
+            enqueuePendingTurn(
+                chatId,
+                PendingTurn(UUID.randomUUID().toString().take(8), body, imagesBase64),
+            )
             publishPendingTurns(chatId)
             // The field is cleared here rather than left to the caller. The composer does clear on
             // a true return, but the device is the verdict on trusting that: the line appeared in
@@ -1288,7 +1410,7 @@ class ChatViewModel : ViewModel() {
         // phone right now" — UI automation — and a line the user typed is not that. A steer that
         // kept the light alive would say the phone is being driven while nothing is driving it. The
         // round's own model/tool activity already lights it and the round's end already puts it out.
-        steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, body, imagesBase64)
+        enqueueSteer(chatId, PendingSteer(id, body, imagesBase64))
         publishSteers(chatId)
         clearDraft(chatId)
         return true
@@ -1297,7 +1419,7 @@ class ChatViewModel : ViewModel() {
     /** Sends a queued line now, cutting the round in flight so the model sees it at once. */
     fun promoteSteer(id: String) {
         val chatId = _state.value.conversationId
-        val queued = steers[chatId].orEmpty().firstOrNull { it.id == id } ?: return
+        val queued = steersOf(chatId).firstOrNull { it.id == id } ?: return
         if (Core.engine.promote(chatId, id)) return
         // No round left to interrupt: the line goes out as an ordinary message instead of
         // being silently dropped — but only because the user asked for it now.
@@ -1306,7 +1428,9 @@ class ChatViewModel : ViewModel() {
         // The send was refused after all — another run in this conversation got there first. The
         // line has already been taken off the board, so putting it back is the only way it is not
         // lost without a word: the row returns and the user can send it again.
-        steers[chatId] = steers[chatId].orEmpty() + queued
+        // Read-modify-write under the lock: an append that lost the update would drop a line
+        // the user had queued in the meantime.
+        enqueueSteer(chatId, queued)
         publishSteers(chatId)
     }
 
@@ -1314,7 +1438,7 @@ class ChatViewModel : ViewModel() {
     fun retractSteer(id: String) {
         val chatId = _state.value.conversationId
         Core.engine.retract(chatId, id)
-        steers[chatId] = steers[chatId].orEmpty().filterNot { it.id == id }
+        removeSteer(chatId, id)
         publishSteers(chatId)
     }
 
@@ -1325,7 +1449,7 @@ class ChatViewModel : ViewModel() {
      * needs the same kind of handle a queued steer has.
      */
     fun retractTurn(chatId: String, id: String) {
-        pendingTurns[chatId] = pendingTurns[chatId].orEmpty().filterNot { it.id == id }
+        removePendingTurn(chatId, id)
         publishPendingTurns(chatId)
     }
 
@@ -1338,29 +1462,91 @@ class ChatViewModel : ViewModel() {
      * already retracted), it goes back to the queue rather than disappearing.
      */
     fun promoteTurn(chatId: String, id: String) {
-        val queued = pendingTurns[chatId].orEmpty().firstOrNull { it.id == id } ?: return
-        pendingTurns[chatId] = pendingTurns[chatId].orEmpty().filterNot { it.id == id }
+        val queued = takePendingTurn(chatId, id) ?: return
         publishPendingTurns(chatId)
         if (Core.engine.steer(chatId, id, queued.text, imagesBase64 = queued.imagesBase64)) {
             // It is an interruption now, so it is drawn as one: the same bubble a steer gets.
-            steers[chatId] = steers[chatId].orEmpty() + PendingSteer(id, queued.text, queued.imagesBase64)
+            enqueueSteer(chatId, PendingSteer(id, queued.text, queued.imagesBase64))
             publishSteers(chatId)
             return
         }
-        pendingTurns[chatId] = pendingTurns[chatId].orEmpty() + queued
+        enqueuePendingTurn(chatId, queued)
         publishPendingTurns(chatId)
     }
 
     /** Mirrors one conversation's queue onto the screen, when that is the one on screen. */
     private fun publishSteers(chatId: String) {
         if (_state.value.conversationId != chatId) return
-        _state.update { it.copy(pendingSteers = steers[chatId].orEmpty()) }
+        // The queue is read **inside** the update's lambda, under the lock: the state update is
+        // a compare-and-set loop, so a lost race re-reads the queue and publishes the newer
+        // one. Reading it once before the update would let a later publish overwrite a newer
+        // one with an older list.
+        _state.update { it.copy(pendingSteers = synchronized(steersLock) { steers[chatId].orEmpty() }) }
+    }
+
+    /**
+     * 排队 turn 的队列（issue #29）：跟 [steers] 一样的形状 —— UI 线程写（[steer]/
+     * [retractTurn]/[promoteTurn]），IO 线程读改写（`handleEvent` 里的 [drainPendingTurns]），
+     * 原来的普通 map 会**静默丢更新**（用户排的 turn 凭空消失）。同一把锁把「读-改-写」收成一步。
+     *
+     * [draining] 也在这把锁里动：它防的是两个 drain 同时发同一条（发两次比丢一条更糟）。
+     */
+    private val pendingTurnsLock = Any()
+
+    /** 队列里的 排队 turn（读，锁内）。 */
+    private fun pendingTurnsOf(chatId: String): List<PendingTurn> =
+        synchronized(pendingTurnsLock) { pendingTurns[chatId].orEmpty() }
+
+    /** 入队（锁内；读-改-写合成一步）。 */
+    private fun enqueuePendingTurn(chatId: String, turn: PendingTurn) {
+        synchronized(pendingTurnsLock) { pendingTurns[chatId] = pendingTurns[chatId].orEmpty() + turn }
+    }
+
+    /** 按 id 摘掉一条（锁内）。 */
+    private fun removePendingTurn(chatId: String, id: String) {
+        synchronized(pendingTurnsLock) {
+            pendingTurns[chatId] = pendingTurns[chatId].orEmpty().filterNot { it.id == id }
+        }
+    }
+
+    /** 按 id 取出一条并同时把它摘掉（锁内，合成一步 ⇒ 不会取到别人已经摘走的那条）。 */
+    private fun takePendingTurn(chatId: String, id: String): PendingTurn? =
+        synchronized(pendingTurnsLock) {
+            val list = pendingTurns[chatId].orEmpty()
+            val hit = list.firstOrNull { it.id == id } ?: return@synchronized null
+            pendingTurns[chatId] = list.filterNot { it.id == id }
+            hit
+        }
+
+    /** 取队首并把它摘掉（锁内；发送被拒绝时要放回队首，见 [drainPendingTurns]）。 */
+    private fun takeHeadPendingTurn(chatId: String): PendingTurn? =
+        synchronized(pendingTurnsLock) {
+            val list = pendingTurns[chatId].orEmpty()
+            val head = list.firstOrNull() ?: return@synchronized null
+            pendingTurns[chatId] = list.drop(1)
+            head
+        }
+
+    /** 放回队首（发送被拒绝时，锁内）。 */
+    private fun restoreHeadPendingTurn(chatId: String, turn: PendingTurn) {
+        synchronized(pendingTurnsLock) {
+            pendingTurns[chatId] = listOf(turn) + pendingTurns[chatId].orEmpty()
+        }
+    }
+
+    /** 这个会话正在排空吗（防重入；锁内）。 */
+    private fun tryBeginDrain(chatId: String): Boolean =
+        synchronized(pendingTurnsLock) { draining.add(chatId) }
+
+    /** 排空结束（锁内）。 */
+    private fun endDrain(chatId: String) {
+        synchronized(pendingTurnsLock) { draining.remove(chatId) }
     }
 
     /** The same, for the 排队 turns waiting to become the next run. */
     private fun publishPendingTurns(chatId: String) {
         if (_state.value.conversationId != chatId) return
-        _state.update { it.copy(pendingTurns = pendingTurns[chatId].orEmpty()) }
+        _state.update { it.copy(pendingTurns = pendingTurnsOf(chatId)) }
     }
 
     /**
@@ -1380,16 +1566,15 @@ class ChatViewModel : ViewModel() {
      * getting in each other's way; a refused turn is restored at the head, in order.
      */
     private fun drainPendingTurns(chatId: String) {
-        if (!draining.add(chatId)) return
+        if (!tryBeginDrain(chatId)) return
         try {
-            val next = pendingTurns[chatId].orEmpty().firstOrNull() ?: return
+            val next = takeHeadPendingTurn(chatId) ?: return
             if (_state.value.conversationId != chatId) return
-            pendingTurns[chatId] = pendingTurns[chatId].orEmpty().drop(1)
             publishPendingTurns(chatId)
             if (send(next.text, next.imagesBase64)) return
             // Refused: back to the head, where the next trigger will try again. Nothing is lost and
             // nothing was sent.
-            pendingTurns[chatId] = listOf(next) + pendingTurns[chatId].orEmpty()
+            restoreHeadPendingTurn(chatId, next)
             publishPendingTurns(chatId)
             // Refused while **nothing is running** is the case that needs help: the engine publishes
             // a run's terminal state before it lets go of the run, so a drain fired by that state can
@@ -1404,7 +1589,7 @@ class ChatViewModel : ViewModel() {
                 }
             }
         } finally {
-            draining.remove(chatId)
+            endDrain(chatId)
         }
     }
 
@@ -1420,7 +1605,7 @@ class ChatViewModel : ViewModel() {
     private fun refreshTodos(chatId: String) {
         viewModelScope.launch {
             val board = withContext(Dispatchers.IO) { Core.todos.read() }
-            todoBoards[chatId] = board
+            setTodos(chatId, board)
             if (_state.value.conversationId == chatId) {
                 _state.update { it.copy(todos = board) }
             }
@@ -1558,7 +1743,7 @@ class ChatViewModel : ViewModel() {
         // Lines left queued by the run that just ended, taken before this one starts: the
         // queue outlives a run, and a line queued from here on is already on its way to the
         // new run, so handing that one over again would deliver it twice.
-        val carried = steers[chatId].orEmpty()
+        val carried = steersOf(chatId)
         putSession(
             RunSession(
                 chatId = chatId,
@@ -1578,7 +1763,7 @@ class ChatViewModel : ViewModel() {
         // items — and drawing them here would show the previous task's plan wearing the new
         // run's clothes, most visibly for a run that never touches the todo tools at all.
         // The first `todo_write` of this run puts it back. 只清这个会话自己那一格。
-        todoBoards[chatId] = emptyList()
+        setTodos(chatId, emptyList())
         // 新一轮开始：清掉上一轮留下的红色提示，并把"用户停止"标记复位（否则这一轮真失败会被
         // 当成用户中断而不再报出来）。
         userStopped -= chatId
@@ -1601,7 +1786,9 @@ class ChatViewModel : ViewModel() {
                     Core.engine.stateOf(chatId).first { it is RunState.Running }
                     // The queue is the truth: a line retracted while the run was starting is
                     // gone from the table, and gone from the UI, so it must not go out here.
-                    carried.filter { queued -> steers[chatId]?.any { it.id == queued.id } == true }
+                    // One snapshot under the lock, not a lookup per line.
+                    val stillWaiting = steersOf(chatId)
+                    carried.filter { line -> stillWaiting.any { it.id == line.id } }
                         .forEach { queued ->
                             // The picture rides along: a steer carries text *and* image, and
                             // re-sending only the text dropped the screenshot without a word.
@@ -1807,17 +1994,27 @@ class ChatViewModel : ViewModel() {
         // flushes first, so nothing is ever applied out of order and no tail is lost.
         val textDelta = event is AgentEvent.TextDelta
         val reasoningDelta = event is AgentEvent.ReasoningDelta
-        if (textDelta) textBuffers.getOrPut(chatId) { StringBuilder() }.append(event.text)
-        if (reasoningDelta) reasoningBuffers.getOrPut(chatId) { StringBuilder() }.append(event.text)
-        if (textDelta || reasoningDelta) {
-            val now = SystemClock.uptimeMillis()
-            if (now - (lastPublishAt[chatId] ?: 0L) < DELTA_PUBLISH_MS) return
-            lastPublishAt[chatId] = now
+        // **一次事件里的「收 delta → 判断该不该发 → 取走缓冲」必须在一个临界区里做完**
+        // （issue #29）：这三步分开做时，IO 线程刚 append 完、另一线程的 flush 立刻把缓冲
+        // 取走 ⇒ 那一段输出凭空消失；`lastPublishAt` 的「每 DELTA_PUBLISH_MS 最多发一次」
+        // 也会被两个线程同时判定为「该发」。
+        //
+        // 临界区里不做任何挂起调用、也不回调本类 ⇒ 不会死锁。
+        var pending: Pair<String, String> = "" to ""
+        synchronized(deltaLock) {
+            if (textDelta) appendDeltaLocked(chatId, event.text, "")
+            if (reasoningDelta) appendDeltaLocked(chatId, "", event.text)
+            if (textDelta || reasoningDelta) {
+                val now = SystemClock.uptimeMillis()
+                // 还没到节拍：缓冲留着，攒到下一次一起发（与改动前一致）。
+                if (!mayPublishLocked(chatId, now)) return
+            }
+            // Whatever has arrived so far, applied in one go. For a non-delta event this is the
+            // flush; for a delta it is the publish that got through the interval above.
+            pending = takeDeltasLocked(chatId)
         }
-        // Whatever has arrived so far, applied in one go. For a non-delta event this is the
-        // flush; for a delta it is the publish that got through the interval above.
-        val pendingText = textBuffers.remove(chatId)?.toString().orEmpty()
-        val pendingReasoning = reasoningBuffers.remove(chatId)?.toString().orEmpty()
+        val pendingText = pending.first
+        val pendingReasoning = pending.second
         val base = applyPending(live, pendingText, pendingReasoning)
         val next = when (event) {
             // Already folded into `base` above.
@@ -1972,7 +2169,7 @@ class ChatViewModel : ViewModel() {
             // out of their buffers a few lines up, so building on `live` would have thrown
             // away whatever text and thinking had just arrived.
             is AgentEvent.Steered -> {
-                steers[chatId] = steers[chatId].orEmpty().filterNot { it.id == event.id }
+                removeSteer(chatId, event.id)
                 publishSteers(chatId)
                 val line = StoredMessage(
                     id = event.id,
@@ -2060,8 +2257,8 @@ class ChatViewModel : ViewModel() {
      */
     private fun flushDeltas(chatId: String) {
         val live = sessions[chatId] ?: return
-        val text = textBuffers.remove(chatId)?.toString().orEmpty()
-        val reasoning = reasoningBuffers.remove(chatId)?.toString().orEmpty()
+        // 同一个锁：取走与事件线程的 append 互斥（否则刚收到的 delta 会被这次 flush 顺手带走）。
+        val (text, reasoning) = synchronized(deltaLock) { takeDeltasLocked(chatId) }
         if (text.isEmpty() && reasoning.isEmpty()) return
         putSession(applyPending(live, text, reasoning))
     }

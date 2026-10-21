@@ -296,7 +296,28 @@ object TouchFx {
 
     private val main = Handler(Looper.getMainLooper())
 
+    /**
+     * The window the effects are drawn into, and the manager that put it there.
+     *
+     * Volatile because the window is created and torn down on the main thread ([overlay]
+     * and [release]) while [trace] reads it from whatever thread the effect came from —
+     * the tool dispatch thread for a gesture or a tool call. Without the volatile write
+     * that read is not guaranteed to see the latest value at all: a tick can report
+     * `overlay=none` while a window is up, or `overlay=up` after the window was taken
+     * down, and the trace then describes a screen that does not exist.
+     *
+     * [manager] is put up and taken down in the same two places as [view] — [overlay] adds
+     * the window through it, [release] removes it through it — so the two are written as
+     * a pair and cleared as a pair. It carries the same guarantee for the same reason: a
+     * reader that sees the new window must not see the old manager (or none at all),
+     * because [release] needs the manager that added the view to remove it.
+     *
+     * Both are single references, so volatile is enough — no lock is needed.
+     */
+    @Volatile
     private var view: FxView? = null
+
+    @Volatile
     private var manager: WindowManager? = null
 
     /**
