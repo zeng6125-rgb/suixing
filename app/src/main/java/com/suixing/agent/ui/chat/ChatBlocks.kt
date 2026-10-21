@@ -369,6 +369,9 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
+    // **临时日志（查完删）**：只记录，不改任何行为。
+    val animCtx = LocalContext.current
+    val animBuf = remember { StringBuilder() }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
@@ -429,7 +432,30 @@ private fun RevealHeight(
                     outer.dispatchRawDelta(px * progress - oldH)
                 }
             }
+            // 只记录：这一帧补了多少、补前/补后的真实偏移
+            if (outer != null) {
+                animBuf.append(System.currentTimeMillis()).append(" t=").append((t * 100).toInt())
+                    .append(" prog=").append((progress * 100).toInt())
+                    .append(" px=").append(px).append(" oldH=").append(oldH.toInt())
+                    .append(" canBack=").append(outer.canScrollBackward)
+                    .append(" fv=").append(outer.firstVisibleItemIndex).append("/")
+                    .append(outer.firstVisibleItemScrollOffset)
+                    .append(" top=").append(topInRoot.toInt())
+                    .append(System.lineSeparator())
+            }
             if (t >= 1f) break
+        }
+        // 把本次动画的逐帧记录追加落盘（IO 线程）。
+        val dump = animBuf.toString(); animBuf.setLength(0)
+        if (dump.isNotEmpty()) {
+            val dir = animCtx.filesDir
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                runCatching {
+                    val f = java.io.File(dir, "reveal-anim.log")
+                    if (f.length() > 256 * 1024) f.writeText("")
+                    f.appendText(dump)
+                }
+            }
         }
         // ③ **收尾按实测位移对账**（issue #22 的核心）：逐帧补偿用的是推算高度，遇到
         // `heightIn(max = 320dp)` 这类钳位就会多补 —— 第二层每多开一个累积偏一段。
