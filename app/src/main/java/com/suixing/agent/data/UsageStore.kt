@@ -146,23 +146,25 @@ class UsageStore(private val context: Context) {
      */
     private fun loadConversations(): List<Conversation> {
         val byId = LinkedHashMap<String, Conversation>()
-        File(chatsDir, STORE_DIR).listFiles { file -> file.name.endsWith(META_SUFFIX) }
-            ?.forEach { file ->
-                val id = file.name.removeSuffix(META_SUFFIX)
-                runCatching {
-                    val meta = store.readMeta(id) ?: return@runCatching
-                    byId[id] = meta.toConversation(store.all(meta))
-                }
-            }
         // A live draft ends in `.json` too; reading it as a conversation would hand
         // accumulate() an id that no transcript has.
+        // The plain files win while the store is not the write path: a `.json` is the newer copy,
+        // and the store can only hold what the build that wrote there left behind.
         chatsDir.listFiles { file -> file.extension == "json" && !file.name.endsWith(LIVE_SUFFIX) }
             ?.forEach { file ->
                 val conversation = runCatching {
                     json.decodeFromString<Conversation>(file.readText())
                 }.getOrNull() ?: return@forEach
-                // The store's copy is newer; a leftover `.json` is one a rename could not retire.
-                byId.putIfAbsent(conversation.id, conversation)
+                byId[conversation.id] = conversation
+            }
+        File(chatsDir, STORE_DIR).listFiles { file -> file.name.endsWith(META_SUFFIX) }
+            ?.forEach { file ->
+                val id = file.name.removeSuffix(META_SUFFIX)
+                if (byId.containsKey(id)) return@forEach
+                runCatching {
+                    val meta = store.readMeta(id) ?: return@runCatching
+                    byId[id] = meta.toConversation(store.all(meta))
+                }
             }
         return byId.values.toList()
     }

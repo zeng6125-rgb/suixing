@@ -7,7 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -15,8 +15,10 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * The repository on the append-only store: the write path, the old-format migration, and the
- * promise that a user's existing chats survive being moved.
+ * The repository while the append-only store is **read but not written**: everything still lands
+ * in `<id>.json`, and any chat the build that wrote to the store left behind is healed back to a
+ * plain file. The store keeps its own unit tests in [ChatStoreTest]; the migration path is
+ * exercised here because it is the repository that drives it.
  */
 class ChatRepositoryStoreTest {
 
@@ -42,16 +44,12 @@ class ChatRepositoryStoreTest {
         title: String = "会话 $id",
         updatedAt: Long = 1_700_000_000_000L,
         messages: List<StoredMessage> = twoMessages("$id-1"),
-        pinned: Boolean = false,
-        archived: Boolean = false,
     ) = Conversation(
         id = id,
         title = title,
         createdAt = updatedAt,
         updatedAt = updatedAt,
         messages = messages,
-        pinned = pinned,
-        archived = archived,
     )
 
     private fun twoMessages(tag: String) = listOf(
@@ -62,7 +60,7 @@ class ChatRepositoryStoreTest {
     /** An old-format chat: one JSON object in `<id>.json`, exactly as the shipped app wrote it. */
     private fun writeLegacy(conversation: Conversation): File {
         chatsDir.mkdirs()
-        return File(chatsDir, "${conversation.id}.json").apply {
+        return legacyFile(conversation.id).apply {
             writeText(json.encodeToString(Conversation.serializer(), conversation))
         }
     }
@@ -73,71 +71,51 @@ class ChatRepositoryStoreTest {
 
     private fun failedMarker(id: String) = File(chatsDir, "$id.json.migrate-failed")
 
-    private fun logBytes(id: String): Long =
-        File(chatsDir, "$STORE_DIR").listFiles { f -> f.name.startsWith("$id.") && f.name.endsWith(LOG_SUFFIX) }
-            ?.sumOf { it.length() }
-            ?: -1
+    private fun readLegacy(id: String): Conversation =
+        json.decodeFromString(legacyFile(id).readText())
 
-    // --- the new write path ------------------------------------------------------------------
+    /** The chat as the half-connected build left it: only in the store, no `.json` at all. */
+    private fun putInStoreOnly(conversation: Conversation) {
+        store.append(store.newMeta(conversation), conversation.messages)
+    }
+
+    // --- the write path: a plain file, as before ----------------------------------------------
 
     @Test
-    fun `a saved chat reads back from the store after a restart`() = runBlocking {
+    fun `saving a chat writes the single json file it always did`() = runBlocking {
         val saved = conversation("c1")
         repository().save(saved)
 
-        val reloaded = repository().apply { load() }.conversations.value
-
-        assertEquals("the chat has to come back", 1, reloaded.size)
-        assertEquals(saved.id, reloaded.single().id)
-        assertEquals("标题 has to survive", saved.title, reloaded.single().title)
-        assertEquals("消息 has to survive, in order", saved.messages, reloaded.single().messages)
-        assertFalse("a new-format chat leaves no .json behind", legacyFile("c1").exists())
-    }
-
-    @Test
-    fun `a new turn appends instead of rewriting the transcript`() = runBlocking {
-        val repository = repository()
-        val first = conversation("c1")
-        repository.save(first)
-        val before = logBytes("c1")
-
-        repository.save(first.copy(messages = first.messages + twoMessages("c1-2")))
-
-        assertTrue(
-            "the log has to grow by the new messages, not be written again ($before → ${logBytes("c1")})",
-            logBytes("c1") > before,
-        )
+        assertTrue("the transcript is a plain .json again", legacyFile("c1").exists())
+        assertFalse("nothing may be written to the store", store.has("c1"))
         val reloaded = repository().apply { load() }.conversations.value.single()
-        assertEquals(4, reloaded.messages.size)
+        assertEquals(saved.messages, reloaded.messages)
+        assertEquals(saved.title, reloaded.title)
     }
 
     @Test
-    fun `pinning a chat does not touch the transcript`() = runBlocking {
+    fun `a new chat is a plain json file`() = runBlocking {
+        repository().create(title = "新会话")
+
+        val files = chatsDir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
+        assertEquals("exactly one transcript file", 1, files?.size)
+        assertTrue("and nothing in the store", storeMetaIds().isEmpty())
+    }
+
+    @Test
+    fun `pinning and archiving survive a restart`() = runBlocking {
         val repository = repository()
         repository.save(conversation("c1"))
-        val before = logBytes("c1")
-
         repository.setPinned("c1", true)
-
-        assertEquals("置顶 must not re-encode a single message", before, logBytes("c1"))
-        val reloaded = repository().apply { load() }.conversations.value.single()
-        assertTrue("置顶 has to survive a restart", reloaded.pinned)
-        assertEquals("for the same reason, its time must not move", 1_700_000_000_000L, reloaded.updatedAt)
-    }
-
-    @Test
-    fun `archiving a chat survives a restart`() = runBlocking {
-        val repository = repository()
-        repository.save(conversation("c1"))
         repository.setArchived("c1", true)
 
         val reloaded = repository().apply { load() }.conversations.value.single()
+        assertTrue("置顶 has to survive a restart", reloaded.pinned)
         assertTrue("归档 has to survive a restart", reloaded.archived)
-        assertFalse("and it is not pinned by accident", reloaded.pinned)
     }
 
     @Test
-    fun `a shorter list is written as a rewrite, not refused`() = runBlocking {
+    fun `a shortened transcript is written as it was given`() = runBlocking {
         val repository = repository()
         val full = conversation("c1", messages = twoMessages("a") + twoMessages("b") + twoMessages("c"))
         repository.save(full)
@@ -151,21 +129,165 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
-    fun `deleting a chat takes its store files with it`() = runBlocking {
+    fun `deleting a chat removes its files in both formats`() = runBlocking {
         val repository = repository()
-        repository.save(conversation("c1"))
-        assertTrue("precondition: the store has the chat", store.has("c1"))
+        val chat = conversation("c1")
+        repository.save(chat)
+        putInStoreOnly(chat)
+        assertTrue("precondition: both formats are on disk", legacyFile("c1").exists() && store.has("c1"))
 
         repository.delete("c1")
 
+        assertFalse("the plain file goes", legacyFile("c1").exists())
         assertFalse("the store entry goes", store.has("c1"))
-        assertTrue("and the repository no longer lists it", repository.conversations.value.isEmpty())
+        assertTrue("and it is no longer listed", repository.conversations.value.isEmpty())
     }
 
-    // --- migrating the old format ------------------------------------------------------------
+    // --- healing: a chat the half-connected build moved into the store -------------------------
 
     @Test
-    fun `an old chat is listed before it is migrated and unchanged after`() = runBlocking {
+    fun `saving a store-only chat puts it back in a plain file and drops the store copy`() = runBlocking {
+        val onlyInStore = conversation("c1", title = "只在 store 里")
+        putInStoreOnly(onlyInStore)
+        assertFalse("precondition: no plain file", legacyFile("c1").exists())
+
+        val repository = repository()
+        repository.load()
+        val listed = repository.conversations.value.single()
+        assertEquals("listed from the store, so saving it has the whole transcript", 2, listed.messages.size)
+
+        repository.save(listed.copy(title = "救回来了"))
+
+        assertTrue("the plain file has to exist again", legacyFile("c1").exists())
+        assertEquals("with the whole transcript", listed.messages, readLegacy("c1").messages)
+        assertEquals("救回来了", readLegacy("c1").title)
+        assertFalse("and the store copy is gone", store.has("c1"))
+        assertEquals(
+            "so a build that only reads .json sees it again",
+            1,
+            repository().apply { load() }.conversations.value.size,
+        )
+    }
+
+    @Test
+    fun `a failed write leaves the store copy alone and the chat readable`() = runBlocking {
+        val onlyInStore = conversation("c1")
+        putInStoreOnly(onlyInStore)
+        // A directory where the temp file has to go: writeText onto a directory throws on every
+        // platform, so the write fails at its first step, before anything is discarded.
+        // (Blocking `<id>.json` itself is not enough — see the note in the class docs.)
+        File(chatsDir, "c1.json.tmp").mkdirs()
+
+        val repository = repository()
+        repository.load()
+        val listed = repository.conversations.value.single()
+        val result = runCatching { repository.save(listed.copy(title = "写不进去")) }
+
+        assertTrue("the save has to fail loudly", result.isFailure)
+        assertTrue("the store copy must survive a failed write", store.has("c1"))
+        val meta = store.readMeta("c1")
+        assertNotNull(meta)
+        assertEquals("and it still holds the whole conversation", onlyInStore.messages, store.all(meta!!))
+
+        // Readable again once the obstacle is gone, from the copy that was never dropped.
+        File(chatsDir, "c1.json.tmp").delete()
+        val reread = repository().apply { load() }.conversations.value.single()
+        assertEquals(onlyInStore.messages, reread.messages)
+    }
+
+    // --- repair-on-launch: the chats that build already scattered ------------------------------
+
+    @Test
+    fun `repair writes a store-only chat back to a plain file and drops the store copy`() = runBlocking {
+        val onlyInStore = conversation("c1", title = "只在 store 里")
+        putInStoreOnly(onlyInStore)
+
+        repository().repairPending()
+
+        assertTrue("the chat is a plain file again", legacyFile("c1").exists())
+        assertEquals("with the whole transcript", onlyInStore.messages, readLegacy("c1").messages)
+        assertEquals("只在 store 里", readLegacy("c1").title)
+        assertFalse("only after that file reads back may the store copy go", store.has("c1"))
+    }
+
+    @Test
+    fun `a repair that cannot write keeps the store copy and leaves the chat readable`() = runBlocking {
+        putInStoreOnly(conversation("c1"))
+        File(chatsDir, "c1.json.tmp").mkdirs()
+        val repository = repository()
+
+        repository.repairPending()
+
+        assertFalse("nothing was written", legacyFile("c1").exists())
+        assertTrue("so the only copy must still be here", store.has("c1"))
+        assertEquals(2, store.all(store.readMeta("c1")!!).size)
+        repository.load()
+        assertEquals("and the chat is still listed", 1, repository.conversations.value.size)
+    }
+
+    @Test
+    fun `a chat retired to json migrated is renamed back`() = runBlocking {
+        val chat = conversation("c1")
+        chatsDir.mkdirs()
+        migratedFile("c1").writeText(json.encodeToString(Conversation.serializer(), chat))
+
+        repository().repairPending()
+
+        assertTrue("the transcript is where the app looks for it", legacyFile("c1").exists())
+        assertFalse("the marker file is gone", migratedFile("c1").exists())
+        assertEquals(chat.messages, readLegacy("c1").messages)
+    }
+
+    @Test
+    fun `repair keeps whichever copy is newer`() = runBlocking {
+        writeLegacy(conversation("c1", title = "文件里的", updatedAt = 5_000))
+        putInStoreOnly(conversation("c1", title = "store 里的", updatedAt = 1_000))
+
+        repository().repairPending()
+
+        assertEquals("the older store copy must not overwrite the file", "文件里的", readLegacy("c1").title)
+        assertFalse("and it is dropped", store.has("c1"))
+    }
+
+    @Test
+    fun `repair takes the store copy when it is the newer one`() = runBlocking {
+        writeLegacy(conversation("c1", title = "文件里的", updatedAt = 1_000))
+        putInStoreOnly(conversation("c1", title = "store 里的", updatedAt = 5_000))
+
+        repository().repairPending()
+
+        assertEquals("a chat saved by that build keeps its newer text", "store 里的", readLegacy("c1").title)
+        assertFalse(store.has("c1"))
+    }
+
+    @Test
+    fun `repair is idempotent`() = runBlocking {
+        putInStoreOnly(conversation("c1"))
+        val repository = repository()
+        repository.repairPending()
+        val repaired = readLegacy("c1")
+
+        repository.repairPending()
+
+        assertEquals("a second pass must change nothing", repaired, readLegacy("c1"))
+        assertFalse(store.has("c1"))
+    }
+
+    @Test
+    fun `a plain file wins over a leftover store copy`() = runBlocking {
+        val chat = conversation("c1", title = "旧标题")
+        putInStoreOnly(chat.copy(title = "store 里的标题"))
+        writeLegacy(chat.copy(title = "文件里的标题"))
+
+        val listed = repository().apply { load() }.conversations.value.single()
+
+        assertEquals("while the store is not the write path, the file is the newer copy", "文件里的标题", listed.title)
+    }
+
+    // --- migrating the old format --------------------------------------------------------------
+
+    @Test
+    fun `an old chat is listed before it is migrated and identical after`() = runBlocking {
         val legacy = conversation("c1", title = "老会话")
         writeLegacy(legacy)
         val repository = repository()
@@ -181,8 +303,7 @@ class ChatRepositoryStoreTest {
         assertTrue("the store owns it now", store.has("c1"))
 
         repository.load()
-        val afterMigration = repository.conversations.value.single()
-        assertEquals("the chat has to be identical across the migration", beforeMigration, afterMigration)
+        assertEquals("the chat has to be identical across the migration", beforeMigration, repository.conversations.value.single())
     }
 
     @Test
@@ -191,10 +312,10 @@ class ChatRepositoryStoreTest {
         val repository = repository()
 
         repository.migratePending()
-        val bytes = logBytes("c1")
+        val meta = store.readMeta("c1")
         repository.migratePending()
 
-        assertEquals("a second pass must not rewrite the log", bytes, logBytes("c1"))
+        assertEquals("a second pass must not touch the log", meta, store.readMeta("c1"))
         assertEquals(1, repository().apply { load() }.conversations.value.size)
     }
 
@@ -202,17 +323,12 @@ class ChatRepositoryStoreTest {
     fun `a migration killed before the rename does not double the chat`() = runBlocking {
         val legacy = conversation("c1")
         writeLegacy(legacy)
-        // The state a kill between the store write and the rename leaves: both copies on disk.
-        store.append(store.newMeta(legacy), legacy.messages)
+        putInStoreOnly(legacy)
 
         val repository = repository()
         repository.load()
 
-        assertEquals(
-            "one chat, not two, when both copies exist",
-            1,
-            repository.conversations.value.size,
-        )
+        assertEquals("one chat, not two, when both copies exist", 1, repository.conversations.value.size)
         repository.migratePending()
         assertFalse("the leftover .json is retired on the next pass", legacyFile("c1").exists())
     }
@@ -233,19 +349,6 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
-    fun `saving an old chat moves it to the store and retires the old file`() = runBlocking {
-        val legacy = conversation("c1")
-        writeLegacy(legacy)
-        val repository = repository()
-        repository.load()
-
-        repository.save(legacy.copy(messages = legacy.messages + twoMessages("c1-2")))
-
-        assertFalse("the old file is retired by the write itself", legacyFile("c1").exists())
-        assertEquals("and the chat is not listed twice", 1, repository().apply { load() }.conversations.value.size)
-    }
-
-    @Test
     fun `migration keeps the order the user saw`() = runBlocking {
         writeLegacy(conversation("old", updatedAt = 1_000))
         writeLegacy(conversation("new", updatedAt = 2_000))
@@ -257,17 +360,6 @@ class ChatRepositoryStoreTest {
         repository.load()
 
         assertEquals("migrating must not reshuffle the list", before, repository.conversations.value.map { it.id })
-    }
-
-    @Test
-    fun `an old chat that already has a store copy keeps the store copy`() = runBlocking {
-        val legacy = conversation("c1", title = "老标题")
-        writeLegacy(legacy)
-        store.append(store.newMeta(legacy.copy(title = "新标题")), legacy.messages)
-
-        val listed = repository().apply { load() }.conversations.value.single()
-
-        assertEquals("the store is newer than a .json it could not retire", "新标题", listed.title)
     }
 
     @Test
@@ -302,6 +394,12 @@ class ChatRepositoryStoreTest {
         assertEquals(mapOf("c1-1-u" to "run-2"), reloaded.activeRuns)
         assertEquals("a checkpoint is part of the chat, not of its messages", chosen.checkpoints, reloaded.checkpoints)
     }
+
+    /** Ids the store holds a meta for — the "which chats did the bad build touch" set. */
+    private fun storeMetaIds(): List<String> =
+        File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
+            ?.map { it.name.removeSuffix(META_SUFFIX) }
+            ?: emptyList()
 
     private companion object {
         const val STORE_DIR = "store"
