@@ -264,18 +264,6 @@ import java.util.concurrent.Executors
 
 
 
-/**
- * 滚动诊断写盘的后台线程（issue #26 收尾清理）。
- *
- * `scrollTrace` 原来在**调用线程**上直接做文件 I/O（`File.length()` + `appendText`，每次开关文件），
- * 而它的调用点全在主线程：手势回调、`ChatScroll` 的滚动收集器、恢复位置流程。
- * 一次写盘几毫秒，正是"主线程没按时开工"的那几毫秒 —— 测性能的代码不该自己制造卡顿。
- * 现在主线程只拼字符串，写盘走这条 daemon 线程；**日志内容与时机不变**。
- */
-private val chatTraceExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-    Thread(r, "chat-trace").apply { isDaemon = true }
-}
-
 
 internal val SUGGESTIONS = listOf(
     "看看现在屏幕上是什么",
@@ -723,27 +711,7 @@ fun ChatScreen(
     // 记下"按下 / 抬手 / 守护撤销"几个时刻的滚动坐标，就能看出那次跳动是程序滚的、
     // 还是列表自己重新锚定的。
     val traceCtx = LocalContext.current
-    // **临时诊断，release 也写**（用户明确要求：「写到 release 啊，到时候再删了」）：
-    // 用来抓「长按复制跳位置」。查完连这个函数一起删。
-    fun scrollTrace(tag: String) {
-        // 主线程只做只读快照 + 拼字符串；写盘交给后台线程（见 chatTraceExecutor 的说明）。
-        val line = runCatching {
-            val info = listState.layoutInfo
-            val first = info.visibleItemsInfo.firstOrNull()
-            "${System.currentTimeMillis()} $tag " +
-                "first=${first?.key}@${first?.offset} " +
-                "idx=${listState.firstVisibleItemIndex}/${listState.firstVisibleItemScrollOffset} " +
-                "canBack=${listState.canScrollBackward} total=${info.totalItemsCount}" + System.lineSeparator()
-        }.getOrNull() ?: return
-        val dir = traceCtx.filesDir
-        chatTraceExecutor.execute {
-            runCatching {
-                val f = java.io.File(dir, "scroll-jump.log")
-                if (f.length() > 128 * 1024) f.writeText("")
-                f.appendText(line)
-            }
-        }
-    }
+
     val scroll = rememberChatScroll(
         listState = listState,
         autoFollow = settings.autoFollow,
@@ -752,7 +720,6 @@ fun ChatScreen(
         // `listState` 来自 `rememberLazyListState()`（第 273 行），**全应用共用一个实例**，
         // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
         conversationId = state.conversationId,
-        trace = { scrollTrace(it) },
     )
     // **#14 的根因（真机日志 2026-10-21 00:25 坐实，不是推断）**：
     // 长按建立选区后，框架会为「把选中的内容滚进视口」发起一次 bring-into-view，走的就是
@@ -803,7 +770,6 @@ fun ChatScreen(
     }
     LaunchedEffect(pressGuardOn) {
         if (!pressGuardOn) return@LaunchedEffect
-        scrollTrace("guard-on")
         // 按下就开始拦「把选中内容滚进视口」的请求（#14）：框架的这次滚动是为了露出选区，
         // 而用户按住的正是眼前这段文字，露出它没有意义，只会把列表推走。
         lastRevealRequestAt.longValue = SystemClock.uptimeMillis()
@@ -828,50 +794,20 @@ fun ChatScreen(
             // `guard-off` 那行写在 `scrollToItem` 之后，而它是挂起函数 ⇒ 读到的 idx 可能是
             // 纠正前也可能是纠正后，日志自己说不清（issue #14 要求"先定位再改"，正是这个意思）。
             // 这里把决策本身写清楚：纠到了哪儿 / 为什么没纠。查完删。
-            if (lockKey == null) {
-                scrollTrace("lock-skip reason=no-key")
-            } else {
+            // **行为保留、日志去掉**：按下到抬手后 400ms 内，如果列表位置被推走
+            // （选区重排造成，手指没动），就关掉追底 —— 而不是把位置纠回去（0.8.242 的教训）。
+            if (lockKey != null) {
                 val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == lockKey }
                 when {
-                    target == null -> scrollTrace("lock-skip reason=offscreen lock=$lockKey")
-                    // **同 index 也要比 offset**（issue #24 问题 2）：上一版只比 index 就判「same」，
-                    // 而 SelectionContainer 建立选区造成的布局微调**通常正是 offset 级变化**，
-                    // 于是 #14 的位移全被这一步当成「不用纠」跳过、日志里也看不见。
+                    target == null -> Unit
                     target.index == listState.firstVisibleItemIndex -> {
                         val drift = listState.firstVisibleItemScrollOffset - lockOffset
-                        if (abs(drift) > 1) {
-                            scrollTrace("lock-would-correct offset-drift=$drift")
-                            // **关掉追底，而不是把位置纠回去**（issue #14，真机日志证据）：
-                            // 长按选字时选区重排把位置推走（手指没动，pressMoved=false），
-                            // 但 `stickToBottom` 仍是 true；守护一撤，追底立刻 scrollToItem(0)
-                            // 把它拉回底部 —— 日志里 guard-off @624 → 123ms 后 @0，中间没有
-                            // 任何 stick=true 标记，正是追底自己干的。
-                            // 纠正位置会把用户刚滚的那段撤回（0.8.242 的教训），关追底则只是
-                            // 「别再自动贴底」，位置留在选区所在处。
-                            if (!pressMoved) scroll.stickToBottom = false
-                        } else {
-                            scrollTrace("lock-skip reason=same-position")
-                        }
+                        if (abs(drift) > 1 && !pressMoved) scroll.stickToBottom = false
                     }
-                    else -> {
-                        // **只记录，不执行**（用户：「滑上一点，就滚下来一点，滑多了就不会」）。
-                        //
-                        // 这条纠正拿的是**按下那一刻**的 lockKey/lockOffset。正常上滑后
-                        // `firstVisibleItemIndex` 变了、而按下时那条 item 仍在屏幕内 ⇒ 它把你
-                        // 纠回按下时的位置 = 把刚滑的那段原样撤回；滑得够远时那条 item 已滚出
-                        // 屏幕、`target == null` ⇒ 不纠 → 所以「滑多了反而正常」。
-                        // 用户报的两半现象（小滑回弹 / 大滑正常）正是这一条的行为。
-                        //
-                        // 去掉执行 ≠ 放弃 #14：这里把「本来会纠到哪」写进 scroll-jump.log，
-                        // 真机长按复制时读日志即可判定 SelectionContainer 重排到底移了多少 ——
-                        // 那才是 issue #14 要求的第一步（先定位，再决定用哪种机制）。
-                        scrollTrace("lock-would-correct to=${target.index}/$lockOffset")
-                        if (!pressMoved) scroll.stickToBottom = false
-                    }
+                    else -> if (!pressMoved) scroll.stickToBottom = false
                 }
             }
             // 组合被带走（切会话/退页）也要解冻，否则外壳的 IME clamp 永远停摆。
-            scrollTrace("guard-off")
             setSelectionActive?.invoke(false)
         }
     }
@@ -1049,7 +985,6 @@ fun ChatScreen(
         if (savedKey == null) {
             // 没有记忆就回底 —— 这是**唯一**该回底的分支（issue #16）。
             scroll.stickToBottom = true
-            scrollTrace("stick=true reason=restore-no-saved")
             scroll.toBottom()
             return@LaunchedEffect
         }
@@ -1081,7 +1016,6 @@ fun ChatScreen(
             } else {
                 // key 完全找不到（消息被删 / 分支切换）：只能回底，别停在随机位置。
                 scroll.stickToBottom = true
-                scrollTrace("stick=true reason=restore-key-not-found")
                 scroll.toBottom()
             }
         } finally {
@@ -1098,7 +1032,6 @@ fun ChatScreen(
     fun jumpToLatest() {
         scope.launch {
             scroll.stickToBottom = true
-            scrollTrace("stick=true reason=restore-target-missing")
             if (itemCount > 0) {
                 scroll.toBottom()
             }
@@ -1667,7 +1600,6 @@ fun ChatScreen(
                         viewModel.send(body, images)
                         // 发送 = 明确要回到最新：先放行追底再跳，并清掉阅读位置记忆。
                         scroll.stickToBottom = true
-                        scrollTrace("stick=true reason=send")
                         scroll.spotKey = null
                         jumpToLatest()
                     },
