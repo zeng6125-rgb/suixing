@@ -355,6 +355,14 @@ data class AppSettings(
      * 文本一收到就整块出现。放在类中间并带默认值，老 JSON 没有这个键时读出来就是 true。
      */
     val typewriter: Boolean = true,
+    /**
+     * 首次启动引导是否已看过（**走完或跳过都算看过**）。
+     *
+     * 引导页是可选的：没配 Key 也能先逛逛，聊天会等用户配好接口。所以这个标记只管
+     * 「要不要在下次冷启动时再弹一次引导」，不管能不能用。
+     * 设置页有「重新看一遍引导」，随时能再看。
+     */
+    val onboardingSeen: Boolean = false,
     /** 工具调用卡片默认展开 */
     val expandTools: Boolean = false,
     /**
