@@ -413,6 +413,8 @@ private fun RevealHeight(
         //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
         // 所以逐帧回到原来的写法（对第一层已验证有效），把"被钳位吃掉的量"交给 ③ 的收尾对账。
         val begin = withFrameNanos { it }
+        // 已真正滚动过的累计量（用 dispatchRawDelta 的返回值记账，不是推算值）。
+        var compensated = 0f
         // **嵌套在有上限的容器里时，按容器高度增量补**（issue #22）：顶到 320dp 后容器不再长，
         // 增量就是 0，自然不补 —— 这正是「钳位时不要多补」的正解，不用去猜约束。
         val parentH = parentHeightState
@@ -429,7 +431,14 @@ private fun RevealHeight(
                     lastParent = cur
                     if (delta != 0) outer.dispatchRawDelta(delta.toFloat())
                 } else {
-                    outer.dispatchRawDelta(px * progress - oldH)
+                    // **按「实际消耗」记账**（#13 抖动的真正原因）：原来用增量式
+                    // `dispatchRawDelta(px*progress - oldH)`，若某一帧被布局/边界少消费了一部分，
+                    // 这份误差会永久留在账上，后续帧来回补 —— 就是「过程中来回抖」。
+                    // 现在：目标累计量 = px*progress，每帧只补「目标 − 已真正滚动的量」，
+                    // 并把 `dispatchRawDelta` 的返回值（实际消费量）累加进去 ⇒ 不累积误差，也不回弹。
+                    val want = px * progress
+                    val delta = want - compensated
+                    if (delta != 0f) compensated += outer.dispatchRawDelta(delta)
                 }
             }
             // 只记录：这一帧补了多少、补前/补后的真实偏移
