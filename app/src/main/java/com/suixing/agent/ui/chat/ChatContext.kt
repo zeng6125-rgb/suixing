@@ -809,8 +809,15 @@ internal fun FailureReceiptRow(text: String) {
         // 让两枚图标互相对齐（上一版就错在这），跟第一行的中线还是差一截。
         // 这里按行高算：图标中心 = 行高的一半 = 第一行的中线。
         val bodySmall = MaterialTheme.typography.bodySmall
-        val lineHeight = with(LocalDensity.current) { bodySmall.lineHeight.toDp() }
-        val iconTop = ((lineHeight - 14.dp) / 2).coerceAtLeast(0.dp)
+        val density = LocalDensity.current
+        val lineHeight = with(density) { bodySmall.lineHeight.toDp() }
+        // **对准字形的墨迹中心，不是行框中心**（用户：「视觉上没有对齐中心啊」）。
+        // 行框（lineHeight）比 em 框高，中文字形只占 em 框的 ~86% 且坐在基线上 ⇒
+        // 墨迹中心比行框中心低约 0.06em。真机截图量过（12sp 正文）：差 ~1.5px ≈ 0.9dp，
+        // 两枚图标彼此是齐的（都是 51.0），只是都比第一行高。
+        // 用 em 的比例算（而不是写死 dp），字体缩放时依然对得上。
+        val inkShift = with(density) { (bodySmall.fontSize.value * 0.06f).sp.toDp() }
+        val iconTop = ((lineHeight - 14.dp) / 2 + inkShift).coerceAtLeast(0.dp)
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.Top,
