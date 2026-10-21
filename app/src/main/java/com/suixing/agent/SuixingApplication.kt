@@ -22,7 +22,14 @@ class SuixingApplication : Application() {
         // 这里在启动后（不是 load() 的锁内）做一次性修复：能改名的改名回来、只有新格式副本的
         // 读出来重新落成 `<id>.json`（校验通过才删副本），失败则什么都不删、下次再试。
         // 可中断可重入：任何时刻被杀都留着一份完整的数据。
-        Core.appScope.launch(kotlinx.coroutines.Dispatchers.IO) { Core.chats.repairPending() }
+        //
+        // **异常必须在这里吃掉**：`Core.appScope` 是 `SupervisorJob() + Dispatchers.Default`，
+        // 协程里逃出去的异常会走默认未捕获处理器 ⇒ Android 上直接崩进程。自愈失败（坏文件、
+        // 磁盘满、权限）绝不能变成"打开就闪退"，所以整段 runCatching + 只记日志。
+        Core.appScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { Core.chats.repairPending() }
+                .onFailure { android.util.Log.w("ChatRepository", "repairPending failed", it) }
+        }
         observeForeground()
     }
 
