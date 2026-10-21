@@ -362,16 +362,6 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
  *
  * 正在读历史（[LocalReadingPinned]）时不做动画：内容原地展开，不推着正在读的内容走。
  */
-/**
- * 折叠块嵌套深度（issue #13 / #22）：**只让最外层补偿列表**。
- *
- * 第二层折叠块嵌在第一层内部，两者拿到的 `LocalChatListState` 是同一个；若各自都
- * `dispatchRawDelta`，同一段高度被补偿两次 ⇒ 展开第二层后整屏往下跳（#13）。
- * 同理，被 `heightIn(max)` 钳住的内层按「自身推算高度」补偿会多补（#22）；
- * 只由最外层按自己的真实高度增量补偿，钳位处自然为 0。
- */
-internal val LocalRevealDepth = compositionLocalOf { 0 }
-
 @Composable
 private fun RevealHeight(
     visible: Boolean,
@@ -379,9 +369,6 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
-    // 只有最外层补偿（见 LocalRevealDepth 的说明）。
-    val revealDepth = LocalRevealDepth.current
-    val compensateHere = revealDepth == 0
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
@@ -432,7 +419,7 @@ private fun RevealHeight(
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
             val oldH = px * progress
             progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
-            if (compensateHere && outer != null && outer.canScrollBackward) {
+            if (outer != null && outer.canScrollBackward) {
                 if (parentH != null) {
                     val cur = parentH.value
                     val delta = if (lastParent < 0) 0 else cur - lastParent
@@ -451,7 +438,7 @@ private fun RevealHeight(
         withFrameNanos { }
         withFrameNanos { }
         val afterTop = topInRoot
-        if (compensateHere && outer != null && outer.canScrollBackward &&
+        if (outer != null && outer.canScrollBackward &&
             !beforeTop.isNaN() && !afterTop.isNaN()
         ) {
             val drift = afterTop - beforeTop
@@ -460,10 +447,7 @@ private fun RevealHeight(
     }
 
     Layout(
-        // 子块看到的是「深度 + 1」，因此它们知道自己是内层、不参与补偿。
-        content = {
-            CompositionLocalProvider(LocalRevealDepth provides revealDepth + 1) { content() }
-        },
+        content = content,
         modifier = Modifier
             .fillMaxWidth()
             // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
