@@ -952,6 +952,38 @@ fun ChatScreen(
     // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
     val laggingNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
+    // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
+    // 偏移 / 能否往回滚」。用途：区分三种"推上去"——
+    //   ① 流式行自己长高（nat 变、idx/off 不变）⇒ 该由这里的补偿抵消；
+    //   ② 流式行之外的东西长高（nat 不变、off 变）⇒ 本机制看不到，要靠别的手段；
+    //   ③ 补偿算了但被列表吞掉（nat 变、d 非 0、off 仍往一个方向走）⇒ 同帧对齐没成立。
+    val driftCtx = LocalContext.current
+    val NL = 10.toChar()
+    LaunchedEffect(listState) {
+        val buf = StringBuilder()
+        var tick = 0
+        var lastFlush = 0L
+        while (true) {
+            withFrameNanos { }
+            if (!laggingNow || lagNatural[0] <= 0) continue
+            if (tick++ % 3 != 0) continue
+            buf.append(lagNatural[0]).append(' ')
+                .append(lagReported).append(' ')
+                .append(listState.firstVisibleItemIndex).append(' ')
+                .append(listState.firstVisibleItemScrollOffset).append(' ')
+                .append(if (listState.canScrollBackward) 1 else 0).append(NL)
+            val now = System.nanoTime()
+            if (buf.length > 16_000 && now - lastFlush > 1_000_000_000L) {
+                val chunk = buf.toString()
+                buf.setLength(0)
+                lastFlush = now
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    java.io.File(driftCtx.filesDir, "drift17.log").appendText(chunk)
+                }
+            }
+        }
+    }
+
     LaunchedEffect(listState) {
         while (true) {
             withFrameNanos { }
