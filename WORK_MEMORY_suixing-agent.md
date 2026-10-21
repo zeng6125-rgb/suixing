@@ -4,7 +4,8 @@
 > `WORK_SESSION_2026-10-10_suixing-agent-ui-iterations.md` 已**移动**到
 > `dist/archive/memory-history/`（`dist/` 在 .gitignore 内）。`dist/TODO-LEDGER.md` 是**账本不是记忆**，保持原位、不许动。
 > 素材来源：`git log --format="%H%n%ad%n%B"` 全量提交正文（70 个提交）、`dist/notes/release-notes-*.md`（27 份）、
-> `dist/commit-msg-*.txt`（39 份）、`dist/TODO-LEDGER.md`、两份旧 WORK_SESSION、`README.md`、`docs/v0.8-contract.md`、当前工作树源码（只读核对）。
+> `dist/commit-msg-*.txt`（39 份）、`dist/TODO-LEDGER.md`、两份旧 WORK_SESSION、`README.md`、当前工作树源码（只读核对）。
+> ⚠️ `docs/v0.8-contract.md` 已过期（改名前的路径 + 早不存在的写域），只作历史留档；**现行团队契约看 `TODO_NEXT.md` 第五节**。
 > 行号口径：**以当前工作树为准**（HEAD 随每次提交变，引用前 `git log -1` 现读）；旧行号一律标注「旧行号」。
 > ⚠️ 工作树在并行变动，**行号会漂移**；引用前先按符号名 grep 复核。
 > 最近三次更新：2026-10-11 03:1x（补 0.8.77/0.8.78/0.8.79、14 条新根因、四条新坑、第四批待办）、2026-10-11 01:3x（补 0.8.76 与第三批）、2026-10-11 00:4x（首轮合并）。
@@ -36,7 +37,7 @@
 | 单测基线 | **435/435 绿**（**当前**，0.8.97）；历史：427（0.8.91）、385（0.8.85 后）、384（0.8.84）、383（0.8.83）、367（0.8.81/0.8.82）、355（0.8.79/0.8.80）、355（0.8.79/0.8.80），`dist/notes/release-notes-0.8.79.md` 记 `355 tests / 0 failures / 0 errors / 0 skipped` + `assembleRelease` BUILD SUCCESSFUL + 装机 `versionName=0.8.79 / versionCode=90`）；历史：336（0.8.78）、309（0.8.77 前）、272（0.8.76）、246（0.8.75）、241（28 类，含 `GroupRowsTest` 6 / `SteerRenderTest` 5 / `InterruptPersistenceTest` 4）；命令 `:app:testDebugUnitTest`。⚠️ 读数来自 commit/notes，**本记忆未跑 gradle、未上真机** |
 | 测试框架事实 | 项目用 **org.junit**（`kotlin.test` **不在类路径**）；依赖只有 `kotlinx-coroutines-core`（**无 coroutines-test**）；0.8.9 起新增 MockK |
 | 出包纪律 | 用户明令**只出 release 不构建 debug**；打包**必须用户放行**；release 构建走 `:app:assembleRelease`，产物归档 `dist/suixing-<ver>.apk` |
-| 团队契约 | `docs/v0.8-contract.md`（§0 teammate 禁打包/禁 git 写、写域划分、验证命令、增量编译自救、子代理写序） |
+| 团队契约 | **现行口径 = `TODO_NEXT.md` 第四节**（禁打包需放行 / 禁 git 写 / 改代码前先说预期与代价 / 先拿数据 / 共享工作树禁 checkout·reset·stash）。`docs/v0.8-contract.md` **已过期**（里面是改名前的路径与早就不存在的写域），只作历史留档，**不要照着做**。 |
 | meow-memory | promptLang `'zh'` 写在 `~/.dsh/profiles/web/node_modules/meow-memory/cordis.patch.yml` |
 | 本地视频分析工具 | **`D:\dsh\fixbug\suixing\video\node_modules\@ffmpeg-installer\win32-x64\ffmpeg.exe`**（本轮实测存在）——用户录屏可用它**逐帧分析**（替代 adb 录屏：见 §4 第 30 条，**不再用 adb 操作用户手机**）。仓库里另有 `gpt-contact-16.png` / `gpt-transitions.png`（用户发的对照截图，未跟踪） |
 
