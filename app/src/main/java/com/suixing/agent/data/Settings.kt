@@ -543,7 +543,7 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun save(settings: AppSettings) {
         context.settingsDataStore.edit { prefs ->
-            prefs[key] = json.encodeToString(AppSettings.serializer(), settings)
+            prefs[key] = json.encodeToString(AppSettings.serializer(), settings.encrypted())
         }
     }
 
@@ -553,7 +553,10 @@ class SettingsRepository(private val context: Context) {
         // field) can no longer both start from the same snapshot and have the later
         // one drop the earlier one's change.
         context.settingsDataStore.edit { prefs ->
-            prefs[key] = json.encodeToString(AppSettings.serializer(), block(decode(prefs[key])))
+            prefs[key] = json.encodeToString(
+                AppSettings.serializer(),
+                block(decode(prefs[key])).encrypted(),
+            )
         }
     }
 
@@ -567,9 +570,45 @@ class SettingsRepository(private val context: Context) {
         } else {
             runCatching { json.decodeFromString<AppSettings>(raw) }.getOrElse { AppSettings() }
         }
-        return parsed.migrated()
+        // **先解密再迁移**：迁移会把顶层的 Key 复制进第一个 provider，密文复制过去是错的。
+        return parsed.decrypted().migrated()
+    }
+
+    /**
+     * 一次性把老文件里的**明文 Key** 换成密文（顺带把明文从文件里抹掉）。
+     *
+     * 不做这一步的话：老用户的 `settings_json` 里一直躺着明文 Key，直到他碰巧改一次设置
+     * 才会被重新加密。启动时跑一遍就干净了。
+     */
+    suspend fun migrateSecrets() {
+        context.settingsDataStore.edit { prefs ->
+            val raw = prefs[key] ?: return@edit
+            val encrypted = json.encodeToString(
+                AppSettings.serializer(),
+                decode(raw).encrypted(),
+            )
+            if (encrypted != raw) prefs[key] = encrypted
+        }
     }
 }
+
+/**
+ * 落盘前：把 Key 换成密文。**内存里始终是明文**，只有这一层是密文。
+ *
+ * 两处都要盖：顶层 [AppSettings.apiKey]（老格式迁移过来的）与每个 [ProviderConfig.apiKey]。
+ */
+private fun AppSettings.encrypted(): AppSettings = copy(
+    apiKey = SecretBox.encrypt(apiKey),
+    providers = providers.map { it.copy(apiKey = SecretBox.encrypt(it.apiKey)) },
+)
+
+/**
+ * 读回后：把密文换回明文。解不开（换机 / 密钥失效）⇒ 当成「没填」，让用户重填。
+ */
+private fun AppSettings.decrypted(): AppSettings = copy(
+    apiKey = SecretBox.decrypt(apiKey),
+    providers = providers.map { it.copy(apiKey = SecretBox.decrypt(it.apiKey)) },
+)
 
 /**
  * Settings written before providers existed only have the flat `baseUrl` /

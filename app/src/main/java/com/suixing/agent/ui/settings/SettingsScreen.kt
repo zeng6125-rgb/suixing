@@ -887,6 +887,17 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item {
+                // **Key 存在哪**（用户要求「更加保密化」后新增）：现在是 Android Keystore 加密后
+                // 落盘，密钥在系统里、不随应用数据走 ⇒ 换机后解不开，用户要在这里重填一次。
+                // 说清楚比不说好 —— 否则用户换了手机发现 Key 没了，以为是 bug。
+                Text(
+                    text = "Key 用系统 Keystore 加密后存在这台手机上，不随备份迁移；换机后需要重填一次。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                )
+            }
+            item {
                 // The raw id, not the alias: what is typed here is what goes on the wire, so
                 // a display name typed or pasted in would be sent as the model and 404. The
                 // alias stays read-only, under the field and on the picker's chips.

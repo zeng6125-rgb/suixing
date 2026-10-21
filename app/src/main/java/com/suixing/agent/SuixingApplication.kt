@@ -14,6 +14,9 @@ class SuixingApplication : Application() {
         // MCP servers are reconnected on every cold start so their tools are
         // already in the registry by the time the user sends the first message.
         Core.appScope.launch { Core.mcp.load() }
+        // 老文件里的 API Key 是**明文**躺在 settings_json 里的：启动时一次性换成 Keystore
+        // 密文（顺带把明文从文件里抹掉）。之后每次落盘都自动加密（见 SettingsRepository）。
+        Core.appScope.launch { Core.settings.migrateSecrets() }
         observeForeground()
     }
 
