@@ -172,7 +172,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
@@ -269,6 +268,26 @@ internal val SUGGESTIONS = listOf(
     "把下载目录里最新的三个文件列出来",
     "搜一下今天有什么科技新闻",
     "打开设置看看还剩多少存储空间",
+)
+
+/**
+ * 读历史时冻结的整份 feed（issue #17 方案 3）。
+ *
+ * 为什么是「整份」而不是只冻流式行：流式结束时，活着的流式行会被**存好的那条消息**替换 ——
+ * 两者内容一样、一样高，所以替换本身不跳。但如果只冻流式行、消息照常进列表，那条新消息
+ * 会在流式行消失的同时冒出来 ⇒ 高度对不上 ⇒ 跳一下。整份一起冻，替换就发生在解冻那一刻，
+ * 两边高度一致（底锚本来就贴底，视觉上连续）。
+ *
+ * 用普通类（不是 State）：它只在「冻/解冻」这两个时刻被换掉，不需要触发重组。
+ */
+private class FrozenFeed(
+    val visible: List<ChatRow>,
+    val live: Boolean,
+    val liveParts: List<LivePart>,
+    val liveRunId: String,
+    val runningTool: String?,
+    val stats: StreamStats?,
+    val runningHere: Boolean,
 )
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -457,7 +476,8 @@ fun ChatScreen(
     // list, every recomposition walked the whole conversation (twelve times a second while an
     // answer streams). The revision is stamped by the view model at the one point every publish
     // goes through, so an edit to a message in the middle of the transcript still lands here.
-    val visible = remember(
+    // **实时 feed**：随流式增长（每一轮新消息、每一块工具输出都加进来）。
+    val liveVisible = remember(
         state.conversationId,
         state.messagesRevision,
         page,
@@ -468,6 +488,24 @@ fun ChatScreen(
         groupRows(state.messages.drop(page.from), state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
+    // ===== 读历史时把整份 feed 冻住（issue #17 方案 3：流式期间上翻就冻结）=====
+    //
+    // 病根：reverseLayout 里流式行是喂序 index 0（视觉最底），它每长高一点，上面的内容就被
+    // 顶上去一点 —— 用户正在读的那段历史会一直漂（issue #11 的原话：「往上翻着读旧内容时
+    // 这是最烦人的漂移」）。三版「检测偏差 → 纠正」（0.8.233 逐帧增量 / 0.8.236 冻结高度 /
+    // 0.8.237~238 绝对定位）都追不上这个**连续推力**（issue #17 的结论：方向要重选，
+    // 不是调参数），所以第④步那种"每帧对账"整段停用之后，漂移回到了未修状态。
+    //
+    // 现在的做法：**结构上不动**。用户一离开底部，整份 feed 就停在那一刻 —— 流式内容照收，
+    // 但不再渲染进列表 ⇒ 列表高度不变 ⇒ 正在读的内容一像素都不动。滑回底部再解冻，
+    // 新内容一次性接上（底锚本来就贴底，视觉上是连续的）。
+    //
+    // 快照用普通 Map（不是 StateMap）：流式期间每个 tick 都不该引发重组 —— 只有
+    // stickToBottom 变化才会重组，而那正是要重读快照的时候。
+    val frozenFeeds = remember { mutableMapOf<String, FrozenFeed>() }
+    val frozen = frozenFeeds[state.conversationId]
+    // 渲染用的 feed：读历史 ⇒ 冻结那份；贴底 ⇒ 实时那份。
+    val visible = frozen?.visible ?: liveVisible
     // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
     // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
     // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
@@ -482,6 +520,14 @@ fun ChatScreen(
     // bubble. Waiting for text is what used to leave a tool call stranded on its own until
     // the reply arrived and merged the two into one.
     val live = state.liveParts.isNotEmpty()
+    // 流式行渲染用的内容：读历史 ⇒ 冻结那份（**不再长高**，这是 #17 的关键）；
+    // 贴底 ⇒ 实时那份。`frozen?.x ?: 实时x`：冻结时一律用快照，贴底时一律用实时。
+    val renderLive = frozen?.live ?: live
+    val renderParts = frozen?.liveParts ?: state.liveParts
+    val renderLiveRunId = frozen?.liveRunId ?: state.liveRunId
+    val renderRunningTool = frozen?.runningTool ?: state.runningTool
+    val renderStats = frozen?.stats ?: state.stats
+    val renderRunningHere = frozen?.runningHere ?: state.runningHere
     val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
     // The chain a run takes, resolved once for the whole screen. The context readouts
     // below divide by the window of the model that actually sends, which is not the
@@ -649,7 +695,7 @@ fun ChatScreen(
     // The live card (with its progress caption inside) is one item; the error line and the
     // 「加载更早」 line are items of their own. 底锚下这个数只用于「有没有内容」与插入回底。
     val itemCount = visible.size + rowOffset +
-        (if (errorLine) 1 else 0) + if (live || state.runningHere) 1 else 0
+        (if (errorLine) 1 else 0) + if (renderLive || renderRunningHere) 1 else 0
 
     // The user's own messages are the landmarks of a conversation, so the status line can
     // say "turn 2 of 5" and jump between them without the engine knowing anything about it.
@@ -677,7 +723,7 @@ fun ChatScreen(
     }
     // 喂序（底锚倒序，视觉从下往上）：live? → compress-status? → error? → visible 倒序 → load-earlier?。
     // 所以 visible 第 i 行的喂序索引 = 前缀项数 + (visible.size - 1 - i)。
-    val feedPrefix = (if (live || state.runningHere) 1 else 0) +
+    val feedPrefix = (if (renderLive || renderRunningHere) 1 else 0) +
         (if (!state.runningHere && state.compressingSince > 0L) 1 else 0) +
         (if (errorLine) 1 else 0)
     fun fedIndexOf(oldVisible: Int) = feedPrefix + (visible.size - 1 - oldVisible)
@@ -810,8 +856,6 @@ fun ChatScreen(
             setSelectionActive?.invoke(false)
         }
     }
-    // 流式行的高度（由 streaming item 的 onSizeChanged 写）。
-    var liveHeight by remember { mutableIntStateOf(0) }
     // 切换会话时给转录一个入场（issue #12）。**不做 crossfade**：那会同时持有两份
     // composition，大会话的内存峰值翻倍。
     //
@@ -931,6 +975,65 @@ fun ChatScreen(
             // `coerceAtLeast(0)`：消息在视口起点下方时 offset 为正，回填负值给 scrollToItem 没有意义。
             val offset = (-first.offset).coerceAtLeast(0)
             anchors[state.conversationId] = first.key to offset
+        }
+    }
+    // **离开底部就冻住 feed**（issue #17）：指针一动就同步取快照。用 `rememberUpdatedState`
+    // 存：下面的 collector 只在会话切换时重建，闭包里必须拿到当下的 liveVisible / liveParts。
+    val freezeNow = rememberUpdatedState<() -> Unit> {
+        if (!frozenFeeds.containsKey(state.conversationId)) {
+            frozenFeeds[state.conversationId] = FrozenFeed(
+                visible = liveVisible,
+                live = live,
+                liveParts = state.liveParts,
+                liveRunId = state.liveRunId,
+                runningTool = state.runningTool,
+                stats = state.stats,
+                runningHere = state.runningHere,
+            )
+        }
+    }
+    // 回到底部 ⇒ 解冻（feed 恢复实时，接着追底）。这里同时兜底冻结：不是每个「离开底部」
+    // 都经过指针（例如「回到最新」按钮、导航条跳转、恢复阅读位置）。
+    //
+    // **切会话 ⇒ 旧的冻结全部作废**：冻结只对「当前这个会话里读历史」有意义；带着旧快照切回来，
+    // 用户看到的就是冻结那一刻的 feed（后来的消息全不在了）。
+    LaunchedEffect(state.conversationId) {
+        frozenFeeds.clear()
+        snapshotFlow { scroll.stickToBottom }.collect { atBottom ->
+            if (atBottom) frozenFeeds.remove(state.conversationId) else freezeNow.value()
+        }
+    }
+    // **临时埋点（issue #17 验收后删）**：读历史时逐帧记「首可见行的偏移」。
+    //
+    // 用户手停着不动时，这个偏移的变化量**就是漂移量**：冻结生效 ⇒ 恒定；没冻住 ⇒ 一路往下走
+    // （之前实测：每帧偏「上一帧的高度增量」）。只写「读历史中」这一段，贴底时不做任何记录。
+    val driftCtx = LocalContext.current
+    LaunchedEffect(state.conversationId) {
+        snapshotFlow { scroll.stickToBottom }.collectLatest { atBottom ->
+            if (atBottom) return@collectLatest
+            val buf = StringBuilder()
+            var frames = 0
+            while (true) {
+                withFrameNanos { }
+                val first = listState.layoutInfo.visibleItemsInfo.firstOrNull() ?: continue
+                buf.append(System.currentTimeMillis())
+                    .append(" i=").append(first.index)
+                    .append(" off=").append(first.offset)
+                    .append(" n=").append(itemCount)
+                    .append(System.lineSeparator())
+                // 每 60 帧（约 1 秒）落一次盘，别把 IO 压到每帧。
+                if (++frames % 60 == 0 && buf.isNotEmpty()) {
+                    val dump = buf.toString(); buf.setLength(0)
+                    val dir = driftCtx.filesDir
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                        runCatching {
+                            val f = java.io.File(dir, "drift.log")
+                            if (f.length() > 256 * 1024) f.writeText("")
+                            f.appendText(dump)
+                        }
+                    }
+                }
+            }
         }
     }
     // **设计 A 的每帧对账：暂时停用**（issue #18 之后）。
@@ -1178,6 +1281,10 @@ fun ChatScreen(
                                                 (dy > CANCEL_FOLLOW_PX || dy < -CANCEL_FOLLOW_PX)
                                             ) {
                                                 scroll.stickToBottom = false
+                                                // 离开底部 ⇒ **同步**冻住 feed（不等下一帧：
+                                                // 一帧都不许漂）。见上面「读历史时把整份 feed
+                                                // 冻住」那段（issue #17）。
+                                                freezeNow.value()
                                                 moved = true
                                                 pressMoved = true
                                             }
@@ -1220,17 +1327,17 @@ fun ChatScreen(
                         // 判断反了。若满屏那一刻有跳变，退回 `Alignment.Bottom` + offset 方案。
                         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Top),
                     ) {
-                        if (live) {
+                        if (renderLive) {
                             // Keyed by conversation: the live row keeps its slot for as long
                             // as it is on screen, and a switch used to hand the next chat
                             // whatever the previous one had left in that slot.
                             item(key = "streaming:${state.conversationId}") {
                                 // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
-                                // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
-                                // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
-                                Column(Modifier.onSizeChanged { liveHeight = it.height }) {
+                                // 往上翻着读旧内容时这是最烦人的漂移。**读历史时这里不再长高**
+                                // （issue #17 方案 3：整份 feed 冻住），贴底时照常长。
+                                Column {
                                     AssistantRow(
-                                        parts = state.liveParts.mapNotNull { part ->
+                                        parts = renderParts.mapNotNull { part ->
                                             when (part) {
                                                 is LivePart.Thinking ->
                                                     if (settings.showReasoning) {
@@ -1243,7 +1350,7 @@ fun ChatScreen(
                                                             // same id, so the block keeps its
                                                             // identity when the live row is
                                                             // replaced by the stored one.
-                                                            runId = state.liveRunId,
+                                                            runId = renderLiveRunId,
                                                         )
                                                     } else {
                                                         null
@@ -1279,8 +1386,8 @@ fun ChatScreen(
                                         name = assistant?.label ?: "随行",
                                         face = assistant?.face ?: "",
                                         avatarPath = assistant?.avatarPath ?: "",
-                                        runningTool = state.runningTool,
-                                        liveStats = state.stats,
+                                        runningTool = renderRunningTool,
+                                        liveStats = renderStats,
                                         contextWindow = contextWindow,
                                         expandTools = settings.expandTools,
                                         expandReasoning = settings.expandReasoning,
@@ -1291,7 +1398,7 @@ fun ChatScreen(
                                     )
                                     // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
                                     // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
-                                    if (state.runningHere) {
+                                    if (renderRunningHere) {
                                         RunStatusLine(
                                             text = liveStatusText,
                                             startedAt = runStartedAt[runKey] ?: 0L,
@@ -1306,7 +1413,7 @@ fun ChatScreen(
                                     }
                                 }
                             }
-                        } else if (state.runningHere) {
+                        } else if (renderRunningHere) {
                             // Sent, not yet answered: the line holds the place the bubble is
                             // about to fill, so the reply lands where the user is already
                             // looking. It is also the only caption the user sees while the

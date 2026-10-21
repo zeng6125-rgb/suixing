@@ -23,3 +23,16 @@ dist/
 
 # meow-memory local memory DB (hidden dir, unrecoverable if deleted)
 .dsh-meow/
+
+# ---- Local tooling artifacts (never committed, safe to delete) ----
+# video/          : 录屏逐帧分析工具（含 npm 依赖与 ffmpeg 二进制，纯本地产物）
+# .playwright-mcp/: Playwright MCP 截图 / 快照输出
+# node_modules/   : 本地 npm 工具的依赖目录
+# /*.log, /*.png  : 根目录散落的编译日志与对比取证截图
+#                    （仓库目前没有任何被跟踪的 PNG；若将来要在根目录放
+#                      需要入库的图片，先改这一行）
+video/
+.playwright-mcp/
+node_modules/
+/*.log
+/*.png
