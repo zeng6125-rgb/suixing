@@ -7,7 +7,6 @@ import android.content.ClipboardManager
 import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.OutlinedTextField
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +85,7 @@ import androidx.compose.runtime.getValue
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -105,6 +105,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -115,8 +117,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -140,6 +144,7 @@ import com.suixing.agent.ui.components.NAV_SHIFT_DIVISOR
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
+import com.suixing.agent.ui.chat.MenuCard
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.LocalOpenSidebar
@@ -907,6 +912,8 @@ private fun Drawer(
             // （用户：「进行了长按等其它操作（例如关闭侧边栏），自动退出拖动模式」）。
             sortMode = false
             draggingState.value = null
+            // 抽屉一关，长按菜单也不该留在屏幕上（它是 focusable = false 的弹窗，不会自己消失）。
+            menuFor = null
         }
     }
 
@@ -1322,10 +1329,28 @@ private fun ConversationRow(
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // 菜单贴哪边、朝上还是朝下，都要先知道这一行在窗口里的位置：
+    // · 水平——Panel 的 Popup 以父节点为锚，父节点就是下面那个「与面板同宽、贴住行右下角」的
+    //   空盒子，于是面板左缘落在行右缘（用户：「在哪里长按，弹窗都靠近左侧」）；
+    // · 垂直——下面是列表底部时朝上翻，翻多少取决于这一行有多高。
+    val density = LocalDensity.current
+    val screenHeightPx = with(density) { LocalConfiguration.current.screenHeightDp.dp.toPx() }
+    val gapPx = with(density) { 4.dp.toPx() }
+    val menuHeightPx = with(density) { DrawerMenuHeight.toPx() }
+    // 导航栏与安全区不落在 screenHeightDp 里，判断「下面还放得下吗」时留一截余量。
+    val bottomInsetPx = with(density) { 72.dp.toPx() }
+    var rowBottomPx by remember { mutableStateOf(0f) }
+    var rowHeightPx by remember { mutableStateOf(0f) }
+    val openUp = rowBottomPx + menuHeightPx + gapPx > screenHeightPx - bottomInsetPx
     // 短按打开、长按出菜单：一行上只挂这一个手势。菜单里的每一项都走抽屉里已经有的那几条路
     // （删除仍旧进 pendingDelete 那个二次确认）。Surface(onClick) 不支持长按，所以点击交给
     // combinedClickable，Surface 只负责形状与底色；clip 是为了让水波纹跟着圆角走。
-    Box(modifier = modifier) {
+    Box(
+        modifier = modifier.onGloballyPositioned { coordinates ->
+            rowBottomPx = coordinates.boundsInWindow().bottom
+            rowHeightPx = coordinates.size.height.toFloat()
+        },
+    ) {
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1401,38 +1426,50 @@ private fun ConversationRow(
                 }
             }
         }
-        // 长按出来的菜单。锚点不是整行，而是一个「和面板同宽、0 高、贴在行的右下角」的空盒子：
-        // M3 的 DropdownMenu 只按锚点**左缘**摆（它没有 popupPositionProvider 可配），锚在整行上
-        // 就永远贴着抽屉左边弹（用户实测：「在哪里长按，弹窗显示都靠近左侧」）。把锚点本身放在
-        // 行的右侧、宽度与面板相同，左缘就落在行右缘，菜单于是贴着这一行弹；下方不够时 M3 自己
-        // 向上翻。删除排在最后，与「设置 → 会话」页那两个动作的顺序一致。
+        // 点面板外面关闭、按返回关闭。
+        // MenuCard 的弹窗是 focusable = false（它自己的注释写了原因：抢焦点的弹窗会把输入法从
+        // 输入框上拿走），这样的窗口既看不到「点在外面」也看不到 BACK —— 两件事都由调用方接，
+        // 写法照 ChatTopBar 那张用量卡：遮罩是另一个弹窗，且**先**组合（弹窗按组合顺序叠）。
+        if (menuOpen) {
+            Popup(properties = PopupProperties(focusable = false)) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { onMenuDismiss() },
+                )
+            }
+        }
+        BackHandler(enabled = menuOpen) { onMenuDismiss() }
+
+        // 面板就是输入框旁「添加」那个弹层本身：`ui/chat/ChatComposer.kt:307-362` 的 MenuCard
+        // （surface 底 + 20dp 圆角 + 8dp 的 shadow(ambient/spot 25% 黑) + 160ms 缩放淡入）。
+        // 它已经是 `internal` 的共用组件，这里直接调用 —— 不是照着参数再画一遍，所以底色、圆角、
+        // 阴影质感、内边距、进场动画不可能再出现第二个版本（用户：「阴影质感都很高级」）。
+        // 锚点仍是「与面板同宽、0 高、贴住行的右下角」的空盒子；MenuCard 的 Popup 以父节点为锚，
+        // 面板左缘于是落在行右缘。
         Box(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .width(DrawerMenuWidth)
                 .height(0.dp),
         ) {
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = onMenuDismiss,
-                // 面板照输入框旁「添加」按钮那个弹层抄（`ui/chat/ChatComposer.kt:328-352` 的
-                // MenuCard：surface 底 + 20dp 圆角 + 8dp 投影）。用户给的参照就是它 ——
-                // 「要和那个弹窗一样，那个是有阴影的」。不是 AlertDialog 那套（28dp +
-                // surfaceContainerHigh + 只有 tonal、没有投影）。
-                // tonalElevation 归零、也不要 border：这一层靠阴影分离，再发丝边就变成两套语言
-                // （SuixingCard「边框代替阴影」那套是给页面内卡片的，不适用于浮层）。
-                shape = MaterialTheme.shapes.large,
-                containerColor = scheme.surface,
-                tonalElevation = 0.dp,
-                shadowElevation = 8.dp,
-                // 往下让 4dp：贴着被长按那一行的下沿，又没压在行身上。
-                offset = DpOffset(0.dp, 4.dp),
+            MenuCard(
+                visible = menuOpen,
+                onDismiss = onMenuDismiss,
+                // 下面放得下：TopStart，面板左上角贴住锚点（= 行的右下角）朝下长；
+                // 放不下：BottomStart，面板左下角贴住锚点，再往上让出这一行的高度，朝上长。
+                alignment = if (openUp) Alignment.BottomStart else Alignment.TopStart,
+                offset = if (openUp) {
+                    IntOffset(0, -(rowHeightPx + gapPx).roundToInt())
+                } else {
+                    IntOffset(0, gapPx.roundToInt())
+                },
                 modifier = Modifier.width(DrawerMenuWidth),
+                focusable = false,
             ) {
-                // 进场动画：MenuCard 是自绘 Popup + AnimatedVisibility（160ms 缩放淡入），
-                // 而 DropdownMenu 的弹窗窗口按内容测量、没有暴露 enter transition —— 在里面包一层
-                // AnimatedVisibility 只会被弹窗边界裁掉。所以这里保持 M3 默认（无缩放淡入），
-                // 不为一条动画把菜单降级成自绘 Popup（要自己接管 dismiss/返回键/focusable）。
                 DrawerMenuAction("改名", onClick = onRename)
                 DrawerMenuAction(
                     if (conversation.pinned) "取消置顶" else "置顶",
@@ -1455,13 +1492,20 @@ private fun ConversationRow(
 private val DrawerMenuWidth = 200.dp
 
 /**
+ * 面板高度：6 个 44dp 的项（40dp 行 + 上下各 2dp）+ MenuCard 的上下各 14dp 内边距。
+ * 只用来判断「下面还放得下吗」，放不下就朝上翻；项数改了这里要跟着改。
+ */
+private val DrawerMenuHeight = 44.dp * 6 + 28.dp
+
+/**
  * 抽屉长按菜单里的一行：尺寸与反馈都照对话框里那颗 `TextButton` 抄。
  *
  * 为什么不用 `DropdownMenuItem`：它自带 M3 的列表语言（17sp Regular、48dp 行高、整行方角
  * 涟漪、onSurface 文字色），和对话框按钮（14sp Medium、40dp、胶囊涟漪、主色）摆在一起就是
  * 两套东西 —— 用户点名的正是这个不一致。尺寸集中在这个函数里，将来对话框若改，两处一起改。
  *
- * 字色：常规项用主色（= 对话框的确认/取消），破坏性项用 error（= 对话框里那颗红的「删除」）。
+ * 字色：常规项用 onSurface（就是那个弹层的正文色；用户看过主色那版说「为什么是绿色的字」），
+ * 破坏性项仍用 error（用户明确说「删除的红色没毛病」）。
  */
 @Composable
 private fun DrawerMenuAction(
@@ -1484,7 +1528,7 @@ private fun DrawerMenuAction(
         Text(
             text = text,
             style = MaterialTheme.typography.labelLarge,
-            color = if (destructive) scheme.error else scheme.primary,
+            color = if (destructive) scheme.error else scheme.onSurface,
             maxLines = 1,
         )
     }
