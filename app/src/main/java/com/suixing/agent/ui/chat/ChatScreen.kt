@@ -166,6 +166,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -188,6 +189,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -931,6 +933,40 @@ fun ChatScreen(
             anchors[state.conversationId] = first.key to offset
         }
     }
+    // ─── #17 流式行高度「滞后一帧 + 同帧补偿」 ────────────────────────────────
+    //
+    // **为什么"看到偏差再纠正"必败**（三版都失败）：流式行每长高 δ，列表在**同一帧的测量**
+    // 里就把上面的内容顶上去 δ；任何"测量之后才知道 δ"的纠正都发生在下一帧 ⇒ 永远慢一拍 ⇒
+    // 用户看到的是「内容一直在爬」，而不是「跳一下就停」（末态对只是收尾对账抹掉了残差）。
+    //
+    // **做法**：把流式行的**高度变化推迟一帧**（布局报的是上一帧的自然高度），然后在
+    // **帧回调里**（下一帧测量之前）同时做两件事：① 把报出的高度前进到新值；② 把同样的 δ
+    // 交给列表 `dispatchRawDelta`。两件事落在**同一帧的测量**里 ⇒ 净位移 0 ⇒ 不漂。
+    // 这正是 `RevealHeight` 已验证的铁律（补偿量与高度变化必须同帧生效，真机实测 ±1px）。
+    //
+    // **不是冻结**：内容照常生长、照常可见，只是高度晚一帧生效（最多裁掉 16ms 宽的一条边缘）。
+    // **不是移出列表**：流式行仍在 LazyColumn 里。
+    // 只在「用户上翻读历史」时启用；贴底时高度直接跟自然值，行为与以前完全一致。
+    val lagNatural = remember { intArrayOf(0) }
+    var lagReported by remember { mutableIntStateOf(0) }
+    // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
+    // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
+    val laggingNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
+    LaunchedEffect(listState) {
+        while (true) {
+            withFrameNanos { }
+            val natural = lagNatural[0]
+            if (natural <= 0) continue
+            val current = if (lagReported > 0) lagReported else natural
+            if (natural == current) continue
+            val delta = (natural - current).toFloat()
+            lagReported = natural
+            if (laggingNow && listState.canScrollBackward) {
+                listState.dispatchRawDelta(delta)
+            }
+        }
+    }
+
     // **设计 A 的每帧对账：暂时停用**（issue #18 之后）。
     //
     // 它每帧都在 `dispatchRawDelta` —— 那是目前唯一还会在「用户没动」时写滚动位置的地方。
@@ -1226,7 +1262,15 @@ fun ChatScreen(
                                 // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
                                 // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
                                 // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
-                                Column {
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .liveRowLagHeight(
+                                            reported = if (laggingNow) lagReported else 0,
+                                            natural = lagNatural,
+                                        )
+                                        .then(if (laggingNow) Modifier.clipToBounds() else Modifier),
+                                ) {
                                     AssistantRow(
                                         parts = state.liveParts.mapNotNull { part ->
                                             when (part) {
@@ -1781,3 +1825,18 @@ fun ChatScreen(
     }
 }
 
+/**
+ * 报出 [reported] 的高度，但内容按**不受限**的高度测量（真实自然高度写进 [natural]）。
+ *
+ * `reported <= 0` ⇒ 直接报自然高度（贴底时走这条，行为与改动前完全一致）。
+ * 内容比 [reported] 高时由调用方加 `clipToBounds()` 裁掉 —— 被裁的只是这一帧多出来的边缘。
+ */
+private fun Modifier.liveRowLagHeight(reported: Int, natural: IntArray): Modifier =
+    this.layout { measurable, constraints ->
+        val placeable = measurable.measure(
+            Constraints(maxWidth = constraints.maxWidth, maxHeight = Constraints.Infinity),
+        )
+        natural[0] = placeable.height
+        val height = if (reported > 0) reported else placeable.height
+        layout(placeable.width, height) { placeable.place(0, 0) }
+    }
