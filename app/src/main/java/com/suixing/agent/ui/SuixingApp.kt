@@ -7,7 +7,6 @@ import android.content.ClipboardManager
 import android.widget.Toast
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedTextField
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +29,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -49,11 +49,13 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
@@ -110,6 +112,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -137,6 +140,7 @@ import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
+import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.onboarding.OnboardingHost
@@ -1213,21 +1217,76 @@ private fun ConversationRow(
         }
         // 长按出来的菜单。锚在这一行上（Box 内），所以它贴着被长按的那一条弹出；
         // 删除排在最后，与「设置 → 会话」页那两个动作的顺序一致。
-        DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuDismiss) {
-            DropdownMenuItem(text = { Text("改名") }, onClick = onRename)
-            DropdownMenuItem(
-                text = { Text(if (conversation.pinned) "取消置顶" else "置顶") },
+        //
+        // 样式照对话框里那颗按钮抄（用户：长按菜单要和对话框按钮一致）：面板 20dp 圆角 + surface
+        // 底 + 8dp 投影 + 一圈 hairline（与 SuixingCard、输入框上方那两张卡同一个做法），每一项
+        // 40dp 高、labelLarge 14sp Medium、胶囊涟漪 —— 与 AlertDialog 的 TextButton 同高同字同反馈。
+        // 不再用 DropdownMenuItem：它自带 bodyLarge 17sp、48dp 行高、整行方角涟漪和 onSurface 字色，
+        // 那是另一套语言，两样摆在一起就是用户说的「样式不一致」。定位与翻转仍由 DropdownMenu 管。
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = onMenuDismiss,
+            shape = MaterialTheme.shapes.large,
+            containerColor = scheme.surface,
+            tonalElevation = 0.dp,
+            shadowElevation = 8.dp,
+            border = BorderStroke(1.dp, scheme.outlineVariant),
+            // 往下让 4dp：贴着被长按那一行的下沿，又没压在行身上。再往下的翻转/夹紧由 M3 负责。
+            offset = DpOffset(0.dp, 4.dp),
+            // 180dp 足够放下最长的一项（「取消归档」）再加胶囊的左右内边距；220dp 是上限，
+            // 免得它长成一条横贯抽屉的带子 —— 它是这一行的菜单，不是一页。
+            modifier = Modifier.widthIn(min = 180.dp, max = 220.dp),
+        ) {
+            DrawerMenuAction("改名", onClick = onRename)
+            DrawerMenuAction(
+                if (conversation.pinned) "取消置顶" else "置顶",
                 onClick = onTogglePin,
             )
             // 归档：从抽屉列表里收起来，数据留着；取消归档在「设置 → 会话管理」那一页。
-            DropdownMenuItem(
-                text = { Text(if (conversation.archived) "取消归档" else "归档") },
+            DrawerMenuAction(
+                if (conversation.archived) "取消归档" else "归档",
                 onClick = onToggleArchive,
             )
-            DropdownMenuItem(text = { Text("复制标题") }, onClick = onCopyTitle)
-            DropdownMenuItem(text = { Text("导出") }, onClick = onExport)
-            DropdownMenuItem(text = { Text("删除") }, onClick = onDelete)
+            DrawerMenuAction("复制标题", onClick = onCopyTitle)
+            DrawerMenuAction("导出", onClick = onExport)
+            DrawerMenuAction("删除", destructive = true, onClick = onDelete)
         }
+    }
+}
+
+/**
+ * 抽屉长按菜单里的一行：尺寸与反馈都照对话框里那颗 `TextButton` 抄。
+ *
+ * 为什么不用 `DropdownMenuItem`：它自带 M3 的列表语言（17sp Regular、48dp 行高、整行方角
+ * 涟漪、onSurface 文字色），和对话框按钮（14sp Medium、40dp、胶囊涟漪、主色）摆在一起就是
+ * 两套东西 —— 用户点名的正是这个不一致。尺寸集中在这个函数里，将来对话框若改，两处一起改。
+ *
+ * 字色：常规项用主色（= 对话框的确认/取消），破坏性项用 error（= 对话框里那颗红的「删除」）。
+ */
+@Composable
+private fun DrawerMenuAction(
+    text: String,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    // 涟漪是整行胶囊：左右各留 8dp，胶囊才碰不到面板那 20dp 的圆角；上下各 2dp 就是行距。
+    // 顺序照 `suixingClickable` 的约定（clip → clickable → 自己的 padding），涟漪才不会缩水。
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .suixingClickable(shape = CircleShape, onClick = onClick)
+            .height(40.dp)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (destructive) scheme.error else scheme.primary,
+            maxLines = 1,
+        )
     }
 }
 

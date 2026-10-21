@@ -1,6 +1,7 @@
 package com.suixing.agent.data
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,41 +21,83 @@ import java.util.UUID
  */
 internal const val LIVE_SUFFIX = ".live.json"
 
-/** Conversations are stored one JSON file per conversation under filesDir/chats. */
+/**
+ * Conversations are stored one JSON file per conversation under filesDir/chats.
+ *
+ * The messages no longer live in that file: they are appended one per line to
+ * `chats/store/<id>.<gen>.jsonl`, and the metadata the list screen needs sits beside it in
+ * `chats/store/<id>.meta` (see [ChatStore]). A legacy `<id>.json` is still read — a user's
+ * existing chats are 54 MB of them — and [migratePending] moves each one over, renaming it to
+ * `<id>.json.migrated` only after the new copy has been read back and compared whole.
+ */
 class ChatRepository(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val dir: File get() = File(context.filesDir, "chats").apply { if (!exists()) mkdirs() }
     private val lock = Mutex()
+
+    /** The new format, keyed under the same `chats` directory but in its own `store/` child. */
+    private val store = ChatStore(File(context.filesDir, "chats"))
 
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
     suspend fun load() = withContext(Dispatchers.IO) {
         lock.withLock {
+            val byId = LinkedHashMap<String, Conversation>()
+            val metas = storeMetas()
+            for (meta in metas) {
+                // A chat whose log no longer parses must not take the whole list down with it.
+                runCatching { meta.toConversation(store.all(meta)) }
+                    .onFailure { cause ->
+                        Log.e(TAG, "log for ${meta.id} is unreadable; quarantining its meta", cause)
+                        quarantine(File(storeDir, "${meta.id}$META_SUFFIX"))
+                    }
+                    .onSuccess { byId[it.id] = it }
+            }
             // A live draft is not a conversation: it sits in the same directory and also ends
             // in `.json`, so it has to be excluded by name or it would show up as a chat.
-            val all = dir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
-                ?.mapNotNull { file ->
+            dir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
+                ?.forEach { file ->
                     runCatching { json.decodeFromString<Conversation>(file.readText()) }
                         // Skipping a file that no longer parses made the chat look deleted
                         // while its bytes were still on disk, with nothing left to recover.
                         .onFailure { quarantine(file) }
                         .getOrNull()
+                        // The store's copy wins: a `.json` that is still here next to it is one
+                        // a rename could not retire, not newer data.
+                        ?.let { byId.putIfAbsent(it.id, it) }
                 }
-                ?.sortedByDescending { it.updatedAt }
-                ?: emptyList()
-            _conversations.value = all
+            _conversations.value = byId.values.sortedByDescending { it.updatedAt }
             // Same pass, same thread: quarantined files are never read again, so without this
             // they would sit in filesDir for ever.
             pruneQuarantine()
+            pruneStaleGens(metas)
         }
+    }
+
+    /**
+     * Converts the chats that are still in the old single-file format, one at a time.
+     *
+     * Deliberately **not** called by [load]: reading a 54 MB transcript, writing it back and
+     * comparing the two is a second of IO per chat, and the list has to be on screen before that.
+     * Call it once, from an IO coroutine, after the UI is up. Idempotent and safe to call on every
+     * launch — a chat already migrated is skipped, and one that failed keeps its old file.
+     */
+    suspend fun migratePending() = withContext(Dispatchers.IO) {
+        val last = readLastOpenedMarker()
+        // The chat the user is about to open goes first, so the wait lands on a chat nobody is
+        // looking at yet.
+        for (id in legacyIds().sortedByDescending { it == last }) {
+            lock.withLock { migrateOne(id) }
+        }
+        pruneMigrated()
     }
 
     suspend fun create(title: String = "新会话"): Conversation = withContext(Dispatchers.IO) {
         val conversation = Conversation(id = UUID.randomUUID().toString(), title = title)
-        write(conversation)
-        _conversations.value = listOf(conversation) + _conversations.value
-        conversation
+        val stored = write(conversation)
+        _conversations.value = listOf(stored) + _conversations.value
+        stored
     }
 
     suspend fun save(conversation: Conversation) = withContext(Dispatchers.IO) {
@@ -74,9 +117,9 @@ class ChatRepository(private val context: Context) {
                 // 归档位同理（第六个）：不继承的话，归档过的会话只要再落一次盘就自己回到列表里。
                 archived = onDisk?.archived ?: conversation.archived,
             )
-            write(stamped)
-            val rest = _conversations.value.filterNot { it.id == stamped.id }
-            _conversations.value = (listOf(stamped) + rest).sortedByDescending { it.updatedAt }
+            val stored = write(stamped)
+            val rest = _conversations.value.filterNot { it.id == stored.id }
+            _conversations.value = (listOf(stored) + rest).sortedByDescending { it.updatedAt }
         }
     }
 
@@ -94,7 +137,7 @@ class ChatRepository(private val context: Context) {
         lock.withLock {
             val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
             val next = current.copy(pinned = pinned)
-            write(next)
+            writeFields(next)
             _conversations.value = _conversations.value.map { if (it.id == id) next else it }
         }
     }
@@ -111,7 +154,7 @@ class ChatRepository(private val context: Context) {
         lock.withLock {
             val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
             val next = current.copy(title = clean)
-            write(next)
+            writeFields(next)
             _conversations.value = _conversations.value.map { if (it.id == id) next else it }
         }
     }
@@ -124,7 +167,7 @@ class ChatRepository(private val context: Context) {
         lock.withLock {
             val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
             val next = current.copy(archived = archived)
-            write(next)
+            writeFields(next)
             _conversations.value = _conversations.value.map { if (it.id == id) next else it }
         }
     }
@@ -132,6 +175,10 @@ class ChatRepository(private val context: Context) {
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
         lock.withLock {
             File(dir, "$id.json").delete()
+            // The transcript itself, its metadata, and whatever a crashed rewrite left behind.
+            store.discard(id)
+            File(dir, "$id.json$MIGRATED_SUFFIX").delete()
+            File(dir, "$id.json$MIGRATE_FAILED_SUFFIX").delete()
             // A deleted chat's draft is garbage nobody will ever read: the conversation it
             // belongs to is gone from the list, so nothing will look for it again.
             liveFile(id).delete()
@@ -218,9 +265,165 @@ class ChatRepository(private val context: Context) {
      */
     private val lastOpenedFile: File get() = File(dir, "last-opened")
 
-    private fun write(conversation: Conversation) {
-        val target = File(dir, "${conversation.id}.json")
-        writeAtomically(target, json.encodeToString(Conversation.serializer(), conversation))
+    /**
+     * Saves [conversation] through the store and returns what is now on disk.
+     *
+     * Only the messages past the stored watermark are written: a finished turn appends its own
+     * two messages instead of re-encoding a transcript that may be tens of megabytes. Anything
+     * else — an edit in place, a branch switch that rewrote history — replaces the log, which is
+     * what the old implementation did on every single save anyway.
+     */
+    private fun write(conversation: Conversation): Conversation {
+        val meta = store.readMeta(conversation.id)?.withFieldsOf(conversation)
+            ?: store.newMeta(conversation)
+        val started = System.nanoTime()
+        val saved = runCatching { store.save(meta, conversation.messages) }
+            .getOrElse { cause ->
+                if (cause !is ConversationLogShrunkException) throw cause
+                // This snapshot still holds whole transcripts, so a shorter list can only be a
+                // deliberate history edit (editAndResend drops every answer after the question
+                // the user corrected). It becomes a hard failure in S2, where the list is a page
+                // and writing a page back as the whole chat is the data loss we are guarding.
+                ChatStore.Saved(
+                    meta = store.rewrite(meta, conversation.messages),
+                    kind = ChatStore.SaveKind.REWRITE_SHRINK,
+                )
+            }
+        if (saved.kind.rewrote) {
+            // One grep-able line per whole-transcript write: measure it before optimising it.
+            Log.w(
+                TAG,
+                "rewrite id=${conversation.id} bytes=${saved.meta.logBytes} " +
+                    "ms=${(System.nanoTime() - started) / 1_000_000} reason=${saved.kind.reason}",
+            )
+        }
+        // The new copy is committed, so the single file is a rollback copy from here on.
+        retireLegacy(conversation.id)
+        return saved.meta.toConversation(conversation.messages)
+    }
+
+    /**
+     * Writes the fields of [conversation] and nothing else — the log is not touched at all.
+     *
+     * Pinning, renaming and recording a compression checkpoint used to re-encode the whole
+     * transcript: a 30 MB write for a boolean, on every branch switch and every compression.
+     */
+    private fun writeFields(conversation: Conversation) {
+        val meta = store.readMeta(conversation.id)
+        if (meta == null) {
+            // Still a legacy chat: the flag has to go somewhere that parses, which means the
+            // whole transcript in the new format — and that retires the old file on the way out.
+            write(conversation)
+            return
+        }
+        store.writeMeta(meta.withFieldsOf(conversation))
+    }
+
+    private val storeDir: File get() = File(dir, STORE_DIR)
+
+    private fun legacyFile(id: String): File = File(dir, "$id.json")
+
+    private fun legacyIds(): List<String> =
+        dir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
+            ?.map { it.name.removeSuffix(".json") }
+            ?: emptyList()
+
+    private fun storeMetas(): List<ChatStore.ConversationMeta> =
+        storeDir.listFiles { f -> f.name.endsWith(META_SUFFIX) }
+            ?.mapNotNull { file ->
+                val id = file.name.removeSuffix(META_SUFFIX)
+                runCatching { store.readMeta(id) }
+                    .onFailure { cause ->
+                        Log.e(TAG, "meta for $id does not parse; quarantining it", cause)
+                        quarantine(file)
+                    }
+                    .getOrNull()
+            }
+            ?: emptyList()
+
+    /**
+     * Moves one chat from `<id>.json` into the store; returns whether it is in the new format now.
+     *
+     * The old file is renamed only after the new copy has been read back and compared message for
+     * message with what was parsed out of it — "it parsed and the counts agree" would not catch a
+     * bad encode. On any failure the legacy bytes stay exactly as they were, a
+     * `<id>.json.migrate-failed` marker says why, and whatever reached the store is thrown away so
+     * it cannot shadow the real file. The next launch tries again.
+     */
+    private fun migrateOne(id: String): Boolean {
+        val legacy = legacyFile(id)
+        if (!legacy.isFile) return true
+        if (store.has(id)) {
+            // Killed after the store write but before the rename: nothing to redo but the rename.
+            retireLegacy(id)
+            return true
+        }
+        val bytes = legacy.length()
+        // Peak is the new log beside the old file, plus the store's temp file during its rename.
+        val free = context.filesDir.usableSpace
+        if (free in 0 until bytes + bytes / 2) {
+            Log.w(TAG, "migrate-skipped id=$id bytes=$bytes free=$free reason=no-space")
+            return false
+        }
+        val conversation = runCatching { json.decodeFromString<Conversation>(legacy.readText()) }
+            .getOrElse { cause ->
+                Log.e(TAG, "migrate-failed id=$id bytes=$bytes reason=unparseable", cause)
+                markMigrateFailed(id, cause)
+                return false
+            }
+        return runCatching {
+            val written = store.append(store.newMeta(conversation), conversation.messages)
+            val readBack = store.all(written)
+            check(readBack == conversation.messages) {
+                "read back ${readBack.size} of ${conversation.messages.size} messages"
+            }
+            retireLegacy(id)
+            Log.i(TAG, "migrated id=$id bytes=$bytes messages=${conversation.messages.size}")
+            true
+        }.getOrElse { cause ->
+            Log.e(TAG, "migrate-failed id=$id bytes=$bytes reason=unwritable", cause)
+            markMigrateFailed(id, cause)
+            // A half-written entry would otherwise shadow the legacy file it failed to replace.
+            runCatching { store.discard(id) }
+            false
+        }
+    }
+
+    private fun retireLegacy(id: String) {
+        val legacy = legacyFile(id)
+        if (!legacy.isFile) return
+        if (!legacy.renameTo(File(dir, "${legacy.name}$MIGRATED_SUFFIX"))) {
+            Log.w(TAG, "migrated id=$id reason=rename-failed; the old file is skipped from now on")
+        }
+    }
+
+    private fun markMigrateFailed(id: String, cause: Throwable) {
+        runCatching {
+            File(dir, "${legacyFile(id).name}$MIGRATE_FAILED_SUFFIX").writeText(cause.toString())
+        }
+    }
+
+    /** Old files are kept through a rollback window, then dropped so nothing reads them twice. */
+    private fun pruneMigrated() {
+        runCatching {
+            val cutoff = System.currentTimeMillis() - MIGRATED_KEEP_MS
+            dir.listFiles { f -> f.name.endsWith(MIGRATED_SUFFIX) }
+                ?.filter { it.lastModified() < cutoff }
+                ?.forEach { it.delete() }
+        }
+    }
+
+    /** Log generations a crashed rewrite left behind. The one the meta names is never touched. */
+    private fun pruneStaleGens(metas: List<ChatStore.ConversationMeta>) {
+        runCatching {
+            val live = metas.associate { it.id to "${it.id}.${it.gen}$LOG_SUFFIX" }
+            storeDir.listFiles { f -> f.name.endsWith(LOG_SUFFIX) }
+                ?.forEach { file ->
+                    val id = file.name.removeSuffix(LOG_SUFFIX).substringBeforeLast('.')
+                    val keep = live[id] ?: return@forEach
+                    if (file.name != keep) file.delete()
+                }
+        }
     }
 
     /**
@@ -274,6 +477,24 @@ class ChatRepository(private val context: Context) {
         const val CORRUPT_KEEP_MS = 30L * 24 * 60 * 60 * 1000
 
         const val CORRUPT_SUFFIX = ".corrupt"
+
+        /**
+         * A migrated chat's old single file, kept through a rollback window so a build that
+         * cannot read the new format still has something to fall back to.
+         */
+        const val MIGRATED_SUFFIX = ".migrated"
+
+        /**
+         * Why a chat is still in the old format. Deliberately not `.json`: every listing in this
+         * app picks files out by extension, and a marker must never be read as a conversation.
+         */
+        const val MIGRATE_FAILED_SUFFIX = ".migrate-failed"
+
+        /** How long that rollback copy is worth keeping after a successful migration. */
+        const val MIGRATED_KEEP_MS = 7L * 24 * 60 * 60 * 1000
+
+        /** Tag for the storage lines: rewriting a whole transcript, and every migration step. */
+        const val TAG = "ChatStore"
     }
 }
 

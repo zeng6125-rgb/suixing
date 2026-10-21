@@ -350,6 +350,17 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
 }
 
 /**
+ * 「外层流式行正在做滞后补偿」——为 true 时，里面的 [RevealHeight] **不再自己补滚动**。
+ *
+ * 为什么需要它（issue #17，用户实测「读历史过程中还是有抖动，貌似是思考块流式后再折叠导致的」）：
+ * 流式行里的思考块/工具块走 RevealHeight，它有自己的逐帧补偿；而流式行外层又会量到同一次
+ * 高度变化并补一次 ⇒ **同一份增量被补两次** ⇒ 过冲/回弹。
+ * 两处只能有一处补：外层滞后补偿生效时由外层统一补，RevealHeight 只负责动高度。
+ * 贴底（外层不补）时这个 flag 为 false，RevealHeight 行为不变。
+ */
+internal val LocalLiveRowLag = compositionLocalOf { false }
+
+/**
  * 折叠块的展开/收起：**纯高度动画**。
  *
  * 不用 `AnimatedVisibility(expandVertically)` 是因为这里要按内容自然高度逐帧写 progress，
@@ -381,6 +392,8 @@ private fun RevealHeight(
     durationMs: Int,
     content: @Composable () -> Unit,
 ) {
+    // 外层流式行正在做滞后补偿时，这里只动高度、不碰滚动（见 [LocalLiveRowLag]）。
+    val suppressOuterCompensation = LocalLiveRowLag.current
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
@@ -443,7 +456,8 @@ private fun RevealHeight(
             // 也不该被截断）⇒ 容器高度 == 内容高度 ⇒ 容器长高 == 这个块长高 ⇒ 一套算法通吃。
             val growth = px * progress - oldH
             val comp = growth
-            if (comp != 0f && outer != null && outer.canScrollBackward) {
+            // 外层流式行在补时这里绝不能补（否则同一份增量补两次 ⇒ 抖动）。
+            if (!suppressOuterCompensation && comp != 0f && outer != null && outer.canScrollBackward) {
                 outer.dispatchRawDelta(comp)
             }
             if (t >= 1f) break
@@ -451,7 +465,9 @@ private fun RevealHeight(
         // ③ 收尾按实测位移对账。
         withFrameNanos { }
         withFrameNanos { }
-        reconcileRevealTop(outer = outer, before = beforeTop, after = topInRoot[0])
+        if (!suppressOuterCompensation) {
+            reconcileRevealTop(outer = outer, before = beforeTop, after = topInRoot[0])
+        }
     }
 
     Layout(

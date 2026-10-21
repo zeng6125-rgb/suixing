@@ -957,9 +957,16 @@ fun ChatScreen(
             withFrameNanos { }
             val natural = lagNatural[0]
             if (natural <= 0) continue
-            val current = if (lagReported > 0) lagReported else natural
-            if (natural == current) continue
-            val delta = (natural - current).toFloat()
+            // **先建基线**：lagReported 初值 0 时直接采用当前自然高度、不补。
+            // （0.8.306 的 bug：`current = if (lagReported > 0) lagReported else natural`
+            //  让 natural 恒等于 current ⇒ 永远进不了下面的分支 ⇒ lagReported 永远是 0
+            //  ⇒ 整套滞后补偿从未激活过。用户实测「读本轮已输出的内容并没有包含」就是这个。）
+            if (lagReported <= 0) {
+                lagReported = natural
+                continue
+            }
+            if (natural == lagReported) continue
+            val delta = (natural - lagReported).toFloat()
             lagReported = natural
             if (laggingNow && listState.canScrollBackward) {
                 listState.dispatchRawDelta(delta)
@@ -1262,6 +1269,7 @@ fun ChatScreen(
                                 // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
                                 // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
                                 // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
+                                CompositionLocalProvider(LocalLiveRowLag provides laggingNow) {
                                 Column(
                                     Modifier
                                         .fillMaxWidth()
@@ -1346,6 +1354,7 @@ fun ChatScreen(
                                             ),
                                         )
                                     }
+                                }
                                 }
                             }
                         } else if (state.runningHere) {

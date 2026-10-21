@@ -111,6 +111,9 @@ class UsageStore(private val context: Context) {
     private val cacheFile: File get() = File(context.filesDir, CACHE_FILE)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true }
 
+    /** Reads the transcripts in whichever format they are in; never writes to them. */
+    private val store = ChatStore(File(context.filesDir, "chats"))
+
     @Volatile
     private var snapshot: UsageSnapshot = UsageSnapshot()
 
@@ -133,12 +136,36 @@ class UsageStore(private val context: Context) {
     /** Per-model subtotals, heaviest first. */
     fun byModel(): List<ModelUsage> = byModelOf(snapshot)
 
-    private fun loadConversations(): List<Conversation> =
+    /**
+     * Every conversation on disk, from whichever format it is in.
+     *
+     * Both are read on purpose. A chat that has been migrated only exists in `chats/store/`, and
+     * one that has not only exists as `<id>.json`; reading just the old files after a migration
+     * would hand [accumulate] an empty list, and its `retainAll` would then drop every chat's
+     * tokens — the day chart, the model chart and the totals would all read zero.
+     */
+    private fun loadConversations(): List<Conversation> {
+        val byId = LinkedHashMap<String, Conversation>()
+        File(chatsDir, STORE_DIR).listFiles { file -> file.name.endsWith(META_SUFFIX) }
+            ?.forEach { file ->
+                val id = file.name.removeSuffix(META_SUFFIX)
+                runCatching {
+                    val meta = store.readMeta(id) ?: return@runCatching
+                    byId[id] = meta.toConversation(store.all(meta))
+                }
+            }
         // A live draft ends in `.json` too; reading it as a conversation would hand
         // accumulate() an id that no transcript has.
         chatsDir.listFiles { file -> file.extension == "json" && !file.name.endsWith(LIVE_SUFFIX) }
-            ?.mapNotNull { file -> runCatching { json.decodeFromString<Conversation>(file.readText()) }.getOrNull() }
-            ?: emptyList()
+            ?.forEach { file ->
+                val conversation = runCatching {
+                    json.decodeFromString<Conversation>(file.readText())
+                }.getOrNull() ?: return@forEach
+                // The store's copy is newer; a leftover `.json` is one a rename could not retire.
+                byId.putIfAbsent(conversation.id, conversation)
+            }
+        return byId.values.toList()
+    }
 
     private fun readCache(): UsageSnapshot {
         snapshot.let { if (it != UsageSnapshot()) return it }
