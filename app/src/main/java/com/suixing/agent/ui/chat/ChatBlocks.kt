@@ -451,8 +451,16 @@ private fun RevealHeight(
         content = content,
         modifier = Modifier
             .fillMaxWidth()
-            // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
-            .clipToBounds()
+            // **只在动画中间裁**（issue #26，真机定位「经过大总结折叠块附近就抖」）：
+            // `clipToBounds()` 会为该节点建立一个**常驻离屏层**（saveLayer），
+            // 一屏 3–4 个折叠块就是 3–4 次离屏合成，滚动经过时 GPU 明显变重。
+            // 内容只在 0 < progress < 1 时溢出：progress==0 时布局高度 0（不画），
+            // progress==1 时高度恰好等于内容高度（不裁也不会画到下一行）。
+            // 所以用 graphicsLayer 的 clip：只在动画那 220ms 里开，其余时间零开销。
+            // 在 layer 块里读 progress 属于绘制阶段，不会触发重组。
+            .graphicsLayer {
+                clip = progress > 0f && progress < 1f
+            }
             .onGloballyPositioned { coords -> topInRoot = coords.positionInRoot().y },
     ) { measurables, constraints ->
         // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
