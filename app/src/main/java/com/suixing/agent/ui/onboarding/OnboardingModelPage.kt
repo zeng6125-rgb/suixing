@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.onboarding
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -56,6 +57,7 @@ import kotlinx.coroutines.launch
 fun ModelPage(
     draft: OnboardingDraft,
     stored: AppSettings,
+    scroll: ScrollState,
     onChange: (OnboardingDraft) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -68,7 +70,7 @@ fun ModelPage(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(horizontal = 16.dp),
     ) {
         Spacer(Modifier.height(8.dp))

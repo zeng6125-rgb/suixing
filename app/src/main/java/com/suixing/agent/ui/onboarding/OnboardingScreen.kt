@@ -1,6 +1,15 @@
 package com.suixing.agent.ui.onboarding
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -8,18 +17,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -32,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -41,12 +51,26 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.PROTOCOL_OPENAI
 import com.suixing.agent.data.ProviderConfig
+import com.suixing.agent.data.SecretBox
+import com.suixing.agent.ui.chat.REVEAL_EASING
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.SuixingOrb
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 引导页的五页，顺序即推进顺序。 */
 enum class OnboardingStep { WELCOME, PROVIDER, MODEL, PERMISSION, READY }
+
+/**
+ * 页内切换的时长：与导航页推入（SuixingApp 的 280ms）同一档，两处手感不打架。
+ */
+private const val PAGE_MS = 280
+
+/**
+ * 淡入淡出比滑动短一半：滑动是主角，淡入淡出只是把它接住。两段一样长会显得"糊"。
+ */
+private const val PAGE_FADE_MS = 140
 
 /**
  * 引导页这一趟里用户填过的东西。
@@ -72,6 +96,25 @@ data class OnboardingDraft(
 )
 
 /**
+ * 读回来的一份设置，加上**解开的** Key。
+ *
+ * **Key 为什么在这儿解**：落盘层已经不再解密了（见 `data/Settings.kt` 的 `decode`：AndroidKeyStore
+ * 每次冷启动要 ~150ms，放在读路径上会连累首屏——Lead 的真机 A/B 是冷启动 165ms → 340ms）。
+ * 所以设置流里的 `apiKey` 现在是 `enc1:` 开头的**密文**，显示与回填的地方要自己调
+ * [SecretBox.decrypt]；解不开（换机、密钥被系统作废）它返回空串 ⇒ 一律按「没填」处理。
+ */
+private data class OnboardingSeed(val settings: AppSettings, val apiKey: String)
+
+/**
+ * 上一次读到的结果：让「重新看一遍引导」进来时**不用再等一次读盘与 Keystore**。
+ *
+ * 只当"立刻能显示"用——进来后还会在后台再读一遍对齐（用户没动过就换成最新的那一份）。
+ */
+private object OnboardingCache {
+    var seed: OnboardingSeed? = null
+}
+
+/**
  * 首次启动引导：五页，从「这是什么」到「开始用」。
  *
  * 插在**导航宿主之外、盖在它上面**（见 SuixingApp 里的 [com.suixing.agent.ui.components.FullScreenOverlay]
@@ -85,41 +128,38 @@ data class OnboardingDraft(
 @Composable
 fun OnboardingHost(onClose: () -> Unit) {
     var step by remember { mutableStateOf(OnboardingStep.WELCOME) }
-    var draft by remember { mutableStateOf<OnboardingDraft?>(null) }
-    // 落盘的那一份（含迁移：老文件会被包成一条 provider），不是 AppSettings() 的原始默认值。
-    // 拿它当草稿的种子，也拿它当「拉模型清单 / 测试连接」时那一次请求的底子——用户自己设的
-    // 自定义请求头、允许自签证书那些开关都在里面，重建一份空的会把它们丢掉。
-    var stored by remember { mutableStateOf<AppSettings?>(null) }
 
-    // 种子是**落盘后的那一份**，不是 AppSettings() 的原始默认值。读出来之前不画表单——
-    // 否则会先闪一下空地址，再跳成真地址。
+    // 滚动位置由外壳拿着：换页再回来时别跳回顶上。页内的 rememberScrollState 活不过换页
+    // （AnimatedContent 退场后旧页会被销毁，那个 remember 一起没了）。
+    val welcomeScroll = rememberScrollState()
+    val providerScroll = rememberScrollState()
+    val modelScroll = rememberScrollState()
+    val permissionScroll = rememberScrollState()
+    val readyScroll = rememberScrollState()
+
+    // **首帧就画**：欢迎页不依赖任何设置，所以不等读盘。以前这里是"先转圈、再把整页跳出来"，
+    // 两段式的一次亮相——用户看到的就是"卡了一下再出现"。
+    val cached = OnboardingCache.seed
+    var stored by remember { mutableStateOf(cached?.settings) }
+    var draft by remember { mutableStateOf(cached?.let { seedOf(it) }) }
+
+    // 读盘与解密都在 IO 上：Keystore 冷启动要 ~150ms（Lead 的真机 A/B：165ms → 340ms），
+    // 放在主线程上就是一次能看见的卡顿。
     LaunchedEffect(Unit) {
-        val s = Core.settings.current()
-        val provider = s.activeProvider()
-        stored = s
-        draft = OnboardingDraft(
-            presetId = presetFor(s.baseUrl)?.id ?: "",
-            presetName = provider?.name.orEmpty(),
-            baseUrl = s.baseUrl,
-            apiKey = s.apiKey,
-            model = s.model,
-            protocol = s.protocol.ifBlank { provider?.protocol ?: PROTOCOL_OPENAI },
-            reasoningEffort = s.reasoningEffort,
-        )
+        val seed = withContext(Dispatchers.IO) {
+            val s = Core.settings.current()
+            OnboardingSeed(s, SecretBox.decrypt(s.apiKey))
+        }
+        OnboardingCache.seed = seed
+        stored = seed.settings
+        val fresh = seedOf(seed)
+        val mine = draft
+        // 用户已经动过草稿就别覆盖：他在填的东西不能被读回来的旧值顶掉。
+        if (mine == null || !mine.touched) draft = fresh
     }
 
     val current = draft
     val base = stored
-    if (current == null || base == null) {
-        // 只有几毫秒的读盘时间。一枚居中的转圈，别闪一帧表单。
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background),
-            contentAlignment = Alignment.Center,
-        ) { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp) }
-        return
-    }
 
     // 收尾：把草稿并进设置（动过才写），并把「看过引导」记上——下次启动不再弹。
     //
@@ -130,7 +170,11 @@ fun OnboardingHost(onClose: () -> Unit) {
         val snapshot = current
         Core.appScope.launch {
             Core.settings.update { latest ->
-                val merged = if (snapshot.touched) latest.mergeOnboarding(snapshot) else latest
+                val merged = if (snapshot != null && snapshot.touched) {
+                    latest.mergeOnboarding(snapshot)
+                } else {
+                    latest
+                }
                 merged.copy(onboardingSeen = true)
             }
         }
@@ -154,6 +198,7 @@ fun OnboardingHost(onClose: () -> Unit) {
             // 键盘让位：填 Key 的时候键盘会盖住页脚（下一步/开始使用那两个按钮）。
             // 用外壳给的那个**夹过的**键盘高度（LocalHeldImePx），与聊天页同一套算法——
             // 自己读 WindowInsets.ime 会遇到那个夹紧逻辑（短促的回落）带来的跳动。
+            // 挂在根上 ⇒ 五页全都让位，不用每页各写一遍。
             .padding(bottom = with(LocalDensity.current) { LocalHeldImePx.current.toDp() })
             // **吃掉落在空白处的点击**：引导层是盖在导航宿主之上的，而 chat 常驻在宿主之下
             // 且还在组合里——不挡这一下，点在引导页的空白处就会打到下面的输入框、消息行上，
@@ -171,22 +216,66 @@ fun OnboardingHost(onClose: () -> Unit) {
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            when (step) {
-                OnboardingStep.WELCOME -> WelcomePage()
-                OnboardingStep.PROVIDER -> ProviderPage(
-                    draft = current,
-                    stored = base,
-                    onChange = { draft = it },
-                )
+            // 页面切换：横向推入 + 轻微淡入淡出。
+            //  - 前进：新页从右边滑进来，旧页往左退 1/3（M3 的"共享轴"做法：旧页退得少，
+            //    两页错开一点才看得出是"推"而不是"换"）；后退方向反过来。
+            //  - 曲线用 REVEAL_EASING（= M3 standard，CubicBezierEasing(0.2, 0, 0, 1)），
+            //    与聊天页的消息揭示同一条曲线，全站只有这一条。
+            //  - **只组合当前页**（外加退场中的那一页）：五个页面一次全组合的话，光是
+            //    供应商页那八张卡就足以让首帧变重。
+            AnimatedContent(
+                targetState = step,
+                // **必须裁掉**：滑进来的那一页要从整屏宽之外进来，不裁的话它会盖到页头与
+                // 页脚上（内容区只有中间那一块）。
+                modifier = Modifier.clipToBounds(),
+                transitionSpec = {
+                    val dir = if (targetState.ordinal > initialState.ordinal) 1 else -1
+                    val enter = slideInHorizontally(
+                        animationSpec = tween(PAGE_MS, easing = REVEAL_EASING),
+                    ) { full -> dir * full }
+                    val exit = slideOutHorizontally(
+                        animationSpec = tween(PAGE_MS, easing = REVEAL_EASING),
+                    ) { full -> -dir * full / 3 }
+                    (enter + fadeIn(tween(PAGE_FADE_MS, easing = REVEAL_EASING)))
+                        .togetherWith(
+                            exit + fadeOut(tween(PAGE_FADE_MS, easing = REVEAL_EASING)),
+                        )
+                },
+                label = "onboarding-page",
+            ) { target ->
+                val d = draft
+                val b = stored
+                when (target) {
+                    OnboardingStep.WELCOME -> WelcomePage(scroll = welcomeScroll)
+                    OnboardingStep.PROVIDER -> if (d != null && b != null) {
+                        ProviderPage(
+                            draft = d,
+                            stored = b,
+                            scroll = providerScroll,
+                            onChange = { draft = it },
+                        )
+                    } else {
+                        PendingPage()
+                    }
 
-                OnboardingStep.MODEL -> ModelPage(
-                    draft = current,
-                    stored = base,
-                    onChange = { draft = it },
-                )
+                    OnboardingStep.MODEL -> if (d != null && b != null) {
+                        ModelPage(
+                            draft = d,
+                            stored = b,
+                            scroll = modelScroll,
+                            onChange = { draft = it },
+                        )
+                    } else {
+                        PendingPage()
+                    }
 
-                OnboardingStep.PERMISSION -> PermissionPage()
-                OnboardingStep.READY -> ReadyPage(draft = current)
+                    OnboardingStep.PERMISSION -> PermissionPage(scroll = permissionScroll)
+                    OnboardingStep.READY -> if (d != null) {
+                        ReadyPage(draft = d, scroll = readyScroll)
+                    } else {
+                        PendingPage()
+                    }
+                }
             }
         }
         OnboardingFooter(
@@ -200,9 +289,51 @@ fun OnboardingHost(onClose: () -> Unit) {
 }
 
 /**
+ * 设置还没读到时那一页的样子。
+ *
+ * 只在用户一进来就猛点「下一步」时才会露脸（读盘是毫秒级的事）。这里**不转圈**：转圈在
+ * 半路出现再消失，本身就是一次"闪"；一句话更安静。
+ */
+@Composable
+private fun PendingPage() {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "正在读你的设置…",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 由设置生成一份草稿（种子）。
+ *
+ * Key 在 [OnboardingSeed] 里已经解开了：设置流给的是密文，显示与回填都要用明文。
+ */
+private fun seedOf(seed: OnboardingSeed): OnboardingDraft {
+    val s = seed.settings
+    val provider = s.activeProvider()
+    return OnboardingDraft(
+        presetId = presetFor(s.baseUrl)?.id ?: "",
+        presetName = provider?.name.orEmpty(),
+        baseUrl = s.baseUrl,
+        apiKey = seed.apiKey,
+        model = s.model,
+        protocol = s.protocol.ifBlank { provider?.protocol ?: PROTOCOL_OPENAI },
+        reasoningEffort = s.reasoningEffort,
+    )
+}
+
+/**
  * 页脚：上一步 / 下一步，最后一页换成「开始使用」。
  *
  * 「开始使用」永远可点：Key 没填、连通性没测过，都不拦——用户自己决定要不要先配。
+ * 按压反馈与禁用态用 M3 按钮自带的（涟漪 + disabled 配色），不另写一套。
  */
 @Composable
 private fun OnboardingFooter(
@@ -246,27 +377,51 @@ private fun HorizontalRule() {
 }
 
 /**
- * 页头：左边是第几页，右边是「跳过」。
+ * 页头：左边是第几步，右边是「跳过」，下面一条进度条。
  *
  * 「跳过」一直都在（含最后一页之前），因为用户随时可以反悔——这一页不该成为他必须走完的关卡。
+ *
+ * 进度条跟页面切换**同一套时长与曲线**（[PAGE_MS] + REVEAL_EASING），所以它是跟页面一起
+ * 动起来的，而不是页面已经换了、条子还在慢慢爬。起手值就是当前进度（animateFloatAsState
+ * 的初值＝目标值），所以不会"先跳一下再归位"。
  */
 @Composable
 private fun OnboardingHeader(step: OnboardingStep, onSkip: (() -> Unit)?) {
-    Row(
+    val progress by animateFloatAsState(
+        targetValue = (step.ordinal + 1f) / OnboardingStep.entries.size,
+        animationSpec = tween(PAGE_MS, easing = REVEAL_EASING),
+        label = "onboarding-progress",
+    )
+    Column(
         Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 10.dp),
     ) {
-        Text(
-            text = "${step.ordinal + 1} / ${OnboardingStep.entries.size}",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.weight(1f))
-        if (onSkip != null) {
-            TextButton(onClick = onSkip) { Text("跳过") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "第 ${step.ordinal + 1} 步 / 共 ${OnboardingStep.entries.size} 步",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.weight(1f))
+            if (onSkip != null) {
+                TextButton(onClick = onSkip) { Text("跳过") }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(progress)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+            )
         }
     }
 }
@@ -279,11 +434,11 @@ private fun OnboardingHeader(step: OnboardingStep, onSkip: (() -> Unit)?) {
  * 会去哪」。
  */
 @Composable
-private fun WelcomePage() {
+private fun WelcomePage(scroll: ScrollState) {
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -348,11 +503,11 @@ private fun WelcomePoint(title: String, body: String) {
  * 看起来一切就绪的假象。
  */
 @Composable
-private fun ReadyPage(draft: OnboardingDraft) {
+private fun ReadyPage(draft: OnboardingDraft, scroll: ScrollState) {
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(horizontal = 16.dp),
     ) {
         Spacer(Modifier.height(16.dp))
@@ -439,6 +594,7 @@ internal fun AppSettings.mergeOnboarding(draft: OnboardingDraft): AppSettings {
         baseUrl = draft.baseUrl,
         // Key 原样搬过去，**不拿老的顶上**：换厂商时老 Key 是另一个厂商的，
         // 拿过去只会被拒，还要多一次「为什么一直 401」的排查。
+        // 这里是**明文**：落盘那一步由 SettingsRepository.encrypted() 统一加密。
         apiKey = draft.apiKey,
         models = models,
         enabled = enabled,

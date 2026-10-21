@@ -250,10 +250,16 @@ fun SuixingApp() {
     // 打开它的理由只有两个：第一次启动（设置里那个「看过引导」的标记还没有），
     // 以及从「设置 → 新手引导」自己再进来一次。
     var showOnboarding by remember { mutableStateOf(false) }
+    // **只有首启那一次**才算「首启」：从设置里「重新看一遍引导」时不能把常驻的 chat 拆了
+    // （那正是「返回像重新加载」的来源）。
+    var onboardingIsFirstRun by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         // 读**落盘后**的那一份，不是 settings flow 的初始值——初始值里 onboardingSeen 是
         // false，拿它判断会在第一帧就弹出来闪一下。
-        if (!Core.settings.current().onboardingSeen) showOnboarding = true
+        if (!Core.settings.current().onboardingSeen) {
+            onboardingIsFirstRun = true
+            showOnboarding = true
+        }
     }
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val context = LocalContext.current
@@ -539,7 +545,17 @@ fun SuixingApp() {
                 // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
                 // 键盘让位只作用在聊天内容上（抽屉不再被顶起，见上面 Scaffold 的说明）。
                 Box(Modifier.padding(bottom = with(rootDensity) { heldImePx.toDp() })) {
-                    ChatScreen(viewModel = chat, onOpenSettings = { open("settings") })
+                    // **首启的引导还没走完时，先别组合 chat**（用户：「第一次出现引导页感觉卡卡的」）。
+                    // 冷启动时 chat 要做 turnPage、receipts/transcript 统计、每条消息的 Markdown
+                    // 渲染（ChatScreen.kt:465/512/560/621、ChatBlocks.kt:895/1519），
+                    // 与引导层 200ms 的入场动画抢同一条主线程 ⇒ 首帧掉帧。引导是全屏覆盖层，
+                    // 底下的 chat 这时看不见 ⇒ 不组合它没有代价。
+                    //
+                    // **只在首启时这样**：设置里「重新看一遍引导」时 chat 已经在组合里，
+                    // 盖一层引导不能把常驻的 chat 拆了。
+                    if (!(showOnboarding && onboardingIsFirstRun)) {
+                        ChatScreen(viewModel = chat, onOpenSettings = { open("settings") })
+                    }
                 }
             }
             }

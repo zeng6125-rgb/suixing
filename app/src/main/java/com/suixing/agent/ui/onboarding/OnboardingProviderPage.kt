@@ -1,10 +1,11 @@
 package com.suixing.agent.ui.onboarding
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,15 +14,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,11 +38,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import com.suixing.agent.R
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.PROTOCOL_ANTHROPIC
 import com.suixing.agent.data.PROTOCOL_OPENAI
@@ -43,7 +49,6 @@ import com.suixing.agent.data.PROTOCOL_RESPONSES
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.describeError
-import com.suixing.agent.ui.components.SuixingCard
 import kotlinx.coroutines.launch
 
 /**
@@ -59,6 +64,7 @@ import kotlinx.coroutines.launch
 fun ProviderPage(
     draft: OnboardingDraft,
     stored: AppSettings,
+    scroll: ScrollState,
     onChange: (OnboardingDraft) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -66,6 +72,9 @@ fun ProviderPage(
     var testing by remember { mutableStateOf(false) }
     var outcome by remember { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf(false) }
+    // Key 默认是藏着的（它是密钥，截图与旁观都不该一眼看见），但要能按一下眼睛看个清楚——
+    // 手抄错一个字符是这一步最常见的失败。
+    var revealKey by remember { mutableStateOf(false) }
 
     val selected = PROVIDER_PRESETS.firstOrNull { it.id == draft.presetId }
 
@@ -98,7 +107,7 @@ fun ProviderPage(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(horizontal = 16.dp),
     ) {
         Spacer(Modifier.height(8.dp))
@@ -112,37 +121,11 @@ fun ProviderPage(
         Spacer(Modifier.height(16.dp))
 
         PROVIDER_PRESETS.forEach { preset ->
-            val isSelected = preset.id == draft.presetId
-            SuixingCard(
+            PresetCard(
+                preset = preset,
+                selected = preset.id == draft.presetId,
                 onClick = { pick(preset) },
-                containerColor = if (isSelected) {
-                    MaterialTheme.colorScheme.surfaceContainerHigh
-                } else {
-                    MaterialTheme.colorScheme.surfaceContainer
-                },
-                contentPadding = PaddingValues(14.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(preset.name, style = MaterialTheme.typography.titleSmall)
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            text = preset.note,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (isSelected) {
-                        Spacer(Modifier.width(8.dp))
-                        Icon(
-                            painter = painterResource(R.drawable.ic_check),
-                            contentDescription = "已选",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                }
-            }
+            )
             Spacer(Modifier.height(8.dp))
         }
 
@@ -186,13 +169,37 @@ fun ProviderPage(
             label = { Text("API Key") },
             supportingText = {
                 Text(
-                    selected?.keyHint ?: "厂商给你的那串密钥；不填也能往下走，只是还不能聊天",
+                    when {
+                        draft.apiKey.isNotBlank() -> "已经填好了。测试连接会真的发一次请求。"
+                        // 提示的**时机**：用户还没动过的时候别说他"没填"（他可能只是还没走到
+                        // 这一步）；动过之后还空着才提示，而且说清"不填也能走"。
+                        draft.touched -> "还没填 Key —— 现在还不能聊天，之后在设置里补也行"
+                        else -> selected?.keyHint
+                            ?: "厂商给你的那串密钥；不填也能往下走，只是还不能聊天"
+                    },
                 )
             },
             singleLine = true,
             shape = MaterialTheme.shapes.small,
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (revealKey) {
+                VisualTransformation.None
+            } else {
+                PasswordVisualTransformation()
+            },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            trailingIcon = {
+                IconButton(onClick = { revealKey = !revealKey }) {
+                    Icon(
+                        imageVector = if (revealKey) {
+                            Icons.Filled.VisibilityOff
+                        } else {
+                            Icons.Filled.Visibility
+                        },
+                        contentDescription = if (revealKey) "隐藏 Key" else "显示 Key",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(14.dp))
@@ -260,6 +267,71 @@ fun ProviderPage(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(32.dp))
+    }
+}
+
+/**
+ * 一张供应商预设卡。
+ *
+ * 选中态要说得很清楚：**主色描边 + 浅一档的表面 + 实心对勾**；没选中就老老实实是普通表面 +
+ * 一个空心圈（radio 的样子），不要用"看起来也像选中"的填充去误导人。图标位两种状态都占着，
+ * 卡片宽度才不会在切换时跳一下。
+ *
+ * 没有用 [SuixingCard]：它的描边颜色写死成 outlineVariant，选中那一圈要变成主色。
+ */
+@Composable
+private fun PresetCard(
+    preset: ProviderPreset,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = if (selected) {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        } else {
+            MaterialTheme.colorScheme.surfaceContainer
+        },
+        border = BorderStroke(
+            width = if (selected) 2.dp else 1.dp,
+            color = if (selected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.outlineVariant
+            },
+        ),
+    ) {
+        Row(
+            Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(preset.name, style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = preset.note,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Icon(
+                imageVector = if (selected) {
+                    Icons.Filled.CheckCircle
+                } else {
+                    Icons.Filled.RadioButtonUnchecked
+                },
+                contentDescription = if (selected) "已选" else "未选",
+                tint = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.outline
+                },
+                modifier = Modifier.size(20.dp),
+            )
+        }
     }
 }
 

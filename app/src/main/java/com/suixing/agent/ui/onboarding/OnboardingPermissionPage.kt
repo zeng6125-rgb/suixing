@@ -2,6 +2,7 @@ package com.suixing.agent.ui.onboarding
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -53,7 +54,7 @@ import kotlinx.coroutines.withContext
  * 每一项都可以跳过：不开只是不能做那一类事，聊天照常。
  */
 @Composable
-fun PermissionPage() {
+fun PermissionPage(scroll: ScrollState) {
     val state by Core.capabilities.state.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -72,7 +73,7 @@ fun PermissionPage() {
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(horizontal = 16.dp),
     ) {
         Spacer(Modifier.height(8.dp))
