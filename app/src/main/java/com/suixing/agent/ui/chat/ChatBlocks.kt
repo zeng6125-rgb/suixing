@@ -422,22 +422,23 @@ private fun RevealHeight(
         val begin = withFrameNanos { it }
         // **嵌套在有上限的容器里时，按容器高度增量补**（issue #22）：顶到 320dp 后容器不再长，
         // 增量就是 0，自然不补 —— 这正是「钳位时不要多补」的正解，不用去猜约束。
-        val parentH = parentHeightState
-        var lastParent = parentH?.value ?: -1
+        // **③ 绝对锚定（0.8.290）**：不再做任何「相对补偿」。
+        //
+        // `dispatchRawDelta(Δ)` 是相对量：它会被列表边界钳住、会累积误差，也会因为
+        // `onGloballyPositioned` 晚一帧而永远追不平 —— 这就是「过程中一直在飘、最终位置却对」。
+        // 现在改为：动画开始时记下**首个可见项的 index 与精确偏移**，每一帧用
+        // `scrollToItem(index, offset)` 把视口**绝对**钉回同一处。绝对定位不累积误差，
+        // 也不依赖任何高度推算（钳位/嵌套/挤压都无所谓）。
+        val pinIndex = outer?.firstVisibleItemIndex ?: 0
+        val pinOffset = outer?.firstVisibleItemScrollOffset ?: 0
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
-            val oldH = px * progress
             progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
+            // 同一帧内先让高度生效，再把视口钉回锚点（下一帧重复），因此画面始终不移。
+            withFrameNanos { }
             if (outer != null && outer.canScrollBackward) {
-                if (parentH != null) {
-                    val cur = parentH.value
-                    val delta = if (lastParent < 0) 0 else cur - lastParent
-                    lastParent = cur
-                    if (delta != 0) outer.dispatchRawDelta(delta.toFloat())
-                } else {
-                    outer.dispatchRawDelta(px * progress - oldH)
-                }
+                outer.scrollToItem(pinIndex, pinOffset)
             }
             if (t >= 1f) break
         }
