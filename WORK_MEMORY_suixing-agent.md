@@ -1527,3 +1527,33 @@ biv off=-20 size=2507 container=2510 want=-621 → -473 → -336 → … → -1
 （恢复 `:1045`、点击跳转 `:1572`），滚动每帧不再经过。**保留观察点**：流式中跨级（`live` 翻转 ⇒ `feedPrefix` 变）。
 ⚠️ 另注意：仓库里新增了 **#26「滚动掉帧 p50=17ms：`currentTurn` 未用 `derivedStateOf` 导致整页重组 + 边缘光每帧全屏 Path.op」**
 （2026-10-21 00:49 建），与本节 `currentTurn` 的读法直接相关，做性能时一起看。
+
+### 8.59 #26 滚动掉帧优化 + 死代码清理 + 告警归零（2026-10-21 13:3x）
+
+提交 **`f29add8`**（0.8.276 / vc287，已 push，远端 `refs/heads/main` 复核一致）。11 文件 +105/−155。
+
+**性能优化 5 项（零布局变化，`padding/size/height/width/spacedBy/Arrangement` 在 diff 新增行里 0 条）**：
+1. `currentTurn` **延迟读**：`ChatScreen.kt` 里 `firstVisible` 改为 `remember { derivedStateOf { … } }`（不读 `.value`），
+   值经 lambda 传给 `TurnScrubber(current: () -> Int)`，在组件内部 `current()` 求值 ⇒ 跨 item 只有导航条重组。
+2. **边缘光 band 几何缓存**（`TouchFx.kt`）：`drawGlow` 原来每帧 16 次 `Path.op(DIFFERENCE)`；band 形状只依赖
+   屏幕几何 ⇒ 预计算 `haloBandCache`，key = 矩形+`cornerPx`+`fadeWidth`，变化才重建。输出逐像素不变。
+3. `scrollTrace` **写盘移出主线程**（`chatTraceExecutor` 单线程 daemon）：调用点全在主线程
+   （`ChatScreen.kt:733` 传入 ChatScroll、press guard、恢复流程、`ChatScroll.kt:192`）。
+4. `formatTime` 用 **ThreadLocal** 复用 `SimpleDateFormat`（`ChatContext.kt`）。
+5. `newestUsage` 记忆化（`ChatScreen.kt:525`，原每次重组 O(n) 反查；`visible` 本身是
+   `remember(conversationId, messagesRevision, page, activeRuns, runningHere, liveRunId)` 的稳定实例）。
+
+**死代码清理 6 处 153 行**：`DialogEdgeToEdge`、`ErrorCard`、`voiceErrorMessage`、`voiceEngine`、
+`relativePath`、`CONTEXT_PRESETS`（全仓含 test/androidTest/@Preview 引用数为 1 → 删后为 0）。
+
+**告警归零**：`MainActivity` 两处 `Window.navigationBarColor` 收敛到 `@Suppress("DEPRECATION")`
+的 `transparentNavigationBar()`；**不要**改成 edge-to-edge 重写 —— API 26–34 上它是去掉手势条灰带的唯一做法。
+
+**⚠️ 踩坑（重要）**：用脚本按「行区间/大括号配平」删 Kotlin 函数**两次都炸**：
+① 残留 `@Composable`、`SettingsScreen` 结构塌陷；② `private val CONTEXT_PRESETS = listOf(...)` 用大括号
+配平会一路吃到后面的 `SettingsPage` 声明。正解：**`val` 用括号配平、`fun` 用大括号配平**，
+且删除后立刻 `grep` 复查引用数 + 编译，不要一次删多处再编译。
+
+**验证**：compile `w:` **0 条**（含 MainActivity）、单测 **525/0/0/0**、assembleRelease 成功、
+`aapt` = 287/0.8.276、装机 Success、`dumpsys` = 287/0.8.276、归档 `dist/suixing-0.8.276.apk`
+（sha256 `6997fd1d313e4c81169f1e565d647fd9367af5239bbc53c59d56e797d2e7c5e0`）。
