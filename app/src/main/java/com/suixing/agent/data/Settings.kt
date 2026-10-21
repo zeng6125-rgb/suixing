@@ -603,16 +603,32 @@ class SettingsRepository(private val context: Context) {
      * 才会被重新加密。启动时跑一遍就干净了。
      */
     suspend fun migrateSecrets() {
+        // **先看有没有明文要迁**，没有就整段不做（用户：「之前会话好像是秒加载的呀」）。
+        // 原来每次启动都走一遍 `edit`：① 要解密/加密 ⇒ 碰 Keystore（每次进程首次 ~150ms）；
+        // ② `edit` 会**写**一次 DataStore ⇒ 设置流多发一次 ⇒ 聊天页整体重组一次
+        // （每条消息的 Markdown 重新渲染）。老用户早就迁完了，却天天付这两笔。
+        val raw = context.settingsDataStore.data.first()[key] ?: return
+        if (!hasPlainSecret(raw)) return
         context.settingsDataStore.edit { prefs ->
-            val raw = prefs[key] ?: return@edit
+            val current = prefs[key] ?: return@edit
             val encrypted = json.encodeToString(
                 AppSettings.serializer(),
-                decode(raw).encrypted(),
+                decode(current).encrypted(),
             )
-            if (encrypted != raw) prefs[key] = encrypted
+            if (encrypted != current) prefs[key] = encrypted
         }
     }
 }
+
+/**
+ * 这个文件里还有没有**明文**的 Key（没迁过的老文件）。
+ *
+ * 只看字符串，不解密、不碰 Keystore：迁移是一次性的准备工作，不该在每次冷启动的路径上。
+ * 判定标准与 [SecretBox.isEncrypted] 一致：`apiKey` 的值非空且不以 `enc1:` 开头。
+ */
+private fun hasPlainSecret(raw: String): Boolean =
+    Regex("""apiKey"\s*:\s*"([^"]*)""").findAll(raw)
+        .any { m -> m.groupValues[1].isNotEmpty() && !m.groupValues[1].startsWith("enc1:") }
 
 /**
  * 落盘前：把 Key 换成密文。**内存里始终是明文**，只有这一层是密文。

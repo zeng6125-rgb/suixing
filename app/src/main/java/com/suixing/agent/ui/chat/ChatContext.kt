@@ -804,6 +804,13 @@ internal fun FailureReceiptRow(text: String) {
         shape = RoundedCornerShape(12.dp),
         color = scheme.errorContainer.copy(alpha = 0.5f),
     ) {
+        // 图标要与**正文第一行的中线**对齐（用户：「我要你让icon和正文第一行对齐」）。
+        // 图标 14dp、正文行高比它高 ⇒ 直接顶对齐会让图标整体偏上；写死一个上边距也只是
+        // 让两枚图标互相对齐（上一版就错在这），跟第一行的中线还是差一截。
+        // 这里按行高算：图标中心 = 行高的一半 = 第一行的中线。
+        val bodySmall = MaterialTheme.typography.bodySmall
+        val lineHeight = with(LocalDensity.current) { bodySmall.lineHeight.toDp() }
+        val iconTop = ((lineHeight - 14.dp) / 2).coerceAtLeast(0.dp)
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.Top,
@@ -812,7 +819,7 @@ internal fun FailureReceiptRow(text: String) {
                 imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
                 contentDescription = null,
                 tint = scheme.error,
-                modifier = Modifier.size(14.dp).padding(top = 1.dp),
+                modifier = Modifier.size(14.dp).padding(top = iconTop),
             )
             Spacer(Modifier.width(6.dp))
             Text(
@@ -838,7 +845,8 @@ internal fun FailureReceiptRow(text: String) {
                     imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
                     contentDescription = "复制错误提醒",
                     tint = scheme.error,
-                    modifier = Modifier.size(14.dp).padding(top = 1.dp),
+                    // 同一个 iconTop ⇒ 与左边那枚完全同高，且都在第一行的中线上。
+                    modifier = Modifier.size(14.dp).padding(top = iconTop),
                 )
             }
         }
