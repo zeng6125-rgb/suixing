@@ -144,7 +144,15 @@ fun modelOffers(
 data class AppSettings(
     val baseUrl: String = "https://api.deepseek.com/v1",
     val apiKey: String = "",
-    val model: String = "deepseek-chat",
+    /**
+     * 模型名**没有出厂默认**（用户：「不需要出厂默认模型，模型只由用户设置」）。
+     *
+     * 空串＝还没选模型：此时 `configured` 为 false，应用不会拿空模型名去发请求。
+     * 引导页与设置页都会让用户自己挑（引导页的供应商预设已按各家官方文档填好现名）。
+     *
+     * 老配置里存过的模型名照旧读得出来（这个字段一直有值），所以改默认不影响老用户。
+     */
+    val model: String = "",
     val temperature: Double = 0.6,
     /**
      * Sampling knobs. `maxTokens = 0` and `topP = 1.0` mean "say nothing about it",
@@ -239,8 +247,8 @@ data class AppSettings(
     val paletteMode: Int = 0,
     val themeMode: Int = 0,
     /**
-     * Off by default because the default endpoint (deepseek-chat) is text-only and
-     * rejects any request carrying an image. Turn it on for vision models.
+     * Off by default because most endpoints are text-only and reject any request
+     * carrying an image. Turn it on for vision models.
      */
     val imageInput: Boolean = false,
     /**
