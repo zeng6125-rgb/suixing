@@ -1738,3 +1738,34 @@ Column、仓库不带 gradlew、只出 release 的纪律）。旧文「默认展
 **⚠️ 提交卫生的一处失误（记录备查）**：`4d0c7ef`（docs 提交）里**混进了 #17 的 ChatScreen.kt 改动**
 —— `git add -A` 把工作树里所有改动一起带上了，提交说明没写。已经推了，不做 force-push
 （共享工作树纪律），改用文档补记（本节 + TODO_NEXT）。**下次先 `git add <具体文件>`**。
+
+### 8.65 0.8.300：引导页落地 + 出包（2026-10-21 20:0x）
+
+**0.8.300（vc311，提交 `7cfc346`）** = #17 冻结 + Key 加密 + 引导页，三件一起出包。
+
+**引导页实现**（子代理 onboarding-scout 写，Lead 审）：
+- 盖在 NavHost **之上**的覆盖层（`FullScreenOverlay`，不占路由、不进返回栈）⇒ 掀开后零重建。
+- 5 页：欢迎与定位 / 选供应商+接口+Key / 选模型与思考强度 / 权限（按用户旅程写）/ 开始使用。
+- **首启判定读「落盘后」的 `settings.current().onboardingSeen`**（不是 flow 初始值，否则第一帧闪）。
+- **走完/跳过在 `Core.appScope` 里写盘** —— 覆盖层退场 200ms 会取消本层 scope，在本层写会丢。
+- `mergeOnboarding` 三条规矩：没动过不写盘 / 地址空了保住线上三元组 / 换厂商不把老 Key 带过去
+  且老 provider 原样留着。
+- 根层加了 click 拦截 + `LocalHeldImePx` 让位（否则点空白会穿透到下面的聊天页、填 Key 时页脚被键盘盖住）。
+- 8 个供应商预设，baseUrl 与模型名都查过官方文档（出处写在每条的 `source` 里）。**已核对**：
+  DeepSeek 官方文档现名就是 `deepseek-flash`（旧名已下线）；⚠️ Claude 的模型名是按官方 SDK 命名
+  **推定**的（anthropic.com 被本机网络区域屏蔽），待在能连的区域点一次「获取模型列表」核对。
+- 设置页新增「新手引导」一行（重新看一遍）。
+
+**出包**：`dist/suixing-0.8.300.apk`（15,693,661 B），apksigner 同签名，aapt 核对 vc310→**vc311 /
+0.8.300**。
+⚠️ **装机没做成**：用户外出，手机无线调试离线（`adb mdns services` 空、`adb devices` 空）——
+ 回来后 `adb mdns services` → `adb connect` → `adb install -r dist/suixing-0.8.300.apk`。
+⚠️ **推送与 GitHub release 也没做成**：当时 GitHub 不可达（代理 7890 报 schannel TLS 握手失败、
+  直连报 443 连不上）⇒ 远端 main 仍在 `4d0c7ef`，`v0.8.300` 的 tag 与 release 待补。
+
+**未上真机**（全部待用户验）：引导页五页的观感/滚动区高度/小屏页脚位置、左缘手势会不会拉出抽屉、
+#17 冻结的漂移（埋点 `filesDir/drift.log` 已就位）、Key 加密的落盘效果。
+
+**顺带**：`PluginModels.kt` 里插件注册名的注释从 `<id>.<name>` 改成 `<id>_<name>`（与
+`PluginRuntime.kt:193` 的实际拼法一致；README 已按实际写）。`PluginStore.installedToolNames()`
+是**无调用方的私有死函数**（且用点号拼法）—— 按「不删无关死代码」的规矩**没动**，只记在这里。
