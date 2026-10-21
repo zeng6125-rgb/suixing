@@ -160,11 +160,17 @@ private enum class SettingsPage(val title: String, val route: String) {
  * the capability list each keep their own page.
  */
 @Composable
-fun SettingsScreen(onOpen: (String) -> Unit, onBack: () -> Unit) {
+fun SettingsScreen(
+    onOpen: (String) -> Unit,
+    onBack: () -> Unit,
+    /** 「重新看一遍引导」：把首启那五页再放出来一次（走的是外壳上的覆盖层，不是路由）。 */
+    onOpenOnboarding: () -> Unit = {},
+) {
     SettingsRoot(
         onBack = onBack,
         onOpen = onOpen,
         onOpenPage = { onOpen(it.route) },
+        onOpenOnboarding = onOpenOnboarding,
     )
 }
 
@@ -209,6 +215,7 @@ private fun SettingsRoot(
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
     onOpenPage: (SettingsPage) -> Unit,
+    onOpenOnboarding: () -> Unit,
 ) {
     val capabilities by Core.capabilities.state.collectAsState()
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
@@ -282,6 +289,11 @@ private fun SettingsRoot(
                         // 自己的回报，不是估算；没采集到的项显示「—」，不用 0 冒充测量。
                         SettingsGroupRow("性能", "首字延迟 · 整轮耗时 · 缓存命中 · 输出速度") {
                             onOpen(SettingsPage.PERF.route)
+                        },
+                        // 再看一遍首启那五页。走的是外壳上的覆盖层（不是一条路由），
+                        // 所以它不进返回栈——从这儿进去，走完还是这一页。
+                        SettingsGroupRow("新手引导", "再走一遍：供应商 · 模型 · 权限") {
+                            onOpenOnboarding()
                         },
                         SettingsGroupRow("关于", "版本、隐私与开源许可") {
                             onOpen("about")

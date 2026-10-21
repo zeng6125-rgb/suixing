@@ -139,6 +139,7 @@ import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
+import com.suixing.agent.ui.onboarding.OnboardingHost
 import com.suixing.agent.ui.schedules.SchedulesScreen
 import com.suixing.agent.ui.settings.AboutScreen
 import com.suixing.agent.ui.settings.AssistantScreen
@@ -245,6 +246,15 @@ fun SuixingApp() {
     var shellAssistants by remember { mutableStateOf(false) }
     // 抽屉路线的助手编辑器（主窗口全屏覆盖层，结构路 0.8.105）。
     var editorAssistantId by remember { mutableStateOf<String?>(null) }
+    // 首次启动引导：盖在应用上面的一层（不是应用里的一页，所以不占路由、不进返回栈）。
+    // 打开它的理由只有两个：第一次启动（设置里那个「看过引导」的标记还没有），
+    // 以及从「设置 → 新手引导」自己再进来一次。
+    var showOnboarding by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        // 读**落盘后**的那一份，不是 settings flow 的初始值——初始值里 onboardingSeen 是
+        // false，拿它判断会在第一帧就弹出来闪一下。
+        if (!Core.settings.current().onboardingSeen) showOnboarding = true
+    }
     val settings by Core.settings.flow.collectAsState(initial = AppSettings())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -627,6 +637,8 @@ fun SuixingApp() {
                                 SettingsScreen(
                                     onOpen = push,
                                     onBack = goBack,
+                                    // 「重新看一遍引导」：走的是同一个覆盖层，不是另一条路由。
+                                    onOpenOnboarding = { showOnboarding = true },
                                 )
                             }
                             // 设置里的七个子页各是一条真路由，而不是设置页内部的 when 分支：同一
@@ -716,6 +728,13 @@ fun SuixingApp() {
             sourceTitle = conversations.firstOrNull { it.id == chatId }?.title,
             otherWaiting = pending.size - 1,
         )
+    }
+
+    // 首次启动引导：与助手编辑器同一个位置——盖在导航宿主与抽屉之上的一切。
+    // AnimatedVisibility 只在 visible 为真（或退场那 200ms）时组合内容，所以引导页
+    // 不显示的时候它一行代码都不跑。
+    FullScreenOverlay(visible = showOnboarding) {
+        OnboardingHost(onClose = { showOnboarding = false })
     }
 
     // 抽屉里那张半屏表。挂在外壳、不在任何一页里：抽屉是外壳自己的面板，表跟着它走，
