@@ -362,9 +362,6 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
  *
  * 正在读历史（[LocalReadingPinned]）时不做动画：内容原地展开，不推着正在读的内容走。
  */
-/** 折叠块嵌套深度（issue #13）：只有最外层做收尾对账，见 RevealHeight 内的说明。 */
-internal val LocalRevealDepth = compositionLocalOf { 0 }
-
 @Composable
 private fun RevealHeight(
     visible: Boolean,
@@ -372,13 +369,6 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
-    // 方案 2（#13/#22）：把**自己实测的高度**广播给子块。内层改按「父容器真实高度增量」补偿，
-    // 被钳位时父高度不变 ⇒ 增量 0 ⇒ 一个像素都不多补（下面 parentH != null 分支）。
-    val myHeight = remember { mutableIntStateOf(0) }
-    // 嵌套深度：**逐帧补偿照旧做**（否则内层展开时最外层没在动画，内层会往上长 —— 0.8.286 的教训）；
-    // 只把「收尾按 positionInRoot 再补一次」限制在最外层，因为嵌套时内外层的 positionInRoot
-    // 都会变，那份 drift 可能被补两遍（#13 的「展开后整屏下移」）。
-    val revealDepth = LocalRevealDepth.current
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
@@ -422,23 +412,22 @@ private fun RevealHeight(
         val begin = withFrameNanos { it }
         // **嵌套在有上限的容器里时，按容器高度增量补**（issue #22）：顶到 320dp 后容器不再长，
         // 增量就是 0，自然不补 —— 这正是「钳位时不要多补」的正解，不用去猜约束。
-        // **③ 绝对锚定（0.8.290）**：不再做任何「相对补偿」。
-        //
-        // `dispatchRawDelta(Δ)` 是相对量：它会被列表边界钳住、会累积误差，也会因为
-        // `onGloballyPositioned` 晚一帧而永远追不平 —— 这就是「过程中一直在飘、最终位置却对」。
-        // 现在改为：动画开始时记下**首个可见项的 index 与精确偏移**，每一帧用
-        // `scrollToItem(index, offset)` 把视口**绝对**钉回同一处。绝对定位不累积误差，
-        // 也不依赖任何高度推算（钳位/嵌套/挤压都无所谓）。
-        val pinIndex = outer?.firstVisibleItemIndex ?: 0
-        val pinOffset = outer?.firstVisibleItemScrollOffset ?: 0
+        val parentH = parentHeightState
+        var lastParent = parentH?.value ?: -1
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
+            val oldH = px * progress
             progress = start + (target - start) * LinearOutSlowInEasing.transform(t)
-            // 同一帧内先让高度生效，再把视口钉回锚点（下一帧重复），因此画面始终不移。
-            withFrameNanos { }
             if (outer != null && outer.canScrollBackward) {
-                outer.scrollToItem(pinIndex, pinOffset)
+                if (parentH != null) {
+                    val cur = parentH.value
+                    val delta = if (lastParent < 0) 0 else cur - lastParent
+                    lastParent = cur
+                    if (delta != 0) outer.dispatchRawDelta(delta.toFloat())
+                } else {
+                    outer.dispatchRawDelta(px * progress - oldH)
+                }
             }
             if (t >= 1f) break
         }
@@ -446,17 +435,19 @@ private fun RevealHeight(
         // `heightIn(max = 320dp)` 这类钳位就会多补 —— 第二层每多开一个累积偏一段。
         // 这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时它接近 0（空操作），
         // 被钳位时它正好是那份多补的量。
-        // **收尾对账已移除**（0.8.290）：绝对锚定每帧已经把视口钉在同一处，
-        // 再叠一次「按 positionInRoot 差值的相对补偿」只会在动画结束时制造一次跳变。
+        withFrameNanos { }
+        withFrameNanos { }
+        val afterTop = topInRoot
+        if (outer != null && outer.canScrollBackward &&
+            !beforeTop.isNaN() && !afterTop.isNaN()
+        ) {
+            val drift = afterTop - beforeTop
+            if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
+        }
     }
 
     Layout(
-        content = {
-            CompositionLocalProvider(
-                LocalRevealDepth provides revealDepth + 1,
-                LocalExpansionParentHeight provides myHeight,
-            ) { content() }
-        },
+        content = content,
         modifier = Modifier
             .fillMaxWidth()
             // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
@@ -480,7 +471,6 @@ private fun RevealHeight(
             //   补偿（顶到 320dp 时父高度不变 ⇒ 补 0）。这一版先不动，见 issue #24 问题 3 的情况 B。
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
-            myHeight.intValue = h
             layout(constraints.maxWidth, h) { placeable.place(0, 0) }
         }
     }
