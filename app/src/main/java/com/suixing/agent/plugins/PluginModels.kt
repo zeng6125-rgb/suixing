@@ -77,7 +77,7 @@ data class ExecDecl(
 
 @Serializable
 data class ToolDecl(
-    /** 注册名 = `<id>.<name>`。 */
+    /** 注册名 = `<id>_<name>`（下划线，与 PluginRuntime 注册时的实际拼法一致）。 */
     val name: String,
     val description: String,
     val parameters: JsonObject? = null,
