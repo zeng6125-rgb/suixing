@@ -161,7 +161,6 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.onSizeChanged
@@ -360,6 +359,22 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
  *
  * 正在读历史（[LocalReadingPinned]）时不做动画：内容原地展开，不推着正在读的内容走。
  */
+/**
+ * ③ **收尾按实测位移对账**：逐帧补偿用的是推算高度，遇到外层约束（钳位、`weight`、嵌套滚动）
+ * 就会多补。这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时它是空操作，
+ * 有偏差时它正好是那份差值。
+ */
+private fun reconcileRevealTop(
+    outer: androidx.compose.foundation.lazy.LazyListState?,
+    before: Float,
+    after: Float,
+) {
+    if (outer == null || !outer.canScrollBackward) return
+    if (before.isNaN() || after.isNaN()) return
+    val drift = after - before
+    if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
+}
+
 @Composable
 private fun RevealHeight(
     visible: Boolean,
@@ -367,19 +382,17 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
-    // **临时日志（查完删）**：只记录，不改任何行为。
-    val animCtx = LocalContext.current
-    val animBuf = remember { StringBuilder() }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
-    // 本帧**实际布局出来**的高度（px）：埋点用（核对推算高度和真实高度差多少）。
-    val laid = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
     val outer = LocalChatListState.current
     // **这个块在根坐标系里的 y**（issue #22）：补偿量不再靠"推算长了多少"，而是量
     // "动画前后这个块实际移动了多少"。任何布局约束（`heightIn(max)`、嵌套滚动、`weight`）
     // 让实际高度 ≠ 自然高度时，推算都会错，测量不会。
-    var topInRoot by remember { mutableFloatStateOf(Float.NaN) }
+    //
+    // 用普通数组而不是 State：它**每帧**写一次，State 每写一次都要发一次快照通知
+    // （TODO #29 列的嫌疑项之一）。数组读出来就是最新值，语义与 State 一致。
+    val topInRoot = remember { floatArrayOf(Float.NaN) }
 
     LaunchedEffect(visible, pinned) {
         val target = if (visible) 1f else 0f
@@ -401,7 +414,7 @@ private fun RevealHeight(
         }
         // ① 先让一帧落地，记下动画开始前的真实位置。
         withFrameNanos { }
-        val beforeTop = topInRoot
+        val beforeTop = topInRoot[0]
         // ② 高度动画 + 逐帧补偿，**恢复成原来的 `px * progress` 增量式**。
         //
         // 上一版改成"逐帧按实测位移补"，结果第一层也偏了 —— 原因有两个：
@@ -430,48 +443,15 @@ private fun RevealHeight(
             // 也不该被截断）⇒ 容器高度 == 内容高度 ⇒ 容器长高 == 这个块长高 ⇒ 一套算法通吃。
             val growth = px * progress - oldH
             val comp = growth
-            if (outer != null && outer.canScrollBackward) {
-                if (comp != 0f) outer.dispatchRawDelta(comp)
-            }
-            // 只记录：这一帧补了多少、补前/补后的真实偏移
-            if (outer != null) {
-                animBuf.append(System.currentTimeMillis()).append(" t=").append((t * 100).toInt())
-                    .append(" prog=").append((progress * 100).toInt())
-                    .append(" px=").append(px).append(" oldH=").append(oldH.toInt())
-                    .append(" h=").append(laid[0])
-                    .append(" comp=").append(comp.toInt())
-                    .append(" canBack=").append(outer.canScrollBackward)
-                    .append(" fv=").append(outer.firstVisibleItemIndex).append("/")
-                    .append(outer.firstVisibleItemScrollOffset)
-                    .append(" top=").append(topInRoot.toInt())
-                    .append(System.lineSeparator())
+            if (comp != 0f && outer != null && outer.canScrollBackward) {
+                outer.dispatchRawDelta(comp)
             }
             if (t >= 1f) break
         }
-        // 把本次动画的逐帧记录追加落盘（IO 线程）。
-        val dump = animBuf.toString(); animBuf.setLength(0)
-        if (dump.isNotEmpty()) {
-            val dir = animCtx.filesDir
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                runCatching {
-                    val f = java.io.File(dir, "reveal-anim.log")
-                    if (f.length() > 256 * 1024) f.writeText("")
-                    f.appendText(dump)
-                }
-            }
-        }
-        // ③ **收尾按实测位移对账**：逐帧补偿用的是推算高度，遇到外层约束（钳位、`weight`、
-        // 嵌套滚动）就会多补。这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时
-        // 它接近 0（空操作），有偏差时它正好是那份差值。
+        // ③ 收尾按实测位移对账。
         withFrameNanos { }
         withFrameNanos { }
-        val afterTop = topInRoot
-        if (outer != null && outer.canScrollBackward &&
-            !beforeTop.isNaN() && !afterTop.isNaN()
-        ) {
-            val drift = afterTop - beforeTop
-            if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
-        }
+        reconcileRevealTop(outer = outer, before = beforeTop, after = topInRoot[0])
     }
 
     Layout(
@@ -482,7 +462,7 @@ private fun RevealHeight(
             // **0.8.285 回退**：0.8.277~0.8.284 曾改用 `graphicsLayer { clip = … }`（为了少一层
             // saveLayer），但实测展开/收起会出现残影；这里回到最初的 `clipToBounds()`。
             .clipToBounds()
-            .onGloballyPositioned { coords -> topInRoot = coords.positionInRoot().y },
+            .onGloballyPositioned { coords -> topInRoot[0] = coords.positionInRoot().y },
     ) { measurables, constraints ->
         // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
         if (!visible && progress <= 0f) {
@@ -495,7 +475,6 @@ private fun RevealHeight(
             // 加过这行、是空操作，已撤回）。
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
-            laid[0] = h
             layout(constraints.maxWidth, h) { placeable.place(0, 0) }
         }
     }
