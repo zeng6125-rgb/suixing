@@ -1656,3 +1656,25 @@ vs 逐帧增量 65/55/46/43/38/35/32/27/24/22/19/16/13/14/11/10/5/7/4/3/3/0/4/0/
 - 编译报错「Unresolved reference 'parentH'」是**埋点日志行**还在引用已删的变量 —— 删埋点字段时
   要连日志行一起删。
 - 手机无线调试端口会变；`adb mdns services` 重发现；git-bash 下 `adb pull` 要 `MSYS_NO_PATHCONV=1`。
+
+### 8.63 #13/#22 收尾：清理 + 发布 v0.8.299（2026-10-21 19:2x）
+
+**0.8.299（vc310，提交 `570094a`）＝ 行为不变的清理**（用户要求「优化性能开销和代码结构，
+不要改变任何既定行为」）：
+1. **删掉验收埋点**（`filesDir/reveal-anim.log`）：每帧拼一行字符串、每次动画再起一个 IO 协程落盘。
+2. **`topInRoot`：State → 普通数组**（`floatArrayOf`）：它每帧写一次，State 每写一次发一次快照
+   通知（TODO #29 的嫌疑项之一）。读点（动画前后）/ 写点（`onGloballyPositioned`）一一对应 ⇒ 语义不变。
+3. 抽出 `reconcileRevealTop()`；清掉孤儿 `laid` 写入与 `LocalContext` import。
+
+**发布**：远端 main = `570094a`（从 `4ce2199` 推上去 11 个提交）；tag `v0.8.299`；
+release <https://github.com/zeng6125-rgb/suixing/releases/tag/v0.8.299>，资产 `suixing-0.8.299.apk`
+（15,640,009 B，apksigner 验签同签名，aapt 核对 vc310 / 0.8.299）。
+**issue**：#13 / #22 / #24 已 close（各附结论）；#29 保留（只完成 `topInRoot` 一个子项，已留言）；
+#17 / #23 / #25 / #26 / #27 仍开。手机仍是 0.8.298（0.8.299 未装机，用户同意关 issue 不再验）。
+
+**踩坑（本轮实测）**：
+- **代理 `127.0.0.1:7890` 的 TLS 握手失败**（`git -c https.proxy=… ls-remote` → schannel
+  handshake failed），**直连反而通**：`git ls-remote` / `git push` / `gh` 全部用
+  `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy` 直连即可（§1 写的「走代理」本轮不适用）。
+- `gh` 带代理时 `gh auth status` 报「token 无效」，其实是代理握手失败造成的误报 —— 直连 `gh api user` 正常。
+- `gh` 命令**不能**写成 `git -c http.proxy=… gh …`（会报「gh is not a git command」）。
