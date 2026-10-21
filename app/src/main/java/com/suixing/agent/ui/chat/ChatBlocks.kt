@@ -111,7 +111,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -315,40 +314,6 @@ internal val LocalReadingPinned = compositionLocalOf { false }
 internal val LocalChatListState = compositionLocalOf<androidx.compose.foundation.lazy.LazyListState?> { null }
 
 /**
- * 外层**有高度上限的滚动容器**自己的高度（issue #22）。
- *
- * 工具列表是 `LazyColumn(heightIn(max = 320dp))`，里面的 [RevealHeight] 长高时，只有当这个
- * 容器还在**上限以下**才会真的把主列表顶上去；一旦顶到 320dp，容器高度不再变、主列表也不动，
- * 但 [RevealHeight] 仍按自己的自然高度补 ⇒ 多补，动画结束再一次性拉回（用户的「被动画拉回」）。
- *
- * 所以嵌套层不能按「自己长了多少」补，要按**这个容器长了多少**补：顶到上限时它的增量为 0，
- * 补偿自然是 0。为 null 表示外面没有这样的容器（第一层），按原来的自然高度补。
- */
-internal class ExpansionParentHeight(
-    /** 实测高度（px）：`onSizeChanged` 写的，动画循环里读到的是**上一帧**的值。 */
-    val height: androidx.compose.runtime.State<Int>,
-    /** 高度上限（px）：容器到这个高度就不再跟着内容长。 */
-    val maxHeight: Int,
-) {
-    /**
-     * 容器**内容**的高度估计（px）：容器被上限钳住时，内容比容器高出多少就记在这里。
-     *
-     * 为什么需要它（0.8.297）：**跨过上限那一刻**容器高度的变化量，实测只有下一帧才知道
-     * （真机实测 0.8.296：那一帧差 6~7px ⇒ 块顶边跳一下）。有内容高度才能**当帧**算出
-     * 容器下一步会变成多少，跨上限那一帧也提前补上。
-     *
-     * -1 = 不可信：内容在「容器贴顶」期间被别的原因改过（来了新工具调用、某行变高），
-     * 这时退回按实测增量补（晚一帧，但不会补错）。
-     *
-     * 用 Float 而不是 Int：估计值每帧都要累加，用整数会每帧掉 0.5px，几十帧下来就偏出
-     * 好几 px（跟要修的那个误差同量级）。Float 累加没有这个损耗。
-     */
-    var contentEst: Float = -1f
-}
-
-internal val LocalExpansionParentHeight = compositionLocalOf<ExpansionParentHeight?> { null }
-
-/**
  * 外观 → 打字机效果（默认开）。只落在**两个**流式渲染点上：正文的 Markdown 与思考块。
  * 用 composition local 而不是逐层传参，是因为这两点离设置有好几层，而参数要穿过折叠卡片、
  * 工具块、轮次渲染器。
@@ -411,8 +376,6 @@ private fun RevealHeight(
     val laid = remember { intArrayOf(0) }
     val pinned = LocalReadingPinned.current
     val outer = LocalChatListState.current
-    // 组合期读取（CompositionLocal 不能在 LaunchedEffect 里读）：外层有上限的滚动容器高度。
-    val parentHeightState = LocalExpansionParentHeight.current
     // **这个块在根坐标系里的 y**（issue #22）：补偿量不再靠"推算长了多少"，而是量
     // "动画前后这个块实际移动了多少"。任何布局约束（`heightIn(max)`、嵌套滚动、`weight`）
     // 让实际高度 ≠ 自然高度时，推算都会错，测量不会。
@@ -446,52 +409,27 @@ private fun RevealHeight(
         //    现在照补，于是第一层一展开就把画面推下去；
         //  · `topInRoot` 是 `onGloballyPositioned` 在**布局之后**写的，动画循环里读到的是
         //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
-        // 所以逐帧回到原来的写法（对第一层已验证有效），把"被钳位吃掉的量"交给 ③ 的收尾对账。
+        // 所以逐帧回到原来的写法（对第一层已验证有效），把"跟实际位移的偏差"交给 ③ 的收尾对账。
         val begin = withFrameNanos { it }
-        // **嵌套在有上限的容器里时，补的是「外层容器」的高度增量**（issue #22）：容器顶到上限后
-        // 就不再跟着内容长 ⇒ 增量 0 ⇒ 补 0（钳位不多补）。
-        // 0.8.297 起这个增量改成**当帧预测**（见下面），不再用上一帧的实测值。
-        val parentH = parentHeightState
-        var lastParent = parentH?.height?.value ?: -1
         while (true) {
             val now = withFrameNanos { it }
             val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
             val oldH = px * progress
             progress = start + (target - start) * REVEAL_EASING.transform(t)
-            // **这一帧该补多少**（0.8.297）：必须和高度变化落在**同一帧**，晚一拍就一直在抖。
+            // **这一帧该补多少**：必须和高度变化落在**同一帧**，晚一拍就一直在抖。
             //
             // 真机埋点（0.8.295，153 帧）实测：补偿晚一帧时，块顶边每帧正好偏「一帧的高度增量」
             // （5~75px），最后靠收尾对账拉回来 ⇒ 观感就是「展开/收起时位置一直在变，最后位置是对的」。
-            // · 第一层：块自己的高度增量 —— 当帧就能算出来，和高度变化同一帧 ⇒ 补得准。
-            // · 第二层：外层容器的高度增量。容器高度是 `onSizeChanged` 写的**实测值**，只在布局
-            //   阶段才有 ⇒ 动画循环里读到的永远是**上一帧**的高度（晚两拍）。
-            //   改成**当帧预测**：没到上限时容器高度 == 内容高度，变化量就是这个块的增量（当帧可算）；
-            //   到上限后容器不再跟着内容长，补 0（钳位也不多补）。
+            //
+            // 补偿量 = 这个块自己的高度增量（0.8.298 起**所有层**都这样）。
+            //
+            // 以前嵌套层要另外算「外层容器的高度增量」，是因为工具条那个容器**有高度上限**：
+            // 容器顶到上限后不再跟着内容长，块自己长高 ≠ 容器长高，差多少得看钳位
+            // （真机实测 0.8.296：跨上限那一帧差 6~7px ⇒ 顶边跳一下）。
+            // 现在工具条的外层改成**普通 Column、没有上限**（用户：工具条不该是虚拟列表，
+            // 也不该被截断）⇒ 容器高度 == 内容高度 ⇒ 容器长高 == 这个块长高 ⇒ 一套算法通吃。
             val growth = px * progress - oldH
-            val comp = if (parentH != null) {
-                val h = parentH.height.value
-                val cap = parentH.maxHeight
-                val est = parentH.contentEst
-                val d = if (h >= cap && est < 0f) {
-                    // 内容高度不可信（容器贴顶期间内容被别的原因改过）⇒ 退回实测增量：
-                    // 晚一帧，但不会补错。
-                    if (h < lastParent) (h - lastParent).toFloat() else 0f
-                } else {
-                    // 容器高度 = min(上限, 内容高度)。内容高度：容器贴顶时靠估计（见
-                    // [ExpansionParentHeight.contentEst]），否则就是容器高度本身（精确）。
-                    val content = if (h >= cap) est else h.toFloat()
-                    val contentNext = content + growth
-                    val hNext = minOf(cap.toFloat(), contentNext)
-                    // 下一帧的内容高度（贴顶时继续累积，没贴顶就是容器高度）
-                    parentH.contentEst = contentNext
-                    // 补「容器高度的变化量」：与高度变化同一帧 ⇒ 跨上限那一帧也算得出来
-                    hNext - h.toFloat()
-                }
-                lastParent = h
-                d
-            } else {
-                growth
-            }
+            val comp = growth
             if (outer != null && outer.canScrollBackward) {
                 if (comp != 0f) outer.dispatchRawDelta(comp)
             }
@@ -501,7 +439,6 @@ private fun RevealHeight(
                     .append(" prog=").append((progress * 100).toInt())
                     .append(" px=").append(px).append(" oldH=").append(oldH.toInt())
                     .append(" h=").append(laid[0])
-                    .append(" ph=").append(parentH?.height?.value ?: -1)
                     .append(" comp=").append(comp.toInt())
                     .append(" canBack=").append(outer.canScrollBackward)
                     .append(" fv=").append(outer.firstVisibleItemIndex).append("/")
@@ -523,10 +460,9 @@ private fun RevealHeight(
                 }
             }
         }
-        // ③ **收尾按实测位移对账**（issue #22 的核心）：逐帧补偿用的是推算高度，遇到
-        // `heightIn(max = 320dp)` 这类钳位就会多补 —— 第二层每多开一个累积偏一段。
-        // 这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时它接近 0（空操作），
-        // 被钳位时它正好是那份多补的量。
+        // ③ **收尾按实测位移对账**：逐帧补偿用的是推算高度，遇到外层约束（钳位、`weight`、
+        // 嵌套滚动）就会多补。这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时
+        // 它接近 0（空操作），有偏差时它正好是那份差值。
         withFrameNanos { }
         withFrameNanos { }
         val afterTop = topInRoot
@@ -556,11 +492,7 @@ private fun RevealHeight(
             // **注意：不能用 `constraints.maxHeight` 钳**（issue #24 情况 A 在这里不成立）。
             // `LazyColumn` 测量子项时，滚动方向给的是 `Constraints.Infinity` —— 两层 RevealHeight
             // 都嵌在 LazyColumn 的 item 里，所以拿到的 maxHeight 都是无穷大，钳了等于没钳（实测
-            // 加过这行、是空操作，已撤回）。320dp 的 `heightIn` 在**内容里**（`ChatBlocks.kt:1117`），
-            // 约束不会传进本函数。
-            // ⇒ #22 已修（0.8.297）：那个 320dp 的 LazyColumn 挂了 `onSizeChanged`，高度（连同上限）
-            //   经 CompositionLocal 传下来，嵌套 RevealHeight 按**容器高度增量**补偿；增量改为当帧
-            //   预测（未到上限时容器高度 == 内容高度），顶到 320dp 时补 0。
+            // 加过这行、是空操作，已撤回）。
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
             laid[0] = h
@@ -1140,9 +1072,6 @@ internal fun ReasoningBlock(
  */
 internal val BLOCK_CONTENT_TOP = 6.dp
 
-/** 工具列表（一个回合里的多次工具调用）的高度上限：超过就自己滚（issue #22）。 */
-internal val TOOL_LIST_MAX_HEIGHT = 320.dp
-
 /** 13sp / 20sp leading, scaled off bodySmall so 字号 still applies to both. */
 @Composable
 internal fun thinkingStyle(): TextStyle {
@@ -1231,52 +1160,33 @@ internal fun ToolBundle(
         if (tools.size == 1) {
             ToolDetail(line = tools.first())
         } else {
-            // Same family as the thinking block: bounded at 320dp with its own lazy list,
-            // so a run of twenty calls does not stretch the bubble past the screen.
+            // **这里不用虚拟列表，也不用高度上限**（用户：3 个工具条里不该有虚拟列表，
+            // 具体工具里面设虚拟列表即可，和单个工具一样）。
+            // 原来是 `LazyColumn(heightIn(max = 320.dp))`：代价有两个 ——
+            //  ① 工具条被 320dp 截断，第 2、3 个工具看不全，只能在条内滑动；
+            //  ② 条内一滑，容器里的内容和主列表的滚动就脱节，接着折叠会让位置跳一下。
+            // 改成普通 Column 后：工具条高度 == 内容高度（不被截断、不能滑动），
+            // 里面的块长高多少，容器就长高多少 ⇒ 补偿和第一层用同一套算法。
+            // 具体的工具内容仍然是虚拟列表（ToolDetail 自己的 180dp 上限，没动）。
             //
-            // **把本容器的高度供下去**（issue #22）：里面的 ToolRow/RevealHeight 展开时，
-            // 只有本容器还在 320dp 以下才会真的把主列表顶上去；顶到上限后本高度不变 ⇒
-            // 嵌套层按这个增量补，补 0，不再「多补再拉回」。
-            val toolListHeight = remember { mutableIntStateOf(0) }
-            // **上限也一起给下去**（0.8.297）：嵌套层改成「当帧预测」补，预测要知道还剩多少空间。
-            val toolListMax = with(LocalDensity.current) { TOOL_LIST_MAX_HEIGHT.toPx().roundToInt() }
-            // **必须 remember**：这个对象带着「内容高度估计」这个跨帧状态，重建就丢了。
-            val parentInfo = remember { ExpansionParentHeight(toolListHeight, toolListMax) }
-            val toolListState = rememberLazyListState()
-            // 工具列表项数变了 ⇒ 内容高度变了（来了新的工具调用）⇒ 「内容高度估计」可能带偏。
-            // 只有「容器正贴着上限」时估计才真的用得上（容器没贴顶时，容器高度就是内容高度，
-            // 下一轮动画第一帧会拿实测高度把它刷新回来），这时才作废：退回按实测增量补
-            // （晚一帧，但不会补错）。
-            LaunchedEffect(toolListState.layoutInfo.totalItemsCount) {
-                if (parentInfo.height.value >= parentInfo.maxHeight) parentInfo.contentEst = -1f
-            }
-            CompositionLocalProvider(
-                LocalExpansionParentHeight provides parentInfo
-            ) {
-            LazyColumn(
-                state = toolListState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = TOOL_LIST_MAX_HEIGHT)
-                    .onSizeChanged { toolListHeight.intValue = it.height },
-                // 不再加 8dp 行距：多工具里每个工具点开后的样子必须和「单个工具」一致，
-                // 多一层间距就是多一层它没有的边距。
-            ) {
-                items(tools.size) { index ->
+            // 不再加 8dp 行距：多工具里每个工具点开后的样子必须和「单个工具」一致，
+            // 多一层间距就是多一层它没有的边距。
+            Column(Modifier.fillMaxWidth()) {
+                tools.forEachIndexed { index, tool ->
                     // 每个工具**各自**点开（用户：「不是点击多个工具马上平铺各个工具」），
                     // 但彼此**不互斥**：展开第二个不会收起第一个（issue #20）。
                     // 展开后的内容与单个工具同一套（ToolRow 内部不再加缩进）。
-                    val tool = tools[index]
                     val key = tool.message?.id ?: "live-$index"
-                    ToolRow(
-                        line = tool,
-                        expanded = key in openTools,
-                        onToggle = {
-                            openTools = if (key in openTools) openTools - key else openTools + key
-                        },
-                    )
+                    key(key) {
+                        ToolRow(
+                            line = tool,
+                            expanded = key in openTools,
+                            onToggle = {
+                                openTools = if (key in openTools) openTools - key else openTools + key
+                            },
+                        )
+                    }
                 }
-            }
             }
         }
     }
