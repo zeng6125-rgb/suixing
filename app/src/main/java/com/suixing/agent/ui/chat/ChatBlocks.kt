@@ -369,6 +369,11 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
+    // **按实测高度差补偿**（#13 第三次尝试的根因修正）：不再用 `px * progress` 推算，
+    // 而是由 Layout 每次布局后用「本帧真实高度 − 上次真实高度」写入待补偿量。
+    // 推算值与实际布局不一致（埋点：45% 的帧请求量≠实际量），正是抖动来源。
+    val pendingCompensation = remember { mutableFloatStateOf(0f) }
+    val lastLaidHeight = remember { mutableIntStateOf(-1) }
     // **临时日志（查完删）**：只记录，不改任何行为。
     val animCtx = LocalContext.current
     val animBuf = remember { StringBuilder() }
@@ -429,7 +434,11 @@ private fun RevealHeight(
                     lastParent = cur
                     if (delta != 0) outer.dispatchRawDelta(delta.toFloat())
                 } else {
-                    outer.dispatchRawDelta(px * progress - oldH)
+                    val dh = pendingCompensation.floatValue
+                    if (dh != 0f) {
+                        pendingCompensation.floatValue = 0f
+                        outer.dispatchRawDelta(dh)
+                    }
                 }
             }
             // 只记录：这一帧补了多少、补前/补后的真实偏移
@@ -497,6 +506,11 @@ private fun RevealHeight(
             //   补偿（顶到 320dp 时父高度不变 ⇒ 补 0）。这一版先不动，见 issue #24 问题 3 的情况 B。
             natural[0] = placeable.height
             val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
+            // 真实高度差（正=长高、负=变矮），交给动画循环去补偿滚动位置。
+            if (lastLaidHeight.intValue >= 0 && h != lastLaidHeight.intValue) {
+                pendingCompensation.floatValue += (h - lastLaidHeight.intValue).toFloat()
+            }
+            lastLaidHeight.intValue = h
             layout(constraints.maxWidth, h) { placeable.place(0, 0) }
         }
     }
