@@ -5,6 +5,7 @@ package com.suixing.agent.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.OutlinedTextField
@@ -29,8 +30,9 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,6 +56,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -87,6 +90,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -846,6 +850,24 @@ private fun Drawer(
     var pendingRename by remember { mutableStateOf<Conversation?>(null) }
     // 长按出来的菜单：只记「哪一行的菜单开着」，于是抽屉里同时最多只有一个菜单。
     var menuFor by remember { mutableStateOf<String?>(null) }
+    // 抽屉的手动顺序：置顶区/普通区各一张 id 表（见 DrawerOrderStore 的注释）。
+    // 它是查看偏好而不是会话数据，所以既不挂在 Conversation 上，也不进存储格式。
+    val orderStore = remember(context) { DrawerOrderStore(context) }
+    val orderState = remember { mutableStateOf(DrawerOrder()) }
+    // 排序模式：抽屉头部那枚把手开关。开着时行尾的垃圾桶换成拖拽把手 ——
+    // 长按行仍然是菜单，两个手势各占一处，不互相抢。
+    var sortMode by remember { mutableStateOf(false) }
+    val draggingState = remember { mutableStateOf<String?>(null) }
+    val dragTracker = remember { DrawerDragTracker() }
+    val listState = rememberLazyListState()
+    // 每行上次看到的 updatedAt：数值变大 = 那条会话来了新消息 ⇒ 把它从普通表里摘掉，
+    // 它就按 updatedAt 冒回普通区顶部（用户：「新会话照常出现在普通会话上面」）。
+    val lastSeen = remember { HashMap<String, Long>() }
+    var orderDirty by remember { mutableStateOf(false) }
+    // 手势回调里要读最新的会话列表与分区，但 pointerInput 的 block 只能建一次
+    // （中途换实例会把进行中的手势取消），所以这两份最新值走 rememberUpdatedState 转发。
+    val conversationsNow = rememberUpdatedState(conversations)
+    val sectionsNow = rememberUpdatedState(drawerSections(conversations, orderState.value))
     // 导出与「设置 → 会话」页同一套：系统选择器（SAF），不碰 FileProvider、不改 manifest。
     var pendingExport by remember { mutableStateOf<Conversation?>(null) }
     val exporter = rememberLauncherForActivityResult(
@@ -880,7 +902,56 @@ private fun Drawer(
             // 设置 included, would sit off-screen with nothing able to scroll them.
             // Dropping the keyboard gives the panel the height it was laid out for.
             keyboard?.hide()
+        } else {
+            // 抽屉一关，排序模式就失效：它是一次性模式，不该跨次拉开残留
+            // （用户：「进行了长按等其它操作（例如关闭侧边栏），自动退出拖动模式」）。
+            sortMode = false
+            draggingState.value = null
         }
+    }
+
+    // 上次手动排的顺序。读失败 = 空表 = 退回时间序：偏好文件坏了不该拦着人看会话列表。
+    LaunchedEffect(Unit) { orderState.value = orderStore.load() }
+
+    // 落盘分两个入口：拖动松手、切换置顶是明确操作，立刻写；「新消息回顶」只挪基线，走 debounce。
+    val persistOrder: () -> Unit = remember {
+        {
+            val snapshot = orderState.value.prunedTo(conversationsNow.value.map { it.id }.toSet())
+            scope.launch { orderStore.save(snapshot) }
+        }
+    }
+
+    // 会话列表一变就做两件事：剔除已删除的 id（残留 id 会在列表里占位，看着像排序没生效），
+    // 以及把「updatedAt 变大」的那几行从普通表里摘掉。
+    LaunchedEffect(conversations) {
+        if (conversations.isEmpty()) return@LaunchedEffect
+        val known = conversations.map { it.id }.toHashSet()
+        val current = orderState.value
+        var next = current.prunedTo(known)
+        val bumped = conversations
+            .filter { chat -> lastSeen[chat.id]?.let { chat.updatedAt > it } == true }
+            .map { it.id }
+        conversations.forEach { lastSeen[it.id] = it.updatedAt }
+        val dropped = bumped.filter { it in next.normal }
+        if (dropped.isNotEmpty()) next = next.copy(normal = next.normal.filterNot { it in dropped })
+        if (next != current) orderState.value = next
+        if (dropped.isNotEmpty()) orderDirty = true
+    }
+
+    // 「新消息回顶」攒 1.5s 落一次盘：应用被杀最多丢这一次位置修正；用户拖出来的顺序是
+    // 松手即写，不会丢。
+    LaunchedEffect(orderDirty) {
+        if (!orderDirty) return@LaunchedEffect
+        delay(1500)
+        orderStore.save(orderState.value.prunedTo(conversationsNow.value.map { it.id }.toSet()))
+        orderDirty = false
+    }
+
+    // 「排序模式是一次性模式」：任何非拖动的交互都从这一个口子关掉它，
+    // 免得一半路径忘了关、模式残留到下一次拉开抽屉。
+    val exitSortMode: () -> Unit = {
+        sortMode = false
+        draggingState.value = null
     }
 
     // 面板：库负责拖动/回弹/遮罩/位移，视觉参数逐条覆盖回自绘那版——
@@ -924,6 +995,17 @@ private fun Drawer(
                         color = scheme.onSurfaceVariant,
                     )
                 }
+                // 排序开关：把手图标 = 「拖」这件事本身。开着时行尾的垃圾桶换把手，
+                // 于是「拖」与「长按菜单」各占一处，不用在同一个手势里二选一。
+                IconButton(
+                    onClick = { sortMode = !sortMode },
+                    modifier = Modifier.size(38.dp),
+                ) {
+                    DrawerGripIcon(
+                        tint = if (sortMode) scheme.primary else scheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
                 IconButton(onClick = onNew, modifier = Modifier.size(38.dp)) {
                     // The same glyph the chat header's compose button draws, at the same
                     // 22dp: the drawer and the bar are two doors to one action, and they
@@ -944,55 +1026,142 @@ private fun Drawer(
             )
             Spacer(Modifier.height(6.dp))
 
+            // 置顶区在上、普通区在下（用户：「置顶的就是最上面的呀」）。顺序来自两张 id 表：
+            // 置顶区只在置顶表里挪；普通区「新会话/新消息在前 + 手动基线」；跨区拖动在
+            // reorderWithinSection 里被直接拒掉，所以怎么拖都越不过置顶那条线。
+            val sections = drawerSections(conversations, orderState.value)
+            // 两个区块共用同一行（只差顺序，不差样子）：抽成局部 lambda，免得把二十来行
+            // 回调抄两遍。animateItem 只在 item 作用域里拿得到，所以由调用处传进来。
+            val drawerRow: @Composable (Conversation, Modifier) -> Unit = { conversation, anim ->
+                // 把手的拖动手势建一次就固定住：手势进行中如果 block 换实例，Compose 会把
+                // 这次拖动取消，于是「拖到一半断了」。
+                val dragHandle = remember(conversation.id) {
+                    Modifier.pointerInput(conversation.id) {
+                        detectDragGestures(
+                            onDragStart = {
+                                val row = listState.layoutInfo.visibleItemsInfo
+                                    .firstOrNull { it.key == conversation.id }
+                                if (row != null) {
+                                    draggingState.value = conversation.id
+                                    dragTracker.pointerY = row.offset + row.size / 2f
+                                }
+                            },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                val dragging = draggingState.value
+                                if (dragging != null) {
+                                    dragTracker.pointerY += amount.y
+                                    val hit = listState.layoutInfo.visibleItemsInfo
+                                        .firstOrNull {
+                                            dragTracker.pointerY >= it.offset &&
+                                                dragTracker.pointerY <= it.offset + it.size
+                                        }
+                                        ?.key as? String
+                                    if (hit != null) {
+                                        val reordered = reorderWithinSection(
+                                            order = orderState.value,
+                                            sections = sectionsNow.value,
+                                            dragging = dragging,
+                                            target = hit,
+                                        )
+                                        if (reordered != null) orderState.value = reordered
+                                    }
+                                }
+                            },
+                            onDragEnd = {
+                                if (draggingState.value != null) persistOrder()
+                                draggingState.value = null
+                            },
+                            onDragCancel = { draggingState.value = null },
+                        )
+                    }
+                }
+                ConversationRow(
+                    conversation = conversation,
+                    selected = conversation.id == activeId,
+                    running = conversation.id in runningId,
+                    menuOpen = menuFor == conversation.id,
+                    sortMode = sortMode,
+                    dragging = draggingState.value == conversation.id,
+                    dragHandleModifier = dragHandle,
+                    modifier = anim,
+                    // 点行、长按、以及菜单里的每一个动作都先退出排序模式：用户要的是
+                    // 「做了别的事就别再停在拖动态」。
+                    onClick = {
+                        exitSortMode()
+                        onOpenConversation(conversation)
+                    },
+                    onLongClick = {
+                        exitSortMode()
+                        menuFor = conversation.id
+                    },
+                    onMenuDismiss = {
+                        exitSortMode()
+                        menuFor = null
+                    },
+                    onRename = {
+                        exitSortMode()
+                        menuFor = null
+                        pendingRename = conversation
+                    },
+                    onDelete = {
+                        exitSortMode()
+                        menuFor = null
+                        pendingDelete = conversation
+                    },
+                    onTogglePin = {
+                        exitSortMode()
+                        menuFor = null
+                        // 置顶就追加到置顶表末尾（置顶区有自己的顺序）；取消置顶只从置顶表
+                        // 摘掉，于是它按 updatedAt 回到普通区该在的位置。
+                        orderState.value = pinToggled(orderState.value, conversation)
+                        persistOrder()
+                        onTogglePin(conversation)
+                    },
+                    onToggleArchive = {
+                        exitSortMode()
+                        menuFor = null
+                        onToggleArchive(conversation)
+                    },
+                    onCopyTitle = {
+                        exitSortMode()
+                        menuFor = null
+                        copyTitle(context, conversation.title)
+                    },
+                    onExport = {
+                        exitSortMode()
+                        menuFor = null
+                        pendingExport = conversation
+                        exporter.launch(exportName(conversation.title))
+                    },
+                )
+            }
+            // 置顶区空着时连标签都不出现：空标签只会让人以为还有东西没加载出来。
             LazyColumn(
+                state = listState,
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
             ) {
-                // 置顶只在抽屉里排：仓库那份列表仍是时间序（会话管理页与「上次打开」都吃它），
-                // 这里换的是展示顺序，不是数据的顺序。已归档的不显示（归档就是把它从这份列表里
-                // 收起来，数据仍在，去「设置 → 会话管理」取消归档）。
-                val ordered = conversations
-                    .filterNot { it.archived }
-                    .sortedWith(
-                        compareByDescending<Conversation> { it.pinned }
-                            .thenByDescending { it.updatedAt },
-                    )
-                items(ordered, key = { it.id }) { conversation ->
-                    ConversationRow(
-                        conversation = conversation,
-                        selected = conversation.id == activeId,
-                        running = conversation.id in runningId,
-                        menuOpen = menuFor == conversation.id,
-                        onClick = { onOpenConversation(conversation) },
-                        onLongClick = { menuFor = conversation.id },
-                        onMenuDismiss = { menuFor = null },
-                        onRename = {
-                            menuFor = null
-                            pendingRename = conversation
-                        },
-                        onDelete = {
-                            menuFor = null
-                            pendingDelete = conversation
-                        },
-                        onTogglePin = {
-                            menuFor = null
-                            onTogglePin(conversation)
-                        },
-                        onToggleArchive = {
-                            menuFor = null
-                            onToggleArchive(conversation)
-                        },
-                        onCopyTitle = {
-                            menuFor = null
-                            copyTitle(context, conversation.title)
-                        },
-                        onExport = {
-                            menuFor = null
-                            pendingExport = conversation
-                            exporter.launch(exportName(conversation.title))
-                        },
-                    )
+                if (sections.pinned.isNotEmpty()) {
+                    item(key = "drawer-pinned-label") {
+                        Text(
+                            text = "置顶",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = scheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
+                        )
+                    }
+                    items(sections.pinned, key = { it.id }) { drawerRow(it, Modifier.animateItem()) }
+                    if (sections.normal.isNotEmpty()) {
+                        item(key = "drawer-section-divider") {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                                color = scheme.outlineVariant,
+                            )
+                        }
+                    }
                 }
+                items(sections.normal, key = { it.id }) { drawerRow(it, Modifier.animateItem()) }
             }
 
             Spacer(Modifier.height(6.dp))
@@ -1145,20 +1314,36 @@ private fun ConversationRow(
     onToggleArchive: () -> Unit,
     onCopyTitle: () -> Unit,
     onExport: () -> Unit,
+    /** 排序模式：行尾的垃圾桶换成拖拽把手（两个手势各占一处，长按行仍是菜单）。 */
+    sortMode: Boolean = false,
+    /** 正在被拖动的那一行：给一层浅底，让「拖住了」看得见。 */
+    dragging: Boolean = false,
+    dragHandleModifier: Modifier = Modifier,
+    modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     // 短按打开、长按出菜单：一行上只挂这一个手势。菜单里的每一项都走抽屉里已经有的那几条路
     // （删除仍旧进 pendingDelete 那个二次确认）。Surface(onClick) 不支持长按，所以点击交给
     // combinedClickable，Surface 只负责形状与底色；clip 是为了让水波纹跟着圆角走。
-    Box {
+    Box(modifier = modifier) {
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 2.dp)
                 .clip(MaterialTheme.shapes.medium)
-                .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+                // 排序模式下这一行没有长按：把手上的拖动和行上的长按是同一只手指上的两个
+                // handler，按住把手超过 500ms 会先被判成长按（用户：「拖把手容易误触菜单」）。
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = if (sortMode) null else onLongClick,
+                ),
             shape = MaterialTheme.shapes.medium,
-            color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
+            // 拖动中被拎起来的那一行给一层浅底：否则「行在跟手」只能靠相邻行换位去猜。
+            color = when {
+                selected -> scheme.primary.copy(alpha = 0.16f)
+                dragging -> scheme.surfaceContainerHighest
+                else -> Color.Transparent
+            },
         ) {
             Row(
                 modifier = Modifier.padding(start = 14.dp, end = 2.dp),
@@ -1191,68 +1376,79 @@ private fun ConversationRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                // A run owns its conversation and the view model refuses to delete it, so an
-                // enabled button here was a tap that silently did nothing. The icon is dimmed
-                // to Material's disabled alpha by hand because the explicit tint below would
-                // otherwise keep it looking live.
-                // The icon keeps its 18dp and the ripple its 36dp disc; the 48dp minimum sits
-                // outside them, so only the touch area grows.
-                IconButton(
-                    onClick = onDelete,
-                    enabled = !running,
-                    modifier = Modifier.minimumInteractiveComponentSize().size(36.dp),
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_trash),
-                        contentDescription = "删除会话",
-                        tint = if (running) {
-                            scheme.onSurfaceVariant.copy(alpha = 0.38f)
-                        } else {
-                            scheme.onSurfaceVariant
-                        },
-                        modifier = Modifier.size(18.dp),
-                    )
+                // 排序模式下，行尾换成拖拽把手：两枚控件同尺寸同位置，切换时列表不会跳。
+                if (sortMode) {
+                    Box(
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .size(36.dp)
+                            // 把手上的短按不打开会话：它是拖动的起手处，轻轻一点不该跳进会话。
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = {},
+                            )
+                            .then(dragHandleModifier),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        DrawerGripIcon(
+                            tint = scheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                } else {
+                    DrawerDeleteButton(running = running, onDelete = onDelete)
                 }
             }
         }
-        // 长按出来的菜单。锚在这一行上（Box 内），所以它贴着被长按的那一条弹出；
-        // 删除排在最后，与「设置 → 会话」页那两个动作的顺序一致。
-        //
-        // 样式照对话框里那颗按钮抄（用户：长按菜单要和对话框按钮一致）：面板 20dp 圆角 + surface
-        // 底 + 8dp 投影 + 一圈 hairline（与 SuixingCard、输入框上方那两张卡同一个做法），每一项
-        // 40dp 高、labelLarge 14sp Medium、胶囊涟漪 —— 与 AlertDialog 的 TextButton 同高同字同反馈。
-        // 不再用 DropdownMenuItem：它自带 bodyLarge 17sp、48dp 行高、整行方角涟漪和 onSurface 字色，
-        // 那是另一套语言，两样摆在一起就是用户说的「样式不一致」。定位与翻转仍由 DropdownMenu 管。
-        DropdownMenu(
-            expanded = menuOpen,
-            onDismissRequest = onMenuDismiss,
-            shape = MaterialTheme.shapes.large,
-            containerColor = scheme.surface,
-            tonalElevation = 0.dp,
-            shadowElevation = 8.dp,
-            border = BorderStroke(1.dp, scheme.outlineVariant),
-            // 往下让 4dp：贴着被长按那一行的下沿，又没压在行身上。再往下的翻转/夹紧由 M3 负责。
-            offset = DpOffset(0.dp, 4.dp),
-            // 180dp 足够放下最长的一项（「取消归档」）再加胶囊的左右内边距；220dp 是上限，
-            // 免得它长成一条横贯抽屉的带子 —— 它是这一行的菜单，不是一页。
-            modifier = Modifier.widthIn(min = 180.dp, max = 220.dp),
+        // 长按出来的菜单。锚点不是整行，而是一个「和面板同宽、0 高、贴在行的右下角」的空盒子：
+        // M3 的 DropdownMenu 只按锚点**左缘**摆（它没有 popupPositionProvider 可配），锚在整行上
+        // 就永远贴着抽屉左边弹（用户实测：「在哪里长按，弹窗显示都靠近左侧」）。把锚点本身放在
+        // 行的右侧、宽度与面板相同，左缘就落在行右缘，菜单于是贴着这一行弹；下方不够时 M3 自己
+        // 向上翻。删除排在最后，与「设置 → 会话」页那两个动作的顺序一致。
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .width(DrawerMenuWidth)
+                .height(0.dp),
         ) {
-            DrawerMenuAction("改名", onClick = onRename)
-            DrawerMenuAction(
-                if (conversation.pinned) "取消置顶" else "置顶",
-                onClick = onTogglePin,
-            )
-            // 归档：从抽屉列表里收起来，数据留着；取消归档在「设置 → 会话管理」那一页。
-            DrawerMenuAction(
-                if (conversation.archived) "取消归档" else "归档",
-                onClick = onToggleArchive,
-            )
-            DrawerMenuAction("复制标题", onClick = onCopyTitle)
-            DrawerMenuAction("导出", onClick = onExport)
-            DrawerMenuAction("删除", destructive = true, onClick = onDelete)
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = onMenuDismiss,
+                // 面板参数与 AlertDialog 的 Surface 一一对应：同一底色（surfaceContainerHigh）、
+                // 同一圆角（extraLarge 28dp）、同一 tonal 高度（6dp），并且**不带** border、**不带**
+                // 投影 —— 用户说的「菜单和对话框的弹窗形式不一致」就是这一层（S1 只统一了行内按钮，
+                // 面板当时还是 SuixingCard 那套「surface + 20dp + hairline + 8dp 阴影」）。
+                // 注：给了具体 containerColor 之后 tonalElevation 不再改变颜色，这里保留它只是让
+                // 参数与 AlertDialog 对齐，将来对话框若改，照着这一行改即可。
+                shape = MaterialTheme.shapes.extraLarge,
+                containerColor = scheme.surfaceContainerHigh,
+                tonalElevation = 6.dp,
+                shadowElevation = 0.dp,
+                // 往下让 4dp：贴着被长按那一行的下沿，又没压在行身上。
+                offset = DpOffset(0.dp, 4.dp),
+                modifier = Modifier.width(DrawerMenuWidth),
+            ) {
+                DrawerMenuAction("改名", onClick = onRename)
+                DrawerMenuAction(
+                    if (conversation.pinned) "取消置顶" else "置顶",
+                    onClick = onTogglePin,
+                )
+                // 归档：从抽屉列表里收起来，数据留着；取消归档在「设置 → 会话管理」那一页。
+                DrawerMenuAction(
+                    if (conversation.archived) "取消归档" else "归档",
+                    onClick = onToggleArchive,
+                )
+                DrawerMenuAction("复制标题", onClick = onCopyTitle)
+                DrawerMenuAction("导出", onClick = onExport)
+                DrawerMenuAction("删除", destructive = true, onClick = onDelete)
+            }
         }
     }
 }
+
+/** 抽屉长按菜单的面板宽度：锚点与面板同宽，菜单才贴着行的右缘弹出（见 ConversationRow）。 */
+private val DrawerMenuWidth = 200.dp
 
 /**
  * 抽屉长按菜单里的一行：尺寸与反馈都照对话框里那颗 `TextButton` 抄。
@@ -1337,32 +1533,34 @@ private fun DrawerAction(
     /** A control on the row's end instead of the chevron-less plain row. */
     trailing: (@Composable () -> Unit)? = null,
 ) {
+    // 尺寸一组（用户：「会话列表下方的五个按钮，整体小一点」）：行高 46dp、图标 20dp、
+    // 字号 14sp、行内左右 14dp、行间 1dp —— 四处同比缩 18% 左右，46dp 是可点高度的底线。
     val scheme = MaterialTheme.colorScheme
     Surface(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 2.dp),
+            .padding(horizontal = 12.dp, vertical = 1.dp),
         shape = MaterialTheme.shapes.medium,
         color = if (selected) scheme.primary.copy(alpha = 0.16f) else Color.Transparent,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp)
-                .padding(horizontal = 16.dp),
+                .height(46.dp)
+                .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 painter = icon,
                 contentDescription = null,
                 tint = if (selected) scheme.primary else scheme.onSurfaceVariant,
-                modifier = Modifier.size(24.dp),
+                modifier = Modifier.size(20.dp),
             )
-            Spacer(Modifier.width(14.dp))
+            Spacer(Modifier.width(12.dp))
             Text(
                 text = label,
-                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
+                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 14.sp),
                 color = if (selected) scheme.primary else scheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1443,4 +1641,115 @@ private fun ApprovalDialog(
             }
         },
     )
+}
+
+/**
+ * 把 [dragging] 挪到 [target] 的槽位上，只在**同一区块内**生效。
+ *
+ * 置顶会话与普通会话之间换位一律返回 null —— 用户原话：「怎么拖都不能越过置顶」。
+ * 另一条路（跨区即隐式置顶/取消置顶）看着更顺手，但一次误拖就会改掉置顶状态，不做。
+ */
+private fun reorderWithinSection(
+    order: DrawerOrder,
+    sections: DrawerSections,
+    dragging: String,
+    target: String,
+): DrawerOrder? {
+    val pinnedIds = sections.pinned.map { it.id }
+    val normalIds = sections.normal.map { it.id }
+    val updated = when {
+        dragging in pinnedIds && target in pinnedIds -> order.copy(
+            pinned = moved(pinnedIds, dragging, target),
+            normal = normalIds,
+        )
+        dragging in normalIds && target in normalIds -> order.copy(
+            pinned = pinnedIds,
+            normal = moved(normalIds, dragging, target),
+        )
+        // 跨区，或者指针落在「置顶」标签/分隔线上：什么都不改。
+        else -> return null
+    }
+    return if (updated == order) null else updated
+}
+
+/** 把 [item] 从表里取出、插到 [target] 原来的槽位（相邻行的一次次换位就是它重复的结果）。 */
+private fun moved(list: List<String>, item: String, target: String): List<String> {
+    val from = list.indexOf(item)
+    val to = list.indexOf(target)
+    if (from < 0 || to < 0 || from == to) return list
+    return list.toMutableList().apply {
+        removeAt(from)
+        add(to.coerceIn(0, size), item)
+    }
+}
+
+/**
+ * 置顶开关对两张表的改动：置顶就追加到置顶表**末尾**（置顶区有它自己的顺序，不抢第一），
+ * 同时从普通表里摘掉；取消置顶只从置顶表摘掉 —— 于是它按 updatedAt 回到普通区该在的位置，
+ * 而不是回到普通表里那个旧槽位（那个槽位代表「手动基线」，刚取消置顶时按时间排更符合预期）。
+ */
+private fun pinToggled(order: DrawerOrder, chat: Conversation): DrawerOrder =
+    if (chat.pinned) {
+        order.copy(pinned = order.pinned.filterNot { it == chat.id })
+    } else {
+        order.copy(
+            pinned = order.pinned.filterNot { it == chat.id } + chat.id,
+            normal = order.normal.filterNot { it == chat.id },
+        )
+    }
+
+/** 拖动时指针落在列表坐标系里的哪个 y（不参与重组，省掉每帧一次的重绘）。 */
+private class DrawerDragTracker {
+    var pointerY: Float = 0f
+}
+
+/** 行尾的删除按钮（排序模式下被拖拽把手顶替）。 */
+@Composable
+private fun DrawerDeleteButton(running: Boolean, onDelete: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    // A run owns its conversation and the view model refuses to delete it, so an
+    // enabled button here was a tap that silently did nothing. The icon is dimmed
+    // to Material's disabled alpha by hand because the explicit tint below would
+    // otherwise keep it looking live.
+    // The icon keeps its 18dp and the ripple its 36dp disc; the 48dp minimum sits
+    // outside them, so only the touch area grows.
+    IconButton(
+        onClick = onDelete,
+        enabled = !running,
+        modifier = Modifier.minimumInteractiveComponentSize().size(36.dp),
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_trash),
+            contentDescription = "删除会话",
+            tint = if (running) {
+                scheme.onSurfaceVariant.copy(alpha = 0.38f)
+            } else {
+                scheme.onSurfaceVariant
+            },
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/**
+ * 拖拽把手：三根短线。仓库里没有 grip 图标，按既有约定（抽屉的置顶标记也是复用 ic_star）
+ * 不新造 drawable，用一个 16dp 的 Canvas 画出来。
+ */
+@Composable
+private fun DrawerGripIcon(tint: Color, modifier: Modifier = Modifier.size(16.dp)) {
+    Canvas(modifier) {
+        val stroke = 1.5.dp.toPx()
+        val start = size.width * 0.16f
+        val end = size.width * 0.84f
+        listOf(0.3f, 0.5f, 0.7f).forEach { fraction ->
+            val y = size.height * fraction
+            drawLine(
+                color = tint,
+                start = Offset(start, y),
+                end = Offset(end, y),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
 }

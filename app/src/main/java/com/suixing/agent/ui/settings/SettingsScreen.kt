@@ -103,6 +103,9 @@ import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.describeError
+import com.suixing.agent.ui.DrawerOrder
+import com.suixing.agent.ui.DrawerOrderStore
+import com.suixing.agent.ui.drawerSections
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.REASONING_LEVELS
@@ -2052,6 +2055,11 @@ internal fun ConversationManagerScreen(
     // 修改时间 + 原始 JSON 尾部。文件信息在 IO 上读，弹窗开着才读一次。
     var pendingInfo by remember { mutableStateOf<Conversation?>(null) }
     var chatFileInfo by remember { mutableStateOf<ChatFileInfo?>(null) }
+    // 手动顺序只读（这一页不提供拖动）：读出来是为了让置顶区与抽屉长得一样 ——
+    // 同一枚置顶在抽屉里排在最上面、在这里却按时间散着，这正是用户说的「置顶逻辑没理清」。
+    val orderStore = remember(context) { DrawerOrderStore(context) }
+    var drawerOrder by remember { mutableStateOf(DrawerOrder()) }
+    LaunchedEffect(Unit) { drawerOrder = orderStore.load() }
     LaunchedEffect(pendingInfo) {
         val chat = pendingInfo ?: return@LaunchedEffect
         chatFileInfo = withContext(Dispatchers.IO) { readChatFileInfo(context, chat.id) }
@@ -2089,7 +2097,10 @@ internal fun ConversationManagerScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            val active = conversations.filterNot { it.archived }.sortedByDescending { it.updatedAt }
+            // 与抽屉共用同一套排序（drawerSections）：置顶在前、置顶区按手动顺序、普通区按
+            // updatedAt。这一页原来是纯时间序、也不显示置顶 —— 同一枚置顶两个页面两个样子。
+            val sections = drawerSections(conversations, drawerOrder)
+            val active = sections.pinned + sections.normal
             val archived = conversations.filter { it.archived }.sortedByDescending { it.updatedAt }
             if (active.isEmpty() && archived.isEmpty()) {
                 item {
@@ -2108,6 +2119,7 @@ internal fun ConversationManagerScreen(
                     }
                     ConversationRow(
                         title = conversation.title,
+                        pinned = conversation.pinned,
                         subtitle = "${lastUpdated(conversation.updatedAt)} · " +
                             "${conversation.messages.size} 条消息" +
                             (if (bytes >= 0) " · ${humanBytes(bytes)}" else ""),
@@ -2190,6 +2202,8 @@ internal fun ConversationManagerScreen(
 private fun ConversationRow(
     title: String,
     subtitle: String,
+    /** 置顶标记：抽屉那份顺序会把它排到最前，这一页至少得看得出「它是置顶的」。 */
+    pinned: Boolean = false,
     onOpen: () -> Unit,
     onInfo: () -> Unit,
     onExport: () -> Unit,
@@ -2213,12 +2227,23 @@ private fun ConversationRow(
                     .weight(1f)
                     .padding(start = 14.dp, top = 12.dp, bottom = 12.dp),
             ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (pinned) {
+                        Icon(
+                            imageVector = ImageVector.vectorResource(R.drawable.ic_star),
+                            contentDescription = "已置顶",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(13.dp),
+                        )
+                        Spacer(Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.labelSmall,
