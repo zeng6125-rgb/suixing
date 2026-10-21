@@ -1452,10 +1452,25 @@ internal fun ImageBlock(base64: String) {
 }
 
 
+/**
+ * 行内时间戳：`HH:mm`，超过一天则 `M月d日 HH:mm`。
+ *
+ * **格式化器按线程复用**（性能优化，输出逐字节不变）：`SimpleDateFormat` 的构造很贵（解析 pattern、
+ * 建符号表），而这段代码原来**每次调用都 new 一个**，被消息时间戳与导航条标签反复调用。
+ * 用 `ThreadLocal` 而不是共享单例，是因为 `SimpleDateFormat` 本身不是线程安全的。
+ */
+private val timeFormatShort = ThreadLocal.withInitial {
+    SimpleDateFormat("HH:mm", Locale.getDefault())
+}
+private val timeFormatWithDate = ThreadLocal.withInitial {
+    SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
+}
+
 internal fun formatTime(timestamp: Long): String {
     val now = System.currentTimeMillis()
-    val pattern = if (now - timestamp < 24 * 60 * 60 * 1000L) "HH:mm" else "M月d日 HH:mm"
-    return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestamp))
+    val withDate = now - timestamp >= 24 * 60 * 60 * 1000L
+    val fmt = (if (withDate) timeFormatWithDate else timeFormatShort).get()!!
+    return fmt.format(Date(timestamp))
 }
 
 internal fun formatDuration(millis: Long): String =

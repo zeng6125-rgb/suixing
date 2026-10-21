@@ -480,11 +480,6 @@ private fun iconFor(file: File): Pair<ImageVector, Color> {
     }
 }
 
-private fun relativePath(root: File, current: File, rootLabel: String): String {
-    if (current == root) return rootLabel
-    return current.absolutePath.removePrefix(root.absolutePath).trimStart('/')
-}
-
 private fun copyToClipboard(context: Context, text: String): Boolean =
     runCatching {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

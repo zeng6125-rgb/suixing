@@ -1641,7 +1641,9 @@ internal fun TurnScrubber(
     /** The conversation whose window this is: opening another one resets it. */
     conversationId: String,
     turns: Int,
-    current: Int,
+    // **延迟读**（issue #26 原因一）：值随滚动每跨一个 item 就变；若由调用方在组合体里算好再传，
+    // 每次变化都会让整个聊天页重组。改成 lambda 后只有本组件自己读、自己重组。
+    current: () -> Int,
     modifier: Modifier = Modifier,
     labelOf: (Int) -> String,
     onJumpTo: (Int) -> Unit,
@@ -1655,7 +1657,10 @@ internal fun TurnScrubber(
     // The last few turns, always including the one being read: sampling the whole
     // conversation into five evenly spaced lines is what made "which line is which turn"
     // impossible to tell, and made the jump land somewhere the user did not point at.
-    val window = remember(turns, current, unlocked) { scrubberWindow(turns, current, unlocked) }
+    val currentTurn = current()
+    val window = remember(turns, currentTurn, unlocked) {
+        scrubberWindow(turns, currentTurn, unlocked)
+    }
     val rows = remember(window) { window.toList() }
     val rowCount = rows.size
     // A gesture outlives the recomposition it started in, so it reads the turns and the
@@ -1830,8 +1835,8 @@ internal fun TurnScrubber(
             horizontalAlignment = Alignment.End,
         ) {
             rows.forEachIndexed { row, turn ->
-                val read = turn < current - 1
-                val active = turn == current - 1
+                val read = turn < currentTurn - 1
+                val active = turn == currentTurn - 1
                 val chosen = shown && row == selected
                 val scale by animateFloatAsState(
                     targetValue = when {

@@ -264,6 +264,19 @@ import java.util.concurrent.Executors
 
 
 
+/**
+ * 滚动诊断写盘的后台线程（issue #26 收尾清理）。
+ *
+ * `scrollTrace` 原来在**调用线程**上直接做文件 I/O（`File.length()` + `appendText`，每次开关文件），
+ * 而它的调用点全在主线程：手势回调、`ChatScroll` 的滚动收集器、恢复位置流程。
+ * 一次写盘几毫秒，正是"主线程没按时开工"的那几毫秒 —— 测性能的代码不该自己制造卡顿。
+ * 现在主线程只拼字符串，写盘走这条 daemon 线程；**日志内容与时机不变**。
+ */
+private val chatTraceExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+    Thread(r, "chat-trace").apply { isDaemon = true }
+}
+
+
 internal val SUGGESTIONS = listOf(
     "看看现在屏幕上是什么",
     "把下载目录里最新的三个文件列出来",
@@ -506,7 +519,10 @@ fun ChatScreen(
     // estimate while it streams — the same pair the summary card reads, so the two agree.
     // The cache count is the newest round's too: context is cumulative, so an older round's
     // cache figure says nothing about the window as it stands now.
-    val newestUsage = visible.lastOrNull { it.usage != null }?.usage
+    // **包 remember**（性能优化，值不变）：这是对可见行的 O(n) 反查，原来每次 ChatScreen
+    // 重组都跑一遍 —— 滚动时每秒好几次、每次扫几百行。`visible` 本身已经按 revision 记忆，
+    // 所以用 `visible` 当键是稳定的。
+    val newestUsage = remember(visible) { visible.lastOrNull { it.usage != null }?.usage }
     // What the endpoint never priced, sized off the text: the ring's floor for a conversation
     val transcriptEstimate = remember(rowsKey, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
@@ -679,12 +695,11 @@ fun ChatScreen(
         (if (errorLine) 1 else 0)
     fun fedIndexOf(oldVisible: Int) = feedPrefix + (visible.size - 1 - oldVisible)
 
-    val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
-    // 底锚下 firstVisibleItemIndex 是**视觉最底**那条的喂序索引：倒着换回 visible 坐标。
-    val firstVisibleOld = (visible.size - 1 - (firstVisible - feedPrefix))
-        .coerceIn(0, (visible.size - 1).coerceAtLeast(0))
-    val currentTurn = turnIndices.indexOfLast { it <= firstVisibleOld + rowOffset }
-        .coerceAtLeast(0) + 1
+    // **不在 ChatScreen 组合体里读 `.value`**（issue #26 原因一）：`firstVisibleItemIndex` 滚动时
+    // 每跨一个 item 就变一次，一旦在这里读，整个 ChatScreen（1600 行、几十个 Composable 调用）
+    // 就要重跑一遍。把读取推迟到 `TurnScrubber` 内部（见下面 `current = { … }`），
+    // 跨边界时只有导航条自己重组。用 `remember` 持有 State 对象而不是 `by` —— `by` 一取就立刻读了。
+    val firstVisible = remember { derivedStateOf { listState.firstVisibleItemIndex } }
 
     // ===== 滚动与阅读位置：底锚列表，逻辑全在 ChatScroll.kt =====
     // 底锚（index 0 = 视觉最底）下长高向上、底边不动；追底＝回到 index 0；取消＝手指轻扫 4dp。
@@ -711,16 +726,22 @@ fun ChatScreen(
     // **临时诊断，release 也写**（用户明确要求：「写到 release 啊，到时候再删了」）：
     // 用来抓「长按复制跳位置」。查完连这个函数一起删。
     fun scrollTrace(tag: String) {
-        runCatching {
+        // 主线程只做只读快照 + 拼字符串；写盘交给后台线程（见 chatTraceExecutor 的说明）。
+        val line = runCatching {
             val info = listState.layoutInfo
             val first = info.visibleItemsInfo.firstOrNull()
-            val line = "${System.currentTimeMillis()} $tag " +
+            "${System.currentTimeMillis()} $tag " +
                 "first=${first?.key}@${first?.offset} " +
                 "idx=${listState.firstVisibleItemIndex}/${listState.firstVisibleItemScrollOffset} " +
-                "canBack=${listState.canScrollBackward} total=${info.totalItemsCount}\n"
-            val f = java.io.File(traceCtx.filesDir, "scroll-jump.log")
-            if (f.length() > 128 * 1024) f.writeText("")
-            f.appendText(line)
+                "canBack=${listState.canScrollBackward} total=${info.totalItemsCount}" + System.lineSeparator()
+        }.getOrNull() ?: return
+        val dir = traceCtx.filesDir
+        chatTraceExecutor.execute {
+            runCatching {
+                val f = java.io.File(dir, "scroll-jump.log")
+                if (f.length() > 128 * 1024) f.writeText("")
+                f.appendText(line)
+            }
         }
     }
     val scroll = rememberChatScroll(
@@ -1536,7 +1557,13 @@ fun ChatScreen(
             TurnScrubber(
                 conversationId = state.conversationId,
                 turns = turnIndices.size,
-                current = currentTurn,
+                // 延迟读（issue #26 原因一）：只有导航条用这个值，就在它内部求值。
+                current = {
+                    val fv = firstVisible.value
+                    val fvOld = (visible.size - 1 - (fv - feedPrefix))
+                        .coerceIn(0, (visible.size - 1).coerceAtLeast(0))
+                    turnIndices.indexOfLast { it <= fvOld + rowOffset }.coerceAtLeast(0) + 1
+                },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 4.dp),

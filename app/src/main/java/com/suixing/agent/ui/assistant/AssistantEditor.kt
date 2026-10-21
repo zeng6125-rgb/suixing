@@ -82,47 +82,6 @@ import com.suixing.agent.ui.components.SettingRow
 import kotlinx.coroutines.launch
 
 /**
- * 保险丝：**直接对对话框自己的窗口**再调一次「铺满」并把窗口背景清成透明。
- *
- * 症状（来自用户截图，不是推测）：编辑助手页的状态栏那一条是**白底**，不是本页背景色；裁剪页
- * 顶上那块带 `01:47` 的"小预览"也是同一类露底。`DialogProperties.decorFitsSystemWindows = false`
- * 是文档里那个开关，代码里也一直在用，但**截图说明它在这台机器上没有达到预期效果**。
- *
- * **机制是假设，未经实测**：能解释症状的有两种，谁真谁假需要 logcat / 窗口尺寸才能定 ——
- * ①窗口没有真正铺到状态栏，那一条露的是后面的活动页（助手列表，白底）；②窗口铺到了，但窗口自己
- * 的默认背景是白的，盖住了本页 Surface。这个函数**两种都治**：对窗口调 `setDecorFitsSystemWindows`
- * 管①，清掉窗口背景管②；而开关本来就生效的机器上它两个都是空操作（幂等），所以留着不亏。
- */
-@Composable
-internal fun DialogEdgeToEdge(darkIcon: Boolean = false) {
-    val view = LocalView.current
-    DisposableEffect(view, darkIcon) {
-        val window = (view.parent as? DialogWindowProvider)?.window
-        window?.let {
-            WindowCompat.setDecorFitsSystemWindows(it, false)
-            it.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            // Dialog 窗口默认是 wrap-content：高度不铺满时，状态栏那一条露的是**窗口外面**的东西
-            // （后面的页/白底），用户截图里那条白带正是它。显式铺满两个方向，配合上面的
-            // decorFitsSystemWindows=false 与透明背景，窗口才真正覆盖整屏。
-            it.setLayout(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-            // **状态栏/导航栏那一条的颜色是窗口自己的属性**，不跟内容走：DialogWindow 新建时拿
-            // 的是主题默认的状态栏色（这台机器上是灰/白），于是内容铺到了状态栏底下、那一条却还
-            // 是灰的 —— 用户三轮截图里的「状态栏半成品」就是它。前三道保险丝（decorFits / 背景 /
-            // 铺满）都没碰这两个颜色，所以一直漏。设成透明，那一条才真正露出本页内容。
-            it.statusBarColor = android.graphics.Color.TRANSPARENT
-            it.navigationBarColor = android.graphics.Color.TRANSPARENT
-            // 状态栏图标（时钟/信号/电池）的明暗跟着**本页背景**走：浅底要深色图标、黑底要浅色。
-            // Dialog 窗口不继承主窗口的设置，所以每页自己声明。
-            WindowCompat.getInsetsController(it, view).isAppearanceLightStatusBars = darkIcon
-        }
-        onDispose { }
-    }
-}
-
-/**
  * 对话框窗口里「系统栏到底占多高」。
  *
  * `decorFitsSystemWindows = false` 让窗口铺满屏幕，inset 就该由内容自己吃 —— 但 **Dialog 自己的

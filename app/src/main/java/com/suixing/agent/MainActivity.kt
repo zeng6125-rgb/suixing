@@ -64,7 +64,7 @@ class MainActivity : ComponentActivity() {
         // gesture-bar strip out of the layout in both themes even if a future
         // enableEdgeToEdge call drops the flag.
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.navigationBarColor = Color.TRANSPARENT
+        transparentNavigationBar()
         super.onCreate(savedInstanceState)
         requestNotificationPermission()
         setContent {
@@ -90,7 +90,7 @@ class MainActivity : ComponentActivity() {
                 // Re-asserted per theme: the style above carries a transparent scrim,
                 // but a solid navigation bar colour is exactly the grey band under the
                 // gesture pill the user photographed.
-                window.navigationBarColor = Color.TRANSPARENT
+                transparentNavigationBar()
                 // Transparent, and it has to stay that way: the keyboard's rounded corners reveal
                 // whatever the window paints behind them, and the apps the user held up as
                 // adapted show the wallpaper there. Painting the theme's surface here (as an
@@ -128,5 +128,18 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val REQUEST_NOTIFICATIONS = 1001
+    }
+
+    /**
+     * 导航栏设为全透明 —— **行为与以前完全一致**，只是把废弃 API 收敛到一处。
+     *
+     * `Window.navigationBarColor` 在 targetSdk 35 起被标记废弃（系统强制 edge-to-edge），
+     * 但本机最低支持 API 26，26–34 上它仍是让手势条那一条不再画灰底的**唯一**做法；
+     * 删掉它会在老系统上留下一道灰带（历史上用户拍过这条灰带）。
+     * 所以保留调用、用 `@Suppress("DEPRECATION")` 显式说明这是有意的，而不是改写行为。
+     */
+    @Suppress("DEPRECATION")
+    private fun transparentNavigationBar() {
+        window.navigationBarColor = Color.TRANSPARENT
     }
 }

@@ -125,20 +125,6 @@ import java.io.File
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
 
-/**
- * The context-window presets for the current model, tokens to 档位名。0 是「不限」，
- * written as a deleted key rather than a stored 0, so 「没设过」 and 「设成不限」 stay
- * indistinguishable — which is what [AppSettings.contextWindowFor] already assumes.
- */
-private val CONTEXT_PRESETS = listOf(
-    0 to "不限",
-    32_000 to "32k",
-    64_000 to "64k",
-    128_000 to "128k",
-    256_000 to "256k",
-    1_000_000 to "1M",
-)
-
 /** How long the provider-name field waits after the last keystroke before writing through. */
 private const val NAME_WRITE_DEBOUNCE_MS = 400L
 

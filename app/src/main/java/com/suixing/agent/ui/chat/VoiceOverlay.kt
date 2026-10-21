@@ -256,28 +256,6 @@ import java.util.concurrent.Executors
 // 语音浮层：录音、转写、波形、引擎选择。
 
 /**
- * The recognizer's error codes in words a user can act on.
- *
- * Kept even though the in-app recognizer is gone: the system-activity fallback still reports
- * codes through this table when the ROM's own screen answers with one.
- */
-internal fun voiceErrorMessage(error: Int): String = when (error) {
-    SpeechRecognizer.ERROR_CLIENT -> "识别服务拒绝了这个应用（ERROR_CLIENT）"
-    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别服务正忙，请稍后再试（ERROR_RECOGNIZER_BUSY）"
-    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-        "没有录音权限（ERROR_INSUFFICIENT_PERMISSIONS）"
-
-    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-        "网络不可用（ERROR_NETWORK）"
-
-    SpeechRecognizer.ERROR_SERVER -> "识别服务出错（ERROR_SERVER）"
-    SpeechRecognizer.ERROR_AUDIO -> "录音出错（ERROR_AUDIO）"
-    SpeechRecognizer.ERROR_NO_MATCH -> "没听清（ERROR_NO_MATCH）"
-    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听到说话（ERROR_SPEECH_TIMEOUT）"
-    else -> "识别失败（错误码 $error）"
-}
-
-/**
  * 随行自己的听写：输入框上方一条细胶囊，屏幕上从头到尾只有它。
  *
  * 录音走 [DictationRecorder]（`AudioRecord`，16k/mono/PCM16 → wav），转写走 [Dictation]：把 wav
@@ -560,21 +538,6 @@ internal fun VoiceOverlay(
 internal enum class VoiceEngine(val label: String) {
     ON_DEVICE("设备端识别"),
     SYSTEM("系统识别服务（优先离线）"),
-}
-
-/**
- * The engine this device can actually offer — the availability test the capsule reports.
- *
- * `isOnDeviceRecognitionAvailable` is API 31+ and a device without the model installed answers
- * false, which is exactly the case that used to end up on the online panel. Everything else keeps
- * the classic service, where the offline preference is the best that can be asked for.
- */
-internal fun voiceEngine(context: Context): VoiceEngine {
-    val sdk = Build.VERSION.SDK_INT
-    val onDevice = sdk >= Build.VERSION_CODES.S &&
-        runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }.getOrDefault(false)
-    val engine = if (onDevice) VoiceEngine.ON_DEVICE else VoiceEngine.SYSTEM
-    return engine
 }
 
 /**
