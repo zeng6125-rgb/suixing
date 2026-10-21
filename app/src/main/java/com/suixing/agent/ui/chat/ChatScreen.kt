@@ -959,6 +959,7 @@ fun ChatScreen(
     //   ③ 补偿算了但被列表吞掉（nat 变、d 非 0、off 仍往一个方向走）⇒ 同帧对齐没成立。
     val driftCtx = LocalContext.current
     val NL = 10.toChar()
+    val lastComp = remember { intArrayOf(0) }
     LaunchedEffect(listState) {
         val buf = StringBuilder()
         var tick = 0
@@ -971,7 +972,8 @@ fun ChatScreen(
                 .append(lagReported).append(' ')
                 .append(listState.firstVisibleItemIndex).append(' ')
                 .append(listState.firstVisibleItemScrollOffset).append(' ')
-                .append(if (listState.canScrollBackward) 1 else 0).append(NL)
+                .append(if (listState.canScrollBackward) 1 else 0).append(' ')
+                .append(lastComp[0]).append(NL)
             val now = System.nanoTime()
             if (buf.length > 16_000 && now - lastFlush > 1_000_000_000L) {
                 val chunk = buf.toString()
@@ -1000,8 +1002,15 @@ fun ChatScreen(
             if (natural == lagReported) continue
             val delta = (natural - lagReported).toFloat()
             lagReported = natural
-            if (laggingNow && listState.canScrollBackward) {
-                listState.dispatchRawDelta(delta)
+            // **缩短方向要取正**（真机埋点实测）：增长时 dispatch(+δ) 正好抵消；但缩短时
+            // dispatch(−δ) 会被加进漂移里（实测 doff ≈ dnat + d），所以这里统一补正量。
+            // 期望值=0 时两种写法等价，所以增长路径的行为不变。
+            val applied = if (delta < 0f) -delta else delta
+            lastComp[0] = if (laggingNow && listState.canScrollBackward) {
+                listState.dispatchRawDelta(applied)
+                applied.toInt()
+            } else {
+                -999999
             }
         }
     }

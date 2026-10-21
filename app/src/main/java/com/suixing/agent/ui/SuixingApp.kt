@@ -1415,20 +1415,24 @@ private fun ConversationRow(
             DropdownMenu(
                 expanded = menuOpen,
                 onDismissRequest = onMenuDismiss,
-                // 面板参数与 AlertDialog 的 Surface 一一对应：同一底色（surfaceContainerHigh）、
-                // 同一圆角（extraLarge 28dp）、同一 tonal 高度（6dp），并且**不带** border、**不带**
-                // 投影 —— 用户说的「菜单和对话框的弹窗形式不一致」就是这一层（S1 只统一了行内按钮，
-                // 面板当时还是 SuixingCard 那套「surface + 20dp + hairline + 8dp 阴影」）。
-                // 注：给了具体 containerColor 之后 tonalElevation 不再改变颜色，这里保留它只是让
-                // 参数与 AlertDialog 对齐，将来对话框若改，照着这一行改即可。
-                shape = MaterialTheme.shapes.extraLarge,
-                containerColor = scheme.surfaceContainerHigh,
-                tonalElevation = 6.dp,
-                shadowElevation = 0.dp,
+                // 面板照输入框旁「添加」按钮那个弹层抄（`ui/chat/ChatComposer.kt:328-352` 的
+                // MenuCard：surface 底 + 20dp 圆角 + 8dp 投影）。用户给的参照就是它 ——
+                // 「要和那个弹窗一样，那个是有阴影的」。不是 AlertDialog 那套（28dp +
+                // surfaceContainerHigh + 只有 tonal、没有投影）。
+                // tonalElevation 归零、也不要 border：这一层靠阴影分离，再发丝边就变成两套语言
+                // （SuixingCard「边框代替阴影」那套是给页面内卡片的，不适用于浮层）。
+                shape = MaterialTheme.shapes.large,
+                containerColor = scheme.surface,
+                tonalElevation = 0.dp,
+                shadowElevation = 8.dp,
                 // 往下让 4dp：贴着被长按那一行的下沿，又没压在行身上。
                 offset = DpOffset(0.dp, 4.dp),
                 modifier = Modifier.width(DrawerMenuWidth),
             ) {
+                // 进场动画：MenuCard 是自绘 Popup + AnimatedVisibility（160ms 缩放淡入），
+                // 而 DropdownMenu 的弹窗窗口按内容测量、没有暴露 enter transition —— 在里面包一层
+                // AnimatedVisibility 只会被弹窗边界裁掉。所以这里保持 M3 默认（无缩放淡入），
+                // 不为一条动画把菜单降级成自绘 Popup（要自己接管 dismiss/返回键/focusable）。
                 DrawerMenuAction("改名", onClick = onRename)
                 DrawerMenuAction(
                     if (conversation.pinned) "取消置顶" else "置顶",
