@@ -1005,7 +1005,9 @@ fun ChatScreen(
     // **不是移出列表**：流式行仍在 LazyColumn 里。
     // 只在「用户上翻读历史」时启用；贴底时高度直接跟自然值，行为与以前完全一致。
     val lagNatural = remember { intArrayOf(0) }
-    var lagReported by remember { mutableIntStateOf(0) }
+    // 状态行（「思考中 · 12.3s」/ 重试提示）的高度。它在**裁剪之外**（要一直可见），
+    // 所以钉住值要含它、并且气泡报出的高度要把它扣掉 —— 见 `liveRowLagHeight` 的 `outside`。
+    val statusHeight = remember { intArrayOf(0) }
     // ─── #17 修复（v0.8.319）：**读历史时把流式行的布局高度钉住** ──────────────
     //
     // 前面三版（dispatchRawDelta / heightIn(max) / anchorKey+scrollToItem）都死在同一个地方：
@@ -1039,25 +1041,14 @@ fun ChatScreen(
     LaunchedEffect(state.conversationId) {
         pinnedLiveHeight = 0
         scroll.pinActive = false
+        // 自然高度也必须清：`lagNatural` 是普通数组，切会话后要到**下一次布局**才被写；
+        // 若不清，状态机可能在拿到新值之前先用旧会话的高度钉住（评审 M3-4 指出的顺序洞）。
+        lagNatural[0] = 0
     }
-    // **内容被大幅删掉时要解除钉住**（评审确证）：`liveForPin` 只回答「有没有活内容」，
-    // 不回答「变短了没有」。`RoundRestarted`（`parts.take(segmentStart)` + streaming 清空）
-    // 或用户收起思考/工具块之后，`liveParts` 仍非空 ⇒ 仍钉着旧的大高度 ⇒ 空白一直挂着，
-    // 直到新内容长回原高度。这里只在**钉住期间**逐帧比一次自然高度（一次性比较，不是 IO），
-    // 掉到钉住值的 60% 以下就当作「真删内容」（220ms 缓动收起降幅远小于这个），解除并让
-    // 上面的采集逻辑下一帧按新高度重新捕获。
-    LaunchedEffect(pinnedLiveHeight) {
-        if (pinnedLiveHeight <= 0) return@LaunchedEffect
-        while (true) {
-            withFrameNanos { }
-            val natural = lagNatural[0]
-            if (natural in 1 until pinnedLiveHeight * 6 / 10) {
-                pinnedLiveHeight = 0
-                scroll.pinActive = false
-                break
-            }
-        }
-    }
+    // **不做「变短就解钉」的逐帧判断**（第二轮评审确证这个思路错）：220ms 是**时长**不是降幅，
+    // 而降幅等于折叠块高度 —— 思考链上限 180dp，收起后 natural/pinned ≈ 40%，必然穿过 60% 采样点
+    // ⇒ 每次手动收起折叠块都会解除钉住。真正需要兜底的场景（`RoundRestarted`、一轮结束）由
+    // `liveForPin`（活内容清空 ⇒ 解钉）覆盖；高度不足时的空白由下一条「钉住值不超过自然高度」兜住。
     // **钉住的高度**（0 = 不钉）。
     //
     // 捕获时机：**从「贴底」切到「读历史」的那一帧**，把当时的自然高度钉住，之后不再变。
@@ -1080,49 +1071,55 @@ fun ChatScreen(
     // 有活内容（正文/思考/工具）才值得钉住 —— 空的行不钉。
     val liveForPin = state.streaming.isNotEmpty() || state.reasoning.isNotEmpty() ||
         state.liveParts.isNotEmpty()
+    // **`liveForPin` 必须用 rememberUpdatedState 取最新值**（第二轮评审的关键发现）：
+    // 它是个普通 `val`，若被 `snapshotFlow` 的 lambda 直接捕获，捕获的是**首次组合**那一帧的值，
+    // 而 ChatScreen 常驻、不随会话重建（`SuixingApp.kt:569`）⇒ 首帧没有活内容时它永远是 false
+    // ⇒ `snapshotFlow` 恒 false ⇒ **钉住从来不会生效**（这才是「钉了还在动」的真正原因）。
+    val liveForPinNow by rememberUpdatedState(liveForPin)
     LaunchedEffect(listState) {
-        var pinned = false
+        // 状态机只有两个变量：`scroll.pinActive`（唯一真值）与 `pinnedLiveHeight`。
+        // **不要再用局部 `var pinned` latch**（评审：清 0 之后 latch 仍为 true，永远钉不回去）。
         snapshotFlow {
-            // **只看「是不是在底部」**（用户 2026-10-23 补充的第二种情况：
-            // 「在新轮次对话查看已输出的内容，同时流式还没结束，就会被推着走」）。
-            //
-            // 之前这里还带一个 `visible`（流式行在不在视野内）作为**解除**条件 —— 那是错的：
-            // 用户正在读当前这一轮已经输出的内容时，流式行本来就在视野里 ⇒ 钉住立刻被解除
-            // ⇒ 继续被推。现在只要「不在底部」就钉住，回到底部才解除。
-            //
-            // 代价：钉住期间超出钉住高度的**最新**那段不占布局（被 clipToBounds 裁掉）。
-            // 用户此时在读上面的内容，不是在看最新输出；回到底部立刻恢复。
-            // 流式行**还在**才谈得上钉住：一轮失败/重试会把 liveParts 清空，
-            // 或者这一轮根本没在进行 —— 那时钉住没有意义，只会留一片空白。
-            (!scroll.stickToBottom && !scroll.restoring) && liveForPin
-        }.collect { lagging ->
-            if (lagging && !pinned) {
-                val h = lagNatural[0]
+            // 触发源必须覆盖**所有**会改变判定的量，否则清 0 之后不会再发一次：
+            //   ① 是否不在底部（钉住的含义是「用户在读上面的内容」）、② 有没有活内容、
+            //   ③ 恢复位置期间不算（与 collector 同一套闸）。
+            Triple(
+                !scroll.stickToBottom && !scroll.restoring,
+                liveForPinNow,
+                scroll.pinActive,
+            )
+        }.collect { (notAtBottom, live, pinned) ->
+            val want = notAtBottom && live
+            if (want && !pinned) {
+                // 高度要到**布局之后**才有；`lagNatural` 是普通数组（不进快照，避免测量期写 state
+                // 触发重测），所以这里最多等 30 帧把它拿到 —— 只在状态翻转时发生一次。
+                var h = lagNatural[0]
+                var tries = 0
+                while (h <= 0 && tries < 30) {
+                    withFrameNanos { }
+                    h = lagNatural[0]
+                    tries++
+                }
                 if (h > 0) {
-                    pinnedLiveHeight = h
-                    pinned = true
-                    // 告诉滚动层：钉住期间别用「到底了」来自动打开贴底（否则会把钉住解除）。
+                    // **含状态行**：状态行在裁剪之外，它的高度变化也要被这一项吸收，
+                    // 否则「思考中 · 12.3s」换行时上面的内容仍会被推 1~2 行。
+                    pinnedLiveHeight = h + statusHeight[0]
                     scroll.pinActive = true
                 }
-            } else if (!lagging && pinned) {
+            } else if (!want && pinned) {
                 pinnedLiveHeight = 0
-                pinned = false
                 scroll.pinActive = false
             }
         }
     }
     // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
-    val captureNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
     val laggingNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
     // 偏移 / 能否往回滚」。用途：区分三种"推上去"——
     //   ① 流式行自己长高（nat 变、idx/off 不变）⇒ 该由这里的补偿抵消；
     //   ② 流式行之外的东西长高（nat 不变、off 变）⇒ 本机制看不到，要靠别的手段；
     //   ③ 补偿算了但被列表吞掉（nat 变、d 非 0、off 仍往一个方向走）⇒ 同帧对齐没成立。
-    // 闭环基准：离开底部那一刻流式行在屏幕上的 y（NaN = 未激活）
-    // 闭环基准（已停用，保留声明避免大改 diff；剩余漂移等新日志再定）
-    val anchorTop = remember { floatArrayOf(Float.NaN) }
     // ─── #17 修复：用 scrollToItem 同步改写位置，不用 dispatchRawDelta ─────────────
     //
     // **依据（d6.log 754 帧真机数据，5 组全同）**：
@@ -1510,6 +1507,7 @@ fun ChatScreen(
                                                 // 实验开关：false 时完全不钉。
                                                 reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
                                                 natural = lagNatural,
+                                                outside = statusHeight,
                                             ),
                                     ) {
                                     AssistantRow(
@@ -1596,11 +1594,14 @@ fun ChatScreen(
                                             startedAt = runStartedAt[runKey] ?: 0L,
                                             // 压缩不再占用这一行（它有自己的过程块），所以时钟一直走。
                                             timed = true,
-                                            modifier = Modifier.padding(
-                                                start = 4.dp,
-                                                top = 12.dp,
-                                                bottom = 0.dp,
-                                            ),
+                                            // 量高度给外层用：状态行在裁剪之外，钉住值要含它、
+                                            // 气泡报出的高度要把它扣掉（见 `liveRowLagHeight` 的 `outside`）。
+                                            // 写普通数组，不进快照 ⇒ 不触发重组。
+                                            modifier = Modifier
+                                                .padding(start = 4.dp, top = 12.dp, bottom = 0.dp)
+                                                .onGloballyPositioned {
+                                                    statusHeight[0] = it.size.height
+                                                },
                                         )
                                     }
                                 }
@@ -2100,7 +2101,12 @@ fun ChatScreen(
  * `reported <= 0` ⇒ 直接报自然高度（贴底时走这条，行为与改动前完全一致）。
  * 内容比 [reported] 高时由调用方加 `clipToBounds()` 裁掉 —— 被裁的只是这一帧多出来的边缘。
  */
-private fun Modifier.liveRowLagHeight(reported: Int, natural: IntArray): Modifier =
+private fun Modifier.liveRowLagHeight(
+    reported: Int,
+    natural: IntArray,
+    /** 与本行同属一个 item、但**在裁剪之外**的那部分高度（状态行）。见下面的说明。 */
+    outside: IntArray,
+): Modifier =
     this.layout { measurable, constraints ->
         val placeable = measurable.measure(
             Constraints(maxWidth = constraints.maxWidth, maxHeight = Constraints.Infinity),
@@ -2115,6 +2121,11 @@ private fun Modifier.liveRowLagHeight(reported: Int, natural: IntArray): Modifie
         // 那 220ms 里报出的高度跟着掉、收起完再弹回 ⇒ 用户看到「读着读着跳一下再回来」。
         // 内容真变短（一轮失败/重试清空 liveParts）时会留一段空白，但那由 `liveForPin` 兜住
         // （没有活内容就不钉），且「读历史期间宁可空白也不要动」正是 #17 要的语义。
-        val height = if (reported > 0) reported else placeable.height
+        // `reported` 是**整个 item** 的钉住高度；状态行在裁剪之外、不算进这里，
+        // 所以要把它扣回来 —— 这样状态行换行（重试/429 的提示会有两三行）时，
+        // 气泡的报出高度会反向缩小同样的量，**item 总高度不变** ⇒ 上面的内容不会被推。
+        // 扣掉的是"最新输出"那一段，本来就在裁剪里，用户看不见。
+        val own = if (reported > 0) (reported - outside[0]).coerceAtLeast(0) else 0
+        val height = if (own > 0) own else placeable.height
         layout(placeable.width, height) { placeable.place(0, 0) }
     }
