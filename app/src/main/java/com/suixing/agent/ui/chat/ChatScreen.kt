@@ -1327,15 +1327,21 @@ fun ChatScreen(
             scroll.spotOffset = saved.second
             // ① 粗定位：只是起点，允许差一两项。**用 `*Now` 里的最新值**，不能用 effect 创建时
             // 捕获的那一份（否则冷路径下 `visible` 是空表、`feedPrefix` 也是旧值）。
+            // 决策走纯函数（`RestoreTarget`，带单测）：换算与"什么时候放弃"都有断言守着 ——
+            // 这条链路出过三次同类事故，症状都是"位置没恢复、退回底部"，且不打日志。
+            val targetFed = RestoreTarget.fedIndex(
+                visibleIds = visibleNow.map { it.message.id },
+                savedKey = savedKey as? String,
+                feedPrefix = feedPrefixNow,
+            )
             val approx = visibleNow.indexOfFirst { it.message.id == savedKey }
             android.util.Log.i(
                 "suixing-pos",
                 "restore chat=${state.conversationId} key=$savedKey approx=$approx rows=${visibleNow.size}",
             )
             pinTrace("restore key=$savedKey approx=$approx rows=${visibleNow.size} prefix=$feedPrefixNow")
-            if (approx >= 0) {
-                // 与 `fedIndexOf` 同一个换算（`fedIndexOf` 留着给组合期调用点用）。
-                listState.scrollToItem(feedPrefixNow + (visibleNow.size - 1 - approx), saved.second)
+            if (targetFed != null) {
+                listState.scrollToItem(targetFed, saved.second)
                 withFrameNanos { }
             }
             // ② 精确校正：按 **key** 在 layoutInfo 里找全局 index（issue #16 第三步）。
