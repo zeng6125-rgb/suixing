@@ -17,6 +17,13 @@ import org.junit.Test
  * ⇒ 判定永远是首帧常量（这个机制前几版"改了却没生效"的真因）。那类问题由
  * `PinSignals` 这个类型（把全部输入收进 `snapshotFlow` 的读取集，漏一个编译不过）+ 代码评审守住，
  * **不要以为这些断言覆盖了它**。
+ *
+ * **变异测试过的**（"全绿"不等于"咬住了实现"，所以刻意把实现改坏验证过）：
+ *  - 把 `height = natural + outside` 改成 `natural` ⇒ `status line height is part of the pin…`
+ *    与 `pins even when the outside part is taller…` 两条变红；
+ *  - 解除钉住时不清 `active` ⇒ `can pin again after a release` 与
+ *    `releases when the run clears its content mid-flight` 两条变红。
+ * 恢复后全绿、`git diff` 为空。
  */
 class LivePinStateTest {
 
