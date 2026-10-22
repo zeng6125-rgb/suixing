@@ -562,7 +562,29 @@ class ChatRepository(private val context: Context) {
      *   （目前只有「编辑重答」：它把改正过的问题之后的内容全部丢掉）。
      *   默认 false 是因为最常见的事故是**只加载了一页却回写** —— 那会把历史删掉。
      */
-    suspend fun save(conversation: Conversation, allowShrink: Boolean = false) =
+    /**
+     * 一次保存的结果。**拒绝必须能被调用方看见**（评审 M3）：
+     * 原来的签名是 `Unit`，两处"为避免截断而跳过"只是 `Log.w` ⇒ 调用方当成成功，
+     * 于是界面一切正常、重启后整轮消失，甚至会把**唯一副本**（live 草稿）清掉。
+     */
+    sealed interface SaveResult {
+        data object Written : SaveResult
+        data class Refused(val reason: String) : SaveResult
+    }
+
+    suspend fun save(
+        conversation: Conversation,
+        allowShrink: Boolean = false,
+        /**
+         * **这份 messages 是不是整份历史**（只有"先读全文再改"的路径才传 true）。
+         *
+         * `allowShrink` 的语义是"我有意缩短"，但它同时是**唯一能绕过「窗口不许当全量」
+         * 这道护栏的开关**。编辑重答曾经把屏幕窗口（12 轮）连同 `allowShrink=true`
+         * 一起交给这里 ⇒ 整份日志被重写成窗口、旧代被删 —— 那就是 issue #33 的形状。
+         * 现在：`allowShrink` **且** 条数少于盘上 **且** 没声明 `fullHistory` ⇒ 拒绝写。
+         */
+        fullHistory: Boolean = false,
+    ): SaveResult =
         withContext(Dispatchers.IO) {
         // Two saves for one chat really do overlap: steering saves from its own
         // coroutine while the run's finally saves the finished turn. Without the lock
@@ -609,6 +631,27 @@ class ChatRepository(private val context: Context) {
             var diskMeta = runCatching { store.readMeta(conversation.id) }.getOrNull()
             var diskHasLog = diskMeta != null && diskMeta.logBytes > 0
 
+            // ─── **allowShrink 不许当后门**（评审 M1：#33 的原形状）──────────────────
+            //
+            // 编辑重答曾经把**屏幕窗口**（12 轮）连同 `allowShrink = true` 一起交进来；
+            // 这个开关让下面两道护栏整段跳过 ⇒ 整份日志被重写成窗口、旧代被删。
+            // 现在：声称"有意缩短"的同时，必须**显式声明手里是整份历史**。
+            if (allowShrink && !fullHistory && diskHasLog) {
+                val known = diskMeta?.messageCount ?: 0
+                if (conversation.messages.size < known) {
+                    Log.w(
+                        TAG,
+                        "save refused id=${conversation.id}: allowShrink with " +
+                            "${conversation.messages.size} of $known messages and no " +
+                            "fullHistory flag — a paged window would replace the log",
+                    )
+                    return@withLock SaveResult.Refused(
+                        "这次缩短没有声明是完整历史（手里 ${conversation.messages.size} 条 < 盘上 $known 条）；" +
+                            "为避免截断没有写入",
+                    )
+                }
+            }
+
             // ─── **旧格式会话：先整份迁移，再谈这一轮写什么**（issue #33 事故机制）────
             //
             // 事故是这样发生的：`.json` 里有 400+ 条（几天累积的历史），UI 手里只有
@@ -636,7 +679,7 @@ class ChatRepository(private val context: Context) {
                         "save skipped id=${conversation.id}: the legacy file could not be " +
                             "migrated, and writing a paged window would replace the history",
                     )
-                    return@withLock
+                    return@withLock SaveResult.Refused("旧格式文件迁移失败，这一轮没有写入")
                 }
             }
 
@@ -668,7 +711,9 @@ class ChatRepository(private val context: Context) {
                                 "head ${conversation.messages.firstOrNull()?.id} != " +
                                 "$headOnDisk — the list is neither the whole log nor its tail",
                         )
-                        return@withLock
+                        return@withLock SaveResult.Refused(
+                            "这份既不是完整历史、也不是盘上末尾的一段；为避免截断没有写入",
+                        )
                     }
                 }
             }
@@ -679,6 +724,7 @@ class ChatRepository(private val context: Context) {
             }
             val rest = _conversations.value.filterNot { it.id == stored.id }
             _conversations.value = (listOf(stored) + rest).sortedByDescending { it.updatedAt }
+            SaveResult.Written
         }
     }
 

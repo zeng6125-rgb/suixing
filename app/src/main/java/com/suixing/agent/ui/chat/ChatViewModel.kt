@@ -24,6 +24,7 @@ import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
+import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.describeError
@@ -1617,18 +1618,34 @@ class ChatViewModel : ViewModel() {
         // "盘上 6 条、手里 3 条"只会正确地判定为**误传了半页**并拒写（护栏 allowShrink=false），
         // 于是编辑重答永远存不下去。
         viewModelScope.launch {
-            save(
-                chatId = snapshot.conversationId,
-                title = snapshot.title,
-                messages = kept,
-                assistantId = snapshot.assistantId,
-                activeRuns = _state.value.activeRuns,
-                providerId = snapshot.providerId,
-                model = snapshot.model,
-                reasoningEffort = snapshot.reasoningEffort,
-                checkpoints = snapshot.checkpoints,
-                allowShrink = true,
-            )
+            // **必须从盘上读全文再切**（评审 M1）：`kept` 只是屏幕窗口（12 轮），
+            // 拿它 + `allowShrink` 去写，就是 issue #33 那个形状（窗口顶替整份日志、旧代被删）。
+            // 读不到全文时**宁可不写**，也不截断。
+            val full = runCatching { Core.chats.readAll(snapshot.conversationId) }.getOrNull()
+            val at = full?.indexOfFirst { it.id == id } ?: -1
+            if (full != null && at >= 0) {
+                val keptFull = full.take(at) + full[at].copy(text = body, edited = true)
+                save(
+                    chatId = snapshot.conversationId,
+                    title = snapshot.title,
+                    messages = keptFull,
+                    assistantId = snapshot.assistantId,
+                    activeRuns = _state.value.activeRuns,
+                    providerId = snapshot.providerId,
+                    model = snapshot.model,
+                    reasoningEffort = snapshot.reasoningEffort,
+                    checkpoints = snapshot.checkpoints,
+                    allowShrink = true,
+                    // 声明"这是整份历史"：护栏放行，但条数不足时会被拒（不再有后门）。
+                    fullHistory = true,
+                )
+            } else {
+                Log.w(TAG, "edit not persisted: full history unavailable for ${snapshot.conversationId}")
+                _state.update {
+                    if (it.conversationId != snapshot.conversationId) it
+                    else it.copy(error = "编辑没有写入磁盘：读不到完整历史（避免截断）")
+                }
+            }
         }
         start(fresh, kept)
     }
@@ -2819,6 +2836,11 @@ class ChatViewModel : ViewModel() {
     private suspend fun mergeLiveDraft(chatId: String) {
         val draft = Core.chats.readLive(chatId) ?: return
         val live = sessions[chatId]
+        // **这一轮还活着就不合并**（评审 M2）：草稿是"运行中每秒写一份"的半截正文，
+        // 而活着的这一轮由引擎自己收尾、草稿由 `endSession` 清。合并它会把同一段文字
+        // 存成两条（一条"（由「任务被停止」，对话中断）"结尾），模型下一轮会看到自己
+        // 回答重复；顺带还会把唯一副本清掉。
+        if (live != null && live.runId == draft.runId) return
         val shown = _state.value.takeIf { it.conversationId == chatId }
         val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }
         val messages = live?.messages ?: shown?.messages ?: stored?.messages.orEmpty()
@@ -2844,7 +2866,8 @@ class ChatViewModel : ViewModel() {
         val next = messages + restored
         if (shown != null) _state.update { it.copy(messages = next) }
         live?.let { putSession(it.copy(messages = next)) }
-        save(
+        // `save` 返回 null = **没有写下去**（被护栏拒绝或抛异常）⇒ 草稿是唯一副本，不能清。
+        val written = save(
             chatId = chatId,
             title = live?.title ?: shown?.title ?: stored?.title.orEmpty(),
             messages = next,
@@ -2855,7 +2878,11 @@ class ChatViewModel : ViewModel() {
             reasoningEffort = live?.reasoningEffort ?: shown?.reasoningEffort ?: stored?.reasoningEffort,
             checkpoints = live?.checkpoints ?: shown?.checkpoints ?: stored?.checkpoints.orEmpty(),
         )
-        Core.chats.clearLive(chatId)
+        if (written != null) {
+            Core.chats.clearLive(chatId)
+        } else {
+            Log.w(TAG, "live draft kept for $chatId: the merged copy was not written")
+        }
     }
 
     /**
@@ -2949,6 +2976,8 @@ class ChatViewModel : ViewModel() {
         checkpoints: List<ContextCheckpoint>? = null,
         /** 只有「编辑重答」传 true：它有意把改正后的问题之后的内容丢掉。 */
         allowShrink: Boolean = false,
+        /** 配套声明：这次缩短手里的确是**整份历史**（护栏据此放行或拒绝）。 */
+        fullHistory: Boolean = false,
     ): String? {
         if (chatId.isEmpty()) return null
         val previous = Core.chats.conversations.value.firstOrNull { it.id == chatId }
@@ -2971,6 +3000,7 @@ class ChatViewModel : ViewModel() {
         val outcome = runCatching {
             Core.chats.save(
                 allowShrink = allowShrink,
+                fullHistory = fullHistory,
                 conversation = Conversation(
                     id = chatId,
                     title = derived,
@@ -2996,7 +3026,20 @@ class ChatViewModel : ViewModel() {
             )
         }
         return outcome.fold(
-            onSuccess = { derived },
+            onSuccess = { result ->
+                // **被拒绝也要说出来**（评审 M3）：原来 save 返回 Unit，两处"为避免截断而跳过"
+                // 只写日志 ⇒ 调用方当成成功 ⇒ 界面一切正常、重启后整轮消失。
+                if (result is ChatRepository.SaveResult.Refused) {
+                    Log.w(TAG, "save refused for $chatId: ${result.reason}")
+                    _state.update {
+                        if (it.conversationId != chatId) it
+                        else it.copy(error = "本次未写入：${result.reason}")
+                    }
+                    null
+                } else {
+                    derived
+                }
+            },
             onFailure = { cause ->
                 Log.w(TAG, "save failed for $chatId: ${cause.message}", cause)
                 _state.update {

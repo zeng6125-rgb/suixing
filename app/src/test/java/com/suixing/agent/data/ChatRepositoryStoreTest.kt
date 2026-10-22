@@ -119,6 +119,24 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
+    fun `a paged window can never be passed off as the whole history`() = runBlocking {
+        // **这就是 #33 的形状**（评审 M1）：调用方手里只有窗口（或任何比盘上短的片段），
+        // 却带着 `allowShrink = true`。没有 `fullHistory` 声明时，护栏必须拒绝，
+        // 并且**盘上一个字节都不能动**。
+        val repository = repository()
+        val full = conversation("c1", messages = twoMessages("a") + twoMessages("b") + twoMessages("c"))
+        repository.save(full)
+        val before = repository.readAll("c1").map { it.id }
+
+        // 典型现场：编辑重答拿了屏幕上的窗口（这里取前 2 条模拟），却声称"我要缩短"。
+        val refused = repository.save(full.copy(messages = full.messages.take(2)), allowShrink = true)
+        assertTrue("必须被拒绝而不是静默写入", refused is ChatRepository.SaveResult.Refused)
+
+        val after = repository().apply { load() }.readAll("c1")
+        assertEquals("日志一个字都不能少", before, after.map { it.id })
+    }
+
+    @Test
     fun `a shortened transcript is written as it was given`() = runBlocking {
         val repository = repository()
         val full = conversation("c1", messages = twoMessages("a") + twoMessages("b") + twoMessages("c"))
@@ -127,9 +145,15 @@ class ChatRepositoryStoreTest {
         // What editAndResend does: everything the model said after the corrected question goes.
         // **新契约**（#31 写侧）：缩短必须显式声明（`allowShrink = true`）—— 护栏默认拒绝
         // "手里只有半页"的回写，正是它防止了"打开长会话却把历史截断"。
+        // **契约在 0.8.367 收紧了**（评审 M1）：光是 `allowShrink = true` 不够 ——
+        // 它还要求调用方**显式声明手里是整份历史**（`fullHistory = true`）。
+        // 原因：`allowShrink` 曾是绕过「窗口不许当全量」护栏的唯一下口子，
+        // 而编辑重答当时交给它的是 12 轮窗口 ⇒ 整份日志被重写、旧代被删（#33 的形状）。
+        // 这里调用方手里**确实是**完整历史（从 `full` 派生），所以声明是诚实的。
         repository.save(
             full.copy(messages = full.messages.take(2) + full.messages[0].copy(text = "改过的问题")),
             allowShrink = true,
+            fullHistory = true,
         )
 
         // **新契约**（#30）：load() 只给 meta，正文用 readAll 读回来。
