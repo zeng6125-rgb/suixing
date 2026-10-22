@@ -579,16 +579,17 @@ class ChatViewModel : ViewModel() {
      * Two buffers, not one: the answer and the reasoning land in different parts of the live
      * bubble, and a single buffer would put half a thought into the answer.
      *
-     * Concurrent on purpose, and guarded by [deltaLock] on top of that: the deltas arrive on
+     * Concurrent on purpose, and guarded by `DeltaBuffer`'s lock on top of that: the deltas arrive on
      * the reader thread that delivers the stream (the endpoint is read in
      * `Dispatchers.IO`), while the main thread handles the other events of the same run and
      * flushes these very buffers. A plain map written from two of them does not only lose an
      * update — it loses the **tail of an answer**, because the reader thread appends into a
      * buffer the main thread has already taken out, and that text is never published.
      */
-    private val textBuffers = ConcurrentHashMap<String, StringBuilder>()
-    private val reasoningBuffers = ConcurrentHashMap<String, StringBuilder>()
-    private val lastPublishAt = ConcurrentHashMap<String, Long>()
+    // 攒批缓冲抽成 `DeltaBuffer`（带单测）：它负责三条**沉默失效**的规则 ——
+    // 不丢（append 的每个字符最终被 take）、不漏（会话结束时残字必须丢弃，否则会拼到下一轮）、
+    // 节流到点必须放行。`ChatViewModel` 里原来这些只能靠人眼守。
+    private val deltaBuffer = DeltaBuffer()
 
     /**
      * Guards the delta buffers **and** the live copy they are published into.
@@ -606,42 +607,33 @@ class ChatViewModel : ViewModel() {
      * [steersLock] — always in that order, and [steersLock] is never held while this one
      * is wanted, so there is no lock order to get wrong.
      */
-    private val deltaLock = Any()
 
     /**
      * Appends a piece of the answer and of the thinking to the buffers of [chatId].
      *
-     * **Caller holds [deltaLock].** A [StringBuilder] that one thread writes while another
+     * **Caller holds the delta lock.** A [StringBuilder] that one thread writes while another
      * reads it out of the map is a garbled answer, and a buffer that is taken out of the map
      * while a delta is being appended to it is a delta that is never published.
      */
-    private fun appendDeltaLocked(chatId: String, text: String, reasoning: String) {
-        if (text.isNotEmpty()) textBuffers.getOrPut(chatId) { StringBuilder() }.append(text)
-        if (reasoning.isNotEmpty()) reasoningBuffers.getOrPut(chatId) { StringBuilder() }.append(reasoning)
-    }
+    private fun appendDeltaLocked(chatId: String, text: String, reasoning: String) =
+        deltaBuffer.append(chatId, text.ifEmpty { null }, reasoning.ifEmpty { null })
 
     /**
      * Whether the buffered text may be published now. The clock is read and set in one step,
      * so two threads cannot both decide that they may publish.
      *
-     * **Caller holds [deltaLock].**
+     * **Caller holds the delta lock.**
      */
-    private fun mayPublishLocked(chatId: String, now: Long): Boolean {
-        if (now - (lastPublishAt[chatId] ?: 0L) < DELTA_PUBLISH_MS) return false
-        lastPublishAt[chatId] = now
-        return true
-    }
+    private fun mayPublishLocked(chatId: String, now: Long): Boolean =
+        deltaBuffer.mayPublish(chatId, now, DELTA_PUBLISH_MS)
 
     /**
      * Takes the buffered text and thinking of [chatId] out and hands them over.
      *
      * **Caller holds [deltaLock]** — the take and the publish that follows it are one step.
      */
-    private fun takeDeltasLocked(chatId: String): Pair<String, String> {
-        val text = textBuffers.remove(chatId)?.toString().orEmpty()
-        val reasoning = reasoningBuffers.remove(chatId)?.toString().orEmpty()
-        return text to reasoning
-    }
+    private fun takeDeltasLocked(chatId: String): Pair<String, String> =
+        deltaBuffer.take(chatId)
 
     /**
      * Queued lines per conversation, oldest first.
@@ -2257,25 +2249,35 @@ class ChatViewModel : ViewModel() {
         //
         // 临界区里不做任何挂起调用、也不回调本类 ⇒ 不会死锁。
         var pending: Pair<String, String> = "" to ""
-        synchronized(deltaLock) {
+        // `locked` 不是 inline（它要守住 DeltaBuffer 内部的锁），所以**不能**在块里 `return` ——
+        // 用 `hold` 标记"这次不发布"，出块后再 return。语义与原来的 `synchronized` + return 一致。
+        var hold = false
+        deltaBuffer.locked {
             if (textDelta) appendDeltaLocked(chatId, event.text, "")
             if (reasoningDelta) appendDeltaLocked(chatId, "", event.text)
             if (textDelta || reasoningDelta) {
                 val now = SystemClock.uptimeMillis()
                 // 还没到节拍：缓冲留着，攒到下一次一起发（与改动前一致）。
-                if (!mayPublishLocked(chatId, now)) return
+                if (!mayPublishLocked(chatId, now)) {
+                    hold = true
+                    return@locked
+                }
                 // **后台会话不发布**（用户实测：「一个会话在对话中，切到别的会话滑动会卡」）。
                 //
                 // 屏幕上根本不是它，发布出去只是在 `sessions` 里做 O(n) 字符串拼接 + 列表复制
                 // （`applyPending`），而引擎的事件是在 Main 上处理的 ⇒ 正在看另一个会话的人
                 // 就感到卡。delta **继续缓冲**（不丢），下一次非 delta 事件（工具行、落盘、
                 // 一轮结束）照常 flush；切回来时 `openConversation` 也会先 flush 一次。
-                if (_state.value.conversationId != chatId) return
+                if (_state.value.conversationId != chatId) {
+                    hold = true
+                    return@locked
+                }
             }
             // Whatever has arrived so far, applied in one go. For a non-delta event this is the
             // flush; for a delta it is the publish that got through the interval above.
             pending = takeDeltasLocked(chatId)
         }
+        if (hold) return
         val pendingText = pending.first
         val pendingReasoning = pending.second
         val base = applyPending(live, pendingText, pendingReasoning)
@@ -2519,9 +2521,16 @@ class ChatViewModel : ViewModel() {
      * stopped or failed run would lose its last words.
      */
     private fun flushDeltas(chatId: String) {
-        val live = sessions[chatId] ?: return
+        val live = sessions[chatId]
+        if (live == null) {
+            // 会话已经没了：缓冲里的文字无处可去，**必须丢掉**。
+            // 留着它会在同一个会话的**下一轮**被 `takeDeltasLocked` 取走、拼到新内容前面 ——
+            // 那是「新回答开头莫名多出一段上一轮的话」这种幽灵 bug，且极难复现。
+            deltaBuffer.drop(chatId)
+            return
+        }
         // 同一个锁：取走与事件线程的 append 互斥（否则刚收到的 delta 会被这次 flush 顺手带走）。
-        val (text, reasoning) = synchronized(deltaLock) { takeDeltasLocked(chatId) }
+        val (text, reasoning) = deltaBuffer.locked { takeDeltasLocked(chatId) }
         if (text.isEmpty() && reasoning.isEmpty()) return
         putSession(applyPending(live, text, reasoning))
     }
@@ -2661,6 +2670,12 @@ class ChatViewModel : ViewModel() {
      * left exactly as it was.
      */
     private fun endSession(chatId: String, status: String, error: String? = null) {
+        // **先把攒着的 delta 冲进去，再摘会话**（0.8.333 引入的风险）：后台会话的 delta 现在
+        // 只缓冲不发布（屏幕上看不到它，发布只是白做 O(n) 拼接）。而一轮结束是
+        // `sessions.remove(chatId)` —— 若此时缓冲里还有没应用的尾巴，那段文字既不会进
+        // 将要落盘的消息，也不会再有人来取（`flushDeltas` 找不到会话就直接返回）。
+        // 用户看到的就是「回答少了一截」，且没有任何报错。
+        flushDeltas(chatId)
         val live = sessions.remove(chatId)
         // 一轮结束：`sessions` 里那份没了，切回来只能靠 LRU 缓存 ⇒ 在这里刷一次
         // （#35：原来是在 `putSession` 里每 80ms 刷，太频繁）。
