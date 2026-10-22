@@ -1061,6 +1061,11 @@ fun ChatScreen(
     // **不是移出列表**：流式行仍在 LazyColumn 里。
     // 只在「用户上翻读历史」时启用；贴底时高度直接跟自然值，行为与以前完全一致。
     val lagNatural = remember { intArrayOf(0) }
+    // #17 定位用：流式行在根坐标系里的 y，以及「钉住那一刻的 y」。
+    // 只有这两个数才能回答**用户到底看到了什么**：「钉住了没动」还是「钉住了但还在动」。
+    // 普通数组（不进快照）⇒ 每帧写也不会触发重组；`onGloballyPositioned` 本来就在布局后回调。
+    val liveRowTop = remember { floatArrayOf(Float.NaN) }
+    val armedTop = remember { floatArrayOf(Float.NaN) }
     // 状态行（「思考中 · 12.3s」/ 重试提示）的高度。它在**裁剪之外**（要一直可见），
     // 所以钉住值要含它、并且气泡报出的高度要把它扣掉 —— 见 `liveRowLagHeight` 的 `outside`。
     val statusHeight = remember { intArrayOf(0) }
@@ -1190,11 +1195,20 @@ fun ChatScreen(
             val nowActive = pinnedLiveHeight > 0
             if (nowActive != wasActive) {
                 if (nowActive) {
+                    armedTop[0] = liveRowTop[0]
                     android.util.Log.i("suixing-pin", "arm h=${pinnedLiveHeight} status=${statusHeight[0]}")
-                    pinTrace("arm h=${pinnedLiveHeight} status=${statusHeight[0]}")
+                    pinTrace("arm h=${pinnedLiveHeight} status=${statusHeight[0]} top=${liveRowTop[0]}")
                 } else {
-                    android.util.Log.i("suixing-pin", "release notAtBottom=$notAtBottom live=$live")
-                    pinTrace("release notAtBottom=$notAtBottom live=$live")
+                    // **位移**：钉住期间流式行在屏幕上挪了多少像素。
+                    // 0（或 ±1）＝ 钉住真的把位置定住了；明显非 0 ＝ 还有别的东西在推。
+                    // 这一列就是「用户报的还在动」到底发生在哪一层」的判据。
+                    val drift = if (armedTop[0].isNaN() || liveRowTop[0].isNaN()) {
+                        Float.NaN
+                    } else {
+                        liveRowTop[0] - armedTop[0]
+                    }
+                    android.util.Log.i("suixing-pin", "release drift=$drift live=$live")
+                    pinTrace("release notAtBottom=$notAtBottom live=$live drift=$drift")
                 }
             }
         }
@@ -1621,7 +1635,10 @@ fun ChatScreen(
                                                 reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
                                                 natural = lagNatural,
                                                 outside = statusHeight,
-                                            ),
+                                            )
+                                            // #17 定位用：记下这一行在屏幕上的 y（普通数组，不进快照）。
+                                            // 钉住期间它与 `armedTop` 的差值就是"用户看到的位移"。
+                                            .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
                                     ) {
                                     AssistantRow(
                                     parts = remember(
