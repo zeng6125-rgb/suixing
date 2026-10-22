@@ -908,7 +908,14 @@ class ChatRepository(private val context: Context) {
      */
     private fun writeTail(conversation: Conversation, newMessages: List<StoredMessage>): Conversation {
         val onDisk = runCatching { store.readMeta(conversation.id) }.getOrNull()
-            ?: return write(conversation)
+            ?: run {
+                // 评审 S2/M4：这里的兜底原来是 `return write(conversation)`，
+                // 而 meta 读不出来时 `write` 只会用 newMeta + 窗口 —— 等于"窗口当全量"。
+                // 现在明确拒绝：调用方拿到 Refused，界面提示"本次未写入"。
+                throw IllegalStateException(
+                    "meta unreadable for ${conversation.id}: refusing to fall back to a full write",
+                )
+            }
         val next = store.appendNew(onDisk, newMessages)
         // The meta's own fields (title / pinned / archived / model …) still come from the
         // conversation, not from the old meta.
@@ -928,8 +935,27 @@ class ChatRepository(private val context: Context) {
         return updated.toConversation()
     }
 
+    /** 这个会话在 store 里是否**已经有日志文件**（不管 meta 读不读得出来）。 */
+    private fun logExists(id: String): Boolean =
+        File(dir, STORE_DIR).listFiles { file ->
+            file.name.startsWith("$id.") && file.name.endsWith(LOG_SUFFIX)
+        }?.isNotEmpty() == true
+
     private fun write(conversation: Conversation, allowShrink: Boolean = false): Conversation {
         val started = System.currentTimeMillis()
+        // **meta 读不出来 ≠ 没有历史**（评审 M4，不可逆）。
+        //
+        // `store.readMeta` 解析失败时返回 null（`storeMetas` 还会把它改名成 `.meta.corrupt`），
+        // 而下面 `onDisk == null` 会走 `store.newMeta`（logBytes = 0）⇒ `ChatStore` 看到
+        // "元数据说 0 字节，文件却非空" ⇒ **`setLength(0)` 把整份日志清空**，再写进手里的窗口。
+        // 迁移出来的会话 gen 本来就是 0，被清空的往往就是那份完整日志本身。
+        // 所以：只要**日志文件还在**、meta 又读不出来，就什么都不写，抛出让人看得见的错。
+        if (runCatching { store.readMeta(conversation.id) }.getOrNull() == null && logExists(conversation.id)) {
+            throw IllegalStateException(
+                "meta unreadable but a log exists for ${conversation.id}: refusing to rewrite the log " +
+                    "from a paged window",
+            )
+        }
         // **meta 的字段一律取自这次要写的会话**（标题/置顶/归档/助手/模型/检查点），
         // 只从盘上继承计数器（messageCount / lastMessageId / logBytes / gen）。
         //

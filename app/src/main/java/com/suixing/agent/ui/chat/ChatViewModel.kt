@@ -2339,7 +2339,13 @@ class ChatViewModel : ViewModel() {
         if (hold) return
         val pendingText = pending.first
         val pendingReasoning = pending.second
-        val base = applyPending(live, pendingText, pendingReasoning)
+        // **临界区之后重读一次**（评审 M5）：`live` 是在进入临界区**之前**取的快照，
+        // 而 `putSession` 是整体覆盖（`sessions[id] = next`）。若另一线程（主线程的
+        // `flushDeltas` / `mergeLiveDraft`）在这中间写入过，用旧快照算出来的 `next`
+        // 会把它刚合并进去的内容盖掉 —— 那种丢失只会发生在内存里，不报错也不落盘。
+        // 重读把窗口从"整个临界区+applyPending"缩到"两条语句之间"，并保留对方写入的字段。
+        val merged = sessions[chatId] ?: live
+        val base = applyPending(merged, pendingText, pendingReasoning)
         val next = when (event) {
             // Already folded into `base` above.
             is AgentEvent.TextDelta -> base.clearRetryStatus()
