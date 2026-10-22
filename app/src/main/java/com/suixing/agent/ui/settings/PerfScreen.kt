@@ -43,6 +43,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 
 /**
  * 设置 → 性能：三段。
@@ -54,6 +57,8 @@ import kotlin.math.roundToInt
  * **只显示真的测到的数字**：GPU 利用率在 Android 上没有公开 API、部分机型的 sysfs 也不给读，
  * 所以它显示为「—」而不是 0 —— 0 会被读成"测得是零"，那是另一种撒谎。
  */
+private val NL_PERF = 10.toChar().toString()
+
 @Composable
 internal fun PerfScreen(onBack: () -> Unit) {
     // 进页面读一次，退出再进就是最新数据 —— 但**读盘与算分位数都不在主线程**：那是几十 KB 的
@@ -87,6 +92,22 @@ internal fun PerfScreen(onBack: () -> Unit) {
         }
     }
     val frame = rememberFrameStat()
+
+    // #17 定位用：把 `pin.log` 的尾部搬进界面。
+    //
+    // 为什么放在这里而不是只写文件：这台机器 MIUI 把 `adb logcat` 限死、release 包 `run-as`
+    // 也不可用 ⇒ 之前只能靠 root 的 `adb shell su -c cat` 才能读到。放进性能页之后，
+    // 复现一次、点「复制」就能贴出来，验证不再依赖电脑。
+    var pinLog by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        pinLog = withContext(Dispatchers.IO) {
+            runCatching {
+                val file = java.io.File(Core.appContext.filesDir, "pin.log")
+                if (!file.isFile) "" else file.readLines().takeLast(30).joinToString(NL_PERF)
+            }.getOrDefault("")
+        }
+    }
+    val clipboard = LocalClipboardManager.current
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -134,6 +155,25 @@ internal fun PerfScreen(onBack: () -> Unit) {
                     val heapMax = metrics?.javaHeapMaxMb
                     MetricRow("Java 堆", if (heap != null && heapMax != null) "$heap / $heapMax MB" else "—")
                     MetricRow("线程", metrics?.threads?.toString() ?: "—")
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item(key = "pinlog") {
+                Column(Modifier.padding(vertical = 12.dp)) {
+                    Text("流式上翻痕迹（最近 30 行）", style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = pinLog.ifBlank {
+                            "（还没有痕迹：发一条长消息、流式中往上滑一下就会生成）"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (pinLog.isNotBlank()) {
+                        TextButton(onClick = { clipboard.setText(AnnotatedString(pinLog)) }) {
+                            Text("复制")
+                        }
+                    }
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
