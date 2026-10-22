@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import kotlinx.coroutines.delay
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.runtime.SideEffect
 
 // ---------------------------------------------------------------------------
 // Block model + parser. Pure Kotlin: no Android or Compose types are involved,
@@ -672,9 +673,18 @@ fun MarkdownText(
      * 只在 `Paragraph` 上追加：标题/列表/代码追加光标会让排版变怪，而流式正文几乎总是段落。
      */
     cursor: Boolean = false,
+    /**
+     * 文本是否已定稿（可以进进程级缓存）。
+     *
+     * **不能拿 [cursor] 顶替**（第四轮评审确证）：live 正文本身**不传** `cursor`
+     * （光标由调用点另画的 `BlinkingCursor()` 负责），所以 `!cursor` 会把流式正文当成定稿 ——
+     * 打字机 25 Hz 每拍一个新前缀，全部塞进 LRU ⇒ 缓存被同一条答案的 16 个连续前缀占满，
+     * 流式期间命中率恒为 0、定稿消息反而被挤掉（最坏 6~10MB 纯浪费）。
+     * 调用点要显式传：`settled = !streaming`。
+     */
+    settled: Boolean = !cursor,
 ) {
-    // `cursor` 只在流式那一行是 true ⇒ 它就是"还没定稿"的信号（定稿行可以进进程级缓存）。
-    val blocks = rememberGrowingMarkdown(text, settled = !cursor)
+    val blocks = rememberGrowingMarkdown(text, settled)
     MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
 }
 
@@ -701,7 +711,10 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
     // 定稿文本：先查进程级缓存 —— 滚出去再滚回来就不必重新解析（快速滑动的卡顿来源）。
     SettledBlocks.get(text)?.let { return it }
     val blocks = cache.blocksFor(text)
-    SettledBlocks.put(text, blocks)
+    // **写入放到 `SideEffect`**（评审 S1）：`put` 改的是全局 LRU，而组合可能被丢弃/重试
+    // （LazyColumn 组合了又立刻回收的项）—— 在组合期写会让"没人看过的文本"占格、
+    // 把正在看的挤掉。`get` 也顺手加了长度门槛（评审 S3）。
+    SideEffect { SettledBlocks.putIfSettled(settled, text, blocks) }
     return blocks
 }
 
@@ -729,10 +742,26 @@ internal object SettledBlocks {
     internal const val MIN_CHARS = 400
     internal const val CAPACITY = MAX_ENTRIES
 
-    internal fun get(text: String): List<MdBlock>? = synchronized(map) { map[text] }
+    internal fun get(text: String): List<MdBlock>? {
+        // 与 `put` 对称：短文本从不入缓存，所以查找纯属白做（思考链每行都短）。
+        if (text.length < MIN_CHARS) return null
+        return synchronized(map) { map[text] }
+    }
 
     /** 仅供单测断言上界（生产路径不需要读容量）。 */
     internal fun sizeForTest(): Int = synchronized(map) { map.size }
+
+    /**
+     * 调用侧契约：**只有定稿文本**可以进缓存。
+     *
+     * 做成函数（而不是只在组合里 `if (settled)`）是因为它能被单测断言 ——
+     * 这条契约曾经只写在 KDoc 里，于是实现踩了自己写的规则（流式正文被当成定稿，
+     * 打字机 25 Hz 每拍一个新前缀把 16 格占满）。
+     */
+    internal fun putIfSettled(settled: Boolean, text: String, blocks: List<MdBlock>) {
+        if (!settled) return
+        put(text, blocks)
+    }
 
     internal fun put(text: String, blocks: List<MdBlock>) {
         if (text.length < MIN_CHARS) return

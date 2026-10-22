@@ -64,4 +64,28 @@ class SettledBlocksTest {
         assertTrue("新插入的也在", SettledBlocks.get(extra) != null)
         assertEquals("恰好淘汰一条", SettledBlocks.CAPACITY, SettledBlocks.sizeForTest())
     }
+
+    @Test
+    fun `a text that is not settled never enters the cache`() {
+        // 调用侧契约（第四轮评审 M1 的回归桩）：流式正文**不能**被当成定稿塞进缓存 ——
+        // 否则打字机 25 Hz 每拍一个新前缀，16 格被同一条答案的 16 个前缀占满，
+        // 流式期命中率恒为 0，定稿消息反而被挤掉。
+        val before = SettledBlocks.sizeForTest()
+        (1..20).map { text("prefix$it") }.forEach { prefix ->
+            SettledBlocks.putIfSettled(settled = false, text = prefix, blocks = parseMarkdown(prefix))
+        }
+        assertEquals("未定稿文本一条都不许进缓存", before, SettledBlocks.sizeForTest())
+
+        // 对照：定稿文本必须进。
+        val settledText = text("settled")
+        SettledBlocks.putIfSettled(settled = true, text = settledText, blocks = parseMarkdown(settledText))
+        assertTrue("定稿文本应该进缓存", SettledBlocks.get(settledText) != null)
+        assertEquals(before + 1, SettledBlocks.sizeForTest())
+    }
+
+    @Test
+    fun `short texts are not looked up either`() {
+        // 与 put 对称（评审 S3）：短文本从不入缓存，查找纯属白做。
+        assertNull(SettledBlocks.get("短"))
+    }
 }

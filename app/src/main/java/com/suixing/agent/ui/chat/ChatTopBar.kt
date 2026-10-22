@@ -1097,7 +1097,11 @@ internal fun AssistantRow(
                             // 流式时逐字放（外观 → 打字机效果）；settled 直接全文，选区也用全文。
                             val shown = rememberTypedText(part.text, streaming)
                             if (streaming || !selectable) {
-                                MarkdownText(text = shown)
+                                // **`settled = !streaming`**（第四轮评审 M1）：live 正文不传 `cursor`
+                                // （光标由下面的 `BlinkingCursor()` 单独画），若让它按 `!cursor`
+                                // 默认成"定稿"，打字机 25 Hz 每拍一个新前缀都会塞进进程级 LRU
+                                // ⇒ 缓存被同一条答案的 16 个前缀占满、流式期命中率恒为 0。
+                                MarkdownText(text = shown, settled = !streaming)
                             } else {
                                 SelectionContainer { MarkdownText(text = part.text) }
                             }

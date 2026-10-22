@@ -369,7 +369,10 @@ fun ChatScreen(
         }
         setDraft(text = text, imageNames = draft.imageNames + List(restored) { QUEUED_IMAGE_LABEL })
     }
-    var editing by remember { mutableStateOf<StoredMessage?>(null) }
+    // **按会话重置**（评审 S4）：它持有的是某条消息对象，切会话后若还能被读到，
+    // `editMessage(id, …)` 会把 A 的编辑改到 B 上。目前靠"编辑弹窗是模态"侥幸挡住，
+    // 但任何非模态切换路径（通知/deep link/分屏）都会踩。
+    var editing by remember(state.conversationId) { mutableStateOf<StoredMessage?>(null) }
     // The composer stack's own measured height: the node inside all of its paddings, so the
     // gesture bar's strip and its own 12dp of air are not in it (they are added back below).
     var composerH by remember { mutableStateOf(0.dp) }
@@ -1251,6 +1254,13 @@ fun ChatScreen(
     // `first { it > 0 }` 永远等不到，**整段恢复位置被静默跳过**（无崩溃、无日志）。
     // 同一事故在本文件 `messageIdsState` 那里已经修过一次，这是第二处。
     val itemCountNow by rememberUpdatedState(itemCount)
+    // **`visible` 与 `feedPrefix` 同样是普通 `val`**（`visible` 是 remember 出来的 List、
+    // `feedPrefix` 是 Int）——这个 effect 的 body 只在切会话时创建一次，捕获的是**切换那一帧**的值。
+    // 冷路径（未命中 5 条 LRU）那一帧 `messages` 还是空 ⇒ `visible` 是空表 ⇒
+    // `visible.indexOfFirst{…}` 恒 -1 ⇒ 粗定位整段跳过、精确校正也找不到 key ⇒ **退回底部**。
+    // 这是同一事故的第三处（前两处：`messageIdsState`、`itemCount`）。
+    val visibleNow by rememberUpdatedState(visible)
+    val feedPrefixNow by rememberUpdatedState(feedPrefix)
     LaunchedEffect(state.conversationId) {
         if (openedPinned) return@LaunchedEffect
         snapshotFlow { itemCountNow }.first { it > 0 }
@@ -1276,10 +1286,12 @@ fun ChatScreen(
             scroll.stickToBottom = false
             scroll.spotKey = savedKey
             scroll.spotOffset = saved.second
-            // ① 粗定位：`fedIndexOf` 只是起点，允许差一两项。
-            val approx = visible.indexOfFirst { it.message.id == savedKey }
+            // ① 粗定位：只是起点，允许差一两项。**用 `*Now` 里的最新值**，不能用 effect 创建时
+            // 捕获的那一份（否则冷路径下 `visible` 是空表、`feedPrefix` 也是旧值）。
+            val approx = visibleNow.indexOfFirst { it.message.id == savedKey }
             if (approx >= 0) {
-                listState.scrollToItem(fedIndexOf(approx), saved.second)
+                // 与 `fedIndexOf` 同一个换算（`fedIndexOf` 留着给组合期调用点用）。
+                listState.scrollToItem(feedPrefixNow + (visibleNow.size - 1 - approx), saved.second)
                 withFrameNanos { }
             }
             // ② 精确校正：按 **key** 在 layoutInfo 里找全局 index（issue #16 第三步）。
