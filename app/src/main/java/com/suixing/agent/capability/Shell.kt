@@ -1,4 +1,6 @@
 package com.suixing.agent.capability
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -247,13 +249,22 @@ object Shell {
         /** 工作目录：直接交给 ProcessBuilder，省掉命令里的 `cd X &&` 前缀（少一层 shell）。 */
         cwd: java.io.File? = null,
     ): ShellResult =
-        runCatching {
-            val builder = ProcessBuilder(*command).apply { environment().putAll(env) }
-            if (cwd != null && cwd.isDirectory) builder.directory(cwd)
-            collect(builder.start())
-        }.getOrElse { error ->
-            if (error is CancellationException) throw error
-            ShellResult(false, "", error.message ?: error.javaClass.simpleName, -1)
+        // **必须切到 IO**（issue #34 缺陷 2）：`collect()` 里是 `process.waitFor(POLL_MS)`
+        // 的阻塞轮询，`ProcessBuilder.start()` 本身也是阻塞的。原来这里没有 `withContext`，
+        // 整段就占着调用方的 dispatcher —— 调用方若是 `Dispatchers.Main`，插件工具一跑
+        // 界面就卡，而且会一直卡到 `DEFAULT_TIMEOUT_MS`。
+        //
+        // 同文件里 `http()` 早就切了 IO，两个分支不该不一致。
+        // 取消仍然有效：`collect()` 每轮 `waitFor` 之后都查 `currentCoroutineContext().isActive`。
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val builder = ProcessBuilder(*command).apply { environment().putAll(env) }
+                if (cwd != null && cwd.isDirectory) builder.directory(cwd)
+                collect(builder.start())
+            }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                ShellResult(false, "", error.message ?: error.javaClass.simpleName, -1)
+            }
         }
 
     private suspend fun collect(process: Process): ShellResult {

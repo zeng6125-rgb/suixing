@@ -338,7 +338,10 @@ object PluginRuntime {
         val headers = exec.headers.entries.associate { (name, value) ->
             render(name, vars, missing) to render(value, vars, missing)
         }
-        val body = exec.body?.let { render(it, vars, missing) }
+        // body 按**位置**处理（issue #34）：字符串里转义、数字位置原样。
+        val body = exec.body?.let {
+            render(it, vars, missing, jsonAware = ::jsonEscapeIfInString)
+        }
         if (missing.isNotEmpty()) return missingFailure(spec, decl, missing)
 
         val method = (exec.method ?: "GET").uppercase()
@@ -492,15 +495,63 @@ object PluginRuntime {
         vars: Map<String, String>,
         missing: MutableList<String>,
         transform: (String) -> String = { it },
+        /** body 专用：在 JSON 字符串内才转义，数字位置原样（见 [jsonEscapeIfInString]）。 */
+        jsonAware: ((value: String, inString: Boolean) -> String)? = null,
     ): String = TEMPLATE_VAR.replace(template) { match ->
         val key = match.groupValues[1]
         val value = vars[key]
         if (value == null) {
             if (key !in missing) missing += key
             match.value
+        } else if (jsonAware != null) {
+            jsonAware(value, isInsideJsonString(template, match.range.first))
         } else {
             transform(value)
         }
+    }
+
+    /** JSON 里的反斜杠字符（写成字符码，避免这一行本身要转义）。 */
+    private val JSON_BACKSLASH = 92.toChar()
+
+    /**
+     * [index] 这个位置在不在一个 JSON 字符串里（从前往后数**未转义**的双引号，奇数即在里面）。
+     *
+     * 为什么需要（issue #34）：`http` 的 body 里既有字符串位置 `{"query":"{{q}}"}`，
+     * 也有数字位置 `{"max_results":{{count}}}`。整段统一转义会把 `8` 变成字符串 `"8"`
+     * （接口 400）；一律不转义则查询词含双引号时把 JSON 弄坏（`他说"你好"` ⇒ 400）。
+     * 所以只能按**位置**决定。
+     */
+    internal fun isInsideJsonString(template: String, index: Int): Boolean {
+        var quotes = 0
+        var i = 0
+        while (i < index && i < template.length) {
+            val ch = template[i]
+            if (ch == JSON_BACKSLASH) i++ else if (ch == '"') quotes++
+            i++
+        }
+        return quotes % 2 == 1
+    }
+
+    /**
+     * 在 JSON 字符串内部就转义；在数字 / 字面量位置原样返回。
+     *
+     * 只处理会破坏 JSON 的字符：双引号、反斜杠、换行、制表、其余控制字符。
+     */
+    internal fun jsonEscapeIfInString(value: String, inString: Boolean): String {
+        if (!inString) return value
+        val out = StringBuilder(value.length + 8)
+        for (ch in value) {
+            when {
+                ch == '"' -> out.append(JSON_BACKSLASH).append('"')
+                ch == JSON_BACKSLASH -> out.append(JSON_BACKSLASH).append(JSON_BACKSLASH)
+                ch.code == 10 -> out.append(JSON_BACKSLASH).append('n')
+                ch.code == 13 -> out.append(JSON_BACKSLASH).append('r')
+                ch.code == 9 -> out.append(JSON_BACKSLASH).append('t')
+                ch < ' ' -> out.append(JSON_BACKSLASH).append(String.format("u%04x", ch.code))
+                else -> out.append(ch)
+            }
+        }
+        return out.toString()
     }
 
     private fun missingFailure(spec: PluginSpec, decl: ToolDecl, missing: List<String>): ToolResult {
