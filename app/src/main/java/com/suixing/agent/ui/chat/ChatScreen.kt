@@ -1200,7 +1200,11 @@ fun ChatScreen(
         }
     }    // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
-    val laggingNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
+    // **抑制信号必须是"外层真的在冻结高度"**，而不是"用户在读历史"（我引入的不一致）：
+    // `LocalLiveRowLag` 用来告诉流式行里的 `RevealHeight`「别自己补，外层统一补」——
+    // 但外层只有在**钉住生效**时才冻结高度（`pinnedLiveHeight > 0` ⇒ `scroll.pinActive`）。
+    // 两者不等价时（读历史了、但钉住没量到高度/没活内容），流式行里的折叠块会**两边都不补** ⇒ 展开时跳。
+    val laggingNow by rememberUpdatedState(scroll.pinActive)
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
     // 偏移 / 能否往回滚」。用途：区分三种"推上去"——
     //   ① 流式行自己长高（nat 变、idx/off 不变）⇒ 该由这里的补偿抵消；
