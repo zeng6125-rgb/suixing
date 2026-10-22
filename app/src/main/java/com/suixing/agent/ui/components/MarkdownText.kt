@@ -1,19 +1,13 @@
 package com.suixing.agent.ui.components
 
-import kotlinx.coroutines.delay
-import androidx.compose.ui.res.vectorResource
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.material3.Icon
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.border
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,40 +21,50 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
+import kotlinx.coroutines.delay
 
 // ---------------------------------------------------------------------------
 // Block model + parser. Pure Kotlin: no Android or Compose types are involved,
@@ -891,37 +895,52 @@ private fun InlineText(
             codeFontSize = palette.codeFontSize,
         ).scan()
     }
-    // 光标：解析完成后再往末尾追加，markdown 边界不受影响（见 cursor 的说明）。
-    // 用 AnnotatedString 拼接而不是外面再放一个 Text —— 后者会自成一行或挤出块外。
-    val alpha = if (cursor) blinkingCursorAlpha() else 1f
-    val shown = if (cursor) {
-        remember(annotated, alpha) {
-            buildAnnotatedString {
-                append(annotated)
-                withStyle(SpanStyle(color = palette.linkColor.copy(alpha = alpha))) {
-                    append(CURSOR_GLYPH)
-                }
-            }
-        }
-    } else {
-        annotated
-    }
+    // 光标：**不再拼进 AnnotatedString**（性能）。
+    //
+    // 原来是 `remember(annotated, alpha) { buildAnnotatedString { … } }`，而 `alpha` 在**组合期**
+    // 读（闪烁动画的 State）⇒ 每帧重建整个 AnnotatedString + 该行文本重新排版（60 次/秒）。
+    // 思考链在打字机 25 Hz 下每行都带光标，这一条就是「流式时滑动发涩」里稳定的一部分。
+    //
+    // 现在 AnnotatedString 只随文本变化；光标用 `drawBehind` 在**绘制阶段**画，
+    // 读 alpha 不触发重组、也不触发重新排版（本仓 `ChatBlocks.kt` 的 `RevealHeight`
+    // 与 `ChatScreen` 的 `switchAlpha` 都是同一个写法）。
+    val caret = remember { arrayOfNulls<TextLayoutResult>(1) }
+    val caretAlpha = if (cursor) blinkingCursorAlphaState() else null
     Text(
-        text = shown,
-        modifier = modifier,
+        text = annotated,
+        modifier = if (caretAlpha == null) {
+            modifier
+        } else {
+            modifier.drawBehind {
+                val layout = caret[0] ?: return@drawBehind
+                if (layout.lineCount == 0) return@drawBehind
+                val line = layout.lineCount - 1
+                val top = layout.getLineTop(line)
+                val h = (layout.getLineBottom(line) - top).toFloat()
+                drawRect(
+                    color = palette.linkColor.copy(alpha = caretAlpha.value),
+                    topLeft = Offset(layout.getLineRight(line), top),
+                    size = Size(CURSOR_WIDTH_PX, h),
+                )
+            }
+        },
         style = style,
         color = color,
+        onTextLayout = { if (caretAlpha != null) caret[0] = it },
     )
 }
 
-/** 光标字符：细竖条，和正文同一行高。 */
-private const val CURSOR_GLYPH = "▍"
+/** 光标宽度：绘制阶段用（1.5dp @3x ≈ 4.5px，取 4px 与旧的 ▍ 视觉接近）。 */
+private const val CURSOR_WIDTH_PX = 4f
 
-/** 与 [com.suixing.agent.ui.chat.BlinkingCursor] 同一节奏（480ms 往返），但作用于文字颜色。 */
+/**
+ * 与 [com.suixing.agent.ui.chat.BlinkingCursor] 同一节奏（480ms 往返）的光标透明度，但**返回 `State`**：绘制阶段要读它（`.value`），
+ * 不能像以前那样在组合期用 `by` 取出来 —— 那会让整行文本每帧重组并重新排版。
+ */
 @Composable
-private fun blinkingCursorAlpha(): Float {
+private fun blinkingCursorAlphaState(): State<Float> {
     val transition = rememberInfiniteTransition(label = "inlineCursor")
-    val alpha by transition.animateFloat(
+    return transition.animateFloat(
         initialValue = 0.15f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -930,7 +949,6 @@ private fun blinkingCursorAlpha(): Float {
         ),
         label = "inlineCursorAlpha",
     )
-    return alpha
 }
 
 @Composable
