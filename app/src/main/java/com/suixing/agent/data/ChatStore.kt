@@ -546,6 +546,10 @@ internal class ChatStore(private val root: File) {
         RandomAccessFile(log, "r").use { raf ->
             var pos = 0L
             val buf = ByteArray(SEARCH_CHUNK + needle.size)
+            // 上一块的**最后一个字节**：分块扫描时 `buf[i - 1]` 在 `i == 0` 处是越界的
+            // （评审 S4：只有「needle 起点正好落在 1MB 边界」才触发，但它是发送路径上的
+            // `readWire` / 加载更早的唯一位置来源，崩了就是"发送失败"）。
+            var previousChunkLast: Byte? = null
             while (pos < limit) {
                 val want = minOf(SEARCH_CHUNK.toLong(), limit - pos).toInt()
                 // One needle's worth of overlap so a match straddling two chunks is still found.
@@ -556,16 +560,30 @@ internal class ChatStore(private val root: File) {
                 var i = 0
                 while (i + needle.size <= avail) {
                     if (buf[i] == needle[0] && regionMatches(buf, i, needle)) {
-                        // Only a line start counts; the first line has no newline before it.
-                        if (pos + i == 0L || buf[i - 1] == NEWLINE) return pos + i
+                        if (isLineStart(pos, i, buf, previousChunkLast)) return pos + i
                     }
                     i++
                 }
+                previousChunkLast = if (want > 0) buf[want - 1] else previousChunkLast
                 pos += want
             }
         }
         return null
     }
+
+    /**
+     * 命中处是不是**行首**。
+     *
+     * 只有行首才算（消息 id 也可能出现在正文里）。抽出成函数是为了能被单测覆盖 ——
+     * 分块扫描里 `buf[i - 1]` 在 `i == 0` 处是**越界**的（评审 S4），
+     * 而这条分支只在「needle 起点正好落在块边界」时才走到，靠真实日志很难碰。
+     */
+    internal fun isLineStart(pos: Long, i: Int, buf: ByteArray, previousChunkLast: Byte?): Boolean =
+        when {
+            pos + i == 0L -> true                       // 文件第一个字节
+            i > 0 -> buf[i - 1] == NEWLINE
+            else -> previousChunkLast == NEWLINE        // i == 0：看上一块最后那个字节
+        }
 
     /** Deletes the chat's store: the meta and every generation of its log. */
     fun discard(id: String) {

@@ -391,7 +391,11 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     // 外层流式行正在做滞后补偿时，这里只动高度、不碰滚动（见 [LocalLiveRowLag]）。
-    val suppressOuterCompensation = LocalLiveRowLag.current
+    // **必须经 `rememberUpdatedState` 读**（评审 M1）：帧循环所在的 `LaunchedEffect(visible)`
+    // 只以 `visible` 为 key，局部 `val` 变了**不会重启协程** ⇒ 读到的是动画开始那一刻的值。
+    // 后果：钉住期间（外层已把高度钉死、补偿必须为 0）它仍是旧值 false ⇒ 帧循环继续
+    // `dispatchRawDelta(comp)`，把内容按剩余补偿量推走 —— 正是 #17 要治的那份漂移。
+    val suppressOuterCompensation by rememberUpdatedState(LocalLiveRowLag.current)
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
