@@ -8,10 +8,15 @@ import org.junit.Test
 /**
  * [LivePinState] 的状态转移。
  *
- * 这些断言是给两次真事故立的桩（都发生在"钉住"这个机制里）：
- *  - `liveForPin` 被一次性捕获 ⇒ 钉住从未生效（表现：改了无数版还在动）；
- *  - 解除时只清高度、没清 latch ⇒ 之后再也钉不回去（表现：某一刻起彻底失效）。
- * 两者都不是编译错误、也不是界面能一眼看出的错，只能靠这些断言守住。
+ * **边界要说清**（第三轮评审的批评）：这里证明的是**状态转移正确**，例如
+ *  - 解除钉住之后能重新钉上（曾经的 latch 事故）；
+ *  - 高度还没量到时不会用 0 去钉；
+ *  - 状态行高度计入钉住值、切会话清零。
+ *
+ * 它**测不到**接线层面的那类事故：`liveForPin` / `livePin` 被 `LaunchedEffect` 一次性捕获
+ * ⇒ 判定永远是首帧常量（这个机制前几版"改了却没生效"的真因）。那类问题由
+ * `PinSignals` 这个类型（把全部输入收进 `snapshotFlow` 的读取集，漏一个编译不过）+ 代码评审守住，
+ * **不要以为这些断言覆盖了它**。
  */
 class LivePinStateTest {
 
@@ -24,10 +29,11 @@ class LivePinStateTest {
         // 不在底部，但没有活内容（这一轮没开始/已结束）⇒ 不钉。
         assertEquals(false, s.update(notAtBottom = true, hasLiveContent = false, natural = 800))
         assertFalse(s.active)
-        // 两个条件都满足 ⇒ 钉住。
-        assertEquals(false, s.update(notAtBottom = true, hasLiveContent = true, natural = 800))
+        // 两个条件都满足 ⇒ 钉住。**这里必须带 outside**，否则"忽略 outside 的实现"照样通过
+        // （第三轮评审指出原来这条断言是恒真的）。
+        assertEquals(false, s.update(notAtBottom = true, hasLiveContent = true, natural = 800, outside = 50))
         assertTrue(s.active)
-        assertEquals("钉住高度 = 自然高度 + 裁剪之外的部分", 800, s.height)
+        assertEquals("钉住高度 = 自然高度 + 裁剪之外的部分", 850, s.height)
     }
 
     @Test
@@ -62,11 +68,13 @@ class LivePinStateTest {
         s.update(notAtBottom = false, hasLiveContent = true, natural = 700)
         assertFalse(s.active)
         assertEquals(0, s.height)
-        // **再上翻必须能重新钉上**（v0.8.341 的 latch bug 就死在这里）。
+        // **再上翻必须能重新钉上**（曾经的 latch bug 就死在这里）：高度已清 ⇒ 要求重等一帧，
+        // 拿到新高度后按**新**高度钉（不是上一个会话/上一轮那个）。
         assertTrue("高度已清，要求重等一帧", s.update(notAtBottom = true, hasLiveContent = true, natural = 0))
+        assertFalse("等待期间仍未钉住", s.active)
         s.update(notAtBottom = true, hasLiveContent = true, natural = 900)
         assertTrue(s.active)
-        assertEquals(900, s.height)
+        assertEquals("必须是新高度，不是 700", 900, s.height)
     }
 
     @Test
@@ -94,6 +102,23 @@ class LivePinStateTest {
         assertTrue(s.active)
         s.reset()
         assertFalse("换会话后不能沿用上一个会话的高度", s.active)
+        assertEquals(0, s.height)
+    }
+
+    @Test
+    fun `pins even when the outside part is taller than the bubble`() {
+        // 小气泡 + 三行 429 提示：裁剪之外的高度比气泡本身还高。
+        // 用「扣完剩多少」当判据会在这里放弃钉住（而 pinActive 已是 true ⇒ 自动贴底被禁、内容跳变）。
+        val s = LivePinState()
+        s.update(notAtBottom = true, hasLiveContent = true, natural = 40, outside = 120)
+        assertTrue("必须仍然处于钉住状态", s.active)
+        assertEquals(160, s.height)
+    }
+
+    @Test
+    fun `a fresh instance starts inactive`() {
+        val s = LivePinState()
+        assertFalse(s.active)
         assertEquals(0, s.height)
     }
 }

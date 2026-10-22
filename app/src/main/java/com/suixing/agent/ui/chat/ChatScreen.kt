@@ -285,6 +285,20 @@ internal val SUGGESTIONS = listOf(
  * 白块消失 ⇒ 与钉住这套有关；白块照旧 ⇒ 无关，回到基础列表找。
  * 对照做完把它改回 `true`（或删掉这个开关）。
  */
+/**
+ * 钉住状态机的**触发信号**。
+ *
+ * 为什么要一个类型而不是 `Triple`：评审第三轮指出「`livePin` 实例被 `LaunchedEffect` 捕获」
+ * 与「`itemCount` 被冻结成常量」是同一类事故 —— 判定的所有输入都必须出现在
+ * `snapshotFlow` 的读取集里。把输入收成一个类型，漏一个就编译不过（而不是静默冻结）。
+ */
+private data class PinSignals(
+    val chatId: String,
+    val notAtBottom: Boolean,
+    val hasLiveContent: Boolean,
+    val pinActive: Boolean,
+)
+
 private const val PIN_LIVE_HEIGHT = true
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -373,7 +387,9 @@ fun ChatScreen(
     // **null = 还没种过**，不是 0.dp（评审确证）：用 0.dp 当哨兵时，恢复位置进会话会先以
     // 0 当作底边距、等 `composerH` 量到才补成真实值 ⇒ 底边距 0 → ~一个输入框高，
     // 而 `scrollToItem` 已经执行过 ⇒ 整段恢复位置被推移一次。
-    var heldFootprint by remember { mutableStateOf<Dp?>(null) }
+    // **按会话 key**（评审）：底边距是"读历史期间冻结的那一个"，不同会话的输入框/让位不同，
+    // 不 key 的话切到另一个会话会沿用上一个会话冻结值。
+    var heldFootprint by remember(state.conversationId) { mutableStateOf<Dp?>(null) }
     val stackFootprint = with(LocalDensity.current) {
         // `composerH` 是**内边距以内**的高度：`onSizeChanged` 挂在
         // `.padding(bottom = COMPOSER_BOTTOM_PAD)` **之后**（TurnScrubber.kt:757-758），
@@ -1046,8 +1062,11 @@ fun ChatScreen(
         scroll.pinActive = false
         livePin.reset()
         // 自然高度也必须清：`lagNatural` 是普通数组，切会话后要到**下一次布局**才被写；
-        // 若不清，状态机可能在拿到新值之前先用旧会话的高度钉住（评审 M3-4 指出的顺序洞）。
+        // 若不清，状态机可能在拿到新值之前先用旧会话的高度钉住（评审指出的顺序洞）。
         lagNatural[0] = 0
+        // 状态行高度同理：它是普通数组、只在状态行**存在**时才被写，不清就会拿上个会话/上轮的
+        // 幽灵值参与「钉住总值」与「气泡扣减」（评审第三轮 B 段）。
+        statusHeight[0] = 0
     }
     // **不做「变短就解钉」的逐帧判断**（第二轮评审确证这个思路错）：220ms 是**时长**不是降幅，
     // 而降幅等于折叠块高度 —— 思考链上限 180dp，收起后 natural/pinned ≈ 40%，必然穿过 60% 采样点
@@ -1080,16 +1099,25 @@ fun ChatScreen(
     // 而 ChatScreen 常驻、不随会话重建（`SuixingApp.kt:569`）⇒ 首帧没有活内容时它永远是 false
     // ⇒ `snapshotFlow` 恒 false ⇒ **钉住从来不会生效**（这才是「钉了还在动」的真正原因）。
     val liveForPinNow by rememberUpdatedState(liveForPin)
+    // **`livePin` 也不能被直接捕获**：`LaunchedEffect(listState)` 的 body 是首次组合那一句
+    // lambda，key 永不变 ⇒ 里面拿到的永远是 ChatScreen 第一次组合时的那个实例。
+    // 后果：`livePin.reset()` 作用在新建的空实例上（空操作），而 collector 用旧实例跑
+    // ⇒ 旧实例 active 时会把上一个会话的高度写回来，正好推翻切会话的复位。
+    val livePinNow by rememberUpdatedState(livePin)
     LaunchedEffect(listState) {
         snapshotFlow {
-            // 三个量一起进读取集：任一变化都要重新判定（少一个就会出现"清 0 之后不再发一次"）。
-            Triple(
-                !scroll.stickToBottom && !scroll.restoring,
-                liveForPinNow,
-                scroll.pinActive,
+            // 四个量一起进读取集：任一变化都要重新判定（少一个就会出现"清 0 之后不再发一次"）。
+            // 第一个是**会话身份**：它决定 `livePin` 是哪个实例，必须参与触发。
+            PinSignals(
+                chatId = state.conversationId,
+                notAtBottom = !scroll.stickToBottom && !scroll.restoring,
+                hasLiveContent = liveForPinNow,
+                pinActive = scroll.pinActive,
             )
-        }.collect { (notAtBottom, live, _) ->
-            var needWait = livePin.update(
+        }.collect { signals ->
+            val notAtBottom = signals.notAtBottom
+            val live = signals.hasLiveContent
+            var needWait = livePinNow.update(
                 notAtBottom = notAtBottom,
                 hasLiveContent = live,
                 natural = lagNatural[0],
@@ -1100,7 +1128,7 @@ fun ChatScreen(
             var tries = 0
             while (needWait && tries < 30) {
                 withFrameNanos { }
-                needWait = livePin.update(
+                needWait = livePinNow.update(
                     notAtBottom = notAtBottom,
                     hasLiveContent = live,
                     natural = lagNatural[0],
@@ -1108,9 +1136,9 @@ fun ChatScreen(
                 )
                 tries++
             }
-            pinnedLiveHeight = livePin.height
+            pinnedLiveHeight = livePinNow.height
             // 以滚动层的 pinActive 为**唯一真值**（它还要被"到底是否自动打开贴底"的 collector 读）。
-            if (scroll.pinActive != livePin.active) scroll.pinActive = livePin.active
+            if (scroll.pinActive != livePinNow.active) scroll.pinActive = livePinNow.active
         }
     }    // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
@@ -1218,9 +1246,14 @@ fun ChatScreen(
     // 而切会话/内容落地那一刻 itemCount 一定会变 —— key 一变协程立刻被取消，正好停在
     // 「粗定位已做、按 key 精确校正还没做」的中间态，表现就是「恢复到大差不差的位置、但不是原位」。
     // 改成在体内等 itemCount 就绪，协程只随 conversationId 重建。
+    // **`itemCount` 是普通 Int**（组合作用域的 `val`）——直接写进 `snapshotFlow` 会把首帧那个值
+    // **冻成常量**，于是冷路径（`loading = true` + 空 messages，磁盘补读晚一帧以上）下
+    // `first { it > 0 }` 永远等不到，**整段恢复位置被静默跳过**（无崩溃、无日志）。
+    // 同一事故在本文件 `messageIdsState` 那里已经修过一次，这是第二处。
+    val itemCountNow by rememberUpdatedState(itemCount)
     LaunchedEffect(state.conversationId) {
         if (openedPinned) return@LaunchedEffect
-        snapshotFlow { itemCount }.first { it > 0 }
+        snapshotFlow { itemCountNow }.first { it > 0 }
         if (openedPinned) return@LaunchedEffect
         openedPinned = true
         // 显式对齐一次：下面的读写都按"当前会话"取键，不能等 SideEffect 的时序（issue #4）。
@@ -1597,11 +1630,13 @@ fun ChatScreen(
                                             // 量高度给外层用：状态行在裁剪之外，钉住值要含它、
                                             // 气泡报出的高度要把它扣掉（见 `liveRowLagHeight` 的 `outside`）。
                                             // 写普通数组，不进快照 ⇒ 不触发重组。
+                                            // **量在 padding 之前**：`outside` 要代表"状态行占掉的整段高度"
+                                            // （含 12dp 间距），否则气泡扣减与 item 总高度天生差 12dp。
                                             modifier = Modifier
-                                                .padding(start = 4.dp, top = 12.dp, bottom = 0.dp)
                                                 .onGloballyPositioned {
                                                     statusHeight[0] = it.size.height
-                                                },
+                                                }
+                                                .padding(start = 4.dp, top = 12.dp, bottom = 0.dp),
                                         )
                                     }
                                 }
@@ -2125,7 +2160,13 @@ private fun Modifier.liveRowLagHeight(
         // 所以要把它扣回来 —— 这样状态行换行（重试/429 的提示会有两三行）时，
         // 气泡的报出高度会反向缩小同样的量，**item 总高度不变** ⇒ 上面的内容不会被推。
         // 扣掉的是"最新输出"那一段，本来就在裁剪里，用户看不见。
-        val own = if (reported > 0) (reported - outside[0]).coerceAtLeast(0) else 0
-        val height = if (own > 0) own else placeable.height
+        // **判据是 `reported`，不是扣完之后的 `own`**：状态行比被钉住的气泡还高时（小气泡 +
+        // 三行 429 提示）`own <= 0`，若拿它当判据就会**静默放弃钉住**（而 `pinActive` 仍为 true
+        // ⇒ 自动贴底被禁、内容瞬间跳到真实高度）。钉住期间永远至少报 1px。
+        val height = if (reported > 0) {
+            (reported - outside[0]).coerceAtLeast(1)
+        } else {
+            placeable.height
+        }
         layout(placeable.width, height) { placeable.place(0, 0) }
     }
