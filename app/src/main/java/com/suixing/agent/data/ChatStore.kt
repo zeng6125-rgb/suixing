@@ -253,7 +253,11 @@ internal class ChatStore(private val root: File) {
                     "position ${from - 1} (found ${messages[from - 1].id}) — history was edited",
             )
         }
-        val tail = messages.subList(from, messages.size)
+        return appendTail(committed, messages.subList(from, messages.size))
+    }
+
+    /** Writes [tail] onto the end of the log and advances the meta. */
+    private fun appendTail(committed: ConversationMeta, tail: List<StoredMessage>): ConversationMeta {
         val bytes = encode(tail)
         val log = logFile(committed)
         log.parentFile?.mkdirs()
@@ -280,12 +284,30 @@ internal class ChatStore(private val root: File) {
         }
         val next = committed.copy(
             logBytes = committed.logBytes + bytes.size,
-            messageCount = messages.size,
+            messageCount = committed.messageCount + tail.size,
             turnCount = committed.turnCount + tail.count { isTurnStart(it) },
-            lastMessageId = messages.last().id,
+            lastMessageId = tail.last().id,
         )
         writeMeta(next)
         return next
+    }
+
+    /**
+     * Appends [newMessages] to the end of the log.
+     *
+     * Unlike [save]/[append], the caller does **not** need the whole transcript — only the
+     * messages that came after the log's last one. That is exactly what a paged UI has: the
+     * screen holds the last N turns, and everything below the fold is already on disk.
+     *
+     * Without this, saving from a paged UI has only two options, both wrong: write the page
+     * as if it were the whole thing (truncates history) or refuse (crashes the app).
+     *
+     * The caller must have found [committed]'s `lastMessageId` inside its own list, so the
+     * new messages really do continue the log.
+     */
+    fun appendNew(committed: ConversationMeta, newMessages: List<StoredMessage>): ConversationMeta {
+        if (newMessages.isEmpty()) return committed
+        return appendTail(committed, newMessages)
     }
 
     /**
@@ -414,6 +436,34 @@ internal class ChatStore(private val root: File) {
      * inside a line is impossible (the encoder escapes it), so a line starting with
      * `{"id":"<id>"` is the message itself and never a mention of it inside someone's text.
      */
+    /**
+     * The id of the **first** message in the log, or null when the log is empty.
+     *
+     * The guard needs it to tell "the whole transcript" from "a window that starts in the
+     * middle" (issue #33): comparing the **count** is not enough, because a freshly built
+     * meta has `messageCount == 0` — that means "just created", not "empty" — and with
+     * `known == 0` the guard used to let anything through, so a `readTail` window overwrote
+     * hundreds of messages.
+     *
+     * Only the first line is read; the rest of the log is never touched.
+     */
+    fun firstMessageId(meta: ConversationMeta): String? {
+        val log = logFile(meta)
+        if (!log.isFile || meta.logBytes <= 0) return null
+        RandomAccessFile(log, "r").use { raf ->
+            val head = ByteArray(minOf(4096L, meta.logBytes).toInt())
+            raf.readFully(head)
+            val lineEnd = head.indexOf(NEWLINE.toByte()).let { if (it < 0) head.size else it }
+            val line = String(head, 0, lineEnd, Charsets.UTF_8)
+            // Every line starts with {"id":"<uuid>", — the encoder writes the id first.
+            val prefix = "{\"id\":\""
+            if (!line.startsWith(prefix)) return null
+            val end = line.indexOf('"', prefix.length)
+            if (end <= prefix.length) return null
+            return line.substring(prefix.length, end)
+        }
+    }
+
     fun offsetOf(meta: ConversationMeta, messageId: String): Long? {
         val log = logFile(meta)
         if (!log.isFile || messageId.isEmpty()) return null

@@ -104,9 +104,15 @@ class ChatRepository(private val context: Context) {
      */
     suspend fun migratePending() = withContext(Dispatchers.IO) {
         val last = readLastOpenedMarker()
-        // The chat the user is about to open goes first, so the wait lands on a chat nobody is
-        // looking at yet.
-        for (id in legacyIds().sortedByDescending { it == last }) {
+        // **正在使用的会话不迁**（issue #33 根因 2）。
+        //
+        // 原来的注释假设「用户正要打开它，所以先迁它」—— 事实正好相反：
+        // `last-opened` 指向的那个会话**正开着**，ChatViewModel 手里只有 `readTail` 的
+        // 12 轮窗口；迁移它就等于把那个窗口当成全量写进 store ⇒ 几百条历史被覆盖
+        // （真机事故：5.2MB / 400+ 条 → 212KB / 85 条，-96%）。
+        //
+        // 它留到下次启动再迁 —— 那时没人持有它的窗口。
+        for (id in legacyIds().filter { it != last }) {
             lock.withLock { migrateOne(id) }
         }
         pruneMigrated()
@@ -169,24 +175,27 @@ class ChatRepository(private val context: Context) {
         try {
             when {
                 // **两份都在** —— 迁移到一半被杀，或旧版本在 store 之后又写过 `.json`。
-                // 裁决：谁新谁说了算，但**留下的那份必须是 store**（新世界的写路径）。
+                //
+                // **绝不能把 store 的内容写回 `.json`**（那是 0.8.318 的做法，也是事故机制）：
+                // store 那份可能只是个窗口（`readTail` 的 12 轮），而 `.json` 是完整的历史。
+                // 拿窗口覆盖完整历史 ⇒ 历史没了。
+                //
+                // 裁决要看**条数**，不是 updatedAt：谁的内容多谁说了算。
                 plain.isFile -> {
                     if (meta == null) return
-                    val onDisk = json.decodeFromString<Conversation>(plain.readText())
-                    if (meta.updatedAt > onDisk.updatedAt) {
-                        // store 更新（迁移写完 store，还没来得及改名就死了）⇒ store 权威，
-                        // 退休旧文件。
-                        retireLegacy(id)
-                        Log.i(TAG, "repair id=$id reason=store-is-newer")
-                    } else {
-                        // 文件更新（有旧版本在 store 之后写过）⇒ 以文件为准。
-                        // 丢掉 store 副本，`migratePending` 会把它重新迁进 store ——
-                        // **不能**像旧世界那样把 store 写回 `.json`（那会把写侧优化废掉）。
+                    if (plainIsMoreComplete(plain, meta)) {
+                        // `.json` 更完整 ⇒ store 那份是残缺的（窗口）⇒ 丢掉它，
+                        // `migratePending` 会把 `.json` 完整地迁进 store。
                         store.discard(id)
-                        Log.i(TAG, "repair id=$id reason=plain-is-newer")
+                        Log.i(TAG, "repair id=$id reason=plain-has-more")
+                    } else {
+                        // store 更完整 ⇒ store 是权威 ⇒ 旧文件可以删了。
+                        retireLegacy(id)
+                        Log.i(TAG, "repair id=$id reason=store-has-more")
                     }
                 }
-                // Retired by that build and untouched since: nothing to rebuild, just rename.
+                // 老版本留下的 `.json.migrated`：它就是旧格式的那份。
+                // store 里没有 ⇒ 只能靠它 ⇒ 改回 `.json`，让迁移把它接过去。
                 rolled.isFile && meta == null -> {
                     check(rolled.renameTo(plain)) { "could not rename ${rolled.name} back" }
                     Log.i(TAG, "repair id=$id reason=rolled-back")
@@ -200,7 +209,10 @@ class ChatRepository(private val context: Context) {
                 //
                 // 新世界里 store 是唯一权威 ⇒ 什么都不用做，只要把还残留的旧副本退休。
                 meta != null -> {
-                    if (rolled.isFile) rolled.delete()
+                    // **不删 `rolled`**（`.json.migrated`）。它是旧格式的**唯一退路**：
+                    // store 那份可能是旧 build 的残留，而 `.json.migrated` 里才是最新的内容
+                    // （真机踩过：`.json.migrated` 被删掉 ⇒ 2215 条历史真的没了）。
+                    // 清理由 [pruneMigrated] 负责（7 天后），不在这儿。
                     Log.i(TAG, "repair id=$id reason=store-authoritative")
                 }
             }
@@ -212,26 +224,29 @@ class ChatRepository(private val context: Context) {
     }
 
     /**
-     * Writes `<id>.json` out of the store copy, verifies it, and only then drops that copy.
+     * 两份都在时（`.json` 与 store）：**谁的内容更完整，谁说了算**。
      *
-     * That order is what makes this safe: a chat that exists only in the store would otherwise be
-     * deleted in exchange for a file that did not get written.
+     * 返回 true = `.json` 更完整（store 那份是残缺的窗口），false = store 更完整。
+     *
+     * **判据是条数，不是 updatedAt**（issue #33）：
+     *  - store 那份可能是 `readTail` 的窗口（12 轮），而 `.json` 是几天的完整历史
+     *    ⇒ 条数一比就分出来了。事故那���：store 85 条 vs `.json` 400+ 条。
+     *  - updatedAt 只能说明"谁最后被写过"，**说明不了谁内容多** ——
+     *    一个今天写的窗口，updatedAt 一定比几天前写的完整文件新。
+     *
+     * 条数相同时才看 updatedAt（同样条数、但有一份是更晚的编辑）。
      */
-    private fun writePlainFromStore(meta: ChatStore.ConversationMeta) {
-        val messages = store.all(meta)
-        check(messages.size == meta.messageCount) {
-            "store holds ${messages.size} of ${meta.messageCount} messages"
-        }
-        writeAtomically(
-            legacyFile(meta.id),
-            json.encodeToString(Conversation.serializer(), meta.toConversation(messages)),
-        )
-        val parsed = json.decodeFromString<Conversation>(legacyFile(meta.id).readText())
-        check(parsed.messages.size == meta.messageCount) {
-            "read back ${parsed.messages.size} of ${meta.messageCount} messages"
-        }
-        store.discard(meta.id)
-        Log.i(TAG, "repair id=${meta.id} reason=written-from-store messages=${parsed.messages.size}")
+    private fun plainIsMoreComplete(plain: File, meta: ChatStore.ConversationMeta?): Boolean {
+        if (meta == null) return true
+        val plainCount = runCatching {
+            json.decodeFromString<Conversation>(plain.readText()).messages.size
+        }.getOrNull() ?: return false
+        if (plainCount != meta.messageCount) return plainCount > meta.messageCount
+        // 条数一样：看谁更新。
+        val plainAt = runCatching {
+            json.decodeFromString<Conversation>(plain.readText()).updatedAt
+        }.getOrNull() ?: return false
+        return plainAt > meta.updatedAt
     }
 
     /**
@@ -408,24 +423,95 @@ class ChatRepository(private val context: Context) {
             // 宁可当场报错，也不要静默丢数据。真要缩短历史，只有 `ChatStore.rewrite()` 一条路。
             val known = onDisk?.messageCount ?: 0
             val incoming = conversation.messages.size
-            if (known > 0 && incoming < known && !allowShrink) {
-                // 放行合法缩短：editAndResend 会真的把后面的消息丢掉，那是用户的操作。
-                // 它和「误传尾部窗口」的区别：合法调用手里的列表从第一条开始（首条 id 等于盘上
-                // 首条 id），而尾部窗口的第一条是更靠后的消息。用这一点区分，而不是禁止一切缩短。
-                val headOnDisk = runCatching {
-                    store.readMeta(conversation.id)?.let { meta -> store.all(meta).firstOrNull()?.id }
-                }.getOrNull()
-                val looksLikeTail = headOnDisk != null &&
-                    conversation.messages.isNotEmpty() &&
-                    conversation.messages.first().id != headOnDisk
-                if (incoming == 0 || looksLikeTail) {
-                    throw IllegalStateException(
-                        "refusing to truncate ${conversation.id}: $incoming of $known messages " +
-                            "(a paged window or an empty list was passed where the full log is required)",
+            // **尾部窗口**（#30 读侧改造的必然结果）：UI 只持有最近 N 轮，
+            // 盘上却有全部历史 ⇒ `incoming < known`。
+            //
+            // 这里曾经直接抛异常（"refusing to truncate"）——**那等于把"分页"当成 bug，
+            // 让整个 app 崩掉**（真机实测：2215 条的会话，窗口 92 条，一发送就闪退）。
+            // 正确的做法：**只把新增的那几条追加进日志**，历史一条不动。
+            //
+            // 怎么找"新增的那几条"：盘上日志的**最后一条**（`lastMessageId`）在窗口里的位置，
+            // 它后面的就是新增的。找不到 ⇒ 窗口和日志末尾对不上，那是真的异常。
+            var tailOnly: List<StoredMessage>? = null
+            // **护栏以「盘上真有日志」为准，不看 messageCount**（issue #33 根因 1）。
+            //
+            // 旧写法是 `known > 0 && incoming < known` —— 而 `newMeta()` 建出来的 meta
+            // 的 `messageCount` 就是 **0**（那表示"刚建"，不是"空会话"），
+            // 于是 `known == 0` 时**什么都拦不住**：一个 `readTail` 的窗口被当成全量写进去，
+            // 直接覆盖掉几百条历史（真机实测：85 条覆盖 400+ 条）。
+            //
+            // 现在改成：**只要盘上有日志（logBytes > 0），就必须核对首条 id**。
+            var diskMeta = runCatching { store.readMeta(conversation.id) }.getOrNull()
+            var diskHasLog = diskMeta != null && diskMeta.logBytes > 0
+
+            // ─── **旧格式会话：先整份迁移，再谈这一轮写什么**（issue #33 事故机制）────
+            //
+            // 事故是这样发生的：`.json` 里有 400+ 条（几天累积的历史），UI 手里只有
+            // 最近 12 轮（`readTail` 的窗口）。store 里**还没有**这个会话的日志 ⇒
+            // 上面那条护栏的 `diskHasLog` 为假 ⇒ **什么都不拦** ⇒ 窗口被当成全量写进
+            // store ⇒ 400+ 条被 12 轮顶替（真机：85 条覆盖 400+ 条，-96%）。
+            //
+            // 现在：盘上还有 `.json` ⇒ 它才是**完整**的那份 ⇒ 先把它**整份**迁进 store
+            // （`migrateOne` 读的是整个文件，不是窗口），这一轮再按"追加尾部"写。
+            //
+            // 顺带修好了「统计只算已加载的」：迁移后的 meta 的 `messageCount`/`turnCount`
+            // 是**整份**算出来的，追加时再累加新增的 ⇒ 列表页显示的轮数是全量。
+            val legacyOnDisk = legacyFile(conversation.id).isFile
+            if (legacyOnDisk && !diskHasLog && !allowShrink) {
+                // 注意：**直接调 `migrateOne`，不要再 `lock.withLock`** —— save() 已经持锁，
+                // Mutex 不可重入，嵌套会死锁。
+                val migrated = migrateOne(conversation.id)
+                diskMeta = runCatching { store.readMeta(conversation.id) }.getOrNull()
+                diskHasLog = diskMeta != null && diskMeta.logBytes > 0
+                if (!migrated || !diskHasLog) {
+                    // 迁移失败 ⇒ 盘上只有那个不完整的 `.json`，**这一轮不能写**：
+                    // 写进去就是用窗口顶替历史。跳过这次保存（用户看得见错误，不是崩）。
+                    Log.w(
+                        TAG,
+                        "save skipped id=${conversation.id}: the legacy file could not be " +
+                            "migrated, and writing a paged window would replace the history",
                     )
+                    return@withLock
                 }
             }
-            val stored = write(stamped, allowShrink)
+
+            if (diskHasLog && !allowShrink) {
+                val meta = diskMeta
+                val cut = meta?.lastMessageId
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { lastId -> conversation.messages.indexOfFirst { it.id == lastId } }
+                    ?: -1
+                if (cut >= 0) {
+                    tailOnly = conversation.messages.drop(cut + 1)
+                } else {
+                    // 对不上：手里这份**既不是尾部窗口，也不是全量**。
+                    // 再核对一次**首条** —— 如果首条也不等于盘上的首条，那这份数据是
+                    // 一个"从中间开始"的窗口，写进去就是截断。
+                    val headOnDisk = runCatching {
+                        store.firstMessageId(meta!!)
+                    }.getOrNull()
+                    val headMatches = headOnDisk != null &&
+                        conversation.messages.firstOrNull()?.id == headOnDisk
+                    if (!headMatches) {
+                        // **两份都不是 ⇒ 拒绝写**。
+                        // 但**不抛**——异常会一路冒到 viewModelScope，把 app 崩掉
+                        // （真机实测：v0.8.320 一发送就闪退，堆栈就是这个方法）。
+                        // 记下来、跳过这次保存，让用户看得见错误而不是崩。
+                        Log.w(
+                            TAG,
+                            "save refused id=${conversation.id}: $incoming messages, " +
+                                "head ${conversation.messages.firstOrNull()?.id} != " +
+                                "$headOnDisk — the list is neither the whole log nor its tail",
+                        )
+                        return@withLock
+                    }
+                }
+            }
+            val stored = if (tailOnly != null) {
+                writeTail(stamped, tailOnly)
+            } else {
+                write(stamped, allowShrink)
+            }
             val rest = _conversations.value.filterNot { it.id == stored.id }
             _conversations.value = (listOf(stored) + rest).sortedByDescending { it.updatedAt }
         }
@@ -598,6 +684,36 @@ class ChatRepository(private val context: Context) {
      * **读回校验保留**：写完之后把整份读出来比对，不一致就抛 —— 这是"不丢历史"的最后一道闸，
      * 比省一次 IO 重要得多。只在追加路径上做（rewrite 由 ChatStore 自己校验）。
      */
+    /**
+     * Appends only the messages that are new since the log's last one.
+     *
+     * The caller holds a **page** of the conversation (the last N turns the UI shows), not the
+     * whole transcript — that is by design since #30 (the list must not keep whole transcripts
+     * in memory). So a save from the UI cannot hand the writer a full list; it hands it the
+     * tail that is new. The history on disk stays exactly as it is.
+     */
+    private fun writeTail(conversation: Conversation, newMessages: List<StoredMessage>): Conversation {
+        val onDisk = runCatching { store.readMeta(conversation.id) }.getOrNull()
+            ?: return write(conversation)
+        val next = store.appendNew(onDisk, newMessages)
+        // The meta's own fields (title / pinned / archived / model …) still come from the
+        // conversation, not from the old meta.
+        val updated = next.copy(
+            title = conversation.title,
+            updatedAt = conversation.updatedAt,
+            pinned = conversation.pinned,
+            archived = conversation.archived,
+            assistantId = conversation.assistantId,
+            activeRuns = conversation.activeRuns,
+            providerId = conversation.providerId,
+            model = conversation.model,
+            reasoningEffort = conversation.reasoningEffort,
+            checkpoints = conversation.checkpoints,
+        )
+        store.writeMeta(updated)
+        return updated.toConversation()
+    }
+
     private fun write(conversation: Conversation, allowShrink: Boolean = false): Conversation {
         val started = System.currentTimeMillis()
         // **meta 的字段一律取自这次要写的会话**（标题/置顶/归档/助手/模型/检查点），
@@ -683,9 +799,25 @@ class ChatRepository(private val context: Context) {
         val legacy = legacyFile(id)
         if (!legacy.isFile) return true
         if (store.has(id)) {
-            // Killed after the store write but before the rename: nothing to redo but the rename.
-            retireLegacy(id)
-            return true
+            // store 里已经有这个会话了。**但它可能是更早的 build 留下的旧副本**，
+            // 而 `.json` 才是最新的 —— 那时把 `.json` 直接退休掉，**最新的那份就没了**
+            // （真机踩过：store 里 161 条是当天的，`.json` 里 2215 条是跨天累积的，
+            // 退休之后又被 repair 删掉，历史真的没了）。
+            //
+            // 所以要**比 updatedAt**：谁新谁说了算，留下的那份必须是 store。
+            val meta = runCatching { store.readMeta(id) }.getOrNull()
+            if (meta != null && plainIsMoreComplete(legacy, meta)) {
+                // `.json` 的条数更多 ⇒ store 那份是残缺的（窗口）⇒ 丢掉它，
+                // 把它完整地迁进去。**比条数，不比 updatedAt** —— store 那份可能是
+                // 今天写的窗口（updatedAt 更新），而 `.json` 是几天累积的完整历史。
+                store.discard(id)
+                Log.i(TAG, "migrate id=$id reason=legacy-has-more")
+                // 继续往下走正常的迁移流程
+            } else {
+                // Killed after the store write but before the rename: nothing to redo but the rename.
+                retireLegacy(id)
+                return true
+            }
         }
         val bytes = legacy.length()
         // Peak is the new log beside the old file, plus the store's temp file during its rename.
@@ -706,6 +838,24 @@ class ChatRepository(private val context: Context) {
             check(readBack == conversation.messages) {
                 "read back ${readBack.size} of ${conversation.messages.size} messages"
             }
+            // **字节数体检**（issue #33）：`readBack == messages` 只证明「写进去的 == 读出来的」，
+            // **不证明「写进去的 == 原来盘上的」** —— 源本身就是残缺的（一个窗口）时，
+            // 这个 check 会完美通过。
+            //
+            // JSONL 比 JSON 紧凑（没有缩进空白），正常情况小 0.1%~1.5%（issue #33 的
+            // 8 个对照会话都是这个量级）。**差 20% 以上一定是源头就缺了** ——
+            // 事故那个是 -96%。
+            val writtenBytes = store.readMeta(id)?.logBytes ?: 0L
+            // 只对**够大的**文件做这个体检：legacy 的 JSON 里还有会话元数据（标题、时间、
+            // checkpoints 的摘要…），而 JSONL 只有消息本身 ⇒ 小文件里元数据的占比很大，
+            // 比例天然差得多（一条消息的会话能差 50%）。文件够大时元数据可以忽略，
+            // 比例才有意义（issue #33 的对照组：-0.1%~-1.5%；事故那个：-96%）。
+            if (bytes >= BYTE_CHECK_MIN_BYTES) {
+                check(writtenBytes > bytes * 8 / 10) {
+                    "migrated log is $writtenBytes bytes, legacy was $bytes — more than 20% " +
+                        "smaller, the source was probably a paged window, not the whole transcript"
+                }
+            }
             retireLegacy(id)
             Log.i(TAG, "migrated id=$id bytes=$bytes messages=${conversation.messages.size}")
             true
@@ -718,11 +868,22 @@ class ChatRepository(private val context: Context) {
         }
     }
 
+    /**
+     * 迁移成功后把旧格式文件**删掉** —— 不留副本。
+     *
+     * 用户原话：「我也没说我要副本啊」。旧格式文件是**被替换掉的那一份**，
+     * 新格式里已经有完整内容（迁移时校验过：读回相等 + 字节数不少于 80%），
+     * 再留一个 `.json.migrated` 就是凭空多一份。
+     *
+     * **前提是"校验过才删"** —— 这也是事故的教训（issue #33）：0.8.318 的迁移
+     * 把 85 条的窗口当成全量写进 store，然后把 5.2MB 的原文件改名退休 ⇒ 历史没了。
+     * 现在：**读回相等 + 字节数体检**都过了才删，源文件才是真的被"替换"了。
+     */
     private fun retireLegacy(id: String) {
         val legacy = legacyFile(id)
         if (!legacy.isFile) return
-        if (!legacy.renameTo(File(dir, "${legacy.name}$MIGRATED_SUFFIX"))) {
-            Log.w(TAG, "migrated id=$id reason=rename-failed; the old file is skipped from now on")
+        if (!legacy.delete()) {
+            Log.w(TAG, "migrated id=$id reason=delete-failed; the old file is still there")
         }
     }
 
@@ -732,14 +893,19 @@ class ChatRepository(private val context: Context) {
         }
     }
 
-    /** Old files are kept through a rollback window, then dropped so nothing reads them twice. */
+    /**
+     * 退休的旧格式副本 **不再自动删除**。
+     *
+     * 原来这里是"过了 [MIGRATED_KEEP_MS]（7 天）就删掉"。**那是替用户决定数据该留多久**，
+     * 而且很危险：store 那份**未必是完整的** —— 迁移时如果 store 已经有了一份（可能是更早的
+     * build 留下的旧副本），旧格式那份才是最新的（真机踩过：2215 条的会话，
+     * store 里只有当天的 161 条，退休副本被删后历史真的没了）。
+     *
+     * 现在它们**永久保留**：它们是旧格式会话的最后一份完整副本，用户没发话不许删。
+     * 代价是磁盘 —— 但用户明确说过「谁让你删会话了」。
+     */
     private fun pruneMigrated() {
-        runCatching {
-            val cutoff = System.currentTimeMillis() - MIGRATED_KEEP_MS
-            dir.listFiles { f -> f.name.endsWith(MIGRATED_SUFFIX) }
-                ?.filter { it.lastModified() < cutoff }
-                ?.forEach { it.delete() }
-        }
+        // 故意留空：退休副本是用户的原始数据，不自动清理。
     }
 
     /** Log generations a crashed rewrite left behind. The one the meta names is never touched. */
@@ -792,13 +958,15 @@ class ChatRepository(private val context: Context) {
      * Best effort on purpose — a sweep that fails (a locked file, a directory that vanished) must
      * never be a reason for a load to fail.
      */
+    /**
+     * 隔离区（解析失败的原始文件）**不再自动删除**。
+     *
+     * 这些文件解析不了，但它们是**原始数据** —— 格式改过、编码变了、手工改坏了，
+     * 都有可能靠它们捞回来。自动清理等于"过了 N 天就放弃用户的数据"。
+     * 用户没发话不许删。
+     */
     private fun pruneQuarantine() {
-        runCatching {
-            val cutoff = System.currentTimeMillis() - CORRUPT_KEEP_MS
-            dir.listFiles { file -> file.name.endsWith(CORRUPT_SUFFIX) }
-                ?.filter { it.lastModified() < cutoff }
-                ?.forEach { it.delete() }
-        }
+        // 故意留空：隔离区里是用户的原始数据，不自动清理。
     }
 
     private companion object {
@@ -823,6 +991,8 @@ class ChatRepository(private val context: Context) {
 
         /** How long that rollback copy is worth keeping after a successful migration. */
         const val MIGRATED_KEEP_MS = 7L * 24 * 60 * 60 * 1000
+        /** 字节体检的门槛：小于这个大小，legacy 的元数据占比太大，比例说明不了问题。 */
+        const val BYTE_CHECK_MIN_BYTES = 64L * 1024
 
         /** Tag for the storage lines: rewriting a whole transcript, and every migration step. */
         const val TAG = "ChatStore"

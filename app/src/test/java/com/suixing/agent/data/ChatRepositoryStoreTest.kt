@@ -304,14 +304,37 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
-    fun `repair keeps whichever copy is newer`() = runBlocking {
+    fun `repair keeps whichever copy is more complete`() = runBlocking {
+        // **判据是条数，不是 updatedAt**（issue #33）。
+        //
+        // store 那份可能是 `readTail` 的窗口（12 轮），`.json` 是几天的完整历史。
+        // updatedAt 只能说明"谁最后被写过"，**说明不了谁内容多** —— 一个今天写的窗口，
+        // updatedAt 一定比几天前写的完整文件新（真机事故：store 85 条 vs .json 400+ 条）。
+        //
+        // 这里两份**条数相同**，所以才轮到 updatedAt：文件里的那份更新 ⇒ 它赢。
         writeLegacy(conversation("c1", title = "文件里的", updatedAt = 5_000))
         putInStoreOnly(conversation("c1", title = "store 里的", updatedAt = 1_000))
 
         repository().repairPending()
 
-        assertEquals("the older store copy must not overwrite the file", "文件里的", readLegacy("c1").title)
-        assertFalse("and it is dropped", store.has("c1"))
+        assertEquals("the newer file must not be overwritten", "文件里的", readLegacy("c1").title)
+        assertFalse("and the store copy is dropped", store.has("c1"))
+    }
+
+    @Test
+    fun `repair prefers the copy with more messages over the newer one`() = runBlocking {
+        // `.json` 有 20 条（完整历史），store 只有 5 条（窗口）——
+        // 哪怕 store 的 updatedAt 更新，**多的那份才赢**。
+        val legacy = conversation("c1", title = "文件里的")
+        val many = (1..20).map { StoredMessage(id = "m$it", role = Roles.USER, text = "m$it") }
+        writeLegacy(legacy.copy(messages = many, updatedAt = 1_000))
+        putInStoreOnly(legacy.copy(messages = many.take(5), updatedAt = 9_000))
+
+        repository().repairPending()
+
+        assertTrue("完整的那份必须留下", legacyFile("c1").exists())
+        assertEquals("而且一条都不能少", 20, readLegacy("c1").messages.size)
+        assertFalse("窗口那份被丢掉", store.has("c1"))
     }
 
     @Test
@@ -326,6 +349,22 @@ class ChatRepositoryStoreTest {
         assertTrue("store 更新 ⇒ store 留下", store.has("c1"))
         assertEquals("留下的是新内容", "store 里的", store.readMeta("c1")!!.title)
         assertFalse("旧文件要退休", legacyFile("c1").exists())
+    }
+
+    @Test
+    fun `the retired copy is never deleted`() = runBlocking {
+        // 退休副本（`.json.migrated`）是旧格式会话的**最后一份完整副本** ——
+        // store 那份未必完整（可能是更早的 build 留下的旧副本）。
+        // 自动清理它等于替用户决定数据该留多久（真机踩过：2215 条的历史没了）。
+        // 用户没发话不许删。
+        putInStoreOnly(conversation("c1"))
+        val retired = File(chatsDir, "c1.json.migrated")
+        retired.writeText("{\"legacy\":true}")
+
+        repository().repairPending()
+
+        assertTrue("退休副本必须还在", retired.exists())
+        assertEquals("内容也不能动", "{\"legacy\":true}", retired.readText())
     }
 
     @Test
@@ -371,8 +410,10 @@ class ChatRepositoryStoreTest {
 
         repository.migratePending()
 
+        // **退休 = 删除旧文件**（用户：「我也没说我要副本啊」）：
+        // 新格式里已经有完整内容（迁移时校验过：读回相等 + 字节数不少于 80%），
+        // 再留一份 `.json.migrated` 就是凭空多一份。
         assertFalse("the old file is retired", legacyFile("c1").exists())
-        assertTrue("into a rollback copy", migratedFile("c1").exists())
         assertTrue("the store owns it now", store.has("c1"))
 
         repository.load()

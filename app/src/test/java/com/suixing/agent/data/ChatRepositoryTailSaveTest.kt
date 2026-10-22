@@ -1,0 +1,96 @@
+package com.suixing.agent.data
+
+import android.content.Context
+import io.mockk.every
+import io.mockk.mockk
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
+
+/**
+ * **分页窗口回写**（真机闪退的根因）。
+ *
+ * 0.8.316 起，列表不再常驻全文，UI 只持有最近 N 轮（#30）。于是保存时手里的列表
+ * **比盘上短** —— 这是分页的正常结果，不是 bug。
+ *
+ * 0.8.317~320 的实现把它当成"要截断"直接抛异常：
+ *
+ * ```
+ * java.lang.IllegalStateException: refusing to truncate …: 92 of 2215 messages
+ *   at ChatRepository$save$2.invokeSuspend(ChatRepository.kt:422)
+ * ```
+ *
+ * 那个异常在 `viewModelScope.launch` 里没人接 ⇒ **一发送就闪退**（真机实测，
+ * 崩溃记录在 dropbox 的 `data_app_crash`）。
+ *
+ * 正确的做法：**只把新增的那几条追加进日志**，历史一条不动。
+ */
+class ChatRepositoryTailSaveTest {
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private fun repository(root: File): ChatRepository {
+        val context = mockk<Context>()
+        every { context.filesDir } returns root
+        return ChatRepository(context)
+    }
+
+    private fun msg(id: String, text: String = id) = StoredMessage(
+        id = id,
+        role = Roles.USER,
+        text = text,
+    )
+
+    @Test
+    fun `a paged window is appended, not refused`() = runBlocking {
+        val dir = tmp.newFolder("chats")
+        val repository = repository(dir)
+
+        // 盘上 6 条。
+        val onDisk = (1..6).map { msg("m$it") }
+        repository.save(Conversation(id = "c1", title = "t", messages = onDisk))
+
+        // UI 只持有最后 3 条（窗口）+ 1 条新的 ⇒ 比盘上短。
+        val window = onDisk.takeLast(3) + msg("m7")
+        repository.save(Conversation(id = "c1", title = "t", messages = window))
+
+        val all = repository.readAll("c1")
+        assertEquals("历史一条都不能少", 7, all.size)
+        assertEquals("第 1 条还在", "m1", all.first().id)
+        assertEquals("新的一条在最后", "m7", all.last().id)
+    }
+
+    @Test
+    fun `a paged window that is empty is refused but does not throw`() = runBlocking {
+        val dir = tmp.newFolder("chats")
+        val repository = repository(dir)
+        repository.save(Conversation(id = "c1", title = "t", messages = (1..4).map { msg("m$it") }))
+
+        // 空列表：没有"新增"可言 ⇒ 拒绝写入，但**不抛**（抛了 app 就崩）。
+        val result = runCatching {
+            repository.save(Conversation(id = "c1", title = "t", messages = emptyList()))
+        }
+        assertTrue("不许崩：" + result.exceptionOrNull()?.message, result.isSuccess)
+        assertEquals("盘上原样", 4, repository.readAll("c1").size)
+    }
+
+    @Test
+    fun `the meta of an appended window keeps the new title`() = runBlocking {
+        val dir = tmp.newFolder("chats")
+        val repository = repository(dir)
+        val onDisk = (1..5).map { msg("m$it") }
+        repository.save(Conversation(id = "c1", title = "旧标题", messages = onDisk))
+
+        repository.save(
+            Conversation(id = "c1", title = "新标题", messages = onDisk.takeLast(2) + msg("m6")),
+        )
+
+        val meta = repository.conversations.value.first { it.id == "c1" }
+        assertEquals("标题要更新", "新标题", meta.title)
+        assertEquals("条数要更新", 6, meta.messageCount)
+    }
+}

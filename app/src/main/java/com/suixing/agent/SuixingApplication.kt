@@ -26,17 +26,25 @@ class SuixingApplication : Application() {
         // **异常必须在这里吃掉**：`Core.appScope` 是 `SupervisorJob() + Dispatchers.Default`，
         // 协程里逃出去的异常会走默认未捕获处理器 ⇒ Android 上直接崩进程。自愈失败（坏文件、
         // 磁盘满、权限）绝不能变成"打开就闪退"，所以整段 runCatching + 只记日志。
+        // **repair 与 migrate 必须串行**（issue #33 根因 3）。
+        //
+        // 原来它们是**两个独立的 launch**，并发跑。事故的直接触发条件就是这个：
+        // `repairOne` 把 store 拆回 `.json`、`migrateOne` 又搬回 store，
+        // 中间的窗口里 meta 被重建（`messageCount` 归零）、护栏失效 ⇒ 窗口被当全量写进去。
+        //
+        // 现在放进**同一个协程**里顺序执行：先 repair（收拾老 build 留下的三种形状），
+        // 再 migrate（把旧格式搬进 store）。两者都逐会话加锁，不会交叉。
         Core.appScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             runCatching { Core.chats.repairPending() }
                 .onFailure { android.util.Log.w("ChatRepository", "repairPending failed", it) }
-        }
-        // **旧格式迁移**（#31）：把 `<id>.json` 逐会话搬进「meta + JSONL 追加日志」。
-        //
-        // 为什么不在 `load()` 里做：读一个 54 MB 的目录、每个会话全量解析 + 写回 + 校验，
-        // 是秒级的 IO，列表必须先在屏幕上。这里排在 IO 协程里，界面照常可用；
-        // 迁移是**幂等、可中断、可重入**的（`migratePending` 内部逐会话加锁、校验通过才改名，
-        // 失败就保留旧文件下次再来），所以每次启动跑一次是安全的。
-        Core.appScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // **旧格式迁移**（#31）：把 `<id>.json` 逐会话搬进「meta + JSONL 追加日志」。
+            //
+            // 为什么不在 `load()` 里做：读一个 54 MB 的目录、每个会话全量解析 + 写回 + 校验，
+            // 是秒级的 IO，列表必须先在屏幕上。这里排在 IO 协程里，界面照常可用；
+            // 迁移是**幂等、可中断、可重入**的（`migratePending` 内部逐会话加锁、校验通过才删旧文件，
+            // 失败就保留旧文件下次再来），所以每次启动跑一次是安全的。
+            //
+            // **必须排在 repair 之后、且在同一个协程里**（issue #33 根因 3）。
             runCatching { Core.chats.migratePending() }
                 .onFailure { android.util.Log.w("ChatRepository", "migratePending failed", it) }
         }

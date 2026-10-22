@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.chat
 
 import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.suixing.agent.agent.AgentEvent
@@ -375,6 +376,8 @@ data class SessionStats(
         }
     }
 }
+private const val TAG = "ChatViewModel"
+
 class ChatViewModel : ViewModel() {
 
     // The process-wide instance, not a private one: the floating console has to be
@@ -2812,32 +2815,52 @@ class ChatViewModel : ViewModel() {
         } else {
             title
         }
-        Core.chats.save(
-            allowShrink = allowShrink,
-            conversation = Conversation(
-                id = chatId,
-                title = derived,
-                createdAt = previous?.createdAt ?: System.currentTimeMillis(),
-                messages = messages,
-                assistantId = assistantId,
-                activeRuns = activeRuns,
+        // **保存失败不许把 app 崩掉**（真机实测：v0.8.320 一发送就闪退，
+        // 堆栈是 `ChatRepository$save` 抛的 `IllegalStateException`，
+        // 它在 `viewModelScope.launch` 里没人接 ⇒ 直接崩进程）。
+        //
+        // 落盘失败是**用户能理解、也能恢复**的事（磁盘满、日志损坏、存储格式改过），
+        // 不是"App 该死"的事。所以：接住，把原因写进气泡里的红条，用户看得见。
+        val outcome = runCatching {
+            Core.chats.save(
+                allowShrink = allowShrink,
+                conversation = Conversation(
+                    id = chatId,
+                    title = derived,
+                    createdAt = previous?.createdAt ?: System.currentTimeMillis(),
+                    messages = messages,
+                    assistantId = assistantId,
+                    activeRuns = activeRuns,
                 // The conversation's own model pick survives every save: dropping it here
                 // would silently hand the next run back to the persona. Saves that carry
                 // no pick (a message landing, a derived title, the end of a run) fall back
                 // to what is already on disk instead of clearing it.
-                providerId = providerId ?: previous?.providerId,
-                model = model ?: previous?.model,
+                    providerId = providerId ?: previous?.providerId,
+                    model = model ?: previous?.model,
                 // Same trap again: the thinking level is picked in the same sheet as the
                 // model, so a save that carries none must inherit the one on disk rather
                 // than resetting the chat to the app-wide default.
-                reasoningEffort = reasoningEffort ?: previous?.reasoningEffort,
+                    reasoningEffort = reasoningEffort ?: previous?.reasoningEffort,
                 // Same trap as the model pick: a save that carries no checkpoints must
                 // inherit the ones on disk, or every message landing would wipe the record
                 // of what was compressed — and the next run would compress and pay again.
-                checkpoints = checkpoints ?: previous?.checkpoints ?: emptyList(),
-            ),
+                    checkpoints = checkpoints ?: previous?.checkpoints ?: emptyList(),
+                ),
+            )
+        }
+        return outcome.fold(
+            onSuccess = { derived },
+            onFailure = { cause ->
+                Log.w(TAG, "save failed for $chatId: ${cause.message}", cause)
+                _state.update {
+                    if (it.conversationId != chatId) it
+                    else it.copy(
+                        error = "保存失败：${cause.message ?: cause.javaClass.simpleName}",
+                    )
+                }
+                null
+            },
         )
-        return derived
     }
 
     override fun onCleared() {
