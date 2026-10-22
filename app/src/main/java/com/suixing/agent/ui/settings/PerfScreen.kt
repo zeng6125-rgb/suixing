@@ -102,8 +102,15 @@ internal fun PerfScreen(onBack: () -> Unit) {
     LaunchedEffect(Unit) {
         pinLog = withContext(Dispatchers.IO) {
             runCatching {
-                val file = java.io.File(Core.appContext.filesDir, "pin.log")
-                if (!file.isFile) "" else file.readLines().takeLast(30).joinToString(NL_PERF)
+                val ctx = Core.appContext
+                // **带上版本**：这份痕迹会被贴到对话里，没有版本号就无法确认是哪个构建产生的
+                // （同一台机器上装过很多个 0.8.3xx）。
+                val version = runCatching {
+                    ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+                }.getOrNull().orEmpty()
+                val file = java.io.File(ctx.filesDir, "pin.log")
+                val body = if (!file.isFile) "" else file.readLines().takeLast(30).joinToString(NL_PERF)
+                if (body.isEmpty()) "" else "version=$version" + NL_PERF + body
             }.getOrDefault("")
         }
     }
