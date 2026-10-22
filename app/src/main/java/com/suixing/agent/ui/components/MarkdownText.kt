@@ -777,7 +777,7 @@ internal object SettledBlocks {
  * parsed tail correct — reusing the *whole* previous block list would append the tail to a list
  * that already contained the old one.
  */
-private class MarkdownCache {
+internal class MarkdownCache {
     private var text = ""
     private var prefix = ""
     private var prefixBlocks: List<MdBlock> = emptyList()
