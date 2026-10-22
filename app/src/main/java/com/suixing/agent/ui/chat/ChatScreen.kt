@@ -957,6 +957,77 @@ fun ChatScreen(
     // 只在「用户上翻读历史」时启用；贴底时高度直接跟自然值，行为与以前完全一致。
     val lagNatural = remember { intArrayOf(0) }
     var lagReported by remember { mutableIntStateOf(0) }
+    // ─── #17 修复（v0.8.319）：**读历史时把流式行的布局高度钉住** ──────────────
+    //
+    // 前面三版（dispatchRawDelta / heightIn(max) / anchorKey+scrollToItem）都死在同一个地方：
+    // 「**检测偏差 → 纠正**」追不上流式的**连续推力**。这一版不检测、不纠正 ——
+    // 它让流式行在读历史期间**根本不长高**（布局层面），于是上面的内容**一帧都不动**。
+    //
+    // 做法（issue #17 自己列的方向 1「在布局前把锚点钉住」）：
+    //  - `pinnedLiveHeight` = 用户开始读历史那一刻，流式行的自然高度；**此后不再变**。
+    //  - 流式行用 `liveRowLagHeight(reported = pinnedLiveHeight, natural = lagNatural)`：
+    //    **报的**高度是钉住的那个，**量的**高度永远是自然高度（内容照常长、照常可见）。
+    //  - 回到底部（stickToBottom）时把 `pinnedLiveHeight` 清零 ⇒ 高度跟自然值 ⇒ 行为与以前完全一致。
+    //
+    // 为什么这能治本：
+    //  - 漂移的**唯一来源**是「流式行布局高度增长 ⇒ 上面的内容被顶走」。
+    //    高度不增长 ⇒ 顶不动 ⇒ 漂移为 0。这不是「追」，是「不发生」。
+    //  - 完全不碰滚动位置：不写 `firstVisibleItemIndex/Offset`、不 `dispatchRawDelta`、
+    //    不 `scrollToItem`。LazyColumn 的测量与我们的逻辑互不干扰 ⇒ 不会「飞到列表最顶部」。
+    //
+    // 与「冻结内容」（issue #17 方案 3、v0.8.236 的 heightIn(max)）的区别：
+    // 那些方案把**内容**也冻住 ⇒ 用户看不到后续输出（用户当时就否了）。
+    // 这里只冻**布局高度**，内容照常流、照常看得到，只是列表不因它而重新排版。
+    //
+    // 代价：读历史期间，若流式行已经比钉住时高，多出来的部分不占布局高度（内容仍在，
+    // 但那一块的下方是空白）。回到底部立刻恢复。**这是"读历史"场景下的合理取舍** ——
+    // 用户在那段时间本来就在读旧内容，不是在看新输出。
+    var pinnedLiveHeight by remember { mutableIntStateOf(0) }
+    // **钉住的高度**（0 = 不钉）。
+    //
+    // 捕获时机：**从「贴底」切到「读历史」的那一帧**，把当时的自然高度钉住，之后不再变。
+    //
+    // 为什么不在每帧更新：每帧更新就等于「高度继续长」⇒ 还在顶 ⇒ 还在漂。
+    // 为什么不用 `laggingNow` 做 key 的 LaunchedEffect：`laggingNow` 是 `rememberUpdatedState`，
+    // 它的**值**变化不重组，而 key 用的是当时的快照 ⇒ 转换点会漏。
+    // 所以直接监听 `scroll.stickToBottom` 这个真正的状态源。
+    //
+    // **释放时机**（v0.8.319 二次修正）：不是"回到底部"，而是**流式行滚出可视范围**。
+    //
+    // 原因：钉住 = 流式行的**布局高度**冻结，而内容照常长 ⇒ 超出冻结高度的那部分
+    // 在布局里没有位置。流式行在读历史时位于屏幕下方（底锚 + 上翻 ⇒ 它在视口外），
+    // 裁掉的部分用户看不见；可一旦它**进入视野**（用户往回滚），裁掉的就是正在显示的
+    // 新输出 —— 用户会看到"输出少了一截"。
+    //
+    // 所以：**钉住期间只要流式行还在视野内就立刻释放**（宁可那一刻跳一下，也不要持续显示被裁的输出）。
+    // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
+    val streamingKey = "streaming:${state.conversationId}"
+    LaunchedEffect(listState) {
+        var pinned = false
+        snapshotFlow {
+            val lagging = !scroll.stickToBottom && !scroll.restoring
+            // 流式行是否还在视野内（含视口外一点点缓冲，避免边界反复横跳）。
+            val visible = listState.layoutInfo.visibleItemsInfo.any { it.key == streamingKey }
+            lagging to visible
+        }.collect { (lagging, visible) ->
+            when {
+                lagging && !visible && !pinned -> {
+                    // 刚开始读历史（且流式行不在视野内）：钉住此刻的自然高度。
+                    // `lagNatural[0]` 是上一帧量到的自然高度 —— 它就是"用户开始上翻时"的高度。
+                    val h = lagNatural[0]
+                    if (h > 0) {
+                        pinnedLiveHeight = h
+                        pinned = true
+                    }
+                }
+                (!lagging || visible) && pinned -> {
+                    // 回到底部，或流式行进入视野：解除钉住，高度跟自然值。
+                    pinnedLiveHeight = 0
+                    pinned = false
+                }
+            }
+        }
+    }
     // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
     val captureNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
@@ -990,46 +1061,33 @@ fun ChatScreen(
     // 每帧量「流式行应处的 y」与「实际 y」的差，用 scrollToItem 把差值补回去。
     //
     // 只在「不在底部、且用户没在滑」时生效；用户在滑时只重取基准，不干预。
-    var anchorLiveTop by remember { mutableFloatStateOf(Float.NaN) }
-    LaunchedEffect(listState) {
-        while (true) {
-            withFrameNanos { }
-            if (!laggingNow) {
-                anchorLiveTop = Float.NaN
-                continue
-            }
-            val top = liveTop[0]
-            if (top.isNaN()) continue
-            // 手指按着 / 惯性中：跟随并重取基准（那是用户在主动移动）。
-            // **不能长期依赖 isScrollInProgress**（文件 :902 记录：流式期间它可能一直是 true），
-            // 所以这里只把它当"用户可能在滑"的附加信号，配合 pressed 一起判断。
-            if (pressed) {
-                anchorLiveTop = top
-                continue
-            }
-            if (anchorLiveTop.isNaN()) {
-                anchorLiveTop = top
-                continue
-            }
-            val drift = top - anchorLiveTop
-            if (abs(drift) < 1f) continue
-            // 同步改写。**符号不是猜的**，用的是本文件 `:928` 的真机实测结论：
-            // 「`scrollToItem(i, x)` 之后 item i 的 offset 恰好是 `-x`」，即 y = -x。
-            // 要让 y 变化 Δy（= anchor - y_current = -drift），需要 x 变化 -Δy = drift：
-            //   x_new = x_current + drift。
-            val idx = listState.firstVisibleItemIndex
-            val off = listState.firstVisibleItemScrollOffset
-            val target = (off + drift.toInt()).coerceAtLeast(0)
-            if (target != off) {
-                listState.scrollToItem(idx, target)
-                lastComp[0] = (-drift).toInt()
-                lastConsumed[0] = target - off
-            } else {
-                // 已经到边界（不能更靠上）：重取基准，避免空转。
-                anchorLiveTop = top
-            }
-        }
-    }
+    // ─── **v0.8.319：这条路走不通，已停用** ────────────────────────────────────
+    //
+    // 真机反馈：不往上翻时正常，但**会飞到列表最顶部**。原因是 `scrollToItem(idx, target)`
+    // 的 `target` 是「该 item 的偏移」，而一个折叠块/一轮对话的高度常常大于视口 ——
+    // 一旦把 target 推过一个 item 的高度，LazyColumn 会落到相邻 item，下一帧再推，累积就飞了。
+    //
+    // 更根本的问题：这条思路是在和 LazyColumn 的测量机制对抗 —— 每帧改写
+    // `firstVisibleItemIndex/Offset` 会与它自己的 `updateFromMeasureResult` 互相覆盖，
+    // 谁也说不清最终位置由谁决定。
+    //
+    // 所以**整段停用**（代码与推理留在这里，别再试第三次同一类方案）：
+    // 现在的行为是「列表不动，流式内容按底锚规则向上推」—— 与你否掉的冻结/移出列表之外的
+    // 唯一现状。下一步要么接受这个现状，要么换一个**不改写滚动位置**的方向
+    // （例如让流式行在阅读态下不参与布局测量），那是另一次设计，不在这里硬补。
+    // ─── **v0.8.319：这条路走不通，整段删掉了** ──────────────────────────────────
+    //
+    // 真机反馈：会飞到列表最顶部。原因有两层：
+    //  1. `scrollToItem(idx, target)` 的 `target` 是「该 item 的偏移」，而一轮对话/一个折叠块
+    //     的高度常常大于视口 —— target 一旦推过一个 item 的高度，LazyColumn 会落到相邻 item，
+    //     下一帧再推，累积就飞了；
+    //  2. 更根本：这条思路在**和 LazyColumn 的测量机制对抗** —— 每帧改写
+    //     `firstVisibleItemIndex/Offset` 会与它自己的 `updateFromMeasureResult` 互相覆盖，
+    //     最终位置由谁决定说不清。
+    //
+    // 现状回到「列表不动，流式内容按底锚规则向上推」。**不要再起第三次同类方案**：
+    // 任何"每帧改写滚动位置"的做法都会撞上上面第 2 点。真要解决得换方向
+    // （例如阅读态下让流式行不参与布局测量），那是另一次设计。
 
     LaunchedEffect(listState) {
         val buf = StringBuilder()
@@ -1386,9 +1444,16 @@ fun ChatScreen(
                                     Modifier
                                         .fillMaxWidth()
                                         .liveRowLagHeight(
-                                            reported = 0,
+                                            // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
+                                            // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
+                                            reported = pinnedLiveHeight,
                                             natural = lagNatural,
                                         )
+                                        // `liveRowLagHeight` 报的���度可能小于内容的自然高度
+                                        // （钉住时就是如此），多出来的部分要裁掉，否则会画到
+                                        // 下一行里去。**常量修饰符**，不加条件 —— 钉住与否
+                                        // 都不改变修饰符链（条件挂载会重建链，见 :1271 的残影教训）。
+                                        .clipToBounds()
                                         .then(Modifier)
                                         .onGloballyPositioned { liveTop[0] = it.positionInRoot().y },
                                 ) {

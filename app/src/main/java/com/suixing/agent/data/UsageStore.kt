@@ -72,6 +72,23 @@ data class ChatUsage(
     val scanned: Int = 0,
     /** Timestamp of the last message folded in — readable by eye, and the old cache's shape. */
     val scannedUpTo: Long = 0,
+    /**
+     * The byte offset in the log **after** the last message folded in (#30).
+     *
+     * This is what lets the next scan read only the new bytes instead of the whole
+     * transcript. 0 = "no byte watermark yet" ⇒ the next scan reads the whole thing
+     * (and then records one).
+     */
+    val scannedBytes: Long = 0,
+    /**
+     * The log generation the byte watermark belongs to.
+     *
+     * The log is append-only **within** a generation. A rewrite (edit-and-resend, or a
+     * message that got its usage attached later) starts a new generation, and then the
+     * old byte offset points into a different file ⇒ the next scan must start over.
+     * -1 = "the watermark is not from a log at all" (the old single-file format).
+     */
+    val scannedGen: Int = -1,
 )
 
 /**
@@ -122,7 +139,8 @@ class UsageStore(private val context: Context) {
      * rewrites the cache. Safe to call on a timer or on screen open.
      */
     suspend fun refresh(): UsageSnapshot = withContext(Dispatchers.IO) {
-        val next = accumulate(readCache(), loadConversations())
+        val cache = readCache()
+        val next = accumulateSlices(cache, loadSlices(cache))
         snapshot = next
         writeCache(next)
         next
@@ -169,6 +187,65 @@ class UsageStore(private val context: Context) {
         return byId.values.toList()
     }
 
+    /**
+     * The part of every conversation that has **not** been counted yet (#30).
+     *
+     * The old [loadConversations] parsed every transcript in full — 10 chats, 54 MB, a
+     * second of IO and a heap spike every time the usage screen opened — only to look at
+     * the messages past the watermark. Now each chat contributes just that part:
+     *
+     *  - **the log format**: read from the byte offset after the last counted message.
+     *    Only the new bytes are read and only those are parsed.
+     *  - **the old single-file format**: still read whole (there is no log to seek in),
+     *    but those are the not-yet-migrated chats, and they are migrated away shortly.
+     */
+    private fun loadSlices(snapshot: UsageSnapshot): List<UsageSlice> {
+        val out = ArrayList<UsageSlice>()
+        // A live draft ends in `.json` too; reading it as a conversation would hand
+        // accumulate() an id that no transcript has.
+        chatsDir.listFiles { file -> file.extension == "json" && !file.name.endsWith(LIVE_SUFFIX) }
+            ?.forEach { file ->
+                val conversation = runCatching {
+                    json.decodeFromString<Conversation>(file.readText())
+                }.getOrNull() ?: return@forEach
+                out += UsageSlice(
+                    id = conversation.id,
+                    messages = conversation.messages,
+                    baseIndex = 0,
+                    endOffsets = null,
+                    gen = -1,
+                )
+            }
+        File(chatsDir, STORE_DIR).listFiles { file -> file.name.endsWith(META_SUFFIX) }
+            ?.forEach { file ->
+                val id = file.name.removeSuffix(META_SUFFIX)
+                if (out.any { it.id == id }) return@forEach
+                runCatching {
+                    val meta = store.readMeta(id) ?: return@runCatching
+                    val previous = snapshot.chats[id]
+                    // **Incremental**: same generation and a byte watermark ⇒ only the
+                    // bytes after the last counted message. A different generation means
+                    // the log was rewritten, so the old offset points nowhere ⇒ start over.
+                    val resumable = previous != null &&
+                        previous.scannedGen == meta.gen &&
+                        previous.scannedBytes > 0
+                    val sliced = if (resumable) {
+                        store.slicedFrom(meta, previous.scannedBytes)
+                    } else {
+                        store.allSliced(meta)
+                    }
+                    out += UsageSlice(
+                        id = id,
+                        messages = sliced.map { it.message },
+                        baseIndex = if (resumable) previous.scanned else 0,
+                        endOffsets = sliced.map { it.endOffset },
+                        gen = meta.gen,
+                    )
+                }
+            }
+        return out
+    }
+
     private fun readCache(): UsageSnapshot {
         snapshot.let { if (it != UsageSnapshot()) return it }
         if (!cacheFile.isFile) return UsageSnapshot()
@@ -208,22 +285,59 @@ internal const val UNKNOWN_MODEL_LABEL = "历史/未知"
  * chat gives its tokens back" — can be tested without a device, a clock, or the real
  * chats folder.
  */
+/**
+ * The part of one conversation that has not been folded into the usage snapshot yet.
+ *
+ * [messages] starts at index [baseIndex] of the whole transcript, so the count watermark
+ * stays an absolute index no matter how much of the transcript was skipped.
+ *
+ * [endOffsets] is the byte offset **after** each message (null = the source has no log to
+ * seek in, e.g. the old single-file format). It is what makes the next scan incremental.
+ */
+internal data class UsageSlice(
+    val id: String,
+    val messages: List<StoredMessage>,
+    val baseIndex: Int,
+    val endOffsets: List<Long>?,
+    val gen: Int,
+)
+
 internal fun accumulate(
     snapshot: UsageSnapshot,
     conversations: List<Conversation>,
+    zone: ZoneId = ZoneId.systemDefault(),
+): UsageSnapshot = accumulateSlices(
+    snapshot,
+    conversations.map {
+        UsageSlice(it.id, it.messages, baseIndex = 0, endOffsets = null, gen = -1)
+    },
+    zone,
+)
+
+/**
+ * Folds the not-yet-counted part of every conversation into the snapshot.
+ *
+ * Same rules as the old [accumulate], with one addition: when the slice knows where each
+ * message ends in the log, the byte watermark is advanced with it, so the next scan can
+ * read only the new bytes (#30) instead of parsing the whole transcript again.
+ */
+internal fun accumulateSlices(
+    snapshot: UsageSnapshot,
+    slices: List<UsageSlice>,
     zone: ZoneId = ZoneId.systemDefault(),
 ): UsageSnapshot {
     val chats = snapshot.chats.toMutableMap()
 
     // A chat the user deleted takes its tokens with it: the totals have to describe the
     // chats still on disk, or the header keeps counting conversations that are gone.
-    chats.keys.retainAll(conversations.mapTo(mutableSetOf<String>()) { it.id })
+    chats.keys.retainAll(slices.mapTo(mutableSetOf<String>()) { it.id })
 
-    for (conversation in conversations) {
-        val previous = chats[conversation.id] ?: ChatUsage()
-        val messages = conversation.messages
-        val start = previous.scanned.coerceIn(0, messages.size)
-        val tail = messages.subList(start, messages.size)
+    for (slice in slices) {
+        val previous = chats[slice.id] ?: ChatUsage()
+        val messages = slice.messages
+        // The watermark is an absolute index; the slice may start later than 0.
+        val start = previous.scanned.coerceIn(slice.baseIndex, slice.baseIndex + messages.size)
+        val tail = messages.subList(start - slice.baseIndex, messages.size)
         // Only up to the newest *priced* message: the newest turn may still be mid-flight
         // with its usage not attached yet, and it has to be re-read once it is priced.
         val lastPriced = tail.indexOfLast { it.usageKnown }
@@ -231,7 +345,16 @@ internal fun accumulate(
             // Nothing priced to add. Record a clamped position (a transcript that somehow
             // shrank is never re-counted from the top), but do not invent an entry for a
             // chat that has never contributed anything.
-            if (previous.scanned != start) chats[conversation.id] = previous.copy(scanned = start)
+            // 字节水位**可能来自上一个世代**（日志被改写过）⇒ 丢掉它。
+            // 留着的话，下一次扫描的"可续读"判断会拿旧偏移去读新文件 —— 那个偏移
+            // 在新世代里指的是别的位置。（可续读还要代数相同，所以现在读不到；
+            // 但把不用的水位留着是雷，丢掉最省心。）
+            val fixed = previous.copy(
+                scanned = start,
+                scannedBytes = if (slice.endOffsets != null) 0L else previous.scannedBytes,
+                scannedGen = if (slice.endOffsets != null) slice.gen else previous.scannedGen,
+            )
+            if (fixed != previous) chats[slice.id] = fixed
             continue
         }
 
@@ -252,11 +375,18 @@ internal fun accumulate(
         }
         // The watermark advances past everything that was priced, so the next scan starts
         // here and the unpriced tail is looked at again.
-        chats[conversation.id] = ChatUsage(
+        // The byte watermark advances to the end of the **last counted** message — the
+        // unpriced tail after it is looked at again next time (same rule as the count
+        // watermark above it).
+        val countedIndex = start - slice.baseIndex + lastPriced
+        val endBytes = slice.endOffsets?.getOrNull(countedIndex)
+        chats[slice.id] = ChatUsage(
             days = days,
             models = models,
             scanned = start + lastPriced + 1,
             scannedUpTo = newest,
+            scannedBytes = endBytes ?: previous.scannedBytes,
+            scannedGen = if (slice.endOffsets != null) slice.gen else previous.scannedGen,
         )
     }
     return UsageSnapshot(chats = chats)

@@ -320,6 +320,38 @@ internal class ChatStore(private val root: File) {
     /** Every committed message, in order. What `loadFull` / export still need. */
     fun all(meta: ConversationMeta): List<StoredMessage> = from(meta, 0)
 
+    /**
+     * A message plus the byte offset **after** it — the point a later scan resumes from.
+     *
+     * The offset is the *next* line's start, so resuming there never re-reads this message
+     * and never starts mid-line.
+     */
+    data class SlicedMessage(val message: StoredMessage, val endOffset: Long)
+
+    /**
+     * Every committed message, each with the offset after it.
+     *
+     * This is what makes an **incremental** scan possible (#30): the usage panel used to
+     * parse every transcript in full, just to count the tokens of the messages it had not
+     * counted yet. With the offsets, the next scan reads only the bytes after the last
+     * message it folded in.
+     */
+    fun allSliced(meta: ConversationMeta): List<SlicedMessage> = slicedFrom(meta, 0)
+
+    /** Every committed message from [startOffset] on, each with the offset after it. */
+    fun slicedFrom(meta: ConversationMeta, startOffset: Long): List<SlicedMessage> {
+        val log = logFile(meta)
+        if (!log.isFile) throw ConversationLogDamagedException("chat ${meta.id}: no log at ${log.name}")
+        val from = startOffset.coerceIn(0, meta.logBytes)
+        val entries = readEntries(log, from, meta.logBytes)
+        return entries.mapIndexed { index, entry ->
+            // The next line's start is where a later scan continues; the last message ends
+            // at the end of the log.
+            val end = entries.getOrNull(index + 1)?.offset ?: meta.logBytes
+            SlicedMessage(entry.message, end)
+        }
+    }
+
     /** Every committed message from the line at [startOffset] to the end. */
     fun from(meta: ConversationMeta, startOffset: Long): List<StoredMessage> {
         val log = logFile(meta)

@@ -241,16 +241,38 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
-    fun `repair writes a store-only chat back to a plain file and drops the store copy`() = runBlocking {
+    fun `a store-only chat is left alone - the store is the write path`() = runBlocking {
+        // **新契约**（#31）：store 是唯一的写路径。旧世界这里会把会话**搬回 `.json`** ——
+        // 那样每次启动都会把已迁移的会话搬回单文件，写侧优化（30 MB/轮 → 几 KB/轮）
+        // 当场失效。现在 store 里有的，就是该有的。
         val onlyInStore = conversation("c1", title = "只在 store 里")
         putInStoreOnly(onlyInStore)
 
         repository().repairPending()
 
-        assertTrue("the chat is a plain file again", legacyFile("c1").exists())
-        assertEquals("with the whole transcript", onlyInStore.messages, readLegacy("c1").messages)
-        assertEquals("只在 store 里", readLegacy("c1").title)
-        assertFalse("only after that file reads back may the store copy go", store.has("c1"))
+        assertFalse("不再搬回 .json", legacyFile("c1").exists())
+        assertTrue("store 副本必须还在", store.has("c1"))
+        assertEquals(
+            "内容一字不差",
+            onlyInStore.messages,
+            store.all(store.readMeta("c1")!!),
+        )
+    }
+
+    @Test
+    fun `when the plain file is the newer one the store copy is dropped for the migration to redo`() = runBlocking {
+        // 有旧版本在 store 之后又写过 `.json` ⇒ 文件才是新的。
+        // 处置：丢掉 store 副本，`migratePending` 会把它重新迁进 store。
+        // **不能**把 store 写回 `.json`（那会把写侧优化废掉）。
+        val chat = conversation("c1", title = "文件里的标题", updatedAt = 5_000)
+        putInStoreOnly(chat.copy(title = "store 里的标题", updatedAt = 1_000))
+        writeLegacy(chat)
+
+        repository().repairPending()
+
+        assertFalse("旧的那份要丢掉", store.has("c1"))
+        assertTrue("文件要留着，等迁移重做", legacyFile("c1").exists())
+        assertEquals("内容没丢", "文件里的标题", readLegacy("c1").title)
     }
 
     @Test
@@ -293,14 +315,17 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
-    fun `repair takes the store copy when it is the newer one`() = runBlocking {
+    fun `repair keeps the store copy when it is the newer one`() = runBlocking {
+        // **新契约**（#31）：store 是写路径 ⇒ 留下的一定是 store，
+        // 旧世界那条"把 store 写回 .json 再删掉 store"是反向的。
         writeLegacy(conversation("c1", title = "文件里的", updatedAt = 1_000))
         putInStoreOnly(conversation("c1", title = "store 里的", updatedAt = 5_000))
 
         repository().repairPending()
 
-        assertEquals("a chat saved by that build keeps its newer text", "store 里的", readLegacy("c1").title)
-        assertFalse(store.has("c1"))
+        assertTrue("store 更新 ⇒ store 留下", store.has("c1"))
+        assertEquals("留下的是新内容", "store 里的", store.readMeta("c1")!!.title)
+        assertFalse("旧文件要退休", legacyFile("c1").exists())
     }
 
     @Test
@@ -308,12 +333,12 @@ class ChatRepositoryStoreTest {
         putInStoreOnly(conversation("c1"))
         val repository = repository()
         repository.repairPending()
-        val repaired = readLegacy("c1")
+        val after = store.all(store.readMeta("c1")!!)
 
         repository.repairPending()
 
-        assertEquals("a second pass must change nothing", repaired, readLegacy("c1"))
-        assertFalse(store.has("c1"))
+        assertEquals("a second pass must change nothing", after, store.all(store.readMeta("c1")!!))
+        assertTrue("store 副本还在", store.has("c1"))
     }
 
     @Test

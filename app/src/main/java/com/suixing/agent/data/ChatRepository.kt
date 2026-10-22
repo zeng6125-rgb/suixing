@@ -134,11 +134,27 @@ class ChatRepository(private val context: Context) {
     }
 
     /** Ids that may have a `.json.migrated` or a store copy, and so may need repairing. */
+    /**
+     * 真正需要修的会话 —— **只有"两份都在"的那些**。
+     *
+     * 以前这里是 `ids += storeMetas().map { it.id }`（把**每一个**会话都算进去），
+     * 因为旧世界的 `repairOne` 末尾有一句 `writePlainFromStore`：只要 store 里有，
+     * 就把它搬回 `.json`。那句话在 0.8.317 之后是**反向的**（见 [repairOne] 的注释），
+     * 于是每次启动都会把全部已迁移会话搬回单文件，写侧优化当场失效。
+     *
+     * 现在 store 是唯一权威，"只有一份"的状态没有任何东西要修 ⇒ 不必进这个集合。
+     * 只保留两种：
+     *  - `.json` 与 store **同时存在**（迁移到一半被杀）⇒ 选新的那份、退休旧的；
+     *  - 只有 `.json.migrated`（旧 build 留下的）⇒ 改回 `.json`，让它走正常迁移。
+     */
     private fun idsNeedingRepair(): Set<String> {
         val ids = LinkedHashSet<String>()
         dir.listFiles { f -> f.name.endsWith(MIGRATED_SUFFIX) }
             ?.forEach { ids += it.name.removeSuffix(MIGRATED_SUFFIX).removeSuffix(".json") }
-        ids += storeMetas().map { it.id }
+        // store 里有、同时 `.json` 也在的 —— 只有这种"两份都在"才需要裁决。
+        storeMetas().map { it.id }.forEach { id ->
+            if (legacyFile(id).isFile) ids += id
+        }
         return ids
     }
 
@@ -152,13 +168,20 @@ class ChatRepository(private val context: Context) {
         val meta = runCatching { store.readMeta(id) }.getOrNull()
         try {
             when {
-                // A readable chat is already there: keep the newer of the two copies.
+                // **两份都在** —— 迁移到一半被杀，或旧版本在 store 之后又写过 `.json`。
+                // 裁决：谁新谁说了算，但**留下的那份必须是 store**（新世界的写路径）。
                 plain.isFile -> {
                     if (meta == null) return
                     val onDisk = json.decodeFromString<Conversation>(plain.readText())
                     if (meta.updatedAt > onDisk.updatedAt) {
-                        writePlainFromStore(meta)
+                        // store 更新（迁移写完 store，还没来得及改名就死了）⇒ store 权威，
+                        // 退休旧文件。
+                        retireLegacy(id)
+                        Log.i(TAG, "repair id=$id reason=store-is-newer")
                     } else {
+                        // 文件更新（有旧版本在 store 之后写过）⇒ 以文件为准。
+                        // 丢掉 store 副本，`migratePending` 会把它重新迁进 store ——
+                        // **不能**像旧世界那样把 store 写回 `.json`（那会把写侧优化废掉）。
                         store.discard(id)
                         Log.i(TAG, "repair id=$id reason=plain-is-newer")
                     }
@@ -168,7 +191,18 @@ class ChatRepository(private val context: Context) {
                     check(rolled.renameTo(plain)) { "could not rename ${rolled.name} back" }
                     Log.i(TAG, "repair id=$id reason=rolled-back")
                 }
-                meta != null -> writePlainFromStore(meta)
+                // **store 里有、`.json` 没有**（新世界的正常态：已迁移）。
+                //
+                // 旧世界这里写的是 `writePlainFromStore(meta)` —— 把 store 里的会话**搬回
+                // `.json` 单文件**再删掉 store 副本。那是"store 只是副本"时代的逻辑；
+                // 0.8.317 把写路径切到 store 之后，它是**反向的**：每次启动都会把所有已迁移的
+                // 会话搬回 `.json`，#31 的写侧优化（30 MB/轮 → 几 KB/轮）当场失效。
+                //
+                // 新世界里 store 是唯一权威 ⇒ 什么都不用做，只要把还残留的旧副本退休。
+                meta != null -> {
+                    if (rolled.isFile) rolled.delete()
+                    Log.i(TAG, "repair id=$id reason=store-authoritative")
+                }
             }
         } catch (cause: Throwable) {
             // Deleting nothing is the point: the chat stays readable through whichever copy
