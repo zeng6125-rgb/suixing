@@ -303,9 +303,6 @@ internal const val PROCESS_EXPAND_MS = 220
  */
 internal val REVEAL_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
-/** 阅读锚活着（人停在历史里）时为 true：折叠动画改即时完成，避免动画把正在读的内容推走。 */
-internal val LocalReadingPinned = compositionLocalOf { false }
-
 /**
  * 主转录的滚动状态：折叠块展开/收起时，若**不在底部**，要按高度增量反向补偿，
  * 才能让块顶边钉住、内容向下展开（见 [RevealHeight]）。
@@ -368,7 +365,8 @@ internal val LocalLiveRowLag = compositionLocalOf { false }
  * 卡片长高天然向上、底边不动；旧版在这里逐帧 `dispatchRawDelta` 同步列表，两处抢同一份
  * 列表才是"先向下、再向上"回弹的来源，已随底锚一起删掉。
  *
- * 正在读历史（[LocalReadingPinned]）时不做动画：内容原地展开，不推着正在读的内容走。
+ * 展开/收起一律有动画（0.8.319 起不再按「是否在读历史」区分：那个 signal 的唯一
+ * 作用变成了「上翻时把正在跑的动画打断重启」，已删除）。
  */
 /**
  * ③ **收尾按实测位移对账**：逐帧补偿用的是推算高度，遇到外层约束（钳位、`weight`、嵌套滚动）
@@ -397,7 +395,6 @@ private fun RevealHeight(
     var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
     // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
     val natural = remember { intArrayOf(0) }
-    val pinned = LocalReadingPinned.current
     val outer = LocalChatListState.current
     // **这个块在根坐标系里的 y**（issue #22）：补偿量不再靠"推算长了多少"，而是量
     // "动画前后这个块实际移动了多少"。任何布局约束（`heightIn(max)`、嵌套滚动、`weight`）
@@ -407,7 +404,7 @@ private fun RevealHeight(
     // （TODO #29 列的嫌疑项之一）。数组读出来就是最新值，语义与 State 一致。
     val topInRoot = remember { floatArrayOf(Float.NaN) }
 
-    LaunchedEffect(visible, pinned) {
+    LaunchedEffect(visible) {
         val target = if (visible) 1f else 0f
         val start = progress
         if (start == target) return@LaunchedEffect
@@ -834,6 +831,9 @@ internal fun ReasoningBlock(
     }
     // The folded header says what the think starts with, so a closed block is still
     // readable; a streaming block adds the cursor right after that line.
+    // 光标挂在最新的一条**非空**行上：末行是空行时顺延，避免光标消失一帧。
+    // **在 items 外算一次**（原来每个可见项都重算一遍 Sequence+Iterator）。
+    val cursorAt = remember(lines) { lines.indexOfLast { it.isNotBlank() }.coerceAtLeast(0) }
     val firstLine = lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
     // The chain itself, shared by both shapes: a think with no text at all (the
     // endpoint reported time but no chain) must not render as an empty slab, and a
@@ -891,15 +891,15 @@ internal fun ReasoningBlock(
                 contentPadding = PaddingValues(top = BLOCK_CONTENT_TOP),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                items(lines.size) { index ->
+                items(
+                    count = lines.size,
+                    // **绝对行号当 key**（性能）：思考链是打字机 25 Hz 逐字放出来的，每冒出一个
+                    // 换行 `lines` 就多一行；底锚下 index 0 是最新行 ⇒ **所有位置的"视觉第 i 行"
+                    // 都换成上一行**。用位置键时可见的十几行全部重组 + 重新测量文本；
+                    // 用绝对行号后已有行的身份不变，只有新行和光标行重组。
+                    key = { index -> lines.lastIndex - index },
+                ) { index ->
                     // 底锚：index 0 是**最新一行**（视觉最底），越往上 index 越大。
-                    // 光标挂在最新的一条**非空**行上：末行是空行时顺延，避免光标消失一帧。
-                    val cursorAt = lines.indices
-                        .asSequence()
-                        .map { lines.lastIndex - it }
-                        .firstOrNull { lines[it].isNotBlank() }
-                        ?.let { lines.lastIndex - it }
-                        ?: 0
                     val line = lines[lines.lastIndex - index]
                     if (line.isBlank()) {
                         // 视觉首行（倒序里的最后一条）是空行时不占位：那 4dp 就是「分割线

@@ -53,6 +53,18 @@ class ChatScroll internal constructor(internal val listState: LazyListState) {
     /** 恢复中：这几帧不许"滚到底就把贴底打开"的 collector 把 [stickToBottom] 翻回去（链路 4）。 */
     internal var restoring by mutableStateOf(false)
 
+    /**
+     * **读历史期间钉住了流式行的高度**（#17 的 `pinnedLiveHeight` 生效中）。
+     *
+     * 钉住 ⇒ 内容比真实高度短 ⇒ 列表更容易被判定成「已经在底部」；而下面那个
+     * 「持续 250ms 到底就把贴底打开」的 collector 一旦把 [stickToBottom] 翻回 true，
+     * 钉住就会被解除、内容一下子恢复真实高度 ⇒ 用户看到的就是「已输出的内容还在动」。
+     *
+     * 所以钉住期间**不许**这个 collector 自动打开贴底：解除只能来自用户真正的操作
+     * （「回到最新」按钮）或者这一轮结束。
+     */
+    internal var pinActive by mutableStateOf(false)
+
     /** 每个会话各自的恢复目标（链路 1）：切回 A 时不能读到 B 恢复时的临时值。 */
     private val spotByConversation = mutableStateMapOf<String, Pair<Any?, Int>>()
     var spotKey: Any?
@@ -178,7 +190,9 @@ fun rememberChatScroll(
                 // **恢复位置的那几帧不许翻回 true**（issue #4 链路 4）：`scrollToItem` 之后布局
                 // 还没定型，`canScrollBackward` 会短暂为假，collector 于是把刚设的 false 改回去，
                 // 位置立刻被追底拉到底。
-                if (scrolling || canBack || scroll.restoring) return@collectLatest
+                // 钉住期间不自动打开贴底（见 [pinActive]）：那时「到底」不代表用户想跟新内容，
+                // 只代表被裁短了的内容滚到了头。
+                if (scrolling || canBack || scroll.restoring || scroll.pinActive) return@collectLatest
                 // **必须「持续」到底才算数**（issue #14，真机日志证据）：长按建立选区时布局会重排，
                 // `canScrollBackward` 会瞬时变成 false。原来一见到 false 就把 `stickToBottom` 翻回 true，
                 // 追底逻辑紧接着 `scrollToItem(0)` 把列表拉回底部 —— 日志里 `guard-off idx=0/624`，

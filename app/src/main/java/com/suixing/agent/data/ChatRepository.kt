@@ -230,7 +230,7 @@ class ChatRepository(private val context: Context) {
      *
      * **判据是条数，不是 updatedAt**（issue #33）：
      *  - store 那份可能是 `readTail` 的窗口（12 轮），而 `.json` 是几天的完整历史
-     *    ⇒ 条数一比就分出来了。事故那���：store 85 条 vs `.json` 400+ 条。
+     *    ⇒ 条数一比就分出来了。事故那组：store 85 条 vs `.json` 400+ 条。
      *  - updatedAt 只能说明"谁最后被写过"，**说明不了谁内容多** ——
      *    一个今天写的窗口，updatedAt 一定比几天前写的完整文件新。
      *
