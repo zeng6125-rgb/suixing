@@ -131,6 +131,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -168,6 +169,7 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -445,7 +447,14 @@ fun ChatScreen(
     )
     // [turnPage] reads nothing but each message's role and steer flag, so this key says everything
     // its answer can depend on.
-    val page = remember(rowsKey, shownTurns) { turnPage(state.messages, shownTurns) }
+    // **轮数总数要按磁盘上的真实值报**（#30）：`state.messages` 现在只是"最近 N 轮"这个窗口，
+    // 用它算出来的 `turns` 就等于窗口里的轮数 ⇒ `earlier` 恒为 0 ⇒ 「加载更早」不出现、
+    // 而且「第 N 轮」永远显示成第 1 轮（用户能直接看见的错）。
+    // 总数来自落盘 meta 的 `turnCount`（由 ChatStore 维护，**是轮数不是条数**）。
+    val page = remember(rowsKey, shownTurns, state.turnCount) {
+        val drawn = turnPage(state.messages, shownTurns)
+        if (state.turnCount > drawn.turns) drawn.withTotal(state.turnCount) else drawn
+    }
     // Tool-only assistant turns carry no text of their own, so their tool calls are
     // folded into the bubble above them instead of standing alone in the transcript.
     // Only the branch the user picked is drawn; the other answers stay on disk.
@@ -857,10 +866,14 @@ fun ChatScreen(
         if (state.conversationId.isNotEmpty()) alphaHistory[0] = true
         androidx.compose.animation.core.Animatable(if (coldStart) 1f else 0f)
     }
-    // **只在动画那 260ms 挂 graphicsLayer**（issue #27）：`graphicsLayer` 修饰符只要存在，
-    // 就会给整个 LazyColumn 创建一个常驻 RenderNode —— 静止时它仍要参与每帧合成，
-    // 哪怕 alpha/translation/scale 全是默认值。动画结束后摘掉，画面完全一样（三者都是恒等）。
-    var switching by remember { mutableStateOf(false) }
+    // **入场层是常驻的，不按 `switching` 条件挂载**（记录一次已经走过的弯路）：
+    // v0.8.276 曾按 issue #27 的建议做成"只在 260ms 动画期间挂"，v0.8.284 实测**出现残影**
+    // （条件挂载让整个 LazyColumn 的修饰符链在 `switching` 翻转时重建，展开/收起折叠块时可见），
+    // 于是回退了。回退时这条注释没跟着改，`switching` 也没删，所以曾经出现过
+    // "注释说 260ms、代码却是常驻"的矛盾 —— 现在以**代码为准**：常驻。
+    //
+    // 常驻的代价是一个 RenderNode 参与合成；省掉它的做法是让层在恒等状态不再改变像素
+    // （见下面 `graphicsLayer` 里的 `p >= 1f` 分支），而不是摘掉它。
     LaunchedEffect(state.conversationId) {
         // 初值已经是 0，这里只负责把它推到 1：从 0 起跑，不需要 `snapTo`，
         // 也就没有「snapTo 生效之前先露一帧」的窗口。
@@ -868,12 +881,7 @@ fun ChatScreen(
         // 这是**唯一的时长来源**，改这里就够（位移 24dp / 缩放 0.92 在同一段的 graphicsLayer 里）。
         // 冷启动时 Animatable 初值就是 1f：不播动画，也不挂层。
         if (switchAlpha.value >= 1f) return@LaunchedEffect
-        switching = true
-        try {
-            switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
-        } finally {
-            switching = false
-        }
+        switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
@@ -951,6 +959,7 @@ fun ChatScreen(
     var lagReported by remember { mutableIntStateOf(0) }
     // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
+    val captureNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
     val laggingNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
     // 偏移 / 能否往回滚」。用途：区分三种"推上去"——
@@ -961,13 +970,86 @@ fun ChatScreen(
     val NL = 10.toChar()
     val lastComp = remember { intArrayOf(0) }
     val lastConsumed = remember { intArrayOf(0) }
+    val liveTop = remember { floatArrayOf(Float.NaN) }
+    // 闭环基准：离开底部那一刻流式行在屏幕上的 y（NaN = 未激活）
+    // 闭环基准（已停用，保留声明避免大改 diff；剩余漂移等新日志再定）
+    val anchorTop = remember { floatArrayOf(Float.NaN) }
+    // ─── #17 修复：用 scrollToItem 同步改写位置，不用 dispatchRawDelta ─────────────
+    //
+    // **依据（d6.log 754 帧真机数据，5 组全同）**：
+    //   帧 N   : 高度 +84，位置 0，列表偏移 0      ← 内容长了
+    //   帧 N+1 : 高度 0，  位置 +84，列表偏移 +84  ← 位置才动
+    // 高度和位移**不在同一帧**，且位移量恰好等于高度增量。
+    //
+    // **为什么 dispatchRawDelta 治不了**：它只是往账上记一笔
+    // （LazyListState 注释原文：scrollToBeConsumed 要等 measuring 里的 forceRemeasure 才被消费），
+    // 结算永远晚一帧 —— 我前六版都在往这个下一帧才生效的账户里存钱。
+    //
+    // **改法**：`scrollToItem` 是同步改写位置的（它直接写 firstVisibleItem 与 offset 并让
+    // 本次测量失效），和已验收的「切会话恢复位置」用的是同一个原语（`:1088`/`:1098`）。
+    // 每帧量「流式行应处的 y」与「实际 y」的差，用 scrollToItem 把差值补回去。
+    //
+    // 只在「不在底部、且用户没在滑」时生效；用户在滑时只重取基准，不干预。
+    var anchorLiveTop by remember { mutableFloatStateOf(Float.NaN) }
+    LaunchedEffect(listState) {
+        while (true) {
+            withFrameNanos { }
+            if (!laggingNow) {
+                anchorLiveTop = Float.NaN
+                continue
+            }
+            val top = liveTop[0]
+            if (top.isNaN()) continue
+            // 手指按着 / 惯性中：跟随并重取基准（那是用户在主动移动）。
+            // **不能长期依赖 isScrollInProgress**（文件 :902 记录：流式期间它可能一直是 true），
+            // 所以这里只把它当"用户可能在滑"的附加信号，配合 pressed 一起判断。
+            if (pressed) {
+                anchorLiveTop = top
+                continue
+            }
+            if (anchorLiveTop.isNaN()) {
+                anchorLiveTop = top
+                continue
+            }
+            val drift = top - anchorLiveTop
+            if (abs(drift) < 1f) continue
+            // 同步改写。**符号不是猜的**，用的是本文件 `:928` 的真机实测结论：
+            // 「`scrollToItem(i, x)` 之后 item i 的 offset 恰好是 `-x`」，即 y = -x。
+            // 要让 y 变化 Δy（= anchor - y_current = -drift），需要 x 变化 -Δy = drift：
+            //   x_new = x_current + drift。
+            val idx = listState.firstVisibleItemIndex
+            val off = listState.firstVisibleItemScrollOffset
+            val target = (off + drift.toInt()).coerceAtLeast(0)
+            if (target != off) {
+                listState.scrollToItem(idx, target)
+                lastComp[0] = (-drift).toInt()
+                lastConsumed[0] = target - off
+            } else {
+                // 已经到边界（不能更靠上）：重取基准，避免空转。
+                anchorLiveTop = top
+            }
+        }
+    }
+
     LaunchedEffect(listState) {
         val buf = StringBuilder()
         var tick = 0
         var lastFlush = 0L
         while (true) {
             withFrameNanos { }
-            if (!laggingNow || lagNatural[0] <= 0) continue
+            // 离开"读历史"状态就把攒的写出去 —— 否则短时间复现（几秒）永远攒不满 16KB，
+            // 日志根本不落盘（上一版就是这样，用户复现后文件不存在）。
+            if (!captureNow) {
+                if (buf.isNotEmpty()) {
+                    val chunk = buf.toString()
+                    buf.setLength(0)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        java.io.File(driftCtx.filesDir, "drift17.log").appendText(chunk)
+                    }
+                }
+                continue
+            }
+            if (lagNatural[0] <= 0) continue
             // **逐帧**记录：采样间隔与 Δnat/Δoff 必须同窗口，否则 d 无法与它们相加（上一轮的模型错在这）。
             tick++
             buf.append(lagNatural[0]).append(' ')
@@ -976,46 +1058,16 @@ fun ChatScreen(
                 .append(listState.firstVisibleItemScrollOffset).append(' ')
                 .append(if (listState.canScrollBackward) 1 else 0).append(' ')
                 .append(lastComp[0]).append(' ')
-                .append(lastConsumed[0]).append(NL)
+                .append(lastConsumed[0]).append(' ')
+                .append(if (liveTop[0].isNaN()) -1 else liveTop[0].toInt()).append(NL)
             val now = System.nanoTime()
-            if (buf.length > 16_000 && now - lastFlush > 1_000_000_000L) {
+            if (buf.length > 4_000 && now - lastFlush > 500_000_000L) {
                 val chunk = buf.toString()
                 buf.setLength(0)
                 lastFlush = now
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     java.io.File(driftCtx.filesDir, "drift17.log").appendText(chunk)
                 }
-            }
-        }
-    }
-
-    LaunchedEffect(listState) {
-        while (true) {
-            withFrameNanos { }
-            val natural = lagNatural[0]
-            if (natural <= 0) continue
-            // **先建基线**：lagReported 初值 0 时直接采用当前自然高度、不补。
-            // （0.8.306 的 bug：`current = if (lagReported > 0) lagReported else natural`
-            //  让 natural 恒等于 current ⇒ 永远进不了下面的分支 ⇒ lagReported 永远是 0
-            //  ⇒ 整套滞后补偿从未激活过。用户实测「读本轮已输出的内容并没有包含」就是这个。）
-            if (lagReported <= 0) {
-                lagReported = natural
-                continue
-            }
-            if (natural == lagReported) continue
-            val delta = (natural - lagReported).toFloat()
-            lagReported = natural
-            // **缩短方向要取正**（真机埋点实测）：增长时 dispatch(+δ) 正好抵消；但缩短时
-            // dispatch(−δ) 会被加进漂移里（实测 doff ≈ dnat + d），所以这里统一补正量。
-            // 期望值=0 时两种写法等价，所以增长路径的行为不变。
-            val applied = if (delta < 0f) -delta else delta
-            if (laggingNow && listState.canScrollBackward) {
-                val consumed = listState.dispatchRawDelta(applied)
-                lastComp[0] = applied.toInt()      // 想补多少
-                lastConsumed[0] = consumed.toInt() // 实际被吃掉多少（0 = 列表拒绝）
-            } else {
-                lastComp[0] = -999999
-                lastConsumed[0] = -999999
             }
         }
     }
@@ -1231,14 +1283,28 @@ fun ChatScreen(
                             .fillMaxSize()
                             // 常驻入场层（0.8.284 回退）：条件挂载会导致本列表的布局修饰符链在
                             // `switching` 翻转时重建，展开/收起折叠块时出现残影（用户实测）。
+                            //
+                            // **所以这里不摘层，只在恒等状态时让它不干活**（#27）：
+                            // `graphicsLayer` 的 lambda 是**绘制阶段**才读快照的，动画结束
+                            // （p == 1f）后把 alpha 等写回默认值即可 —— 层还在（不会重建修饰符链、
+                            // 不会有残影），但不再改变任何像素，合成器可以直接跳过它。
+                            // 动画那 260ms 内行为完全不变。
                             .graphicsLayer {
                                 // 形态 = 淡入 + 从下方 24dp 升起 + 缩放 0.92→1.0（issue #12）。
                                 val p = switchAlpha.value
-                                alpha = p
-                                translationY = (1f - p) * 24.dp.toPx()
-                                val sc = 0.92f + 0.08f * p
-                                scaleX = sc
-                                scaleY = sc
+                                if (p >= 1f) {
+                                    // 恒等：显式写回默认值，避免上一帧的非默认值被缓存住。
+                                    alpha = 1f
+                                    translationY = 0f
+                                    scaleX = 1f
+                                    scaleY = 1f
+                                } else {
+                                    alpha = p
+                                    translationY = (1f - p) * 24.dp.toPx()
+                                    val sc = 0.92f + 0.08f * p
+                                    scaleX = sc
+                                    scaleY = sc
+                                }
                             }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
@@ -1320,10 +1386,11 @@ fun ChatScreen(
                                     Modifier
                                         .fillMaxWidth()
                                         .liveRowLagHeight(
-                                            reported = if (laggingNow) lagReported else 0,
+                                            reported = 0,
                                             natural = lagNatural,
                                         )
-                                        .then(if (laggingNow) Modifier.clipToBounds() else Modifier),
+                                        .then(Modifier)
+                                        .onGloballyPositioned { liveTop[0] = it.positionInRoot().y },
                                 ) {
                                     AssistantRow(
                                         parts = state.liveParts.mapNotNull { part ->
@@ -1524,9 +1591,14 @@ fun ChatScreen(
                                 ) {
                                     TextButton(
                                         onClick = {
-                                            shownTurnsByConversation =
-                                                shownTurnsByConversation +
-                                                    (state.conversationId to shownTurns + PAGE_TURNS)
+                                            // **先真的去磁盘读**（#30）：`state.messages` 现在只是
+                                            // 尾部窗口，光把 `shownTurns` 加大不会让旧消息从磁盘长出来。
+                                            // 读到了才扩窗口；没得读（已到文件开头）就不动，避免按钮骗人。
+                                            if (viewModel.loadEarlier()) {
+                                                shownTurnsByConversation =
+                                                    shownTurnsByConversation +
+                                                        (state.conversationId to shownTurns + PAGE_TURNS)
+                                            }
                                         },
                                     ) {
                                         Text(
