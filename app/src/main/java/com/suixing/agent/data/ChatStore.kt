@@ -41,6 +41,61 @@ import java.nio.file.StandardOpenOption
  * [ChatRepository]). Keeping this class free of `Context` and of coroutines is what lets
  * [ChatStoreTest] drive it on a plain `TemporaryFolder`.
  */
+/**
+ * 一个会话的**全量**统计：轮数、步数、tokens、用时。
+ *
+ * 为什么需要它（用户实测）：标题栏那个「会话统计」原来是把界面上的消息列表加一遍，
+ * 而列表只加载最近 12 轮（`readTail`）⇒ 显示的是「已加载那部分」，不是整个会话。
+ * 用户的要求是**整个会话**。
+ *
+ * 怎么保证是整份：这些数字**跟着追加走** —— [ChatStore.appendTail] 把新落盘那几条加进来
+ * （O(新增条数)），显示时直接读 meta，不需要为了一次统计去扫日志。
+ */
+@Serializable
+internal data class ChatTotals(
+    /** 用户提了几轮（`isTurnStart`）。 */
+    val turns: Int = 0,
+    /** 工具调用次数（role == TOOL）。 */
+    val steps: Int = 0,
+    val promptTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val cachedTokens: Int = 0,
+    /** Σ整轮墙钟（含 TTFT 等待）。 */
+    val elapsedMs: Long = 0,
+    /** Σ首字延迟。`elapsed - firstToken` 就是各轮 decode 段之和。 */
+    val firstTokenMs: Long = 0,
+    /** 最近一条**报了用量**的消息的 prompt tokens。 */
+    val contextTokens: Int = 0,
+) {
+    operator fun plus(other: ChatTotals): ChatTotals = ChatTotals(
+        turns = turns + other.turns,
+        steps = steps + other.steps,
+        promptTokens = promptTokens + other.promptTokens,
+        completionTokens = completionTokens + other.completionTokens,
+        cachedTokens = cachedTokens + other.cachedTokens,
+        elapsedMs = elapsedMs + other.elapsedMs,
+        firstTokenMs = firstTokenMs + other.firstTokenMs,
+        // 这个字段是"最后一条"而不是"求和"，所以后一段覆盖前一段。
+        contextTokens = if (other.contextTokens > 0) other.contextTokens else contextTokens,
+    )
+
+    companion object {
+        val EMPTY = ChatTotals()
+    }
+}
+
+/** 一条消息贡献的统计量。 */
+internal fun totalsOfMessage(message: StoredMessage): ChatTotals = ChatTotals(
+    turns = if (isTurnStart(message)) 1 else 0,
+    steps = if (message.role == Roles.TOOL) 1 else 0,
+    promptTokens = message.promptTokens,
+    completionTokens = message.completionTokens,
+    cachedTokens = message.cachedTokens,
+    elapsedMs = message.elapsedMs,
+    firstTokenMs = message.firstTokenMs,
+    contextTokens = if (message.usageKnown) message.promptTokens else 0,
+)
+
 internal class ChatStore(private val root: File) {
 
     /**
@@ -75,6 +130,18 @@ internal class ChatStore(private val root: File) {
         val turnCount: Int = 0,
         /** Id of the last committed message; the anchor an append has to line up with. */
         val lastMessageId: String = "",
+        /**
+         * 整个会话的统计。**跟着追加走**（[appendTail] 只累加新落盘的几条），
+         * 所以「会话统计」不需要为了显示数字去扫一遍日志。
+         */
+        val totals: ChatTotals = ChatTotals(),
+        /**
+         * [totals] 是按多少条消息算出来的。
+         *
+         * 用来判断"统计跟当前日志对不对得上"：相等 ⇒ 直接读；不等（旧 meta 默认 -1）⇒
+         * 需要一次性补算。这样旧会话也能得到正确的统计，而不是显示 0。
+         */
+        val totalsAt: Int = -1,
     ) {
         /** The list screen's copy of a conversation: every field, no messages. */
         fun toConversation(): Conversation = Conversation(
@@ -287,6 +354,9 @@ internal class ChatStore(private val root: File) {
             messageCount = committed.messageCount + tail.size,
             turnCount = committed.turnCount + tail.count { isTurnStart(it) },
             lastMessageId = tail.last().id,
+            // 会话统计跟着追加走：只累加**新落盘**这几条，不重扫日志。
+            totals = tail.fold(committed.totals) { acc, m -> acc + totalsOfMessage(m) },
+            totalsAt = committed.messageCount + tail.size,
         )
         writeMeta(next)
         return next
@@ -509,7 +579,16 @@ internal class ChatStore(private val root: File) {
      */
     fun newMeta(conversation: Conversation): ConversationMeta =
         metaOf(conversation, gen = 0, logBytes = 0)
-            .copy(messageCount = 0, turnCount = 0, lastMessageId = "")
+            // 水位全部归零 —— **包括统计**（`totals` / `totalsAt`）：下一次 append 会从头
+            // 把落盘的每一条累加进来。不归零的话首次追加会把整份统计又加一遍
+            // （单测抓到过：20 条消息算成 20 轮）。
+            .copy(
+                messageCount = 0,
+                turnCount = 0,
+                lastMessageId = "",
+                totals = ChatTotals.EMPTY,
+                totalsAt = 0,
+            )
 
     /**
      * Builds the meta for [conversation] whose log has already been written at [logBytes].
@@ -536,6 +615,11 @@ internal class ChatStore(private val root: File) {
             messageCount = conversation.messages.size,
             turnCount = conversation.messages.count { isTurnStart(it) },
             lastMessageId = conversation.messages.lastOrNull()?.id ?: "",
+            // 传进来的一定是**完整**消息列表（新会话 / rewrite / 迁移），所以这就是整份。
+            totals = conversation.messages.fold(ChatTotals.EMPTY) { acc, m ->
+                acc + totalsOfMessage(m)
+            },
+            totalsAt = conversation.messages.size,
         )
 
     /** Encodes [messages] as the log's bytes: one record per line, each newline-terminated. */

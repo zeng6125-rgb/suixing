@@ -302,6 +302,46 @@ class ChatRepository(private val context: Context) {
     // readWire 是这次改造里最容易漏的一条：只加载 12 轮却把它当模型上下文，模型会静默变笨
     // （不报错、只是答得差），比崩溃难查得多。
 
+    /**
+     * **整个会话**的统计（轮数 / 步数 / tokens / 用时）。
+     *
+     * 从 meta 直接读，**O(1)** —— 数字跟着追加走（[ChatStore.appendTail] 只累加新落盘的几条），
+     * 显示统计时不需要扫描日志。
+     *
+     * 为什么不能拿界面上的消息列表加一遍：列表只加载最近 12 轮（`readTail`），
+     * 加出来的只是"已加载那部分"（用户实测：标题栏的会话统计少了一大截）。
+     *
+     * 旧会话的 meta 没有这个字段：`chatJson` 有 `ignoreUnknownKeys`，缺失字段取声明默认值，
+     * 所以 `totalsAt` 读到 **-1**，与 `messageCount` 不等 ⇒ 这里**一次性补算**并写回，
+     * 此后都是 O(1)。补算在 IO 线程上，且只在这个会话第一次看统计时发生。
+     */
+    internal suspend fun sessionTotals(id: String): ChatTotals? =
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                val meta = store.readMeta(id) ?: return@withLock legacyTotals(id)
+                if (meta.totalsAt == meta.messageCount) return@withLock meta.totals
+                val totals = runCatching {
+                    store.all(meta).fold(ChatTotals.EMPTY) { acc, message ->
+                        acc + totalsOfMessage(message)
+                    }
+                }.onFailure {
+                    Log.w(TAG, "totals backfill failed for $id", it)
+                }.getOrNull() ?: return@withLock meta.totals
+                runCatching {
+                    store.writeMeta(meta.copy(totals = totals, totalsAt = meta.messageCount))
+                }
+                totals
+            }
+        }
+
+    /** 还没迁移的旧格式会话：只有一份 `.json`，直接数。 */
+    private fun legacyTotals(id: String): ChatTotals? {
+        val conversation = readLegacyConversation(id) ?: return null
+        return conversation.messages.fold(ChatTotals.EMPTY) { acc, message ->
+            acc + totalsOfMessage(message)
+        }
+    }
+
     /** Every message of one chat. Use only where the whole transcript is genuinely needed. */
     suspend fun readAll(id: String): List<StoredMessage> = withContext(Dispatchers.IO) {
         lock.withLock {

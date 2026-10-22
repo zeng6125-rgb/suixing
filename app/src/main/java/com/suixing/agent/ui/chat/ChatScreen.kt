@@ -577,13 +577,15 @@ fun ChatScreen(
     // The conversation's own clock, summed off the very rows [SessionStats] divides its speed
     // by — so 「会话总用时」 and 「会话输出速度」 are two readings of one measurement rather
     // than two tallies that can drift apart. The tally carries the speed but not the total.
-    val sessionElapsedMs = remember(rowsKey) { state.messages.sumOf { it.elapsedMs } }
+    // **整个会话**的墙钟合计（原来是 `state.messages.sumOf{…}`，那只是 12 轮窗口）。
+    val sessionElapsedMs = session?.elapsedMs ?: 0L
     // The conversation's spend, split the way the endpoint reports it, for the ring's card: the
     // prompt the cache could not answer, the cache reads, and the output. The card used to give
     // the total and the hit rate only; the user asked for the three parts by name —
     // 「未缓存输入」「缓存读取」「输出」 — and in full, because these are the figures a bill is
     // checked against and a rounded one cannot be checked against anything.
-    val sessionSplit = remember(rowsKey) { sessionSplitOf(state.messages) }
+    // **整个会话**的三块花费（原来 `sessionSplitOf(state.messages)` 只算窗口）。
+    val sessionSplit = session?.split ?: SessionSplit(0, 0, 0)
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.

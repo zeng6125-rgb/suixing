@@ -15,6 +15,8 @@ import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.LiveDraft
 import com.suixing.agent.data.PerfRecord
+import com.suixing.agent.data.ChatTotals
+import com.suixing.agent.data.totalsOfMessage
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Tps
@@ -43,6 +45,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.withContext
 import java.util.LinkedHashMap
 import java.util.UUID
@@ -335,6 +338,9 @@ private data class RunSession(
  * Aggregated from the stored usage rows rather than from the engine: the numbers have to
  * survive the run that produced them, and a reopened conversation has no engine state.
  */
+/** 「要不要重算会话统计」的请求：会话 id + 盘上内容的指纹 + 上下文窗口。 */
+private data class StatsRequest(val chat: String, val key: String, val window: Int)
+
 data class SessionStats(
     val turns: Int,
     val steps: Int,
@@ -343,35 +349,55 @@ data class SessionStats(
     val perSecond: Double,
     val contextTokens: Int,
     val contextWindow: Int,
+    /** 三块花费（未缓存输入 / 缓存读取 / 输出），**整个会话**。 */
+    val split: SessionSplit = SessionSplit(0, 0, 0),
+    /** 整个会话的墙钟合计。 */
+    val elapsedMs: Long = 0,
 ) {
     companion object {
-        fun of(messages: List<StoredMessage>, contextWindow: Int): SessionStats? {
-            val turns = messages.count { it.role == Roles.USER && !it.steer }
-            val steps = messages.count { it.role == Roles.TOOL }
-            val prompt = messages.sumOf { it.promptTokens }
-            val completion = messages.sumOf { it.completionTokens }
-            val cached = messages.sumOf { it.cachedTokens }
-            // 官方聚合＝ΣdecodeTokens/ΣdecodeMs：分母只数各轮「首字之后→结束」，不含 TTFT 等待。
-            // TOOL 消息 elapsedMs=0，天然不进这个和（sumOf 只累加 assistant 轮的 decode 段）。
-            val decode = messages.sumOf { Tps.decodeMs(it.elapsedMs, it.firstTokenMs) }
+        /**
+         * 由**整个会话**的统计量构建（[ChatRepository.sessionTotals] 从 meta 读，O(1)）。
+         *
+         * **不能**再传界面上的消息列表：那只是 `readTail` 的 12 轮窗口，
+         * 加出来的轮数/用量只是"已加载那部分"（用户实测：标题栏的会话统计少了一大截）。
+         */
+        /**
+         * 从一段消息算统计 —— **只用于测试和"手里确实有完整列表"的调用方**。
+         *
+         * 界面上**不要**用这个重载：`ChatUiState.messages` 是 `readTail` 的窗口，
+         * 加出来的只是"已加载那部分"。生产路径走 [of] 的 `ChatTotals` 版本。
+         */
+        fun of(messages: List<StoredMessage>, contextWindow: Int): SessionStats? =
+            of(
+                messages.fold(ChatTotals.EMPTY) { acc, message -> acc + totalsOfMessage(message) },
+                contextWindow,
+            )
+
+        internal fun of(totals: ChatTotals, contextWindow: Int): SessionStats? {
+            val prompt = totals.promptTokens
+            val completion = totals.completionTokens
+            val cached = totals.cachedTokens
+            // 官方聚合＝ΣdecodeTokens/ΣdecodeMs。逐轮 `elapsed - firstToken` 恒 ≥ 0，
+            // 所以"先求和再相减"与逐轮求和等价。
+            val decode = (totals.elapsedMs - totals.firstTokenMs).coerceAtLeast(0L)
             val tokens = prompt + completion
-            // Nothing to say about an empty conversation, or one whose endpoint never
-            // reported usage.
-            if (tokens == 0 && steps == 0) return null
-            val newest = messages.lastOrNull { it.usageKnown }
+            if (tokens == 0 && totals.steps == 0) return null
             return SessionStats(
-                turns = turns,
-                steps = steps,
+                turns = totals.turns,
+                steps = totals.steps,
                 tokens = tokens,
-                // The ratio is worked out in Long and kept unrounded, not `cached * 100 / prompt`
-                // on Int: that multiplication overflows on a conversation whose cached tokens pass
-                // 21,474,837, and the negative percentage it produced was drawn as no line at
-                // all — the user saw 「缓存命中」 vanish. 两位小数是**显示层**的事（ChatComposer 的
-                // 「缓存命中」行按 %.2f 格式化）：这里一旦取整，后面就再也补不回来了。
+                // 比率在 Long 里算、不取整：`cached * 100 / prompt` 在 Int 上会在
+                // cached 超过 21,474,837 时溢出，历史上那次就画成了"缓存命中整行消失"。
                 cachePercent = if (prompt > 0) cached.toLong() * 100.0 / prompt else 0.0,
                 perSecond = Tps.of(completion, decode),
-                contextTokens = newest?.promptTokens ?: 0,
+                contextTokens = totals.contextTokens,
                 contextWindow = contextWindow,
+                split = SessionSplit(
+                    uncached = (prompt.toLong() - cached.toLong()).coerceAtLeast(0L),
+                    cached = cached.toLong(),
+                    output = completion.toLong(),
+                ),
+                elapsedMs = totals.elapsedMs,
             )
         }
     }
@@ -471,22 +497,24 @@ class ChatViewModel : ViewModel() {
         val assistant = settings.assistant(snapshot.assistantId) ?: settings.activeAssistant()
         val model = settings.choiceFor(snapshot.providerId, snapshot.model, assistant).model
         val window = settings.contextWindowFor(model)
-        val last = snapshot.messages.lastOrNull()
-        val key = StatsKey(
+        // **缓存键用盘上的条数/更新时间，不用窗口的条数**：窗口会随「加载更早」变，
+        // 而整个会话的总账不变。
+        val meta = Core.chats.conversations.value.firstOrNull { it.id == snapshot.conversationId }
+        StatsRequest(
             chat = snapshot.conversationId,
-            rows = snapshot.messages.size,
-            lastId = last?.id,
-            lastPrompt = last?.promptTokens ?: 0,
-            lastCompletion = last?.completionTokens ?: 0,
-            lastCached = last?.cachedTokens ?: 0,
+            key = "${meta?.messageCount ?: 0}:${meta?.updatedAt ?: 0}",
             window = window,
         )
-        if (key != statsKey) {
-            statsKey = key
-            statsValue = SessionStats.of(snapshot.messages, window)
+    }
+        .distinctUntilChanged()
+        .mapLatest { request ->
+            if (request.chat.isEmpty()) return@mapLatest null
+            // 整个会话的统计：读 meta（O(1)）；旧会话第一次读时补算一次。
+            val totals = withContext(Dispatchers.IO) {
+                runCatching { Core.chats.sessionTotals(request.chat) }.getOrNull()
+            } ?: return@mapLatest null
+            SessionStats.of(totals, request.window)
         }
-        statsValue
-    }.distinctUntilChanged()
 
     /** The per-conversation run-state watcher; replaced whenever the display switches. */
     private var stateWatcher: Job? = null
@@ -1410,7 +1438,21 @@ class ChatViewModel : ViewModel() {
                 val wire = runCatching { Core.chats.readWire(chatId) }.getOrNull()
                 if (_state.value.conversationId != chatId) return@launch
                 // 空结果与异常走同一条兜底：用屏幕上这一段。
-                start(fresh, wire.orEmpty().ifEmpty { shownMessages })
+                // **刚发的这条必须自己拼上去**（P0：用户实测「我发的新对话，助手回的是上一轮
+                // 我说的那句」）。
+                // 依据（读代码）：`ChatRepository.readWire` 只读盘上的日志（`store.readMeta`
+                // → `store.all` / `store.from`），不看内存 `_state`；而这一条此刻还没落盘
+                // （落盘在这一轮跑完之后）⇒ history 的最后一条是**上一轮**的用户消息，
+                // 模型就去回答它。
+                // 兜底用 `shownMessages`（它是在 `_state.update` 之后取的，已含这条）。
+                // 防重：万一将来 wire 也带上了它，末条相等就不再拼。
+                val filled = wire.orEmpty()
+                val history = when {
+                    filled.isEmpty() -> shownMessages
+                    filled.lastOrNull()?.id == user.id -> filled
+                    else -> filled + user
+                }
+                start(fresh, history)
             }
         }
         clearDraft(_state.value.conversationId)

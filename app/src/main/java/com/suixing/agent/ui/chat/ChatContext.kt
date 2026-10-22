@@ -422,7 +422,7 @@ internal fun shortTokens(tokens: Int): String = when {
 internal fun fullTokens(tokens: Long): String = String.format(Locale.US, "%,d", tokens)
 
 /** The three parts of a conversation's spend, as the endpoint itself reports them. */
-internal data class SessionSplit(val uncached: Long, val cached: Long, val output: Long)
+data class SessionSplit(val uncached: Long, val cached: Long, val output: Long)
 
 /**
  * Sums [SessionSplit] off the stored usage rows, the same rows [SessionStats] divides its hit
