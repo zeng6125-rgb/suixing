@@ -42,6 +42,18 @@ internal class DeltaBuffer {
         return true
     }
 
+    /**
+     * **只读**看一眼还没被取走的内容（不清空、不动节流记账）。
+     *
+     * 为什么需要：后台会话的 delta 只缓冲不发布（屏幕上看不到它，发布只是白做的 O(n) 拼接），
+     * 而「live 草稿」（进程被杀后的恢复副本）读的是 `sessions` 里那份 ——
+     * 于是后台长回答的草稿会是**空的**，进程一旦被杀就真丢了。草稿写出时把这段拼上去即可。
+     *
+     * **调用方必须已在 [locked] 内。**
+     */
+    fun peek(chatId: String): Pair<String, String> =
+        (texts[chatId]?.toString().orEmpty()) to (reasonings[chatId]?.toString().orEmpty())
+
     /** 取走并清空这一份。**调用方必须已在 [locked] 内。** */
     fun take(chatId: String): Pair<String, String> {
         val text = texts.remove(chatId)?.toString().orEmpty()

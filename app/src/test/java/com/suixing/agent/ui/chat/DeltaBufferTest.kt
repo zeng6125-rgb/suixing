@@ -82,4 +82,24 @@ class DeltaBufferTest {
         b.locked { b.append("c", "", ""); b.append("c", null, null) }
         assertEquals("", b.locked { b.take("c") }.first)
     }
+
+    @Test
+    fun `peek shows the pending tail without taking it`() {
+        // 草稿（进程被杀后的恢复副本）需要看到**还没发布**的这段：后台会话的 delta 只进缓冲、
+        // 不进 sessions，不补的话草稿是空的，进程一死就真丢输出。
+        val b = DeltaBuffer()
+        b.locked { b.append("c", "还没发出去的", "思考尾巴") }
+        val peeked = b.locked { b.peek("c") }
+        assertEquals("还没发出去的", peeked.first)
+        assertEquals("思考尾巴", peeked.second)
+        // **只读**：peek 之后内容仍在（否则下一次 take 会漏）。
+        assertEquals("还没发出去的", b.locked { b.take("c") }.first)
+        assertEquals("取走之后 peek 应为空", "", b.locked { b.peek("c") }.first)
+    }
+
+    @Test
+    fun `peek on an empty chat is empty`() {
+        val b = DeltaBuffer()
+        assertEquals("", b.locked { b.peek("nobody") }.first)
+    }
 }

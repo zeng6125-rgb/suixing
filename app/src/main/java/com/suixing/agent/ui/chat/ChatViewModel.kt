@@ -2755,11 +2755,15 @@ class ChatViewModel : ViewModel() {
             // produced. The reasoning and those rounds are not "extra": the session is the
             // only place they exist until the run ends, so a run that never ends would
             // otherwise leave a paragraph with no chain of thought and no tool cards.
+            // **把还没发布的那段也算进去**：后台会话的 delta 只进缓冲、不进 `sessions`
+            // （0.8.333 的"后台不发布"），而 `live.streaming` 只反映已发布的那些 ——
+            // 不补的话，后台跑长回答时草稿永远是旧的/空的，进程一被杀就真丢输出。
+            val (pendingText, pendingReasoning) = deltaBuffer.locked { deltaBuffer.peek(chatId) }
             val next = liveDraftFor(
                 chatId = chatId,
                 runId = live.runId,
-                text = live.streaming,
-                reasoning = live.reasoning,
+                text = live.streaming + pendingText,
+                reasoning = live.reasoning + pendingReasoning,
                 messages = live.messages,
             ) ?: continue
             if (next.sameContentAs(written)) continue
