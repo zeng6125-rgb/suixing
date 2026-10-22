@@ -8,11 +8,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [HistoryTrim] 的三条不变量。
+ * [HistoryTrim] 的**特征化测试（characterization test）**：锁住的是**当前行为**，不是"应该怎样"。
  *
- * 它出错**不崩不报错**，只会静默改变"模型这一轮看到什么"：
- * 要么丢了最近的上下文（回答变差），要么把请求撑爆（超预算/多花钱），
- * 要么让转录以工具结果开头（端点直接 400）。
+ * ## 这组断言能证明什么、不能证明什么
+ *
+ * **能**：抽取 `HistoryTrim` 前后行为没有漂移（配合 `HEAD~1` 的逐行 diff），以及将来改这段逻辑时
+ * 不会无声地把某个形状改掉。
+ *
+ * **不能**：证明当前行为就是**对的**。写这些断言的过程中我有两次失败，两次都**改的是断言**
+ * （因为实现与旧版逐行一致）—— 那一刻测试就已经从"规格"退化成"现状复述"。
+ * 其中两条被锁住的行为**我并没有验证其合理性**，已在 issue 里记录下来：
+ *
+ *  - `a suffix that would start mid turn keeps the whole suffix`：后缀里没有 user 时**原样返回**，
+ *    于是可能发出一条**没有任何用户消息**的请求（端点接受与否、模型怎么理解，未验证）；
+ *  - `the newest message is always sent however large it is`：靠 `estimateTokens = 长度/3` 记账，
+ *    **短消息会算成 0 token** ⇒ 很多短消息时可以大幅低估预算（未验证是否会真的撑爆）。
+ *
+ * 换句话说：**这两条是"已观察"，不是"已确认合理"。** 改动它们需要单独的证据与决定。
  */
 class HistoryTrimTest {
 
