@@ -2039,22 +2039,9 @@ class AgentEngine(
      * with a tool result has no assistant turn to attach it to, and endpoints reject
      * that outright, so the cut moves forward to the first user message.
      */
-    private fun trim(messages: List<StoredMessage>, budget: Int): List<StoredMessage> {
-        if (budget <= 0 || messages.isEmpty()) return messages
-        val kept = ArrayDeque<StoredMessage>()
-        var used = 0
-        for (message in messages.asReversed()) {
-            val cost = estimateTokens(message)
-            // The newest message always goes out, however large it is.
-            if (kept.isNotEmpty() && used + cost > budget) break
-            kept.addFirst(message)
-            used += cost
-        }
-        if (kept.size == messages.size) return messages
-        val tail = kept.toList()
-        val start = tail.indexOfFirst { it.role == Roles.USER }
-        return if (start <= 0) tail else tail.subList(start, tail.size)
-    }
+    // 逻辑搬进 `HistoryTrim`（纯函数，带测试）：三条不变量原来只写在 KDoc 里。
+    private fun trim(messages: List<StoredMessage>, budget: Int): List<StoredMessage> =
+        HistoryTrim.apply(messages, budget)
 
     /**
      * A run stopped in the middle of a tool call leaves an assistant message whose
