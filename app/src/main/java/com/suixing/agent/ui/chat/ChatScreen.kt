@@ -735,6 +735,16 @@ fun ChatScreen(
      * 以前 `moved` 只是 pointerInput 里的局部变量，外面看不到。
      */
     var pressMoved by remember { mutableStateOf(false) }
+    // **长按才 arm**（跟手性）：400ms 的守护窗口是给「长按选文字」用的（选区建立期间不许列表
+    // 自己动），但原来每次按下都 arm ⇒ 每个拖动手势之后 400ms 都有一个逐帧协程 + 冻结 IME clamp，
+    // 正好落在惯性滚动期，观感就是「滑完发涩」。
+    // 长按阈值：composable 作用域里没有 `PointerInputScope.viewConfiguration`，要取 Local。
+    val viewConfig = androidx.compose.ui.platform.LocalViewConfiguration.current
+    LaunchedEffect(pressed) {
+        if (!pressed) return@LaunchedEffect
+        delay(viewConfig.longPressTimeoutMillis)
+        if (pressed && !pressMoved) pressGuardOn = true
+    }
     // composition local 只能在组合里读：先在组合层捕获，守护协程里用这个引用。
     val setSelectionActive = LocalSetSelectionActive.current
     // **临时诊断（查完就删）**：长按复制会跳位置，且只有本次进程第一次出现。
@@ -1373,7 +1383,11 @@ fun ChatScreen(
                                         val downY = down.changes.first().position.y
                                         val downAt = SystemClock.uptimeMillis()
                                         pressed = true
-                                        pressGuardOn = true
+                                        // **不在这里 arm 守护**（跟手性）：原来每次按下都置 true，而
+                                        // 只有「没移动且短于长按阈值」才会立刻撤销 ⇒ **任何拖动手势之后
+                                        // 守护都会保持 [LONG_PRESS_SETTLE_MS]（400ms）**，正好盖住整段
+                                        // 惯性滚动：这期间有一个逐帧协程在跑，还冻结着外壳的 IME clamp。
+                                        // 现在改由下面的 `LaunchedEffect(pressed)` 在**真的到长按**时才 arm。
                                         pressMoved = false
                                         var moved = false
                                         var released = false
@@ -1400,15 +1414,9 @@ fun ChatScreen(
                                         }
                                         pressed = false
                                         pressUpAt = SystemClock.uptimeMillis()
-                                        // 短按（没移动、也没到长按阈值）= 点折叠条/点按钮这类点击：抬手即放行追底。
-                                        // 守护窗口是给"长按选文字"的（400ms 内不许列表自己动，否则选区跟着跑），
-                                        // 但展开动画只有 220ms（PROCESS_EXPAND_MS）：不区分的话整个展开都落在守护窗口里，
-                                        // 列表一动不动、等守护撤了再一次性补上整段高度 —— 这就是"卡片长高后被瞬移到上面"。
-                                        if (!moved && SystemClock.uptimeMillis() - downAt <
-                                            viewConfiguration.longPressTimeoutMillis
-                                        ) {
-                                            pressGuardOn = false
-                                        }
+                                        // 短按/拖动都不需要撤销：守护从没 arm 过（见上面的说明），
+                                        // 只有**长按**那条路才会打开它，并由 `LaunchedEffect(pressGuardOn)`
+                                        // 里的 400ms 结算逻辑关掉。
                                     }
                                 }
                             },
