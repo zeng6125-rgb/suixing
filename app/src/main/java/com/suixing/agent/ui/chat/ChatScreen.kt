@@ -724,8 +724,18 @@ fun ChatScreen(
     val rowOffset = if (page.hasEarlier) 1 else 0
     // The live card (with its progress caption inside) is one item; the error line and the
     // 「加载更早」 line are items of their own. 底锚下这个数只用于「有没有内容」与插入回底。
-    val itemCount = visible.size + rowOffset +
-        (if (errorLine) 1 else 0) + if (live || state.runningHere) 1 else 0
+    // 槽位账本走纯函数（`ListSlots`，带单测）：这两个数原来是**各写一遍**的，而且已经数得不一致
+    // —— `feedPrefix` 数了「压缩中」那一行、`itemCount` 没数。今天少一项只影响 `<= 0` 这类判据，
+    // 但列表以后再加一行，另一处必然漏（这条链路已经出过三次同类事故）。
+    val slots = ListSlots.of(
+        hasLiveCard = live || state.runningHere,
+        runningHere = state.runningHere,
+        compressing = state.compressingSince > 0L,
+        hasErrorLine = errorLine,
+        visibleRows = visible.size,
+        hasLoadEarlier = page.hasEarlier,
+    )
+    val itemCount = slots.total
 
     // The user's own messages are the landmarks of a conversation, so the status line can
     // say "turn 2 of 5" and jump between them without the engine knowing anything about it.
@@ -753,9 +763,7 @@ fun ChatScreen(
     }
     // 喂序（底锚倒序，视觉从下往上）：live? → compress-status? → error? → visible 倒序 → load-earlier?。
     // 所以 visible 第 i 行的喂序索引 = 前缀项数 + (visible.size - 1 - i)。
-    val feedPrefix = (if (live || state.runningHere) 1 else 0) +
-        (if (!state.runningHere && state.compressingSince > 0L) 1 else 0) +
-        (if (errorLine) 1 else 0)
+    val feedPrefix = slots.feedPrefix
     fun fedIndexOf(oldVisible: Int) = feedPrefix + (visible.size - 1 - oldVisible)
 
     // **不在 ChatScreen 组合体里读 `.value`**（issue #26 原因一）：`firstVisibleItemIndex` 滚动时
