@@ -673,7 +673,8 @@ fun MarkdownText(
      */
     cursor: Boolean = false,
 ) {
-    val blocks = rememberGrowingMarkdown(text)
+    // `cursor` 只在流式那一行是 true ⇒ 它就是"还没定稿"的信号（定稿行可以进进程级缓存）。
+    val blocks = rememberGrowingMarkdown(text, settled = !cursor)
     MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
 }
 
@@ -691,12 +692,52 @@ fun MarkdownText(
  * blank line lands — a few times per answer, not a dozen times a second.
  */
 @Composable
-private fun rememberGrowingMarkdown(text: String): List<MdBlock> {
+private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): List<MdBlock> {
     // A plain holder rather than state: the blocks are returned from this call, so nothing has
     // to recompose when the cache moves on, and writing state during composition is exactly
     // the kind of thing that recomposes forever.
     val cache = remember { MarkdownCache() }
-    return cache.blocksFor(text)
+    if (!settled) return cache.blocksFor(text)
+    // 定稿文本：先查进程级缓存 —— 滚出去再滚回来就不必重新解析（快速滑动的卡顿来源）。
+    SettledBlocks.get(text)?.let { return it }
+    val blocks = cache.blocksFor(text)
+    SettledBlocks.put(text, blocks)
+    return blocks
+}
+
+/**
+ * 已**定稿**文本的解析结果缓存（进程级 LRU）。
+ *
+ * 为什么需要：`MarkdownCache` 是**每一项各自的 `remember`**，滚出视口就被丢掉 ——
+ * 快速滑动时每一行重新进入都要把整段答案 `parseMarkdown` 一遍（长答案 2~10ms），
+ * 而滚动期每帧可能要进两三行 ⇒ 直接表现为「滑过一段长答案就卡一下」。
+ *
+ * 只缓存定稿文本：流式中的文本每 80ms 变一次，缓存它没有意义（也会把内存撑爆）。
+ *
+ * 上限按**条目数**而不是字节数：一条消息的解析结果与它的文本同量级，16 条已经能覆盖
+ * 「来回翻看最近几屏」这个场景，且总内存有界（最坏 16 × 单条长度）。
+ */
+internal object SettledBlocks {
+    private const val MAX_ENTRIES = 16
+
+    private val map = object : LinkedHashMap<String, List<MdBlock>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MdBlock>>?): Boolean =
+            size > MAX_ENTRIES
+    }
+
+    /** 只对**足够长**的文本生效：短文本本身解析就很快，缓存它只是多占内存。 */
+    internal const val MIN_CHARS = 400
+    internal const val CAPACITY = MAX_ENTRIES
+
+    internal fun get(text: String): List<MdBlock>? = synchronized(map) { map[text] }
+
+    /** 仅供单测断言上界（生产路径不需要读容量）。 */
+    internal fun sizeForTest(): Int = synchronized(map) { map.size }
+
+    internal fun put(text: String, blocks: List<MdBlock>) {
+        if (text.length < MIN_CHARS) return
+        synchronized(map) { map[text] = blocks }
+    }
 }
 
 /**
