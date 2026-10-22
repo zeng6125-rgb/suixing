@@ -35,12 +35,4 @@ internal class OffsetCache {
         this.messageId = messageId
         this.offset = offset
     }
-
-    /** 换代/删除会话时显式作废，避免"同一个 id 但内容已重建"的边界情形。 */
-    fun clear() {
-        chatId = null
-        gen = -1
-        messageId = null
-        offset = -1L
-    }
 }

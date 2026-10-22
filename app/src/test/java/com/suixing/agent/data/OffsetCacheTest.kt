@@ -44,12 +44,4 @@ class OffsetCacheTest {
     fun `an empty cache never hits`() {
         assertNull(OffsetCache().get("c1", 0, "m1"))
     }
-
-    @Test
-    fun `clear drops the entry`() {
-        val cache = OffsetCache()
-        cache.put("c1", 2, "m1", 4_096L)
-        cache.clear()
-        assertNull(cache.get("c1", 2, "m1"))
-    }
 }
