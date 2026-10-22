@@ -115,6 +115,21 @@ data class ChatUiState(
      * an answer streams.
      */
     val messagesRevision: Long = 0,
+    /**
+     * 这个会话**总共有多少条消息**（来自落盘 meta，不是 [messages] 的长度）。
+     *
+     * 为什么要单独一个字段（#30）：打开会话只读最近 N 轮，`messages` 是**窗口**而不是全部，
+     * 所以 `messages.size` 不再等于总条数。需要总数的调用方（会话状态工具、轮次）
+     * 必须读这个字段，否则会把 12 轮当成整份对话。
+     */
+    val messageCount: Int = 0,
+    /**
+     * 这个会话**总共有多少轮**（来自落盘 meta，不是 [messages] 里的轮数）。
+     *
+     * 导航条用它算「第 N 轮」和「上面还有 N 轮」；[messages] 只是窗口，
+     * 用窗口里的轮数会让打开长会话时永远显示第 1 轮（#30 的可见回归）。
+     */
+    val turnCount: Int = 0,
     /** Which run of each turn is on screen; see [Transcript]. */
     val activeRuns: Map<String, String> = emptyMap(),
     /** The persona this conversation speaks as. */
@@ -778,9 +793,12 @@ class ChatViewModel : ViewModel() {
         // left blank on purpose: an empty id means "follow the app-wide default", which is
         // exactly what a fresh state wants, and resolving it needs a suspend call this
         // constructor cannot make.
+        // **不再用 cached 直接当正文**（#30）：`load()` 现在只读 meta，`cached.messages` 是空的。
+        // 这里只把"在哪个会话"定下来（conversationId/title），正文交给下面那个 IO 协程的
+        // `readTail()` —— 它会读出最近 N 轮。`loading = true` 保留，否则首帧会闪一个空会话。
         lastOpenedId?.let { id ->
             Core.chats.conversations.value.firstOrNull { it.id == id }?.let { cached ->
-                _state.value = cached.toUiState("").copy(loading = false)
+                _state.value = cached.toUiState("").copy(loading = true)
             }
         }
         // The engine keys its runs by conversation, so this screen subscribes to the
@@ -870,7 +888,10 @@ class ChatViewModel : ViewModel() {
                     loading = false,
                 )
             } else {
-                _state.value = existing.toUiState(assistantId).copy(loading = false)
+                // **正文只读尾部**（#30）：`existing` 来自只读 meta 的列表，`messages` 是空的。
+                // `readTail` 读最近 OPEN_TURNS 轮；读不到（老格式且未迁移）时它内部回退到旧文件。
+                val opened = Core.chats.readTail(existing.id) ?: existing
+                _state.value = opened.toUiState(assistantId).copy(loading = false)
             }
             // Recorded here as well as on a switch: a session that only ever read one
             // conversation never wrote the marker, and the next launch would fall back to
@@ -891,6 +912,39 @@ class ChatViewModel : ViewModel() {
                     }
                 }
         }
+    }
+
+    /**
+     * Reads one more page of older turns from disk and prepends it to the messages on screen.
+     *
+     * #30 made opening a chat read only the tail, so "加载更早" can no longer just raise a number in
+     * memory — the older messages are not in the list at all. This walks the log backwards from the
+     * current window and returns true when something was actually added (the screen then re-anchors
+     * on the item it was reading, which it already does on every list change).
+     *
+     * Returns false when there is nothing older, or the chat has no store copy yet.
+     */
+    fun loadEarlier(turns: Int = Core.chats.openTurns()): Boolean {
+        val chatId = _state.value.conversationId
+        if (chatId.isEmpty()) return false
+        val shown = _state.value.messages
+        if (shown.isEmpty()) return false
+        // 已经读到文件开头就别再读了。
+        if (_state.value.messageCount in 1..shown.size) return false
+        viewModelScope.launch {
+            val older = Core.chats.readEarlierBefore(chatId, shown.first().id, turns) ?: return@launch
+            if (older.isEmpty()) return@launch
+            if (_state.value.conversationId != chatId) return@launch
+            _state.update { current ->
+                // 双保险：只接在**同一个**头部之前，避免期间列表被替换过。
+                if (current.messages.firstOrNull()?.id != shown.first().id) {
+                    current
+                } else {
+                    current.copy(messages = older + current.messages)
+                }
+            }
+        }
+        return true
     }
 
     fun newConversation() {
@@ -967,13 +1021,39 @@ class ChatViewModel : ViewModel() {
         } else {
             // A conversation that never picked a persona keeps the one already on screen,
             // which was seeded from the settings when this screen was created.
+            //
+            // **正文要自己读**（#30）：传进来的 `conversation` 来自只读 meta 的列表，`messages`
+            // 是空的。`openConversation` 不是挂起函数（它是点击回调），所以这里**先按 meta
+            // 建状态、带上 loading**，正文由下面那段协程补读 —— 补读期间显示骨架，
+            // 不会闪一个空白会话，也不会让 `save()` 把空列表当成"变短"。
             conversation.toUiState(_state.value.assistantId).let {
                 it.copy(
+                    loading = true,
                     error = failure,
                     // A run that ended with lines still queued keeps them: they are the
                     // user's words, and the rows say they never went out.
                     pendingSteers = steersOf(conversation.id),
                 )
+            }
+        }
+        // **补读正文**（#30）：上面只按 meta 建了状态，这里把最近 N 轮读进来。
+        // 条件是"这个会话还在屏幕上"——用户可能已经切走，那就别再写回状态去覆盖新会话。
+        viewModelScope.launch {
+            val opened = Core.chats.readTail(conversation.id)
+            if (opened != null && _state.value.conversationId == conversation.id &&
+                _state.value.messages.isEmpty()
+            ) {
+                _state.update {
+                    it.copy(
+                        messages = opened.messages,
+                        checkpoints = opened.checkpoints,
+                        messageCount = opened.messageCount,
+                        turnCount = opened.turnCount,
+                        loading = false,
+                    )
+                }
+            } else if (_state.value.conversationId == conversation.id) {
+                _state.update { it.copy(loading = false) }
             }
         }
         // A run that was killed left its half-written answer in a draft file: it belongs to
@@ -1249,7 +1329,22 @@ class ChatViewModel : ViewModel() {
                 error = null,
             )
         }
-        start(fresh, _state.value.messages)
+        // **喂给模型的历史必须是完整 wire，不是屏幕上那个窗口**（#30 最要紧的一条）。
+        // 打开会话只读最近 OPEN_TURNS 轮，`_state.value.messages` 就是那个窗口；
+        // 直接拿它当历史 ⇒ 模型看不到更早的对话，**不报错、只是变笨**，比崩溃难查得多。
+        //
+        // `send()` 不是挂起函数（它是输入框的回调），所以：屏幕上的历史已经是完整的
+        // （`messageCount == messages.size`，短会话）就直接发；否则先进协程把完整 wire 读出来再发。
+        val shownMessages = _state.value.messages
+        if (_state.value.messageCount <= shownMessages.size) {
+            start(fresh, shownMessages)
+        } else {
+            val chatId = _state.value.conversationId
+            viewModelScope.launch {
+                val wire = Core.chats.readWire(chatId).ifEmpty { shownMessages }
+                start(fresh, wire)
+            }
+        }
         clearDraft(_state.value.conversationId)
         return true
     }
@@ -2564,23 +2659,11 @@ class ChatViewModel : ViewModel() {
             )
         }
         viewModelScope.launch {
-            // Read-modify-write of the checkpoints field alone: the run's own copy of the
-            // messages is still growing, and saving it here would write a half-finished
-            // snapshot back over the transcript. A conversation that is gone has nothing to
-            // write to at all — save() upserts, so it would come back as an empty ghost.
-            val base = Core.chats.conversations.value.firstOrNull { it.id == chatId }
-                ?: return@launch
-            save(
-                chatId = chatId,
-                title = base.title,
-                messages = base.messages,
-                assistantId = base.assistantId,
-                activeRuns = base.activeRuns,
-                providerId = base.providerId,
-                model = base.model,
-                reasoningEffort = base.reasoningEffort,
-                checkpoints = next,
-            )
+            // **只写 meta，不碰正文**（#30）：原来这里走 save(messages = base.messages) ——
+            // 一次压缩就把整份转录（几十 MB）重写一遍；而且 `load()` 现在不再物化 messages，
+            // `base.messages` 是空的，那个调用会被护栏判成「历史变短」。
+            // `updateMeta` 只改字段，O(1)，且不可能动到消息。
+            Core.chats.updateMeta(id = chatId, checkpoints = next)
         }
     }
 
@@ -2685,6 +2768,10 @@ private fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = C
     conversationId = id,
     title = title,
     messages = messages,
+    // **总条数来自 meta**（#30）：`messages` 只是窗口（打开会话读最近 N 轮），
+    // 调用方判断"屏幕上的历史是不是完整"就是比这两个数（见 send() 的 wire 分支）。
+    messageCount = messageCount,
+    turnCount = turnCount,
     activeRuns = activeRuns,
     assistantId = assistantId.ifBlank { fallbackAssistantId },
     providerId = providerId,

@@ -128,6 +128,22 @@ data class Conversation(
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     val messages: List<StoredMessage> = emptyList(),
+    /**
+     * 这条会话总共有多少条消息 —— **列表页用它，而不必把整份记录读进内存**。
+     *
+     * 0 = 未知（老数据、或来自只读了 meta 的列表加载）。需要真实条数时读消息列表本身。
+     * 落盘层在写 meta 时维护它；`load()` 只读 meta 时把它填上来，于是
+     * `SessionTools` 这种"只要条数"的调用方不必解析几十 MB。
+     */
+    val messageCount: Int = 0,
+    /**
+     * 这条会话总共有多少**轮**（一个用户提问 + 它引出的回答算一轮）。
+     *
+     * 和 [messageCount] 分开是因为**条数 ≠ 轮数**：一轮里有用户消息、可能还有思考/工具/多条助手消息。
+     * 导航条的「第 N 轮」「上面还有 N 轮」用的就是这个数；用条数去顶会算错。
+     * 0 = 未知（老数据，或列表来自只读 meta 之外的路径）。
+     */
+    val turnCount: Int = 0,
     /** The persona this conversation speaks as; empty falls back to the active one. */
     val assistantId: String = "",
     /**

@@ -88,8 +88,10 @@ class ChatRepositoryStoreTest {
 
         assertTrue("the transcript is a plain .json again", legacyFile("c1").exists())
         assertFalse("nothing may be written to the store", store.has("c1"))
-        val reloaded = repository().apply { load() }.conversations.value.single()
-        assertEquals(saved.messages, reloaded.messages)
+        val reloadedRepo = repository().apply { load() }
+        val reloaded = reloadedRepo.conversations.value.single()
+        // **新契约**（#30）：列表不常驻正文 ⇒ 正文用 readAll 读回来比对（内容必须一字不差）。
+        assertEquals(saved.messages, reloadedRepo.readAll("c1"))
         assertEquals(saved.title, reloaded.title)
     }
 
@@ -123,9 +125,12 @@ class ChatRepositoryStoreTest {
         // What editAndResend does: everything the model said after the corrected question goes.
         repository.save(full.copy(messages = full.messages.take(2) + full.messages[0].copy(text = "改过的问题")))
 
-        val reloaded = repository().apply { load() }.conversations.value.single()
-        assertEquals("the drop has to reach the disk", 3, reloaded.messages.size)
-        assertEquals("改过的问题", reloaded.messages.last().text)
+        // **新契约**（#30）：load() 只给 meta，正文用 readAll 读回来。
+        // 这条测试要验的是"缩短后的历史真的落到盘上了"，所以必须读正文，而不是看列表。
+        val rereader = repository().apply { load() }
+        val onDisk = rereader.readAll("c1")
+        assertEquals("the drop has to reach the disk", 3, onDisk.size)
+        assertEquals("改过的问题", onDisk.last().text)
     }
 
     @Test
@@ -154,12 +159,17 @@ class ChatRepositoryStoreTest {
         val repository = repository()
         repository.load()
         val listed = repository.conversations.value.single()
-        assertEquals("listed from the store, so saving it has the whole transcript", 2, listed.messages.size)
+        // **新契约**（#30）：列表不再常驻正文，但 meta 里的条数是准的。
+        assertEquals("listed from the store with its message count", 2, listed.messageCount)
+        assertEquals("and no messages materialised", 0, listed.messages.size)
+        // 要回写全文，调用方得自己把正文读出来（这正是 save() 护栏要求的）。
+        val full = repository.readAll("c1")
+        assertEquals("the transcript is readable on demand", 2, full.size)
 
-        repository.save(listed.copy(title = "救回来了"))
+        repository.save(listed.copy(title = "救回来了", messages = full))
 
         assertTrue("the plain file has to exist again", legacyFile("c1").exists())
-        assertEquals("with the whole transcript", listed.messages, readLegacy("c1").messages)
+        assertEquals("with the whole transcript", full, readLegacy("c1").messages)
         assertEquals("救回来了", readLegacy("c1").title)
         assertFalse("and the store copy is gone", store.has("c1"))
         assertEquals(
@@ -181,7 +191,10 @@ class ChatRepositoryStoreTest {
         val repository = repository()
         repository.load()
         val listed = repository.conversations.value.single()
-        val result = runCatching { repository.save(listed.copy(title = "写不进去")) }
+        // **新契约**（#30）：列表不常驻正文，回写要自己读全文（否则 save() 的护栏会先拦下来，
+        // 那样这个测试就测不到"写失败"了）。
+        val full = repository.readAll("c1")
+        val result = runCatching { repository.save(listed.copy(title = "写不进去", messages = full)) }
 
         assertTrue("the save has to fail loudly", result.isFailure)
         assertTrue("the store copy must survive a failed write", store.has("c1"))
@@ -191,8 +204,13 @@ class ChatRepositoryStoreTest {
 
         // Readable again once the obstacle is gone, from the copy that was never dropped.
         File(chatsDir, "c1.json.tmp").delete()
-        val reread = repository().apply { load() }.conversations.value.single()
-        assertEquals(onlyInStore.messages, reread.messages)
+        val rereader = repository().apply { load() }
+        assertEquals("the chat is listed again", 1, rereader.conversations.value.size)
+        assertEquals(
+            "and its transcript is still readable from the copy that was never dropped",
+            onlyInStore.messages,
+            rereader.readAll("c1"),
+        )
     }
 
     // --- repair-on-launch: the chats that build already scattered ------------------------------
@@ -294,7 +312,12 @@ class ChatRepositoryStoreTest {
 
         repository.load()
         val beforeMigration = repository.conversations.value.single()
-        assertEquals("an unmigrated chat is listed like any other", legacy.messages, beforeMigration.messages)
+        // **新契约**（#30）：列表只带 meta，正文按需读。这里断言两件事：
+        // ① 这条会话确实被列出来了（标题正确）；② 正文能通过 readAll 完整读出来。
+        // 旧断言 `legacy.messages == beforeMigration.messages` 属于"列表常驻全文"的语义，
+        // 正是 #30 要去掉的那个东西。
+        assertEquals("an unmigrated chat is listed like any other", legacy.title, beforeMigration.title)
+        assertEquals("the transcript is still readable on demand", legacy.messages, repository.readAll("c1"))
 
         repository.migratePending()
 
@@ -303,7 +326,12 @@ class ChatRepositoryStoreTest {
         assertTrue("the store owns it now", store.has("c1"))
 
         repository.load()
-        assertEquals("the chat has to be identical across the migration", beforeMigration, repository.conversations.value.single())
+        assertEquals(
+            "the listed metadata has to be identical across the migration",
+            beforeMigration,
+            repository.conversations.value.single(),
+        )
+        assertEquals("and so does the transcript", legacy.messages, repository.readAll("c1"))
     }
 
     @Test

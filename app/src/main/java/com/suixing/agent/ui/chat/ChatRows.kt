@@ -656,10 +656,28 @@ internal const val PAGE_TURNS = 12
  * is, since a turn is what the reader counts in. A page is always a suffix, the newest turns:
  * that is where a conversation is read from and where a streaming answer lives.
  */
-internal data class TurnPage(val from: Int, val turns: Int, val drawn: Int) {
+internal data class TurnPage(
+    val from: Int,
+    /**
+     * 轮数总数。**默认等于已加载窗口里的轮数**，但打开会话只读最近 N 轮时，
+     * 调用方要传**磁盘上的真实总轮数**（`meta.turnCount`）—— 否则 [earlier] 恒为 0，
+     * 「加载更早」按钮不出现、而且「第 N 轮」会永远显示成第 1 轮（#30 的可见回归）。
+     */
+    val turns: Int,
+    val drawn: Int,
+) {
     /** Turns above the drawn part. */
-    val earlier: Int get() = turns - drawn
+    val earlier: Int get() = (turns - drawn).coerceAtLeast(0)
     val hasEarlier: Boolean get() = earlier > 0
+
+    /**
+     * 同一个已加载窗口，但按**磁盘上的总轮数**报数。
+     *
+     * `drawn` 是窗口里实际画出来的轮数，`turns` 换成总数后 [earlier] 就变成"上面还有多少轮"，
+     * 于是「加载更早」和「第 N 轮」都对了。
+     */
+    fun withTotal(totalTurns: Int): TurnPage =
+        copy(turns = totalTurns.coerceAtLeast(drawn))
 }
 
 /**

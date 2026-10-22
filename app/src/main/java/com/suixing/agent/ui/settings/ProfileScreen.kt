@@ -124,8 +124,10 @@ fun ProfileScreen(onBack: () -> Unit) {
                             scope.launch {
                                 // 画像页可能先于会话页被打开：chats 还没 load 过就没有对话可总结。
                                 if (Core.chats.conversations.value.isEmpty()) Core.chats.load()
-                                val messages = Core.chats.conversations.value
-                                    .firstOrNull()?.messages.orEmpty()
+                                // **列表里没有正文了**（#30：load() 只读 meta）⇒ 画像总结要自己读全文。
+                                // 这里本来就要把整份对话喂给总结，readAll 是唯一正确的读法。
+                                val newest = Core.chats.conversations.value.maxByOrNull { it.updatedAt }
+                                val messages = newest?.let { Core.chats.readAll(it.id) }.orEmpty()
                                 val outcome = Core.engine.summarizeProfileNow(
                                     store = Core.profile,
                                     settings = Core.settings.current(),

@@ -91,6 +91,10 @@ internal class ChatStore(private val root: File) {
             model = model,
             reasoningEffort = reasoningEffort,
             checkpoints = checkpoints,
+            // **列表页要知道条数，但不该为此把整份记录读进内存**（#30：10 个会话 54 MB，
+            // 全量解析常驻后 RSS 413 MB）。meta 里本来就存着 messageCount，这里直接带上去。
+            messageCount = messageCount,
+            turnCount = turnCount,
         )
 
         /** The same conversation with [messages] attached — what [readTail] hands the screen. */

@@ -44,7 +44,10 @@ class SessionTools : ToolGroup() {
         lines += "会话总数：" + conversations.size
         if (latest != null) {
             val title = latest.title.ifBlank { "（无标题）" }
-            lines += "最近会话：" + title + " · " + latest.messages.size + " 条消息"
+            // **条数走 meta，不读正文**（#30）：`conversations` 现在只带 meta，messages 是空的；
+            // 就算不为性能，这里读 `.messages.size` 也会永远是 0。
+            val count = latest.messageCount.takeIf { it > 0 } ?: latest.messages.size
+            lines += "最近会话：" + title + " · " + count + " 条消息"
         }
         return ToolResult.success(lines.joinToString("\n"))
     }

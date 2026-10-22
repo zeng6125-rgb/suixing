@@ -1108,7 +1108,12 @@ class FloatConsoleService : Service() {
         statsText.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
     }
 
-    private fun renderConversation() {
+    /**
+     * **改成挂起**（#30）：正文要按需从磁盘读（列表只带 meta）。
+     * 两个调用点都在协程里（`collectLatest`），所以这里挂起是安全的；
+     * 读的是**尾部**而不是全文 —— 悬浮窗只回显最近几条，没必要把 30MB 拉进内存。
+     */
+    private suspend fun renderConversation() {
         val conversations = Core.chats.conversations.value
         val running = Core.engine.newestRun()?.chatId
         val conversation: Conversation? =
@@ -1121,7 +1126,13 @@ class FloatConsoleService : Service() {
         conversationText.text = conversation.title.ifBlank { "新会话" }
         // 只留有正文的行：工具消息（role=TOOL、text=""）与失败回执等以前会显示成一条空的
         // 「随行：」，占位却没内容。内容区可滚后回显最近 6 条，拖高就能多看。
-        val recent = conversation.messages
+        // **正文要自己读**（#30）：列表只带 meta。用 runBlocking 拉全文会很糟，
+        // 所以这里只在后台线程取；renderConversation 由 UI 线程调用，改为 post 一次。
+        // 只取尾部几条就够回显；`readTail` 给的是「最近 N 轮」，比全文小一个数量级。
+        val recentMessages = conversation.messages.ifEmpty {
+            runCatching { Core.chats.readTail(conversation.id)?.messages }.getOrNull().orEmpty()
+        }
+        val recent = recentMessages
             .filter { it.text.isNotBlank() }
             .takeLast(RECENT_MESSAGE_COUNT)
         recentText.text = if (recent.isEmpty()) {
@@ -1274,7 +1285,14 @@ class FloatConsoleService : Service() {
             ?: Core.chats.create(text.take(18))
         val title = conversation.title.ifBlank { text.take(18) }
         val question = StoredMessage(id = UUID.randomUUID().toString(), role = Roles.USER, text = text)
-        val history = conversation.messages + question
+        // **历史要自己读**（#30）：`conversations` 只带 meta，`conversation.messages` 是空的。
+        // 悬浮窗发起的这一轮同样要把完整历史交给引擎，否则模型只能看到这一句问题。
+        val full = if (conversation.messages.isEmpty()) {
+            Core.chats.readAll(conversation.id)
+        } else {
+            conversation.messages
+        }
+        val history = full + question
         // The question is saved before the run: a run that is refused, stopped or killed still
         // leaves the user's own line in the transcript to look at.
         Core.chats.save(conversation.copy(title = title, messages = history))

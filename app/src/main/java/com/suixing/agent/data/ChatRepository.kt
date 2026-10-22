@@ -57,18 +57,34 @@ class ChatRepository(private val context: Context) {
                         // while its bytes were still on disk, with nothing left to recover.
                         .onFailure { quarantine(file) }
                         .getOrNull()
-                        ?.let { byId[it.id] = it }
+                        // **旧格式也走同一契约**（#30）：列表不常驻正文。这里把刚解析出来的
+                        // messages 丢掉，只保留 meta —— 否则同一个会话"迁移前带正文、迁移后不带"，
+                        // 两条读路径给出不同的对象（测试 `an old chat is listed…` 抓到的就是这个）。
+                        // 丢掉的只是内存里的引用；正文仍在 `.json` 里，`readAll`/`readTail`
+                        // 会在需要时读回来（`readLegacyMessages` 就是为此保留的）。
+                        ?.let {
+                            byId[it.id] = it.copy(
+                                messages = emptyList(),
+                                messageCount = it.messages.size,
+                                turnCount = it.messages.count { m ->
+                                    m.role == com.suixing.agent.data.Roles.USER && !m.steer
+                                },
+                            )
+                        }
                 }
             val metas = storeMetas()
             for (meta in metas) {
                 if (byId.containsKey(meta.id)) continue
-                // A chat whose log no longer parses must not take the whole list down with it.
-                runCatching { meta.toConversation(store.all(meta)) }
-                    .onFailure { cause ->
-                        Log.e(TAG, "log for ${meta.id} is unreadable; quarantining its meta", cause)
-                        quarantine(File(storeDir, "${meta.id}$META_SUFFIX"))
-                    }
-                    .onSuccess { byId[it.id] = it }
+                // **列表页只读 meta，不读日志**（#30 的核心收益）：原来这里走
+                // `store.all(meta)` 把整份记录解析进内存 —— 10 个会话 54 MB，列表就常驻 54 MB
+                // 的字符串树（实测 RSS 413 MB）。现在只要 meta，`messages` 留空、
+                // `messageCount` 带上去给"只要条数"的调用方。
+                //
+                // **谁需要全文，谁自己读**：打开会话走 `readTail()`（只读尾部 N 轮），
+                // 喂给模型的历史走 `readWire()`（从最后一个 checkpoint 往后），
+                // 导出/详情走 `readAll()`。调用方不改成这些，就会拿到空 messages ——
+                // 这是有意的：宁可让漏改的地方立刻暴露，也不要它悄悄把空历史写回盘。
+                byId[meta.id] = meta.toConversation()
             }
             _conversations.value = byId.values.sortedByDescending { it.updatedAt }
             // Same pass, same thread: quarantined files are never read again, so without this
@@ -184,6 +200,142 @@ class ChatRepository(private val context: Context) {
         Log.i(TAG, "repair id=${meta.id} reason=written-from-store messages=${parsed.messages.size}")
     }
 
+    /**
+     * Updates a conversation's **fields only** — title, pinned, archived, checkpoints, the model
+     * pick — without touching the transcript.
+     *
+     * Why this exists (#30): `save()` writes the whole log. `recordCheckpoint` used to go through
+     * it with `messages = base.messages`, so every compression rewrote the entire transcript —
+     * and once `load()` stopped materialising messages, that list was empty, which would have been
+     * read as "the history shrank". A meta-only write is both correct and O(1).
+     *
+     * Returns the updated Conversation as the list now holds it, or null when the chat is gone.
+     */
+    suspend fun updateMeta(
+        id: String,
+        title: String? = null,
+        assistantId: String? = null,
+        activeRuns: Map<String, String>? = null,
+        providerId: String? = null,
+        model: String? = null,
+        reasoningEffort: String? = null,
+        checkpoints: List<ContextCheckpoint>? = null,
+    ): Conversation? = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val meta = store.readMeta(id) ?: return@withLock null
+            val next = meta.copy(
+                title = title ?: meta.title,
+                assistantId = assistantId ?: meta.assistantId,
+                activeRuns = activeRuns ?: meta.activeRuns,
+                providerId = providerId ?: meta.providerId,
+                model = model ?: meta.model,
+                reasoningEffort = reasoningEffort ?: meta.reasoningEffort,
+                checkpoints = checkpoints ?: meta.checkpoints,
+            )
+            store.writeMeta(next)
+            val updated = next.toConversation()
+            _conversations.value = _conversations.value
+                .map { if (it.id == id) updated.copy(messages = it.messages) else it }
+            updated
+        }
+    }
+
+    // ─── 按需读取（#30/#31）────────────────────────────────────────────────────
+    //
+    // `load()` 现在只读 meta，`_conversations` 里的 `messages` 是空的。谁需要正文谁自己调这里，
+    // **四种读法对应四类需求**，别再让所有人共用"全部读进来"那一条：
+    //
+    //   readAll(id)      导出、文件详情、写回全量（只在真正需要全文时）
+    //   readTail(id)     打开会话要画的那一页（最近 N 轮）
+    //   readEarlier(id)  「加载更早」往上翻一页
+    //   readWire(id)     **喂给模型的历史**：从最后一个 checkpoint 往后，与今天完全一致
+    //
+    // readWire 是这次改造里最容易漏的一条：只加载 12 轮却把它当模型上下文，模型会静默变笨
+    // （不报错、只是答得差），比崩溃难查得多。
+
+    /** Every message of one chat. Use only where the whole transcript is genuinely needed. */
+    suspend fun readAll(id: String): List<StoredMessage> = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val meta = store.readMeta(id) ?: return@withLock readLegacyMessages(id)
+            store.all(meta)
+        }
+    }
+
+    /**
+     * The page the screen opens with: the last [turns] rounds.
+     *
+     * Returns the conversation with those messages attached, or null when the chat is gone.
+     */
+    suspend fun readTail(id: String, turns: Int = OPEN_TURNS): Conversation? =
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                val meta = store.readMeta(id) ?: return@withLock readLegacyConversation(id)
+                meta.toConversation(store.tail(meta, turns).messages)
+            }
+        }
+
+    /**
+     * The history the model is given: everything from the last checkpoint forward.
+     *
+     * Same cut the engine makes today (`history.drop(resumeAt + 1)`), but read from disk instead of
+     * from a fully materialised list — so opening a 30 MB chat no longer costs 30 MB to send a turn.
+     */
+    suspend fun readWire(id: String): List<StoredMessage> = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val meta = store.readMeta(id) ?: return@withLock readLegacyMessages(id)
+            // No checkpoint yet: the whole transcript is the wire, which is what the engine does
+            // when `resumeAt` is null. Memory is still bounded by the checkpoint when there is one.
+            val from = meta.checkpoints.lastOrNull()?.toMessageId
+                ?.let { store.offsetOf(meta, it) }
+                ?: return@withLock store.all(meta)
+            store.from(meta, from)
+        }
+    }
+
+    /** One more page, walking backwards from [endOffset] (the window the caller already has). */
+    /** 打开会话/每次「加载更早」取几轮。 */
+    fun openTurns(): Int = OPEN_TURNS
+
+    /**
+     * The page of turns immediately older than [beforeMessageId], newest-last.
+     *
+     * "加载更早" needs this rather than an offset: the screen knows the id of its first message, and
+     * walking the log backwards from that id is what keeps the pages contiguous no matter how many
+     * saves happened in between.
+     */
+    suspend fun readEarlierBefore(
+        id: String,
+        beforeMessageId: String,
+        turns: Int = OPEN_TURNS,
+    ): List<StoredMessage>? = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val meta = store.readMeta(id) ?: return@withLock null
+            val end = store.offsetOf(meta, beforeMessageId) ?: return@withLock null
+            if (end <= 0L) return@withLock emptyList()
+            store.window(meta, end, turns).messages
+        }
+    }
+
+    internal suspend fun readEarlier(
+        id: String,
+        endOffset: Long,
+        turns: Int = OPEN_TURNS,
+    ): ChatStore.MessageWindow? =
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                val meta = store.readMeta(id) ?: return@withLock null
+                store.window(meta, endOffset, turns)
+            }
+        }
+
+    /** Legacy single-file paths: still readable, so a chat that failed to migrate still works. */
+    private fun readLegacyConversation(id: String): Conversation? =
+        legacyFile(id).takeIf { it.isFile }
+            ?.let { runCatching { json.decodeFromString<Conversation>(it.readText()) }.getOrNull() }
+
+    private fun readLegacyMessages(id: String): List<StoredMessage> =
+        readLegacyConversation(id)?.messages.orEmpty()
+
     suspend fun create(title: String = "新会话"): Conversation = withContext(Dispatchers.IO) {
         val conversation = Conversation(id = UUID.randomUUID().toString(), title = title)
         val stored = write(conversation)
@@ -208,6 +360,31 @@ class ChatRepository(private val context: Context) {
                 // 归档位同理（第六个）：不继承的话，归档过的会话只要再落一次盘就自己回到列表里。
                 archived = onDisk?.archived ?: conversation.archived,
             )
+            // **护栏：历史只能变长**（#30）。`load()` 现在只读 meta，`_conversations` 里的
+            // `messages` 是空的或只是尾部窗口；任何调用方如果拿它当全量回写，就会把聊天记录
+            // 截断成几条 —— 而应用里**没有删除消息的功能**（编辑重答走 `ChatStore.rewrite()`），
+            // 所以"变短"永远是调用方的 bug。
+            //
+            // 宁可当场报错，也不要静默丢数据。真要缩短历史，只有 `ChatStore.rewrite()` 一条路。
+            val known = onDisk?.messageCount ?: 0
+            val incoming = conversation.messages.size
+            if (known > 0 && incoming < known) {
+                // 放行合法缩短：editAndResend 会真的把后面的消息丢掉，那是用户的操作。
+                // 它和「误传尾部窗口」的区别：合法调用手里的列表从第一条开始（首条 id 等于盘上
+                // 首条 id），而尾部窗口的第一条是更靠后的消息。用这一点区分，而不是禁止一切缩短。
+                val headOnDisk = runCatching {
+                    store.readMeta(conversation.id)?.let { meta -> store.all(meta).firstOrNull()?.id }
+                }.getOrNull()
+                val looksLikeTail = headOnDisk != null &&
+                    conversation.messages.isNotEmpty() &&
+                    conversation.messages.first().id != headOnDisk
+                if (incoming == 0 || looksLikeTail) {
+                    throw IllegalStateException(
+                        "refusing to truncate ${conversation.id}: $incoming of $known messages " +
+                            "(a paged window or an empty list was passed where the full log is required)",
+                    )
+                }
+            }
             val stored = write(stamped)
             val rest = _conversations.value.filterNot { it.id == stored.id }
             _conversations.value = (listOf(stored) + rest).sortedByDescending { it.updatedAt }
@@ -546,6 +723,8 @@ class ChatRepository(private val context: Context) {
     }
 
     private companion object {
+        /** 打开会话与「加载更早」每次取的轮数。 */
+        const val OPEN_TURNS = 12
         /** How long a quarantined transcript is kept for hand recovery. */
         const val CORRUPT_KEEP_MS = 30L * 24 * 60 * 60 * 1000
 
