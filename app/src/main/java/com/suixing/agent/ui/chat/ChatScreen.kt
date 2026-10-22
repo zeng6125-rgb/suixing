@@ -370,7 +370,10 @@ fun ChatScreen(
     // （用户要恒定）。原来用「列表底 − 输入框顶」两个节点的测量值相减，两个 onGloballyPositioned
     // 不同帧到位 ⇒ 动画中间态抖动。
     // 读历史期间沿用的底边距（见 LazyColumn 的 `bottom`）。
-    var heldFootprint by remember { mutableStateOf(0.dp) }
+    // **null = 还没种过**，不是 0.dp（评审确证）：用 0.dp 当哨兵时，恢复位置进会话会先以
+    // 0 当作底边距、等 `composerH` 量到才补成真实值 ⇒ 底边距 0 → ~一个输入框高，
+    // 而 `scrollToItem` 已经执行过 ⇒ 整段恢复位置被推移一次。
+    var heldFootprint by remember { mutableStateOf<Dp?>(null) }
     val stackFootprint = with(LocalDensity.current) {
         // `composerH` 是**内边距以内**的高度：`onSizeChanged` 挂在
         // `.padding(bottom = COMPOSER_BOTTOM_PAD)` **之后**（TurnScrubber.kt:757-758），
@@ -769,7 +772,9 @@ fun ChatScreen(
     LaunchedEffect(stackFootprint, scroll.stickToBottom) {
         // 贴底时持续跟随；**另外**只要还没种过（0.dp）就种一次 —— 恢复位置进会话时
         // `stickToBottom` 一开始就是 false，条件永远不成立 ⇒ 整个阅读期间底边距是 0。
-        if (scroll.stickToBottom || heldFootprint == 0.dp) heldFootprint = stackFootprint
+        // 贴底时持续跟随；没种过（null）也种一次 —— 恢复位置进会话时 `stickToBottom` 一开始就是
+        // false，否则整个阅读期间都取不到值。
+        if (scroll.stickToBottom || heldFootprint == null) heldFootprint = stackFootprint
     }
     // **#14 的根因（真机日志 2026-10-21 00:25 坐实，不是推断）**：
     // 长按建立选区后，框架会为「把选中的内容滚进视口」发起一次 bring-into-view，走的就是
@@ -1027,6 +1032,32 @@ fun ChatScreen(
     // 但那一块的下方是空白）。回到底部立刻恢复。**这是"读历史"场景下的合理取舍** ——
     // 用户在那段时间本来就在读旧内容，不是在看新输出。
     var pinnedLiveHeight by remember { mutableIntStateOf(0) }
+    // **切会话必须清零**（评审确证）：`pinnedLiveHeight` 与 pin effect 里的 `pinned` 都不随会话变，
+    // 而 `stickToBottom` 是按会话存的 —— A 里钉住 H_A 之后切到 B，若 B 也「不在底部且有活 run」，
+    // `lagging` 恒 true ⇒ **不会重新捕获** ⇒ B 的流式行按 H_A 报高（去掉 `minOf` 之后没有钳制，
+    // 会留下大片空白或裁掉内容）。
+    LaunchedEffect(state.conversationId) {
+        pinnedLiveHeight = 0
+        scroll.pinActive = false
+    }
+    // **内容被大幅删掉时要解除钉住**（评审确证）：`liveForPin` 只回答「有没有活内容」，
+    // 不回答「变短了没有」。`RoundRestarted`（`parts.take(segmentStart)` + streaming 清空）
+    // 或用户收起思考/工具块之后，`liveParts` 仍非空 ⇒ 仍钉着旧的大高度 ⇒ 空白一直挂着，
+    // 直到新内容长回原高度。这里只在**钉住期间**逐帧比一次自然高度（一次性比较，不是 IO），
+    // 掉到钉住值的 60% 以下就当作「真删内容」（220ms 缓动收起降幅远小于这个），解除并让
+    // 上面的采集逻辑下一帧按新高度重新捕获。
+    LaunchedEffect(pinnedLiveHeight) {
+        if (pinnedLiveHeight <= 0) return@LaunchedEffect
+        while (true) {
+            withFrameNanos { }
+            val natural = lagNatural[0]
+            if (natural in 1 until pinnedLiveHeight * 6 / 10) {
+                pinnedLiveHeight = 0
+                scroll.pinActive = false
+                break
+            }
+        }
+    }
     // **钉住的高度**（0 = 不钉）。
     //
     // 捕获时机：**从「贴底」切到「读历史」的那一帧**，把当时的自然高度钉住，之后不再变。
@@ -1434,7 +1465,12 @@ fun ChatScreen(
                             // before/after 的内部名对调：before=bottom padding），所以让位仍在
                             // 输入框这一侧。
                             // 读历史期间用冻结值（见 heldFootprint）。
-                            bottom = if (scroll.stickToBottom) stackFootprint else heldFootprint,
+                            // 没种过就退回当前值（**不要退回 0.dp**，那会让恢复位置被推移一次）。
+                            bottom = if (scroll.stickToBottom) {
+                                stackFootprint
+                            } else {
+                                heldFootprint ?: stackFootprint
+                            },
                         ),
                         // **内容不满一屏时贴顶**（issue #19，用户：「新会话气泡就应该在上面，然后再流式
                         // 长下来，旧内容不就往上推了」）。底锚（reverseLayout）已经负责"满了之后"：
@@ -1455,34 +1491,38 @@ fun ChatScreen(
                                 // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
                                 // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
                                 CompositionLocalProvider(LocalLiveRowLag provides laggingNow) {
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        // **顺序要紧**（jank-profiler 确证）：修饰符从左到右是由外到内，
-                                        // `clipToBounds` 的自身尺寸取的是它**内层**报的尺寸。原来写在
-                                        // `liveRowLagHeight` 之后（更内层）⇒ 尺寸等于内容自然高度，
-                                        // 等于一条裁不到任何东西的 clip，溢出会画到槽位外面。
-                                        // 放外层后按**报出的（钉住的）高度**裁，裁掉的正是底部的最新输出；
-                                        // reverseLayout 下用户正在读的旧内容在几何上不动（这才是 #17 要的）。
-                                        .clipToBounds()
-                                        .liveRowLagHeight(
-                                            // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
-                                            // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
-                                            // 实验开关：false 时完全不钉。
-                                            reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
-                                            natural = lagNatural,
-                                        )
-                                ) {
+                                Column(Modifier.fillMaxWidth()) {
+                                    // **只把气泡**放进「钉住 + 裁剪」里（评审确证）：状态行（思考中 · 12.3s）
+                                    // 在自然内容的最底部，一起裁的话钉住期间整行连 spinner 都会消失。
+                                    // **只把气泡**放进「钉住 + 裁剪」里：状态行（思考中 · 12.3s）在自然内容的
+                                    // 最底部，若跟气泡一起被裁，钉住期间整行连 spinner 都会消失（评审确证）。
+                                    //
+                                    // 修饰符顺序：`clipToBounds` 取的是**内层**尺寸 —— 必须写在
+                                    // `liveRowLagHeight` **之前**（更外层）才按"报出的高度"裁；
+                                    // 反过来它拿到的是内容自然高度，等于一条裁不到任何东西的 clip。
+                                    Box(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clipToBounds()
+                                            .liveRowLagHeight(
+                                                // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
+                                                // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
+                                                // 实验开关：false 时完全不钉。
+                                                reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
+                                                natural = lagNatural,
+                                            ),
+                                    ) {
                                     AssistantRow(
                                     parts = remember(
                                         state.liveParts,
                                         state.liveRunId,
                                         settings.showReasoning,
                                     ) {
-                                        // **记住映射结果**：`List<Part>` 是 unstable，strong skipping 按 `===` 比较 ——
-                                        // 每次重组都新建 list，`AssistantRow` 就永远跳不过。ChatScreen 流式期 12.5 Hz
-                                        // 重组，还会因钉住/贴底这类状态翻转额外重组；键带 liveParts 的**实例**，
-                                        // 内容真变了才重算。
+                                        // **记住映射结果**：`List<Part>` 是 unstable 参数。开了 strong skipping
+                                        // （Kotlin 2.0 起默认）时它按 **equals（结构）** 比较 —— 复用同一实例能让
+                                        // `AbstractList.equals` 在首行 `o === this` 处短路，省掉逐条
+                                        // `Part` 深比较（里面带 Markdown 文本、工具输出）和一次新 list 分配。
+                                        // 键带 liveParts 的**实例**：内容真变了才重算。
                                         state.liveParts.mapNotNull { part ->
                                             when (part) {
                                                 is LivePart.Thinking ->
@@ -1547,6 +1587,7 @@ fun ChatScreen(
                                         bubbleMaxWidth = bubbleMaxWidth,
                                         reasoningExpansion = reasoningExpansion,
                                     )
+                                    }
                                     // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
                                     // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
                                     if (state.runningHere) {

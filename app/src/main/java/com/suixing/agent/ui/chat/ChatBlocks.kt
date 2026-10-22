@@ -833,7 +833,12 @@ internal fun ReasoningBlock(
     // readable; a streaming block adds the cursor right after that line.
     // 光标挂在最新的一条**非空**行上：末行是空行时顺延，避免光标消失一帧。
     // **在 items 外算一次**（原来每个可见项都重算一遍 Sequence+Iterator）。
-    val cursorAt = remember(lines) { lines.indexOfLast { it.isNotBlank() }.coerceAtLeast(0) }
+    //
+    // **必须是「视觉行号」**（0 = 最新行，因为底锚 reverseLayout 下 `items` 的 index 就是视觉号）。
+    // 绝对行号（`indexOfLast`）与它差一个 `lastIndex - i` 的换算，混用会让光标挂到最旧那一行 ——
+    // 长的思考链里甚至直接移出视口（真机症状：「光标没有跟在思考链后面」）。
+    // 全空行时 `indexOfLast` 为 -1 ⇒ cursorAt = lastIndex + 1，永远不会等于任何 index（正确）。
+    val cursorAt = remember(lines) { lines.lastIndex - lines.indexOfLast { it.isNotBlank() } }
     val firstLine = lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
     // The chain itself, shared by both shapes: a think with no text at all (the
     // endpoint reported time but no chain) must not render as an empty slab, and a
@@ -1429,8 +1434,8 @@ internal fun TurnSummary(
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
-    // **remember**（性能）：这行每次重组都全表扫两遍 + flatMap 出新 list，
-    // 而 `parts` 在 settled 行里跨重组是稳定的（同一轮的 part 列表不会重建）。
+    // **remember**（性能）：这两行在**参数变化时**才需要重算；记住后同一实例能让
+    // `AbstractList.equals` 首行 `o === this` 短路，省掉逐条 Part 深比较。
     val thoughts = remember(parts) { parts.filterIsInstance<Part.Thinking>() }
     val calls = remember(parts) { parts.filterIsInstance<Part.Tools>().flatMap { it.calls } }
     val settled = usage?.takeIf { it.known }

@@ -1048,10 +1048,10 @@ internal fun AssistantRow(
                             // card's expanded list, not flat beside the answer.
                             // Consecutive tool rounds merge into one block: one card per
                             // run of calls, not a card inside a card per round.
-                            // **记住合并结果**（性能）：`tools: List<ToolLine>` 是 unstable，
-                            // strong skipping 按 `===` 比较 —— 每次重组都 `flatten()` 出一个新 list，
-                            // `ToolBundle` 就永远跳不过（里面的 ToolDetail / RevealHeight /
-                            // 每行一个 `collectIsPressedAsState` 全部重跑）。
+                            // **记住合并结果**（性能）：`tools: List<ToolLine>` 是 unstable 参数。
+                            // 开了 strong skipping 时按 **equals（结构）** 比较：复用同一实例能让
+                            // `AbstractList.equals` 首行 `o === this` 短路，省掉逐条 `ToolLine` 的深比较
+                            // （每条带 toolArgs / toolOutput 字符串，工具输出可能几十 KB）。
                             val tools = remember(parts, index) {
                                 buildList {
                                     var c = index

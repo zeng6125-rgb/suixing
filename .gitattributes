@@ -1,0 +1,8 @@
+# 行尾归一（评审 S5）：仓库里 Kotlin 源码既有 CRLF 也有 LF，python 脚本整文件重写时
+# 会顺手把整个文件的行尾改掉 ⇒ git blame 整文件失效、diff 出现几千行噪声。
+# 这里统一声明：源码一律 LF（工作区落地由 core.autocrlf 决定，不影响内容语义）。
+*.kt   text eol=lf
+*.kts  text eol=lf
+*.xml  text eol=lf
+*.md   text eol=lf
+*.json text eol=lf

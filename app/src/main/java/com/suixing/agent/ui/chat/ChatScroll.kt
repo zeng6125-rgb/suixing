@@ -185,14 +185,23 @@ fun rememberChatScroll(
     val downNow0 = rememberUpdatedState(pressed)
     val guardNow0 = rememberUpdatedState(pressGuardOn)
     LaunchedEffect(listState) {
-        snapshotFlow { listState.canScrollBackward to listState.isScrollInProgress }
-            .collectLatest { (canBack, scrolling) ->
+        // **`pinActive` 必须在读取集里**（评审确证）：只在 collect 体内读它时，钉住解除那一刻
+        // 若 `canBack`/`isScrollInProgress` 都没变，collector 就不会重跑 ⇒ 人已经在底部、
+        // `stickToBottom` 仍是 false ⇒ 「回到最新」常亮、新输出不跟（静默失去跟底）。
+        snapshotFlow {
+            Triple(
+                listState.canScrollBackward,
+                listState.isScrollInProgress,
+                scroll.pinActive,
+            )
+        }
+            .collectLatest { (canBack, scrolling, pinned) ->
                 // **恢复位置的那几帧不许翻回 true**（issue #4 链路 4）：`scrollToItem` 之后布局
                 // 还没定型，`canScrollBackward` 会短暂为假，collector 于是把刚设的 false 改回去，
                 // 位置立刻被追底拉到底。
                 // 钉住期间不自动打开贴底（见 [pinActive]）：那时「到底」不代表用户想跟新内容，
                 // 只代表被裁短了的内容滚到了头。
-                if (scrolling || canBack || scroll.restoring || scroll.pinActive) return@collectLatest
+                if (scrolling || canBack || scroll.restoring || pinned) return@collectLatest
                 // **必须「持续」到底才算数**（issue #14，真机日志证据）：长按建立选区时布局会重排，
                 // `canScrollBackward` 会瞬时变成 false。原来一见到 false 就把 `stickToBottom` 翻回 true，
                 // 追底逻辑紧接着 `scrollToItem(0)` 把列表拉回底部 —— 日志里 `guard-off idx=0/624`，
