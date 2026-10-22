@@ -557,7 +557,13 @@ internal fun MessageRow(
             AssistantRow(
                 // The setting hides thinking entirely; everything else keeps its place in
                 // the sequence either way.
-                parts = if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking },
+                //
+                // **记住过滤结果**：`List<Part>` 是 unstable 参数，每次重组都 `filterNot` 出新 list
+                // ⇒ 下游（每个 Markdown 块、思考列表、工具卡）永远跳不过。`row.parts` 本身跨重组
+                // 是稳定的（`groupRows` 按 revision 记忆），所以这个 remember 会命中。
+                parts = remember(row.parts, showReasoning) {
+                    if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking }
+                },
                 streaming = false,
                 name = assistantName,
                 face = assistantFace,
