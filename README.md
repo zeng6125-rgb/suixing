@@ -4,6 +4,8 @@
 
 > 0.7.0 起项目从「灵枢 / Lingshu」更名为「随行 / Suixing」，包名同步从 `com.lingshu.agent` 改为 `com.suixing.agent`。**包名变了意味着这是一次全新安装**：旧版本请先卸载，会话记录与设置不会迁移。
 
+> ⚠️ **0.8.317 起会话存储格式变了，旧版本读不了新数据。** 会话从「一个 `<id>.json` 单文件、每次保存全量重写」改成「`chats/store/<id>.meta` + `<id>.<gen>.jsonl` 追加日志」。收益是 30 MB 的会话每轮保存从「重写 30 MB」降到「追加几十字节」。代价是**装回 0.8.316 及更早版本看不到这些会话**。本项目是单人自用的 beta，不做向后兼容；旧数据会在首次启动时由 `migratePending()` 逐个迁移（校验通过才退休旧文件，失败则原样保留、下次再试）。
+
 - 纯 Kotlin + Jetpack Compose（Material 3），没有 NDK 源码；随包只带两个预编译的静态 shell 二进制（bash / BusyBox，见[第三方声明](#开源许可与第三方声明)）
 - 目标平台：Android 8.0 (API 26) 及以上；`compileSdk` / `targetSdk` = 35
 - 不做云同步、不做遥测，API Key 只存在本机应用私有目录

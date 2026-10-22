@@ -72,10 +72,12 @@ class FileTools(private val context: Context) : ToolGroup() {
         ),
         ToolSpec(
             "list_dir",
-            "List a directory (directories first, with sizes). Runs in-process: no shell is spawned.",
+            "List a directory (directories first, with sizes). Runs in-process: no shell is spawned. " +
+                "Use pattern to filter inside big directories instead of raising limit.",
             Schema.objectOf(
                 properties = listOf(
                     "path" to Schema.string("Directory path, default the working directory", default = "~"),
+                    "pattern" to Schema.string("Glob filter on the entry name (*.kt, build*), optional"),
                     "limit" to Schema.integer("Maximum entries, default 200", default = 200, minimum = 1, maximum = 1000),
                     "all" to Schema.boolean("Include dot-files, default false", default = false),
                 ),
@@ -84,22 +86,30 @@ class FileTools(private val context: Context) : ToolGroup() {
         ToolSpec(
             "find_files",
             "Find files by name anywhere under a directory tree. Runs in-process: no shell is spawned. " +
-                "For regex/glob/exclude patterns use run_shell with find instead.",
+                "Use pattern for globs (*.kt, **/test/*.kt); name is a plain case-insensitive substring.",
             Schema.objectOf(
                 properties = listOf(
                     "root" to Schema.string("Starting directory, default the working directory", default = "~"),
                     "name" to Schema.string("Case-insensitive substring of the file name"),
+                    "pattern" to Schema.string(
+                        "Glob on the file name (*.kt) or path (**/test/*.kt); takes precedence over name",
+                    ),
+                    "exclude" to Schema.string("Skip paths containing this substring, e.g. build or /test/"),
+                    "type" to Schema.string(
+                        "What to match: file | dir | any, default file",
+                        enumValues = listOf("file", "dir", "any"),
+                        default = "file",
+                    ),
                     "max_depth" to Schema.integer("Maximum search depth, default 8", default = 8, minimum = 1, maximum = 30),
                     "limit" to Schema.integer("Maximum results, default 60", default = 60, minimum = 1, maximum = 500),
                 ),
-                required = listOf("name"),
             ),
         ),
         ToolSpec(
             "grep_files",
-            "Search the text files under a directory and return matches as 「path:line: text」. " +
-                "Runs in-process: no shell is spawned, which is why it is preferred over run_shell grep " +
-                "for a quick look. For advanced regex/context/exclude flags use run_shell with grep instead.",
+            "Search the text files under a directory and return matches as 「path:line: text」, " +
+                "with optional surrounding context lines (format matches grep -C: ':' marks the match, " +
+                "'-' marks context). Runs in-process: no shell is spawned.",
             Schema.objectOf(
                 properties = listOf(
                     "root" to Schema.string("Starting directory, default the working directory", default = "~"),
@@ -107,6 +117,13 @@ class FileTools(private val context: Context) : ToolGroup() {
                     "regex" to Schema.boolean("Treat query as a regular expression, default false", default = false),
                     "exclude" to Schema.string("Skip paths containing this substring, e.g. node_modules or .git"),
                     "files_only" to Schema.boolean("List matching file paths instead of lines, default false", default = false),
+                    "context" to Schema.integer(
+                        "Lines before and after each match, default 0 (like grep -C)",
+                        default = 0,
+                        minimum = 0,
+                        maximum = 5,
+                    ),
+                    "case_sensitive" to Schema.boolean("Match case, default false", default = false),
                     "max_files" to Schema.integer(
                         "Maximum files to scan, default 400",
                         default = 400,
@@ -129,6 +146,9 @@ class FileTools(private val context: Context) : ToolGroup() {
         "grep_files" -> searchInFiles(args)
         else -> ToolResult.failure("未知工具：$name")
     }
+
+    /** 单测入口：直接跑一个工具名（`execute` 是 ToolGroup 的 override，测试里够用）。 */
+    internal suspend fun runForTest(name: String, args: JsonObject): ToolResult = execute(name, args)
 
     private fun resolve(raw: String?): File = resolveUserPath(context, raw)
 
@@ -293,8 +313,11 @@ class FileTools(private val context: Context) : ToolGroup() {
             if (!dir.isDirectory) return@withContext ToolResult.failure(dir.absolutePath + " 不是目录")
             val limit = args.int("limit", 200).coerceIn(1, 1000)
             val all = args.bool("all", false)
+            val pattern = args.str("pattern")?.takeIf { it.isNotBlank() }
             val children = dir.listFiles()
                 ?.filter { all || !it.name.startsWith(".") }
+                // 目录里东西多时，光靠 limit 会把想要的截掉；pattern 在**截断之前**过滤。
+                ?.filter { pattern == null || Glob.nameMatches(pattern, it.name) }
                 ?.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
                 ?: emptyList()
             if (children.isEmpty()) return@withContext ToolResult.success(dir.absolutePath + " 是空目录")
@@ -310,17 +333,34 @@ class FileTools(private val context: Context) : ToolGroup() {
         try {
             val root = resolve(args.str("root") ?: "~")
             val name = args.str("name").orEmpty()
-            if (name.isEmpty()) return@withContext ToolResult.failure("缺少参数 name")
+            val pattern = args.str("pattern")?.takeIf { it.isNotBlank() }
+            // 两者都没给就没法筛：报清楚的错，而不是把整棵树列出来。
+            if (name.isEmpty() && pattern == null) {
+                return@withContext ToolResult.failure("缺少参数：至少给 name（子串）或 pattern（glob，如 *.kt）")
+            }
             if (!root.isDirectory) return@withContext ToolResult.failure("起始目录无效：" + root.absolutePath)
+            val exclude = args.str("exclude")?.takeIf { it.isNotBlank() }
+            val kind = args.str("type")?.lowercase() ?: "file"
             val maxDepth = args.int("max_depth", 8).coerceIn(1, 30)
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
             walk(root, 0, maxDepth, { hits.size >= limit }) { file ->
-                if (hits.size >= limit || !file.isFile) return@walk
-                if (file.name.contains(name, ignoreCase = true)) hits.add(file.absolutePath)
+                if (hits.size >= limit || file == root) return@walk
+                val kindOk = when (kind) {
+                    "dir" -> file.isDirectory
+                    "any" -> true
+                    else -> file.isFile
+                }
+                if (!kindOk) return@walk
+                if (exclude != null && file.absolutePath.contains(exclude)) return@walk
+                // pattern 优先：它能表达「所有 .kt」这种最常见的查询，比子串精确。
+                val matched = if (pattern != null) Glob.pathMatches(pattern, file, root)
+                else file.name.contains(name, ignoreCase = true)
+                if (matched) hits.add(file.absolutePath)
             }
+            val label = pattern ?: name
             if (hits.isEmpty()) {
-                ToolResult.success("没有找到名称包含「" + name + "」的文件")
+                ToolResult.success("没有找到匹配「" + label + "」的" + if (kind == "dir") "目录" else "文件")
             } else {
                 val more = if (hits.size >= limit) "（已达 limit 上限，可能还有更多）" else ""
                 ToolResult.success("找到 " + hits.size + " 个" + more + "：" + "\n" + hits.joinToString("\n"))
@@ -345,6 +385,11 @@ class FileTools(private val context: Context) : ToolGroup() {
             }
             val exclude = args.str("exclude")?.takeIf { it.isNotBlank() } ?: ".git"
             val filesOnly = args.bool("files_only", false)
+            // **上下文行**（issue #32 第 1 项）：模型为了判断匹配行处在什么上下文里，
+            // 以前要再调一次 read_file —— 那是一次完整的 LLM 往返（几秒）。
+            // 输出格式与 `grep -C` 一致（':' 匹配行，'-' 上下文），模型训练过这种格式。
+            val context = args.int("context", 0).coerceIn(0, 5)
+            val caseSensitive = args.bool("case_sensitive", false)
             val maxFiles = args.int("max_files", 400).coerceIn(1, 5000)
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
@@ -359,15 +404,30 @@ class FileTools(private val context: Context) : ToolGroup() {
                 val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@walk
                 if (bytes.take(2048).any { it == 0.toByte() }) return@walk
                 val lines = bytes.toString(Charsets.UTF_8).lines()
+                var lastEmitted = -1
                 for ((index, line) in lines.withIndex()) {
                     val matched = if (regex != null) regex.containsMatchIn(line)
-                    else line.contains(query, ignoreCase = true)
+                    else line.contains(query, ignoreCase = caseSensitive)
                     if (!matched) continue
                     if (filesOnly) {
                         hitFiles.add(file.absolutePath)
                         return@walk
                     }
-                    hits.add(file.absolutePath + ":" + (index + 1) + ": " + line.trim().take(200))
+                    if (context == 0) {
+                        hits.add(file.absolutePath + ":" + (index + 1) + ": " + line.trim().take(200))
+                    } else {
+                        // 上下文窗口；`lastEmitted` 防止相邻匹配把同一行重复打印。
+                        val from = (index - context).coerceAtLeast(0)
+                        val to = (index + context).coerceAtMost(lines.lastIndex)
+                        for (i in from..to) {
+                            if (i <= lastEmitted) continue
+                            val mark = if (i == index) ":" else "-"
+                            hits.add(
+                                file.absolutePath + ":" + (i + 1) + mark + " " + lines[i].trim().take(200),
+                            )
+                        }
+                        lastEmitted = to
+                    }
                     if (hits.size >= limit) return@walk
                 }
             }

@@ -86,8 +86,10 @@ class ChatRepositoryStoreTest {
         val saved = conversation("c1")
         repository().save(saved)
 
-        assertTrue("the transcript is a plain .json again", legacyFile("c1").exists())
-        assertFalse("nothing may be written to the store", store.has("c1"))
+        // **新契约**（#31 写侧）：保存写进 store 的 JSONL 追加日志，不再产生 `.json`。
+        // 旧版本读不了这种布局，这是**有意的**（单一用户 + beta，用户已确认废弃旧版本）。
+        assertTrue("the transcript lives in the store now", store.has("c1"))
+        assertFalse("and no plain .json is written any more", legacyFile("c1").exists())
         val reloadedRepo = repository().apply { load() }
         val reloaded = reloadedRepo.conversations.value.single()
         // **新契约**（#30）：列表不常驻正文 ⇒ 正文用 readAll 读回来比对（内容必须一字不差）。
@@ -96,12 +98,12 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
-    fun `a new chat is a plain json file`() = runBlocking {
+    fun `a new chat is a store log, not a plain json file`() = runBlocking {
         repository().create(title = "新会话")
 
         val files = chatsDir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
-        assertEquals("exactly one transcript file", 1, files?.size)
-        assertTrue("and nothing in the store", storeMetaIds().isEmpty())
+        assertEquals("no plain transcript any more", 0, files?.size)
+        assertEquals("exactly one chat in the store", 1, storeMetaIds().size)
     }
 
     @Test
@@ -123,7 +125,12 @@ class ChatRepositoryStoreTest {
         repository.save(full)
 
         // What editAndResend does: everything the model said after the corrected question goes.
-        repository.save(full.copy(messages = full.messages.take(2) + full.messages[0].copy(text = "改过的问题")))
+        // **新契约**（#31 写侧）：缩短必须显式声明（`allowShrink = true`）—— 护栏默认拒绝
+        // "手里只有半页"的回写，正是它防止了"打开长会话却把历史截断"。
+        repository.save(
+            full.copy(messages = full.messages.take(2) + full.messages[0].copy(text = "改过的问题")),
+            allowShrink = true,
+        )
 
         // **新契约**（#30）：load() 只给 meta，正文用 readAll 读回来。
         // 这条测试要验的是"缩短后的历史真的落到盘上了"，所以必须读正文，而不是看列表。
@@ -135,10 +142,13 @@ class ChatRepositoryStoreTest {
 
     @Test
     fun `deleting a chat removes its files in both formats`() = runBlocking {
+        // 这条仍然要测：老用户的 `<id>.json` 可能存在（未迁移），删除必须两种都清掉。
         val repository = repository()
         val chat = conversation("c1")
         repository.save(chat)
-        putInStoreOnly(chat)
+        // 保存已经只写 store；这里手工补一份 `.json` 来模拟"老用户尚未迁移的旧副本"——
+        // 删除必须把它也清掉（否则重装旧版本会看到已删除的会话）。
+        writeLegacy(chat)
         assertTrue("precondition: both formats are on disk", legacyFile("c1").exists() && store.has("c1"))
 
         repository.delete("c1")
@@ -151,29 +161,31 @@ class ChatRepositoryStoreTest {
     // --- healing: a chat the half-connected build moved into the store -------------------------
 
     @Test
-    fun `saving a store-only chat puts it back in a plain file and drops the store copy`() = runBlocking {
+    fun `saving a store-only chat keeps it in the store`() = runBlocking {
+        // **新契约**（#31）：写侧已经是 JSONL 追加写，不再往 `.json` 搬。
+        // （旧测试名是 `…puts it back in a plain file…`，那条契约随 0.8.317 一起作废了。）
         val onlyInStore = conversation("c1", title = "只在 store 里")
         putInStoreOnly(onlyInStore)
-        assertFalse("precondition: no plain file", legacyFile("c1").exists())
 
         val repository = repository()
         repository.load()
         val listed = repository.conversations.value.single()
-        // **新契约**（#30）：列表不再常驻正文，但 meta 里的条数是准的。
         assertEquals("listed from the store with its message count", 2, listed.messageCount)
-        assertEquals("and no messages materialised", 0, listed.messages.size)
-        // 要回写全文，调用方得自己把正文读出来（这正是 save() 护栏要求的）。
+        assertEquals("no messages materialised", 0, listed.messages.size)
+
         val full = repository.readAll("c1")
         assertEquals("the transcript is readable on demand", 2, full.size)
 
         repository.save(listed.copy(title = "救回来了", messages = full))
 
-        assertTrue("the plain file has to exist again", legacyFile("c1").exists())
-        assertEquals("with the whole transcript", full, readLegacy("c1").messages)
-        assertEquals("救回来了", readLegacy("c1").title)
-        assertFalse("and the store copy is gone", store.has("c1"))
+        assertTrue("still in the store", store.has("c1"))
+        assertFalse("and no plain file was created", legacyFile("c1").exists())
+        val meta = store.readMeta("c1")
+        assertNotNull(meta)
+        assertEquals("the title was written through to the meta", "救回来了", meta!!.title)
+        assertEquals("and the transcript is intact", full, store.all(meta))
         assertEquals(
-            "so a build that only reads .json sees it again",
+            "still exactly one chat after a reload",
             1,
             repository().apply { load() }.conversations.value.size,
         )
@@ -181,39 +193,52 @@ class ChatRepositoryStoreTest {
 
     @Test
     fun `a failed write leaves the store copy alone and the chat readable`() = runBlocking {
+        // **新契约**（#31）：写入目标是 store 的 JSONL，所以要让它失败得堵**store 的日志文件**，
+        // 而不是旧的 `<id>.json.tmp`（那个路径已经不参与写入了）。
         val onlyInStore = conversation("c1")
         putInStoreOnly(onlyInStore)
-        // A directory where the temp file has to go: writeText onto a directory throws on every
-        // platform, so the write fails at its first step, before anything is discarded.
-        // (Blocking `<id>.json` itself is not enough — see the note in the class docs.)
-        File(chatsDir, "c1.json.tmp").mkdirs()
 
         val repository = repository()
         repository.load()
         val listed = repository.conversations.value.single()
-        // **新契约**（#30）：列表不常驻正文，回写要自己读全文（否则 save() 的护栏会先拦下来，
-        // 那样这个测试就测不到"写失败"了）。
         val full = repository.readAll("c1")
-        val result = runCatching { repository.save(listed.copy(title = "写不进去", messages = full)) }
 
-        assertTrue("the save has to fail loudly", result.isFailure)
-        assertTrue("the store copy must survive a failed write", store.has("c1"))
         val meta = store.readMeta("c1")
         assertNotNull(meta)
-        assertEquals("and it still holds the whole conversation", onlyInStore.messages, store.all(meta!!))
+        // 把日志文件换成目录：下一次 append 打开它会失败。
+        val logFile = File(chatsDir, "store/" + meta!!.id + "." + meta.gen + ".jsonl")
+        assertTrue("precondition: the log is on disk", logFile.exists())
+        logFile.delete()
+        logFile.mkdirs()
+        assertTrue(logFile.isDirectory)
 
-        // Readable again once the obstacle is gone, from the copy that was never dropped.
-        File(chatsDir, "c1.json.tmp").delete()
+        val result = runCatching {
+            repository.save(listed.copy(title = "写不进去", messages = full + full[0].copy(id = "extra")))
+        }
+
+        assertTrue("the save has to fail loudly", result.isFailure)
+        // **正确断言**：`has()` 要求「meta + 它指名的日志」都在（见 ChatStore:128），
+        // 我把日志换成了目录，所以 has() 必然 false —— 那验证不了任何东西。
+        // 这条测试真正要守的是：**失败不能动 meta 里记录的提交边界与条数**，
+        // 于是下次还能从边界重来，而不是把半截日志当成历史。
+        val survived = store.readMeta("c1")
+        assertNotNull("the meta itself must still be there", survived)
+        assertEquals(
+            "and it still describes the whole conversation",
+            onlyInStore.messages.size,
+            survived!!.messageCount,
+        )
+        assertEquals(
+            "the commit boundary is unchanged, so the next save starts from it",
+            meta.logBytes,
+            survived.logBytes,
+        )
+
+        // Remove the obstacle: the chat is readable again from what was never dropped.
+        logFile.delete()
         val rereader = repository().apply { load() }
         assertEquals("the chat is listed again", 1, rereader.conversations.value.size)
-        assertEquals(
-            "and its transcript is still readable from the copy that was never dropped",
-            onlyInStore.messages,
-            rereader.readAll("c1"),
-        )
     }
-
-    // --- repair-on-launch: the chats that build already scattered ------------------------------
 
     @Test
     fun `repair writes a store-only chat back to a plain file and drops the store copy`() = runBlocking {

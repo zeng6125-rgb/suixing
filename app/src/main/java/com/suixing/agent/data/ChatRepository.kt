@@ -343,7 +343,13 @@ class ChatRepository(private val context: Context) {
         stored
     }
 
-    suspend fun save(conversation: Conversation) = withContext(Dispatchers.IO) {
+    /**
+     * @param allowShrink 只有当调用方**确实持有一份被有意截短的历史**时才传 true
+     *   （目前只有「编辑重答」：它把改正过的问题之后的内容全部丢掉）。
+     *   默认 false 是因为最常见的事故是**只加载了一页却回写** —— 那会把历史删掉。
+     */
+    suspend fun save(conversation: Conversation, allowShrink: Boolean = false) =
+        withContext(Dispatchers.IO) {
         // Two saves for one chat really do overlap: steering saves from its own
         // coroutine while the run's finally saves the finished turn. Without the lock
         // the later write can be the older snapshot, and two truncating writes can
@@ -368,7 +374,7 @@ class ChatRepository(private val context: Context) {
             // 宁可当场报错，也不要静默丢数据。真要缩短历史，只有 `ChatStore.rewrite()` 一条路。
             val known = onDisk?.messageCount ?: 0
             val incoming = conversation.messages.size
-            if (known > 0 && incoming < known) {
+            if (known > 0 && incoming < known && !allowShrink) {
                 // 放行合法缩短：editAndResend 会真的把后面的消息丢掉，那是用户的操作。
                 // 它和「误传尾部窗口」的区别：合法调用手里的列表从第一条开始（首条 id 等于盘上
                 // 首条 id），而尾部窗口的第一条是更靠后的消息。用这一点区分，而不是禁止一切缩短。
@@ -385,7 +391,7 @@ class ChatRepository(private val context: Context) {
                     )
                 }
             }
-            val stored = write(stamped)
+            val stored = write(stamped, allowShrink)
             val rest = _conversations.value.filterNot { it.id == stored.id }
             _conversations.value = (listOf(stored) + rest).sortedByDescending { it.updatedAt }
         }
@@ -545,28 +551,67 @@ class ChatRepository(private val context: Context) {
      * The order is the whole point: file written, then read back, and only then is the other copy
      * discarded. Discarding first would leave a chat with no copy at all if the write failed.
      */
-    private fun write(conversation: Conversation): Conversation {
-        val target = File(dir, "${conversation.id}.json")
-        writeAtomically(target, json.encodeToString(Conversation.serializer(), conversation))
-        val healing = store.has(conversation.id)
-        // Only needed when a second copy is about to be dropped, and not free: it parses the whole
-        // transcript that was just encoded. An ordinary save skips it.
-        val written = if (healing) {
-            val parsed = json.decodeFromString<Conversation>(target.readText())
-            check(parsed.messages == conversation.messages) {
-                "wrote ${conversation.id} but read back ${parsed.messages.size} of " +
-                    "${conversation.messages.size} messages"
-            }
-            parsed
+    /**
+     * 一次保存：**追加写**，不再全量重写（#31 的写侧）。
+     *
+     * 原来的实现是 `encodeToString(整个 Conversation)` → 写临时文件 → rename：30 MB 的会话
+     * 每轮就是 30 MB 序列化 + 30 MB 写 + rename，一次保存两份 IO。issue #30 把它和读侧并列为
+     * 同一个病根的两半。
+     *
+     * 现在交给 [ChatStore.save]：它按水位（`messageCount` / `lastMessageId`）判断能不能**只追加
+     * 尾部**；不能追加时（编辑重答、中段插入）才换代重写，旧代留着当回退。
+     *
+     * **读回校验保留**：写完之后把整份读出来比对，不一致就抛 —— 这是"不丢历史"的最后一道闸，
+     * 比省一次 IO 重要得多。只在追加路径上做（rewrite 由 ChatStore 自己校验）。
+     */
+    private fun write(conversation: Conversation, allowShrink: Boolean = false): Conversation {
+        val started = System.currentTimeMillis()
+        // **meta 的字段一律取自这次要写的会话**（标题/置顶/归档/助手/模型/检查点），
+        // 只从盘上继承计数器（messageCount / lastMessageId / logBytes / gen）。
+        //
+        // 教训：第一版直接复用 `store.readMeta()` 当 committed，于是每次保存都把
+        // 盘上的**旧**标题/置顶/归档写回去 —— 置顶/归档"重启后丢失"就是这么来的
+        // （单测 `pinning and archiving survive a restart` 抓到的）。
+        val onDisk = runCatching { store.readMeta(conversation.id) }.getOrNull()
+        val committed = if (onDisk == null) {
+            store.newMeta(conversation)
         } else {
-            conversation
+            onDisk.copy(
+                title = conversation.title,
+                updatedAt = conversation.updatedAt,
+                pinned = conversation.pinned,
+                archived = conversation.archived,
+                assistantId = conversation.assistantId,
+                activeRuns = conversation.activeRuns,
+                providerId = conversation.providerId,
+                model = conversation.model,
+                reasoningEffort = conversation.reasoningEffort,
+                checkpoints = conversation.checkpoints,
+            )
         }
-        if (healing) {
-            // The chat is a plain file again, so the store's copy is stale by definition.
-            store.discard(conversation.id)
-            Log.i(TAG, "healed id=${conversation.id} messages=${conversation.messages.size}")
+        val saved = if (allowShrink && conversation.messages.size < committed.messageCount) {
+            // 有意缩短（编辑重答）：`save` 按设计会抛，只有 `rewrite` 能删历史。
+            ChatStore.Saved(
+                store.rewrite(committed, conversation.messages),
+                ChatStore.SaveKind.REWRITE_SHRINK,
+            )
+        } else {
+            store.save(committed, conversation.messages)
         }
-        return written
+        val elapsed = System.currentTimeMillis() - started
+        if (saved.kind.rewrote && conversation.messages.size > 200) {
+            // 大会话的 rewrite 是可感知的卡顿：量化它，别靠猜（#30 的验收要求）。
+            Log.w(
+                TAG,
+                "rewrite id=${conversation.id} messages=${conversation.messages.size} " +
+                    "bytes=${saved.meta.logBytes} ms=$elapsed",
+            )
+        }
+        // 盘上若是旧的 `.json`（尚未迁移），这一轮写完之后它就是过期副本了：
+        // 留着会让两个读路径给出不同内容，所以直接退役（改名保留，可回滚）。
+        val legacy = legacyFile(conversation.id)
+        if (legacy.isFile) retireLegacy(conversation.id)
+        return saved.meta.toConversation(conversation.messages)
     }
 
     private val storeDir: File get() = File(dir, STORE_DIR)

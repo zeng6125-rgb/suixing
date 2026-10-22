@@ -43,6 +43,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
@@ -89,6 +90,12 @@ data class PendingSteer(val id: String, val text: String, val imagesBase64: List
  * send into — and a copy on disk would come back as the app talking to itself.
  */
 data class PendingTurn(val id: String, val text: String, val imagesBase64: List<String> = emptyList())
+
+/**
+ * 最多缓存几个会话的正文（LRU）。用户定的数：在 5 个会话之间来回切不该反复读盘。
+ * 超出就淘汰最久没被打开的那一个 —— 与"列表常驻全文"（RSS 413MB 的根因）是两回事。
+ */
+private const val MESSAGE_CACHE_SIZE = 5
 
 data class ChatUiState(
     val conversationId: String = "",
@@ -500,6 +507,36 @@ class ChatViewModel : ViewModel() {
      * it before its first frame instead of waiting for the marker file to be read.
      */
     private var lastOpenedId: String? = null
+
+    /**
+     * 最近打开过的会话正文，**最多 [MESSAGE_CACHE_SIZE] 个**，LRU 淘汰。
+     *
+     * 为什么需要它（用户实测）：0.8.316 把列表改成只读 meta 后，`openConversation` 每次都把
+     * `_state` 换掉、正文清空，再从磁盘重读 —— 于是「切走再切回」看起来像**又要重新加载**。
+     * 只有当前会话驻留内存是对的（54MB 全驻留正是 RSS 413MB 的根因），但**在几个会话之间来回
+     * 切**是极常见的操作，每次都读盘是明显的退步。
+     *
+     * 容量 5（用户定的数）：足够覆盖"在几个会话间来回看"，最坏内存 = 5 × 12 轮，
+     * 与"全部常驻"不是一个量级。存的是**读出来的那一页**（`readTail` 的结果），与屏幕一致。
+     */
+    private val messageCache = object : LinkedHashMap<String, List<StoredMessage>>(
+        MESSAGE_CACHE_SIZE, 0.75f, true,
+    ) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, List<StoredMessage>>?,
+        ): Boolean = size > MESSAGE_CACHE_SIZE
+    }
+
+    /** [messageCache] 的锁：它会同时被 UI 线程和读盘协程碰到。 */
+    private val messageCacheLock = Any()
+
+    private fun cachedMessages(chatId: String): List<StoredMessage>? =
+        synchronized(messageCacheLock) { messageCache[chatId] }
+
+    private fun cacheMessages(chatId: String, messages: List<StoredMessage>) {
+        if (chatId.isEmpty() || messages.isEmpty()) return
+        synchronized(messageCacheLock) { messageCache[chatId] = messages }
+    }
 
     /**
      * Text waiting to be published, per conversation; see [handleEvent] and [DELTA_PUBLISH_MS].
@@ -940,7 +977,9 @@ class ChatViewModel : ViewModel() {
                 if (current.messages.firstOrNull()?.id != shown.first().id) {
                     current
                 } else {
-                    current.copy(messages = older + current.messages)
+                    val merged = older + current.messages
+                    cacheMessages(chatId, merged)
+                    current.copy(messages = merged)
                 }
             }
         }
@@ -1036,13 +1075,30 @@ class ChatViewModel : ViewModel() {
                 )
             }
         }
-        // **补读正文**（#30）：上面只按 meta 建了状态，这里把最近 N 轮读进来。
-        // 条件是"这个会话还在屏幕上"——用户可能已经切走，那就别再写回状态去覆盖新会话。
+        // **补读正文**（#30 + LRU 缓存）：上面只按 meta 建了状态，这里把最近 N 轮读进来。
+        // 先查缓存：「切走再切回」在几个会话之间来回看是极常见的操作，不该每次都读盘。
+        //
+        // 条件都是"这个会话还在屏幕上"：用户可能已经切走，那就别再写回状态去覆盖新会话。
         viewModelScope.launch {
+            val cached = cachedMessages(conversation.id)
+            if (cached != null && _state.value.conversationId == conversation.id) {
+                val stored = Core.chats.conversations.value.firstOrNull { it.id == conversation.id }
+                _state.update {
+                    it.copy(
+                        messages = cached,
+                        messageCount = stored?.messageCount ?: cached.size,
+                        turnCount = stored?.turnCount ?: 0,
+                        checkpoints = stored?.checkpoints.orEmpty(),
+                        loading = false,
+                    )
+                }
+                return@launch
+            }
             val opened = Core.chats.readTail(conversation.id)
             if (opened != null && _state.value.conversationId == conversation.id &&
                 _state.value.messages.isEmpty()
             ) {
+                cacheMessages(conversation.id, opened.messages)
                 _state.update {
                     it.copy(
                         messages = opened.messages,
@@ -1434,6 +1490,24 @@ class ChatViewModel : ViewModel() {
                 reasoning = "",
                 status = "正在重新回答…",
                 error = null,
+            )
+        }
+        // **缩短必须在这一刻显式落盘**：editAndResend 真的把改正后的问题之后的内容丢掉了，
+        // 这件事只有这里知道。若等后面某一轮 persistDisplayed() 去写，那次调用看到
+        // "盘上 6 条、手里 3 条"只会正确地判定为**误传了半页**并拒写（护栏 allowShrink=false），
+        // 于是编辑重答永远存不下去。
+        viewModelScope.launch {
+            save(
+                chatId = snapshot.conversationId,
+                title = snapshot.title,
+                messages = kept,
+                assistantId = snapshot.assistantId,
+                activeRuns = _state.value.activeRuns,
+                providerId = snapshot.providerId,
+                model = snapshot.model,
+                reasoningEffort = snapshot.reasoningEffort,
+                checkpoints = snapshot.checkpoints,
+                allowShrink = true,
             )
         }
         start(fresh, kept)
@@ -2463,6 +2537,9 @@ class ChatViewModel : ViewModel() {
      */
     private fun putSession(next: RunSession) {
         sessions[next.chatId] = next
+        // 会话的正文变了（新一轮、插话、重试……）⇒ 顺带刷新 LRU 缓存，
+        // 否则「切走再切回」会看到缓存里的旧内容。
+        cacheMessages(next.chatId, next.messages)
         _state.update { snapshot ->
             if (snapshot.conversationId != next.chatId) {
                 snapshot
@@ -2711,6 +2788,8 @@ class ChatViewModel : ViewModel() {
         model: String?,
         reasoningEffort: String? = null,
         checkpoints: List<ContextCheckpoint>? = null,
+        /** 只有「编辑重答」传 true：它有意把改正后的问题之后的内容丢掉。 */
+        allowShrink: Boolean = false,
     ): String? {
         if (chatId.isEmpty()) return null
         val previous = Core.chats.conversations.value.firstOrNull { it.id == chatId }
@@ -2725,7 +2804,8 @@ class ChatViewModel : ViewModel() {
             title
         }
         Core.chats.save(
-            Conversation(
+            allowShrink = allowShrink,
+            conversation = Conversation(
                 id = chatId,
                 title = derived,
                 createdAt = previous?.createdAt ?: System.currentTimeMillis(),

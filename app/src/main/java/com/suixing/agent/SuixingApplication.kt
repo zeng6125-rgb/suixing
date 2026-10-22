@@ -30,6 +30,16 @@ class SuixingApplication : Application() {
             runCatching { Core.chats.repairPending() }
                 .onFailure { android.util.Log.w("ChatRepository", "repairPending failed", it) }
         }
+        // **旧格式迁移**（#31）：把 `<id>.json` 逐会话搬进「meta + JSONL 追加日志」。
+        //
+        // 为什么不在 `load()` 里做：读一个 54 MB 的目录、每个会话全量解析 + 写回 + 校验，
+        // 是秒级的 IO，列表必须先在屏幕上。这里排在 IO 协程里，界面照常可用；
+        // 迁移是**幂等、可中断、可重入**的（`migratePending` 内部逐会话加锁、校验通过才改名，
+        // 失败就保留旧文件下次再来），所以每次启动跑一次是安全的。
+        Core.appScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { Core.chats.migratePending() }
+                .onFailure { android.util.Log.w("ChatRepository", "migratePending failed", it) }
+        }
         observeForeground()
     }
 
