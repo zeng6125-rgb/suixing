@@ -2291,7 +2291,18 @@ class AgentEngine(
                     ToolResult.failure("用户拒绝了这次调用。")
                 } else {
                     val startedAt = System.currentTimeMillis()
-                    runCatching { runner(parseArgs(call.arguments)) }.getOrElse { error ->
+                    // **工具本体跑在 IO 上**（#36 的第一小步）：`startRun` 的协程是
+                    // `withContext(runJob)`，而 `runJob` 是 `Job` **不是调度器** ⇒ 整段 run loop
+                    // 继承调用方（`viewModelScope` = Main.immediate）。工具里既有 `ProcessBuilder`
+                    // 这类阻塞调用，也有遍历目录/解析大文本这类纯 CPU ⇒ 都落在主线程上，
+                    // 正是「A 会话在跑工具、切到 B 滑动卡」的直接来源。
+                    //
+                    // **只把工具本体移走**，不动事件顺序：`withContext` 返回后仍回到调用方
+                    // （Main）继续发事件、写回写，所以 `ToolStarted` → `ToolFinished` 的次序、
+                    // 以及 `onEvent` 的线程假设全部不变。
+                    runCatching {
+                        withContext(Dispatchers.IO) { runner(parseArgs(call.arguments)) }
+                    }.getOrElse { error ->
                         if (error is CancellationException) throw error
                         ToolResult.failure("工具执行异常：${error.message ?: error::class.java.simpleName}")
                     }.also { toolMs = System.currentTimeMillis() - startedAt }
