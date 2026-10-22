@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import kotlinx.coroutines.delay
+import androidx.compose.ui.unit.LayoutDirection
 
 // ---------------------------------------------------------------------------
 // Block model + parser. Pure Kotlin: no Android or Compose types are involved,
@@ -917,9 +918,13 @@ private fun InlineText(
                 val line = layout.lineCount - 1
                 val top = layout.getLineTop(line)
                 val h = (layout.getLineBottom(line) - top).toFloat()
+                // **RTL 要用 getLineLeft**：`getLineRight` 在从右往左的行里是行的左端起点，
+                // 直接把光标画到行首去了。按行方向选端点。
+                val rtl = layout.layoutInput.layoutDirection == LayoutDirection.Rtl
+                val x = if (rtl) layout.getLineLeft(line) - CURSOR_WIDTH_PX else layout.getLineRight(line)
                 drawRect(
                     color = palette.linkColor.copy(alpha = caretAlpha.value),
-                    topLeft = Offset(layout.getLineRight(line), top),
+                    topLeft = Offset(x, top),
                     size = Size(CURSOR_WIDTH_PX, h),
                 )
             }
