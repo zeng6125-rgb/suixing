@@ -493,6 +493,8 @@ fun ChatScreen(
         groupRows(state.messages.drop(page.from), state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
+    // 底锚的喂序是反的；反转结果记住，别每次重组都新建包装对象。
+    val reversedVisible = remember(visible) { visible.asReversed() }
     // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
     // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
     // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
@@ -1601,7 +1603,9 @@ fun ChatScreen(
                                 RunReasonLine(state.error.orEmpty())
                             }
                         }
-                        items(visible.asReversed(), key = { it.message.id }) { row ->
+                        // `asReversed()` 每次调用都返回一个**新包装对象**；`visible` 本身按
+                        // revision 记忆，所以这里记住反转结果就够了。
+                        items(reversedVisible, key = { it.message.id }) { row ->
                             // One placeable per item: the list's own 16dp spacing applies
                             // between the placeables of a single item as well, which is what
                             // held the timestamp a full 16dp above the bubble it belongs to.
@@ -1662,7 +1666,11 @@ fun ChatScreen(
                             // away: that is the point in the transcript where the model
                             // stopped seeing the conversation verbatim.
                             checkpointsByRow[row.message.id].orEmpty().forEach { checkpoint ->
-                                val originals = checkpointSpan(state.messages, checkpoint)
+                                // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
+                                // 键用 revision + checkpoint（两者任一变化才需要重算）。
+                                val originals = remember(checkpoint, state.messagesRevision) {
+                                    checkpointSpan(state.messages, checkpoint)
+                                }
                                 // A checkpoint whose span is not in this transcript (a
                                 // branch switch, a trimmed conversation) is not drawn: half
                                 // a record would read as data loss.

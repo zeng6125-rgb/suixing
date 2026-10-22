@@ -1429,8 +1429,10 @@ internal fun TurnSummary(
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
-    val thoughts = parts.filterIsInstance<Part.Thinking>()
-    val calls = parts.filterIsInstance<Part.Tools>().flatMap { it.calls }
+    // **remember**（性能）：这行每次重组都全表扫两遍 + flatMap 出新 list，
+    // 而 `parts` 在 settled 行里跨重组是稳定的（同一轮的 part 列表不会重建）。
+    val thoughts = remember(parts) { parts.filterIsInstance<Part.Thinking>() }
+    val calls = remember(parts) { parts.filterIsInstance<Part.Tools>().flatMap { it.calls } }
     val settled = usage?.takeIf { it.known }
     // The prompt size of the newest round is what is actually sitting in the window now.
     // While a run streams, the engine's copy of the endpoint's last report is fresher than
@@ -1459,13 +1461,16 @@ internal fun TurnSummary(
     }
     // The numbers ride inside the title rather than in their own slot, so they shorten
     // with it and the chip after them is never the thing that gets squeezed.
-    val header = buildList {
+    // 标题串只在输入变化时重算（每次重组 3 个 buildList + joinToString 是纯浪费）。
+    val header = remember(headline, tail, note) {
+        buildList {
         add(if (headline.isEmpty()) "本轮用量" else "本轮：${headline.joinToString(" · ")}")
         addAll(tail)
         // After the numbers, before nothing else: the compression line is a fact about this
         // turn, so it rides in the same title and folds away with the card.
         if (note.isNotBlank()) add(note)
-    }.joinToString(" · ")
+        }.joinToString(" · ")
+    }
     ProcessCard(
         icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
         title = header,

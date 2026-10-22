@@ -1048,14 +1048,23 @@ internal fun AssistantRow(
                             // card's expanded list, not flat beside the answer.
                             // Consecutive tool rounds merge into one block: one card per
                             // run of calls, not a card inside a card per round.
-                            val run = mutableListOf(part.calls)
-                            var cursor = index + 1
-                            while (cursor < parts.size && parts[cursor] is Part.Tools) {
-                                run.add((parts[cursor] as Part.Tools).calls)
-                                cursor++
+                            // **记住合并结果**（性能）：`tools: List<ToolLine>` 是 unstable，
+                            // strong skipping 按 `===` 比较 —— 每次重组都 `flatten()` 出一个新 list，
+                            // `ToolBundle` 就永远跳不过（里面的 ToolDetail / RevealHeight /
+                            // 每行一个 `collectIsPressedAsState` 全部重跑）。
+                            val tools = remember(parts, index) {
+                                buildList {
+                                    var c = index
+                                    while (c < parts.size && parts[c] is Part.Tools) {
+                                        addAll((parts[c] as Part.Tools).calls)
+                                        c++
+                                    }
+                                }
                             }
+                            var cursor = index + 1
+                            while (cursor < parts.size && parts[cursor] is Part.Tools) cursor++
                             ToolBundle(
-                                tools = run.flatten(),
+                                tools = tools,
                                 // Only the newest block can be the one waiting on a tool.
                                 runningTool = runningTool.takeIf { cursor > parts.lastIndex },
                                 startExpanded = expandTools,
