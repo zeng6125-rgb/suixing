@@ -534,7 +534,8 @@ class ChatViewModel : ViewModel() {
      * screen. The run's copy is gone by then and nothing else remembers why it stopped, so
      * the reason is held here until that conversation is opened again.
      */
-    private val lastErrors = mutableMapOf<String, String>()
+    // **并发结构**（#36 准备）：run loop 一旦离开主线程，这个表会在事件线程写、在打开会话时读。
+    private val lastErrors = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /**
      * The conversation this process last showed, remembered so a new screen instance can adopt
@@ -731,7 +732,8 @@ class ChatViewModel : ViewModel() {
      * 哪些会话的运行是**用户按中断按钮**停的：停止不是失败，不写回执、不留红色提示。
      * 按 chatId 记 —— 多个会话可以同时跑，单个布尔会把别的会话的真实失败一起吞掉。
      */
-    private val userStopped = mutableSetOf<String>()
+    // **并发结构**（#36 准备）：用户点停（主线程）写，事件线程读。
+    private val userStopped: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /**
      * One line about retries, appended to `files/retry-trace.log`.
@@ -805,7 +807,8 @@ class ChatViewModel : ViewModel() {
     private val sessions = ConcurrentHashMap<String, RunSession>()
 
     /** One coroutine per running conversation, so stopping one leaves the others alone. */
-    private val jobs = mutableMapOf<String, Job>()
+    // **并发结构**（#36 准备）：用户操作写，事件线程 `containsKey` 读。
+    private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private val _drafts = MutableStateFlow<Map<String, Draft>>(emptyMap())
 
@@ -1925,7 +1928,8 @@ class ChatViewModel : ViewModel() {
     }
 
     /** 正在手动压缩的会话，防止连点。 */
-    private val compressing = mutableSetOf<String>()
+    // **并发结构**（#36 准备）：压缩协程写，事件线程判定。
+    private val compressing: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /**
      * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）：按**当前**上下文算一次，不依赖 run。
