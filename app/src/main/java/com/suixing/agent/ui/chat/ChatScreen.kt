@@ -275,6 +275,18 @@ internal val SUGGESTIONS = listOf(
     "打开设置看看还剩多少存储空间",
 )
 
+/**
+ * **A/B 实验开关**：读历史时要不要「钉住流式行的布局高度」（#17 的方案）。
+ *
+ * `true` = 现状（钉住，防止被推着走）；`false` = 关掉钉住（只测量、不冻结高度）。
+ *
+ * 用途：用户报「往上滑、再快速下滑会出现白色块」。白块是近期才高频出现的，而钉住正是
+ * `dd4f998`（0.8.320）引入的 —— 出一版 `false` 的包做**单变量对照**：
+ * 白块消失 ⇒ 与钉住这套有关；白块照旧 ⇒ 无关，回到基础列表找。
+ * 对照做完把它改回 `true`（或删掉这个开关）。
+ */
+private const val PIN_LIVE_HEIGHT = true
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
@@ -357,6 +369,8 @@ fun ChatScreen(
     // heldIme，而它正是输入框自身位置的同一个驱动量 ⇒ 两者同步移动，可见空隙在任何一帧都一样
     // （用户要恒定）。原来用「列表底 − 输入框顶」两个节点的测量值相减，两个 onGloballyPositioned
     // 不同帧到位 ⇒ 动画中间态抖动。
+    // 读历史期间沿用的底边距（见 LazyColumn 的 `bottom`）。
+    var heldFootprint by remember { mutableStateOf(0.dp) }
     val stackFootprint = with(LocalDensity.current) {
         // `composerH` 是**内边距以内**的高度：`onSizeChanged` 挂在
         // `.padding(bottom = COMPOSER_BOTTOM_PAD)` **之后**（TurnScrubber.kt:757-758），
@@ -733,6 +747,12 @@ fun ChatScreen(
         // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
         conversationId = state.conversationId,
     )
+
+    // 贴底时持续记住当前占位；离开底部（开始读历史）就冻住它 ——
+    // 输入框高度在流式期间会变（状态行出现/消失），不冻住就会把整列内容推几 dp。
+    LaunchedEffect(stackFootprint, scroll.stickToBottom) {
+        if (scroll.stickToBottom) heldFootprint = stackFootprint
+    }
     // **#14 的根因（真机日志 2026-10-21 00:25 坐实，不是推断）**：
     // 长按建立选区后，框架会为「把选中的内容滚进视口」发起一次 bring-into-view，走的就是
     // `LocalBringIntoViewSpec`。日志证据：`guard-on` 在 0/0，365ms 后开始逐帧位移
@@ -1004,29 +1024,34 @@ fun ChatScreen(
     // 所以：**钉住期间只要流式行还在视野内就立刻释放**（宁可那一刻跳一下，也不要持续显示被裁的输出）。
     // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
     val streamingKey = "streaming:${state.conversationId}"
+    // 有活内容（正文/思考/工具）才值得钉住 —— 空的行不钉。
+    val liveForPin = state.streaming.isNotEmpty() || state.reasoning.isNotEmpty() ||
+        state.liveParts.isNotEmpty()
     LaunchedEffect(listState) {
         var pinned = false
         snapshotFlow {
-            val lagging = !scroll.stickToBottom && !scroll.restoring
-            // 流式行是否还在视野内（含视口外一点点缓冲，避免边界反复横跳）。
-            val visible = listState.layoutInfo.visibleItemsInfo.any { it.key == streamingKey }
-            lagging to visible
-        }.collect { (lagging, visible) ->
-            when {
-                lagging && !visible && !pinned -> {
-                    // 刚开始读历史（且流式行不在视野内）：钉住此刻的自然高度。
-                    // `lagNatural[0]` 是上一帧量到的自然高度 —— 它就是"用户开始上翻时"的高度。
-                    val h = lagNatural[0]
-                    if (h > 0) {
-                        pinnedLiveHeight = h
-                        pinned = true
-                    }
+            // **只看「是不是在底部」**（用户 2026-10-23 补充的第二种情况：
+            // 「在新轮次对话查看已输出的内容，同时流式还没结束，就会被推着走」）。
+            //
+            // 之前这里还带一个 `visible`（流式行在不在视野内）作为**解除**条件 —— 那是错的：
+            // 用户正在读当前这一轮已经输出的内容时，流式行本来就在视野里 ⇒ 钉住立刻被解除
+            // ⇒ 继续被推。现在只要「不在底部」就钉住，回到底部才解除。
+            //
+            // 代价：钉住期间超出钉住高度的**最新**那段不占布局（被 clipToBounds 裁掉）。
+            // 用户此时在读上面的内容，不是在看最新输出；回到底部立刻恢复。
+            // 流式行**还在**才谈得上钉住：一轮失败/重试会把 liveParts 清空，
+            // 或者这一轮根本没在进行 —— 那时钉住没有意义，只会留一片空白。
+            (!scroll.stickToBottom && !scroll.restoring) && liveForPin
+        }.collect { lagging ->
+            if (lagging && !pinned) {
+                val h = lagNatural[0]
+                if (h > 0) {
+                    pinnedLiveHeight = h
+                    pinned = true
                 }
-                (!lagging || visible) && pinned -> {
-                    // 回到底部，或流式行进入视野：解除钉住，高度跟自然值。
-                    pinnedLiveHeight = 0
-                    pinned = false
-                }
+            } else if (!lagging && pinned) {
+                pinnedLiveHeight = 0
+                pinned = false
             }
         }
     }
@@ -1039,10 +1064,6 @@ fun ChatScreen(
     //   ① 流式行自己长高（nat 变、idx/off 不变）⇒ 该由这里的补偿抵消；
     //   ② 流式行之外的东西长高（nat 不变、off 变）⇒ 本机制看不到，要靠别的手段；
     //   ③ 补偿算了但被列表吞掉（nat 变、d 非 0、off 仍往一个方向走）⇒ 同帧对齐没成立。
-    val driftCtx = LocalContext.current
-    val NL = 10.toChar()
-    val lastComp = remember { intArrayOf(0) }
-    val lastConsumed = remember { intArrayOf(0) }
     val liveTop = remember { floatArrayOf(Float.NaN) }
     // 闭环基准：离开底部那一刻流式行在屏幕上的 y（NaN = 未激活）
     // 闭环基准（已停用，保留声明避免大改 diff；剩余漂移等新日志再定）
@@ -1091,46 +1112,12 @@ fun ChatScreen(
     // 任何"每帧改写滚动位置"的做法都会撞上上面第 2 点。真要解决得换方向
     // （例如阅读态下让流式行不参与布局测量），那是另一次设计。
 
-    LaunchedEffect(listState) {
-        val buf = StringBuilder()
-        var tick = 0
-        var lastFlush = 0L
-        while (true) {
-            withFrameNanos { }
-            // 离开"读历史"状态就把攒的写出去 —— 否则短时间复现（几秒）永远攒不满 16KB，
-            // 日志根本不落盘（上一版就是这样，用户复现后文件不存在）。
-            if (!captureNow) {
-                if (buf.isNotEmpty()) {
-                    val chunk = buf.toString()
-                    buf.setLength(0)
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        java.io.File(driftCtx.filesDir, "drift17.log").appendText(chunk)
-                    }
-                }
-                continue
-            }
-            if (lagNatural[0] <= 0) continue
-            // **逐帧**记录：采样间隔与 Δnat/Δoff 必须同窗口，否则 d 无法与它们相加（上一轮的模型错在这）。
-            tick++
-            buf.append(lagNatural[0]).append(' ')
-                .append(lagReported).append(' ')
-                .append(listState.firstVisibleItemIndex).append(' ')
-                .append(listState.firstVisibleItemScrollOffset).append(' ')
-                .append(if (listState.canScrollBackward) 1 else 0).append(' ')
-                .append(lastComp[0]).append(' ')
-                .append(lastConsumed[0]).append(' ')
-                .append(if (liveTop[0].isNaN()) -1 else liveTop[0].toInt()).append(NL)
-            val now = System.nanoTime()
-            if (buf.length > 4_000 && now - lastFlush > 500_000_000L) {
-                val chunk = buf.toString()
-                buf.setLength(0)
-                lastFlush = now
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    java.io.File(driftCtx.filesDir, "drift17.log").appendText(chunk)
-                }
-            }
-        }
-    }
+    // #17 的逐帧埋点已经用完，**整段删掉**（2026-10-23）：它原来是一个常驻的
+    // `while (true) { withFrameNanos {} }` —— 每帧跑一次，而且「不在底部」（正是用户往上滑
+    // 的时候）会往 `drift17.log` 写盘。实测表现就是「往上滑再快速往下滑出现白块、滑动卡」。
+    // 结论已记录：① 读历史时钉住布局高度有效；② 底边距随输入框高度变化会把内容推几 dp，
+    // 用 heldFootprint 冻住即可。需要再查时用 systrace/Perfetto，不要再往主线程加逐帧 IO。
+
 
     // **设计 A 的每帧对账：暂时停用**（issue #18 之后）。
     //
@@ -1421,7 +1408,8 @@ fun ChatScreen(
                             // reverseLayout 下 top/bottom 的**视觉**归属不变（Compose 只是把
                             // before/after 的内部名对调：before=bottom padding），所以让位仍在
                             // 输入框这一侧。
-                            bottom = stackFootprint,
+                            // 读历史期间用冻结值（见 heldFootprint）。
+                            bottom = if (scroll.stickToBottom) stackFootprint else heldFootprint,
                         ),
                         // **内容不满一屏时贴顶**（issue #19，用户：「新会话气泡就应该在上面，然后再流式
                         // 长下来，旧内容不就往上推了」）。底锚（reverseLayout）已经负责"满了之后"：
@@ -1448,7 +1436,8 @@ fun ChatScreen(
                                         .liveRowLagHeight(
                                             // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
                                             // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
-                                            reported = pinnedLiveHeight,
+                                            // 实验开关：false 时完全不钉。
+                                            reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
                                             natural = lagNatural,
                                         )
                                         // `liveRowLagHeight` 报的���度可能小于内容的自然高度
@@ -2031,6 +2020,9 @@ private fun Modifier.liveRowLagHeight(reported: Int, natural: IntArray): Modifie
             Constraints(maxWidth = constraints.maxWidth, maxHeight = Constraints.Infinity),
         )
         natural[0] = placeable.height
-        val height = if (reported > 0) reported else placeable.height
+        // **报的高度不超过内容实际高度**（真机白块：一轮失败/重试会把 liveParts 清空，
+        // 而钉住的高度还是失败前的几千 px ⇒ 这个 item 留一大片空白）。
+        // 钉住只用来「不许长高」，不该用来「占着没有内容的空位」。
+        val height = if (reported > 0) minOf(reported, placeable.height) else placeable.height
         layout(placeable.width, height) { placeable.place(0, 0) }
     }

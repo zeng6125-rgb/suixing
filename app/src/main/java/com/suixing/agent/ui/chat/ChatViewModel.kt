@@ -404,6 +404,9 @@ data class SessionStats(
 }
 private const val TAG = "ChatViewModel"
 
+/** 「记住上次打开」的写盘 debounce：快速连点几个会话不该连写几次。 */
+private const val LAST_OPENED_DEBOUNCE_MS = 1_200L
+
 class ChatViewModel : ViewModel() {
 
     // The process-wide instance, not a private one: the floating console has to be
@@ -1041,18 +1044,37 @@ class ChatViewModel : ViewModel() {
      * is why "touch the conversation so it sorts first" was rejected. Fire and forget: the
      * switch must not wait for a disk write.
      */
+    /**
+     * 记住「上次打开的是哪个」，供下次启动用。
+     *
+     * **不再每次切会话都写盘**（#35）：一次点击 = 一次 `writeAtomically`（临时文件 +
+     * rename + fsync），而它只需要**最终值** —— 快速连点几个会话会连写几次。
+     * 现在 debounce 1.2 秒：停下来才写。
+     */
     private fun rememberOpened(chatId: String) {
         if (chatId.isEmpty()) return
         lastOpenedId = chatId
-        viewModelScope.launch { Core.chats.saveLastOpened(chatId) }
+        lastOpenedJob?.cancel()
+        lastOpenedJob = viewModelScope.launch {
+            delay(LAST_OPENED_DEBOUNCE_MS)
+            Core.chats.saveLastOpened(chatId)
+        }
     }
+
+    /** 排队中的「记住上次打开」写盘（debounce 用）。 */
+    private var lastOpenedJob: Job? = null
 
     fun openConversation(conversation: Conversation) {
         // Anything the conversation on screen was still holding is published before the
         // display moves: a buffered tail would otherwise land in the conversation being
         // opened, or be lost with the one being left.
         flushDeltas(_state.value.conversationId)
+        // 后台会话按上面的规则只缓冲不发布 ⇒ 切回来时要先把它攒的 delta 冲进 `sessions`，
+        // 否则刚建的界面缺最后一截（而且下一条事件又会把它叠在旧内容后面）。
+        flushDeltas(conversation.id)
         val live = sessions[conversation.id]
+        // **先查缓存**（#35）：命中就带正文建状态，连读盘协程都不用起。
+        val cached = cachedMessages(conversation.id)
         // Read-and-clear: a failure that landed while another conversation was on screen
         // is reported the moment its own chat comes back.
         val failure = lastErrors.remove(conversation.id)
@@ -1096,35 +1118,38 @@ class ChatViewModel : ViewModel() {
             // 是空的。`openConversation` 不是挂起函数（它是点击回调），所以这里**先按 meta
             // 建状态、带上 loading**，正文由下面那段协程补读 —— 补读期间显示骨架，
             // 不会闪一个空白会话，也不会让 `save()` 把空列表当成"变短"。
-            conversation.toUiState(_state.value.assistantId).let {
-                it.copy(
-                    loading = true,
-                    error = failure,
-                    // A run that ended with lines still queued keeps them: they are the
-                    // user's words, and the rows say they never went out.
-                    pendingSteers = steersOf(conversation.id),
-                )
+            conversation.toUiState(_state.value.assistantId).let { base ->
+                // **命中 LRU 缓存就直接带正文**（#35）：原来缓存命中也要先 loading=true
+                // 再补读，「切走再切回」会闪一次骨架。
+                if (cached != null) {
+                    val stored = Core.chats.conversations.value
+                        .firstOrNull { it.id == conversation.id }
+                    base.copy(
+                        messages = cached,
+                        messageCount = stored?.messageCount ?: cached.size,
+                        turnCount = stored?.turnCount ?: 0,
+                        checkpoints = stored?.checkpoints.orEmpty(),
+                        loading = false,
+                        error = failure,
+                        pendingSteers = steersOf(conversation.id),
+                    )
+                } else {
+                    base.copy(
+                        loading = true,
+                        error = failure,
+                        // A run that ended with lines still queued keeps them: they are the
+                        // user's words, and the rows say they never went out.
+                        pendingSteers = steersOf(conversation.id),
+                    )
+                }
             }
         }
         // **补读正文**（#30 + LRU 缓存）：上面只按 meta 建了状态，这里把最近 N 轮读进来。
         // 先查缓存：「切走再切回」在几个会话之间来回看是极常见的操作，不该每次都读盘。
         //
         // 条件都是"这个会话还在屏幕上"：用户可能已经切走，那就别再写回状态去覆盖新会话。
-        viewModelScope.launch {
-            val cached = cachedMessages(conversation.id)
-            if (cached != null && _state.value.conversationId == conversation.id) {
-                val stored = Core.chats.conversations.value.firstOrNull { it.id == conversation.id }
-                _state.update {
-                    it.copy(
-                        messages = cached,
-                        messageCount = stored?.messageCount ?: cached.size,
-                        turnCount = stored?.turnCount ?: 0,
-                        checkpoints = stored?.checkpoints.orEmpty(),
-                        loading = false,
-                    )
-                }
-                return@launch
-            }
+        // 只有**没命中缓存**才读盘（#35：命中时上面已经带正文建好状态了）。
+        if (cached == null) viewModelScope.launch {
             val opened = Core.chats.readTail(conversation.id)
             if (opened != null && _state.value.conversationId == conversation.id &&
                 _state.value.messages.isEmpty()
@@ -1145,7 +1170,11 @@ class ChatViewModel : ViewModel() {
         }
         // A run that was killed left its half-written answer in a draft file: it belongs to
         // this conversation, so it is picked up the moment the conversation is.
-        viewModelScope.launch { mergeLiveDraft(conversation.id) }
+        // 绝大多数会话**没有草稿**（`.live.json` 只在一轮跑到一半被杀时才有），
+        // 所以先 stat 一下再决定要不要起协程（#35）。
+        if (Core.chats.hasLiveDraft(conversation.id)) {
+            viewModelScope.launch { mergeLiveDraft(conversation.id) }
+        }
         // Where the user is, for the next launch.
         rememberOpened(conversation.id)
     }
@@ -2231,6 +2260,13 @@ class ChatViewModel : ViewModel() {
                 val now = SystemClock.uptimeMillis()
                 // 还没到节拍：缓冲留着，攒到下一次一起发（与改动前一致）。
                 if (!mayPublishLocked(chatId, now)) return
+                // **后台会话不发布**（用户实测：「一个会话在对话中，切到别的会话滑动会卡」）。
+                //
+                // 屏幕上根本不是它，发布出去只是在 `sessions` 里做 O(n) 字符串拼接 + 列表复制
+                // （`applyPending`），而引擎的事件是在 Main 上处理的 ⇒ 正在看另一个会话的人
+                // 就感到卡。delta **继续缓冲**（不丢），下一次非 delta 事件（工具行、落盘、
+                // 一轮结束）照常 flush；切回来时 `openConversation` 也会先 flush 一次。
+                if (_state.value.conversationId != chatId) return
             }
             // Whatever has arrived so far, applied in one go. For a non-delta event this is the
             // flush; for a delta it is the publish that got through the interval above.
@@ -2591,9 +2627,10 @@ class ChatViewModel : ViewModel() {
      */
     private fun putSession(next: RunSession) {
         sessions[next.chatId] = next
-        // 会话的正文变了（新一轮、插话、重试……）⇒ 顺带刷新 LRU 缓存，
-        // 否则「切走再切回」会看到缓存里的旧内容。
-        cacheMessages(next.chatId, next.messages)
+        // **不在这里刷 LRU 缓存**（#35）：流式期间每 ~80ms 一次 `putSession`，每次抢
+        // `messageCacheLock`，而切会话时的 `readTail` 读盘也在同一把锁上 —— 撞在一起就是
+        // 可感知的抖动。缓存只在「一轮结束」时刷（见 [endSession]）就够：
+        // 一轮中途切回来走的是 `sessions`（live 分支），根本不看缓存。
         _state.update { snapshot ->
             if (snapshot.conversationId != next.chatId) {
                 snapshot
@@ -2621,6 +2658,9 @@ class ChatViewModel : ViewModel() {
      */
     private fun endSession(chatId: String, status: String, error: String? = null) {
         val live = sessions.remove(chatId)
+        // 一轮结束：`sessions` 里那份没了，切回来只能靠 LRU 缓存 ⇒ 在这里刷一次
+        // （#35：原来是在 `putSession` 里每 80ms 刷，太频繁）。
+        if (live != null) cacheMessages(chatId, live.messages)
         val failure = error ?: live?.error
         // A run that failed while another conversation was on screen has no state to land
         // in — its own copy is gone a line above — so the reason waits here until that
@@ -2906,6 +2946,13 @@ class ChatViewModel : ViewModel() {
     }
 
     override fun onCleared() {
+        // debounce 中的「记住上次打开」可能还没落盘 —— 页面刚切走就退到后台时很容易撞上。
+        // 用 appScope 写（viewModelScope 马上就要被取消），失败也无所谓：它只影响下次启动
+        // 先打开哪个会话。
+        lastOpenedJob?.cancel()
+        lastOpenedId?.takeIf { it.isNotEmpty() }?.let { id ->
+            Core.appScope.launch { runCatching { Core.chats.saveLastOpened(id) } }
+        }
         // Every prompt this screen's runs put on screen is answered "refused" as the
         // screen dies; other conversations' prompts belong to their own screens.
         jobs.keys.forEach { gate.cancelPending(it) }

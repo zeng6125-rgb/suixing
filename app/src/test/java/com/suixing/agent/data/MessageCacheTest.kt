@@ -18,10 +18,15 @@ class MessageCacheTest {
     @Test
     fun `keeps at most the configured number of chats`() {
         val cache = MessageCache(capacity = 5)
-        for (i in 1..6) cache.put("c$i", messages("c$i"))
+        // **每一份只建一次**：`StoredMessage.timestamp` 默认是 `System.currentTimeMillis()`，
+        // 两次 `messages("c6")` 会各自取"当前毫秒" —— 跨一次毫秒边界两个列表就不相等，
+        // 这条测试因此偶发失败（真机 CI 上出现过两次）。
+        val six = messages("c6")
+        for (i in 1..5) cache.put("c$i", messages("c$i"))
+        cache.put("c6", six)
         assertEquals("capacity 5 means the oldest is dropped", 5, cache.size())
         assertNull("c1 was evicted", cache.get("c1"))
-        assertEquals(messages("c6"), cache.get("c6"))
+        assertEquals(six, cache.get("c6"))
     }
 
     @Test

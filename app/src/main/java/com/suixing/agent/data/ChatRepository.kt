@@ -706,6 +706,15 @@ class ChatRepository(private val context: Context) {
      * parse is deleted rather than quarantined: unlike a transcript there is nothing in it
      * worth recovering by hand, and keeping it would mean failing on it at every launch.
      */
+    /**
+     * 这个会话有没有草稿文件（`chats/<id>.live.json`）。
+     *
+     * 给「切会话」用（#35）：绝大多数会话没有草稿，先 stat 一下就能省掉一个协程 + 一次读盘。
+     * 是一次 `File.isFile`（~几十微秒），比起协程便宜得多。
+     */
+    fun hasLiveDraft(chatId: String): Boolean =
+        chatId.isNotEmpty() && liveFile(chatId).isFile
+
     suspend fun readLive(chatId: String): LiveDraft? = withContext(Dispatchers.IO) {
         val file = liveFile(chatId)
         if (!file.exists()) return@withContext null
