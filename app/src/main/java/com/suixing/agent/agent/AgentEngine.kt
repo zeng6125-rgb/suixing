@@ -2491,7 +2491,14 @@ private const val INTERRUPTED_TOOL_OUTPUT = "（已中断：任务被停止，�
 internal fun estimateTokens(message: StoredMessage): Int {
     val text = message.text.length + message.toolOutput.orEmpty().length + message.toolArgs.orEmpty().length
     val image = IMAGE_TOKENS * message.allImages.size
-    return text / 3 + image
+    // **向上取整**（issue #37）：整数除法会让 1~2 个字符的消息算成 **0 token**，
+    // 几十条短消息累积起来就会让预算判断系统性偏低 —— 而低估的后果是**超预算的请求**，
+    // 端点直接拒绝。向上取整只会让估算**不小于**原来（裁剪更保守、显示略大），
+    // 方向是安全的：宁可少发一条，也不要发一个会被拒的请求。
+    //
+    // 这仍然是粗略估算（`/3` 是中英混排的折中系数，真实值以端点回报的 `prompt_tokens` 为准），
+    // 只是修掉了"非空消息算 0"这个明显不合理的点。
+    return (text + 2) / 3 + image
 }
 
 /**
