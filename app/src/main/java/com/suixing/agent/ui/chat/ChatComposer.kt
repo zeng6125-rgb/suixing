@@ -465,10 +465,19 @@ internal fun LevelSlider(levelIndex: Int, levels: Int, onChange: (Int) -> Unit) 
     val last = (levels - 1).coerceAtLeast(1)
     var width by remember { mutableStateOf(0) }
     val fraction = (levelIndex.toFloat() / last).coerceIn(0f, 1f)
+    // **手势闭包里的等级必须是"最新值"**（用户实测：从 max 滑到别的档之后滑不回 max，
+    // 得重开弹窗）。原因：`pointerInput(levels)` 只在 `levels` 变时重启，它捕获的 `pick`
+    // 一直持有**打开弹窗那一刻**的 `levelIndex` —— 于是「滑回原档」时 `index == 旧值`，
+    // 被当成"没变"而不派发，滑不回去。
+    //
+    // 不能改成 `pointerInput(levels, levelIndex)`：等级一变指针输入就重启，**正在进行的拖动
+    // 会被取消**，滑一下就断。所以用 `rememberUpdatedState` 取最新值，键仍然是 `levels`。
+    val currentLevel by rememberUpdatedState(levelIndex)
+    val currentOnChange by rememberUpdatedState(onChange)
     val pick: (Float) -> Unit = { x ->
         if (width > 0) {
             val index = (x / width * last).roundToInt().coerceIn(0, last)
-            if (index != levelIndex) onChange(index)
+            if (index != currentLevel) currentOnChange(index)
         }
     }
     Box(

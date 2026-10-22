@@ -356,6 +356,16 @@ data class AppSettings(
      */
     val edgeLight: Boolean = true,
     /**
+     * 边缘光**在前台是否显示**（用户 2026-10-23：「加一个前台是否显示的开关，不独立，
+     * 只在边缘光开启后才起作用」）。
+     *
+     * - 开（默认）：随行自己在前台时也显示 —— 这是 issue #6 定下的行为，保持兼容。
+     * - 关：随行在前台时**不显示**；退到后台操作别的 app 时照常显示。
+     *
+     * **不独立**：`edgeLight` 为 false 时这一项无效（一律不显示）。
+     */
+    val edgeLightInForeground: Boolean = true,
+    /**
      * 打字机效果：**正在流式**的正文与思考逐字放出来，而不是每 80ms 整块跳一次
      * （节拍见 ChatViewModel 的 `DELTA_PUBLISH_MS`、放字逻辑见 ui/chat/Typewriter.kt）。
      *

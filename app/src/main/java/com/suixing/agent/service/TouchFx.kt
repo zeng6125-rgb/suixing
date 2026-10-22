@@ -50,6 +50,21 @@ private const val FX_RING_HOLD_RADIUS_DP = 8f
 private const val FX_RING_DURATION_MS = 260L
 private const val FX_LONG_PRESS_HOLD_MS = 600L
 private const val FX_SWIPE_DURATION_MS = 320L
+/**
+ * 边缘光此刻该不该亮（纯函数，便于单测）。
+ *
+ * 两条门：
+ *  1. **总开关** [masterOn] —— 关掉就一律不显示（用户：「关了之后一律不显示」）。
+ *  2. **前台开关** [showInForeground] —— 关掉时，随行自己在前台就不亮（后台照常亮）。
+ *
+ * 第二个开关**不独立**：总开关为 false 时，它无论怎么设都不亮。
+ */
+internal fun edgeLightVisible(
+    masterOn: Boolean,
+    showInForeground: Boolean,
+    inForeground: Boolean,
+): Boolean = masterOn && (showInForeground || !inForeground)
+
 private const val FX_EDGE_DURATION_MS = 350L
 
 /**
@@ -398,6 +413,13 @@ object TouchFx {
     @Volatile
     private var edgeLightOn = true
 
+    /**
+     * 边缘光在**前台是否显示**（`AppSettings.edgeLightInForeground`，默认开 = 保持 issue #6）。
+     * 关掉之后：随行在前台不亮，退到后台操作别的 app 照常亮。
+     */
+    @Volatile
+    private var edgeLightInForeground = true
+
     /** 设置收集只开一次。 */
     private var watchingSettings = false
 
@@ -424,8 +446,10 @@ object TouchFx {
             // 而且没有任何迹象。失败就写一行 trace，让人能从日志里看出来。
             runCatching {
                 Core.settings.flow.collect { s ->
-                    val changed = edgeLightOn != s.edgeLight
+                    val changed = edgeLightOn != s.edgeLight ||
+                        edgeLightInForeground != s.edgeLightInForeground
                     edgeLightOn = s.edgeLight
+                    edgeLightInForeground = s.edgeLightInForeground
                     if (changed) apply("settings")
                 }
             }.onFailure { error ->
@@ -804,7 +828,11 @@ object TouchFx {
         // 亮不亮只看这一轮驱动过屏幕的 run 还活不活着，前台/后台一视同仁。
         // `inForeground` 仍然照常传给 [traceLight]，日志里的 `fg=self|other` 不丢。
         // 外观页的开关是最后一道门：关掉只是不显示，驱动判定与自动返回照旧。
-        val target = if (sessionAlive && edgeLightOn) FX_ALPHA_HOT else 0f
+        val target = if (sessionAlive && edgeLightVisible(edgeLightOn, edgeLightInForeground, inForeground)) {
+            FX_ALPHA_HOT
+        } else {
+            0f
+        }
         traceLight(app, reason, target, sessionAlive, running, now, inForeground)
         // 目标值而不是开关：view 自己逐帧缓动逼近，所以亮起/熄灭都是斜坡，不会「啪」地闪。
         val fx = (if (target > 0f) overlay(app) else view)
@@ -1071,6 +1099,10 @@ object TouchFx {
     }
 
     private fun flashEdge(fx: FxView) {
+        // 总开关关掉时**一律不显示**（用户 2026-10-23）：`onDraw` 里的边光只看
+        // `edgeStart`，不看总开关，所以这里必须拦 —— 否则关掉之后每次 UI 操作
+        // 还会闪 350ms。前台开关同理。
+        if (!edgeLightVisible(edgeLightOn, edgeLightInForeground, foreground())) return
         val now = SystemClock.uptimeMillis()
         if (now - lastEdgeFlashAt < FX_EDGE_THROTTLE_MS) return
         lastEdgeFlashAt = now
@@ -1204,7 +1236,11 @@ object TouchFx {
         val sessionAlive = drivingIds.any { it in running }
         // 前台不压制（issue #6）：与 [apply] 同一口径，窗口重建后不能又暗下去。
         // 外观页开关同理（关掉时窗口重建也不该亮）。
-        val target = if (sessionAlive && edgeLightOn) FX_ALPHA_HOT else 0f
+        val target = if (sessionAlive && edgeLightVisible(edgeLightOn, edgeLightInForeground, inForeground)) {
+            FX_ALPHA_HOT
+        } else {
+            0f
+        }
         traceLight(context, "overlay", target, sessionAlive, running, now, inForeground)
         fx.setTarget(target)
         return fx

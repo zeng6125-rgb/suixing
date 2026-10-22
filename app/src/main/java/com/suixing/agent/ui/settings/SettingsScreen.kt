@@ -1144,7 +1144,15 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         .coerceAtLeast(0)
                     val (wire, name) = REASONING_LEVELS[effort]
                     LabeledSlider(
-                        label = "思考强度 · " + if (wire.isEmpty() || wire == name) name else "$name ($wire)",
+                        // 七档全英文之后（Default/Low/…），旧判据 `wire == name` 永远不成立
+                        // ⇒ 会显示成「Minimal (minimal)」。改成忽略大小写比较，只在真正不同
+                        // （接口自造的值）时才附上 wire。
+                        label = "思考强度 · " +
+                            if (wire.isEmpty() || wire.equals(name, ignoreCase = true)) {
+                                name
+                            } else {
+                                "$name ($wire)"
+                            },
                         hint = "对应接口的 reasoning_effort；xhigh / max 仅部分模型支持，不支持的忽略。",
                         value = effort.toFloat(),
                         range = 0f..REASONING_LEVELS.lastIndex.toFloat(),
@@ -1806,12 +1814,37 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 LabeledBlock(
                     label = "边缘光",
                     hint = "agent 在操作这台手机时，屏幕四周亮起一圈彩虹光。关掉只是不显示，" +
-                        "自动化、自动返回与诊断日志全都照旧。",
+                        "自动化、自动返回与诊断日志全都照旧。**这是总开关**：关掉之后一律不显示。",
                 ) {
                     SegmentedPill(
                         options = listOf("开", "关"),
                         selectedIndex = if (stored.edgeLight) 0 else 1,
                         onSelect = { index -> scope.persist { it.copy(edgeLight = index == 0) } },
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
+                // **不独立**（用户 2026-10-23）：只有边缘光总开关开着时这一项才起作用。
+                // 总开关关掉时置灰，但值仍然保留 —— 重新打开边缘光时它还是原来的选择。
+                LabeledBlock(
+                    label = "前台显示",
+                    hint = if (stored.edgeLight) {
+                        "关掉之后：随行自己在前台时不显示边缘光，退到后台操作别的 app 照常显示。"
+                    } else {
+                        "边缘光已关闭，这一项暂不生效。"
+                    },
+                ) {
+                    SegmentedPill(
+                        options = listOf("开", "关"),
+                        selectedIndex = if (stored.edgeLightInForeground) 0 else 1,
+                        onSelect = { index ->
+                            // 总开关关着时不动这个值（不独立 = 不起作用，而不是被重置）。
+                            if (stored.edgeLight) {
+                                scope.persist { it.copy(edgeLightInForeground = index == 0) }
+                            }
+                        },
+                        modifier = if (stored.edgeLight) Modifier else Modifier.alpha(0.38f),
                     )
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
