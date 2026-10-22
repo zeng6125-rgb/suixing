@@ -538,6 +538,17 @@ class ChatViewModel : ViewModel() {
     private val lastErrors = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /**
+     * 每个会话「当前已加载窗口」的起飞字节位置 + 日志代次。
+     *
+     * 为什么要有：`readEarlierBefore` 是按**消息 id** 找位置（`offsetOf` 从日志开头整份扫描），
+     * 30MB 的会话里每次「加载更早」都要扫最多 30MB。`ChatStore` 的文档本来就写明设计意图是
+     * 「用上一次返回的 `startOffset`」，但 ViewModel 一直走的是 id 那条路。
+     *
+     * 代次用来校验：换代重写（编辑重答）之后旧偏移没有意义，必须回退到按 id 查。
+     */
+    private val windowStarts = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
+
+    /**
      * The conversation this process last showed, remembered so a new screen instance can adopt
      * it before its first frame instead of waiting for the marker file to be read.
      */
@@ -1007,7 +1018,16 @@ class ChatViewModel : ViewModel() {
         // 已经读到文件开头就别再读了。
         if (_state.value.messageCount in 1..shown.size) return false
         viewModelScope.launch {
-            val older = Core.chats.readEarlierBefore(chatId, shown.first().id, turns) ?: return@launch
+            // **优先用字节偏移**（O(窗口)），只有偏移未知/代次不匹配时才退回按 id 扫全文件。
+            val start = windowStarts[chatId]
+            val window = if (start != null) {
+                Core.chats.readEarlier(chatId, start.second, turns, expectGen = start.first)
+            } else {
+                null
+            }
+            val older = window?.messages
+                ?: Core.chats.readEarlierBefore(chatId, shown.first().id, turns) ?: return@launch
+            if (window != null && start != null) windowStarts[chatId] = start.first to window.startOffset
             if (older.isEmpty()) return@launch
             if (_state.value.conversationId != chatId) return@launch
             _state.update { current ->
@@ -1154,7 +1174,10 @@ class ChatViewModel : ViewModel() {
         // 条件都是"这个会话还在屏幕上"：用户可能已经切走，那就别再写回状态去覆盖新会话。
         // 只有**没命中缓存**才读盘（#35：命中时上面已经带正文建好状态了）。
         if (cached == null) viewModelScope.launch {
-            val opened = Core.chats.readTail(conversation.id)
+            val opened = Core.chats.readTailWindow(conversation.id)?.let { (conversationTail, startOffset, gen) ->
+                windowStarts[conversation.id] = gen to startOffset
+                conversationTail
+            } ?: Core.chats.readTail(conversation.id)
             if (opened != null && _state.value.conversationId == conversation.id &&
                 _state.value.messages.isEmpty()
             ) {

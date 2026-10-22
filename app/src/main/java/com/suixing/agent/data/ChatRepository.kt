@@ -436,6 +436,26 @@ class ChatRepository(private val context: Context) {
         }
 
     /**
+     * 打开会话：尾部窗口**连同它的起飞字节位置**一起返回。
+     *
+     * 为什么要那个字节：`readEarlierBefore` 是按**消息 id** 找位置的（`offsetOf` 从日志开头
+     * 整份扫描），30MB 的会话里每次「加载更早」都要扫最多 30MB；而 `readEarlier` 接受**字节偏移**，
+     * 只读窗口那一段。调用方把这个偏移记住，往上翻就变成 O(窗口) 而不是 O(文件)。
+     *
+     * 返回的 gen 用来**校验偏移是否还有效**：换代重写（编辑重答）之后旧的字节位置没有意义。
+     */
+    suspend fun readTailWindow(
+        id: String,
+        turns: Int = OPEN_TURNS,
+    ): Triple<Conversation, Long, Int>? = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val meta = store.readMeta(id) ?: return@withLock null
+            val window = store.tail(meta, turns)
+            Triple(meta.toConversation(window.messages), window.startOffset, meta.gen)
+        }
+    }
+
+    /**
      * The history the model is given: everything from the last checkpoint forward.
      *
      * Same cut the engine makes today (`history.drop(resumeAt + 1)`), but read from disk instead of
@@ -481,10 +501,13 @@ class ChatRepository(private val context: Context) {
         id: String,
         endOffset: Long,
         turns: Int = OPEN_TURNS,
+        /** 调用方记住的代次；不匹配说明日志被换代重写过，旧字节偏移已失效。 */
+        expectGen: Int? = null,
     ): ChatStore.MessageWindow? =
         withContext(Dispatchers.IO) {
             lock.withLock {
                 val meta = store.readMeta(id) ?: return@withLock null
+                if (expectGen != null && meta.gen != expectGen) return@withLock null
                 store.window(meta, endOffset, turns)
             }
         }
