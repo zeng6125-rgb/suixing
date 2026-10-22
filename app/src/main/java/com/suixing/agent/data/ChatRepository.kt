@@ -35,6 +35,16 @@ class ChatRepository(private val context: Context) {
     private val dir: File get() = File(context.filesDir, "chats").apply { if (!exists()) mkdirs() }
     private val lock = Mutex()
 
+    /**
+     * 「最后一个 checkpoint 在日志里的字节偏移」缓存。
+     *
+     * checkpoint 只在**压缩**时产生（`AgentEngine` 的两处 `onCheckpoint` 都在压缩流程里），
+     * 所以同一个 checkpoint 会被其后**每一轮**发消息复用；而 `readWire` 每次都要找它的字节位置，
+     * `offsetOf` 是**从日志开头分块扫描**（O(文件大小)）⇒ 30MB 会话里等于每发一条消息扫 30MB。
+     * 缓存后只有第一轮扫，之后 O(1)（换代或换 checkpoint 会自动失效）。
+     */
+    private val checkpointOffsets = OffsetCache()
+
     /** The new format, keyed under the same `chats` directory but in its own `store/` child. */
     private val store = ChatStore(File(context.filesDir, "chats"))
 
@@ -466,8 +476,12 @@ class ChatRepository(private val context: Context) {
             val meta = store.readMeta(id) ?: return@withLock readLegacyMessages(id)
             // No checkpoint yet: the whole transcript is the wire, which is what the engine does
             // when `resumeAt` is null. Memory is still bounded by the checkpoint when there is one.
-            val from = meta.checkpoints.lastOrNull()?.toMessageId
-                ?.let { store.offsetOf(meta, it) }
+            val checkpointId = meta.checkpoints.lastOrNull()?.toMessageId
+                ?: return@withLock store.all(meta)
+            val from = checkpointOffsets.get(meta.id, meta.gen, checkpointId)
+                ?: store.offsetOf(meta, checkpointId)?.also {
+                    checkpointOffsets.put(meta.id, meta.gen, checkpointId, it)
+                }
                 ?: return@withLock store.all(meta)
             store.from(meta, from)
         }
