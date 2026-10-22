@@ -312,12 +312,20 @@ private const val PIN_LIVE_HEIGHT = true
  */
 private val NL_PIN = 10.toChar().toString()
 
+// 写盘放到自己的 IO 作用域（`SupervisorJob` 保证一条写失败不影响后续）：
+// 调用点在 Compose 的 effect 里、跑在**主线程**上，直接 `appendText` 就是一次主线程 IO。
+// 只在状态翻转时触发（一轮几条），但没理由让它占主线程。
+private val PIN_TRACE_SCOPE =
+    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+
 private fun pinTrace(message: String) {
-    runCatching {
-        val dir = Core.appContext.filesDir
-        val file = java.io.File(dir, "pin.log")
-        if (file.length() > 64 * 1024) file.writeText("")
-        file.appendText(System.currentTimeMillis().toString() + " " + message + NL_PIN)
+    PIN_TRACE_SCOPE.launch {
+        runCatching {
+            val dir = Core.appContext.filesDir
+            val file = java.io.File(dir, "pin.log")
+            if (file.length() > 64 * 1024) file.writeText("")
+            file.appendText(System.currentTimeMillis().toString() + " " + message + NL_PIN)
+        }
     }
 }
 

@@ -902,7 +902,16 @@ class ChatViewModel : ViewModel() {
                             // 上报值（用户截图里的 90%），正是「一中断就显示之前的」。保留 stats 时
                             // 圆环继续显示本轮实测的 currentPrompt（含压缩后的真实大小）。
                             _state.update { it.copy(runningHere = false) }
-                            sessions[chatId]?.let { live ->
+                            sessions[chatId]?.let { before ->
+                                // **先 flush 再取快照**（可达性已证）：这条分支由引擎的
+                                // `RunState.Cancelled`（**状态**观察）触发，**不经过 `handleEvent`**
+                                // ⇒ 没有任何地方替它 flush。而攒批最多 80ms 才发一次 ——
+                                // 用户点「停止」时若刚到一个 chunk，它还在 `DeltaBuffer` 里。
+                                // 原来 `saveSession(live)` 捕获的是 **flush 之前**那个对象，
+                                // `endSession` 里的 flush 再写回 `sessions` 也追不回这份快照
+                                // ⇒ 那段输出不会进文件（用户看到「最后一句话没了」）。
+                                flushDeltas(chatId)
+                                val live = sessions[chatId] ?: before
                                 viewModelScope.launch { saveSession(live) }
                                 endSession(chatId, "已停止")
                             }
