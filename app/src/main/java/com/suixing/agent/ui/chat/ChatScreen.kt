@@ -301,6 +301,27 @@ private data class PinSignals(
 
 private const val PIN_LIVE_HEIGHT = true
 
+/**
+ * #17 验收用的**轻量痕迹**：只在状态翻转时写一行。
+ *
+ * 为什么不用 logcat：这台机器上 MIUI 把 logcat 通道限得很死（`adb logcat` 读不到），
+ * 而 `run-as` 对 release 包不可用。写文件至少能用 root 的 `adb shell su -c cat` 捞出来。
+ *
+ * **只在翻转时调用**（一轮对话通常 3~5 行），并带大小上限，绝不做逐帧 IO
+ * —— 0.8.333 已经吃过一次"逐帧写盘反而造成卡顿"的教训。
+ */
+private val NL_PIN = 10.toChar().toString()
+
+private fun pinTrace(message: String) {
+    runCatching {
+        val dir = Core.appContext.filesDir
+        val file = java.io.File(dir, "pin.log")
+        if (file.length() > 64 * 1024) file.writeText("")
+        file.appendText(System.currentTimeMillis().toString() + " " + message + NL_PIN)
+    }
+}
+
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
@@ -1139,9 +1160,27 @@ fun ChatScreen(
                 )
                 tries++
             }
+            // 等了 30 帧还没量到高度 ⇒ **这一轮不会钉住**（这正是历史上"钉了还是动"的形态之一）。
+            if (needWait) {
+                android.util.Log.i("suixing-pin", "arm-timeout tries=$tries")
+                pinTrace("arm-timeout tries=$tries natural=${lagNatural[0]}")
+            }
+            val wasActive = pinnedLiveHeight > 0
             pinnedLiveHeight = livePinNow.height
             // 以滚动层的 pinActive 为**唯一真值**（它还要被"到底是否自动打开贴底"的 collector 读）。
             if (scroll.pinActive != livePinNow.active) scroll.pinActive = livePinNow.active
+            // **只在翻转时打一行**（#17 验收用）：不逐帧、不写盘。下次连上手机时
+            // `adb logcat -s suixing-pin` 就能直接回答"到底钉上了没有、什么时候解除的"。
+            val nowActive = pinnedLiveHeight > 0
+            if (nowActive != wasActive) {
+                if (nowActive) {
+                    android.util.Log.i("suixing-pin", "arm h=${pinnedLiveHeight} status=${statusHeight[0]}")
+                    pinTrace("arm h=${pinnedLiveHeight} status=${statusHeight[0]}")
+                } else {
+                    android.util.Log.i("suixing-pin", "release notAtBottom=$notAtBottom live=$live")
+                    pinTrace("release notAtBottom=$notAtBottom live=$live")
+                }
+            }
         }
     }    // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
@@ -1289,6 +1328,11 @@ fun ChatScreen(
             // ① 粗定位：只是起点，允许差一两项。**用 `*Now` 里的最新值**，不能用 effect 创建时
             // 捕获的那一份（否则冷路径下 `visible` 是空表、`feedPrefix` 也是旧值）。
             val approx = visibleNow.indexOfFirst { it.message.id == savedKey }
+            android.util.Log.i(
+                "suixing-pos",
+                "restore chat=${state.conversationId} key=$savedKey approx=$approx rows=${visibleNow.size}",
+            )
+            pinTrace("restore key=$savedKey approx=$approx rows=${visibleNow.size} prefix=$feedPrefixNow")
             if (approx >= 0) {
                 // 与 `fedIndexOf` 同一个换算（`fedIndexOf` 留着给组合期调用点用）。
                 listState.scrollToItem(feedPrefixNow + (visibleNow.size - 1 - approx), saved.second)
