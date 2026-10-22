@@ -269,6 +269,8 @@ class ChatRepository(private val context: Context) {
         model: String? = null,
         reasoningEffort: String? = null,
         checkpoints: List<ContextCheckpoint>? = null,
+        pinned: Boolean? = null,
+        archived: Boolean? = null,
     ): Conversation? = withContext(Dispatchers.IO) {
         lock.withLock {
             val meta = store.readMeta(id) ?: return@withLock null
@@ -280,6 +282,8 @@ class ChatRepository(private val context: Context) {
                 model = model ?: meta.model,
                 reasoningEffort = reasoningEffort ?: meta.reasoningEffort,
                 checkpoints = checkpoints ?: meta.checkpoints,
+                pinned = pinned ?: meta.pinned,
+                archived = archived ?: meta.archived,
             )
             store.writeMeta(next)
             val updated = next.toConversation()
@@ -315,6 +319,74 @@ class ChatRepository(private val context: Context) {
      * 所以 `totalsAt` 读到 **-1**，与 `messageCount` 不等 ⇒ 这里**一次性补算**并写回，
      * 此后都是 O(1)。补算在 IO 线程上，且只在这个会话第一次看统计时发生。
      */
+    /** 会话在磁盘上的真实文件（`chats/store/<id>.<gen>.jsonl`）—— 详情弹窗与导出用它。 */
+    data class ChatFile(
+        val path: String,
+        val bytes: Long,
+        val modifiedAt: Long,
+        /** 日志尾部原文（诊断用，最多 4000 字）。 */
+        val tail: String,
+        /** 消息条数（来自 meta，不受窗口影响）。 */
+        val messageCount: Int,
+    )
+
+    /**
+     * 读会话在磁盘上的真实文件信息。
+     *
+     * **必须读 store 路径**（`chats/store/`），不能再读旧的 `chats/<id>.json`：
+     * 0.8.317 迁移之后那个文件已经不存在了，详情弹窗因此对**每个**会话都显示
+     * 「这个会话在磁盘上没有对应的文件」（用户实测）。
+     */
+    internal suspend fun chatFile(id: String): ChatFile? = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val meta = store.readMeta(id)
+            if (meta != null) {
+                val log = store.logFileOf(meta)
+                if (log != null && log.isFile) {
+                    return@withLock ChatFile(
+                        path = log.absolutePath,
+                        bytes = log.length(),
+                        modifiedAt = log.lastModified(),
+                        tail = runCatching { log.readText().takeLast(4000) }.getOrDefault(""),
+                        messageCount = meta.messageCount,
+                    )
+                }
+            }
+            // 兜底：还没迁移的旧格式。
+            val legacy = legacyFile(id)
+            if (legacy.isFile) {
+                ChatFile(
+                    path = legacy.absolutePath,
+                    bytes = legacy.length(),
+                    modifiedAt = legacy.lastModified(),
+                    tail = runCatching { legacy.readText().takeLast(4000) }.getOrDefault(""),
+                    messageCount = runCatching {
+                        json.decodeFromString<Conversation>(legacy.readText()).messages.size
+                    }.getOrDefault(0),
+                )
+            } else {
+                null
+            }
+        }
+    }
+
+    /**
+     * 导出用：整份会话序列化成 JSON 文本（**不是**直接拷日志 —— 日志是 JSONL，
+     * 拷出去用户打不开；而旧 `.json` 已经不存在了）。
+     */
+    internal suspend fun exportJson(id: String): String? = withContext(Dispatchers.IO) {
+        val meta = store.readMeta(id)
+        val messages = if (meta != null) {
+            store.all(meta)
+        } else {
+            readLegacyConversation(id)?.messages
+        } ?: return@withContext null
+        val base = _conversations.value.firstOrNull { it.id == id }
+        val conversation = (base ?: meta?.toConversation() ?: return@withContext null)
+            .copy(messages = messages)
+        json.encodeToString(Conversation.serializer(), conversation)
+    }
+
     internal suspend fun sessionTotals(id: String): ChatTotals? =
         withContext(Dispatchers.IO) {
             lock.withLock {
@@ -567,13 +639,12 @@ class ChatRepository(private val context: Context) {
      * 列表顺序也不在这里动：抽屉自己按「置顶优先」排（那是它的展示规则），[conversations]
      * 保持原本的时间序，别处读到的还是同一份。
      */
-    suspend fun setPinned(id: String, pinned: Boolean) = withContext(Dispatchers.IO) {
-        lock.withLock {
-            val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
-            val next = current.copy(pinned = pinned)
-            write(next)
-            _conversations.value = _conversations.value.map { if (it.id == id) next else it }
-        }
+    suspend fun setPinned(id: String, pinned: Boolean) {
+        // **只改 meta**（不碰日志）：`_conversations` 里的 `messages` 是空列表
+        // （`load()` 只读 meta，见 #30），走 `write()` 会把「0 条」当全量回写 ⇒
+        // `ConversationLogShrunkException` 崩进程（真机实测：点「取消归档」闪退）。
+        val next = updateMeta(id = id, pinned = pinned) ?: return
+        _conversations.value = _conversations.value.map { if (it.id == id) next else it }
     }
 
     /**
@@ -582,28 +653,23 @@ class ChatRepository(private val context: Context) {
      * 调用方要注意：屏幕上那一份标题是 ChatViewModel 里的拷贝，只改这里的话，用户给**当前打开
      * 的会话**改名会在下一轮被它写回去 —— 所以 UI 走 `ChatViewModel.renameConversation`。
      */
-    suspend fun rename(id: String, title: String) = withContext(Dispatchers.IO) {
+    suspend fun rename(id: String, title: String) {
+        // 同 [setPinned]：只改 meta。走 `write()` 会拿空 messages 回写 ⇒ 崩。
         val clean = title.trim()
-        if (clean.isEmpty()) return@withContext
-        lock.withLock {
-            val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
-            val next = current.copy(title = clean)
-            write(next)
-            _conversations.value = _conversations.value.map { if (it.id == id) next else it }
-        }
+        if (clean.isEmpty()) return
+        val next = updateMeta(id = id, title = clean) ?: return
+        _conversations.value = _conversations.value.map { if (it.id == id) next else it }
     }
 
     /**
      * 归档 / 取消归档。与 [setPinned] 同一条规矩：只改这一位，**不动 `updatedAt`**（归档是标签，
      * 不是一次内容变更），列表顺序也不在这里动（抽屉自己过滤与排序）。
      */
-    suspend fun setArchived(id: String, archived: Boolean) = withContext(Dispatchers.IO) {
-        lock.withLock {
-            val current = _conversations.value.firstOrNull { it.id == id } ?: return@withLock
-            val next = current.copy(archived = archived)
-            write(next)
-            _conversations.value = _conversations.value.map { if (it.id == id) next else it }
-        }
+    suspend fun setArchived(id: String, archived: Boolean) {
+        // 同 [setPinned]：只改 meta。真机崩溃栈就是这条 ——
+        // `setArchived → write → ChatStore.save` 抛「log has 83 messages, caller holds 0」。
+        val next = updateMeta(id = id, archived = archived) ?: return
+        _conversations.value = _conversations.value.map { if (it.id == id) next else it }
     }
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {

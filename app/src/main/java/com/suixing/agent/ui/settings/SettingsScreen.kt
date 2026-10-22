@@ -68,6 +68,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -85,6 +86,7 @@ import com.suixing.agent.R
 import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.decrypted
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.Conversation
@@ -1086,54 +1088,9 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             // Sampling lives behind a fold: these three are set once and then never
             // touched, and they were the rows pushing the daily switches off the screen.
             item {
-                AdvancedSection {
-                    // 独立采样: off = the four knobs below read and write the globals,
-                    // on = they read and write this provider's nullable overrides.
-                    SettingRow(
-                        title = "独立采样参数",
-                        subtitle = "开启后温度 / Top P / 思考强度只作用于当前提供方。",
-                        control = {
-                            Switch(
-                                checked = selected?.ownSampling == true,
-                                onCheckedChange = { on ->
-                                    form = form.mapProvider(selected?.id) { it.copy(ownSampling = on) }
-                                    scope.persist { it.copy(providers = form.providers) }
-                                },
-                            )
-                        },
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    val own = selected?.takeIf { it.ownSampling }
-                    LabeledSlider(
-                        label = "温度 ${"%.1f".format(own?.temperature ?: form.temperature)}",
-                        hint = "越高越随机，日常 0.3 – 0.8",
-                        value = (own?.temperature ?: form.temperature).toFloat(),
-                        range = 0f..2f,
-                        steps = 0,
-                        onValueChange = { v ->
-                            form = if (own != null) {
-                                form.mapProvider(selected?.id) { it.copy(temperature = v.toDouble()) }
-                            } else {
-                                form.copy(temperature = v.toDouble())
-                            }
-                        },
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    LabeledSlider(
-                        label = "Top P ${"%.2f".format(own?.topP ?: form.topP)}",
-                        hint = "核采样。1.00 表示不过滤，一般不用动。",
-                        value = own?.topP ?: form.topP,
-                        range = 0.1f..1f,
-                        steps = 17,
-                        onValueChange = { v ->
-                            form = if (own != null) {
-                                form.mapProvider(selected?.id) { it.copy(topP = v) }
-                            } else {
-                                form.copy(topP = v)
-                            }
-                        },
-                    )
-                    Spacer(Modifier.height(12.dp))
+                // **思考强度是初级参数**（用户 2026-10-23：「思考强度不用放进高级参数里面」）：
+                // 它是日常最常调的那一个，藏在折叠里每次都要多点两下。
+                val own = selected?.takeIf { it.ownSampling }
                     // 滑杆而不是 pill：六档在一行 pill 上每格只剩两个字的宽度，滑杆顺带
                     // 把线上值写进标题，不用另起一行解释 reasoning_effort 收到的是什么。
                     // 同源显示：provider(own) > global，与 forAssistant 的解析顺序一致。
@@ -1163,6 +1120,79 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                 form.mapProvider(selected?.id) { it.copy(reasoningEffort = level) }
                             } else {
                                 form.copy(reasoningEffort = level)
+                            }
+                        },
+                    )
+            }
+            item {
+                AdvancedSection {
+                    // 独立采样: off = the four knobs below read and write the globals,
+                    // on = they read and write this provider's nullable overrides.
+                    SettingRow(
+                        title = "独立采样参数",
+                        subtitle = "开启后温度 / Top P / 思考强度只作用于当前提供方。",
+                        control = {
+                            Switch(
+                                checked = selected?.ownSampling == true,
+                                onCheckedChange = { on ->
+                                    form = form.mapProvider(selected?.id) { it.copy(ownSampling = on) }
+                                    scope.persist { it.copy(providers = form.providers) }
+                                },
+                            )
+                        },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    val own = selected?.takeIf { it.ownSampling }
+                    LabeledSlider(
+                        label = if (!form.sendTemperature) {
+                            "温度 · 不发送"
+                        } else {
+                            "温度 ${"%.1f".format(own?.temperature ?: form.temperature)}"
+                        },
+                        // **最左一档 = 不发送**（用户 2026-10-23：「只保留滑块就行了，
+                        // 俩滑块左侧或者右侧就是不发的档次」）。
+                        // 档位：0 = 不发送；1..21 = 0.0 .. 2.0（步长 0.1）。
+                        hint = "最左「不发」；其余是采样温度（推理型端点常拒收 temperature）。",
+                        value = if (!form.sendTemperature) 0f
+                        else (((own?.temperature ?: form.temperature) * 10.0) + 1.0)
+                            .toFloat().coerceIn(1f, 21f),
+                        range = 0f..21f,
+                        steps = 20,
+                        onValueChange = { v ->
+                            val stop = v.toInt()
+                            val send = stop > 0
+                            val temp = if (send) (stop - 1) / 10.0 else (own?.temperature ?: form.temperature)
+                            form = if (own != null) {
+                                form.mapProvider(selected?.id) {
+                                    it.copy(temperature = temp)
+                                }.copy(sendTemperature = send)
+                            } else {
+                                form.copy(temperature = temp, sendTemperature = send)
+                            }
+                        },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    LabeledSlider(
+                        label = if (!form.sendTopP) {
+                            "Top P · 不发送"
+                        } else {
+                            "Top P ${"%.2f".format(own?.topP ?: form.topP)}"
+                        },
+                        // 档位：0 = 不发送；1..10 = 0.1 .. 1.0。
+                        hint = "最左「不发」；其余是核采样阈值（1.0 = 不过滤）。",
+                        value = if (!form.sendTopP) 0f
+                        else ((own?.topP ?: form.topP) * 10f).roundToInt().toFloat().coerceIn(1f, 10f),
+                        range = 0f..10f,
+                        steps = 9,
+                        onValueChange = { v ->
+                            val stop = v.toInt()
+                            val send = stop > 0
+                            val p = if (send) stop / 10f else (own?.topP ?: form.topP)
+                            form = if (own != null) {
+                                form.mapProvider(selected?.id) { it.copy(topP = p) }
+                                    .copy(sendTopP = send)
+                            } else {
+                                form.copy(topP = p, sendTopP = send)
                             }
                         },
                     )
@@ -2087,7 +2117,7 @@ internal fun ConversationManagerScreen(
     // 详情弹窗（用户：「会话管理要有会话的文件，可以看会话详细日志、大小等等」）：文件路径/大小/
     // 修改时间 + 原始 JSON 尾部。文件信息在 IO 上读，弹窗开着才读一次。
     var pendingInfo by remember { mutableStateOf<Conversation?>(null) }
-    var chatFileInfo by remember { mutableStateOf<ChatFileInfo?>(null) }
+    var chatFileInfo by remember { mutableStateOf<ChatRepository.ChatFile?>(null) }
     // 手动顺序只读（这一页不提供拖动）：读出来是为了让置顶区与抽屉长得一样 ——
     // 同一枚置顶在抽屉里排在最上面、在这里却按时间散着，这正是用户说的「置顶逻辑没理清」。
     val orderStore = remember(context) { DrawerOrderStore(context) }
@@ -2095,7 +2125,10 @@ internal fun ConversationManagerScreen(
     LaunchedEffect(Unit) { drawerOrder = orderStore.load() }
     LaunchedEffect(pendingInfo) {
         val chat = pendingInfo ?: return@LaunchedEffect
-        chatFileInfo = withContext(Dispatchers.IO) { readChatFileInfo(context, chat.id) }
+        // **走仓库的 chatFile**：它知道日志在 `chats/store/<id>.<gen>.jsonl`。
+        // 原来这里读旧的 `chats/<id>.json`，迁移之后那个文件不存在 ⇒ 对每个会话都显示
+        // 「这个会话在磁盘上没有对应的文件」（用户实测）。
+        chatFileInfo = withContext(Dispatchers.IO) { Core.chats.chatFile(chat.id) }
     }
     // 系统选择器（SAF）：不需要 FileProvider、不改 manifest，用户自己决定存到哪。
     val exporter = rememberLauncherForActivityResult(
@@ -2107,9 +2140,11 @@ internal fun ConversationManagerScreen(
         scope.launch {
             val ok = withContext(Dispatchers.IO) {
                 runCatching {
-                    val source = File(context.filesDir, "chats/${chat.id}.json")
+                    // **不能直接拷 `chats/<id>.json`**：迁移之后它不存在了（导出必然失败）。
+                    // 也不能拷 JSONL 日志 —— 用户打不开。这里序列化成整份 JSON。
+                    val text = Core.chats.exportJson(chat.id) ?: error("读不到会话内容")
                     context.contentResolver.openOutputStream(uri)?.use { out ->
-                        source.inputStream().use { it.copyTo(out) }
+                        out.write(text.toByteArray(Charsets.UTF_8))
                     } ?: error("打不开目标文件")
                 }.isSuccess
             }
@@ -2180,8 +2215,10 @@ internal fun ConversationManagerScreen(
                     items(archived, key = { it.id }) { conversation ->
                         ConversationRow(
                             title = conversation.title,
+                            // **用 meta 的 messageCount**：`messages` 是空列表
+                            // （`load()` 只读 meta），拿它算会显示成「0 条消息」。
                             subtitle = "已归档 · ${lastUpdated(conversation.updatedAt)} · " +
-                                "${conversation.messages.size} 条消息",
+                                "${conversation.messageCount} 条消息",
                             onOpen = { onOpenConversation(conversation.id) },
                             onInfo = { pendingInfo = conversation },
                             onExport = {
@@ -2340,26 +2377,6 @@ private fun exportFileName(title: String): String {
  * 会话文件的白盒信息（用户：「会话管理要有会话的文件，可以看详细日志、大小等等」）。
  * [tail] 是原始 JSON 的尾部——排查「这一轮到底存了什么」时尾部就是最新那几条消息。
  */
-private data class ChatFileInfo(
-    val path: String,
-    val bytes: Long,
-    val modifiedAt: Long,
-    val tail: String,
-)
-
-private fun readChatFileInfo(context: android.content.Context, id: String): ChatFileInfo? =
-    runCatching {
-        val file = File(context.filesDir, "chats/$id.json")
-        if (!file.exists()) return null
-        val text = file.readText()
-        ChatFileInfo(
-            path = file.absolutePath,
-            bytes = file.length(),
-            modifiedAt = file.lastModified(),
-            tail = text.takeLast(4000),
-        )
-    }.getOrNull()
-
 /** 字节数用人话：1.2 KB / 3.4 MB。 */
 private fun humanBytes(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
@@ -2369,7 +2386,7 @@ private fun humanBytes(bytes: Long): String = when {
 
 /** 会话详情弹窗：文件三要素 + 原始 JSON 尾部（可滚动、等宽）。 */
 @Composable
-private fun ChatInfoDialog(info: ChatFileInfo?, onDismiss: () -> Unit) {
+private fun ChatInfoDialog(info: ChatRepository.ChatFile?, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("会话文件") },

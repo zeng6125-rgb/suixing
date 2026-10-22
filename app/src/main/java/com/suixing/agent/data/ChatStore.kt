@@ -517,6 +517,10 @@ internal class ChatStore(private val root: File) {
      *
      * Only the first line is read; the rest of the log is never touched.
      */
+    /** 这个 meta 指向的日志文件（详情弹窗/导出/诊断用）。不存在时返回 null。 */
+    fun logFileOf(meta: ConversationMeta): java.io.File? =
+        logFile(meta).takeIf { it.isFile }
+
     fun firstMessageId(meta: ConversationMeta): String? {
         val log = logFile(meta)
         if (!log.isFile || meta.logBytes <= 0) return null

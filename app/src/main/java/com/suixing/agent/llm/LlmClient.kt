@@ -258,6 +258,25 @@ private fun retryReason(code: Int?): String = when {
  * Minimal streaming client for any OpenAI-compatible endpoint
  * (`/chat/completions` with SSE). Supports tool calling and image inputs.
  */
+/**
+ * 采样参数要不要进请求体 —— **默认两个都不进**（用户 2026-10-23：
+ * 「温度和 top-p 都默认不发」）。
+ *
+ * * `temperature`：只有调用方显式把 `sendTemperature` 打开才发。默认关，而且**没有 UI
+ *   开关** —— 推理型端点（OpenAI 推理系等）会直接拒收它（400），其余的多半忽略，
+ *   而 agent 场景要的是确定性而不是采样多样性。字段留着是为了将来真要开时不用改结构。
+ * * `top_p`：只有 `sendTopP` 打开才发。**没有 UI 开关** —— 滑杆最左那一档就是
+ *   「不发送」，停在那里这个布尔就是 false（默认值），所以升级后一律不发。
+ *
+ * 抽成纯函数是为了能单测：三个构造器（OpenAI / Anthropic / Responses）都调它，
+ * 断言它是空列表就等于断言三个请求体都不含这两个字段。
+ */
+internal fun samplingFields(settings: AppSettings): List<Pair<String, kotlinx.serialization.json.JsonElement>> =
+    buildList {
+        if (settings.sendTemperature) add("temperature" to JsonPrimitive(settings.temperature))
+        if (settings.sendTopP) add("top_p" to JsonPrimitive(settings.topP))
+    }
+
 class LlmClient(private val http: OkHttpClient = defaultClient()) {
 
     /** Built on first use: only endpoints that need it pay for the relaxed socket factory. */
@@ -879,12 +898,12 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         put("model", JsonPrimitive(settings.model))
         put("messages", JsonArray(messages.map { encodeMessage(it) }))
         put("stream", JsonPrimitive(true))
-        put("temperature", JsonPrimitive(settings.temperature))
+        // 采样参数（温度 / top_p）**默认都不发**，见 [samplingFields]。
+        samplingFields(settings).forEach { (name, value) -> put(name, value) }
         // Ask for the usage block on the last chunk; endpoints that do not know
         // the flag ignore it, and the ones that do stop guessing.
         put("stream_options", buildJsonObject { put("include_usage", JsonPrimitive(true)) })
         if (settings.maxTokens > 0) put("max_tokens", JsonPrimitive(settings.maxTokens))
-        if (settings.topP in 0.01f..0.99f) put("top_p", JsonPrimitive(settings.topP))
         if (settings.reasoningEffort.isNotBlank()) {
             put("reasoning_effort", JsonPrimitive(settings.reasoningEffort))
         }
@@ -910,8 +929,8 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         put("model", JsonPrimitive(settings.model))
         put("max_tokens", JsonPrimitive(if (settings.maxTokens > 0) settings.maxTokens else DEFAULT_ANTHROPIC_MAX_TOKENS))
         put("stream", JsonPrimitive(true))
-        put("temperature", JsonPrimitive(settings.temperature))
-        if (settings.topP in 0.01f..0.99f) put("top_p", JsonPrimitive(settings.topP))
+        // 采样参数（温度 / top_p）**默认都不发**，见 [samplingFields]。
+        samplingFields(settings).forEach { (name, value) -> put(name, value) }
         val system = messages.filter { it.role == Roles.SYSTEM }
             .joinToString("\n\n") { it.text }
             .trim()
@@ -937,9 +956,9 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         put("model", JsonPrimitive(settings.model))
         put("stream", JsonPrimitive(true))
         put("store", JsonPrimitive(false))
-        put("temperature", JsonPrimitive(settings.temperature))
+        // 采样参数（温度 / top_p）**默认都不发**，见 [samplingFields]。
+        samplingFields(settings).forEach { (name, value) -> put(name, value) }
         if (settings.maxTokens > 0) put("max_output_tokens", JsonPrimitive(settings.maxTokens))
-        if (settings.topP in 0.01f..0.99f) put("top_p", JsonPrimitive(settings.topP))
         if (settings.reasoningEffort.isNotBlank()) {
             put("reasoning", buildJsonObject { put("effort", JsonPrimitive(settings.reasoningEffort)) })
         }

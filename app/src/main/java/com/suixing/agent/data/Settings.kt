@@ -155,6 +155,26 @@ data class AppSettings(
     val model: String = "",
     val temperature: Double = 0.6,
     /**
+     * **是否把 `temperature` 发进请求**（默认 false = 不发）。
+     *
+     * 用户 2026-10-23：「感觉默认不加了吧，可以在高级调节进入有开关供打开」。
+     *
+     * 为什么默认不发：现在的模型大多带思考/推理档，其中一批（OpenAI 推理系等）
+     * **直接拒收** `temperature`（400），另一批忽略它。而 agent 场景本身也不需要
+     * 采样多样性 —— 工具调用要的是确定性。所以默认「不说」，需要时在高级参数里打开。
+     *
+     * 注意：值本身保留（滑杆仍然可调），只是默认不发送。
+     */
+    val sendTemperature: Boolean = false,
+    /**
+     * 是否把 `top_p` 发进请求（默认 false = 不发）。
+     *
+     * 用户 2026-10-23：「只保留滑块就行了，不用独立两个不发的开关，俩滑块左侧或者右侧
+     * 就是不发的档次」—— 所以**没有 UI 开关**：滑杆最左那一档就是「不发送」，
+     * 这两个布尔只记录「用户把滑杆停在哪一档」，不暴露成控件。
+     */
+    val sendTopP: Boolean = false,
+    /**
      * Sampling knobs. `maxTokens = 0` and `topP = 1.0` mean "say nothing about it",
      * which is what most endpoints want; a value only goes on the wire when the user
      * actually moved the slider.
