@@ -72,12 +72,12 @@
 
 ### 工具
 
-内置 **54 个工具**，分 12 个工具包；分组由工具包自己声明，加一个工具、删一个工具，分组和人数自动跟着变。
+内置 **50 个工具**，分 12 个工具包；分组由工具包自己声明，加一个工具、删一个工具，分组和人数自动跟着变。
 
 | 分组 | 数量 | 工具 |
 | --- | --- | --- |
 | 系统 | 10 | `device_info` `list_apps` `open_app` `open_url` `clipboard_read` `clipboard_write` `memory_write` `memory_read` `profile_write` `profile_read` |
-| 文件 | 10 | `read_file` `write_file` `edit_file` `list_dir` `make_dir` `stat_path` `move_path` `delete_path` `find_files` `search_in_files` |
+| 文件 | 6 | `read_file` `write_file` `edit_file` `list_dir` `find_files` `grep_files`（前三个与 `list_dir`/`find_files`/`grep_files` 都在应用内执行，不 fork 进程；`mkdir`/`stat`/`mv`/`rm` 直接用 `run_shell`） |
 | 界面操作 | 11 | `ui_dump` `ui_screenshot` `ui_tap` `ui_long_press` `ui_swipe` `ui_click_text` `ui_type` `ui_type_into` `ui_key` `ui_current_app` `ui_wait` |
 | 后台任务 | 4 | `job_start` `job_list` `job_output` `job_kill` |
 | 定时提醒 | 4 | `schedule_create` `schedule_list` `schedule_update` `schedule_delete` |

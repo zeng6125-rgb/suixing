@@ -72,56 +72,19 @@ class FileTools(private val context: Context) : ToolGroup() {
         ),
         ToolSpec(
             "list_dir",
-            "List a directory (directories first, with sizes).",
+            "List a directory (directories first, with sizes). Runs in-process: no shell is spawned.",
             Schema.objectOf(
                 properties = listOf(
                     "path" to Schema.string("Directory path, default the working directory", default = "~"),
                     "limit" to Schema.integer("Maximum entries, default 200", default = 200, minimum = 1, maximum = 1000),
+                    "all" to Schema.boolean("Include dot-files, default false", default = false),
                 ),
-            ),
-        ),
-        ToolSpec(
-            "make_dir",
-            "Create a directory, including any missing parents.",
-            Schema.objectOf(
-                properties = listOf("path" to Schema.string("Directory path to create")),
-                required = listOf("path"),
-            ),
-        ),
-        ToolSpec(
-            "stat_path",
-            "Inspect a path: whether it exists, its type, size, modification time and read/write access.",
-            Schema.objectOf(
-                properties = listOf("path" to Schema.string("File or directory path")),
-                required = listOf("path"),
-            ),
-        ),
-        ToolSpec(
-            "move_path",
-            "Move or rename a file or directory.",
-            Schema.objectOf(
-                properties = listOf(
-                    "from" to Schema.string("Source path"),
-                    "to" to Schema.string("Destination path"),
-                ),
-                required = listOf("from", "to"),
-            ),
-        ),
-        ToolSpec(
-            "delete_path",
-            "Delete a file or directory. Directories are not recursive by default: a non-empty " +
-                "directory is refused, and deleting the whole tree needs recursive=true. This cannot be undone.",
-            Schema.objectOf(
-                properties = listOf(
-                    "path" to Schema.string("Path to delete"),
-                    "recursive" to Schema.boolean("Delete a directory tree recursively, default false", default = false),
-                ),
-                required = listOf("path"),
             ),
         ),
         ToolSpec(
             "find_files",
-            "Find files by name anywhere under a directory tree.",
+            "Find files by name anywhere under a directory tree. Runs in-process: no shell is spawned. " +
+                "For regex/glob/exclude patterns use run_shell with find instead.",
             Schema.objectOf(
                 properties = listOf(
                     "root" to Schema.string("Starting directory, default the working directory", default = "~"),
@@ -133,13 +96,17 @@ class FileTools(private val context: Context) : ToolGroup() {
             ),
         ),
         ToolSpec(
-            "search_in_files",
-            "Search the text files under a directory and return matches as 「path:line: text」.",
+            "grep_files",
+            "Search the text files under a directory and return matches as 「path:line: text」. " +
+                "Runs in-process: no shell is spawned, which is why it is preferred over run_shell grep " +
+                "for a quick look. For advanced regex/context/exclude flags use run_shell with grep instead.",
             Schema.objectOf(
                 properties = listOf(
                     "root" to Schema.string("Starting directory, default the working directory", default = "~"),
                     "query" to Schema.string("Text or regular expression to search for"),
                     "regex" to Schema.boolean("Treat query as a regular expression, default false", default = false),
+                    "exclude" to Schema.string("Skip paths containing this substring, e.g. node_modules or .git"),
+                    "files_only" to Schema.boolean("List matching file paths instead of lines, default false", default = false),
                     "max_files" to Schema.integer(
                         "Maximum files to scan, default 400",
                         default = 400,
@@ -158,12 +125,8 @@ class FileTools(private val context: Context) : ToolGroup() {
         "write_file" -> writeFile(args)
         "edit_file" -> editFile(args)
         "list_dir" -> listDir(args)
-        "make_dir" -> makeDir(args)
-        "stat_path" -> statPath(args)
-        "move_path" -> movePath(args)
-        "delete_path" -> deletePath(args)
         "find_files" -> findFiles(args)
-        "search_in_files" -> searchInFiles(args)
+        "grep_files" -> searchInFiles(args)
         else -> ToolResult.failure("未知工具：$name")
     }
 
@@ -178,7 +141,7 @@ class FileTools(private val context: Context) : ToolGroup() {
         try {
             val file = resolve(args.str("path"))
             if (!file.exists()) return@withContext ToolResult.failure("文件不存在：${file.absolutePath}")
-            if (file.isDirectory) return@withContext ToolResult.failure("${file.absolutePath} 是目录，请改用 list_dir")
+            if (file.isDirectory) return@withContext ToolResult.failure("${file.absolutePath} 是目录，请改用 run_shell 的 ls")
             if (file.length() > MAX_TEXT_BYTES) {
                 return@withContext ToolResult.failure(
                     "文件过大（${humanSize(file.length())}），超过 ${humanSize(MAX_TEXT_BYTES)} 上限；" +
@@ -233,7 +196,7 @@ class FileTools(private val context: Context) : ToolGroup() {
             val replaceAll = args.bool("replace_all", false)
             val file = resolve(path)
             if (!file.exists()) return@withContext ToolResult.failure("文件不存在：${file.absolutePath}")
-            if (file.isDirectory) return@withContext ToolResult.failure("${file.absolutePath} 是目录，请改用 list_dir")
+            if (file.isDirectory) return@withContext ToolResult.failure("${file.absolutePath} 是目录，请改用 run_shell 的 ls")
             if (file.length() > MAX_TEXT_BYTES) {
                 return@withContext ToolResult.failure("文件过大（${humanSize(file.length())}），请改用 read_file 分段处理后重写")
             }
@@ -286,125 +249,84 @@ class FileTools(private val context: Context) : ToolGroup() {
     /** 1-based 行号：该偏移之前有多少个换行。 */
     private fun lineOf(text: String, index: Int): Int = text.substring(0, index).count { it == '\n' } + 1
 
+
+    private fun deleteRecursive(file: File): Int {
+        var count = 0
+        if (file.isDirectory) {
+            file.listFiles()?.forEach { count += deleteRecursive(it) }
+        }
+        if (file.delete()) count++
+        return count
+    }
+
+    private fun copyRecursive(from: File, to: File): Boolean = try {
+        if (from.isDirectory) {
+            if (!to.mkdirs() && !to.isDirectory) false
+            else from.listFiles()?.all { copyRecursive(it, File(to, it.name)) } ?: true
+        } else {
+            to.parentFile?.mkdirs()
+            from.inputStream().use { input -> to.outputStream().use { output -> input.copyTo(output) } }
+            true
+        }
+    } catch (error: Exception) {
+        false
+    }
+
+    // ─── 原生目录/查找/搜索（不 fork 子进程）──────────────────────────────────
+    //
+    // 这三个留在应用内是有意的（v0.8.322 复盘）：`run_shell` 每调一次就
+    // `ProcessBuilder.start()` 起一个进程（Shell.kt:251），Android 上一次 20~100ms；
+    // 而日常"看看目录、找个文件、搜段文字"是最频繁的动作，靠 fork 去做纯属浪费。
+    // 功能边界写进各自的 description 了：花哨的 flag 交给 run_shell 的 grep/find。
+
+    // ─── 原生目录/查找/搜索（不 fork 子进程）──────────────────────────────────
+    //
+    // 这三个留在应用内是有意的：`run_shell` 每调一次就 ProcessBuilder.start() 起一个进程
+    // （Shell.kt:251），Android 上一次 20~100ms；而「看看目录 / 找个文件 / 搜段文字」是最频繁
+    // 的动作，靠 fork 去做纯属浪费。功能边界写进各自的 description 了：花哨的 flag
+    //（正则上下文、排除 glob、按时间/大小筛选）交给 run_shell 的 grep/find。
+
     private suspend fun listDir(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         try {
             val dir = resolve(args.str("path") ?: "~")
-            if (!dir.exists()) return@withContext ToolResult.failure("目录不存在：${dir.absolutePath}")
-            if (!dir.isDirectory) return@withContext ToolResult.failure("${dir.absolutePath} 不是目录")
+            if (!dir.exists()) return@withContext ToolResult.failure("目录不存在：" + dir.absolutePath)
+            if (!dir.isDirectory) return@withContext ToolResult.failure(dir.absolutePath + " 不是目录")
             val limit = args.int("limit", 200).coerceIn(1, 1000)
-            val children = dir.listFiles()?.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
+            val all = args.bool("all", false)
+            val children = dir.listFiles()
+                ?.filter { all || !it.name.startsWith(".") }
+                ?.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
                 ?: emptyList()
-            if (children.isEmpty()) return@withContext ToolResult.success("${dir.absolutePath} 是空目录")
-            val body = children.take(limit).joinToString("\n") { "${describe(it)} ${it.name}" }
-            val suffix = if (children.size > limit) "\n…共 ${children.size} 项，已截断" else ""
-            ToolResult.success("${dir.absolutePath}（${children.size} 项）：\n$body$suffix")
+            if (children.isEmpty()) return@withContext ToolResult.success(dir.absolutePath + " 是空目录")
+            val body = children.take(limit).joinToString("\n") { describe(it) + " " + it.name }
+            val suffix = if (children.size > limit) "\n" + "…共 " + children.size + " 项，已截断" else ""
+            ToolResult.success(dir.absolutePath + "（" + children.size + " 项）：" + "\n" + body + suffix)
         } catch (error: Exception) {
-            ToolResult.failure("列出目录失败：${error.message ?: error.javaClass.simpleName}")
-        }
-    }
-
-    private suspend fun makeDir(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        try {
-            val dir = resolve(args.str("path"))
-            if (dir.exists()) return@withContext ToolResult.success("目录已存在：${dir.absolutePath}")
-            val created = dir.mkdirs()
-            if (created) {
-                ToolResult.success("已创建目录 ${dir.absolutePath}")
-            } else {
-                ToolResult.failure("创建目录失败：${dir.absolutePath}（可能没有权限）")
-            }
-        } catch (error: Exception) {
-            ToolResult.failure("创建目录失败：${error.message ?: error.javaClass.simpleName}")
-        }
-    }
-
-    private suspend fun statPath(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        try {
-            val file = resolve(args.str("path"))
-            if (!file.exists()) return@withContext ToolResult.failure("路径不存在：${file.absolutePath}")
-            val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date(file.lastModified()))
-            buildString {
-                appendLine("路径: ${file.absolutePath}")
-                appendLine("类型: ${if (file.isDirectory) "目录" else "文件"}")
-                if (file.isFile) appendLine("大小: ${humanSize(file.length())}")
-                appendLine("修改时间: $time")
-                appendLine("可读: ${file.canRead()}  可写: ${file.canWrite()}  可执行: ${file.canExecute()}")
-                if (file.isDirectory) appendLine("子项数: ${file.list()?.size ?: 0}")
-            }.trim().let { ToolResult.success(it) }
-        } catch (error: Exception) {
-            ToolResult.failure("读取路径信息失败：${error.message ?: error.javaClass.simpleName}")
-        }
-    }
-
-    private suspend fun movePath(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        try {
-            val from = resolve(args.str("from"))
-            val to = resolve(args.str("to"))
-            if (!from.exists()) return@withContext ToolResult.failure("源路径不存在：${from.absolutePath}")
-            if (to.exists()) return@withContext ToolResult.failure("目标已存在：${to.absolutePath}")
-            to.parentFile?.mkdirs()
-            if (from.renameTo(to)) {
-                ToolResult.success("已移动 ${from.absolutePath} → ${to.absolutePath}")
-            } else {
-                val copied = copyRecursive(from, to)
-                if (!copied) return@withContext ToolResult.failure("移动失败（跨分区复制未成功）")
-                deleteRecursive(from)
-                ToolResult.success("已移动（复制后删除）${from.absolutePath} → ${to.absolutePath}")
-            }
-        } catch (error: Exception) {
-            ToolResult.failure("移动失败：${error.message ?: error.javaClass.simpleName}")
-        }
-    }
-
-    private suspend fun deletePath(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        try {
-            val file = resolve(args.str("path"))
-            if (!file.exists()) return@withContext ToolResult.failure("路径不存在：${file.absolutePath}")
-            val canonical = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
-            if (canonical.length < 2 || canonical in PROTECTED_PATHS || canonical == workspace.canonicalPath) {
-                return@withContext ToolResult.failure(
-                    "拒绝删除受保护路径：$canonical（可以删除它下面的具体文件或子目录）",
-                )
-            }
-            if (file.isDirectory && !args.bool("recursive", false)) {
-                val empty = file.delete()
-                return@withContext if (empty) {
-                    ToolResult.success("已删除空目录 $canonical")
-                } else {
-                    ToolResult.failure("$canonical 是非空目录；确认要整树删除时请显式传 recursive=true")
-                }
-            }
-            val removed = deleteRecursive(file)
-            if (removed > 0) {
-                ToolResult.success("已删除 $canonical（$removed 项）")
-            } else {
-                ToolResult.failure("删除失败：$canonical（可能没有权限）")
-            }
-        } catch (error: Exception) {
-            ToolResult.failure("删除失败：${error.message ?: error.javaClass.simpleName}")
+            ToolResult.failure("列出目录失败：" + (error.message ?: error.javaClass.simpleName))
         }
     }
 
     private suspend fun findFiles(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         try {
             val root = resolve(args.str("root") ?: "~")
-            val keyword = args.str("name")?.trim().orEmpty()
-            if (keyword.isEmpty()) return@withContext ToolResult.failure("缺少参数 name")
-            if (!root.isDirectory) return@withContext ToolResult.failure("起始目录无效：${root.absolutePath}")
+            val name = args.str("name").orEmpty()
+            if (name.isEmpty()) return@withContext ToolResult.failure("缺少参数 name")
+            if (!root.isDirectory) return@withContext ToolResult.failure("起始目录无效：" + root.absolutePath)
             val maxDepth = args.int("max_depth", 8).coerceIn(1, 30)
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
             walk(root, 0, maxDepth, { hits.size >= limit }) { file ->
-                if (file.name.contains(keyword, ignoreCase = true)) hits.add(file.absolutePath)
+                if (hits.size >= limit || !file.isFile) return@walk
+                if (file.name.contains(name, ignoreCase = true)) hits.add(file.absolutePath)
             }
             if (hits.isEmpty()) {
-                ToolResult.success("没有找到名称包含「$keyword」的文件")
+                ToolResult.success("没有找到名称包含「" + name + "」的文件")
             } else {
                 val more = if (hits.size >= limit) "（已达 limit 上限，可能还有更多）" else ""
-                ToolResult.success("找到 ${hits.size} 个$more：\n" + hits.joinToString("\n"))
+                ToolResult.success("找到 " + hits.size + " 个" + more + "：" + "\n" + hits.joinToString("\n"))
             }
         } catch (error: Exception) {
-            ToolResult.failure("查找失败：${error.message ?: error.javaClass.simpleName}")
+            ToolResult.failure("查找失败：" + (error.message ?: error.javaClass.simpleName))
         }
     }
 
@@ -413,40 +335,52 @@ class FileTools(private val context: Context) : ToolGroup() {
             val root = resolve(args.str("root") ?: "~")
             val query = args.str("query").orEmpty()
             if (query.isEmpty()) return@withContext ToolResult.failure("缺少参数 query")
-            if (!root.isDirectory) return@withContext ToolResult.failure("起始目录无效：${root.absolutePath}")
+            if (!root.isDirectory) return@withContext ToolResult.failure("起始目录无效：" + root.absolutePath)
             val regex = if (args.bool("regex", false)) {
                 runCatching { Regex(query) }.getOrElse {
-                    return@withContext ToolResult.failure("正则表达式无效：${it.message}")
+                    return@withContext ToolResult.failure("正则表达式无效：" + (it.message ?: ""))
                 }
             } else {
                 null
             }
+            val exclude = args.str("exclude")?.takeIf { it.isNotBlank() } ?: ".git"
+            val filesOnly = args.bool("files_only", false)
             val maxFiles = args.int("max_files", 400).coerceIn(1, 5000)
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
+            val hitFiles = LinkedHashSet<String>()
             var scanned = 0
-            walk(root, 0, 12, { hits.size >= limit || scanned >= maxFiles }) { file ->
-                if (hits.size >= limit || scanned >= maxFiles || !file.isFile) return@walk
+            walk(root, 0, 12, { hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles }) { file ->
+                val full = hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles
+                if (full || !file.isFile) return@walk
+                if (file.absolutePath.contains(exclude)) return@walk
                 if (file.length() > MAX_SEARCH_BYTES) return@walk
                 scanned++
                 val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@walk
                 if (bytes.take(2048).any { it == 0.toByte() }) return@walk
                 val lines = bytes.toString(Charsets.UTF_8).lines()
                 for ((index, line) in lines.withIndex()) {
-                    val matched = regex?.containsMatchIn(line) ?: line.contains(query, ignoreCase = true)
-                    if (matched) {
-                        hits.add("${file.absolutePath}:${index + 1}: ${line.trim().take(200)}")
-                        if (hits.size >= limit) return@walk
+                    val matched = if (regex != null) regex.containsMatchIn(line)
+                    else line.contains(query, ignoreCase = true)
+                    if (!matched) continue
+                    if (filesOnly) {
+                        hitFiles.add(file.absolutePath)
+                        return@walk
                     }
+                    hits.add(file.absolutePath + ":" + (index + 1) + ": " + line.trim().take(200))
+                    if (hits.size >= limit) return@walk
                 }
             }
-            if (hits.isEmpty()) {
-                ToolResult.success("在 $scanned 个文件里没有找到「$query」")
+            val found: List<String> = if (filesOnly) hitFiles.toList() else hits
+            if (found.isEmpty()) {
+                ToolResult.success("在 " + scanned + " 个文件里没有找到「" + query + "」")
             } else {
-                ToolResult.success("命中 ${hits.size} 条（扫描 $scanned 个文件）：\n" + hits.joinToString("\n"))
+                ToolResult.success(
+                    "命中 " + found.size + " 条（扫描 " + scanned + " 个文件）：" + "\n" + found.joinToString("\n"),
+                )
             }
         } catch (error: Exception) {
-            ToolResult.failure("搜索失败：${error.message ?: error.javaClass.simpleName}")
+            ToolResult.failure("搜索失败：" + (error.message ?: error.javaClass.simpleName))
         }
     }
 
@@ -471,40 +405,14 @@ class FileTools(private val context: Context) : ToolGroup() {
         }
     }
 
-    private fun deleteRecursive(file: File): Int {
-        var count = 0
-        if (file.isDirectory) {
-            file.listFiles()?.forEach { count += deleteRecursive(it) }
-        }
-        if (file.delete()) count++
-        return count
-    }
-
-    private fun copyRecursive(from: File, to: File): Boolean = try {
-        if (from.isDirectory) {
-            if (!to.mkdirs() && !to.isDirectory) false
-            else from.listFiles()?.all { copyRecursive(it, File(to, it.name)) } ?: true
-        } else {
-            to.parentFile?.mkdirs()
-            from.inputStream().use { input -> to.outputStream().use { output -> input.copyTo(output) } }
-            true
-        }
-    } catch (error: Exception) {
-        false
-    }
-
     private companion object {
+        /** read_file / edit_file 的文本上限。 */
         const val MAX_TEXT_BYTES = 4L * 1024 * 1024
-        const val MAX_SEARCH_BYTES = 2L * 1024 * 1024
 
-        /**
-         * `delete_path` is the one tool that cannot be undone, so whole trees that
-         * a single wrong argument would wipe out are refused outright.
-         */
-        val PROTECTED_PATHS = setOf(
-            "/", "/sdcard", "/storage", "/storage/emulated", "/storage/emulated/0",
-            "/system", "/system/bin", "/data", "/data/data", "/vendor", "/proc", "/sys", "/etc",
-        )
+        /** 搜索时单个文件的上限：再大就不是"搜一段文字"，而是扫数据文件。 */
+        const val MAX_SEARCH_BYTES = 2L * 1024 * 1024
+        // MAX_SEARCH_BYTES 与 PROTECTED_PATHS 随 searchInFiles / deletePath 一起删掉了
+        // （v0.8.322：那 7 个文件工具改用 run_shell 的 grep/find/stat/rm）。
     }
 }
 
@@ -532,7 +440,8 @@ internal fun resolveUserPath(context: Context, raw: String?): File {
  *
  * Not a fix for an open hole: the workspace is app-private storage, so a `..` could only reach
  * directories the tools have no business in, and absolute paths stay allowed because the file
- * tools check those against `PROTECTED_PATHS` by canonical path. This is depth instead — a
+ * tools used to check those against a protected-path table by canonical path (removed with
+ * `delete_path` in v0.8.322 — deletions go through `run_shell` now). This is depth instead — a
  * relative path is documented as 「工作目录之内」, and quietly honouring `../..` is how a later
  * change to what the workspace is turns the promise into an escape.
  */
