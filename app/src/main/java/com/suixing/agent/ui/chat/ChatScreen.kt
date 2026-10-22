@@ -1604,8 +1604,6 @@ fun ChatScreen(
                                 // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
                                 CompositionLocalProvider(LocalLiveRowLag provides laggingNow) {
                                 Column(Modifier.fillMaxWidth()) {
-                                    // **只把气泡**放进「钉住 + 裁剪」里（评审确证）：状态行（思考中 · 12.3s）
-                                    // 在自然内容的最底部，一起裁的话钉住期间整行连 spinner 都会消失。
                                     // **只把气泡**放进「钉住 + 裁剪」里：状态行（思考中 · 12.3s）在自然内容的
                                     // 最底部，若跟气泡一起被裁，钉住期间整行连 spinner 都会消失（评审确证）。
                                     //
