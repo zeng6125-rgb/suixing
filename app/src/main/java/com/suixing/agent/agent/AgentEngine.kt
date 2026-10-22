@@ -35,6 +35,7 @@ import com.suixing.agent.tools.TIER_SHELL
 import com.suixing.agent.tools.ToolRegistry
 import com.suixing.agent.tools.ToolResult
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -1182,17 +1183,19 @@ class AgentEngine(
          * 成员函数够不着。**只在主协程里逐条调用、按模型请求的顺序** —— 端点对 tool 消息顺序敏感，
          * 并行执行的结果也必须排着队回写。执行阶段（[executeOneTool]）不碰这些，所以能并发。
          */
-        fun commitTool(outcome: ToolOutcome) {
+        suspend fun commitTool(outcome: ToolOutcome) {
             val call = outcome.call
             val result = outcome.result
             // 超长输出**不能无声截断**：完整内容落盘、路径写进结果，模型才知道自己没看全、
             // 也才知道去哪取（见 spillToolOutput）。落盘失败时同样会写明"截断了且没存下来"。
-            val spill = spillToolOutput(
+            // 切 IO：这一行会 mkdirs + writeText + 列目录清理，原来是跑在 runLoop 的
+            // 调用线程上（`viewModelScope` = Main.immediate）⇒ 大输出（>8000 字）时主线程卡一下。
+            val spill = withContext(Dispatchers.IO) { spillToolOutput(
                 dir = File(Core.appContext.filesDir, "toolout"),
                 tool = call.name,
                 output = result.output,
                 maxKept = MAX_TOOL_OUTPUT,
-            )
+            ) }
             val output = spill?.kept ?: result.output
             val stored = StoredMessage(
                 id = UUID.randomUUID().toString(),

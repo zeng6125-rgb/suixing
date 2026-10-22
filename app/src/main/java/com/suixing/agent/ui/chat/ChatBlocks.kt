@@ -1197,6 +1197,9 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
     val scheme = MaterialTheme.colorScheme
     val args = line.args.takeIf { it.isNotBlank() && it != "{}" }
     val output = line.message?.toolOutput?.takeIf { it.isNotBlank() }
+    // 行表在这里算（`LazyColumn` 的 content lambda **不是** `@Composable`，里面不能用 remember）。
+    // 不 remember 的话，工具块在流式期间每个发布节拍重组都会重跑一次 lines()。
+    val rows = remember(output) { output?.lines().orEmpty() }
     // 工具输出的「复制」：写剪贴板 + Toast（用户：「复制后给个提示」）。
     val copyOutput = rememberCopyToClipboard()
     // 与思考块同一套形态：**虚拟列表 + 高度上限**，内容比上限短时按真实高度渲染。
@@ -1274,7 +1277,6 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                     }
                 }
             }
-            val rows = output.lines()
             // 逐行进虚拟列表：行数再多也只排版可见的那些。
             items(rows.size, key = { index -> "out-$index" }) { index ->
                 Text(

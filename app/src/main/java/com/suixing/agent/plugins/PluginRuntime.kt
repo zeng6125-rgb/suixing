@@ -103,7 +103,9 @@ object PluginRuntime {
      * 已启用的插件清单，**带 2 秒 TTL 缓存**。
      *
      * 原来每轮工具调用都读一次目录 + 解析 JSON（引擎每轮都要拼工具表）。热插拔只需要
-     * 「装完很快能看到」，不需要每轮都扫盘 —— 2 秒既够快，又把每轮的磁盘 IO 省掉。
+     * 「装完很快能看到」，不需要每轮都扫盘 —— 30 秒足够（热插拔的即时性由 invalidateEnabled 保证，
+ * TTL 只是兜底）。2 秒太短：一轮 run 里连续调几个工具就会跨过一次，
+ * 每次都重新 Core.plugins.list()（6 个目录 = 6 次 readText + 6 次 JSON 反序列化）。
      * 装/卸/启用这类写操作之后会 [invalidateEnabled] 主动失效，所以感知是即时的。
      */
     @Volatile private var enabledCache: List<PluginSpec>? = null
@@ -335,8 +337,12 @@ object PluginRuntime {
         val missing = mutableListOf<String>()
         // url 里的替换值百分号编码，header / body 原样：编码会把 `Bearer x` 变成 `Bearer+x`。
         val url = render(exec.url, vars, missing, ::urlEncode)
+        // header 值**不做 URL 编码**（`Bearer x` 不能变成 `Bearer+x`），但必须挡掉换行：
+        // OkHttp 遇到 CR/LF 会抛 IllegalArgumentException（issue #34 的补充）。
+        // 模型给的参数里带换行是很可能的，所以这里把换行压成空格而不是让它炸在 header()。
         val headers = exec.headers.entries.associate { (name, value) ->
-            render(name, vars, missing) to render(value, vars, missing)
+            render(name, vars, missing) to
+                render(value, vars, missing, transform = ::headerSafe)
         }
         // body 按**位置**处理（issue #34）：字符串里转义、数字位置原样。
         val body = exec.body?.let {
@@ -510,6 +516,21 @@ object PluginRuntime {
         }
     }
 
+    /**
+     * header 值里不许有换行：OkHttp 遇到 CR/LF 会抛 `IllegalArgumentException`，
+     * 而模型给的参数里带换行是很可能的。这里压成空格，而不是让它炸在 header()。
+     *
+     * 用字符码判断（13 = CR，10 = LF），不写转义字面量。
+     */
+    internal fun headerSafe(value: String): String {
+        if (value.none { it.code == 13 || it.code == 10 }) return value
+        val out = StringBuilder(value.length)
+        for (ch in value) {
+            out.append(if (ch.code == 13 || ch.code == 10) ' ' else ch)
+        }
+        return out.toString()
+    }
+
     /** JSON 里的反斜杠字符（写成字符码，避免这一行本身要转义）。 */
     private val JSON_BACKSLASH = 92.toChar()
 
@@ -661,13 +682,38 @@ private object PluginLog {
     }
 }
 
-/** 插件链路的取证日志（有界、循环截断），与 fx-trace.log 同级同格式习惯。 */
+/**
+ * 插件链路的取证日志（有界、循环截断），与 fx-trace.log 同级同格式习惯。
+ *
+ * **追加写，不读全文**（0.8.326）：原来每次都是「`readText()` 读整个文件 +
+ * `writeText()` 重写一遍」，而调用点全在**主线程**（`preExecute` 的 log action、
+ * toolSpecs 重名跳过、`logPluginError`）—— 插件开了 log hook 时每个匹配调用都付一次。
+ * 现在走 `File.appendText`（O_APPEND），只在**超过上限时才轮转一次**。
+ *
+ * `SimpleDateFormat` 不是线程安全的，但每次调用新建一个又太浪费；用 ThreadLocal。
+ */
+private val TRACE_STAMP = object : ThreadLocal<java.text.SimpleDateFormat>() {
+    override fun initialValue() =
+        java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+}
+
+/** 超过这个大小就轮转（把旧的挪到 `.1`）。 */
+private const val TRACE_MAX_BYTES = 64 * 1024
+
+/** 换行符（写成字符码，避免这一行本身要转义）。 */
+private val NL_CHAR = 10.toChar()
+
 internal fun appendPluginTrace(line: String) {
     val app = Core.appContext
     val file = java.io.File(app.filesDir, "plugin-trace.log")
-    val stamp = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US)
-        .format(java.util.Date())
-    val text = if (file.exists()) file.readText() else ""
-    val next = (text + "$stamp $line\n")
-    file.writeText(next.takeLast(64 * 1024))
+    val stamp = TRACE_STAMP.get()?.format(java.util.Date()).orEmpty()
+    runCatching {
+        // 只 stat 不读内容：超过上限才轮转。
+        if (file.length() > TRACE_MAX_BYTES) {
+            val old = java.io.File(app.filesDir, "plugin-trace.log.1")
+            old.delete()
+            file.renameTo(old)
+        }
+        file.appendText("$stamp $line" + NL_CHAR)
+    }
 }
