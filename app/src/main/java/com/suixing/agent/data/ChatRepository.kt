@@ -498,18 +498,34 @@ class ChatRepository(private val context: Context) {
      * walking the log backwards from that id is what keeps the pages contiguous no matter how many
      * saves happened in between.
      */
+    /**
+     * 按**消息 id** 取更早的一页（回退路径：不知道字节偏移时用）。
+     *
+     * 返回值里带上 `startOffset` 与 `gen`：调用方拿到之后就能记下来，
+     * **下一次**加载更早直接走字节偏移（O(窗口)）而不用再扫全文件。
+     * 之前这个方法只返回消息，于是「编辑重答换代之后」窗口位置永久失效 ⇒
+     * 之后每次翻页都退回全文件扫描（评审 S1）。
+     */
     suspend fun readEarlierBefore(
         id: String,
         beforeMessageId: String,
         turns: Int = OPEN_TURNS,
-    ): List<StoredMessage>? = withContext(Dispatchers.IO) {
+    ): EarlierPage? = withContext(Dispatchers.IO) {
         lock.withLock {
             val meta = store.readMeta(id) ?: return@withLock null
             val end = store.offsetOf(meta, beforeMessageId) ?: return@withLock null
-            if (end <= 0L) return@withLock emptyList()
-            store.window(meta, end, turns).messages
+            if (end <= 0L) return@withLock EarlierPage(emptyList(), 0L, meta.gen)
+            val window = store.window(meta, end, turns)
+            EarlierPage(window.messages, window.startOffset, meta.gen)
         }
     }
+
+    /** 一页更早的转录，附带"它从日志的哪个字节开始"与日志代次。 */
+    data class EarlierPage(
+        val messages: List<StoredMessage>,
+        val startOffset: Long,
+        val gen: Int,
+    )
 
     internal suspend fun readEarlier(
         id: String,

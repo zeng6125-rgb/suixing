@@ -1025,9 +1025,19 @@ class ChatViewModel : ViewModel() {
             } else {
                 null
             }
-            val older = window?.messages
-                ?: Core.chats.readEarlierBefore(chatId, shown.first().id, turns) ?: return@launch
-            if (window != null && start != null) windowStarts[chatId] = start.first to window.startOffset
+            // 回退路径也把窗口位置记下来：编辑重答会换 gen（旧偏移失效），
+            // 不补种的话之后每次翻页都要重扫整个日志（评审 S1）。
+            val fallback = if (window == null) {
+                Core.chats.readEarlierBefore(chatId, shown.first().id, turns)
+            } else {
+                null
+            }
+            val older = window?.messages ?: fallback?.messages ?: return@launch
+            if (window != null && start != null) {
+                windowStarts[chatId] = start.first to window.startOffset
+            } else if (fallback != null) {
+                windowStarts[chatId] = fallback.gen to fallback.startOffset
+            }
             if (older.isEmpty()) return@launch
             if (_state.value.conversationId != chatId) return@launch
             _state.update { current ->

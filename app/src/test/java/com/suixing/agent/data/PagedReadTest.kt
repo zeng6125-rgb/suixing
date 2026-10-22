@@ -86,9 +86,10 @@ class PagedReadTest {
         while (guard++ < 20) {
             val first = byId.first()
             if (byId.size >= chat.messages.size) break
-            val older = repository.readEarlierBefore(chat.id, first.id, turns = 3) ?: break
-            if (older.isEmpty()) break
-            byId.addAll(0, older)
+            // 回退路径现在返回 `EarlierPage`（消息 + startOffset + gen，供调用方补种）。
+            val page = repository.readEarlierBefore(chat.id, first.id, turns = 3) ?: break
+            if (page.messages.isEmpty()) break
+            byId.addAll(0, page.messages)
         }
 
         assertEquals("两条路径必须给出同样多的内容", byId.map { it.id }, byOffset.map { it.id })
