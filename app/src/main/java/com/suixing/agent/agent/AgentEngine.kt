@@ -14,6 +14,7 @@ import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.data.Tps
+import com.suixing.agent.data.WireSanitize
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.FINISH_CUT
 import com.suixing.agent.llm.LlmClient
@@ -2060,27 +2061,10 @@ class AgentEngine(
      * `tool_calls` were never answered. Replaying that to an OpenAI-compatible
      * endpoint is a hard 400, so any such message is dropped before sending.
      */
-    private fun sanitize(messages: List<StoredMessage>): List<StoredMessage> {
-        val answered = messages.filter { it.role == Roles.TOOL }.mapNotNull { it.toolCallId }.toSet()
-        val assistants = messages.filterNot { message ->
-            message.role == Roles.ASSISTANT && message.toolCalls.any { it.id !in answered }
-        }
-        // The mirror image, and the same 400 from the other side: a tool result whose assistant
-        // call has just been dropped — or one that arrived with no call at all — is a `tool`
-        // message with nothing that asked for it. Dropping only the assistant would trade one
-        // rejected request for another. A half-answered parallel round is how it happens: two
-        // calls, one result, then a stop or a kill before the second one lands.
-        val asked = assistants
-            .filter { it.role == Roles.ASSISTANT }
-            .flatMap { it.toolCalls }
-            .map { it.id }
-            .toSet()
-        return assistants.filter { message ->
-            if (message.role != Roles.TOOL) return@filter true
-            val id = message.toolCallId ?: return@filter false
-            id in asked
-        }
-    }
+    // 逻辑搬进 `WireSanitize`（纯函数，带测试）：它守着**两种**会让端点回 400 的形状，
+    // 而原来一条测试都没有。
+    private fun sanitize(messages: List<StoredMessage>): List<StoredMessage> =
+        WireSanitize.apply(messages)
 
     /**
      * Writes one stored message onto the wire.
