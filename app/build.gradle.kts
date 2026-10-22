@@ -13,8 +13,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 337
-        versionName = "0.8.317"
+        versionCode = 338
+        versionName = "0.8.318"
         resourceConfigurations += listOf("zh", "en")
     }
 

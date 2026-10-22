@@ -1397,8 +1397,17 @@ class ChatViewModel : ViewModel() {
         } else {
             val chatId = _state.value.conversationId
             viewModelScope.launch {
-                val wire = Core.chats.readWire(chatId).ifEmpty { shownMessages }
-                start(fresh, wire)
+                // 读盘失败不能让发送带崩（`viewModelScope` 里未捕获的异常会打到主线程）。
+                //
+                // 降级方式：用屏幕上的历史继续发。**这里刻意不写 `_state.error`** ——
+                // `start()` 开头就会 `error = null`（它要清掉上一轮的红条），
+                // 在这里写等于白写；而下一次 `start` 之后用户已经看到消息发出去了，
+                // 再补一条红条只会让人以为这一轮失败了。上下文不完整是次要的，
+                // 而且坏数据本身已经在 `ChatStore` 层被记下（`LogDamaged`/`LogMismatch`）。
+                val wire = runCatching { Core.chats.readWire(chatId) }.getOrNull()
+                if (_state.value.conversationId != chatId) return@launch
+                // 空结果与异常走同一条兜底：用屏幕上这一段。
+                start(fresh, wire.orEmpty().ifEmpty { shownMessages })
             }
         }
         clearDraft(_state.value.conversationId)
