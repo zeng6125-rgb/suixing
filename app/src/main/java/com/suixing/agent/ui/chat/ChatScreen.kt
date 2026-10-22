@@ -1922,11 +1922,16 @@ fun ChatScreen(
                 conversationId = state.conversationId,
                 turns = turnIndices.size,
                 // 延迟读（issue #26 原因一）：只有导航条用这个值，就在它内部求值。
+                // 换算走纯函数（`TurnMarks`，带单测）：喂序 → 可见要**倒置**、
+                // 比较时要补 `rowOffset` —— 两处都漏过一次（#16 的"偏一两项"）。
                 current = {
-                    val fv = firstVisible.value
-                    val fvOld = (visible.size - 1 - (fv - feedPrefix))
-                        .coerceIn(0, (visible.size - 1).coerceAtLeast(0))
-                    turnIndices.indexOfLast { it <= fvOld + rowOffset }.coerceAtLeast(0) + 1
+                    TurnMarks.current(
+                        firstVisibleFed = firstVisible.value,
+                        feedPrefix = feedPrefix,
+                        visibleSize = visible.size,
+                        rowOffset = rowOffset,
+                        turnIndices = turnIndices,
+                    )
                 },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
