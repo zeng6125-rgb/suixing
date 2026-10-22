@@ -1034,6 +1034,9 @@ fun ChatScreen(
     // 但那一块的下方是空白）。回到底部立刻恢复。**这是"读历史"场景下的合理取舍** ——
     // 用户在那段时间本来就在读旧内容，不是在看新输出。
     var pinnedLiveHeight by remember { mutableIntStateOf(0) }
+    // 纯状态机（`LivePinState`，带单测）：这条链连续几版"改了没生效"，两次都是状态机问题
+    // （判定值被一次性捕获、解除时 latch 没清）。逻辑移出去之后可以用断言守住。
+    val livePin = remember(state.conversationId) { LivePinState() }
     // **切会话必须清零**（评审确证）：`pinnedLiveHeight` 与 pin effect 里的 `pinned` 都不随会话变，
     // 而 `stickToBottom` 是按会话存的 —— A 里钉住 H_A 之后切到 B，若 B 也「不在底部且有活 run」，
     // `lagging` 恒 true ⇒ **不会重新捕获** ⇒ B 的流式行按 H_A 报高（去掉 `minOf` 之后没有钳制，
@@ -1041,6 +1044,7 @@ fun ChatScreen(
     LaunchedEffect(state.conversationId) {
         pinnedLiveHeight = 0
         scroll.pinActive = false
+        livePin.reset()
         // 自然高度也必须清：`lagNatural` 是普通数组，切会话后要到**下一次布局**才被写；
         // 若不清，状态机可能在拿到新值之前先用旧会话的高度钉住（评审 M3-4 指出的顺序洞）。
         lagNatural[0] = 0
@@ -1077,42 +1081,38 @@ fun ChatScreen(
     // ⇒ `snapshotFlow` 恒 false ⇒ **钉住从来不会生效**（这才是「钉了还在动」的真正原因）。
     val liveForPinNow by rememberUpdatedState(liveForPin)
     LaunchedEffect(listState) {
-        // 状态机只有两个变量：`scroll.pinActive`（唯一真值）与 `pinnedLiveHeight`。
-        // **不要再用局部 `var pinned` latch**（评审：清 0 之后 latch 仍为 true，永远钉不回去）。
         snapshotFlow {
-            // 触发源必须覆盖**所有**会改变判定的量，否则清 0 之后不会再发一次：
-            //   ① 是否不在底部（钉住的含义是「用户在读上面的内容」）、② 有没有活内容、
-            //   ③ 恢复位置期间不算（与 collector 同一套闸）。
+            // 三个量一起进读取集：任一变化都要重新判定（少一个就会出现"清 0 之后不再发一次"）。
             Triple(
                 !scroll.stickToBottom && !scroll.restoring,
                 liveForPinNow,
                 scroll.pinActive,
             )
-        }.collect { (notAtBottom, live, pinned) ->
-            val want = notAtBottom && live
-            if (want && !pinned) {
-                // 高度要到**布局之后**才有；`lagNatural` 是普通数组（不进快照，避免测量期写 state
-                // 触发重测），所以这里最多等 30 帧把它拿到 —— 只在状态翻转时发生一次。
-                var h = lagNatural[0]
-                var tries = 0
-                while (h <= 0 && tries < 30) {
-                    withFrameNanos { }
-                    h = lagNatural[0]
-                    tries++
-                }
-                if (h > 0) {
-                    // **含状态行**：状态行在裁剪之外，它的高度变化也要被这一项吸收，
-                    // 否则「思考中 · 12.3s」换行时上面的内容仍会被推 1~2 行。
-                    pinnedLiveHeight = h + statusHeight[0]
-                    scroll.pinActive = true
-                }
-            } else if (!want && pinned) {
-                pinnedLiveHeight = 0
-                scroll.pinActive = false
+        }.collect { (notAtBottom, live, _) ->
+            var needWait = livePin.update(
+                notAtBottom = notAtBottom,
+                hasLiveContent = live,
+                natural = lagNatural[0],
+                outside = statusHeight[0],
+            )
+            // 高度要到**布局之后**才有；`lagNatural` 是普通数组（不进快照，避免测量期写 state
+            // 触发重测），所以这里最多等 30 帧把它拿到 —— 只在状态翻转时发生一次。
+            var tries = 0
+            while (needWait && tries < 30) {
+                withFrameNanos { }
+                needWait = livePin.update(
+                    notAtBottom = notAtBottom,
+                    hasLiveContent = live,
+                    natural = lagNatural[0],
+                    outside = statusHeight[0],
+                )
+                tries++
             }
+            pinnedLiveHeight = livePin.height
+            // 以滚动层的 pinActive 为**唯一真值**（它还要被"到底是否自动打开贴底"的 collector 读）。
+            if (scroll.pinActive != livePin.active) scroll.pinActive = livePin.active
         }
-    }
-    // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
+    }    // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
     // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
     val laggingNow by rememberUpdatedState(!scroll.stickToBottom && !scroll.restoring)
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
