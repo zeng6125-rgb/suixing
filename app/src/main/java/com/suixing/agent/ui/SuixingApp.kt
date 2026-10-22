@@ -57,7 +57,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
@@ -75,6 +74,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.ripple
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -149,7 +149,6 @@ import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingMark
-import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.onboarding.OnboardingHost
@@ -1492,10 +1491,10 @@ private fun ConversationRow(
 private val DrawerMenuWidth = 200.dp
 
 /**
- * 面板高度：6 个 44dp 的项（40dp 行 + 上下各 2dp）+ MenuCard 的上下各 14dp 内边距。
+ * 面板高度：6 个 40dp 的项 + MenuCard 的上下各 14dp 内边距（项之间不再有外层 padding）。
  * 只用来判断「下面还放得下吗」，放不下就朝上翻；项数改了这里要跟着改。
  */
-private val DrawerMenuHeight = 44.dp * 6 + 28.dp
+private val DrawerMenuHeight = 40.dp * 6 + 28.dp
 
 /**
  * 抽屉长按菜单里的一行：尺寸与反馈都照对话框里那颗 `TextButton` 抄。
@@ -1514,15 +1513,22 @@ private fun DrawerMenuAction(
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    // 涟漪是整行胶囊：左右各留 8dp，胶囊才碰不到面板那 20dp 的圆角；上下各 2dp 就是行距。
-    // 顺序照 `suixingClickable` 的约定（clip → clickable → 自己的 padding），涟漪才不会缩水。
+    // 缩进与「添加」弹层里那些行是**同一组数字**（`ui/chat/ChatComposer.kt:420-455` 的 MenuItemRow）：
+    // 行自己只留 4dp 左右内边距，其余空白全部由 MenuCard 自带的 18dp 提供。
+    // 左边距因此是 18 + 4 = 22dp。改之前那版是给 DropdownMenu 用的（它自带 12dp 留白）：
+    // 外层 8dp + 内层 16dp 叠成 42dp，用户看到的就是「项离左边太远」。外层 padding 已整层删掉。
+    // clip 与触感也照 MenuItemRow：shapes.small + ripple()（不再是整行胶囊），涟漪正好铺满可见形状。
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp)
-            .suixingClickable(shape = CircleShape, onClick = onClick)
+            .clip(MaterialTheme.shapes.small)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick,
+            )
             .height(40.dp)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
