@@ -1153,10 +1153,20 @@ class AgentEngine(
         if (hasCheckpoint) wire += ChatMessage.system("[上下文摘要] ${checkpoint!!.summary}")
         // The messages themselves are never removed from the conversation — the usage watermark
         // counts them — which is why the span is found by id and the replay is a slice, not a rewrite.
-        replayed.forEach { message ->
+        // **消息 → wire 的转换也放后台**（issue #36 同类）：每条都要做字符串拼装
+        // （工具输出最长 8000 字符/条、一轮几十条），而它每轮都在主线程上跑一遍。
+        // 转换是纯函数，`wire`/`spans` 的写入仍在主线程、顺序不变。
+        val wireChunks = withContext(Dispatchers.Default) {
+            replayed.map { message ->
+                val one = ArrayList<ChatMessage>(1)
+                appendToWire(one, message, settings)
+                message.id to one
+            }
+        }
+        for ((id, chunk) in wireChunks) {
             val from = wire.size
-            appendToWire(wire, message, settings)
-            spans += WireSpan(message.id, from, wire.size)
+            wire.addAll(chunk)
+            spans += WireSpan(id, from, wire.size)
         }
 
         // A ceiling of 0 (or less) means the user set none: the loop then ends only when
