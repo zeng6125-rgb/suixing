@@ -137,6 +137,23 @@ class ChatRepositoryStoreTest {
     }
 
     @Test
+    fun `claiming the whole history is checked, not trusted`() = runBlocking {
+        // 评审 S-3：`fullHistory = true` 只是调用方的一句话。声明了却比盘上少、首条也对不上
+        // ⇒ 仍然是"窗口冒充全量"，必须拒绝，且盘上一个字节不动。
+        val repository = repository()
+        val full = conversation("c1", messages = twoMessages("a") + twoMessages("b") + twoMessages("c"))
+        repository.save(full)
+        val before = repository.readAll("c1").map { it.id }
+
+        val window = full.copy(messages = full.messages.takeLast(2))
+        val refused = repository.save(window, allowShrink = true, fullHistory = true)
+        assertTrue("声明与内容不符时必须拒绝", refused is ChatRepository.SaveResult.Refused)
+
+        val after = repository().apply { load() }.readAll("c1")
+        assertEquals("日志一条都不能少", before, after.map { it.id })
+    }
+
+    @Test
     fun `a shortened transcript is written as it was given`() = runBlocking {
         val repository = repository()
         val full = conversation("c1", messages = twoMessages("a") + twoMessages("b") + twoMessages("c"))

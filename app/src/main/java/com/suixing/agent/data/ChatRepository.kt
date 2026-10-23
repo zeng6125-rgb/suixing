@@ -638,6 +638,28 @@ class ChatRepository(private val context: Context) {
             // 编辑重答曾经把**屏幕窗口**（12 轮）连同 `allowShrink = true` 一起交进来；
             // 这个开关让下面两道护栏整段跳过 ⇒ 整份日志被重写成窗口、旧代被删。
             // 现在：声称"有意缩短"的同时，必须**显式声明手里是整份历史**。
+            // **`fullHistory` 也要核对**（评审 S-3）：它只是调用方的一句声明。
+            // 声明"我手里是整份历史"却又比盘上少、且首条也对不上 —— 那就是窗口冒充全量，
+            // 和没有这个开关时一样危险，必须拒绝。
+            if (allowShrink && fullHistory && diskHasLog) {
+                val known = diskMeta?.messageCount ?: 0
+                if (conversation.messages.size < known) {
+                    val headOnDisk = runCatching { store.firstMessageId(diskMeta!!) }.getOrNull()
+                    val headMatches = headOnDisk != null &&
+                        conversation.messages.firstOrNull()?.id == headOnDisk
+                    if (!headMatches) {
+                        Log.w(
+                            TAG,
+                            "save refused id=${conversation.id}: claims the whole history but holds " +
+                                "${conversation.messages.size} of $known and does not start where the log does",
+                        )
+                        return@withLock SaveResult.Refused(
+                            "声明了完整历史但内容对不上（手里 ${conversation.messages.size} 条 < 盘上 $known 条）；" +
+                                "为避免截断没有写入",
+                        )
+                    }
+                }
+            }
             if (allowShrink && !fullHistory && diskHasLog) {
                 val known = diskMeta?.messageCount ?: 0
                 if (conversation.messages.size < known) {
@@ -821,7 +843,10 @@ class ChatRepository(private val context: Context) {
         if (!file.exists()) return@withContext null
         runCatching { json.decodeFromString(LiveDraft.serializer(), file.readText()) }
             .getOrElse {
-                file.delete()
+                // **解析失败不要删**（评审建议，与「用户没发话不删文件」同口径）：
+                // 草稿是进程被杀后唯一的副本；文件坏了多半只是"写到一半被切断"，
+                // 里面仍可能有一段可救的正文。改成改名留下痕迹，绝不 delete。
+                runCatching { file.renameTo(File(file.parentFile, file.name + ".corrupt")) }
                 null
             }
     }

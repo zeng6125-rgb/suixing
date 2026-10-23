@@ -1612,9 +1612,12 @@ class ChatViewModel : ViewModel() {
             val at = full?.indexOfFirst { it.id == id } ?: -1
             if (full == null || at < 0) {
                 Log.w(TAG, "edit not persisted: full history unavailable for ${snapshot.conversationId}")
+                // **把用户刚输入的文字放回输入框**（评审建议）：编辑面板已经关掉了，
+                // 不回填就等于把他改的那句话吞掉。
+                onDraftChange(snapshot.conversationId, Draft(text = body))
                 _state.update {
                     if (it.conversationId != snapshot.conversationId) it
-                    else it.copy(error = "编辑没有写入磁盘：读不到完整历史（避免截断）")
+                    else it.copy(error = "编辑没有写入磁盘：读不到完整历史（已把文字放回输入框）")
                 }
                 return@launch
             }
@@ -1642,7 +1645,11 @@ class ChatViewModel : ViewModel() {
                 allowShrink = true,
                 fullHistory = true,
             )
-            if (written == null) return@launch
+            if (written == null) {
+                // 落盘失败同理：文字回到输入框，别让它连同那段编辑一起消失。
+                onDraftChange(snapshot.conversationId, Draft(text = body))
+                return@launch
+            }
             // **两次 IO 之后必须复检前置条件**（评审 8 第 4 条）：`readAll` + `save` 在大会话上
             // 是百毫秒到秒级，这期间用户可能切走了会话、或已经发起了另一轮 —— 那时再 `start()`
             // 会拿**旧会话的全文**当新会话的 wire 发出去（回答写进别人的会话），
