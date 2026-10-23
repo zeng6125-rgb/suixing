@@ -578,28 +578,44 @@ internal class ChatStore(private val root: File) {
         val needle = "{\"id\":\"$messageId\"".toByteArray(Charsets.UTF_8)
         val limit = meta.logBytes
         RandomAccessFile(log, "r").use { raf ->
-            var pos = 0L
-            val buf = ByteArray(SEARCH_CHUNK + needle.size)
-            // 上一块的**最后一个字节**：分块扫描时 `buf[i - 1]` 在 `i == 0` 处是越界的
-            // （评审 S4：只有「needle 起点正好落在 1MB 边界」才触发，但它是发送路径上的
-            // `readWire` / 加载更早的唯一位置来源，崩了就是"发送失败"）。
-            var previousChunkLast: Byte? = null
-            while (pos < limit) {
-                val want = minOf(SEARCH_CHUNK.toLong(), limit - pos).toInt()
-                // One needle's worth of overlap so a match straddling two chunks is still found.
-                val extra = minOf(needle.size.toLong(), limit - (pos + want)).toInt()
-                raf.seek(pos)
-                raf.readFully(buf, 0, want + extra)
-                val avail = want + extra
-                var i = 0
-                while (i + needle.size <= avail) {
+            // **从尾部往前倒扫**（issue #38 第 2 项）：needle 几乎总是**最近**的一条
+            // （`readWire` 找的是最后一个 checkpoint 那条，而 checkpoint 由压缩生成、位于末尾附近），
+            // 从 0 正扫要读完整份日志（32MB 会话 = 每轮发送扫 32MB）。
+            //
+            // 两处必须注意：
+            //  · 要的是**该 id 的第一条**（消息在正文里被引用也会命中同一个 needle）⇒
+            //    倒扫命中后要**继续往前找**，直到没有更早的命中；
+            //  · 命中处必须是**行首**（`{"id":` 只会出现在行首，因为 id 是消息的第一个字段）⇒
+            //    往前一个字节必须是换行，或就是文件开头。
+            var end = limit
+            var previousChunkFirst: Byte? = null
+            var found: Long? = null
+            while (end > 0) {
+                val want = minOf(SEARCH_CHUNK.toLong(), end).toInt()
+                val from = end - want
+                val buf = ByteArray(want)
+                raf.seek(from)
+                raf.readFully(buf, 0, want)
+                var i = buf.size - needle.size
+                while (i >= 0) {
                     if (buf[i] == needle[0] && regionMatches(buf, i, needle)) {
-                        if (isLineStart(pos, i, buf, previousChunkLast)) return pos + i
+                        val at = from + i
+                        val atLineStart = when {
+                            at == 0L -> true
+                            i > 0 -> buf[i - 1] == NEWLINE
+                            else -> previousChunkFirst == NEWLINE
+                        }
+                        if (atLineStart) {
+                            // 记下**最靠前**的那次命中（倒扫里先遇到的是最新的，继续往前才是更早的）。
+                            found = at
+                            break
+                        }
                     }
-                    i++
+                    i--
                 }
-                previousChunkLast = if (want > 0) buf[want - 1] else previousChunkLast
-                pos += want
+                if (found != null) return found
+                previousChunkFirst = buf.first()
+                end = from
             }
         }
         return null

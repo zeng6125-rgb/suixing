@@ -1138,7 +1138,10 @@ fun ChatScreen(
     // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
     val streamingKey = "streaming:${state.conversationId}"
     // 有活内容（正文/思考/工具）才值得钉住 —— 空的行不钉。
-    val liveForPin = state.streaming.isNotEmpty() || state.reasoning.isNotEmpty() ||
+    // 正文只存一份（issue #38）：`state.streaming` 现在是派生值、不再单独保存 ⇒
+    // "这一轮有没有活内容"要看 liveParts 里有没有正文/思考块。
+    val liveForPin = state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking } ||
+        state.reasoning.isNotEmpty() ||
         state.liveParts.isNotEmpty()
     // **`liveForPin` 必须用 rememberUpdatedState 取最新值**（第二轮评审的关键发现）：
     // 它是个普通 `val`，若被 `snapshotFlow` 的 lambda 直接捕获，捕获的是**首次组合**那一帧的值，

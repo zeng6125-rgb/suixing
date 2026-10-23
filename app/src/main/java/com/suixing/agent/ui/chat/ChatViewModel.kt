@@ -274,9 +274,32 @@ sealed interface LivePart {
      * moves on to a tool or to prose, so two thinking blocks in one run never show the
      * same clock — sharing the run-level tally is what made every block read 23.3s.
      */
-    data class Thinking(val text: String, val tokens: Int = 0, val elapsedMs: Long = 0) : LivePart
+    /**
+     * 一段思考。**文本用可增长缓冲**（issue #38 的 O(n²) 修复）：
+     * 原来每个 delta 都 `part.text + delta`（整串复制），一轮 5000 个 delta ⇒ 约 1.2×10⁷ 字符复制。
+     * 现在只追加增量（O(delta)），渲染时 `text` 才 `toString()` 一次。
+     */
+    class Thinking(
+        val buffer: GrowableText = GrowableText(),
+        val tokens: Int = 0,
+        val elapsedMs: Long = 0,
+    ) : LivePart {
+        constructor(text: String, tokens: Int = 0, elapsedMs: Long = 0) :
+            this(GrowableText(text), tokens, elapsedMs)
+
+        val text: String get() = buffer.toString()
+    }
+
     data class Tools(val calls: List<LiveTool>) : LivePart
-    data class Text(val text: String) : LivePart
+
+    /** 正文。同样用可增长缓冲（见 [Thinking] 的说明）。 */
+    class Text(val buffer: GrowableText = GrowableText()) : LivePart {
+        constructor(text: String) : this(GrowableText(text))
+
+        val text: String get() = buffer.toString()
+    }
+
+
 
     /**
      * A line the user handed over while this run was going.
@@ -305,6 +328,20 @@ sealed interface LivePart {
      */
     data class Compress(val checkpoint: ContextCheckpoint) : LivePart
 }
+/** 流式文本的**可增长缓冲**（见 issue #38 的 O(n²) 修复说明）。
+ *
+ * 原来每个 delta 都做 `part.text + delta`（整串复制）；现在**只追加增量**（O(delta)），
+ * 渲染时按需 `toString()`。
+ */
+class GrowableText(initial: String = "") {
+    private val buf = StringBuilder(initial)
+    fun append(delta: String) {
+        buf.append(delta)
+    }
+    fun length(): Int = buf.length
+    override fun toString(): String = buf.toString()
+}
+
 private data class RunSession(
     val chatId: String,
     val title: String,
@@ -1400,15 +1437,41 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+    /**
+     * 忘掉一个会话名下**所有**按会话保存的运行时状态（issue #38）。
+     *
+     * 原来删除会话只清了 `steers`，其余这些表都没有容量上限、也不会被淘汰：
+     * `pendingTurns` 最重（排队未发的消息，**含 base64 图片，可达几 MB**），
+     * 其次是 `todoBoards`、`lastErrors`、`windowStarts`、`attachmentCache`、LRU 正文缓存。
+     * 会话数量只增不减 ⇒ 这些残留会一直堆着。
+     */
+    private fun forgetConversation(chatId: String) {
+        pendingTurns.remove(chatId)
+        todoBoards.remove(chatId)
+        lastErrors.remove(chatId)
+        windowStarts.remove(chatId)
+        attachmentCache.remove(chatId)
+        messageCache.remove(chatId)
+        userStopped -= chatId
+    }
+
     fun deleteConversation(conversation: Conversation) {
         // Published before the conversation goes: a buffered tail is part of an answer that
         // may still be streaming into a chat that is about to disappear from the list.
         flushDeltas(conversation.id)
         // The run owns its conversation until it ends: deleting it would only have the
         // next save write it straight back.
-        if (sessions.containsKey(conversation.id)) return
+        if (sessions.containsKey(conversation.id)) {
+            // **不许静默拒绝**（issue #38）：用户点了删除却毫无反应，分不清是被拒绝还是卡了。
+            _state.update {
+                if (it.conversationId != conversation.id) it
+                else it.copy(error = "这个会话正在执行任务，先停止或等它结束再删除")
+            }
+            return
+        }
         // Nothing left to hand a queued line to.
         clearSteers(conversation.id)
+        forgetConversation(conversation.id)
         viewModelScope.launch {
             Core.chats.delete(conversation.id)
             if (conversation.id != _state.value.conversationId) return@launch
@@ -2665,6 +2728,18 @@ class ChatViewModel : ViewModel() {
      * 一轮跑起来时这个方法每 80ms 调一次，少一次全量复制就少一次分配与 GC 压力；
      * 字段与取值顺序与改动前逐字一致，行为不变。
      */
+    /**
+     * 正文文本 = `parts` 里所有 `Text` 块的拼接（**派生值**，不单独存一份）。
+     *
+     * 存两份的代价是每个 delta 拼两遍整串（O(n²) ×2）与双份内存。
+     * 派生只在"真的要读"时算一次 —— 读它的地方只有两处：草稿合并与"是否为空"的判定。
+     */
+    private fun RunSession.derivedStreaming(): String {
+        val sb = StringBuilder()
+        for (part in parts) if (part is LivePart.Text) sb.append(part.text)
+        return sb.toString()
+    }
+
     private fun applyPending(live: RunSession, text: String, reasoning: String): RunSession {
         val hasText = text.isNotEmpty()
         val hasReasoning = reasoning.isNotEmpty()
@@ -2676,8 +2751,11 @@ class ChatViewModel : ViewModel() {
             hasText -> live.parts.appendText(text, live.segmentStart)
             else -> live.parts.appendThinking(reasoning, live.segmentStart)
         }
+        // **正文只存一份**（issue #38 第 3 条）：原来 `streaming` 与 `parts` 里的 Text 块
+        // 各存一份正文，每个 delta 各拼一遍 —— CPU 与内存都是双份。
+        // 现在 `streaming` 由 `parts` 派生（见 `derivedStreaming`），写入路径只碰 `parts`。
         return live.copy(
-            streaming = if (hasText) live.streaming + text else live.streaming,
+            streaming = "",
             reasoning = if (hasReasoning) live.reasoning + reasoning else live.reasoning,
             parts = parts,
             status = "",
@@ -2721,7 +2799,9 @@ class ChatViewModel : ViewModel() {
         if (tailIdx < 0) return this + LivePart.Text(delta)
         val idx = from + tailIdx
         val part = this[idx] as LivePart.Text
-        return take(idx) + part.copy(text = part.text + delta) + drop(idx + 1)
+        // **只追加增量**（不是整串复制）：文本块本体原地增长，列表只复制"前段 + 这一项"。
+        part.buffer.append(delta)
+        return take(idx) + part + subList(idx + 1, size)
     }
 
     /**
@@ -2741,7 +2821,8 @@ class ChatViewModel : ViewModel() {
         if (tailIdx < 0) return this + LivePart.Thinking(delta)
         val idx = from + tailIdx
         val part = this[idx] as LivePart.Thinking
-        return take(idx) + part.copy(text = part.text + delta) + drop(idx + 1)
+        part.buffer.append(delta)
+        return take(idx) + part + subList(idx + 1, size)
     }
 
     /** 当前段里是否已有思考块（决定这一段的思考钟是续走还是重置）。 */
@@ -2758,7 +2839,10 @@ class ChatViewModel : ViewModel() {
     private fun List<LivePart>.sealThinking(startedAt: Long): List<LivePart> {
         val last = lastOrNull() as? LivePart.Thinking ?: return this
         val elapsed = if (startedAt > 0) System.currentTimeMillis() - startedAt else 0L
-        return dropLast(1) + last.copy(tokens = last.text.length / 4, elapsedMs = elapsed)
+        // `Thinking` 现在不是 data class（它持有一个可变缓冲），所以这里**新建**一个，
+        // 但**沿用同一个 buffer** —— 文本不能被复制/重建（那正是我们要避免的整串复制）。
+        val tokens = last.text.length / 4
+        return dropLast(1) + LivePart.Thinking(last.buffer, tokens, elapsed)
     }
 
     /** A call joins the round of tools already open, or starts one. */
@@ -2926,7 +3010,7 @@ class ChatViewModel : ViewModel() {
             val next = liveDraftFor(
                 chatId = chatId,
                 runId = live.runId,
-                text = live.streaming + pendingText,
+                text = live.derivedStreaming() + pendingText,
                 reasoning = live.reasoning + pendingReasoning,
                 messages = live.messages,
             ) ?: continue
