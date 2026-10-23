@@ -1232,7 +1232,6 @@ fun ChatScreen(
     val laggingNow by rememberUpdatedState(scroll.pinActive)
     /** 用户是否在读历史（不在底部、也不在恢复位置）。 */
     val readingHistory = !scroll.stickToBottom && !scroll.restoring
-    val liveOutside = false // 已废弃：改为就地渲染 + 滚动锚定补偿
     /**
      * **滚动锚定**：流式行就地正常长高，长出来的那一点用滚动位置补回去，
      * 于是"内容照常长、你读的那一行不动"。
