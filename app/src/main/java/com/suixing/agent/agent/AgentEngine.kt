@@ -1305,18 +1305,23 @@ class AgentEngine(
                 }
                 // 三个数字都来自同一份 wire：一次遍历算完，别为每个数字各扫一遍
                 // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
-                var historyChars = 0
-                var totalChars = 0
-                var imageCarriers = 0
-                for (message in wire) {
-                    val chars = messageChars(message)
-                    totalChars += chars
-                    if (message.role != ROLE_SYSTEM) historyChars += chars
-                    if (message.allImages.isNotEmpty()) imageCarriers++
+                // **这一遍扫描也放后台**（issue #36 同类）：几十万字符的遍历不该占着主线程，
+                // 而它每轮都跑一次。只搬计算，赋值仍在原地。
+                val (historyChars, promptEstimate) = withContext(Dispatchers.Default) {
+                    var chars = 0
+                    var total = 0
+                    var images = 0
+                    for (message in wire) {
+                        val c = messageChars(message)
+                        total += c
+                        if (message.role != ROLE_SYSTEM) chars += c
+                        if (message.allImages.isNotEmpty()) images++
+                    }
+                    chars to estimatePromptTokens(total, images)
                 }
                 breakHistory = historyChars / 4
                 // 显示层的「当前请求多大」：wire 在这一刻定型，估算＝端点真实值 + 增量。
-                currentPromptEstimate = estimatePromptTokens(totalChars, imageCarriers)
+                currentPromptEstimate = promptEstimate
                 val turnStartedAt = System.currentTimeMillis()
                 // When the first piece of anything arrived: the wait a user actually feels,
                 // and one the endpoint's own usage block never reports.
