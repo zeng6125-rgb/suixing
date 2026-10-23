@@ -17,30 +17,30 @@ class EmptyBaseMergeTest {
 
     @Test
     fun `a non-empty base is never skipped`() {
-        assertFalse(shouldSkipEmptBaseMerge(baseEmpty = false, baseFromDisk = false, diskMessageCount = 5))
-        assertFalse(shouldSkipEmptBaseMerge(baseEmpty = false, baseFromDisk = true, diskMessageCount = 0))
+        assertFalse(shouldSkipEmptBaseMerge(baseEmpty = false, baseFromDisk = false, listMessageCount = 5))
+        assertFalse(shouldSkipEmptBaseMerge(baseEmpty = false, baseFromDisk = true, listMessageCount = 0))
     }
 
     @Test
     fun `an empty base that did not come from disk is skipped`() {
         // 用户切走导致 shown 变 null：这时写盘会把截短的历史当成整份。
-        assertTrue(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = false, diskMessageCount = 5))
+        assertTrue(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = false, listMessageCount = 5))
     }
 
     @Test
     fun `an empty base with messages on disk is skipped`() {
-        assertTrue(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = true, diskMessageCount = 5))
+        assertTrue(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = true, listMessageCount = 5))
     }
 
     @Test
     fun `an empty base over a genuinely empty log may heal`() {
         // 新建会话首发后被杀：盘上确实 0 条 ⇒ 自愈是安全的。
-        assertFalse(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = true, diskMessageCount = 0))
+        assertFalse(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = true, listMessageCount = 0))
     }
 
     @Test
     fun `an unknown disk count is treated as not-empty`() {
         // 拿不准就保守（不写盘）—— 误写会截断历史，误跳过只是把草稿多留一会儿。
-        assertTrue(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = true, diskMessageCount = null))
+        assertTrue(shouldSkipEmptBaseMerge(baseEmpty = true, baseFromDisk = true, listMessageCount = null))
     }
 }

@@ -3027,7 +3027,10 @@ class ChatViewModel : ViewModel() {
         // 否则下一次真合并会把用户主动停止误写成"（由「任务被停止」原因，对话中断）"）。
         cancelReason = "任务被停止"
         val next = messages + restored
-        if (shown != null) _state.update { it.copy(messages = next) }
+        // 自愈时 `_state.messageCount` 还是 0 ⇒ `loadEarlier` 每次触顶都白读一次。
+        if (shown != null) {
+            _state.update { it.copy(messages = next, messageCount = maxOf(it.messageCount, next.size)) }
+        }
         live?.let { putSession(it.copy(messages = next)) }
         // `save` 返回 null = **没有写下去**（被护栏拒绝或抛异常）⇒ 草稿是唯一副本，不能清。
         val written = save(
@@ -3363,16 +3366,19 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * 而它正是"新建会话首发后约 1 秒内被杀"那条**本来能自愈**的路径。
  *
  * @param baseEmpty 手里的 base 是否为空
- * @param baseFromDisk base 是否确实来自磁盘（`readTail` 成功）
- * @param diskMessageCount 盘上该会话的消息条数（来自 meta，未知时传 null）
+ * @param baseFromDisk base 是否确实来自磁盘（`readTail` 成功，且调用点 gate 在 `opened != null`）
+ * @param listMessageCount 会话列表里那份 meta 的条数（**不是磁盘字节数**；未知传 null）。
+ *   在 store 的自有不变式下 `count == 0 ⟺ logBytes == 0`（count 与 logBytes 同一个 list 写出），
+ *   而真正的字节级把关仍在 `ChatRepository.save` 的 `diskHasLog = logBytes > 0`。
  */
 internal fun shouldSkipEmptBaseMerge(
     baseEmpty: Boolean,
     baseFromDisk: Boolean,
-    diskMessageCount: Int?,
+    listMessageCount: Int?,
 ): Boolean {
     if (!baseEmpty) return false
-    val diskIsTrulyEmpty = baseFromDisk && diskMessageCount == 0
+    // 只有"确实从盘读到 + 盘上本来就一条没有"才放过；**拿不准就保守跳过**。
+    val diskIsTrulyEmpty = baseFromDisk && listMessageCount == 0
     return !diskIsTrulyEmpty
 }
 
