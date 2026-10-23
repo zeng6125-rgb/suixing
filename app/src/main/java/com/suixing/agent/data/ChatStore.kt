@@ -329,6 +329,19 @@ internal class ChatStore(private val root: File) {
         val log = logFile(committed)
         log.parentFile?.mkdirs()
         RandomAccessFile(log, "rw").use { raf ->
+            // **「元数据说空、文件非空」不是可覆盖状态**（评审 M-3，不可逆）。
+            //
+            // 真实路径：某个会话的 `.meta` 被隔离（改名 `.meta.corrupt`）之后，下次启动
+            // `migratePending → migrateOne` 看到"store 里没有这个会话"就会
+            // `store.append(newMeta(...), legacyMessages)`；而 `newMeta` 的 `logBytes = 0`
+            // ⇒ 下面的 `setLength(0)` 会把**还在那儿的孤儿日志**清空再写进去。
+            // 直接抛：宁可让迁移失败并留下痕迹，也不要静默清掉一份完整日志。
+            if (committed.logBytes == 0L && committed.messageCount == 0 && raf.length() > 0L) {
+                throw ConversationLogDamagedException(
+                    "chat ${committed.id}: meta says empty but the log holds ${raf.length()} bytes " +
+                        "— refusing to truncate an orphan log",
+                )
+            }
             // Anything past the commit boundary is a leftover from a save that died between
             // writing bytes and recording them. It is not history, so it goes before we add to it.
             if (raf.length() < committed.logBytes) {

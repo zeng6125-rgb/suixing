@@ -1603,54 +1603,62 @@ class ChatViewModel : ViewModel() {
         if (index < 0) return
         val kept = active.take(index) + active[index].copy(text = body, edited = true)
         val fresh = UUID.randomUUID().toString()
-        _state.update {
-            it.copy(
-                messages = kept,
-                // Runs whose messages just disappeared would only leak memory.
-                activeRuns = it.activeRuns.filterKeys { key -> kept.any { row -> row.id == key } } + (id to fresh),
-                streaming = "",
-                reasoning = "",
-                status = "正在重新回答…",
-                error = null,
-            )
-        }
-        // **缩短必须在这一刻显式落盘**：editAndResend 真的把改正后的问题之后的内容丢掉了，
-        // 这件事只有这里知道。若等后面某一轮 persistDisplayed() 去写，那次调用看到
-        // "盘上 6 条、手里 3 条"只会正确地判定为**误传了半页**并拒写（护栏 allowShrink=false），
-        // 于是编辑重答永远存不下去。
+        // **顺序很重要**（评审 M-2/M-4）：先落盘、成功了再起这一轮。
+        // 原来先改屏幕再 `start()`，而 `start` 的第一件事就是 `saveSession`（allowShrink=false）——
+        // 盘上那份的末尾还是**被丢掉的那条旧回答** ⇒ 对不上 ⇒ 护栏拒绝 ⇒ 界面挂一条"本次未写入"，
+        // 而编辑其实已经写成功了；顺带模型拿到的还是窗口版。
         viewModelScope.launch {
-            // **必须从盘上读全文再切**（评审 M1）：`kept` 只是屏幕窗口（12 轮），
-            // 拿它 + `allowShrink` 去写，就是 issue #33 那个形状（窗口顶替整份日志、旧代被删）。
-            // 读不到全文时**宁可不写**，也不截断。
             val full = runCatching { Core.chats.readAll(snapshot.conversationId) }.getOrNull()
             val at = full?.indexOfFirst { it.id == id } ?: -1
-            if (full != null && at >= 0) {
-                val keptFull = full.take(at) + full[at].copy(text = body, edited = true)
-                save(
-                    chatId = snapshot.conversationId,
-                    title = snapshot.title,
-                    messages = keptFull,
-                    assistantId = snapshot.assistantId,
-                    activeRuns = _state.value.activeRuns,
-                    providerId = snapshot.providerId,
-                    model = snapshot.model,
-                    reasoningEffort = snapshot.reasoningEffort,
-                    checkpoints = snapshot.checkpoints,
-                    allowShrink = true,
-                    // 声明"这是整份历史"：护栏放行，但条数不足时会被拒（不再有后门）。
-                    fullHistory = true,
-                )
-            } else {
+            if (full == null || at < 0) {
                 Log.w(TAG, "edit not persisted: full history unavailable for ${snapshot.conversationId}")
                 _state.update {
                     if (it.conversationId != snapshot.conversationId) it
                     else it.copy(error = "编辑没有写入磁盘：读不到完整历史（避免截断）")
                 }
+                return@launch
             }
+            val keptFull = full.take(at) + full[at].copy(text = body, edited = true)
+            // **被改的那条若落在某个压缩区间里，那个摘要就已经在说谎**（评审 M-4）：
+            // `readWire` 只从最后一个 checkpoint 之后开始发，模型会拿到旧摘要而不是改后的句子。
+            // 所以丢掉"覆盖它"的那个 checkpoint 以及**之后的所有** checkpoint（历史改从更早处回放）。
+            val safeCheckpoints = snapshot.checkpoints
+                .takeWhile { cp ->
+                    val from = full.indexOfFirst { it.id == cp.fromMessageId }.takeIf { it >= 0 } ?: Int.MAX_VALUE
+                    val to = full.indexOfFirst { it.id == cp.toMessageId }.takeIf { it >= 0 } ?: Int.MAX_VALUE
+                    at !in from..to
+                }
+            // 先落盘：`fullHistory = true` 是诚实声明（手里确实是整份），护栏据此放行。
+            val written = save(
+                chatId = snapshot.conversationId,
+                title = snapshot.title,
+                messages = keptFull,
+                assistantId = snapshot.assistantId,
+                activeRuns = snapshot.activeRuns,
+                providerId = snapshot.providerId,
+                model = snapshot.model,
+                reasoningEffort = snapshot.reasoningEffort,
+                checkpoints = safeCheckpoints,
+                allowShrink = true,
+                fullHistory = true,
+            )
+            if (written == null) return@launch
+            // 写成了：更新屏幕，然后**用全文版**起这一轮（模型才看得到改后的句子）。
+            _state.update {
+                if (it.conversationId != snapshot.conversationId) it
+                else it.copy(
+                    messages = kept,
+                    activeRuns = it.activeRuns.filterKeys { key -> kept.any { row -> row.id == key } } + (id to fresh),
+                    streaming = "",
+                    reasoning = "",
+                    status = "正在重新回答…",
+                    error = null,
+                    checkpoints = safeCheckpoints,
+                )
+            }
+            start(fresh, keptFull)
         }
-        start(fresh, kept)
     }
-
     fun stop() {
         // Only this conversation's reading: the speaker is one app-wide queue, so an
         // unconditional stop here used to cut short a reply another chat was reading out.
@@ -2257,7 +2265,9 @@ class ChatViewModel : ViewModel() {
                     // Whatever the endpoint sent since the last publish belongs to the answer
                     // too: without this flush a stopped run would save all but its tail.
                     flushDeltas(chatId)
-                    sessions[chatId]?.let { saveSession(it) }
+                    // **写成功才清草稿**（评审 M-1，不可逆）：`saveSession` 现在返回结果；
+                    // 保存被拒/抛异常时草稿是磁盘上唯一的副本，绝不能删。
+                    val written = sessions[chatId]?.let { saveSession(it) } ?: true
                     // 性能记录：**这一轮真的发生了什么**。首字延迟、缓存命中、prompt/completion
                     // 都取自本轮落下的那条回答（StoredMessage 本身就带着端点的回报），不另做估算。
                     // 请求体大小目前没有采集点，留 0 —— 监测页会把它显示成「—」，不是「测到零」。
@@ -2286,7 +2296,11 @@ class ChatViewModel : ViewModel() {
                     // The answer is in the transcript now, whatever way the run ended: a
                     // draft left behind would come back on the next launch as a second
                     // bubble saying the same thing.
-                    Core.chats.clearLive(chatId)
+                    if (written) {
+                        Core.chats.clearLive(chatId)
+                    } else {
+                        Log.w(TAG, "live draft kept for $chatId: the final save did not land")
+                    }
                 }
             }
         }
@@ -2953,7 +2967,13 @@ class ChatViewModel : ViewModel() {
         if (title != shown.title) _state.update { it.copy(title = title) }
     }
 
-    private suspend fun saveSession(live: RunSession) {
+    /**
+     * 保存这一轮，返回**是否真的写下去了**。
+     *
+     * 返回值不能被忽略（评审 M-1）：`clearLive` 会删掉草稿，而草稿是"进程被杀后唯一副本"。
+     * 保存被拒（`Refused`）或抛异常时若照样清草稿，长回答在磁盘上就**一份都不剩**。
+     */
+    private suspend fun saveSession(live: RunSession): Boolean {
         val title = save(
             chatId = live.chatId,
             title = live.title,
@@ -2963,11 +2983,12 @@ class ChatViewModel : ViewModel() {
             providerId = live.providerId,
             model = live.model,
             checkpoints = live.checkpoints,
-        ) ?: return
+        ) ?: return false
         val current = sessions[live.chatId]
         if (current != null && title != current.title) {
             putSession(current.copy(title = title))
         }
+        return true
     }
 
     /** Writes one conversation to disk; returns the title it ended up with. */
