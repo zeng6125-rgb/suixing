@@ -9,37 +9,10 @@ import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 
 /**
- * The conversation store: a metadata file per chat beside an append-only message log.
+ * 会话存储：每个会话一个 meta + 一份只追加的消息日志（#30/#31）。
  *
- * Why it exists (#30/#31): a conversation used to be one JSON object in one file, so every save
- * re-encoded the whole transcript and rewrote it, and every launch parsed all of them. A chat the
- * user has had for a year is 30–50 MB, and both costs scale with that number on every single turn.
- *
- * Layout, deliberately inside its own directory so that no existing listing of `filesDir/chats`
- * (which picks files out by `extension == "json"`, in [ChatRepository] and in [UsageStore]) can
- * ever mistake a piece of it for a conversation:
- *
- * ```
- * filesDir/chats/store/<id>.meta          ConversationMeta — id, title, times, counts, watermark
- * filesDir/chats/store/<id>.<gen>.jsonl   one StoredMessage per line
- * ```
- *
- * Two rules make the pair safe against a kill at any instant:
- *
- * 1. **[ConversationMeta.logBytes] is the commit boundary.** Bytes past it are not history. A turn
- *    is on disk only once its bytes are appended *and* [RandomAccessFile.getFD] has been synced
- *    *and* a meta file naming the new length has been renamed into place. A crash between any two
- *    of those leaves the log longer than the meta says; the next writer truncates back to the
- *    boundary and the conversation still parses ([append] does this on its way in).
- * 2. **Replacing the log takes a new generation.** A rewrite never truncates or overwrites the
- *    live file: it writes `<id>.<gen+1>.jsonl` whole, syncs it, then points the meta at it, then
- *    deletes the old one. Kill it anywhere and either the old generation or the new one is
- *    complete and named by the meta that survived. (Truncating the live file in place would leave
- *    a log whose bytes no longer correspond to any count the meta could describe.)
- *
- * Everything here is plain blocking IO: the caller wraps it in `Dispatchers.IO` (see
- * [ChatRepository]). Keeping this class free of `Context` and of coroutines is what lets
- * [ChatStoreTest] drive it on a plain `TemporaryFolder`.
+ * 原来一个会话是一个 JSON，每次保存都重新编码整份（30–50 MB 的会话 = 每轮 30 MB 读写），
+ * 每次启动又要解析全部。日志按行组织，追加只写新增的几条；读侧按窗口/字节偏移取。
  */
 /**
  * 一个会话的**全量**统计：轮数、步数、tokens、用时。
