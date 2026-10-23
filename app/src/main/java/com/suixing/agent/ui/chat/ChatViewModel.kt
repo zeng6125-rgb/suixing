@@ -25,6 +25,7 @@ import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
 import com.suixing.agent.data.ChatRepository
+import com.suixing.agent.data.ConversationLogShrunkException
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.describeError
@@ -3047,14 +3048,23 @@ class ChatViewModel : ViewModel() {
                 }
             },
             onFailure = { cause ->
-                Log.w(TAG, "save failed for $chatId: ${cause.message}", cause)
-                _state.update {
-                    if (it.conversationId != chatId) it
-                    else it.copy(
-                        error = "保存失败：${cause.message ?: cause.javaClass.simpleName}",
-                    )
+                // **"变短"不是失败**（评审 S4）：一次停机可能保存两次（`RunState.Cancelled` 分支
+                // 一次、引擎 `finally` 一次）。第二次手里的快照更短时 `ChatStore.append` 会抛
+                // `ConversationLogShrunkException` —— 而盘上那份其实**更全**，第一次已经写成功了。
+                // 把它当错误弹红条，用户会看到一条假的「保存失败」，还会以为内容丢了。
+                if (cause is ConversationLogShrunkException) {
+                    Log.i(TAG, "save skipped for $chatId: disk already holds a longer log", )
+                    null
+                } else {
+                    Log.w(TAG, "save failed for $chatId: ${cause.message}", cause)
+                    _state.update {
+                        if (it.conversationId != chatId) it
+                        else it.copy(
+                            error = "保存失败：${cause.message ?: cause.javaClass.simpleName}",
+                        )
+                    }
+                    null
                 }
-                null
             },
         )
     }

@@ -400,6 +400,12 @@ internal class ChatStore(private val root: File) {
             messageCount = messages.size,
             turnCount = messages.count { isTurnStart(it) },
             lastMessageId = messages.lastOrNull()?.id ?: "",
+            // **统计也要跟着重算**（评审 S1）：五个水位字段原来只有这俩没更新。
+            // 后果不是丢数据，而是「条数恰好相等时（同长编辑/同长 rewrite）」`sessionTotals`
+            // 会认为统计仍然有效、直接用**过期值**；不等时又要整份 `store.all` 重扫一次
+            // （30MB 会话可感知）。这里顺手算掉，改写本来就要遍历一遍消息。
+            totals = messages.fold(ChatTotals.EMPTY) { acc, m -> acc + totalsOfMessage(m) },
+            totalsAt = messages.size,
         )
         writeAtomically(logFile(next), bytes)
         writeMeta(next)
