@@ -612,6 +612,8 @@ class ChatViewModel : ViewModel() {
         messages: List<StoredMessage>,
         diskBacked: Boolean = false,
     ) {
+        // 空列表不入缓存（保持原契约）⇒ **空列表也无法把已有标记降级**；
+        // 唯一的降级点是 `endSession` 写内存版那份，而它恒非空，所以当前不可达。
         if (chatId.isEmpty() || messages.isEmpty()) return
         synchronized(messageCacheLock) {
             // 内容与标记同批写入：同一格被"内存版"覆盖时标记自动降级。
@@ -619,9 +621,17 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /** 缓存里的那份是否确认已落盘（与内容在同一格、同一把锁里读，不可能脱节）。 */
-    private fun cacheIsDiskBacked(chatId: String): Boolean =
-        synchronized(messageCacheLock) { messageCache[chatId]?.diskBacked == true }
+    /**
+     * 缓存里的那份是否确认已落盘（与内容在同一格、同一把锁里读，**不可能脱节**）。
+     *
+     * 用 `entries.firstOrNull` 而**不是** `messageCache[chatId]`：后者是 `get`，在
+     * `accessOrder = true` 的 LinkedHashMap 上会把这个会话移到"最近使用" ——
+     * 读一个标记不该改变淘汰顺序（将来若有清理全量会话的调用，会给后台会话续命）。
+     * 容量只有 5，线性找也是常数级。
+     */
+    private fun cacheIsDiskBacked(chatId: String): Boolean = synchronized(messageCacheLock) {
+        messageCache.entries.firstOrNull { it.key == chatId }?.value?.diskBacked == true
+    }
 
     /**
      * Text waiting to be published, per conversation; see [handleEvent] and [DELTA_PUBLISH_MS].
@@ -1101,6 +1111,9 @@ class ChatViewModel : ViewModel() {
             // 可能含"只在内存"的消息（保存失败 / 刚合并进来的恢复消息）。无条件标"已落盘"
             // 会给后面删草稿开一条新路 —— 而草稿恰恰可能是那份内容的唯一副本。
             // 只有当**当前这份列表本身就是那份"确认已落盘"的缓存对象**时，合并结果才全部可证在盘上。
+            // **`===` 是这条判据的一部分**：只有"当前列表就是缓存里那个对象"时，
+            // 缓存条目的 `diskBacked` 才在描述这份内容。若将来有人在这里插 `.toList()`/`filter`，
+            // 身份会静默失配 ⇒ 退化成"不敢清草稿"（方向安全，但没人会知道）。
             val baseWasDiskBacked = cacheIsDiskBacked(chatId) &&
                 cachedMessages(chatId) === _state.value.messages
             var mergedOut: List<StoredMessage>? = null
