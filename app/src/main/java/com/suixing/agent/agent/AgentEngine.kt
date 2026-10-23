@@ -1134,12 +1134,14 @@ class AgentEngine(
         val resumeAt = checkpoint?.let { saved -> history.indexOfFirst { it.id == saved.toMessageId } }
         val replayed = if (checkpoint != null && resumeAt != null && resumeAt >= 0) {
             wire += ChatMessage.system("[上下文摘要] ${checkpoint.summary}")
-            sanitize(trim(history.drop(resumeAt + 1), window))
+            // **裁完必须仍有人问的那句话**（issue #37 第一条）：若裁出来的只有一条超大工具结果，
+            // `sanitize` 会把它当孤儿丢掉 ⇒ 请求里没有任何 user，模型答非所问。
+            sanitize(ensureQuestionKept(trim(history.drop(resumeAt + 1), window), history))
         } else {
             // No checkpoint, or one whose message is no longer in the transcript: the transcript is
             // what decides the prompt, so a checkpoint that no longer lines up is ignored rather
             // than half-applied.
-            sanitize(trim(history, window))
+            sanitize(ensureQuestionKept(trim(history, window), history))
         }
         // The messages themselves are never removed from the conversation — the usage watermark
         // counts them — which is why the span is found by id and the replay is a slice, not a rewrite.

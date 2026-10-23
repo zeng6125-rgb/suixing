@@ -4,6 +4,26 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 
 /**
+ * 裁完之后**必须仍有人问的那句话**。
+ *
+ * 为什么需要：`trim` 在"最新那条怎么都装不下"时只保留最新一条（这是对的 —— 宁可只发一条，
+ * 也不要发一堆旧的）。但如果那条恰好是 `tool` 结果，而它的 `assistant`（带 tool_calls）已被裁掉，
+ * `WireSanitize` 会把这条孤儿结果丢掉 ⇒ 请求里**一条 user 都没有**（只剩 checkpoint 摘要），
+ * 模型就会答非所问。工具输出动辄几十万字符，这条链不是假想。
+ *
+ * 这里只在"wire 里没有任何 user"时，把历史上**最后一句**用户消息补回来 —— 只补一条，
+ * 代价上界是一条消息，而不是把预算撑爆。
+ */
+internal fun ensureQuestionKept(
+    wire: List<StoredMessage>,
+    history: List<StoredMessage>,
+): List<StoredMessage> {
+    if (wire.any { it.role == Roles.USER }) return wire
+    val question = history.lastOrNull { it.role == Roles.USER && !it.steer } ?: return wire
+    return wire + question
+}
+
+/**
  * 按 token 预算**从前面**裁历史。
  *
  * 为什么单独抽出来：它决定的正是"模型这一轮看得到什么"，出错不会崩、不会报错，
