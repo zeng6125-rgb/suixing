@@ -1,46 +1,34 @@
 package com.suixing.agent.ui.chat
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * 打字机每拍放几个字。
  *
- * 这两个坑都真踩过，用户连续反馈"瞬移"：
- *  - **按积压比例放**（`积压/4`）：第一跳就是积压的 1/4，800 字积压第一跳 200 字；
- *  - **上限太大**（20 字/拍 × 25 拍 = 500 字/秒）：刚好追平快端点，也是瞬移。
- *
- * 所以稳态必须是**绝对**的逐字：每拍 ≤ 4 个字。
+ * **每拍放积压的 1/4、无上限**（0.8.202 原始公式）。这是实测换来的教训
+ * （0.8.381~0.8.403，用户连续六轮反馈"瞬移"）：
+ *  - 任何稳态上限都会让"显示速度 < 到达速度"（实测思考 ~470 字/秒），
+ *    欠账在 run 结束、落盘行替换 live 行的那一刻**全部一次性吐出** ——
+ *    打字机对已定型行不生效，这就是瞬移的机制；
+ *  - 比例追上是指数收敛（余量每拍 ×0.75），5000 字 ≈ 16 拍（640ms）追平，
+ *    不需要任何"加速档"。
  */
 class TypewriterStepTest {
 
     @Test
-    fun `steady state is absolute per-tick not proportional`() {
-        // 不管积压 3 字还是 900 字，每拍最多 4 个字
-        assertEquals(3, typewriterStep(3))
-        assertEquals(4, typewriterStep(4))
-        assertEquals(4, typewriterStep(40))
-        assertEquals(4, typewriterStep(400))
-        assertEquals(4, typewriterStep(900))
-        assertEquals(4, typewriterStep(1_999))
-        assertTrue("稳态绝不该按比例跳", typewriterStep(900) <= 4)
+    fun `each tick releases a quarter of the backlog`() {
+        assertEquals(2, typewriterStep(1))   // 下限：慢端点也看得见在动
+        assertEquals(2, typewriterStep(8))
+        assertEquals(25, typewriterStep(100))
+        assertEquals(250, typewriterStep(1_000))
     }
 
     @Test
-    fun `a tiny backlog shows what arrived`() {
-        // 慢端点一个 delta 一两个字：不能少于 1，也不要抬到 2（会凭空多出字）
-        assertEquals(1, typewriterStep(1))
-        assertEquals(2, typewriterStep(2))
-    }
-
-    @Test
-    fun `a huge one-shot chunk is relaxed so the tail does not drag`() {
-        // 2001 字以上才加速：2001/8=250 → 封顶 40；5000/8=625 → 40；20 万 → 40
-        assertEquals(40, typewriterStep(2_001))
-        assertEquals(40, typewriterStep(5_000))
-        assertEquals(40, typewriterStep(200_000))
-        // 加速档也要 ≥ 稳态上限，否则大积压反而更慢
-        assertTrue(typewriterStep(2_001) >= 4)
+    fun `there is no cap so reveal always outpaces arrival`() {
+        // 470 字/秒到达 = 每 40ms 约 19 字；revealed 每拍放积压 1/4，
+        // 稳态欠账只有 4 拍的到达量（~75 字）—— run 结束时的跳变肉眼不可见
+        assertEquals(500, typewriterStep(2_000))
+        assertEquals(1_250, typewriterStep(5_000))
     }
 }

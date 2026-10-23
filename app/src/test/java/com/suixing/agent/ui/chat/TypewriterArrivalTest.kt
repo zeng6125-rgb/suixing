@@ -4,19 +4,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 「一次到达 N 字」时，用户多久看见全文。
+ * 「一次到达 N 字」时，显示跟上需要多久。
  *
- * 这条测试就是"瞬移"的守门人：稳态每拍 4 字 ⇒ 100 字/秒，
- * 远慢于阅读速度 ⇒ **任何规模的一次到达都有一段可见的逐字过程**。
+ * 比例追上是指数收敛：余量每拍 ×0.75，n 字在 4·log₄(n/2) 拍内追平。
+ * 这条测试守住两件事：过程可见（不瞬移）、尾巴不拖（不磨几十秒）。
  */
 class TypewriterArrivalTest {
 
-    /** 每拍 40ms；返回从 0 放到 [total] 需要多少毫秒。 */
-    private fun revealMs(total: Int): Int {
-        var revealed = 0
+    private fun catchUpMs(total: Int): Int {
+        var backlog = total
         var ticks = 0
-        while (revealed < total) {
-            revealed = (revealed + typewriterStep(total - revealed)).coerceAtMost(total)
+        while (backlog > 0) {
+            backlog -= typewriterStep(backlog)
             ticks++
             if (ticks > 100_000) error("追不上")
         }
@@ -24,22 +23,14 @@ class TypewriterArrivalTest {
     }
 
     @Test
-    fun `a small burst is visibly typed out`() {
-        // 50 字：13 拍 = 520ms
-        assertTrue("50 字 ${revealMs(50)}ms", revealMs(50) >= 400)
+    fun `a small burst catches up in a few ticks`() {
+        assertTrue(catchUpMs(100) <= 800)    // ~8 拍
     }
 
     @Test
-    fun `a medium burst never snaps`() {
-        // 200 字：50 拍 = 2000ms；900 字：225 拍 = 9000ms
-        // 900 字要 9 秒 —— 慢，但**没有瞬移**；用户明确要逐字
-        assertTrue("200 字 ${revealMs(200)}ms", revealMs(200) >= 1_500)
-        assertTrue("900 字 ${revealMs(900)}ms", revealMs(900) >= 5_000)
-    }
-
-    @Test
-    fun `a one-shot chunk over 2000 chars is the only relaxed case`() {
-        // 5000 字：125 拍 = 5000ms（不是一帧全出）
-        assertTrue("5000 字 ${revealMs(5_000)}ms", revealMs(5_000) >= 3_000)
+    fun `a huge one-shot chunk still catches up quickly`() {
+        // 指数收敛：5000 字 ≈ 16 拍（640ms），不是几十秒
+        assertTrue("5000 字 ${catchUpMs(5_000)}ms", catchUpMs(5_000) <= 1_200)
+        assertTrue("50000 字 ${catchUpMs(50_000)}ms", catchUpMs(50_000) <= 2_000)
     }
 }
