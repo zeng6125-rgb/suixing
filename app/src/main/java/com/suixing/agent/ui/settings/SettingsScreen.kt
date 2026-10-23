@@ -1341,6 +1341,9 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val allowed by Core.gate.alwaysAllowedTools.collectAsState()
     val denied by Core.gate.alwaysDeniedTools.collectAsState()
+    // 排序只依赖这两个集合：别每次重组都在 items() 里重排一遍。
+    val allowSorted = remember(allowed) { allowed.sorted() }
+    val denySorted = remember(denied) { denied.sorted() }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -1481,7 +1484,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                 }
                 // Namespaced keys: the two lists share one LazyColumn, and a name that
                 // moved from one to the other must not be two items with one key.
-                items(allowed.sorted(), key = { "allow-$it" }) { name ->
+                items(allowSorted, key = { "allow-$it" }) { name ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1527,7 +1530,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                         }
                     }
                 }
-                items(denied.sorted(), key = { "deny-$it" }) { name ->
+                items(denySorted, key = { "deny-$it" }) { name ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
