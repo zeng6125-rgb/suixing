@@ -3,14 +3,11 @@ package com.suixing.agent.ui.chat
 /**
  * 导航条「当前是第几轮」的换算。
  *
- * 坐标空间有两层，历史上多次搞混（#16 的"偏一两项"就是它）：
- * - `visible[i]`：存储行的**正序**下标（0 = 最旧）；
- * - 喂序：底锚倒序，`visible[i]` 的喂序下标 = `feedPrefix + (size - 1 - i)`；
- * - `turnIndices`：轮首在**可见坐标 + rowOffset（「加载更早」那一行）**下的下标。
- *
- * 所以比较时必须把 `firstVisible` 先倒回可见坐标，**再补上 rowOffset** —— 漏了倒置会跳到下一轮，
- * 漏了 rowOffset 会在一屏内偏一行。两种错都只表现为"高亮位置不对"，不报错。
+ * 坐标两层：`visible[i]` 是存储行正序；喂序下标 = `feedPrefix + (size - 1 - i)`；
+ * `turnIndices` 用"可见坐标 + rowOffset"。比较前必须先把 `firstVisible` 倒回可见坐标再补
+ * `rowOffset` —— 漏前者跳到下一轮，漏后者偏一行，都不报错。
  */
+
 internal object TurnMarks {
 
     /**
