@@ -369,7 +369,16 @@ internal class ChatStore(private val root: File) {
             lastMessageId = tail.last().id,
             // 会话统计跟着追加走：只累加**新落盘**这几条，不重扫日志。
             totals = tail.fold(committed.totals) { acc, m -> acc + totalsOfMessage(m) },
-            totalsAt = committed.messageCount + tail.size,
+            // **只有原统计本来就是全量时，追加后的才是全量**（评审 S-4）。
+            // 旧 meta 的 `totalsAt` 可能落后于 `messageCount`（历史版本没维护这两列），
+            // 那种情况下累加出来的是"残缺基数 + 新尾巴"，若把 `totalsAt` 写成新的条数，
+            // `sessionTotals` 会认为统计有效、**永远不再补算**（列表页统计从此偏小）。
+            // 所以对不齐时写 -1，让下游知道"这份统计需要重算"。
+            totalsAt = if (committed.totalsAt == committed.messageCount) {
+                committed.messageCount + tail.size
+            } else {
+                -1
+            },
         )
         writeMeta(next)
         return next

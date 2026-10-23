@@ -14,6 +14,8 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption
 
 /**
  * `<chatId>.live.json` — a draft beside its conversation, never inside it. Top-level because
@@ -1179,6 +1181,12 @@ class ChatRepository(private val context: Context) {
             } finally {
                 temp.delete()
             }
+        }
+        // **目录也要 sync**（评审 S-6）：只 sync 文件时，"rename 已经改了目录项"这件事
+        // 仍在页缓存里；断电后可能出现"文件存在但名字没生效"，草稿就凭空消失。
+        // `ChatStore.writeAtomically` 早就是这么做的，这份漏了。
+        runCatching {
+            FileChannel.open(target.parentFile!!.toPath(), StandardOpenOption.READ).use { it.force(true) }
         }
     }
 

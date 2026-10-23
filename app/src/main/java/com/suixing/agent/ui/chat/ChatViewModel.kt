@@ -2861,7 +2861,11 @@ class ChatViewModel : ViewModel() {
         // 而活着的这一轮由引擎自己收尾、草稿由 `endSession` 清。合并它会把同一段文字
         // 存成两条（一条"（由「任务被停止」，对话中断）"结尾），模型下一轮会看到自己
         // 回答重复；顺带还会把唯一副本清掉。
-        if (live != null && live.runId == draft.runId) return
+        // **只要有活会话就不合并**（评审 S-5）：原来只挡"同一个 runId"，
+        // 而 `live.runId != draft.runId` 时（上一轮残留的会话对象）仍会合并 ——
+        // 那会把上一轮被中断的半截回答（带"（由…原因，对话中断）"尾巴）混进**当前**这一轮。
+        // 活着的会话自己会收尾，草稿留给 `endSession`/`finally` 清。
+        if (live != null) return
         val shown = _state.value.takeIf { it.conversationId == chatId }
         val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }
         val messages = live?.messages ?: shown?.messages ?: stored?.messages.orEmpty()
