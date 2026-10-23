@@ -1238,70 +1238,7 @@ fun ChatScreen(
      * 与之前几版的差别：补偿量由**实测位移**（`liveRowTop`）驱动，不是按 item 高度推算，
      * 所以不依赖 index/offset 的换算；方向若猜错会在下一帧被观测到并自动翻转。
      */
-    val anchorTop = remember { floatArrayOf(Float.NaN) }
-    val sign = remember { floatArrayOf(1f) }
-    /**
-     * **滚动锚定**：流式行就地正常长高，长出来的那一点用滚动位置补回去，
-     * 于是"内容照常长、你读的那一行不动"。
-     *
-     * 与之前几版的差别：补偿量由**实测位移**（`liveRowTop`，`onGloballyPositioned` 写的）驱动，
-     * 不是按 item 高度推算 —— 不依赖 index/offset 换算，方向猜错会在下一帧被观测到并自动翻转。
-     *
-     * 三条自我约束（避免"补偿本身变成抖动源"）：
-     * 1. **只读历史时启动**；不读历史整段不跑（原写法每帧空转，本身就是抢主线程的一份开销）。
-     * 2. **单次漂移最多补 3 帧**，补不动就重新取样 —— 否则会和布局互相追着跑。
-     * 3. 位移小于 1.5px 不补（亚像素抖动没有意义，还会让列表一直在动）。
-     */
-    // **没有活内容就不启动**：没有一轮在跑时，流式行不会长高，也就不需要每帧唤醒。
-    // 原写法只在 `!readingHistory` 时退出，于是"读历史但没任务在跑"这个**最常见**的场景里，
-    // 它每帧空转 120 次/秒 —— 那正是拖慢滚动的东西（#26/#35 的同类）。
-    val liveGrowing = state.runningHere || hasLiveText
-    LaunchedEffect(listState, readingHistory, liveGrowing) {
-        if (!readingHistory || !liveGrowing) {
-            anchorTop[0] = Float.NaN
-            return@LaunchedEffect
-        }
-        var attempts = 0
-        // 诊断（沿用 pin.log，用户已经会复制那份）：这一段读历史期间**补了多少次、共多少像素**。
-        // 判读：`frames=0` ⇒ 期间根本没需要补（最优）；`frames>0` ⇒ 补偿在工作。
-        var frames = 0
-        var total = 0f
-        while (true) {
-            withFrameNanos { }
-            val top = liveRowTop[0]
-            if (!readingHistory || top.isNaN()) {
-                anchorTop[0] = Float.NaN
-                attempts = 0
-                continue
-            }
-            if (anchorTop[0].isNaN()) {
-                anchorTop[0] = top
-                attempts = 0
-                continue
-            }
-            val drift = top - anchorTop[0]
-            if (abs(drift) < 1.5f) {
-                attempts = 0
-                continue
-            }
-            if (attempts >= 3) {
-                // 补不动（可能被别的东西同时推）：重新取样，别继续较劲。
-                anchorTop[0] = top
-                attempts = 0
-                continue
-            }
-            val before = abs(drift)
-            listState.dispatchRawDelta(drift * sign[0])
-            withFrameNanos { }
-            val after = abs(liveRowTop[0] - anchorTop[0])
-            if (after > before) sign[0] = -sign[0]
-            attempts++
-            frames++
-            total += drift * sign[0]
-        }
-        // 循环结束（切回贴底 / 切换会话）时留一行，下一次读历史前先自报一次。
-        pinTrace("anchor frames=$frames total=${total.toInt()} sign=${sign[0]}")
-    }
+
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
     // 偏移 / 能否往回滚」。用途：区分三种"推上去"——
     //   ① 流式行自己长高（nat 变、idx/off 不变）⇒ 该由这里的补偿抵消；
@@ -1695,132 +1632,135 @@ fun ChatScreen(
                             // Keyed by conversation: the live row keeps its slot for as long
                             // as it is on screen, and a switch used to hand the next chat
                             // whatever the previous one had left in that slot.
-                            item(key = "streaming:${state.conversationId}") {
-                                // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
-                                // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
-                                // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
-                                CompositionLocalProvider(LocalLiveRowLag provides laggingNow) {
-                                Column(Modifier.fillMaxWidth()) {
-                                    // **只把气泡**放进「钉住 + 裁剪」里：状态行（思考中 · 12.3s）在自然内容的
-                                    // 最底部，若跟气泡一起被裁，钉住期间整行连 spinner 都会消失（评审确证）。
-                                    //
-                                    // 修饰符顺序：`clipToBounds` 取的是**内层**尺寸 —— 必须写在
-                                    // `liveRowLagHeight` **之前**（更外层）才按"报出的高度"裁；
-                                    // 反过来它拿到的是内容自然高度，等于一条裁不到任何东西的 clip。
-                                    Box(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .clipToBounds()
-                                            .liveRowLagHeight(
-                                                // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
-                                                // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
-                                                // 实验开关：false 时完全不钉。
-                                                reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
-                                                natural = lagNatural,
-                                                outside = statusHeight,
-                                            )
-                                            // #17 定位用：记下这一行在屏幕上的 y（普通数组，不进快照）。
-                                            // 钉住期间它与 `armedTop` 的差值就是"用户看到的位移"。
-                                            .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
-                                    ) {
-                                    AssistantRow(
-                                    parts = remember(
-                                        state.liveParts,
-                                        state.liveRunId,
-                                        settings.showReasoning,
-                                    ) {
-                                        // **记住映射结果**：`List<Part>` 是 unstable 参数。开了 strong skipping
-                                        // （Kotlin 2.0 起默认）时它按 **equals（结构）** 比较 —— 复用同一实例能让
-                                        // `AbstractList.equals` 在首行 `o === this` 处短路，省掉逐条
-                                        // `Part` 深比较（里面带 Markdown 文本、工具输出）和一次新 list 分配。
-                                        // 键带 liveParts 的**实例**：内容真变了才重算。
-                                        state.liveParts.mapNotNull { part ->
-                                            when (part) {
-                                                is LivePart.Thinking ->
-                                                    if (settings.showReasoning) {
-                                                        Part.Thinking(
-                                                            text = part.text,
-                                                            tokens = part.tokens,
-                                                            elapsedMs = part.elapsedMs,
-                                                            // The run this block belongs to:
-                                                            // the saved message carries the
-                                                            // same id, so the block keeps its
-                                                            // identity when the live row is
-                                                            // replaced by the stored one.
-                                                            runId = state.liveRunId,
-                                                        )
-                                                    } else {
-                                                        null
+                            // 贴底时它照旧在列表里：这时内容往上长正是你想要的。
+                            if (live && !readingHistory) {
+                                    item(key = "streaming:${state.conversationId}") {
+                                        // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
+                                        // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
+                                        // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
+                                        CompositionLocalProvider(LocalLiveRowLag provides laggingNow) {
+                                        Column(Modifier.fillMaxWidth()) {
+                                            // **只把气泡**放进「钉住 + 裁剪」里：状态行（思考中 · 12.3s）在自然内容的
+                                            // 最底部，若跟气泡一起被裁，钉住期间整行连 spinner 都会消失（评审确证）。
+                                            //
+                                            // 修饰符顺序：`clipToBounds` 取的是**内层**尺寸 —— 必须写在
+                                            // `liveRowLagHeight` **之前**（更外层）才按"报出的高度"裁；
+                                            // 反过来它拿到的是内容自然高度，等于一条裁不到任何东西的 clip。
+                                            Box(
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .clipToBounds()
+                                                    .liveRowLagHeight(
+                                                        // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
+                                                        // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
+                                                        // 实验开关：false 时完全不钉。
+                                                        reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
+                                                        natural = lagNatural,
+                                                        outside = statusHeight,
+                                                    )
+                                                    // #17 定位用：记下这一行在屏幕上的 y（普通数组，不进快照）。
+                                                    // 钉住期间它与 `armedTop` 的差值就是"用户看到的位移"。
+                                                    .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
+                                            ) {
+                                            AssistantRow(
+                                            parts = remember(
+                                                state.liveParts,
+                                                state.liveRunId,
+                                                settings.showReasoning,
+                                            ) {
+                                                // **记住映射结果**：`List<Part>` 是 unstable 参数。开了 strong skipping
+                                                // （Kotlin 2.0 起默认）时它按 **equals（结构）** 比较 —— 复用同一实例能让
+                                                // `AbstractList.equals` 在首行 `o === this` 处短路，省掉逐条
+                                                // `Part` 深比较（里面带 Markdown 文本、工具输出）和一次新 list 分配。
+                                                // 键带 liveParts 的**实例**：内容真变了才重算。
+                                                state.liveParts.mapNotNull { part ->
+                                                    when (part) {
+                                                        is LivePart.Thinking ->
+                                                            if (settings.showReasoning) {
+                                                                Part.Thinking(
+                                                                    text = part.text,
+                                                                    tokens = part.tokens,
+                                                                    elapsedMs = part.elapsedMs,
+                                                                    // The run this block belongs to:
+                                                                    // the saved message carries the
+                                                                    // same id, so the block keeps its
+                                                                    // identity when the live row is
+                                                                    // replaced by the stored one.
+                                                                    runId = state.liveRunId,
+                                                                )
+                                                            } else {
+                                                                null
+                                                            }
+
+                                                        is LivePart.Tools ->
+                                                            Part.Tools(part.calls.map(ToolLine::of))
+
+                                                        is LivePart.Text -> Part.Text(part.text)
+
+                                                        // The stored copy of this line is hidden for as
+                                                        // long as the run streams, so the live part is
+                                                        // what puts it on screen the moment it is handed
+                                                        // over. Same widget either way, which is why the
+                                                        // bubble does not move when the run settles.
+                                                        is LivePart.Steer -> Part.Steer(part.message)
+
+                                                        // 重试留痕：这一轮的落盘消息在流式期间是藏起来的，
+                                                        // 只有这里画了，用户才不用等整轮结束才知道刚才重试过。
+                                                        is LivePart.Trace -> Part.Trace(part.note)
+
+                                                        // 压缩块：运行中就画在它发生的位置，不再用气泡下面
+                                                        // 那一行提示（用户：「在哪个部分进行的就在哪个部分
+                                                        // 渲染」——思考 → 工具 → 压缩 → 继续）。
+                                                        is LivePart.Compress -> Part.Compress(part.checkpoint)
                                                     }
-
-                                                is LivePart.Tools ->
-                                                    Part.Tools(part.calls.map(ToolLine::of))
-
-                                                is LivePart.Text -> Part.Text(part.text)
-
-                                                // The stored copy of this line is hidden for as
-                                                // long as the run streams, so the live part is
-                                                // what puts it on screen the moment it is handed
-                                                // over. Same widget either way, which is why the
-                                                // bubble does not move when the run settles.
-                                                is LivePart.Steer -> Part.Steer(part.message)
-
-                                                // 重试留痕：这一轮的落盘消息在流式期间是藏起来的，
-                                                // 只有这里画了，用户才不用等整轮结束才知道刚才重试过。
-                                                is LivePart.Trace -> Part.Trace(part.note)
-
-                                                // 压缩块：运行中就画在它发生的位置，不再用气泡下面
-                                                // 那一行提示（用户：「在哪个部分进行的就在哪个部分
-                                                // 渲染」——思考 → 工具 → 压缩 → 继续）。
-                                                is LivePart.Compress -> Part.Compress(part.checkpoint)
+                                                }
+                                            },
+                                                streaming = true,
+                                                // The live bubble is the persona's reply too:
+                                                // without these two it fell back to the brand name
+                                                // and feather while every stored bubble showed the
+                                                // persona.
+                                                name = assistant?.label ?: "随行",
+                                                face = assistant?.face ?: "",
+                                                avatarPath = assistant?.avatarPath ?: "",
+                                                runningTool = state.runningTool,
+                                                // **流式分支里不用它**（唯一的读取点是
+                                                // `if (!streaming && …)` 那条 note）—— 传 null，
+                                                // 否则 stats 每变一次都让整棵 live 气泡（Markdown 全块 +
+                                                // 思考内层列表 + 工具行）重跑，而这时根本没人读它。
+                                                liveStats = null,
+                                                contextWindow = contextWindow,
+                                                expandTools = settings.expandTools,
+                                                expandReasoning = settings.expandReasoning,
+                                                reasoningMaxHeight = settings.reasoningHeight.dp,
+                                                followReasoning = settings.followReasoning,
+                                                bubbleMaxWidth = bubbleMaxWidth,
+                                                reasoningExpansion = reasoningExpansion,
+                                            )
+                                            }
+                                            // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
+                                            // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
+                                            if (state.runningHere) {
+                                                RunStatusLine(
+                                                    text = liveStatusText,
+                                                    startedAt = runStartedAt[runKey] ?: 0L,
+                                                    // 压缩不再占用这一行（它有自己的过程块），所以时钟一直走。
+                                                    timed = true,
+                                                    // 量高度给外层用：状态行在裁剪之外，钉住值要含它、
+                                                    // 气泡报出的高度要把它扣掉（见 `liveRowLagHeight` 的 `outside`）。
+                                                    // 写普通数组，不进快照 ⇒ 不触发重组。
+                                                    // **量在 padding 之前**：`outside` 要代表"状态行占掉的整段高度"
+                                                    // （含 12dp 间距），否则气泡扣减与 item 总高度天生差 12dp。
+                                                    modifier = Modifier
+                                                        .onGloballyPositioned {
+                                                            statusHeight[0] = it.size.height
+                                                        }
+                                                        .padding(start = 4.dp, top = 12.dp, bottom = 0.dp),
+                                                )
                                             }
                                         }
-                                    },
-                                        streaming = true,
-                                        // The live bubble is the persona's reply too:
-                                        // without these two it fell back to the brand name
-                                        // and feather while every stored bubble showed the
-                                        // persona.
-                                        name = assistant?.label ?: "随行",
-                                        face = assistant?.face ?: "",
-                                        avatarPath = assistant?.avatarPath ?: "",
-                                        runningTool = state.runningTool,
-                                        // **流式分支里不用它**（唯一的读取点是
-                                        // `if (!streaming && …)` 那条 note）—— 传 null，
-                                        // 否则 stats 每变一次都让整棵 live 气泡（Markdown 全块 +
-                                        // 思考内层列表 + 工具行）重跑，而这时根本没人读它。
-                                        liveStats = null,
-                                        contextWindow = contextWindow,
-                                        expandTools = settings.expandTools,
-                                        expandReasoning = settings.expandReasoning,
-                                        reasoningMaxHeight = settings.reasoningHeight.dp,
-                                        followReasoning = settings.followReasoning,
-                                        bubbleMaxWidth = bubbleMaxWidth,
-                                        reasoningExpansion = reasoningExpansion,
-                                    )
+                                        }
                                     }
-                                    // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
-                                    // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
-                                    if (state.runningHere) {
-                                        RunStatusLine(
-                                            text = liveStatusText,
-                                            startedAt = runStartedAt[runKey] ?: 0L,
-                                            // 压缩不再占用这一行（它有自己的过程块），所以时钟一直走。
-                                            timed = true,
-                                            // 量高度给外层用：状态行在裁剪之外，钉住值要含它、
-                                            // 气泡报出的高度要把它扣掉（见 `liveRowLagHeight` 的 `outside`）。
-                                            // 写普通数组，不进快照 ⇒ 不触发重组。
-                                            // **量在 padding 之前**：`outside` 要代表"状态行占掉的整段高度"
-                                            // （含 12dp 间距），否则气泡扣减与 item 总高度天生差 12dp。
-                                            modifier = Modifier
-                                                .onGloballyPositioned {
-                                                    statusHeight[0] = it.size.height
-                                                }
-                                                .padding(start = 4.dp, top = 12.dp, bottom = 0.dp),
-                                        )
-                                    }
-                                }
-                                }
                             }
                         } else if (state.runningHere) {
                             // Sent, not yet answered: the line holds the place the bubble is
@@ -2080,6 +2020,137 @@ fun ChatScreen(
             // 以前 `if (!state.loading)` 把输入框藏到会话读完为止 —— 那段时间屏幕上只剩
             // 「加载会话中…」，看着像应用没开起来。输入框是常驻件；代表"新会话"的是空会话页的
             // 英雄区，两者不要混。
+            // **读历史时它停靠在这里**（不进列表）：长高推不动列表，也就不需要每帧「测量→纠正」
+            // —— 那条路 issue #17 已经证明追不上连续变化，正是抖动的来源。样式与列表里**完全相同**。
+            if (live && readingHistory) {
+                Column(Modifier.fillMaxWidth()) {
+                                                        // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
+                                                        // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
+                                                        // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
+                                                        CompositionLocalProvider(LocalLiveRowLag provides laggingNow) {
+                                                        Column(Modifier.fillMaxWidth()) {
+                                                            // **只把气泡**放进「钉住 + 裁剪」里：状态行（思考中 · 12.3s）在自然内容的
+                                                            // 最底部，若跟气泡一起被裁，钉住期间整行连 spinner 都会消失（评审确证）。
+                                                            //
+                                                            // 修饰符顺序：`clipToBounds` 取的是**内层**尺寸 —— 必须写在
+                                                            // `liveRowLagHeight` **之前**（更外层）才按"报出的高度"裁；
+                                                            // 反过来它拿到的是内容自然高度，等于一条裁不到任何东西的 clip。
+                                                            Box(
+                                                                Modifier
+                                                                    .fillMaxWidth()
+                                                                    .clipToBounds()
+                                                                    .liveRowLagHeight(
+                                                                        // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
+                                                                        // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
+                                                                        // 实验开关：false 时完全不钉。
+                                                                        reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
+                                                                        natural = lagNatural,
+                                                                        outside = statusHeight,
+                                                                    )
+                                                                    // #17 定位用：记下这一行在屏幕上的 y（普通数组，不进快照）。
+                                                                    // 钉住期间它与 `armedTop` 的差值就是"用户看到的位移"。
+                                                                    .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
+                                                            ) {
+                                                            AssistantRow(
+                                                            parts = remember(
+                                                                state.liveParts,
+                                                                state.liveRunId,
+                                                                settings.showReasoning,
+                                                            ) {
+                                                                // **记住映射结果**：`List<Part>` 是 unstable 参数。开了 strong skipping
+                                                                // （Kotlin 2.0 起默认）时它按 **equals（结构）** 比较 —— 复用同一实例能让
+                                                                // `AbstractList.equals` 在首行 `o === this` 处短路，省掉逐条
+                                                                // `Part` 深比较（里面带 Markdown 文本、工具输出）和一次新 list 分配。
+                                                                // 键带 liveParts 的**实例**：内容真变了才重算。
+                                                                state.liveParts.mapNotNull { part ->
+                                                                    when (part) {
+                                                                        is LivePart.Thinking ->
+                                                                            if (settings.showReasoning) {
+                                                                                Part.Thinking(
+                                                                                    text = part.text,
+                                                                                    tokens = part.tokens,
+                                                                                    elapsedMs = part.elapsedMs,
+                                                                                    // The run this block belongs to:
+                                                                                    // the saved message carries the
+                                                                                    // same id, so the block keeps its
+                                                                                    // identity when the live row is
+                                                                                    // replaced by the stored one.
+                                                                                    runId = state.liveRunId,
+                                                                                )
+                                                                            } else {
+                                                                                null
+                                                                            }
+
+                                                                        is LivePart.Tools ->
+                                                                            Part.Tools(part.calls.map(ToolLine::of))
+
+                                                                        is LivePart.Text -> Part.Text(part.text)
+
+                                                                        // The stored copy of this line is hidden for as
+                                                                        // long as the run streams, so the live part is
+                                                                        // what puts it on screen the moment it is handed
+                                                                        // over. Same widget either way, which is why the
+                                                                        // bubble does not move when the run settles.
+                                                                        is LivePart.Steer -> Part.Steer(part.message)
+
+                                                                        // 重试留痕：这一轮的落盘消息在流式期间是藏起来的，
+                                                                        // 只有这里画了，用户才不用等整轮结束才知道刚才重试过。
+                                                                        is LivePart.Trace -> Part.Trace(part.note)
+
+                                                                        // 压缩块：运行中就画在它发生的位置，不再用气泡下面
+                                                                        // 那一行提示（用户：「在哪个部分进行的就在哪个部分
+                                                                        // 渲染」——思考 → 工具 → 压缩 → 继续）。
+                                                                        is LivePart.Compress -> Part.Compress(part.checkpoint)
+                                                                    }
+                                                                }
+                                                            },
+                                                                streaming = true,
+                                                                // The live bubble is the persona's reply too:
+                                                                // without these two it fell back to the brand name
+                                                                // and feather while every stored bubble showed the
+                                                                // persona.
+                                                                name = assistant?.label ?: "随行",
+                                                                face = assistant?.face ?: "",
+                                                                avatarPath = assistant?.avatarPath ?: "",
+                                                                runningTool = state.runningTool,
+                                                                // **流式分支里不用它**（唯一的读取点是
+                                                                // `if (!streaming && …)` 那条 note）—— 传 null，
+                                                                // 否则 stats 每变一次都让整棵 live 气泡（Markdown 全块 +
+                                                                // 思考内层列表 + 工具行）重跑，而这时根本没人读它。
+                                                                liveStats = null,
+                                                                contextWindow = contextWindow,
+                                                                expandTools = settings.expandTools,
+                                                                expandReasoning = settings.expandReasoning,
+                                                                reasoningMaxHeight = settings.reasoningHeight.dp,
+                                                                followReasoning = settings.followReasoning,
+                                                                bubbleMaxWidth = bubbleMaxWidth,
+                                                                reasoningExpansion = reasoningExpansion,
+                                                            )
+                                                            }
+                                                            // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
+                                                            // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
+                                                            if (state.runningHere) {
+                                                                RunStatusLine(
+                                                                    text = liveStatusText,
+                                                                    startedAt = runStartedAt[runKey] ?: 0L,
+                                                                    // 压缩不再占用这一行（它有自己的过程块），所以时钟一直走。
+                                                                    timed = true,
+                                                                    // 量高度给外层用：状态行在裁剪之外，钉住值要含它、
+                                                                    // 气泡报出的高度要把它扣掉（见 `liveRowLagHeight` 的 `outside`）。
+                                                                    // 写普通数组，不进快照 ⇒ 不触发重组。
+                                                                    // **量在 padding 之前**：`outside` 要代表"状态行占掉的整段高度"
+                                                                    // （含 12dp 间距），否则气泡扣减与 item 总高度天生差 12dp。
+                                                                    modifier = Modifier
+                                                                        .onGloballyPositioned {
+                                                                            statusHeight[0] = it.size.height
+                                                                        }
+                                                                        .padding(start = 4.dp, top = 12.dp, bottom = 0.dp),
+                                                                )
+                                                            }
+                                                        }
+                                                        }
+                }
+            }
             Box(Modifier.align(Alignment.BottomCenter)) {
                 Composer(
                     input = input,
