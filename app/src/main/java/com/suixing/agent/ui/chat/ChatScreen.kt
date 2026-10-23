@@ -26,8 +26,6 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -299,7 +297,10 @@ private data class PinSignals(
     val pinActive: Boolean,
 )
 
-private const val PIN_LIVE_HEIGHT = true
+// **关掉"钉住布局高度"**（用户明确要求）：它会让流式行只露出半截/或只剩提示条，
+// 而用户要的是「正常生长」。代价是回到"读历史时新内容会把上面的位置推走"，
+// 那要靠"把流式内容移出列表"来根治（issue #25 的做法，只移流式那一行）。
+private const val PIN_LIVE_HEIGHT = false
 
 /**
  * #17 验收用的**轻量痕迹**：只在状态翻转时写一行。
@@ -1226,6 +1227,46 @@ fun ChatScreen(
     // 但外层只有在**钉住生效**时才冻结高度（`pinnedLiveHeight > 0` ⇒ `scroll.pinActive`）。
     // 两者不等价时（读历史了、但钉住没量到高度/没活内容），流式行里的折叠块会**两边都不补** ⇒ 展开时跳。
     val laggingNow by rememberUpdatedState(scroll.pinActive)
+    /** 用户是否在读历史（不在底部、也不在恢复位置）。 */
+    val readingHistory = !scroll.stickToBottom && !scroll.restoring
+    val liveOutside = false // 已废弃：改为就地渲染 + 滚动锚定补偿
+    /**
+     * **滚动锚定**：流式行就地正常长高，长出来的那一点用滚动位置补回去，
+     * 于是"内容照常长、你读的那一行不动"。
+     *
+     * 与之前几版的差别：补偿量由**实测位移**（`liveRowTop`）驱动，不是按 item 高度推算，
+     * 所以不依赖 index/offset 的换算；方向若猜错会在下一帧被观测到并自动翻转。
+     */
+    val anchorTop = remember { floatArrayOf(Float.NaN) }
+    var sign = remember { floatArrayOf(1f) }
+    // **只在读历史时启动**：不读历史就整段不跑（原写法 `while(true)+withFrameNanos` 会每帧空转，
+    // 在"有会话在跑"时给整机再添一份 120Hz 的唤醒 —— 那正是切到别的会话滑动变卡的因素之一）。
+    LaunchedEffect(listState, readingHistory) {
+        if (!readingHistory) {
+            anchorTop[0] = Float.NaN
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameNanos { }
+            val top = liveRowTop[0]
+            val reading = readingHistory
+            if (!reading || top.isNaN()) {
+                anchorTop[0] = Float.NaN
+                continue
+            }
+            if (anchorTop[0].isNaN()) {
+                anchorTop[0] = top
+                continue
+            }
+            val drift = top - anchorTop[0]
+            if (abs(drift) < 1.5f) continue
+            val before = abs(drift)
+            listState.dispatchRawDelta(drift * sign[0])
+            withFrameNanos { }
+            val after = abs(liveRowTop[0] - anchorTop[0])
+            if (after > before) sign[0] = -sign[0]      // 方向错了就翻过来
+        }
+    }
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
     // 偏移 / 能否往回滚」。用途：区分三种"推上去"——
     //   ① 流式行自己长高（nat 变、idx/off 不变）⇒ 该由这里的补偿抵消；

@@ -2427,16 +2427,10 @@ class ChatViewModel : ViewModel() {
                     hold = true
                     return@locked
                 }
-                // **后台会话不发布**（用户实测：「一个会话在对话中，切到别的会话滑动会卡」）。
-                //
-                // 屏幕上根本不是它，发布出去只是在 `sessions` 里做 O(n) 字符串拼接 + 列表复制
-                // （`applyPending`），而引擎的事件是在 Main 上处理的 ⇒ 正在看另一个会话的人
-                // 就感到卡。delta **继续缓冲**（不丢），下一次非 delta 事件（工具行、落盘、
-                // 一轮结束）照常 flush；切回来时 `openConversation` 也会先 flush 一次。
-                if (_state.value.conversationId != chatId) {
-                    hold = true
-                    return@locked
-                }
+                // **不做前后台区分**（用户明确要求）：后台会话必须与前台**完全一致、依旧实时**。
+                // 之前这里有一句"后台会话不发布"，那是把行为按"是否在屏幕上"分叉了 —— 不允许。
+                // 真正要解决的是"发布这一下有多贵"，而不是"后台干脆不发"：
+                // `applyPending` 的 O(n) 拼接/复制仍在 Main 上，那是下一步要搬走的（issue #36 ④）。
             }
             // Whatever has arrived so far, applied in one go. For a non-delta event this is the
             // flush; for a delta it is the publish that got through the interval above.
@@ -2657,31 +2651,38 @@ class ChatViewModel : ViewModel() {
      * and merging them would put half a thought into the answer. Applied in one go, so one
      * publish covers everything that arrived since the last one.
      */
+    /**
+     * 把这一拍攒下来的正文/思考并进 [live]。
+     *
+     * **只做一次 `copy`**（原来每有一种增量就 copy 一次、每次都重建整份 Session）：
+     * 一轮跑起来时这个方法每 80ms 调一次，而"跑着的那一轮"与"你正在看的另一会话"共享同一个
+     * 主线程时间片 —— 少一次全量复制就少一次分配与 GC 压力。行为完全不变（字段与顺序一致）。
+     */
+    /**
+     * 把这一拍攒下来的正文/思考并进 [live]。
+     *
+     * **只做一次 `copy`**：原来每有一种增量就 copy 一次（每次都重建整份 Session）。
+     * 一轮跑起来时这个方法每 80ms 调一次，少一次全量复制就少一次分配与 GC 压力；
+     * 字段与取值顺序与改动前逐字一致，行为不变。
+     */
     private fun applyPending(live: RunSession, text: String, reasoning: String): RunSession {
-        var next = live
-        if (text.isNotEmpty()) {
-            next = next.copy(
-                streaming = next.streaming + text,
-                // 不在这里 seal 思考块：交错流（思考→正文→思考→正文）里正文一到就封口，会把
-                // 同一段思考劈成两块、同一段正文劈成两块（真机截图：一句「先说声抱歉…」被一个
-                // 2-token 的思考块从中间劈开）。封口只发生在工具行/插话行/本轮落盘那一刻，
-                // 与 settled 视图「一条消息＝一个思考块＋一段正文」同形。
-                parts = next.parts.appendText(text, next.segmentStart),
-                status = "",
-            )
+        val hasText = text.isNotEmpty()
+        val hasReasoning = reasoning.isNotEmpty()
+        if (!hasText && !hasReasoning) return live
+        val opening = hasReasoning && !live.parts.hasOpenThinking(live.segmentStart)
+        val parts = when {
+            hasText && hasReasoning ->
+                live.parts.appendThinking(reasoning, live.segmentStart).appendText(text, live.segmentStart)
+            hasText -> live.parts.appendText(text, live.segmentStart)
+            else -> live.parts.appendThinking(reasoning, live.segmentStart)
         }
-        if (reasoning.isNotEmpty()) {
-            // 同一段（最后一个工具行/插话行之后）里已有思考块就续进去，它的钟从第一次思考
-            // delta 起算；跨过工具行/插话行才是新的一段，钟才重置。
-            val opening = !next.parts.hasOpenThinking(next.segmentStart)
-            next = next.copy(
-                reasoning = next.reasoning + reasoning,
-                parts = next.parts.appendThinking(reasoning, next.segmentStart),
-                status = "",
-                thinkingStartedAt = if (opening) System.currentTimeMillis() else next.thinkingStartedAt,
-            )
-        }
-        return next
+        return live.copy(
+            streaming = if (hasText) live.streaming + text else live.streaming,
+            reasoning = if (hasReasoning) live.reasoning + reasoning else live.reasoning,
+            parts = parts,
+            status = "",
+            thinkingStartedAt = if (opening) System.currentTimeMillis() else live.thinkingStartedAt,
+        )
     }
 
     /**
