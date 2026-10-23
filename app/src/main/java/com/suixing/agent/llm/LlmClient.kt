@@ -1572,23 +1572,25 @@ private fun String.toFinishReason(): String = when (this) {
  * timer — the empty block users reported. Real reasoning keeps its paragraph breaks because
  * those arrive attached to text.
  */
-private fun reasoningOf(
+internal fun reasoningOf(
     chunk: JsonObject,
     choice: JsonObject,
     delta: JsonObject?,
     message: JsonObject?,
 ): String? {
-    val candidates = listOf(
-        delta?.get("reasoning_content"),
-        delta?.get("reasoning"),
-        message?.get("reasoning_content"),
-        message?.get("reasoning"),
-        choice["reasoning_content"],
-        choice["reasoning"],
-        chunk["reasoning_content"],
-        chunk["reasoning"],
-    )
-    return candidates.firstNotNullOfOrNull { it.textOf()?.takeIf { text -> text.isNotBlank() } }
+    // **不建 list**：这段每个 delta 都会跑（思考流式），原来每次分配一个 8 元素列表。
+    // 直接按优先级顺序早返回，零分配。
+    fun of(source: JsonObject?, key: String): String? =
+        source?.get(key).textOf()?.takeIf { it.isNotBlank() }
+
+    of(delta, "reasoning_content")?.let { return it }
+    of(delta, "reasoning")?.let { return it }
+    of(message, "reasoning_content")?.let { return it }
+    of(message, "reasoning")?.let { return it }
+    of(choice, "reasoning_content")?.let { return it }
+    of(choice, "reasoning")?.let { return it }
+    of(chunk, "reasoning_content")?.let { return it }
+    return of(chunk, "reasoning")
 }
 
 /** Turns an HTTP status into advice, not just a number. */
