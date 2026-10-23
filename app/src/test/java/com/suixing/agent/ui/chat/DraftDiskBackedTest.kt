@@ -15,25 +15,19 @@ class DraftDiskBackedTest {
 
     @Test
     fun `a cold-start window read back from disk counts as disk-backed`() {
-        assertTrue(
-            draftIsDiskBacked(livePresent = false, shownPresent = true, baseFromDisk = true),
-        )
-    }
-
-    @Test
-    fun `an in-memory session is never disk-backed`() {
-        assertFalse(draftIsDiskBacked(livePresent = true, shownPresent = true, baseFromDisk = true))
-        assertFalse(draftIsDiskBacked(livePresent = true, shownPresent = false, baseFromDisk = true))
+        assertTrue(draftIsDiskBacked(shownPresent = true, baseFromDisk = true))
     }
 
     @Test
     fun `the cache path is not disk-backed`() {
         // 命中 LRU 时 base 来自内存（可能含保存失败的消息）⇒ 不能删草稿。
-        assertFalse(draftIsDiskBacked(livePresent = false, shownPresent = true, baseFromDisk = false))
+        assertFalse(draftIsDiskBacked(shownPresent = true, baseFromDisk = false))
     }
 
     @Test
-    fun `nothing on screen means the list came from the stored conversation`() {
-        assertTrue(draftIsDiskBacked(livePresent = false, shownPresent = false, baseFromDisk = false))
+    fun `nothing on screen falls back to the stored conversation`() {
+        assertTrue(draftIsDiskBacked(shownPresent = false, baseFromDisk = false))
+        // 组合补齐（评审 12 的 S3）：这一格原来没测。`shown == null` 且声明来自磁盘 ⇒ 仍是 true。
+        assertTrue(draftIsDiskBacked(shownPresent = false, baseFromDisk = true))
     }
 }

@@ -1225,10 +1225,14 @@ class ChatViewModel : ViewModel() {
             // **尾部读完再合并草稿**（评审 10 的 S4）：这两件事原来各起一个协程，
             // 而草稿是小文件、往往先读完 ⇒ `mergeLiveDraft` 手里 `messages` 还是空
             // ⇒ 两个判重分支都看不到那条消息 ⇒ 又补一条（重复）。串起来之后才真正生效。
-            if (_state.value.conversationId == conversation.id &&
+            // **必须 gate 在 `opened != null` 上**（评审 12 的 H1）：读盘失败时 `_state.messages`
+            // 还是空列表，那不算"来自磁盘"。硬写 true 会让空 base 也获得"可以清草稿"的资格，
+            // 而且紧接着的 `save` 必被护栏拒绝（既不是全量也不是尾部）⇒ 假红条 + 只剩一条消息的画面。
+            // 读失败就把草稿留给下一次打开。
+            if (opened != null &&
+                _state.value.conversationId == conversation.id &&
                 Core.chats.hasLiveDraft(conversation.id)
             ) {
-                // 这里的 base 是**刚从盘上读回的窗口** ⇒ 明确告诉合并逻辑"它来自磁盘"（S1）。
                 mergeLiveDraft(conversation.id, baseFromDisk = true)
             }
         }
@@ -2975,8 +2979,8 @@ class ChatViewModel : ViewModel() {
             // `messages` 可能来自活会话或 LRU 缓存 —— 里面可能有**保存失败、只在内存里**的消息
             // （`endSession` 把内存版写进了缓存）。判重命中它们就删草稿，等于把"唯一副本"
             // 在一个不可逆的方向上扔掉。宁可留着（下次还能再判一次）。
+            // 走到这里 `live` 必为 null（上面已 early-return），所以判据里不需要它 —— 去掉死参数。
             val fromDisk = draftIsDiskBacked(
-                livePresent = live != null,
                 shownPresent = shown != null,
                 baseFromDisk = baseFromDisk,
             )
@@ -3281,6 +3285,18 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
     other.messages == messages
 
 /**
+ * 合并草稿时，手里这份 `messages` 是不是**确实在磁盘上**（决定能不能清掉草稿）。
+ *
+ * 这条判据关系不可逆：判成"是"就去删草稿，而草稿是进程被杀后唯一的副本。所以它必须覆盖
+ * 那个容易漏的路径 —— **冷启动时的 base 恰恰是刚从盘上读回来的窗口**（`live == null`
+ * 但 `shown != null` 且 `baseFromDisk == true`）⇒ 它就是磁盘来源，可以清。
+ * 只有"来自内存缓存"时才是假的。
+ *
+ * 注意 **`shown == null` 并不等于"盘上有内容"**：按 #30，会话列表只带 meta，冷启动时
+ * `stored.messages` 是空的 —— 那种空 base 也不会走清理分支（要求 `restored` 为空），
+ * 所以这条判据只需要区分"屏幕上的这份是否来自磁盘"。
+ */
+/**
  * What has to be appended to [messages] for the draft a killed run left behind to come back
  * whole: the rounds and tool results it had already produced, then the half-written answer.
  *
@@ -3295,16 +3311,8 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
  * for no reason.
  */
-/**
- * 合并草稿时，手里这份 `messages` 是不是**确实在磁盘上**（决定能不能清掉草稿）。
- *
- * 这条判据关系不可逆：判成"是"就去删草稿，而草稿是进程被杀后唯一的副本。所以它必须覆盖
- * 那个容易漏的路径 —— **冷启动时的 base 恰恰是刚从盘上读回来的窗口**（`live == null`
- * 但 `shown != null` 且 `baseFromDisk == true`）⇒ 它就是磁盘来源，可以清。
- * 只有"来自活会话/内存缓存"时才是假的。
- */
-internal fun draftIsDiskBacked(livePresent: Boolean, shownPresent: Boolean, baseFromDisk: Boolean): Boolean =
-    !livePresent && (!shownPresent || baseFromDisk)
+internal fun draftIsDiskBacked(shownPresent: Boolean, baseFromDisk: Boolean): Boolean =
+    !shownPresent || baseFromDisk
 
 internal fun liveDraftRecovery(
     draft: LiveDraft,
