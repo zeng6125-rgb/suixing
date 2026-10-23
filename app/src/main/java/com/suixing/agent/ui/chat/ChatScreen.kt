@@ -1979,7 +1979,17 @@ fun ChatScreen(
             // **读历史时它停靠在这里**（不进列表）：长高推不动列表，也就不需要每帧「测量→纠正」
             // —— 那条路 issue #17 已经证明追不上连续变化，正是抖动的来源。样式与列表里**完全相同**。
             if (live && readingHistory) {
-                Column(Modifier.fillMaxWidth()) {
+                // **必须对齐到下方**：父容器是 Box，不写 align 会落到左上角（真机截图：跑到顶上去了）。
+                // 底垫 = 输入框占的高度，于是它正好坐在输入框上方。
+                Column(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(bottom = stackFootprint)
+                        // 长回答不能把列表盖没：最多占屏高的 40%，超出在框内滚动。
+                        .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.4f).dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
                                                         // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
                                                         // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
                                                         // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
