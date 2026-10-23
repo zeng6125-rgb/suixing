@@ -556,9 +556,6 @@ class ChatViewModel : ViewModel() {
      */
     private val mergingLive = InFlightGuard()
 
-    /** 哪些会话的**缓存**内容确认已经在磁盘上（S1 水位）。由 [cacheMessages] 维护。 */
-    private val diskBackedCache = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-
     /**
      * The conversation this process last showed, remembered so a new screen instance can adopt
      * it before its first frame instead of waiting for the marker file to be read.
@@ -576,19 +573,34 @@ class ChatViewModel : ViewModel() {
      * 容量 5（用户定的数）：足够覆盖"在几个会话间来回看"，最坏内存 = 5 × 12 轮，
      * 与"全部常驻"不是一个量级。存的是**读出来的那一页**（`readTail` 的结果），与屏幕一致。
      */
-    private val messageCache = object : LinkedHashMap<String, List<StoredMessage>>(
+    private val messageCache = object : LinkedHashMap<String, CacheEntry>(
         MESSAGE_CACHE_SIZE, 0.75f, true,
     ) {
         override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<String, List<StoredMessage>>?,
+            eldest: MutableMap.MutableEntry<String, CacheEntry>?,
         ): Boolean = size > MESSAGE_CACHE_SIZE
     }
+
+    /**
+     * 缓存里的一格：**内容 + 它是否已经在磁盘上**。
+     *
+     * 两件事放进同一个值，是为了让"内容和标记脱节"这种 bug 物理上不可能发生 ——
+     * 本项目已经因为"同一个概念写两遍"出过四次事故（`ListSlots` 两处各数一遍、
+     * 平台水位、`messageCache` 与 `diskBackedCache` 各存一份）。
+     *
+     * [diskBacked] 决定合并草稿时能不能清草稿：从盘读回来的窗口、以及"保存成功之后"的快照是 true；
+     * `endSession` 把内存里的会话写进缓存时是 false（那份可能含保存失败、只在内存的消息）。
+     */
+    private data class CacheEntry(
+        val messages: List<StoredMessage>,
+        val diskBacked: Boolean,
+    )
 
     /** [messageCache] 的锁：它会同时被 UI 线程和读盘协程碰到。 */
     private val messageCacheLock = Any()
 
     private fun cachedMessages(chatId: String): List<StoredMessage>? =
-        synchronized(messageCacheLock) { messageCache[chatId] }
+        synchronized(messageCacheLock) { messageCache[chatId]?.messages }
 
     /**
      * @param diskBacked 这份 `messages` 是不是**已经在磁盘上**（决定合并草稿时能不能清草稿）。
@@ -602,14 +614,14 @@ class ChatViewModel : ViewModel() {
     ) {
         if (chatId.isEmpty() || messages.isEmpty()) return
         synchronized(messageCacheLock) {
-            messageCache[chatId] = messages
-            // 水位跟缓存一起走：同一格被"内存版"覆盖时必须降级，否则会拿旧水位去清草稿。
-            if (diskBacked) diskBackedCache.add(chatId) else diskBackedCache.remove(chatId)
+            // 内容与标记同批写入：同一格被"内存版"覆盖时标记自动降级。
+            messageCache[chatId] = CacheEntry(messages, diskBacked)
         }
     }
 
-    /** 缓存里的那份是否确认已落盘（S1 的水位）。 */
-    private fun cacheIsDiskBacked(chatId: String): Boolean = chatId in diskBackedCache
+    /** 缓存里的那份是否确认已落盘（与内容在同一格、同一把锁里读，不可能脱节）。 */
+    private fun cacheIsDiskBacked(chatId: String): Boolean =
+        synchronized(messageCacheLock) { messageCache[chatId]?.diskBacked == true }
 
     /**
      * Text waiting to be published, per conversation; see [handleEvent] and [DELTA_PUBLISH_MS].
