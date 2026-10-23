@@ -32,7 +32,7 @@ internal const val LIVE_SUFFIX = ".live.json"
  * `chats/store/<id>.meta` (see [ChatStore]). **旧格式 `<id>.json` 已不再读取**（issue #40）——
  * 若机器上仍有它们，`load()` 会打一条 ERROR 说明原因，文件本身不会被删。A user's
  * existing chats are 54 MB of them — and [migratePending] moves each one over, renaming it to
- * `<id>.json.migrated` only after the new copy has been read back and compared whole.
+ * 只有读回校验通过才认为写入成功（见 [save]）。
  */
 class ChatRepository(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -932,19 +932,6 @@ class ChatRepository(private val context: Context) {
         const val CORRUPT_KEEP_MS = 30L * 24 * 60 * 60 * 1000
 
         const val CORRUPT_SUFFIX = ".corrupt"
-
-        /**
-         * A migrated chat's old single file, kept through a rollback window so a build that
-         * cannot read the new format still has something to fall back to.
-         */
-
-        /**
-         * Why a chat is still in the old format. Deliberately not `.json`: every listing in this
-         * app picks files out by extension, and a marker must never be read as a conversation.
-         */
-
-        /** How long that rollback copy is worth keeping after a successful migration. */
-        /** 字节体检的门槛：小于这个大小，legacy 的元数据占比太大，比例说明不了问题。 */
 
         /** Tag for the storage lines: rewriting a whole transcript, and every migration step. */
         const val TAG = "ChatStore"
