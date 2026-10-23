@@ -550,6 +550,9 @@ class ChatViewModel : ViewModel() {
      */
     private val windowStarts = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
 
+    /** 正在合并草稿的会话（S3）：三个入口可能并发进来，重复合并会各造一份 id ⇒ 撞护栏或触发整份重写。 */
+    private val mergingLive = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     /**
      * The conversation this process last showed, remembered so a new screen instance can adopt
      * it before its first frame instead of waiting for the marker file to be read.
@@ -1225,7 +1228,8 @@ class ChatViewModel : ViewModel() {
             if (_state.value.conversationId == conversation.id &&
                 Core.chats.hasLiveDraft(conversation.id)
             ) {
-                mergeLiveDraft(conversation.id)
+                // 这里的 base 是**刚从盘上读回的窗口** ⇒ 明确告诉合并逻辑"它来自磁盘"（S1）。
+                mergeLiveDraft(conversation.id, baseFromDisk = true)
             }
         }
         // A run that was killed left its half-written answer in a draft file: it belongs to
@@ -2913,7 +2917,30 @@ class ChatViewModel : ViewModel() {
      * order is append, save, then clear — clearing first would lose the text for good if the
      * save never happened.
      */
-    private suspend fun mergeLiveDraft(chatId: String) {
+    private suspend fun mergeLiveDraft(
+        chatId: String,
+        /**
+         * `messages` 这份 base 是不是**刚从磁盘读回来的**（S1）。
+         *
+         * 冷启动路径的 base 恰恰是刚读回的窗口 —— 只看 `shown == null` 会把它判成"非磁盘来源"，
+         * 于是判重命中时草稿**永远不清**（每次打开白读一遍；残留草稿带旧 runId，
+         * 将来 `rewrite` 丢过那条消息后会变成一张过时的"中断"卡片）。
+         */
+        baseFromDisk: Boolean = false,
+    ) {
+        // **活会话直接返回，且要在读草稿之前**（S4）：运行中每秒都在写草稿，
+        // 排在后面等于每次切进来都白读+解析一遍。
+        if (sessions[chatId] != null) return
+        // 多个入口（冷启动 / 切回 / 缓存命中）可能并发进这里（S3）。
+        if (!mergingLive.add(chatId)) return
+        try {
+            mergeLiveDraftLocked(chatId, baseFromDisk)
+        } finally {
+            mergingLive.remove(chatId)
+        }
+    }
+
+    private suspend fun mergeLiveDraftLocked(chatId: String, baseFromDisk: Boolean) {
         val draft = Core.chats.readLive(chatId) ?: return
         val live = sessions[chatId]
         // **这一轮还活着就不合并**（评审 M2）：草稿是"运行中每秒写一份"的半截正文，
@@ -2948,7 +2975,11 @@ class ChatViewModel : ViewModel() {
             // `messages` 可能来自活会话或 LRU 缓存 —— 里面可能有**保存失败、只在内存里**的消息
             // （`endSession` 把内存版写进了缓存）。判重命中它们就删草稿，等于把"唯一副本"
             // 在一个不可逆的方向上扔掉。宁可留着（下次还能再判一次）。
-            val fromDisk = live == null && shown == null
+            val fromDisk = draftIsDiskBacked(
+                livePresent = live != null,
+                shownPresent = shown != null,
+                baseFromDisk = baseFromDisk,
+            )
             if (fromDisk) {
                 Core.chats.clearLive(chatId)
             } else {
@@ -2972,6 +3003,9 @@ class ChatViewModel : ViewModel() {
             checkpoints = live?.checkpoints ?: shown?.checkpoints ?: stored?.checkpoints.orEmpty(),
         )
         if (written != null) {
+            // **回写 LRU**（S2）：合并只改了 `_state` 与 `sessions`，而切走再切回走的是缓存 ——
+            // 不回写的话，本进程内会少那条刚恢复的消息（盘上是对的，重启才看得见）。
+            cacheMessages(chatId, next)
             Core.chats.clearLive(chatId)
         } else {
             Log.w(TAG, "live draft kept for $chatId: the merged copy was not written")
@@ -3261,6 +3295,17 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
  * for no reason.
  */
+/**
+ * 合并草稿时，手里这份 `messages` 是不是**确实在磁盘上**（决定能不能清掉草稿）。
+ *
+ * 这条判据关系不可逆：判成"是"就去删草稿，而草稿是进程被杀后唯一的副本。所以它必须覆盖
+ * 那个容易漏的路径 —— **冷启动时的 base 恰恰是刚从盘上读回来的窗口**（`live == null`
+ * 但 `shown != null` 且 `baseFromDisk == true`）⇒ 它就是磁盘来源，可以清。
+ * 只有"来自活会话/内存缓存"时才是假的。
+ */
+internal fun draftIsDiskBacked(livePresent: Boolean, shownPresent: Boolean, baseFromDisk: Boolean): Boolean =
+    !livePresent && (!shownPresent || baseFromDisk)
+
 internal fun liveDraftRecovery(
     draft: LiveDraft,
     messages: List<StoredMessage>,
