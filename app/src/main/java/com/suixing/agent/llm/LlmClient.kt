@@ -475,6 +475,8 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         if (stream.hasToolCalls()) received = true
                     }
                     while (true) {
+                        // 多行 JSON 的配平状态（见下面 SseFrames 处）
+                        val frame = SseFrames.State()
                         val line = source.readUtf8Line() ?: break
                         if (line.isEmpty()) {
                             // 事件边界：把攒着的多行 data 拼成一条再解析。
@@ -503,10 +505,10 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         }
                         if (pending.isNotEmpty()) pending.append('\n')
                         pending.append(data)
-                        if (
-                            runCatching { Json.parseToJsonElement(pending.toString()).jsonObject }
-                                .getOrNull() != null
-                        ) {
+                        // **不要每加一行就重新 parse 整个 pending**：网关把一个 JSON 拆成多行时，
+                        // 那是 O(行数2) 的字符解析（30KB 的 chunk 约等于 600 行，十几万字符被反复解析）。
+                        // 改用花括号配平判断「这个 JSON 完整了」，每行只扫本行；完整时仍会 parse 一次。
+                        if (SseFrames.feed(frame, data)) {
                             acceptPayload(pending.toString())
                             pending.clear()
                         }
