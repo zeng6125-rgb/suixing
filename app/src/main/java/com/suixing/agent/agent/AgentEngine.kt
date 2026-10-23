@@ -1325,7 +1325,7 @@ class AgentEngine(
                         val c = messageChars(message)
                         total += c
                         if (message.role != ROLE_SYSTEM) chars += c
-                        if (message.allImages.isNotEmpty()) images++
+                        if (message.imageCount > 0) images++
                     }
                     chars to estimatePromptTokens(total, images)
                 }
@@ -1448,7 +1448,7 @@ class AgentEngine(
                 usage?.promptTokens?.takeIf { it > 0 }?.let { reported ->
                     lastPromptTokens = reported
                     lastPromptChars = wireChars(wire)
-                    lastPromptImages = wire.count { it.allImages.isNotEmpty() }
+                    lastPromptImages = wire.count { it.imageCount > 0 }
                 }
                 val thinking = turn.reasoning.takeIf { it.isNotBlank() }
                 // A truncated turn can end mid-tool-call, so say so instead of silently
@@ -1971,7 +1971,7 @@ class AgentEngine(
         message.toolCalls.forEach { call ->
             append("\n  [调用工具 ").append(call.name).append(' ').append(call.arguments).append(']')
         }
-        if (message.allImages.isNotEmpty()) append("\n  （含截图，已省略）")
+        if (message.imageCount > 0) append("\n  （含截图，已省略）")
     }
 
     /**
@@ -1991,7 +1991,7 @@ class AgentEngine(
      * the pessimistic way.
      */
     private fun estimatePromptTokens(wire: List<ChatMessage>): Int =
-        estimatePromptTokens(wireChars(wire), wire.count { it.allImages.isNotEmpty() })
+        estimatePromptTokens(wireChars(wire), wire.count { it.imageCount > 0 })
 
     /**
      * 同一个估算，但字符数与图片数由调用方提供 —— 调用点已经遍历过一遍 wire 时用它，
@@ -2095,7 +2095,7 @@ class AgentEngine(
         // Images only go out when the configured model can read them; a text-only
         // endpoint rejects the whole request otherwise.
         val imageList = message.allImages.takeIf { settings.imageInput }.orEmpty()
-        val note = if (message.allImages.isNotEmpty() && imageList.isEmpty()) {
+        val note = if (message.imageCount > 0 && imageList.isEmpty()) {
             "\n（图片已省略：当前未开启「模型支持图片输入」）"
         } else {
             ""
@@ -2129,7 +2129,7 @@ class AgentEngine(
                 val tool = message.toolName.orEmpty()
                 if (imageList.isNotEmpty()) {
                     wire += ChatMessage.screenshot("（这是上一步 $tool 返回的截图）", imageList)
-                } else if (message.allImages.isNotEmpty()) {
+                } else if (message.imageCount > 0) {
                     wire += ChatMessage.user(
                         "（上一步 $tool 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
                     )

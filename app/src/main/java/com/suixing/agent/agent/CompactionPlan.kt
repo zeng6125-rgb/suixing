@@ -66,7 +66,7 @@ internal fun renderForCompaction(message: StoredMessage): String = buildString {
         append("\n  [工具结果] ").append(output.take(TOOL_OUTPUT_IN_SUMMARY))
         if (output.length > TOOL_OUTPUT_IN_SUMMARY) append(" …（共 ${output.length} 字符）")
     }
-    if (message.allImages.isNotEmpty()) append("\n  （含截图，已省略）")
+    if (message.imageCount > 0) append("\n  （含截图，已省略）")
 }
 
 /** 压缩时保留的尾部条数：一轮的量。 */

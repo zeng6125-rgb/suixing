@@ -23,7 +23,7 @@ internal fun pruneRequestImages(
 ): List<ChatMessage> {
     if (budgetChars <= 0) return wire
     val carriers = wire.withIndex().filter { entry ->
-        entry.value.toolScreenshot && entry.value.allImages.isNotEmpty()
+        entry.value.toolScreenshot && entry.value.imageCount > 0
     }
     if (carriers.isEmpty()) return wire
     var total = carriers.sumOf { entry -> entry.value.allImages.sumOf { it.length } }

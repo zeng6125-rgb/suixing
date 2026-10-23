@@ -62,6 +62,10 @@ data class ChatMessage(
     /** 单值与列表的聚合读侧：旧调用点（工具截图）与新调用点（多附件）都不丢。 */
     val allImages: List<String> get() = imagesBase64.ifEmpty { listOfNotNull(imageBase64) }
 
+    /** 图片张数，**不分配对象**（`allImages` 每次访问都新建一个 List）。只数张数时代替它。 */
+    val imageCount: Int
+        get() = if (imagesBase64.isNotEmpty()) imagesBase64.size else if (imageBase64 != null) 1 else 0
+
     /** 去掉图片并补一行说明；[toolScreenshot] 保留，降级过的条目仍认得出是截图。 */
     fun omitImages(note: String): ChatMessage = copy(
         text = (text + note).trim(),
