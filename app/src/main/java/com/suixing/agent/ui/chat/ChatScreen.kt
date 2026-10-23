@@ -1254,8 +1254,13 @@ fun ChatScreen(
      * 2. **单次漂移最多补 3 帧**，补不动就重新取样 —— 否则会和布局互相追着跑。
      * 3. 位移小于 1.5px 不补（亚像素抖动没有意义，还会让列表一直在动）。
      */
-    LaunchedEffect(listState, readingHistory) {
-        if (!readingHistory) {
+    // **没有活内容就不启动**：没有一轮在跑时，流式行不会长高，也就不需要每帧唤醒。
+    // 原写法只在 `!readingHistory` 时退出，于是"读历史但没任务在跑"这个**最常见**的场景里，
+    // 它每帧空转 120 次/秒 —— 那正是拖慢滚动的东西（#26/#35 的同类）。
+    val liveGrowing = state.runningHere ||
+        state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking }
+    LaunchedEffect(listState, readingHistory, liveGrowing) {
+        if (!readingHistory || !liveGrowing) {
             anchorTop[0] = Float.NaN
             return@LaunchedEffect
         }
