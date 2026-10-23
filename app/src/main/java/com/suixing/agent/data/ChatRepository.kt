@@ -643,7 +643,10 @@ class ChatRepository(private val context: Context) {
             // 和没有这个开关时一样危险，必须拒绝。
             if (allowShrink && fullHistory && diskHasLog) {
                 val known = diskMeta?.messageCount ?: 0
-                if (conversation.messages.size < known) {
+                // **条数相等也要核对末条 id**（评审 9 建议项）：编辑不改 id，这个核对零成本；
+                // 少了它，"另一个会话恰好同长的窗口"会被当成全文写进 `rewrite`（gen+1、旧代被删）。
+                val tailMatches = conversation.messages.lastOrNull()?.id == diskMeta?.lastMessageId
+                if (conversation.messages.size < known || !tailMatches) {
                     val headOnDisk = runCatching { store.firstMessageId(diskMeta!!) }.getOrNull()
                     val headMatches = headOnDisk != null &&
                         conversation.messages.firstOrNull()?.id == headOnDisk
@@ -846,7 +849,13 @@ class ChatRepository(private val context: Context) {
                 // **解析失败不要删**（评审建议，与「用户没发话不删文件」同口径）：
                 // 草稿是进程被杀后唯一的副本；文件坏了多半只是"写到一半被切断"，
                 // 里面仍可能有一段可救的正文。改成改名留下痕迹，绝不 delete。
-                runCatching { file.renameTo(File(file.parentFile, file.name + ".corrupt")) }
+                // 目标名带时间戳：`renameTo` 失败是**返回 false 而不是抛**，
+                // 原来的 `runCatching` 抓不到（文件仍在原名 ⇒ 每次打开都重解析）；
+                // 固定目标名还会让第二次损坏覆盖第一次。
+                val target = File(file.parentFile, file.name + "." + System.currentTimeMillis() + ".corrupt")
+                if (!file.renameTo(target)) {
+                    Log.w(TAG, "could not set aside a corrupt draft at ${file.name}; leaving it in place")
+                }
                 null
             }
     }

@@ -3251,11 +3251,20 @@ internal fun liveDraftRecovery(
 ): List<StoredMessage> {
     val restored = draft.messages.filterNot { written -> messages.any { it.id == written.id } }
     val probe = draft.text.trim().take(LIVE_DRAFT_PROBE_CHARS)
-    val delivered = probe.isNotEmpty() && messages.any { message ->
+    // **正文为空、只有思考内容**时也要判重（评审 9 建议项）。
+    // `emitPartial` 在"还没吐正文"时会把 text="" + reasoning 全文发出来并落盘；
+    // 草稿的 text 也是空 ⇒ `probe` 为空 ⇒ 原来判 delivered=false ⇒ 再补一条
+    // 带同样思考内容的助理消息 ⇒ 用户看到**重复的思考卡**（而 0.8.372 的 `?: false`
+    // 让"用户按停止"这条路每次都会留下草稿，所以更容易走到）。
+    val reasoningDelivered = probe.isEmpty() && !draft.reasoning.isNullOrBlank() &&
+        messages.any { message ->
+            message.runId == draft.runId && message.reasoning == draft.reasoning
+        }
+    val delivered = reasoningDelivered || (probe.isNotEmpty() && messages.any { message ->
         message.runId == draft.runId &&
             message.role == Roles.ASSISTANT &&
             message.text.trim().startsWith(probe)
-    }
+    })
     // Nothing left to say only when the answer already landed, or when the draft is empty in
     // every sense. A run stopped while it was still thinking has no answer text at all, and
     // that is not the same as having produced nothing: the thinking — and any tool round
