@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
@@ -59,9 +60,21 @@ class AgentForegroundService : Service() {
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /**
+     * 一次 run 期间持有的 partial wakelock —— **息屏后 CPU 不休眠**。
+     *
+     * 前台服务只保证进程不被杀，**不阻止 CPU 休眠**：息屏一段时间后设备进 doze，socket 被冻结，
+     * 表现就是"切后台/息屏后回答卡住，点亮屏幕才继续"。这是长连接流式必须自己保的事。
+     *
+     * 不加超时：这个服务的寿命**就是 run 的寿命**（两个调用点都在 run 的起止），
+     * 而进程被杀时系统会自动释放任何持有的 wakelock —— 不会漏。
+     */
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "正在执行任务"
         ensureChannel()
+        acquireWakeLock()
         startForeground(NOTIFICATION_ID, buildNotification(text))
         // Started after startForeground, not in onCreate: a process that is already
         // running a foreground service may start another one on Android 12+, and one
@@ -99,6 +112,7 @@ class AgentForegroundService : Service() {
      * `onDestroy` is a synchronous callback; the value is the one this run ended under.
      */
     override fun onDestroy() {
+        releaseWakeLock()
         scope.cancel()
         Core.appScope.launch {
             if (!Core.settings.current().floatingConsole) {
@@ -109,6 +123,21 @@ class AgentForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val power = getSystemService(PowerManager::class.java) ?: return
+        wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "suixing:run").apply {
+            // 不计数：避免 acquire/release 次数不配对导致永远不释放
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        wakeLock = null
+    }
 
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

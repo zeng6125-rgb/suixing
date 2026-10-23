@@ -3,6 +3,8 @@ package com.suixing.agent.ui.capability
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import android.os.Build
 import android.os.Environment
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -88,6 +90,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
     // to be re-read when the user comes back rather than remembered in state.
     val context = LocalContext.current
     var overlayGranted by remember { mutableStateOf(FloatConsoleService.canDrawOverlays(context)) }
+    var batteryExempt by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
     val overlayLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { overlayGranted = FloatConsoleService.canDrawOverlays(context) }
@@ -261,6 +264,32 @@ fun CapabilityScreen(onBack: () -> Unit) {
                             scope.launch { Core.settings.update { it.copy(consoleWhileRunning = on) } }
                         },
                     )
+                },
+            )
+
+            CapabilityCard(
+                title = "后台运行",
+                icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
+                summary = "息屏或切到别的应用时，长任务与流式回答继续跑",
+                granted = batteryExempt,
+                lines = if (batteryExempt) {
+                    listOf(
+                        "已豁免电池优化：息屏后也能继续接收回答",
+                        "run 期间持有唤醒锁，任务结束即释放",
+                    )
+                } else {
+                    listOf(
+                        "未豁免：系统可能在息屏后冻结本应用，回答会卡住直到你点亮屏幕",
+                        "点右侧「允许后台运行」，在系统弹框里选允许",
+                    )
+                },
+                actionLabel = if (batteryExempt) "去系统设置确认" else "允许后台运行",
+                onAction = {
+                    val launched = requestIgnoreBatteryOptimizations(context)
+                    batteryExempt = isIgnoringBatteryOptimizations(context)
+                    if (!launched) {
+                        notice = "本机无法打开电池优化设置，请到系统设置里手动允许随行自启动。"
+                    }
                 },
             )
 
@@ -766,4 +795,27 @@ private fun formatAgo(timestamp: Long): String {
         delta < 86_400_000L -> "${delta / 3_600_000L} 小时前"
         else -> "${delta / 86_400_000L} 天前"
     }
+}
+
+/** 本应用是否已豁免电池优化（「允许后台运行」）。 */
+private fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+    val power = context.getSystemService(PowerManager::class.java) ?: return false
+    return power.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+/**
+ * 请求豁免电池优化。
+ *
+ * 优先用 `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 直接弹系统确认框；个别 ROM 不认这个
+ * action，就退回「电池优化设置列表」让用户自己找。返回是否成功打开了某个界面。
+ */
+private fun requestIgnoreBatteryOptimizations(context: Context): Boolean {
+    val direct = Intent(
+        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        Uri.parse("package:" + context.packageName),
+    )
+    if (runCatching { context.startActivity(direct) }.isSuccess) return true
+    return runCatching {
+        context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+    }.isSuccess
 }

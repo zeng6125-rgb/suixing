@@ -31,7 +31,11 @@ internal fun rememberTypedText(text: String, enabled: Boolean): String {
     if (!enabled || !LocalTypewriter.current) return text
     val target = rememberUpdatedState(text)
     // 初值是当前长度：中途打开这个开关（或这一块刚从折叠里出来）时不会把已有文字重播一遍。
-    var revealed by remember { mutableIntStateOf(text.length) }
+    // **初值必须是 0，不能是 text.length**：思考内容常整块到达（网关一次把
+    // `reasoning_content` 全吐出来），块被创建时 text 已经是全文 —— 初值取长度就等于
+    // 「一个字都不用打」，真机表现就是"思考一下子全显示完"（正文是细碎增量所以看不出问题）。
+    // 只在 enabled（=正在流式）时才会走到这里，所以已定型的块不受影响。
+    var revealed by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         while (true) {
             delay(TYPE_TICK_MS)
@@ -46,11 +50,7 @@ internal fun rememberTypedText(text: String, enabled: Boolean): String {
                 // 步长按积压自适应，但**有上下限**：下限保证看得见"在打字"，
                 // 上限避免一块一块蹦。原来的 `CATCH_UP=240` 太小 —— 思考内容常成块到达
                 // （一次几百字），一超过就直接对齐 ⇒ 观感变成"瞬发"（真机反馈）。
-                val step = if (backlog > TYPE_CATCH_UP) {
-                    backlog
-                } else {
-                    (backlog / 3).coerceIn(TYPE_MIN_STEP, TYPE_MAX_STEP)
-                }
+                val step = typewriterStep(backlog)
                 revealed = (revealed + step).coerceAtMost(goal)
             }
         }
@@ -68,4 +68,24 @@ private const val TYPE_MIN_STEP = 2
 private const val TYPE_MAX_STEP = 20
 
 /** 积压超过这个数就直接对齐（一次吐几千字的端点不该让尾巴拖几秒）。 */
+/**
+ * 这一拍放几个字。
+ *
+ * 抽成纯函数只为了能测：它决定"看得见在打字"还是"整块蹦出来"，是这个文件里唯一容易被
+ * 参数调坏的地方。
+ *
+ * - 积压 ≤ [TYPE_CATCH_UP]：`积压/3`，限制在 2..20 —— 稳态落后约 3 拍（120ms），
+ *   看得见在打字，又不会永远追不上；
+ * - 积压更大（端点一次吐几千字）：`积压/8`，限制在 20..400 —— 3000 字约 8 拍（320ms）
+ *   追完，既不是瞬发，也不是几十秒的磨。
+ */
+internal fun typewriterStep(backlog: Int): Int = if (backlog > TYPE_CATCH_UP) {
+    (backlog / 8).coerceIn(TYPE_MAX_STEP, TYPE_FAST_STEP)
+} else {
+    (backlog / 3).coerceIn(TYPE_MIN_STEP, TYPE_MAX_STEP)
+}
+
 private const val TYPE_CATCH_UP = 2_000
+
+/** 积压超过 [TYPE_CATCH_UP] 时的每拍上限：够快，但不至于整块蹦出来。 */
+private const val TYPE_FAST_STEP = 400
