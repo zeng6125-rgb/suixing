@@ -1436,6 +1436,14 @@ internal fun ImagePreviewDialog(
     }
 }
 
+/**
+ * 已解码截图的**进程级**小缓存（4 张）。
+ *
+ * 为什么是进程级而不是 `remember`：`remember` 随组合销毁 —— 列表项滚出视口就丢，
+ * 滚回来就要重新解码一张 1080p（几十毫秒）。用户"滑上滑下很慢"有一部分就是它。
+ */
+private val decodedImages = DecodedImageCache()
+
 @Composable
 internal fun ImageBlock(base64: String) {
     // Decoding a 1080p screenshot costs tens of milliseconds; doing it inside
@@ -1443,12 +1451,29 @@ internal fun ImageBlock(base64: String) {
     var bitmap by remember(base64) { mutableStateOf<ImageBitmap?>(null) }
     var full by remember { mutableStateOf(false) }
     LaunchedEffect(base64) {
+        val key = decodedImages.keyOf(base64)
+        // 命中缓存直接显示：滚出视口再滚回来时不必重新解码（issue #38 方向 7）。
+        (decodedImages.get(key) as? ImageBitmap)?.let {
+            bitmap = it
+            return@LaunchedEffect
+        }
         bitmap = withContext(Dispatchers.Default) {
             runCatching {
                 val bytes = Base64.decode(base64, Base64.DEFAULT)
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                // **只解析尺寸，先算降采样倍率**：显示上限 240dp（约 720px），
+                // 直接解 1080p 原图既慢又占内存，而这一张图最终只会显示成那么高。
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val sample = ImageDecode.sampleSizeFor(
+                    width = bounds.outWidth,
+                    height = bounds.outHeight,
+                    maxHeight = 720,
+                )
+                val options = BitmapFactory.Options().apply { inSampleSize = sample }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
             }.getOrNull()
         }
+        bitmap?.let { decodedImages.put(key, it) }
     }
     bitmap?.let { decoded ->
         Spacer(Modifier.height(6.dp))
