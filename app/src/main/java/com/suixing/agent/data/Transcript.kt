@@ -56,8 +56,9 @@ object Transcript {
     fun chosenRuns(
         messages: List<StoredMessage>,
         activeRuns: Map<String, String>,
+        /** 调用方已经算过的 `turnOf`：这一层每次重算都是 O(条数)，而组行时会被连着调好几次。 */
+        turnOf: Map<String, String> = turnOf(messages),
     ): Map<String, String> {
-        val turnOf = turnOf(messages)
         return runsByTurn(messages, turnOf).mapValues { (turn, runs) ->
             activeRuns[turn]?.takeIf { it in runs }
                 ?: runs.lastOrNull { it.isNotEmpty() }
@@ -72,9 +73,10 @@ object Transcript {
     fun active(
         messages: List<StoredMessage>,
         activeRuns: Map<String, String>,
+        /** 同上：组行时调用方已经算过，别再重算一遍。 */
+        turnOf: Map<String, String> = turnOf(messages),
     ): List<StoredMessage> {
-        val turnOf = turnOf(messages)
-        val chosen = chosenRuns(messages, activeRuns)
+        val chosen = chosenRuns(messages, activeRuns, turnOf)
         return messages.filter { message ->
             if (message.role == Roles.USER) return@filter true
             val turn = turnOf[message.id].orEmpty()

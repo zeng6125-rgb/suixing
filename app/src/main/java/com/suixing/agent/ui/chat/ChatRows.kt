@@ -467,8 +467,9 @@ internal fun groupRows(
 ): List<ChatRow> {
     val turnOf = Transcript.turnOf(messages)
     val runs = Transcript.runsByTurn(messages, turnOf)
-    val chosen = Transcript.chosenRuns(messages, activeRuns)
-    val shown = Transcript.active(messages, activeRuns)
+    // `turnOf` 是 O(条数) 的扫描，下面几处都要它 —— 算一次传下去（原来被重复算了 4 次）。
+    val chosen = Transcript.chosenRuns(messages, activeRuns, turnOf)
+    val shown = Transcript.active(messages, activeRuns, turnOf)
     // A steer line is the user talking mid-answer, not a new question: only a real
     // question can be re-answered or own the branch switcher.
     val lastQuestion = shown.lastOrNull { it.role == Roles.USER && !it.steer }?.id.orEmpty()

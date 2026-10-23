@@ -131,4 +131,26 @@ class TranscriptTest {
             Transcript.withoutLastAnswer(messages).map { it.id },
         )
     }
+
+    @Test
+    fun `passing turnOf in gives the same answer as computing it`() {
+        // 组行时 `turnOf` 会被连着调好几次（每次 O(条数)）。可复用的版本必须给出**同一个结果**，
+        // 否则省下的那点扫描换回一个错位列表就不值了。
+        val rows = listOf(
+            StoredMessage(id = "u1", role = Roles.USER, text = "q1"),
+            StoredMessage(id = "a1", role = Roles.ASSISTANT, text = "a1", runId = "r1"),
+            StoredMessage(id = "u2", role = Roles.USER, text = "q2"),
+            StoredMessage(id = "a2", role = Roles.ASSISTANT, text = "a2", runId = "r2"),
+        )
+        val activeRuns = mapOf("u2" to "r2")
+        val turnOf = Transcript.turnOf(rows)
+        assertEquals(
+            Transcript.chosenRuns(rows, activeRuns).mapValues { it.value },
+            Transcript.chosenRuns(rows, activeRuns, turnOf),
+        )
+        assertEquals(
+            Transcript.active(rows, activeRuns).map { it.id },
+            Transcript.active(rows, activeRuns, turnOf).map { it.id },
+        )
+    }
 }
