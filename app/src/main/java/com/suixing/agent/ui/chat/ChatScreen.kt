@@ -1241,33 +1241,55 @@ fun ChatScreen(
      * 所以不依赖 index/offset 的换算；方向若猜错会在下一帧被观测到并自动翻转。
      */
     val anchorTop = remember { floatArrayOf(Float.NaN) }
-    var sign = remember { floatArrayOf(1f) }
-    // **只在读历史时启动**：不读历史就整段不跑（原写法 `while(true)+withFrameNanos` 会每帧空转，
-    // 在"有会话在跑"时给整机再添一份 120Hz 的唤醒 —— 那正是切到别的会话滑动变卡的因素之一）。
+    val sign = remember { floatArrayOf(1f) }
+    /**
+     * **滚动锚定**：流式行就地正常长高，长出来的那一点用滚动位置补回去，
+     * 于是"内容照常长、你读的那一行不动"。
+     *
+     * 与之前几版的差别：补偿量由**实测位移**（`liveRowTop`，`onGloballyPositioned` 写的）驱动，
+     * 不是按 item 高度推算 —— 不依赖 index/offset 换算，方向猜错会在下一帧被观测到并自动翻转。
+     *
+     * 三条自我约束（避免"补偿本身变成抖动源"）：
+     * 1. **只读历史时启动**；不读历史整段不跑（原写法每帧空转，本身就是抢主线程的一份开销）。
+     * 2. **单次漂移最多补 3 帧**，补不动就重新取样 —— 否则会和布局互相追着跑。
+     * 3. 位移小于 1.5px 不补（亚像素抖动没有意义，还会让列表一直在动）。
+     */
     LaunchedEffect(listState, readingHistory) {
         if (!readingHistory) {
             anchorTop[0] = Float.NaN
             return@LaunchedEffect
         }
+        var attempts = 0
         while (true) {
             withFrameNanos { }
             val top = liveRowTop[0]
-            val reading = readingHistory
-            if (!reading || top.isNaN()) {
+            if (!readingHistory || top.isNaN()) {
                 anchorTop[0] = Float.NaN
+                attempts = 0
                 continue
             }
             if (anchorTop[0].isNaN()) {
                 anchorTop[0] = top
+                attempts = 0
                 continue
             }
             val drift = top - anchorTop[0]
-            if (abs(drift) < 1.5f) continue
+            if (abs(drift) < 1.5f) {
+                attempts = 0
+                continue
+            }
+            if (attempts >= 3) {
+                // 补不动（可能被别的东西同时推）：重新取样，别继续较劲。
+                anchorTop[0] = top
+                attempts = 0
+                continue
+            }
             val before = abs(drift)
             listState.dispatchRawDelta(drift * sign[0])
             withFrameNanos { }
             val after = abs(liveRowTop[0] - anchorTop[0])
-            if (after > before) sign[0] = -sign[0]      // 方向错了就翻过来
+            if (after > before) sign[0] = -sign[0]
+            attempts++
         }
     }
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +

@@ -2829,16 +2829,21 @@ class ChatViewModel : ViewModel() {
             // （0.8.333 的"后台不发布"），而 `live.streaming` 只反映已发布的那些 ——
             // 不补的话，后台跑长回答时草稿永远是旧的/空的，进程一被杀就真丢输出。
             val (pendingText, pendingReasoning) = deltaBuffer.locked { deltaBuffer.peek(chatId) }
-            val next = liveDraftFor(
-                chatId = chatId,
-                runId = live.runId,
-                text = live.derivedStreaming() + pendingText,
-                reasoning = live.reasoning + pendingReasoning,
-                messages = live.messages,
-            ) ?: continue
-            if (next.sameContentAs(written)) continue
-            written = next
-            Core.chats.saveLive(next)
+            // **组装也放 IO**：`derivedStreaming()` 是 O(正文长度) 的字符串重建，
+            // 而原来这一段跑在 `viewModelScope`（Main）上 —— 长回答时每秒在主线程上
+            // 重建一次整段正文。`saveLive` 自身已经在 IO 里，这里把整段一起放过去。
+            val built = withContext(Dispatchers.IO) {
+                liveDraftFor(
+                    chatId = chatId,
+                    runId = live.runId,
+                    text = live.derivedStreaming() + pendingText,
+                    reasoning = live.reasoning + pendingReasoning,
+                    messages = live.messages,
+                )
+            } ?: continue
+            if (built.sameContentAs(written)) continue
+            written = built
+            Core.chats.saveLive(built)
         }
     }
 
