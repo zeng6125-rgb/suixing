@@ -2187,10 +2187,11 @@ internal fun ConversationManagerScreen(
                 }
             } else {
                 items(active, key = { it.id }) { conversation ->
-                    val bytes = remember(conversation.id) {
-                        File(context.filesDir, "chats/${conversation.id}.json").let {
-                            if (it.exists()) it.length() else -1L
-                        }
+                    // **读 store 里的日志**（#40 之后磁盘上已无 `<id>.json`，旧路径恒返回 -1）
+                    // ⇒ 副标题里的"体积"一直不显示。`chatFile` 给的就是 meta 指向的那份日志。
+                    var bytes by remember(conversation.id) { mutableStateOf(-1L) }
+                    LaunchedEffect(conversation.id) {
+                        bytes = withContext(Dispatchers.IO) { Core.chats.chatFile(conversation.id)?.bytes } ?: -1L
                     }
                     ConversationRow(
                         title = conversation.title,
