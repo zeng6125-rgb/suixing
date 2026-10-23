@@ -1619,17 +1619,13 @@ fun ChatScreen(
                                                     .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
                                             ) {
                                             AssistantRow(
-                                            parts = remember(
-                                                state.liveParts,
-                                                state.liveRunId,
-                                                settings.showReasoning,
-                                            ) {
-                                                // **记住映射结果**：`List<Part>` 是 unstable 参数。开了 strong skipping
-                                                // （Kotlin 2.0 起默认）时它按 **equals（结构）** 比较 —— 复用同一实例能让
-                                                // `AbstractList.equals` 在首行 `o === this` 处短路，省掉逐条
-                                                // `Part` 深比较（里面带 Markdown 文本、工具输出）和一次新 list 分配。
-                                                // 键带 liveParts 的**实例**：内容真变了才重算。
-                                                state.liveParts.mapNotNull { part ->
+                                            // **不能给这个映射套 remember**（0.8.36x~0.8.405 瞬移的根因，
+                                            // 机制见 LivePartsFreezeTest）：liveParts 的元素是「同一对象只追加」
+                                            // （GrowableText），新旧列表逐元素 === 相等 ⇒ 列表 equals 恒 true
+                                            // ⇒ remember 的 key 永远命中缓存 ⇒ 映射冻结 —— 屏幕只在列表结构
+                                            // 变化（新块诞生）时刷新一次，该块积累的全部文本一次性放出。
+                                            // parts 只有几个元素，直接映射，代价可以忽略。
+                                            parts = state.liveParts.mapNotNull { part ->
                                                     when (part) {
                                                         is LivePart.Thinking ->
                                                             if (settings.showReasoning) {
@@ -1669,8 +1665,7 @@ fun ChatScreen(
                                                         // 渲染」——思考 → 工具 → 压缩 → 继续）。
                                                         is LivePart.Compress -> Part.Compress(part.checkpoint)
                                                     }
-                                                }
-                                            },
+                                                },
                                                 streaming = true,
                                                 // The live bubble is the persona's reply too:
                                                 // without these two it fell back to the brand name
