@@ -2238,6 +2238,20 @@ fun ChatScreen(
  * `reported <= 0` ⇒ 直接报自然高度（贴底时走这条，行为与改动前完全一致）。
  * 内容比 [reported] 高时由调用方加 `clipToBounds()` 裁掉 —— 被裁的只是这一帧多出来的边缘。
  */
+/**
+ * 钉住期间，**气泡**该报多高（不含状态行）。
+ *
+ * 钉的是"气泡 + 状态行"的总高（`LivePinState.height = natural + outside`），所以气泡要报
+ * `总高 − 当前状态行高度`，这样 item 总高恒等于钉住值，上面的内容才不动。
+ *
+ * 两个边界都写在这里、并各有一条断言：
+ * - `reported <= 0`（没钉）⇒ 直接用自然高度，行为与改动前完全一致；
+ * - `outside >= reported`（小气泡 + 三行重试提示）⇒ 钳到 1px。**这是刻意的取舍**：
+ *   这种情况下总高会比钉住值大（内容被推一下），换的是"错误提示要显示全"。
+ */
+internal fun laggedBubbleHeight(reported: Int, outside: Int, natural: Int): Int =
+    if (reported > 0) (reported - outside).coerceAtLeast(1) else natural
+
 private fun Modifier.liveRowLagHeight(
     reported: Int,
     natural: IntArray,
@@ -2272,10 +2286,6 @@ private fun Modifier.liveRowLagHeight(
         // 这是刻意的取舍：另一种选择是把状态行一起裁掉（总高恒定），但那会违反
         // 「错误的提示要显示全」（用户明确要求过），而"读历史时看不到失败原因"比"推一下"更糟。
         // 触发条件很窄：只在钉住期间状态行**从 1~2 行涨到比气泡还高**的那一瞬。
-        val height = if (reported > 0) {
-            (reported - outside[0]).coerceAtLeast(1)
-        } else {
-            placeable.height
-        }
+        val height = laggedBubbleHeight(reported = reported, outside = outside[0], natural = placeable.height)
         layout(placeable.width, height) { placeable.place(0, 0) }
     }
