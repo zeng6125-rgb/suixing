@@ -2633,31 +2633,10 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
-     * Folds the buffered deltas into a session: the answer first, then the reasoning.
-     *
-     * Both fields are separate buffers on purpose — they feed different parts of the bubble,
-     * and merging them would put half a thought into the answer. Applied in one go, so one
-     * publish covers everything that arrived since the last one.
-     */
-    /**
-     * 把这一拍攒下来的正文/思考并进 [live]。
-     *
-     * **只做一次 `copy`**（原来每有一种增量就 copy 一次、每次都重建整份 Session）：
-     * 一轮跑起来时这个方法每 80ms 调一次，而"跑着的那一轮"与"你正在看的另一会话"共享同一个
-     * 主线程时间片 —— 少一次全量复制就少一次分配与 GC 压力。行为完全不变（字段与顺序一致）。
-     */
-    /**
-     * 把这一拍攒下来的正文/思考并进 [live]。
-     *
-     * **只做一次 `copy`**：原来每有一种增量就 copy 一次（每次都重建整份 Session）。
-     * 一轮跑起来时这个方法每 80ms 调一次，少一次全量复制就少一次分配与 GC 压力；
-     * 字段与取值顺序与改动前逐字一致，行为不变。
-     */
-    /**
      * 正文文本 = `parts` 里所有 `Text` 块的拼接（**派生值**，不单独存一份）。
      *
-     * 存两份的代价是每个 delta 拼两遍整串（O(n²) ×2）与双份内存。
-     * 派生只在"真的要读"时算一次 —— 读它的地方只有两处：草稿合并与"是否为空"的判定。
+     * 存两份的代价是每个 delta 拼两遍整串（O(n²) ×2）与双份内存（issue #38 第 3 条）。
+     * 派生只在真的要用时算一次 —— 读它的只有两处：草稿合并、以及"这一轮有没有活内容"的判定。
      */
     private fun RunSession.derivedStreaming(): String {
         val sb = StringBuilder()
@@ -2665,6 +2644,16 @@ class ChatViewModel : ViewModel() {
         return sb.toString()
     }
 
+    /**
+     * 把这一拍攒下来的正文/思考并进 [live]。
+     *
+     * **只做一次 `copy`**：原来每有一种增量就 copy 一次（每次都重建整份 Session）。
+     * 一轮跑起来时这个方法每 80ms 调一次，少一次全量复制就少一次分配与 GC 压力；
+     * 字段与取值顺序与改动前逐字一致，行为不变。
+     *
+     * 正文**不再另存一份**（`streaming` 留空，由 [derivedStreaming] 派生）——
+     * 那是 issue #38 的第 3 条：同一段文本存两份、每个 delta 各拼一遍。
+     */
     private fun applyPending(live: RunSession, text: String, reasoning: String): RunSession {
         val hasText = text.isNotEmpty()
         val hasReasoning = reasoning.isNotEmpty()
