@@ -201,7 +201,12 @@ fun rememberChatScroll(
                 // 位置立刻被追底拉到底。
                 // 钉住期间不自动打开贴底（见 [pinActive]）：那时「到底」不代表用户想跟新内容，
                 // 只代表被裁短了的内容滚到了头。
-                if (scrolling || canBack || scroll.restoring || pinned) return@collectLatest
+                // **钉住期间不再无条件跳过**（真机反馈：「流式上翻时底部滑不下去」）。
+                // 原来的 `|| pinned` 让"到没到底"的判定在钉住期间永远不成立 ⇒ `stickToBottom`
+                // 一直是 false、钉住只能等这一轮结束才解除 ⇒ 用户滑到底也解不开、也就看不到最新输出。
+                // 现在：钉住期间也照常等 250ms 的"持续到底"，**到了就解除钉住并重新贴底**。
+                // 反过来，"内容被裁短导致的一瞬间到底"仍被 250ms 持续性挡住。
+                if (scrolling || canBack || scroll.restoring) return@collectLatest
                 // **必须「持续」到底才算数**（issue #14，真机日志证据）：长按建立选区时布局会重排，
                 // `canScrollBackward` 会瞬时变成 false。原来一见到 false 就把 `stickToBottom` 翻回 true，
                 // 追底逻辑紧接着 `scrollToItem(0)` 把列表拉回底部 —— 日志里 `guard-off idx=0/624`，
@@ -211,6 +216,11 @@ fun rememberChatScroll(
                 if (!listState.canScrollBackward && !listState.isScrollInProgress &&
                     !scroll.restoring
                 ) {
+                    // 钉住期间走到这里 = 用户自己滚回了底部 ⇒ 解除钉住（下一帧内容就会展开）。
+                    if (scroll.pinActive) {
+                        scroll.pinActive = false
+                        trace("pin=false reason=reached-bottom")
+                    }
                     scroll.stickToBottom = true
                     trace("stick=true reason=canBack-false")
                 }

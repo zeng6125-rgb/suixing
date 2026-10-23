@@ -1207,8 +1207,15 @@ fun ChatScreen(
                     } else {
                         liveRowTop[0] - armedTop[0]
                     }
-                    android.util.Log.i("suixing-pin", "release drift=$drift live=$live")
-                    pinTrace("release notAtBottom=$notAtBottom live=$live drift=$drift")
+                    // **区分解除原因**：这一轮结束时状态行会消失，那一瞬的位移（≈状态行高度）
+                    // 并不代表"钉住期间内容在漂"。只有 `streaming`（这轮还活着）时的 drift 才有判读价值。
+                    val why = when {
+                        !live -> "runEnd"
+                        !notAtBottom -> "atBottom"
+                        else -> "other"
+                    }
+                    android.util.Log.i("suixing-pin", "release reason=$why drift=$drift")
+                    pinTrace("release reason=$why notAtBottom=$notAtBottom live=$live drift=$drift")
                 }
             }
         }
