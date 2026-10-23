@@ -1017,6 +1017,11 @@ class ChatViewModel : ViewModel() {
                 // **正文只读尾部**（#30）：`existing` 来自只读 meta 的列表，`messages` 是空的。
                 // `readTail` 读最近 OPEN_TURNS 轮；读不到（老格式且未迁移）时它内部回退到旧文件。
                 val opened = Core.chats.readTail(existing.id) ?: existing
+            // 冷启动自动打开这条入口原来**完全不写缓存** ⇒ 水位对它无效（S1 只修了"点开"那一半）。
+            // 从盘读到就记成"已落盘"，合并草稿时才敢清。
+            if (opened.messages.isNotEmpty()) {
+                cacheMessages(existing.id, opened.messages, diskBacked = true)
+            }
                 _state.value = opened.toUiState(assistantId).copy(loading = false)
             }
             // Recorded here as well as on a switch: a session that only ever read one
@@ -1080,16 +1085,25 @@ class ChatViewModel : ViewModel() {
             }
             if (older.isEmpty()) return@launch
             if (_state.value.conversationId != chatId) return@launch
+            // **合并后的列表未必都在盘上**（评审 13 的 H1）：`older` 来自盘，但 `current.messages`
+            // 可能含"只在内存"的消息（保存失败 / 刚合并进来的恢复消息）。无条件标"已落盘"
+            // 会给后面删草稿开一条新路 —— 而草稿恰恰可能是那份内容的唯一副本。
+            // 只有当**当前这份列表本身就是那份"确认已落盘"的缓存对象**时，合并结果才全部可证在盘上。
+            val baseWasDiskBacked = cacheIsDiskBacked(chatId) &&
+                cachedMessages(chatId) === _state.value.messages
+            var mergedOut: List<StoredMessage>? = null
             _state.update { current ->
                 // 双保险：只接在**同一个**头部之前，避免期间列表被替换过。
                 if (current.messages.firstOrNull()?.id != shown.first().id) {
                     current
                 } else {
                     val merged = older + current.messages
-                    cacheMessages(chatId, merged, diskBacked = true)
+                    mergedOut = merged
                     current.copy(messages = merged)
                 }
             }
+            // 副作用放到 update 之外：`MutableStateFlow.update` 是 CAS 重试循环，lambda 可能被重跑。
+            mergedOut?.let { cacheMessages(chatId, it, diskBacked = baseWasDiskBacked) }
         }
         return true
     }
@@ -3118,6 +3132,11 @@ class ChatViewModel : ViewModel() {
             model = live.model,
             checkpoints = live.checkpoints,
         ) ?: return false
+        // **写成功就把这份记成"已落盘"的缓存**（评审 13 建议 3）：停止路径走的是
+        // `RunState.Cancelled` 观察者 → fire-and-forget 保存 → `endSession` 把水位降级，
+        // 等 `finally` 跑到时会话已被摘掉 ⇒ 水位一直是 false ⇒ 水位对"停止留下的草稿"
+        // 几乎不生效。这里补上：写成功的那份就是内存这份。
+        cacheMessages(live.chatId, live.messages, diskBacked = true)
         val current = sessions[live.chatId]
         if (current != null && title != current.title) {
             putSession(current.copy(title = title))
