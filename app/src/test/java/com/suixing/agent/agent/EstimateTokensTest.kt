@@ -7,13 +7,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * token 估算的**取整规则**（issue #37 第二条）。
+ * token 估算的**取整规则**与**脚本系数**。
  *
- * 原来 `text / 3` 的整数除法让 **1~2 个字符的消息算 0 token**：几十条短消息累积起来，
- * 预算判断就会系统性偏低 ⇒ 发出超预算的请求 ⇒ 端点拒绝。
+ * 系数不是猜的：取设备上一个真实会话（927 条消息、425 条带端点回报的 usage），
+ * 对 192 条"回答"样本做过原点最小二乘拟合 `tokens = a·CJK + b·其它`，得到
+ * **CJK 1.10 token/字**、**其它 0.39 token/字**（旧实现中英同价 1/3）。
+ * 见 `tokensFor` 的 KDoc。
  *
- * 这条测试锁的是「**非空就至少算 1，且向上取整**」这个规则本身，不声称估算准确
- * （真实值以端点回报的 `prompt_tokens` 为准）。
+ * 这组断言锁的是"系数与取整的行为"，**不声称等于端点真实值** —— 真实值只有
+ * `prompt_tokens` 是权威，系数是拟合出来的中位近似。
  */
 class EstimateTokensTest {
 
@@ -22,62 +24,46 @@ class EstimateTokensTest {
     @Test
     fun `an empty message costs nothing`() {
         assertEquals(0, estimateTokens(msg("")))
+        assertEquals(0, tokensFor(""))
     }
 
     @Test
     fun `a one or two character message is never free`() {
-        // 这就是原来算成 0 的情形。
-        assertEquals("1 个字符也必须 ≥ 1", 1, estimateTokens(msg("嗯")))
-        assertEquals(1, estimateTokens(msg("嗯嗯")))
+        // 旧实现 `len/3` 会把 1~2 字算成 0 token；那条是真 bug（预算被系统性低估）。
+        assertTrue(estimateTokens(msg("嗯")) >= 1)
+        assertTrue(estimateTokens(msg("嗯嗯")) >= 1)
     }
 
     @Test
-    fun `rounding is upward`() {
-        assertEquals(1, estimateTokens(msg("abc")))       // 3/3
-        assertEquals(2, estimateTokens(msg("abcd")))      // 4/3 → 上取整
-        assertEquals(2, estimateTokens(msg("abcde")))     // 5/3 → 上取整
-        assertEquals(2, estimateTokens(msg("abcdef")))    // 6/3
+    fun `latin text costs about 39 hundredths per character`() {
+        // 'abc' 3 个字符 ⇒ 117/100 ⇒ 向上取整成 2。
+        assertEquals(2, tokensFor("abc"))
+        assertEquals(4, tokensFor("abcdefghi"))       // 9 × 0.39 = 3.51 ⇒ 向上取整 4
     }
 
     @Test
-    fun `a length divisible by three is the only case identical to the old floor`() {
-        // **注意**（issue #39 问题 4）：`(n+2)/3` 是向上取整，不是"只把 0 补成 1"。
-        // 只有 n 是 3 的倍数时与旧的 `n/3` 相同（约占 1/3 的情形）；其余全部上调。
-        assertEquals(100, estimateTokens(msg("字".repeat(300))))
+    fun `chinese costs about three times what latin does per character`() {
+        // 中文 13 字 ⇒ 14.3 ⇒ 15；拉丁 43 字符 ⇒ 16.8 ⇒ 17。两者量级相近但**每字**差 2.8 倍。
+        val cjk = tokensFor("这是一个用来测试的中文句子")
+        val latin = tokensFor("this is a sentence used to test the tokenizer token")
+        assertTrue("中文 13 字应在 13~16（实测 $cjk）", cjk in 13..16)
+        // 非空白 42 字符 × 0.39 = 16.4 ⇒ 17（空白不计费）
+        assertTrue("拉丁 42 个非空白字符应在 16~18（实测 $latin）", latin in 16..18)
+        assertTrue("每字单价：中文应远贵于拉丁", cjk / 13.0 > latin / 51.0 * 2.5)
     }
 
     @Test
-    fun `the ceiling costs at most one token per message, not a third`() {
-        // **更正 issue #39 的「+33% 全局膨胀」**：`(n+2)/3` 相对旧的 `n/3`，
-        // 每条消息**最多多算 1 token**（n % 3 == 0 时相同，否则 +1），不是按比例膨胀。
-        // 均匀长度分布下整体比值 ≈ 1.008；只有极短消息（1~2 字）从 0 变 1 的相对涨幅看起来大。
-        for (n in 0..2_000) {
-            val delta = estimateTokens(msg("x".repeat(n))) -
-                (n / 3)
-            assertTrue("n=$n 的差值只能是 0 或 1（实测 $delta）", delta == 0 || delta == 1)
-        }
-        var floorTotal = 0
-        var ceilTotal = 0
-        for (n in 1..500) {
-            floorTotal += n / 3
-            ceilTotal += estimateTokens(msg("x".repeat(n)))
-        }
-        val ratio = ceilTotal.toDouble() / floorTotal
-        assertTrue("整体比值接近 1（实测 $ratio）", ratio in 1.00..1.02)
+    fun `mixed text sums both scripts`() {
+        val onlyCjk = tokensFor("测试测试测试测试")          // 8 字 ⇒ 8.8 ⇒ 9
+        val onlyLatin = tokensFor("testtesttesttest")        // 16 字符 ⇒ 6.24 ⇒ 7
+        val mixed = tokensFor("测试test测试test")            // 4 字 + 8 字符 ⇒ 4.4+3.1=7.5 ⇒ 8
+        assertTrue("混排应介于两者之间（$mixed vs $onlyCjk/$onlyLatin）", mixed in onlyLatin..onlyCjk)
     }
 
     @Test
-    fun `an image costs the same whether it comes from the list or the single field`() {
-        // `imageCount` 是 `allImages.size` 的零分配替代，两者必须给出同一个数。
-        val list = StoredMessage(id = "a", role = Roles.USER, text = "x", imagesBase64 = listOf("1", "2"))
-        val single = StoredMessage(id = "b", role = Roles.USER, text = "x", imageBase64 = "1")
-        val none = StoredMessage(id = "c", role = Roles.USER, text = "x")
-        assertEquals(2, list.imageCount)
-        assertEquals(1, single.imageCount)
-        assertEquals(0, none.imageCount)
-        assertEquals(list.allImages.size, list.imageCount)
-        assertEquals(single.allImages.size, single.imageCount)
-        assertEquals(none.allImages.size, none.imageCount)
+    fun `whitespace costs nothing`() {
+        assertEquals(0, tokensFor(" "))
+        assertEquals(tokensFor("abc"), tokensFor("  a b c  "))
     }
 
     @Test
@@ -95,7 +81,29 @@ class EstimateTokensTest {
         val withImage = StoredMessage(
             id = "m", role = Roles.USER, text = "", imagesBase64 = listOf("abc"),
         )
-        val noImage = estimateTokens(msg(""))
-        assertTrue("带图必须比不带图贵", estimateTokens(withImage) > noImage)
+        assertTrue("带图必须比不带图贵", estimateTokens(withImage) > estimateTokens(msg("")))
+        assertTrue("带图必须算得出正数", estimateTokens(withImage) > 0)
+    }
+
+    @Test
+    fun `an image costs the same whether it comes from the list or the single field`() {
+        // `imageCount` 是 `allImages.size` 的零分配替代，两者必须给出同一个数。
+        val list = StoredMessage(id = "a", role = Roles.USER, text = "x", imagesBase64 = listOf("1", "2"))
+        val single = StoredMessage(id = "b", role = Roles.USER, text = "x", imageBase64 = "1")
+        val none = StoredMessage(id = "c", role = Roles.USER, text = "x")
+        assertEquals(2, list.imageCount)
+        assertEquals(1, single.imageCount)
+        assertEquals(0, none.imageCount)
+        assertEquals(list.allImages.size, list.imageCount)
+        assertEquals(single.allImages.size, single.imageCount)
+        assertEquals(none.allImages.size, none.imageCount)
+    }
+
+    @Test
+    fun `a short message that used to be free is now charged`() {
+        // 这条是 issue #37 的回归锁：`len/3` 让 1~2 字算 0，几十条短消息累积 ⇒ 预算被骗。
+        assertEquals(0, tokensFor("") )
+        assertTrue(tokensFor("x") >= 1)
+        assertTrue(tokensFor("xy") >= 1)
     }
 }

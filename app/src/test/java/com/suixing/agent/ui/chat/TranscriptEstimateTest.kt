@@ -29,8 +29,10 @@ class TranscriptEstimateTest {
     private fun user(id: String, text: String) = StoredMessage(id = id, role = Roles.USER, text = text)
 
     @Test
-    fun `text is charged a third of a token per character`() {
-        assertEquals(100, estimate(listOf(user("u1", "字".repeat(300)))))
+    fun `chinese text is charged by the measured CJK coefficient`() {
+        // 300 个 CJK 字 × 1.10 token/字 = 330（旧实现按 1/3 算成 100，低估 3.3 倍）。
+        // 系数来自真实 usage 的拟合，见 `tokensFor` 的 KDoc。
+        assertEquals(330, estimate(listOf(user("u1", "字".repeat(300)))))
     }
 
     @Test
@@ -42,7 +44,8 @@ class TranscriptEstimateTest {
             toolArgs = "字".repeat(300),
             toolOutput = "字".repeat(300),
         )
-        assertEquals(300, estimate(listOf(call)))
+        // 正文 300 字走 CJK 系数（330）；工具参数与输出仍按更便宜的 /3（各 100）⇒ 530。
+        assertEquals(530, estimate(listOf(call)))
     }
 
     /** A screenshot is about a thousand tokens, not the hundreds of thousands of base64 chars. */

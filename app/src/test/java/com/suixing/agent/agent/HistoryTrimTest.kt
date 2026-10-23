@@ -94,7 +94,8 @@ class HistoryTrimTest {
     fun `a suffix that would start mid turn keeps the whole suffix`() {
         // 后缀里没有任何 user 时无处可挪 —— 原样返回比丢光好；孤儿工具结果由 `WireSanitize` 收尾。
         val wire = listOf(answer("a1"), tool("t1"))
-        assertEquals(listOf("a1", "t1"), HistoryTrim.apply(wire, 5).map { it.id })
+        // 预算 1 装不下任何一条 ⇒ 只留最新那条（工具结果），它没有 user 可挪 ⇒ 原样返回。
+        assertEquals(listOf("t1"), HistoryTrim.apply(wire, 1).map { it.id })
     }
 
     @Test
