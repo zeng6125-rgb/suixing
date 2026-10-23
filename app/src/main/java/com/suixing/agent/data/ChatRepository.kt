@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 
 /**
@@ -608,7 +609,6 @@ class ChatRepository(private val context: Context) {
             // 所以"变短"永远是调用方的 bug。
             //
             // 宁可当场报错，也不要静默丢数据。真要缩短历史，只有 `ChatStore.rewrite()` 一条路。
-            val known = onDisk?.messageCount ?: 0
             val incoming = conversation.messages.size
             // **尾部窗口**（#30 读侧改造的必然结果）：UI 只持有最近 N 轮，
             // 盘上却有全部历史 ⇒ `incoming < known`。
@@ -1169,16 +1169,32 @@ class ChatRepository(private val context: Context) {
      */
     private fun writeAtomically(target: File, text: String) {
         val temp = File(target.parentFile, "${target.name}.tmp")
-        temp.writeText(text)
+        writeAndSync(temp, text)
         if (!temp.renameTo(target)) {
             // renameTo reports failure by returning false instead of throwing. Fall back
             // to a direct write and let its exception surface: a silently swallowed save
             // is how a finished turn disappears from disk.
             try {
-                target.writeText(text)
+                writeAndSync(target, text)
             } finally {
                 temp.delete()
             }
+        }
+    }
+
+    /**
+     * 写文件并 **fsync**（评审 S6）。
+     *
+     * 这里写的是 `last-opened` 与 `<id>.live.json`（草稿）。原来只有 `writeText`，
+     * 断电/被杀时**长度已更新、内容还在页缓存里**，重启后就是一份半截 JSON：
+     * 而 `readLive` 解析失败会**直接删掉草稿** —— 于是"唯一副本"变成"读到坏的就丢"。
+     * `ChatStore.writeAtomically` 早就带 `fd.sync()`，这份漏了。
+     */
+    private fun writeAndSync(target: File, text: String) {
+        FileOutputStream(target).use { out ->
+            out.write(text.toByteArray(Charsets.UTF_8))
+            out.flush()
+            out.fd.sync()
         }
     }
 
