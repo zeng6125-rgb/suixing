@@ -1133,11 +1133,21 @@ class ChatRepository(private val context: Context) {
             // 一起删掉 —— 那正是"孤儿日志"场景里唯一的一份完整历史。
             // 只有"日志本身就是坏的/半写"时清理才是对的；`ConversationLogDamagedException`
             // 恰恰说明"日志里有内容、只是元数据对不上"，删了就是不可逆。
-            if (cause !is ConversationLogDamagedException) {
+            // **只有"元数据还在"时才保留**（评审 9 第 1 条，我之前改过头了）。
+            //
+            // `ConversationLogDamagedException` 有两种来源：
+            //  ① `appendTail` 的孤儿护栏：`logBytes == 0 && count == 0 && 文件非空` **且 meta 文件不在**
+            //     —— 那种字节**从未提交**（水位一次都没写过），而此刻 `.json` 已在上面解析成功，
+            //     所以清理是对的；保留反而会把"半写的垃圾"当历史，导致该会话**永不成功迁移**：
+            //     `has()` 恒 false → 每次启动重试、刷日志、重解析整份 `.json`；用户发消息被永久拒绝
+            //     （只活内存，重启即丢）；`pruneStaleGens`/`repairOne` 两条清理路径也都堵死。
+            //  ② 真正"元数据在、日志却对不上"：那份日志可能是唯一副本，**必须留**。
+            val metaStillThere = runCatching { store.readMeta(id) }.getOrNull() != null
+            if (cause is ConversationLogDamagedException && metaStillThere) {
+                Log.w(TAG, "kept the log for id=$id: metadata disagrees but it may be the only copy")
+            } else {
                 // A half-written entry would otherwise shadow the legacy file it failed to replace.
                 runCatching { store.discard(id) }
-            } else {
-                Log.w(TAG, "kept the log for id=$id: metadata disagreed, the bytes may be the only copy")
             }
             false
         }

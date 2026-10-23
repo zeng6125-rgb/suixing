@@ -852,6 +852,19 @@ class ChatViewModel : ViewModel() {
         _drafts.value = _drafts.value + (chatId to draft)
     }
 
+    /**
+     * 只把**正文**放回输入框，保留这个会话已有的附件等字段。
+     *
+     * 为什么不能直接 `onDraftChange(chatId, Draft(text = …))`（评审 9 第 2 条）：
+     * 那是**全量覆盖**，会把 `imageNames` 清空；而附件 chip 读的是另一个缓存
+     * （`attachmentCache`），于是"chip 还在、draft.imageNames 为空" ⇒ 用户点 ✕ 时
+     * `removeAt(index)` 撞 `IndexOutOfBoundsException`（主线程崩）。
+     */
+    private fun backfillDraftText(chatId: String, text: String) {
+        val current = _drafts.value[chatId] ?: Draft()
+        _drafts.value = _drafts.value + (chatId to current.copy(text = text))
+    }
+
     /** Sending empties the conversation's draft; nothing else touches it. */
     fun clearDraft(chatId: String) {
         _drafts.value = _drafts.value + (chatId to Draft())
@@ -1612,9 +1625,8 @@ class ChatViewModel : ViewModel() {
             val at = full?.indexOfFirst { it.id == id } ?: -1
             if (full == null || at < 0) {
                 Log.w(TAG, "edit not persisted: full history unavailable for ${snapshot.conversationId}")
-                // **把用户刚输入的文字放回输入框**（评审建议）：编辑面板已经关掉了，
-                // 不回填就等于把他改的那句话吞掉。
-                onDraftChange(snapshot.conversationId, Draft(text = body))
+                // **把用户刚输入的文字放回输入框**（只改正文，别清掉附件）。
+                backfillDraftText(snapshot.conversationId, body)
                 _state.update {
                     if (it.conversationId != snapshot.conversationId) it
                     else it.copy(error = "编辑没有写入磁盘：读不到完整历史（已把文字放回输入框）")
@@ -1647,19 +1659,33 @@ class ChatViewModel : ViewModel() {
             )
             if (written == null) {
                 // 落盘失败同理：文字回到输入框，别让它连同那段编辑一起消失。
-                onDraftChange(snapshot.conversationId, Draft(text = body))
+                backfillDraftText(snapshot.conversationId, body)
                 return@launch
             }
             // **两次 IO 之后必须复检前置条件**（评审 8 第 4 条）：`readAll` + `save` 在大会话上
             // 是百毫秒到秒级，这期间用户可能切走了会话、或已经发起了另一轮 —— 那时再 `start()`
             // 会拿**旧会话的全文**当新会话的 wire 发出去（回答写进别人的会话），
             // 或与已在跑的那一轮撞车（引擎回 Failed，第二个 run 的 finally 还会把会话摘掉）。
+            // **复检失败不能只记日志**（评审 9 第 3 条）：编辑已经落盘了，而
+            // `messageCache` 还留着编辑前的窗口 —— 切回来会用旧缓存，再发一条时
+            // 「编辑本该丢掉的旧回答」会被当成尾部追加回日志，等于**把编辑撤销**。
             if (_state.value.conversationId != snapshot.conversationId) {
                 Log.w(TAG, "edit not started: the conversation changed while saving")
+                cacheMessages(snapshot.conversationId, kept)
                 return@launch
             }
             if (Core.engine.isRunning(snapshot.conversationId)) {
                 Log.w(TAG, "edit not started: a run began while saving")
+                // 那一轮的 session 是按**编辑前**的状态建的，这里不再起跑；
+                // 至少把编辑后的窗口写进缓存 + 把文字还回输入框，并明确告诉用户。
+                cacheMessages(snapshot.conversationId, kept)
+                backfillDraftText(snapshot.conversationId, body)
+                _state.update {
+                    if (it.conversationId != snapshot.conversationId) it
+                    else it.copy(
+                        error = "这次编辑已保存，但当前有一轮正在运行，没有立刻重新回答（文字已放回输入框）",
+                    )
+                }
                 return@launch
             }
             // 写成了：更新屏幕，然后**用全文版**起这一轮（模型才看得到改后的句子）。
