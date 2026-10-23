@@ -564,17 +564,6 @@ class ChatViewModel : ViewModel() {
     private var lastOpenedId: String? = null
 
     /**
-     * 最近打开过的会话正文，**最多 [MESSAGE_CACHE_SIZE] 个**，LRU 淘汰。
-     *
-     * 为什么需要它（用户实测）：0.8.316 把列表改成只读 meta 后，`openConversation` 每次都把
-     * `_state` 换掉、正文清空，再从磁盘重读 —— 于是「切走再切回」看起来像**又要重新加载**。
-     * 只有当前会话驻留内存是对的（54MB 全驻留正是 RSS 413MB 的根因），但**在几个会话之间来回
-     * 切**是极常见的操作，每次都读盘是明显的退步。
-     *
-     * 容量 5（用户定的数）：足够覆盖"在几个会话间来回看"，最坏内存 = 5 × 12 轮，
-     * 与"全部常驻"不是一个量级。存的是**读出来的那一页**（`readTail` 的结果），与屏幕一致。
-     */
-    /**
      * 最近打开过的会话正文，LRU（容量 [MESSAGE_CACHE_SIZE]）。
      *
      * 逻辑在 `data/MessageCache` 里（纯 Kotlin、可单测）—— 原来这里有一份**内联实现**，
@@ -2821,9 +2810,9 @@ class ChatViewModel : ViewModel() {
      */
     private fun putSession(next: RunSession) {
         sessions[next.chatId] = next
-        // **不在这里刷 LRU 缓存**（#35）：流式期间每 ~80ms 一次 `putSession`，每次抢
-        // `messageCacheLock`，而切会话时的 `readTail` 读盘也在同一把锁上 —— 撞在一起就是
-        // 可感知的抖动。缓存只在「一轮结束」时刷（见 [endSession]）就够：
+        // **不在这里刷 LRU 缓存**（#35）：流式期间每 ~80ms 一次 `putSession`，每次都要动缓存
+        // （`MessageCache` 内部是一把监视器锁），而切会话时的 `readTail` 读盘也要用同一把 ——
+        // 撞在一起就是可感知的抖动。缓存只在「一轮结束」时刷（见 [endSession]）就够：
         // 一轮中途切回来走的是 `sessions`（live 分支），根本不看缓存。
         _state.update { snapshot ->
             if (snapshot.conversationId != next.chatId) {
@@ -3005,8 +2994,6 @@ class ChatViewModel : ViewModel() {
             // 被动中断仍写原因，用户才知道为什么断了。
             cancelReason = if (chatId in userStopped) "" else cancelReason,
         )
-        // 原因消费一次即复位：下一轮若是引擎自己取消，写的就是默认文案而不是这一次的。
-        cancelReason = "任务被停止"
         // Nothing this draft holds is missing from the transcript; clearing it is all that is
         // left.
         if (restored.isEmpty()) {
@@ -3032,10 +3019,13 @@ class ChatViewModel : ViewModel() {
         // `next` 只剩那条恢复消息。若此时 save 成功，会把一份**截短的历史**写进缓存并标"已落盘"，
         // 切回来命中缓存、不再读盘 ⇒ 屏幕上只显示那几条。
         // 草稿留着，等下一次真正带着 base 的合并。
-        if (messages.isEmpty()) {
+        if (shouldSkipEmptBaseMerge(messages.isEmpty(), baseFromDisk, stored?.messageCount)) {
             Log.i(TAG, "live draft kept for $chatId: no base to merge into yet")
             return
         }
+        // 原因消费一次即复位（**放在守卫之后**：早退时还没"消费"，别把这次的原因弄丢 ——
+        // 否则下一次真合并会把用户主动停止误写成"（由「任务被停止」原因，对话中断）"）。
+        cancelReason = "任务被停止"
         val next = messages + restored
         if (shown != null) _state.update { it.copy(messages = next) }
         live?.let { putSession(it.copy(messages = next)) }
@@ -3361,6 +3351,31 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
  * for no reason.
  */
+/**
+ * 合并草稿时，**base 为空**要不要放弃这一次（先不动磁盘，把草稿留到下次）。
+ *
+ * 为什么需要这条：`shown` 在"合并读盘期间用户切走"时会变 null，而 `stored.messages` 恒为空
+ * （#30 之后会话列表只带 meta）⇒ 手里只剩那条恢复消息。若照旧写盘，会把一份**截短的历史**
+ * 写进缓存并标"已落盘"，切回来命中缓存、不再读盘 ⇒ 屏幕只显示那几条。
+ *
+ * **但有一个例外必须放过**：`baseFromDisk == true`（尾部确实从盘上读到了）且盘上**本来就没有
+ * 任何消息**（`diskMessageCount == 0`）—— 这时把恢复消息当整份历史写回不可能截断任何东西，
+ * 而它正是"新建会话首发后约 1 秒内被杀"那条**本来能自愈**的路径。
+ *
+ * @param baseEmpty 手里的 base 是否为空
+ * @param baseFromDisk base 是否确实来自磁盘（`readTail` 成功）
+ * @param diskMessageCount 盘上该会话的消息条数（来自 meta，未知时传 null）
+ */
+internal fun shouldSkipEmptBaseMerge(
+    baseEmpty: Boolean,
+    baseFromDisk: Boolean,
+    diskMessageCount: Int?,
+): Boolean {
+    if (!baseEmpty) return false
+    val diskIsTrulyEmpty = baseFromDisk && diskMessageCount == 0
+    return !diskIsTrulyEmpty
+}
+
 internal fun draftIsDiskBacked(
     shownPresent: Boolean,
     baseFromDisk: Boolean,
