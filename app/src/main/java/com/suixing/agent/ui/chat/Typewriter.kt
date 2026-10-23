@@ -8,16 +8,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
-import kotlin.math.ceil
 
 /**
  * 打字机：把**已经收到**的文本按"追得上的速度"逐字放出来。
  *
  * 三条约束决定了它长这样：
  *
- * 1. **永远落后 4 拍**。每个节拍放积压的 1/4（至少 2 个字）⇒ 稳态落后约 160ms：
- *    字一直在放，永远像在打字。**不要给稳态加上限** —— 快端点（一秒几百字）会被压成
- *    "刚好追平"，观感就是一次全出（0.8.381~0.8.397 踩过，用户连续反馈）。
+ * 1. **逐字**。每拍最多 [TYPE_MAX_STEP]（4）个字 ⇒ 永远慢于阅读速度，每个字都看得见。
+ *    **不要按积压比例放**（`积压/4` 之类）：第一跳就是积压的 1/4，800 字积压第一跳 200 字，
+ *    那就是用户说的"瞬移"（0.8.399 踩过，连续反馈）。比例放只有在小积压下才像逐字。
  * 2. **不许逐帧重排 Markdown**。节拍是 40ms（25 次/秒），不是每一帧：正文每换一次前缀都要
  *    整段重新解析，60fps 会把这个代价翻一倍多（见 ChatViewModel 里 `DELTA_PUBLISH_MS` 的注释，
  *    渲染缓存是按文本内容做键的，文本一变就是一次 miss）。
@@ -69,24 +68,27 @@ private const val TYPE_MIN_STEP = 2
  *
  * 抽成纯函数只为了能测：它决定"看得见在打字"还是"整块蹦出来"。
  *
- * **稳态没有上限，每拍放积压的 1/4** ⇒ 永远落后 4 拍（160ms）：字一直在放，永远像在打字。
- * 0.8.381~0.8.397 曾给稳态加过 `coerceIn(2, 20)` 的上限，结果快端点（一秒几百字的思考模型）
- * 被压成 500 字/秒 —— 刚好追平到达速度，观感变成"一次全出"（用户连续反馈）。
+ * **每拍都有硬上限 [TYPE_MAX_STEP]**（4 个字）：这是"逐字"的底线 ——
+ * 0.8.381~0.8.399 之间改过三轮，全是"上限不够小"或"攒批太大"：
+ *  · 稳态无上限 ⇒ 第一跳就是积压的 1/4，800 字积压第一跳 200 字，**瞬移**；
+ *  · 上限 20 字 ⇒ 40ms 一拍 = 500 字/秒，刚好追平快端点，也是瞬移。
+ * 现在每拍最多 4 字 ⇒ 封顶 100 字/秒，慢于任何人的阅读速度，也慢于端点的吐字速度
+ * ⇒ 永远有字在放，且每放一个字都看得见。
  *
- * 只有一次来了几千字才加速（`积压/8`，上限 400）：那种情况追 4 拍要几十秒，等不起。
+ * 一次来了几千字时放宽到 [TYPE_FAST_STEP]（40 字/拍）：那种情况若还按 4 字/拍，
+ * 一条 5000 字的回答要 50 秒才显示完，那是另一种坏。
  */
-internal fun typewriterStep(backlog: Int): Int =
-    if (backlog > TYPE_CATCH_UP) {
-        (backlog / 8).coerceIn(TYPE_BURST_STEP, TYPE_FAST_STEP)
-    } else {
-        maxOf(TYPE_MIN_STEP, ceil(backlog / 4.0).toInt())
-    }
+internal fun typewriterStep(backlog: Int): Int = when {
+    backlog <= TYPE_MIN_STEP -> backlog.coerceAtLeast(1)
+    backlog > TYPE_CATCH_UP -> (backlog / 8).coerceIn(TYPE_MAX_STEP, TYPE_FAST_STEP)
+    else -> backlog.coerceAtMost(TYPE_MAX_STEP)
+}
 
-/** 一次到达超过这个字数的积压才走"加速"，否则永远落后 4 拍。 */
+/** 一次到达超过这个字数的积压才走"加速"，否则严格逐字。 */
 private const val TYPE_CATCH_UP = 2_000
 
-/** 加速档的每拍下限：比稳态下限高，避免大积压时反而更慢。 */
-private const val TYPE_BURST_STEP = 40
+/** 每拍最多放几个字：逐字的底线。4 字 × 25 拍/秒 = 100 字/秒，慢于阅读速度。 */
+private const val TYPE_MAX_STEP = 4
 
 /** 加速档的每拍上限：够快，但不至于整块蹦出来。 */
-private const val TYPE_FAST_STEP = 400
+private const val TYPE_FAST_STEP = 40

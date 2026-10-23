@@ -3383,7 +3383,18 @@ private const val LIVE_DRAFT_INTERVAL_MS = 1000L
  * the unchanged prefix instead of re-parsing the whole document — needs `MarkdownText` to
  * report where each block starts, which it does not do yet.
  */
-private const val DELTA_PUBLISH_MS = 80L
+/**
+ * 多久把攒着的 delta 发布一次。
+ *
+ * 0.8.35 从 50ms 提到 80ms 是为了少做 Markdown 重解析（代价随端点速度线性增长）。
+ * 但 80ms 的攒批让**一次到达**变成几百字，打字机再快也只能"一块一块蹦"——
+ * 用户连续反馈「瞬移」「不要一次到达」。
+ *
+ * 现在取 40ms（与打字机节拍同频，25 次/秒）：一次到达的量降到 1/2，
+ * 每拍放的字数也随之变小，逐字感才回来。重解析次数翻倍仍在可接受范围
+ * （0.8.382 实测：光标 480ms 步进后单核 42% → 这一项不是发热主因）。
+ */
+private const val DELTA_PUBLISH_MS = 40L
 
 /**
  * How long to wait before trying a refused 排队 turn again.
