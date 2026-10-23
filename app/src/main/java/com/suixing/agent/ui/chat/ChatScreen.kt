@@ -1260,6 +1260,10 @@ fun ChatScreen(
             return@LaunchedEffect
         }
         var attempts = 0
+        // 诊断（沿用 pin.log，用户已经会复制那份）：这一段读历史期间**补了多少次、共多少像素**。
+        // 判读：`frames=0` ⇒ 期间根本没需要补（最优）；`frames>0` ⇒ 补偿在工作。
+        var frames = 0
+        var total = 0f
         while (true) {
             withFrameNanos { }
             val top = liveRowTop[0]
@@ -1290,7 +1294,11 @@ fun ChatScreen(
             val after = abs(liveRowTop[0] - anchorTop[0])
             if (after > before) sign[0] = -sign[0]
             attempts++
+            frames++
+            total += drift * sign[0]
         }
+        // 循环结束（切回贴底 / 切换会话）时留一行，下一次读历史前先自报一次。
+        pinTrace("anchor frames=$frames total=${total.toInt()} sign=${sign[0]}")
     }
     // **临时埋点（#17 定位用，验收后删）**：逐帧记「流式行自然高度 / 报出高度 / 首可见项 +
     // 偏移 / 能否往回滚」。用途：区分三种"推上去"——
