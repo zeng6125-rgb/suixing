@@ -39,3 +39,6 @@ node_modules/
 
 # 团队工作记忆：只在本地，不进仓库（用户要求：记忆不要上传到仓库）
 WORK_MEMORY_suixing-agent.md
+
+# 真机验证脚本的输出目录（tools/verify_device.sh）
+verify-out/

@@ -12,7 +12,8 @@ bash tools/verify_device.sh
 
 三步：
 
-1. **找设备** —— USB，或无线调试（脚本会跑 `adb mdns services` 帮你发现端口，再 `adb connect`）；
+1. **找设备** —— USB，或无线调试（脚本会跑 `adb mdns services` 列出可连的服务；
+   `adb connect` 需要你自己执行，脚本**只打印不代劳**）；
 2. **取 `pin.log`** —— 应用内「流式上翻痕迹」那一份（有 root 就走 `su -c cat`；没有就提示改用
    应用内「设置 → 性能 → 流式上翻痕迹 → 复制」）；
 3. **打印帧数据的取法与判读要点** —— `gfxinfo` 需要**用手指**滑动产生，脚本不代劳

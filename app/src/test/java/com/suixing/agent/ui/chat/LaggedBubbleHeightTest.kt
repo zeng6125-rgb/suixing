@@ -36,7 +36,16 @@ class LaggedBubbleHeightTest {
 
     @Test
     fun `the pinned value never tracks the natural height`() {
-        // 单向棘轮事故的回归锁：自然高度变长时，报出的高度**不许跟着长**。
+        // 单向棘轮事故的回归锁。
+        // **注意**：只比较"natural 变大时结果不变"是**恒真**的（那条分支根本不看 natural）——
+        // 把实现换成历史事故版 `minOf(reported - outside, natural)` 也照样全绿（评审 18 实测）。
+        // 所以这里必须钉住**具体数值**：钉住值是 1200，而自然高度只有 500（比钉住值小）。
+        // `minOf` 版会返回 500，正确实现必须返回 1200。
+        assertEquals(
+            "自然高度比钉住值小时，也必须报钉住值（minOf 会错误地报 500）",
+            1_200,
+            laggedBubbleHeight(reported = 1_200, outside = 0, natural = 500),
+        )
         val pinned = laggedBubbleHeight(reported = 1_200, outside = 0, natural = 2_000)
         val grown = laggedBubbleHeight(reported = 1_200, outside = 0, natural = 9_000)
         assertEquals("自然高度长了，报出的高度不能变", pinned, grown)

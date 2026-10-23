@@ -42,13 +42,15 @@ class QuestionKeptTest {
 
         val kept = ensureQuestionKept(wire, history)
         assertTrue("裁剪之后必须仍有人问的那句话", kept.any { it.role == Roles.USER })
+        // 钉住**是哪一条**、在**哪个位置**：必须是那句真问题，且追加在末尾（wire 不能以 assistant 结尾）。
+        assertEquals("必须是那句真问题", "u1", kept.last().id)
     }
 
     @Test
     fun `a wire that already has a question is returned as is`() {
         val history = listOf(user("u1", "问题"), StoredMessage(id = "a1", role = Roles.ASSISTANT, text = "回答"))
         val wire = HistoryTrim.apply(history, budget = 1_000)
-        assertTrue(ensureQuestionKept(wire, history).map { it.id } == wire.map { it.id })
+        assertEquals(wire.map { it.id }, ensureQuestionKept(wire, history).map { it.id })
     }
 
     @Test

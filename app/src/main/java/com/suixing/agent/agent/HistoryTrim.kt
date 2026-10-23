@@ -11,14 +11,20 @@ import com.suixing.agent.data.StoredMessage
  * `WireSanitize` 会把这条孤儿结果丢掉 ⇒ 请求里**一条 user 都没有**（只剩 checkpoint 摘要），
  * 模型就会答非所问。工具输出动辄几十万字符，这条链不是假想。
  *
- * 这里只在"wire 里没有任何 user"时，把历史上**最后一句**用户消息补回来 —— 只补一条，
- * 代价上界是一条消息，而不是把预算撑爆。
+ * 这里只在"wire 里没有任何 user 提问"时，把历史上**最后一句**用户消息补回来 —— 只补一条，
+ * 代价上界是一条消息（且它不计入预算：问题消息是唯一无界项，宁可略超也不要不发）。
+ *
+ * **为什么追加到末尾而不是紧跟 system 之后**（评审 18 的 A1）：后缀里没有 user 时 `apply`
+ * 会整段保留（见上面不变量 3 的说明），wire 尾部可能是一条 assistant；把问题插到前面会让请求
+ * **以 assistant 结尾** ⇒ 模型会"续写"而不是回答。追加末尾让末尾永远是 user，两种尾都成立。
  */
 internal fun ensureQuestionKept(
     wire: List<StoredMessage>,
     history: List<StoredMessage>,
 ): List<StoredMessage> {
-    if (wire.any { it.role == Roles.USER }) return wire
+    // **`steer` 不算"问题在 wire 里"**（评审 18 的 A3）：插话在请求里是「（用户在任务进行中说：…）」
+    // 包装，不是用户提问；若后缀恰好从一条 steer 开始，真问题已被裁掉，这里必须把它补回来。
+    if (wire.any { it.role == Roles.USER && !it.steer }) return wire
     val question = history.lastOrNull { it.role == Roles.USER && !it.steer } ?: return wire
     return wire + question
 }
