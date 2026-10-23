@@ -43,10 +43,13 @@ internal fun rememberTypedText(text: String, enabled: Boolean): String {
                 // **每拍有上限**：原来是 `backlog/4`，意味着不论积压多少都在 4 拍（160ms）内追完
                 // ⇒ 看起来是一大块一大块蹦出来，而不是"打字"。现在压到固定上限，
                 // 只有积压**很大**（端点一次吐几千字）时才直接对齐，避免永远追不上的尾巴。
+                // 步长按积压自适应，但**有上下限**：下限保证看得见"在打字"，
+                // 上限避免一块一块蹦。原来的 `CATCH_UP=240` 太小 —— 思考内容常成块到达
+                // （一次几百字），一超过就直接对齐 ⇒ 观感变成"瞬发"（真机反馈）。
                 val step = if (backlog > TYPE_CATCH_UP) {
                     backlog
                 } else {
-                    (backlog / 4).coerceIn(TYPE_MIN_STEP, TYPE_MAX_STEP)
+                    (backlog / 3).coerceIn(TYPE_MIN_STEP, TYPE_MAX_STEP)
                 }
                 revealed = (revealed + step).coerceAtMost(goal)
             }
@@ -62,7 +65,7 @@ private const val TYPE_TICK_MS = 40L
 private const val TYPE_MIN_STEP = 2
 
 /** 每拍最多放多少字：太小追不上快端点，太大会变成"一块一块蹦"。 */
-private const val TYPE_MAX_STEP = 6
+private const val TYPE_MAX_STEP = 20
 
 /** 积压超过这个数就直接对齐（一次吐几千字的端点不该让尾巴拖几秒）。 */
-private const val TYPE_CATCH_UP = 240
+private const val TYPE_CATCH_UP = 2_000

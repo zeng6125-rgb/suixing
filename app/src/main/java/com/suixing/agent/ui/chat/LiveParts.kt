@@ -23,35 +23,43 @@ sealed interface LivePart {
      * 现在只追加增量（O(delta)），渲染时 `text` 才 `toString()` 一次。
      */
 class Thinking(
-        val buffer: GrowableText = GrowableText(),
-        val tokens: Int = 0,
-        val elapsedMs: Long = 0,
+    val buffer: GrowableText = GrowableText(),
+    val tokens: Int = 0,
+    val elapsedMs: Long = 0,
 ) : LivePart {
-        constructor(text: String, tokens: Int = 0, elapsedMs: Long = 0) :
-            this(GrowableText(text), tokens, elapsedMs)
+    constructor(text: String, tokens: Int = 0, elapsedMs: Long = 0) :
+        this(GrowableText(text), tokens, elapsedMs)
 
-        val text: String get() = buffer.toString()
+    val text: String get() = buffer.toString()
+
+    /**
+     * **必须自己定义相等性。** 这个类持有可变缓冲、流式期间对象始终是同一个（只 append），
+     * 默认按引用比较 ⇒ `remember(liveParts)` 认为列表没变、不重算映射 ⇒ 界面只在结构变化时
+     * 整块刷新（真机表现："思考内容一下子全出来"）。用长度判断变化，代价 O(1)。
+     */
+    override fun equals(other: Any?): Boolean =
+        this === other ||
+            (other is Thinking && other.buffer.length() == buffer.length() &&
+                other.tokens == tokens && other.elapsedMs == elapsedMs)
+
+    override fun hashCode(): Int = buffer.length() * 31 + tokens
 }
 
 data class Tools(val calls: List<LiveTool>) : LivePart
 
 /** 正文。同样用可增长缓冲（见 [Thinking] 的说明）。 */
 class Text(val buffer: GrowableText = GrowableText()) : LivePart {
-        constructor(text: String) : this(GrowableText(text))
+    constructor(text: String) : this(GrowableText(text))
 
-        val text: String get() = buffer.toString()
+    val text: String get() = buffer.toString()
+
+    // 同 [Thinking]：持有可变缓冲，必须按内容长度参与相等性，否则界面感知不到每次发布。
+    override fun equals(other: Any?): Boolean =
+        this === other || (other is Text && other.buffer.length() == buffer.length())
+
+    override fun hashCode(): Int = buffer.length()
 }
 
-
-
-/**
-     * A line the user handed over while this run was going.
-     *
-     * The run's own stored rounds are hidden from the transcript for as long as it streams,
-     * because this bubble already draws them — and a steer stored as a message folds into
-     * exactly the row that is hidden. Without its own live part the line the user just typed
-     * had nowhere to appear until the run ended.
-     */
 data class Steer(val message: StoredMessage) : LivePart
 
 /**

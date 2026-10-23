@@ -3,6 +3,7 @@ package com.suixing.agent.ui.chat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -86,5 +87,23 @@ class LivePartsTest {
         val calls = (acc.single() as LivePart.Tools).calls
         assertTrue("先完成的是最早那次", calls[0].done)
         assertEquals("第二次还没完成", false, calls[1].done)
+    }
+
+    @Test
+    fun `a growing text block stops comparing equal so Compose sees the change`() {
+        // **真机 bug 的回归锁**：这些块持有可变缓冲、对象始终是同一个；默认 equals 按引用 ⇒
+        // `remember(liveParts)` 认为列表没变 ⇒ 界面只在结构变化时整块更新（表现为"一下子全出来"）。
+        val block = LivePart.Text("a")
+        val before = LivePart.Text("a")           // 内容相同的另一实例
+        block.buffer.append("b")
+        assertFalse("追加后必须与之前的快照不相等", block == before)
+        assertEquals(block, LivePart.Text("ab"))
+        assertTrue("长度不同必须不相等", block != LivePart.Text("abc"))
+        // 思考块同理：拿"追加前的内容"构造一个比较对象（不能拿同一引用，那必然相等）。
+        val think = LivePart.Thinking("想")
+        val sameContent = LivePart.Thinking("想")
+        assertEquals(sameContent, think)
+        think.buffer.append("了")
+        assertFalse("追加后不能与旧内容的实例相等", sameContent == think)
     }
 }
