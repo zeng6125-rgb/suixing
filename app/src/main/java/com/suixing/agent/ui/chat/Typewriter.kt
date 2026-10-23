@@ -15,9 +15,9 @@ import kotlin.math.ceil
  *
  * 三条约束决定了它长这样：
  *
- * 1. **不许落后**。积压越多放得越快（每个节拍放 backlog/4 个字，至少 2 个），稳态落后
- *    大约 4 个节拍 ≈ 160ms —— 看得见在打字，但读完不会被吊在后面。固定速度（比如每帧 1 字）
- *    在快端点上会越积越多，最后变成一个永远追不上的尾巴，那是比整块跳更糟的体验。
+ * 1. **永远落后 4 拍**。每个节拍放积压的 1/4（至少 2 个字）⇒ 稳态落后约 160ms：
+ *    字一直在放，永远像在打字。**不要给稳态加上限** —— 快端点（一秒几百字）会被压成
+ *    "刚好追平"，观感就是一次全出（0.8.381~0.8.397 踩过，用户连续反馈）。
  * 2. **不许逐帧重排 Markdown**。节拍是 40ms（25 次/秒），不是每一帧：正文每换一次前缀都要
  *    整段重新解析，60fps 会把这个代价翻一倍多（见 ChatViewModel 里 `DELTA_PUBLISH_MS` 的注释，
  *    渲染缓存是按文本内容做键的，文本一变就是一次 miss）。
@@ -59,33 +59,34 @@ internal fun rememberTypedText(text: String, enabled: Boolean): String {
 }
 
 /** 一个节拍多久放一次字。40ms＝25 次/秒：够顺，又不至于每秒重新解析 60 次 Markdown。 */
-private const val TYPE_TICK_MS = 40L
+internal const val TYPE_TICK_MS = 40L
 
 /** 每个节拍至少放几个字：慢端点（一个 delta 一两个字）也要看得见在动。 */
 private const val TYPE_MIN_STEP = 2
 
-/** 每拍最多放多少字：太小追不上快端点，太大会变成"一块一块蹦"。 */
-private const val TYPE_MAX_STEP = 20
-
-/** 积压超过这个数就直接对齐（一次吐几千字的端点不该让尾巴拖几秒）。 */
 /**
  * 这一拍放几个字。
  *
- * 抽成纯函数只为了能测：它决定"看得见在打字"还是"整块蹦出来"，是这个文件里唯一容易被
- * 参数调坏的地方。
+ * 抽成纯函数只为了能测：它决定"看得见在打字"还是"整块蹦出来"。
  *
- * - 积压 ≤ [TYPE_CATCH_UP]：`积压/3`，限制在 2..20 —— 稳态落后约 3 拍（120ms），
- *   看得见在打字，又不会永远追不上；
- * - 积压更大（端点一次吐几千字）：`积压/8`，限制在 20..400 —— 3000 字约 8 拍（320ms）
- *   追完，既不是瞬发，也不是几十秒的磨。
+ * **稳态没有上限，每拍放积压的 1/4** ⇒ 永远落后 4 拍（160ms）：字一直在放，永远像在打字。
+ * 0.8.381~0.8.397 曾给稳态加过 `coerceIn(2, 20)` 的上限，结果快端点（一秒几百字的思考模型）
+ * 被压成 500 字/秒 —— 刚好追平到达速度，观感变成"一次全出"（用户连续反馈）。
+ *
+ * 只有一次来了几千字才加速（`积压/8`，上限 400）：那种情况追 4 拍要几十秒，等不起。
  */
-internal fun typewriterStep(backlog: Int): Int = if (backlog > TYPE_CATCH_UP) {
-    (backlog / 8).coerceIn(TYPE_MAX_STEP, TYPE_FAST_STEP)
-} else {
-    (backlog / 3).coerceIn(TYPE_MIN_STEP, TYPE_MAX_STEP)
-}
+internal fun typewriterStep(backlog: Int): Int =
+    if (backlog > TYPE_CATCH_UP) {
+        (backlog / 8).coerceIn(TYPE_BURST_STEP, TYPE_FAST_STEP)
+    } else {
+        maxOf(TYPE_MIN_STEP, ceil(backlog / 4.0).toInt())
+    }
 
+/** 一次到达超过这个字数的积压才走"加速"，否则永远落后 4 拍。 */
 private const val TYPE_CATCH_UP = 2_000
 
-/** 积压超过 [TYPE_CATCH_UP] 时的每拍上限：够快，但不至于整块蹦出来。 */
+/** 加速档的每拍下限：比稳态下限高，避免大积压时反而更慢。 */
+private const val TYPE_BURST_STEP = 40
+
+/** 加速档的每拍上限：够快，但不至于整块蹦出来。 */
 private const val TYPE_FAST_STEP = 400

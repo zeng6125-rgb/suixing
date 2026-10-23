@@ -15,40 +15,27 @@ class TypewriterStepTest {
 
     @Test
     fun `a small backlog advances at the slow visible pace`() {
-        // 积压 3 字 → 1 字/拍被下限抬到 2；积压 6 → 2
+        // 积压 1~7 字 ⇒ 1 字/拍被下限抬到 2
         assertEquals(2, typewriterStep(1))
-        assertEquals(2, typewriterStep(3))
-        assertEquals(2, typewriterStep(6))
+        assertEquals(2, typewriterStep(7))
     }
 
     @Test
-    fun `a normal backlog lands inside the visible band`() {
-        // 30 字积压 → 10 字/拍（10 拍/秒 ⇒ 100 字/秒）
-        assertEquals(10, typewriterStep(30))
-        // 但绝不超过 20 字/拍：再快就成"一块一块蹦"了
-        assertEquals(20, typewriterStep(300))
-        assertEquals(20, typewriterStep(2_000))
+    fun `the steady state is a quarter of the backlog so it always lags four ticks`() {
+        // 40 字 → 10 字/拍；400 字 → 100 字/拍；2000 字 → 500 字/拍
+        // **没有上限**：快端点一秒几百字，压上限就等于"刚好追平"，观感是一次全出
+        assertEquals(10, typewriterStep(40))
+        assertEquals(100, typewriterStep(400))
+        assertEquals(500, typewriterStep(2_000))
+
     }
 
     @Test
-    fun `a huge one-shot chunk still animates instead of snapping`() {
-        // 网关一次吐 3000 字：不能一拍放完
-        val step = typewriterStep(3_000)
-        assertTrue("3000 字积压至少要多拍才能放完", step < 3_000)
-        assertTrue("但也不能慢成磨", step >= 20)
-        // 3000 字约 8 拍（320ms）
-        assertTrue("3000 字应在 20 拍内追完，实际 $step 字/拍", 3_000 / step <= 20)
-    }
-
-    @Test
-    fun `an enormous chunk is capped rather than unbounded`() {
-        // 20 万字：每拍 400 字上限 ⇒ 500 拍（20 秒），不会一拍放完，也不会卡死
+    fun `a huge one-shot chunk is accelerated so the tail does not drag`() {
+        // 5000 字 → 625 被 400 封顶；20 万 → 400 封顶
+        assertEquals(400, typewriterStep(5_000))
         assertEquals(400, typewriterStep(200_000))
-    }
-
-    @Test
-    fun `zero backlog yields the minimum step and the caller clamps to the goal`() {
-        // 积压 0 时调用方走 `revealed >= goal` 分支，这里只保证不返回 0（0 会让循环空转）
-        assertEquals(2, typewriterStep(0))
+        // 加速档也要 >= 40，否则大积压反而比稳态慢
+        assertTrue(typewriterStep(2_001) >= 40)
     }
 }
