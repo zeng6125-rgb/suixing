@@ -843,9 +843,11 @@ private fun Drawer(
         scope.launch {
             val ok = withContext(Dispatchers.IO) {
                 runCatching {
-                    val source = File(context.filesDir, "chats/${chat.id}.json")
+                    // **从 store 导出**（#40 之后磁盘上已经没有 `<id>.json`）：原来这里直接读旧文件，
+                    // 旧格式删掉后它必然不存在 ⇒ 每次导出都失败。`exportJson` 会拼出完整 JSON。
+                    val text = Core.chats.exportJson(chat.id) ?: error("读不到会话内容")
                     context.contentResolver.openOutputStream(uri)?.use { out ->
-                        source.inputStream().use { it.copyTo(out) }
+                        out.write(text.toByteArray())
                     } ?: error("打不开目标文件")
                 }.isSuccess
             }
