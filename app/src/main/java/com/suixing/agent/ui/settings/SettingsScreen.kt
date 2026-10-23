@@ -2196,7 +2196,7 @@ internal fun ConversationManagerScreen(
                         title = conversation.title,
                         pinned = conversation.pinned,
                         subtitle = "${lastUpdated(conversation.updatedAt)} · " +
-                            "${conversation.messages.size} 条消息" +
+                            "${conversation.messageCount} 条消息" +
                             (if (bytes >= 0) " · ${humanBytes(bytes)}" else ""),
                         onOpen = { onOpenConversation(conversation.id) },
                         onInfo = { pendingInfo = conversation },
@@ -2251,7 +2251,7 @@ internal fun ConversationManagerScreen(
             title = { Text("删除这个会话？") },
             text = {
                 Text(
-                    "「${chat.title}」的聊天记录（${chat.messages.size} 条消息）会被永久删除，" +
+                    "「${chat.title}」的聊天记录（${chat.messageCount} 条消息）会被永久删除，" +
                         "不能撤销。工作区里的文件不受影响。",
                 )
             },

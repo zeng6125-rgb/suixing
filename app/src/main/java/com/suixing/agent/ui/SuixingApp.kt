@@ -1222,7 +1222,8 @@ private fun Drawer(
             title = { Text("删除这个会话？") },
             text = {
                 Text(
-                    text = "「${target.title}」的聊天记录（${target.messages.size} 条消息）会被永久删除，" +
+                    // **用 meta 里的条数**：列表只带 meta，`messages` 恒为空（#30）⇒ 原来这里永远显示 0 条。
+                    text = "「${target.title}」的聊天记录（${target.messageCount} 条消息）会被永久删除，" +
                         "不能撤销。工作区里的文件不受影响。",
                     maxLines = 6,
                     overflow = TextOverflow.Ellipsis,
