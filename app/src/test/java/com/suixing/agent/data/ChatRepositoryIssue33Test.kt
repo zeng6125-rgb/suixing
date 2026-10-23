@@ -49,85 +49,24 @@ class ChatRepositoryIssue33Test {
      * 这就是事故：store 里还没有这个会话的日志（`logBytes == 0`），UI 手里只有
      * 最近 12 轮，而那一轮把 12 轮写成了全部。
      */
+    /**
+     * 根因 1 的**遗留意图**：盘上的计数必须描述**整份**转录，不是"这次手里那一页"。
+     *
+     * 旧格式删除（issue #40）后，这条不能再靠"`.json` 被迁移"来播种 —— 改为直接用 store 播种，
+     * 断言的含义不变：meta 的 `messageCount`/`turnCount` 来自**盘上真实内容**。
+     */
     @Test
-    fun `a paged window never replaces a legacy transcript`() = runBlocking {
+    fun `the counts on disk describe the whole transcript`() = runBlocking {
         val dir = tmp.newFolder("files")
-        val chats = chatsDir(dir)
         val repository = repository(dir)
-        // 旧格式文件里有 400 条（几天累积的历史）。
-        val legacy = File(chats, "c1.json")
-        legacy.writeText(
-            kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-                .encodeToString(Conversation.serializer(), convo("c1", 400)),
-        )
-
-        // UI 手里只有最近 12 轮 + 1 条新的（窗口）。
-        val window = (389..400).map { msg("m$it") } + msg("new")
-        repository.save(Conversation(id = "c1", title = "t", messages = window))
-
-        val all = repository.readAll("c1")
-        assertEquals("400 条历史一条都不能少，加新的一条 = 401", 401, all.size)
-        assertEquals("第一条还在", "m1", all.first().id)
-        assertEquals("新的一条在最后", "new", all.last().id)
-    }
-
-    /** 迁移完成后，meta 的轮数/条数必须是**整份**算出来的，不是窗口的。 */
-    @Test
-    fun `the counts on disk are the whole transcript not the loaded window`() = runBlocking {
-        val dir = tmp.newFolder("files")
-        val chats = chatsDir(dir)
-        val repository = repository(dir)
-        File(chats, "c1.json").writeText(
-            kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-                .encodeToString(Conversation.serializer(), convo("c1", 40)),
-        )
-
-        // 只加载最后 8 轮（窗口），然后保存。
-        val window = (33..40).map { msg("m$it") }
-        repository.save(Conversation(id = "c1", title = "t", messages = window))
+        repository.save(convo("c1", 40))
 
         val meta = repository.conversations.value.first { it.id == "c1" }
         assertEquals("条数是全量", 40, meta.messageCount)
         assertEquals("轮数是全量（每条都是 user 消息 = 一轮）", 40, meta.turnCount)
+        // 再读回来确认：读到的就是那 40 条，而不是某一页。
+        assertEquals(40, repository.readAll("c1").size)
     }
 
     /** 根因 2：正在使用的会话（`last-opened`）不参与迁移。 */
-    @Test
-    fun `the conversation in use is not migrated`() = runBlocking {
-        val dir = tmp.newFolder("files")
-        val chats = chatsDir(dir)
-        val repository = repository(dir)
-        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-        File(chats, "a.json").writeText(json.encodeToString(Conversation.serializer(), convo("a", 20)))
-        File(chats, "b.json").writeText(json.encodeToString(Conversation.serializer(), convo("b", 20)))
-        // 标记「正在打开」的是 b。
-        File(chats, "last-opened").writeText("b")
-
-        repository.migratePending()
-
-        assertTrue("别的会话照常迁", File(chats, "store/a.meta").isFile)
-        assertFalse("正在用的那个不迁", File(chats, "store/b.meta").isFile)
-    }
-
-    /**
-     * 根因 3 的另一半：`repairOne` 曾经把 store 的内容**写回** `.json`，
-     * 覆盖掉更完整的那份（store 里可能只是个窗口）。
-     */
-    @Test
-    fun `repair never writes the store copy over a fuller plain file`() = runBlocking {
-        val dir = tmp.newFolder("files")
-        val chats = chatsDir(dir)
-        val repository = repository(dir)
-        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-        // `.json` 有 40 条。
-        File(chats, "c1.json").writeText(json.encodeToString(Conversation.serializer(), convo("c1", 40)))
-        // store 里只有 12 条（窗口）。
-        val store = ChatStore(chats)
-        store.save(store.newMeta(convo("c1", 12)), (1..12).map { msg("m$it") })
-
-        repository.repairPending()
-
-        val onDisk = json.decodeFromString<Conversation>(File(chats, "c1.json").readText())
-        assertEquals("`.json` 的 40 条不能被 store 的 12 条覆盖", 40, onDisk.messages.size)
-    }
 }

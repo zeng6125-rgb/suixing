@@ -29,7 +29,8 @@ internal const val LIVE_SUFFIX = ".live.json"
  *
  * The messages no longer live in that file: they are appended one per line to
  * `chats/store/<id>.<gen>.jsonl`, and the metadata the list screen needs sits beside it in
- * `chats/store/<id>.meta` (see [ChatStore]). A legacy `<id>.json` is still read — a user's
+ * `chats/store/<id>.meta` (see [ChatStore]). **旧格式 `<id>.json` 已不再读取**（issue #40）——
+ * 若机器上仍有它们，`load()` 会打一条 ERROR 说明原因，文件本身不会被删。A user's
  * existing chats are 54 MB of them — and [migratePending] moves each one over, renaming it to
  * `<id>.json.migrated` only after the new copy has been read back and compared whole.
  */
@@ -57,34 +58,11 @@ class ChatRepository(private val context: Context) {
     suspend fun load() = withContext(Dispatchers.IO) {
         lock.withLock {
             val byId = LinkedHashMap<String, Conversation>()
-            // The plain files come first on purpose: while the store is not the write path, a
-            // `.json` is always the newer copy and the store can only hold a leftover from the
-            // build that wrote there. (When the migration is switched on this flips: the store
-            // becomes authoritative and a `.json` will only be an unretired old copy.)
-            // A live draft is not a conversation: it sits in the same directory and also ends
-            // in `.json`, so it has to be excluded by name or it would show up as a chat.
-            dir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
-                ?.forEach { file ->
-                    runCatching { json.decodeFromString<Conversation>(file.readText()) }
-                        // Skipping a file that no longer parses made the chat look deleted
-                        // while its bytes were still on disk, with nothing left to recover.
-                        .onFailure { quarantine(file) }
-                        .getOrNull()
-                        // **旧格式也走同一契约**（#30）：列表不常驻正文。这里把刚解析出来的
-                        // messages 丢掉，只保留 meta —— 否则同一个会话"迁移前带正文、迁移后不带"，
-                        // 两条读路径给出不同的对象（测试 `an old chat is listed…` 抓到的就是这个）。
-                        // 丢掉的只是内存里的引用；正文仍在 `.json` 里，`readAll`/`readTail`
-                        // 会在需要时读回来（`readLegacyMessages` 就是为此保留的）。
-                        ?.let {
-                            byId[it.id] = it.copy(
-                                messages = emptyList(),
-                                messageCount = it.messages.size,
-                                turnCount = it.messages.count { m ->
-                                    m.role == com.suixing.agent.data.Roles.USER && !m.steer
-                                },
-                            )
-                        }
-                }
+            // **旧格式（`<id>.json`）不再加载**（issue #40）：写路径自 0.8.317 起全在 `store/`，
+            // 兼容层删掉之后没有任何读路径能解析它们。**但也不能静默消失** ——
+            // 机器上若还有未迁移的文件，说明升级路径被跳过了；打一条 ERROR 让排查有线索，
+            // 数据本身仍在磁盘上（可以用外部工具读出）。
+            warnAboutLegacyFiles()
             val metas = storeMetas()
             for (meta in metas) {
                 if (byId.containsKey(meta.id)) continue
@@ -107,160 +85,10 @@ class ChatRepository(private val context: Context) {
         }
     }
 
-    /**
-     * Converts the chats that are still in the old single-file format, one at a time.
-     *
-     * Deliberately **not** called by [load]: reading a 54 MB transcript, writing it back and
-     * comparing the two is a second of IO per chat, and the list has to be on screen before that.
-     * Call it once, from an IO coroutine, after the UI is up. Idempotent and safe to call on every
-     * launch — a chat already migrated is skipped, and one that failed keeps its old file.
-     */
-    suspend fun migratePending() = withContext(Dispatchers.IO) {
-        val last = readLastOpenedMarker()
-        // **正在使用的会话不迁**（issue #33 根因 2）。
-        //
-        // 原来的注释假设「用户正要打开它，所以先迁它」—— 事实正好相反：
-        // `last-opened` 指向的那个会话**正开着**，ChatViewModel 手里只有 `readTail` 的
-        // 12 轮窗口；迁移它就等于把那个窗口当成全量写进 store ⇒ 几百条历史被覆盖
-        // （真机事故：5.2MB / 400+ 条 → 212KB / 85 条，-96%）。
-        //
-        // 它留到下次启动再迁 —— 那时没人持有它的窗口。
-        for (id in legacyIds().filter { it != last }) {
-            lock.withLock { migrateOne(id) }
-        }
-        pruneMigrated()
-    }
 
-    /**
-     * Puts every chat back where the rest of the app expects it: a plain `chats/<id>.json`.
-     *
-     * The build that shipped with the store half-connected left three shapes on a device:
-     * - `<id>.json.migrated` and nothing else — nothing has been written since, so that copy is a
-     *   complete transcript and is simply renamed back;
-     * - a store copy and no plain file — read it whole, write `.json` atomically, read *that* back
-     *   and compare the message count, and only then drop the store copy;
-     * - both — whichever carries the newer `updatedAt` wins, so a chat that build saved is not
-     *   rolled back to the file it retired.
-     *
-     * Not part of [load] for the same reason [migratePending] is not: it moves whole transcripts,
-     * and the list has to be on screen first. Idempotent and re-entrant — a kill halfway leaves
-     * either the old file or the store copy, never neither, and the next pass continues.
-     */
-    suspend fun repairPending() = withContext(Dispatchers.IO) {
-        for (id in idsNeedingRepair()) {
-            lock.withLock { repairOne(id) }
-        }
-    }
 
-    /** Ids that may have a `.json.migrated` or a store copy, and so may need repairing. */
-    /**
-     * 真正需要修的会话 —— **只有"两份都在"的那些**。
-     *
-     * 以前这里是 `ids += storeMetas().map { it.id }`（把**每一个**会话都算进去），
-     * 因为旧世界的 `repairOne` 末尾有一句 `writePlainFromStore`：只要 store 里有，
-     * 就把它搬回 `.json`。那句话在 0.8.317 之后是**反向的**（见 [repairOne] 的注释），
-     * 于是每次启动都会把全部已迁移会话搬回单文件，写侧优化当场失效。
-     *
-     * 现在 store 是唯一权威，"只有一份"的状态没有任何东西要修 ⇒ 不必进这个集合。
-     * 只保留两种：
-     *  - `.json` 与 store **同时存在**（迁移到一半被杀）⇒ 选新的那份、退休旧的；
-     *  - 只有 `.json.migrated`（旧 build 留下的）⇒ 改回 `.json`，让它走正常迁移。
-     */
-    private fun idsNeedingRepair(): Set<String> {
-        val ids = LinkedHashSet<String>()
-        dir.listFiles { f -> f.name.endsWith(MIGRATED_SUFFIX) }
-            ?.forEach { ids += it.name.removeSuffix(MIGRATED_SUFFIX).removeSuffix(".json") }
-        // store 里有、同时 `.json` 也在的 —— 只有这种"两份都在"才需要裁决。
-        storeMetas().map { it.id }.forEach { id ->
-            if (legacyFile(id).isFile) ids += id
-        }
-        return ids
-    }
 
-    /**
-     * Repairs one chat, or logs why it could not be. Nothing is deleted before the copy replacing
-     * it has been written and read back.
-     */
-    private fun repairOne(id: String) {
-        val plain = legacyFile(id)
-        val rolled = File(dir, "${plain.name}$MIGRATED_SUFFIX")
-        val meta = runCatching { store.readMeta(id) }.getOrNull()
-        try {
-            when {
-                // **两份都在** —— 迁移到一半被杀，或旧版本在 store 之后又写过 `.json`。
-                //
-                // **绝不能把 store 的内容写回 `.json`**（那是 0.8.318 的做法，也是事故机制）：
-                // store 那份可能只是个窗口（`readTail` 的 12 轮），而 `.json` 是完整的历史。
-                // 拿窗口覆盖完整历史 ⇒ 历史没了。
-                //
-                // 裁决要看**条数**，不是 updatedAt：谁的内容多谁说了算。
-                plain.isFile -> {
-                    if (meta == null) return
-                    if (plainIsMoreComplete(plain, meta)) {
-                        // `.json` 更完整 ⇒ store 那份是残缺的（窗口）⇒ 丢掉它，
-                        // `migratePending` 会把 `.json` 完整地迁进 store。
-                        store.discard(id)
-                        Log.i(TAG, "repair id=$id reason=plain-has-more")
-                    } else {
-                        // store 更完整 ⇒ store 是权威 ⇒ 旧文件可以删了。
-                        retireLegacy(id)
-                        Log.i(TAG, "repair id=$id reason=store-has-more")
-                    }
-                }
-                // 老版本留下的 `.json.migrated`：它就是旧格式的那份。
-                // store 里没有 ⇒ 只能靠它 ⇒ 改回 `.json`，让迁移把它接过去。
-                rolled.isFile && meta == null -> {
-                    check(rolled.renameTo(plain)) { "could not rename ${rolled.name} back" }
-                    Log.i(TAG, "repair id=$id reason=rolled-back")
-                }
-                // **store 里有、`.json` 没有**（新世界的正常态：已迁移）。
-                //
-                // 旧世界这里写的是 `writePlainFromStore(meta)` —— 把 store 里的会话**搬回
-                // `.json` 单文件**再删掉 store 副本。那是"store 只是副本"时代的逻辑；
-                // 0.8.317 把写路径切到 store 之后，它是**反向的**：每次启动都会把所有已迁移的
-                // 会话搬回 `.json`，#31 的写侧优化（30 MB/轮 → 几 KB/轮）当场失效。
-                //
-                // 新世界里 store 是唯一权威 ⇒ 什么都不用做，只要把还残留的旧副本退休。
-                meta != null -> {
-                    // **不删 `rolled`**（`.json.migrated`）。它是旧格式的**唯一退路**：
-                    // store 那份可能是旧 build 的残留，而 `.json.migrated` 里才是最新的内容
-                    // （真机踩过：`.json.migrated` 被删掉 ⇒ 2215 条历史真的没了）。
-                    // 清理由 [pruneMigrated] 负责（7 天后），不在这儿。
-                    Log.i(TAG, "repair id=$id reason=store-authoritative")
-                }
-            }
-        } catch (cause: Throwable) {
-            // Deleting nothing is the point: the chat stays readable through whichever copy
-            // survived, and the next launch tries again.
-            Log.w(TAG, "repair-failed id=$id reason=${cause.javaClass.simpleName}: ${cause.message}")
-        }
-    }
 
-    /**
-     * 两份都在时（`.json` 与 store）：**谁的内容更完整，谁说了算**。
-     *
-     * 返回 true = `.json` 更完整（store 那份是残缺的窗口），false = store 更完整。
-     *
-     * **判据是条数，不是 updatedAt**（issue #33）：
-     *  - store 那份可能是 `readTail` 的窗口（12 轮），而 `.json` 是几天的完整历史
-     *    ⇒ 条数一比就分出来了。事故那组：store 85 条 vs `.json` 400+ 条。
-     *  - updatedAt 只能说明"谁最后被写过"，**说明不了谁内容多** ——
-     *    一个今天写的窗口，updatedAt 一定比几天前写的完整文件新。
-     *
-     * 条数相同时才看 updatedAt（同样条数、但有一份是更晚的编辑）。
-     */
-    private fun plainIsMoreComplete(plain: File, meta: ChatStore.ConversationMeta?): Boolean {
-        if (meta == null) return true
-        val plainCount = runCatching {
-            json.decodeFromString<Conversation>(plain.readText()).messages.size
-        }.getOrNull() ?: return false
-        if (plainCount != meta.messageCount) return plainCount > meta.messageCount
-        // 条数一样：看谁更新。
-        val plainAt = runCatching {
-            json.decodeFromString<Conversation>(plain.readText()).updatedAt
-        }.getOrNull() ?: return false
-        return plainAt > meta.updatedAt
-    }
 
     /**
      * Updates a conversation's **fields only** — title, pinned, archived, checkpoints, the model
@@ -365,21 +193,7 @@ class ChatRepository(private val context: Context) {
                     )
                 }
             }
-            // 兜底：还没迁移的旧格式。
-            val legacy = legacyFile(id)
-            if (legacy.isFile) {
-                ChatFile(
-                    path = legacy.absolutePath,
-                    bytes = legacy.length(),
-                    modifiedAt = legacy.lastModified(),
-                    tail = runCatching { legacy.readText().takeLast(4000) }.getOrDefault(""),
-                    messageCount = runCatching {
-                        json.decodeFromString<Conversation>(legacy.readText()).messages.size
-                    }.getOrDefault(0),
-                )
-            } else {
-                null
-            }
+            null
         }
     }
 
@@ -392,8 +206,8 @@ class ChatRepository(private val context: Context) {
         val messages = if (meta != null) {
             store.all(meta)
         } else {
-            readLegacyConversation(id)?.messages
-        } ?: return@withContext null
+            return@withContext null
+        }
         val base = _conversations.value.firstOrNull { it.id == id }
         val conversation = (base ?: meta?.toConversation() ?: return@withContext null)
             .copy(messages = messages)
@@ -403,7 +217,7 @@ class ChatRepository(private val context: Context) {
     internal suspend fun sessionTotals(id: String): ChatTotals? =
         withContext(Dispatchers.IO) {
             lock.withLock {
-                val meta = store.readMeta(id) ?: return@withLock legacyTotals(id)
+                val meta = store.readMeta(id) ?: return@withLock ChatTotals.EMPTY
                 if (meta.totalsAt == meta.messageCount) return@withLock meta.totals
                 val totals = runCatching {
                     store.all(meta).fold(ChatTotals.EMPTY) { acc, message ->
@@ -419,18 +233,11 @@ class ChatRepository(private val context: Context) {
             }
         }
 
-    /** 还没迁移的旧格式会话：只有一份 `.json`，直接数。 */
-    private fun legacyTotals(id: String): ChatTotals? {
-        val conversation = readLegacyConversation(id) ?: return null
-        return conversation.messages.fold(ChatTotals.EMPTY) { acc, message ->
-            acc + totalsOfMessage(message)
-        }
-    }
 
     /** Every message of one chat. Use only where the whole transcript is genuinely needed. */
     suspend fun readAll(id: String): List<StoredMessage> = withContext(Dispatchers.IO) {
         lock.withLock {
-            val meta = store.readMeta(id) ?: return@withLock readLegacyMessages(id)
+            val meta = store.readMeta(id) ?: return@withLock emptyList()
             store.all(meta)
         }
     }
@@ -443,7 +250,7 @@ class ChatRepository(private val context: Context) {
     suspend fun readTail(id: String, turns: Int = OPEN_TURNS): Conversation? =
         withContext(Dispatchers.IO) {
             lock.withLock {
-                val meta = store.readMeta(id) ?: return@withLock readLegacyConversation(id)
+                val meta = store.readMeta(id) ?: return@withLock null
                 meta.toConversation(store.tail(meta, turns).messages)
             }
         }
@@ -476,7 +283,7 @@ class ChatRepository(private val context: Context) {
      */
     suspend fun readWire(id: String): List<StoredMessage> = withContext(Dispatchers.IO) {
         lock.withLock {
-            val meta = store.readMeta(id) ?: return@withLock readLegacyMessages(id)
+            val meta = store.readMeta(id) ?: return@withLock emptyList()
             // No checkpoint yet: the whole transcript is the wire, which is what the engine does
             // when `resumeAt` is null. Memory is still bounded by the checkpoint when there is one.
             val checkpointId = meta.checkpoints.lastOrNull()?.toMessageId
@@ -544,14 +351,6 @@ class ChatRepository(private val context: Context) {
                 store.window(meta, endOffset, turns)
             }
         }
-
-    /** Legacy single-file paths: still readable, so a chat that failed to migrate still works. */
-    private fun readLegacyConversation(id: String): Conversation? =
-        legacyFile(id).takeIf { it.isFile }
-            ?.let { runCatching { json.decodeFromString<Conversation>(it.readText()) }.getOrNull() }
-
-    private fun readLegacyMessages(id: String): List<StoredMessage> =
-        readLegacyConversation(id)?.messages.orEmpty()
 
     suspend fun create(title: String = "新会话"): Conversation = withContext(Dispatchers.IO) {
         val conversation = Conversation(id = UUID.randomUUID().toString(), title = title)
@@ -692,24 +491,6 @@ class ChatRepository(private val context: Context) {
             //
             // 顺带修好了「统计只算已加载的」：迁移后的 meta 的 `messageCount`/`turnCount`
             // 是**整份**算出来的，追加时再累加新增的 ⇒ 列表页显示的轮数是全量。
-            val legacyOnDisk = legacyFile(conversation.id).isFile
-            if (legacyOnDisk && !diskHasLog && !allowShrink) {
-                // 注意：**直接调 `migrateOne`，不要再 `lock.withLock`** —— save() 已经持锁，
-                // Mutex 不可重入，嵌套会死锁。
-                val migrated = migrateOne(conversation.id)
-                diskMeta = runCatching { store.readMeta(conversation.id) }.getOrNull()
-                diskHasLog = diskMeta != null && diskMeta.logBytes > 0
-                if (!migrated || !diskHasLog) {
-                    // 迁移失败 ⇒ 盘上只有那个不完整的 `.json`，**这一轮不能写**：
-                    // 写进去就是用窗口顶替历史。跳过这次保存（用户看得见错误，不是崩）。
-                    Log.w(
-                        TAG,
-                        "save skipped id=${conversation.id}: the legacy file could not be " +
-                            "migrated, and writing a paged window would replace the history",
-                    )
-                    return@withLock SaveResult.Refused("旧格式文件迁移失败，这一轮没有写入")
-                }
-            }
 
             if (diskHasLog && !allowShrink) {
                 val meta = diskMeta
@@ -804,8 +585,6 @@ class ChatRepository(private val context: Context) {
             File(dir, "$id.json").delete()
             // The transcript itself, its metadata, and whatever a crashed rewrite left behind.
             store.discard(id)
-            File(dir, "$id.json$MIGRATED_SUFFIX").delete()
-            File(dir, "$id.json$MIGRATE_FAILED_SUFFIX").delete()
             // A deleted chat's draft is garbage nobody will ever read: the conversation it
             // belongs to is gone from the list, so nothing will look for it again.
             liveFile(id).delete()
@@ -1041,21 +820,29 @@ class ChatRepository(private val context: Context) {
                     "bytes=${saved.meta.logBytes} ms=$elapsed",
             )
         }
-        // 盘上若是旧的 `.json`（尚未迁移），这一轮写完之后它就是过期副本了：
-        // 留着会让两个读路径给出不同内容，所以直接退役（改名保留，可回滚）。
-        val legacy = legacyFile(conversation.id)
-        if (legacy.isFile) retireLegacy(conversation.id)
         return saved.meta.toConversation(conversation.messages)
+    }
+
+    /**
+     * 只**报告**不处理：机器上若还有旧格式的 `<id>.json`，说明它没有走过迁移（0.8.316~0.8.340）。
+     *
+     * 为什么保留这条日志而不彻底删干净：删掉兼容层之后这些会话会**从列表里消失**，
+     * 而"消失"与"数据真的没了"在用户眼里没有区别。一条 ERROR 至少说明原因是升级路径被跳过，
+     * 而不是数据丢失 —— 文件仍在 `files/chats/` 下。
+     */
+    private fun warnAboutLegacyFiles() {
+        val legacy = dir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
+        if (legacy.isNullOrEmpty()) return
+        Log.e(
+            TAG,
+            "${legacy.size} 个旧格式会话文件（<id>.json）未迁移，不会出现在列表中。" +
+                "它们需要 0.8.316~0.8.340 的版本打开过一次才能搬进 store/；" +
+                "文件本身仍在 files/chats/ 下，没有被删除。",
+        )
     }
 
     private val storeDir: File get() = File(dir, STORE_DIR)
 
-    private fun legacyFile(id: String): File = File(dir, "$id.json")
-
-    private fun legacyIds(): List<String> =
-        dir.listFiles { f -> f.extension == "json" && !f.name.endsWith(LIVE_SUFFIX) }
-            ?.map { it.name.removeSuffix(".json") }
-            ?: emptyList()
 
     private fun storeMetas(): List<ChatStore.ConversationMeta> =
         storeDir.listFiles { f -> f.name.endsWith(META_SUFFIX) }
@@ -1070,145 +857,9 @@ class ChatRepository(private val context: Context) {
             }
             ?: emptyList()
 
-    /**
-     * Moves one chat from `<id>.json` into the store; returns whether it is in the new format now.
-     *
-     * The old file is renamed only after the new copy has been read back and compared message for
-     * message with what was parsed out of it — "it parsed and the counts agree" would not catch a
-     * bad encode. On any failure the legacy bytes stay exactly as they were, a
-     * `<id>.json.migrate-failed` marker says why, and whatever reached the store is thrown away so
-     * it cannot shadow the real file. The next launch tries again.
-     */
-    private fun migrateOne(id: String): Boolean {
-        val legacy = legacyFile(id)
-        if (!legacy.isFile) return true
-        if (store.has(id)) {
-            // store 里已经有这个会话了。**但它可能是更早的 build 留下的旧副本**，
-            // 而 `.json` 才是最新的 —— 那时把 `.json` 直接退休掉，**最新的那份就没了**
-            // （真机踩过：store 里 161 条是当天的，`.json` 里 2215 条是跨天累积的，
-            // 退休之后又被 repair 删掉，历史真的没了）。
-            //
-            // 所以要**比 updatedAt**：谁新谁说了算，留下的那份必须是 store。
-            val meta = runCatching { store.readMeta(id) }.getOrNull()
-            if (meta != null && plainIsMoreComplete(legacy, meta)) {
-                // `.json` 的条数更多 ⇒ store 那份是残缺的（窗口）⇒ 丢掉它，
-                // 把它完整地迁进去。**比条数，不比 updatedAt** —— store 那份可能是
-                // 今天写的窗口（updatedAt 更新），而 `.json` 是几天累积的完整历史。
-                store.discard(id)
-                Log.i(TAG, "migrate id=$id reason=legacy-has-more")
-                // 继续往下走正常的迁移流程
-            } else {
-                // Killed after the store write but before the rename: nothing to redo but the rename.
-                retireLegacy(id)
-                return true
-            }
-        }
-        val bytes = legacy.length()
-        // Peak is the new log beside the old file, plus the store's temp file during its rename.
-        val free = context.filesDir.usableSpace
-        if (free in 0 until bytes + bytes / 2) {
-            Log.w(TAG, "migrate-skipped id=$id bytes=$bytes free=$free reason=no-space")
-            return false
-        }
-        val conversation = runCatching { json.decodeFromString<Conversation>(legacy.readText()) }
-            .getOrElse { cause ->
-                Log.e(TAG, "migrate-failed id=$id bytes=$bytes reason=unparseable", cause)
-                markMigrateFailed(id, cause)
-                return false
-            }
-        return runCatching {
-            val written = store.append(store.newMeta(conversation), conversation.messages)
-            val readBack = store.all(written)
-            check(readBack == conversation.messages) {
-                "read back ${readBack.size} of ${conversation.messages.size} messages"
-            }
-            // **字节数体检**（issue #33）：`readBack == messages` 只证明「写进去的 == 读出来的」，
-            // **不证明「写进去的 == 原来盘上的」** —— 源本身就是残缺的（一个窗口）时，
-            // 这个 check 会完美通过。
-            //
-            // JSONL 比 JSON 紧凑（没有缩进空白），正常情况小 0.1%~1.5%（issue #33 的
-            // 8 个对照会话都是这个量级）。**差 20% 以上一定是源头就缺了** ——
-            // 事故那个是 -96%。
-            val writtenBytes = store.readMeta(id)?.logBytes ?: 0L
-            // 只对**够大的**文件做这个体检：legacy 的 JSON 里还有会话元数据（标题、时间、
-            // checkpoints 的摘要…），而 JSONL 只有消息本身 ⇒ 小文件里元数据的占比很大，
-            // 比例天然差得多（一条消息的会话能差 50%）。文件够大时元数据可以忽略，
-            // 比例才有意义（issue #33 的对照组：-0.1%~-1.5%；事故那个：-96%）。
-            if (bytes >= BYTE_CHECK_MIN_BYTES) {
-                check(writtenBytes > bytes * 8 / 10) {
-                    "migrated log is $writtenBytes bytes, legacy was $bytes — more than 20% " +
-                        "smaller, the source was probably a paged window, not the whole transcript"
-                }
-            }
-            retireLegacy(id)
-            Log.i(TAG, "migrated id=$id bytes=$bytes messages=${conversation.messages.size}")
-            true
-        }.getOrElse { cause ->
-            Log.e(TAG, "migrate-failed id=$id bytes=$bytes reason=unwritable", cause)
-            markMigrateFailed(id, cause)
-            // **日志还在就别删**（评审 8 第 3 条）：`store.discard` 会把 meta 和**所有代次的日志**
-            // 一起删掉 —— 那正是"孤儿日志"场景里唯一的一份完整历史。
-            // 只有"日志本身就是坏的/半写"时清理才是对的；`ConversationLogDamagedException`
-            // 恰恰说明"日志里有内容、只是元数据对不上"，删了就是不可逆。
-            // **只有"元数据还在"时才保留**（评审 9 第 1 条，我之前改过头了）。
-            //
-            // `ConversationLogDamagedException` 有两种来源：
-            //  ① `appendTail` 的孤儿护栏：`logBytes == 0 && count == 0 && 文件非空` **且 meta 文件不在**
-            //     —— 那种字节**从未提交**（水位一次都没写过），而此刻 `.json` 已在上面解析成功，
-            //     所以清理是对的；保留反而会把"半写的垃圾"当历史，导致该会话**永不成功迁移**：
-            //     `has()` 恒 false → 每次启动重试、刷日志、重解析整份 `.json`；用户发消息被永久拒绝
-            //     （只活内存，重启即丢）；`pruneStaleGens`/`repairOne` 两条清理路径也都堵死。
-            //  ② 真正"元数据在、日志却对不上"：那份日志可能是唯一副本，**必须留**。
-            val metaStillThere = runCatching { store.readMeta(id) }.getOrNull() != null
-            if (cause is ConversationLogDamagedException && metaStillThere) {
-                Log.w(TAG, "kept the log for id=$id: metadata disagrees but it may be the only copy")
-            } else {
-                // A half-written entry would otherwise shadow the legacy file it failed to replace.
-                runCatching { store.discard(id) }
-            }
-            false
-        }
-    }
 
-    /**
-     * 迁移成功后把旧格式文件**删掉** —— 不留副本。
-     *
-     * 用户原话：「我也没说我要副本啊」。旧格式文件是**被替换掉的那一份**，
-     * 新格式里已经有完整内容（迁移时校验过：读回相等 + 字节数不少于 80%），
-     * 再留一个 `.json.migrated` 就是凭空多一份。
-     *
-     * **前提是"校验过才删"** —— 这也是事故的教训（issue #33）：0.8.318 的迁移
-     * 把 85 条的窗口当成全量写进 store，然后把 5.2MB 的原文件改名退休 ⇒ 历史没了。
-     * 现在：**读回相等 + 字节数体检**都过了才删，源文件才是真的被"替换"了。
-     */
-    private fun retireLegacy(id: String) {
-        val legacy = legacyFile(id)
-        if (!legacy.isFile) return
-        if (!legacy.delete()) {
-            Log.w(TAG, "migrated id=$id reason=delete-failed; the old file is still there")
-        }
-    }
 
-    private fun markMigrateFailed(id: String, cause: Throwable) {
-        runCatching {
-            File(dir, "${legacyFile(id).name}$MIGRATE_FAILED_SUFFIX").writeText(cause.toString())
-        }
-    }
 
-    /**
-     * 退休的旧格式副本 **不再自动删除**。
-     *
-     * 原来这里是"过了 [MIGRATED_KEEP_MS]（7 天）就删掉"。**那是替用户决定数据该留多久**，
-     * 而且很危险：store 那份**未必是完整的** —— 迁移时如果 store 已经有了一份（可能是更早的
-     * build 留下的旧副本），旧格式那份才是最新的（真机踩过：2215 条的会话，
-     * store 里只有当天的 161 条，退休副本被删后历史真的没了）。
-     *
-     * 现在它们**永久保留**：它们是旧格式会话的最后一份完整副本，用户没发话不许删。
-     * 代价是磁盘 —— 但用户明确说过「谁让你删会话了」。
-     */
-    private fun pruneMigrated() {
-        // 故意留空：退休副本是用户的原始数据，不自动清理。
-    }
 
     /** Log generations a crashed rewrite left behind. The one the meta names is never touched. */
     private fun pruneStaleGens(metas: List<ChatStore.ConversationMeta>) {
@@ -1305,18 +956,14 @@ class ChatRepository(private val context: Context) {
          * A migrated chat's old single file, kept through a rollback window so a build that
          * cannot read the new format still has something to fall back to.
          */
-        const val MIGRATED_SUFFIX = ".migrated"
 
         /**
          * Why a chat is still in the old format. Deliberately not `.json`: every listing in this
          * app picks files out by extension, and a marker must never be read as a conversation.
          */
-        const val MIGRATE_FAILED_SUFFIX = ".migrate-failed"
 
         /** How long that rollback copy is worth keeping after a successful migration. */
-        const val MIGRATED_KEEP_MS = 7L * 24 * 60 * 60 * 1000
         /** 字节体检的门槛：小于这个大小，legacy 的元数据占比太大，比例说明不了问题。 */
-        const val BYTE_CHECK_MIN_BYTES = 64L * 1024
 
         /** Tag for the storage lines: rewriting a whole transcript, and every migration step. */
         const val TAG = "ChatStore"

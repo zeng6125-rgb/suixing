@@ -82,19 +82,52 @@ class ChatRepositoryStoreTest {
     // --- the write path: a plain file, as before ----------------------------------------------
 
     @Test
-    fun `saving a chat writes the single json file it always did`() = runBlocking {
-        val saved = conversation("c1")
-        repository().save(saved)
+    fun `a failed write leaves the store copy alone and the chat readable`() = runBlocking {
+        // **新契约**（#31）：写入目标是 store 的 JSONL，所以要让它失败得堵**store 的日志文件**，
+        // 而不是旧的 `<id>.json.tmp`（那个路径已经不参与写入了）。
+        val onlyInStore = conversation("c1")
+        putInStoreOnly(onlyInStore)
 
-        // **新契约**（#31 写侧）：保存写进 store 的 JSONL 追加日志，不再产生 `.json`。
-        // 旧版本读不了这种布局，这是**有意的**（单一用户 + beta，用户已确认废弃旧版本）。
-        assertTrue("the transcript lives in the store now", store.has("c1"))
-        assertFalse("and no plain .json is written any more", legacyFile("c1").exists())
-        val reloadedRepo = repository().apply { load() }
-        val reloaded = reloadedRepo.conversations.value.single()
-        // **新契约**（#30）：列表不常驻正文 ⇒ 正文用 readAll 读回来比对（内容必须一字不差）。
-        assertEquals(saved.messages, reloadedRepo.readAll("c1"))
-        assertEquals(saved.title, reloaded.title)
+        val repository = repository()
+        repository.load()
+        val listed = repository.conversations.value.single()
+        val full = repository.readAll("c1")
+
+        val meta = store.readMeta("c1")
+        assertNotNull(meta)
+        // 把日志文件换成目录：下一次 append 打开它会失败。
+        val logFile = File(chatsDir, "store/" + meta!!.id + "." + meta.gen + ".jsonl")
+        assertTrue("precondition: the log is on disk", logFile.exists())
+        logFile.delete()
+        logFile.mkdirs()
+        assertTrue(logFile.isDirectory)
+
+        val result = runCatching {
+            repository.save(listed.copy(title = "写不进去", messages = full + full[0].copy(id = "extra")))
+        }
+
+        assertTrue("the save has to fail loudly", result.isFailure)
+        // **正确断言**：`has()` 要求「meta + 它指名的日志」都在（见 ChatStore:128），
+        // 我把日志换成了目录，所以 has() 必然 false —— 那验证不了任何东西。
+        // 这条测试真正要守的是：**失败不能动 meta 里记录的提交边界与条数**，
+        // 于是下次还能从边界重来，而不是把半截日志当成历史。
+        val survived = store.readMeta("c1")
+        assertNotNull("the meta itself must still be there", survived)
+        assertEquals(
+            "and it still describes the whole conversation",
+            onlyInStore.messages.size,
+            survived!!.messageCount,
+        )
+        assertEquals(
+            "the commit boundary is unchanged, so the next save starts from it",
+            meta.logBytes,
+            survived.logBytes,
+        )
+
+        // Remove the obstacle: the chat is readable again from what was never dropped.
+        logFile.delete()
+        val rereader = repository().apply { load() }
+        assertEquals("the chat is listed again", 1, rereader.conversations.value.size)
     }
 
     @Test
@@ -179,347 +212,6 @@ class ChatRepositoryStoreTest {
         val onDisk = rereader.readAll("c1")
         assertEquals("the drop has to reach the disk", 3, onDisk.size)
         assertEquals("改过的问题", onDisk.last().text)
-    }
-
-    @Test
-    fun `deleting a chat removes its files in both formats`() = runBlocking {
-        // 这条仍然要测：老用户的 `<id>.json` 可能存在（未迁移），删除必须两种都清掉。
-        val repository = repository()
-        val chat = conversation("c1")
-        repository.save(chat)
-        // 保存已经只写 store；这里手工补一份 `.json` 来模拟"老用户尚未迁移的旧副本"——
-        // 删除必须把它也清掉（否则重装旧版本会看到已删除的会话）。
-        writeLegacy(chat)
-        assertTrue("precondition: both formats are on disk", legacyFile("c1").exists() && store.has("c1"))
-
-        repository.delete("c1")
-
-        assertFalse("the plain file goes", legacyFile("c1").exists())
-        assertFalse("the store entry goes", store.has("c1"))
-        assertTrue("and it is no longer listed", repository.conversations.value.isEmpty())
-    }
-
-    // --- healing: a chat the half-connected build moved into the store -------------------------
-
-    @Test
-    fun `saving a store-only chat keeps it in the store`() = runBlocking {
-        // **新契约**（#31）：写侧已经是 JSONL 追加写，不再往 `.json` 搬。
-        // （旧测试名是 `…puts it back in a plain file…`，那条契约随 0.8.317 一起作废了。）
-        val onlyInStore = conversation("c1", title = "只在 store 里")
-        putInStoreOnly(onlyInStore)
-
-        val repository = repository()
-        repository.load()
-        val listed = repository.conversations.value.single()
-        assertEquals("listed from the store with its message count", 2, listed.messageCount)
-        assertEquals("no messages materialised", 0, listed.messages.size)
-
-        val full = repository.readAll("c1")
-        assertEquals("the transcript is readable on demand", 2, full.size)
-
-        repository.save(listed.copy(title = "救回来了", messages = full))
-
-        assertTrue("still in the store", store.has("c1"))
-        assertFalse("and no plain file was created", legacyFile("c1").exists())
-        val meta = store.readMeta("c1")
-        assertNotNull(meta)
-        assertEquals("the title was written through to the meta", "救回来了", meta!!.title)
-        assertEquals("and the transcript is intact", full, store.all(meta))
-        assertEquals(
-            "still exactly one chat after a reload",
-            1,
-            repository().apply { load() }.conversations.value.size,
-        )
-    }
-
-    @Test
-    fun `a failed write leaves the store copy alone and the chat readable`() = runBlocking {
-        // **新契约**（#31）：写入目标是 store 的 JSONL，所以要让它失败得堵**store 的日志文件**，
-        // 而不是旧的 `<id>.json.tmp`（那个路径已经不参与写入了）。
-        val onlyInStore = conversation("c1")
-        putInStoreOnly(onlyInStore)
-
-        val repository = repository()
-        repository.load()
-        val listed = repository.conversations.value.single()
-        val full = repository.readAll("c1")
-
-        val meta = store.readMeta("c1")
-        assertNotNull(meta)
-        // 把日志文件换成目录：下一次 append 打开它会失败。
-        val logFile = File(chatsDir, "store/" + meta!!.id + "." + meta.gen + ".jsonl")
-        assertTrue("precondition: the log is on disk", logFile.exists())
-        logFile.delete()
-        logFile.mkdirs()
-        assertTrue(logFile.isDirectory)
-
-        val result = runCatching {
-            repository.save(listed.copy(title = "写不进去", messages = full + full[0].copy(id = "extra")))
-        }
-
-        assertTrue("the save has to fail loudly", result.isFailure)
-        // **正确断言**：`has()` 要求「meta + 它指名的日志」都在（见 ChatStore:128），
-        // 我把日志换成了目录，所以 has() 必然 false —— 那验证不了任何东西。
-        // 这条测试真正要守的是：**失败不能动 meta 里记录的提交边界与条数**，
-        // 于是下次还能从边界重来，而不是把半截日志当成历史。
-        val survived = store.readMeta("c1")
-        assertNotNull("the meta itself must still be there", survived)
-        assertEquals(
-            "and it still describes the whole conversation",
-            onlyInStore.messages.size,
-            survived!!.messageCount,
-        )
-        assertEquals(
-            "the commit boundary is unchanged, so the next save starts from it",
-            meta.logBytes,
-            survived.logBytes,
-        )
-
-        // Remove the obstacle: the chat is readable again from what was never dropped.
-        logFile.delete()
-        val rereader = repository().apply { load() }
-        assertEquals("the chat is listed again", 1, rereader.conversations.value.size)
-    }
-
-    @Test
-    fun `a store-only chat is left alone - the store is the write path`() = runBlocking {
-        // **新契约**（#31）：store 是唯一的写路径。旧世界这里会把会话**搬回 `.json`** ——
-        // 那样每次启动都会把已迁移的会话搬回单文件，写侧优化（30 MB/轮 → 几 KB/轮）
-        // 当场失效。现在 store 里有的，就是该有的。
-        val onlyInStore = conversation("c1", title = "只在 store 里")
-        putInStoreOnly(onlyInStore)
-
-        repository().repairPending()
-
-        assertFalse("不再搬回 .json", legacyFile("c1").exists())
-        assertTrue("store 副本必须还在", store.has("c1"))
-        assertEquals(
-            "内容一字不差",
-            onlyInStore.messages,
-            store.all(store.readMeta("c1")!!),
-        )
-    }
-
-    @Test
-    fun `when the plain file is the newer one the store copy is dropped for the migration to redo`() = runBlocking {
-        // 有旧版本在 store 之后又写过 `.json` ⇒ 文件才是新的。
-        // 处置：丢掉 store 副本，`migratePending` 会把它重新迁进 store。
-        // **不能**把 store 写回 `.json`（那会把写侧优化废掉）。
-        val chat = conversation("c1", title = "文件里的标题", updatedAt = 5_000)
-        putInStoreOnly(chat.copy(title = "store 里的标题", updatedAt = 1_000))
-        writeLegacy(chat)
-
-        repository().repairPending()
-
-        assertFalse("旧的那份要丢掉", store.has("c1"))
-        assertTrue("文件要留着，等迁移重做", legacyFile("c1").exists())
-        assertEquals("内容没丢", "文件里的标题", readLegacy("c1").title)
-    }
-
-    @Test
-    fun `a repair that cannot write keeps the store copy and leaves the chat readable`() = runBlocking {
-        putInStoreOnly(conversation("c1"))
-        File(chatsDir, "c1.json.tmp").mkdirs()
-        val repository = repository()
-
-        repository.repairPending()
-
-        assertFalse("nothing was written", legacyFile("c1").exists())
-        assertTrue("so the only copy must still be here", store.has("c1"))
-        assertEquals(2, store.all(store.readMeta("c1")!!).size)
-        repository.load()
-        assertEquals("and the chat is still listed", 1, repository.conversations.value.size)
-    }
-
-    @Test
-    fun `a chat retired to json migrated is renamed back`() = runBlocking {
-        val chat = conversation("c1")
-        chatsDir.mkdirs()
-        migratedFile("c1").writeText(json.encodeToString(Conversation.serializer(), chat))
-
-        repository().repairPending()
-
-        assertTrue("the transcript is where the app looks for it", legacyFile("c1").exists())
-        assertFalse("the marker file is gone", migratedFile("c1").exists())
-        assertEquals(chat.messages, readLegacy("c1").messages)
-    }
-
-    @Test
-    fun `repair keeps whichever copy is more complete`() = runBlocking {
-        // **判据是条数，不是 updatedAt**（issue #33）。
-        //
-        // store 那份可能是 `readTail` 的窗口（12 轮），`.json` 是几天的完整历史。
-        // updatedAt 只能说明"谁最后被写过"，**说明不了谁内容多** —— 一个今天写的窗口，
-        // updatedAt 一定比几天前写的完整文件新（真机事故：store 85 条 vs .json 400+ 条）。
-        //
-        // 这里两份**条数相同**，所以才轮到 updatedAt：文件里的那份更新 ⇒ 它赢。
-        writeLegacy(conversation("c1", title = "文件里的", updatedAt = 5_000))
-        putInStoreOnly(conversation("c1", title = "store 里的", updatedAt = 1_000))
-
-        repository().repairPending()
-
-        assertEquals("the newer file must not be overwritten", "文件里的", readLegacy("c1").title)
-        assertFalse("and the store copy is dropped", store.has("c1"))
-    }
-
-    @Test
-    fun `repair prefers the copy with more messages over the newer one`() = runBlocking {
-        // `.json` 有 20 条（完整历史），store 只有 5 条（窗口）——
-        // 哪怕 store 的 updatedAt 更新，**多的那份才赢**。
-        val legacy = conversation("c1", title = "文件里的")
-        val many = (1..20).map { StoredMessage(id = "m$it", role = Roles.USER, text = "m$it") }
-        writeLegacy(legacy.copy(messages = many, updatedAt = 1_000))
-        putInStoreOnly(legacy.copy(messages = many.take(5), updatedAt = 9_000))
-
-        repository().repairPending()
-
-        assertTrue("完整的那份必须留下", legacyFile("c1").exists())
-        assertEquals("而且一条都不能少", 20, readLegacy("c1").messages.size)
-        assertFalse("窗口那份被丢掉", store.has("c1"))
-    }
-
-    @Test
-    fun `repair keeps the store copy when it is the newer one`() = runBlocking {
-        // **新契约**（#31）：store 是写路径 ⇒ 留下的一定是 store，
-        // 旧世界那条"把 store 写回 .json 再删掉 store"是反向的。
-        writeLegacy(conversation("c1", title = "文件里的", updatedAt = 1_000))
-        putInStoreOnly(conversation("c1", title = "store 里的", updatedAt = 5_000))
-
-        repository().repairPending()
-
-        assertTrue("store 更新 ⇒ store 留下", store.has("c1"))
-        assertEquals("留下的是新内容", "store 里的", store.readMeta("c1")!!.title)
-        assertFalse("旧文件要退休", legacyFile("c1").exists())
-    }
-
-    @Test
-    fun `the retired copy is never deleted`() = runBlocking {
-        // 退休副本（`.json.migrated`）是旧格式会话的**最后一份完整副本** ——
-        // store 那份未必完整（可能是更早的 build 留下的旧副本）。
-        // 自动清理它等于替用户决定数据该留多久（真机踩过：2215 条的历史没了）。
-        // 用户没发话不许删。
-        putInStoreOnly(conversation("c1"))
-        val retired = File(chatsDir, "c1.json.migrated")
-        retired.writeText("{\"legacy\":true}")
-
-        repository().repairPending()
-
-        assertTrue("退休副本必须还在", retired.exists())
-        assertEquals("内容也不能动", "{\"legacy\":true}", retired.readText())
-    }
-
-    @Test
-    fun `repair is idempotent`() = runBlocking {
-        putInStoreOnly(conversation("c1"))
-        val repository = repository()
-        repository.repairPending()
-        val after = store.all(store.readMeta("c1")!!)
-
-        repository.repairPending()
-
-        assertEquals("a second pass must change nothing", after, store.all(store.readMeta("c1")!!))
-        assertTrue("store 副本还在", store.has("c1"))
-    }
-
-    @Test
-    fun `a plain file wins over a leftover store copy`() = runBlocking {
-        val chat = conversation("c1", title = "旧标题")
-        putInStoreOnly(chat.copy(title = "store 里的标题"))
-        writeLegacy(chat.copy(title = "文件里的标题"))
-
-        val listed = repository().apply { load() }.conversations.value.single()
-
-        assertEquals("while the store is not the write path, the file is the newer copy", "文件里的标题", listed.title)
-    }
-
-    // --- migrating the old format --------------------------------------------------------------
-
-    @Test
-    fun `an old chat is listed before it is migrated and identical after`() = runBlocking {
-        val legacy = conversation("c1", title = "老会话")
-        writeLegacy(legacy)
-        val repository = repository()
-
-        repository.load()
-        val beforeMigration = repository.conversations.value.single()
-        // **新契约**（#30）：列表只带 meta，正文按需读。这里断言两件事：
-        // ① 这条会话确实被列出来了（标题正确）；② 正文能通过 readAll 完整读出来。
-        // 旧断言 `legacy.messages == beforeMigration.messages` 属于"列表常驻全文"的语义，
-        // 正是 #30 要去掉的那个东西。
-        assertEquals("an unmigrated chat is listed like any other", legacy.title, beforeMigration.title)
-        assertEquals("the transcript is still readable on demand", legacy.messages, repository.readAll("c1"))
-
-        repository.migratePending()
-
-        // **退休 = 删除旧文件**（用户：「我也没说我要副本啊」）：
-        // 新格式里已经有完整内容（迁移时校验过：读回相等 + 字节数不少于 80%），
-        // 再留一份 `.json.migrated` 就是凭空多一份。
-        assertFalse("the old file is retired", legacyFile("c1").exists())
-        assertTrue("the store owns it now", store.has("c1"))
-
-        repository.load()
-        assertEquals(
-            "the listed metadata has to be identical across the migration",
-            beforeMigration,
-            repository.conversations.value.single(),
-        )
-        assertEquals("and so does the transcript", legacy.messages, repository.readAll("c1"))
-    }
-
-    @Test
-    fun `migrating twice changes nothing`() = runBlocking {
-        writeLegacy(conversation("c1"))
-        val repository = repository()
-
-        repository.migratePending()
-        val meta = store.readMeta("c1")
-        repository.migratePending()
-
-        assertEquals("a second pass must not touch the log", meta, store.readMeta("c1"))
-        assertEquals(1, repository().apply { load() }.conversations.value.size)
-    }
-
-    @Test
-    fun `a migration killed before the rename does not double the chat`() = runBlocking {
-        val legacy = conversation("c1")
-        writeLegacy(legacy)
-        putInStoreOnly(legacy)
-
-        val repository = repository()
-        repository.load()
-
-        assertEquals("one chat, not two, when both copies exist", 1, repository.conversations.value.size)
-        repository.migratePending()
-        assertFalse("the leftover .json is retired on the next pass", legacyFile("c1").exists())
-    }
-
-    @Test
-    fun `an unparseable old chat is left alone and reported`() = runBlocking {
-        chatsDir.mkdirs()
-        val broken = File(chatsDir, "c1.json").apply { writeText("{\"id\":\"c1\", broken") }
-        val onDisk = broken.readBytes()
-        val repository = repository()
-
-        repository.migratePending()
-
-        assertTrue("the old file must still be there", broken.exists())
-        assertEquals("and not one byte of it may change", onDisk.toList(), broken.readBytes().toList())
-        assertTrue("the failure has to leave a marker", failedMarker("c1").exists())
-        assertFalse("nothing may reach the store", store.has("c1"))
-    }
-
-    @Test
-    fun `migration keeps the order the user saw`() = runBlocking {
-        writeLegacy(conversation("old", updatedAt = 1_000))
-        writeLegacy(conversation("new", updatedAt = 2_000))
-        val repository = repository()
-        repository.load()
-        val before = repository.conversations.value.map { it.id }
-
-        repository.migratePending()
-        repository.load()
-
-        assertEquals("migrating must not reshuffle the list", before, repository.conversations.value.map { it.id })
     }
 
     @Test
