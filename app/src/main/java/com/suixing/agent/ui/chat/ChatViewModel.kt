@@ -1250,7 +1250,8 @@ class ChatViewModel : ViewModel() {
             // ⇒ 两个判重分支都看不到那条消息 ⇒ 又补一条（重复）。串起来之后才真正生效。
             // **必须 gate 在 `opened != null` 上**（评审 12 的 H1）：读盘失败时 `_state.messages`
             // 还是空列表，那不算"来自磁盘"。硬写 true 会让空 base 也获得"可以清草稿"的资格，
-            // 而且紧接着的 `save` 必被护栏拒绝（既不是全量也不是尾部）⇒ 假红条 + 只剩一条消息的画面。
+            // 而且紧接着的 `save` 在"盘上已有内容"时必被护栏拒绝（既不是全量也不是尾部）⇒ 假红条 +
+            // 只剩一条消息的画面。（"盘上本来就 0 条"那个例外见 `shouldSkipEmptBaseMerge`：那时放行安全且能自愈。）
             // 读失败就把草稿留给下一次打开。
             if (opened != null &&
                 _state.value.conversationId == conversation.id &&
@@ -3335,7 +3336,7 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * 写进缓存并标"已落盘"，切回来命中缓存、不再读盘 ⇒ 屏幕只显示那几条。
  *
  * **但有一个例外必须放过**：`baseFromDisk == true`（尾部确实从盘上读到了）且盘上**本来就没有
- * 任何消息**（`diskMessageCount == 0`）—— 这时把恢复消息当整份历史写回不可能截断任何东西，
+ * 任何消息**（`listMessageCount == 0`）—— 这时把恢复消息当整份历史写回不可能截断任何东西，
  * 而它正是"新建会话首发后约 1 秒内被杀"那条**本来能自愈**的路径。
  *
  * @param baseEmpty 手里的 base 是否为空
@@ -3344,6 +3345,17 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  *   在 store 的自有不变式下 `count == 0 ⟺ logBytes == 0`（count 与 logBytes 同一个 list 写出），
  *   而真正的字节级把关仍在 `ChatRepository.save` 的 `diskHasLog = logBytes > 0`。
  */
+internal fun shouldSkipEmptBaseMerge(
+    baseEmpty: Boolean,
+    baseFromDisk: Boolean,
+    listMessageCount: Int?,
+): Boolean {
+    if (!baseEmpty) return false
+    // 只有"确实从盘读到 + 盘上本来就一条没有"才放过；**拿不准就保守跳过**。
+    val diskIsTrulyEmpty = baseFromDisk && listMessageCount == 0
+    return !diskIsTrulyEmpty
+}
+
 /**
  * 合并草稿时，手里这份 `messages` 是不是**确实在磁盘上**（决定能不能清掉草稿）。
  *
@@ -3356,6 +3368,18 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * `stored.messages` 是空的 —— 那种空 base 也不会走清理分支（要求 `restored` 为空），
  * 所以这条判据只需要区分"屏幕上的这份是否来自磁盘"。
  */
+internal fun draftIsDiskBacked(
+    shownPresent: Boolean,
+    baseFromDisk: Boolean,
+    /**
+     * 缓存里的那份是否**确认已落盘**（S1 的水位）。
+     *
+     * 这是缓存路径上唯一可信的证据：只看"屏幕上有没有会话"无法区分"这份来自磁盘"与
+     * "这份含保存失败、只在内存的消息"。
+     */
+    cacheDiskBacked: Boolean = false,
+): Boolean = !shownPresent || baseFromDisk || cacheDiskBacked
+
 /**
  * What has to be appended to [messages] for the draft a killed run left behind to come back
  * whole: the rounds and tool results it had already produced, then the half-written answer.
@@ -3371,29 +3395,6 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
  * for no reason.
  */
-internal fun shouldSkipEmptBaseMerge(
-    baseEmpty: Boolean,
-    baseFromDisk: Boolean,
-    listMessageCount: Int?,
-): Boolean {
-    if (!baseEmpty) return false
-    // 只有"确实从盘读到 + 盘上本来就一条没有"才放过；**拿不准就保守跳过**。
-    val diskIsTrulyEmpty = baseFromDisk && listMessageCount == 0
-    return !diskIsTrulyEmpty
-}
-
-internal fun draftIsDiskBacked(
-    shownPresent: Boolean,
-    baseFromDisk: Boolean,
-    /**
-     * 缓存里的那份是否**确认已落盘**（S1 的水位）。
-     *
-     * 这是缓存路径上唯一可信的证据：只看"屏幕上有没有会话"无法区分"这份来自磁盘"与
-     * "这份含保存失败、只在内存的消息"。
-     */
-    cacheDiskBacked: Boolean = false,
-): Boolean = !shownPresent || baseFromDisk || cacheDiskBacked
-
 internal fun liveDraftRecovery(
     draft: LiveDraft,
     messages: List<StoredMessage>,

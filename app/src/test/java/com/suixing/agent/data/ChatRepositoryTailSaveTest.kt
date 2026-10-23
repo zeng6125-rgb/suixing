@@ -110,4 +110,38 @@ class ChatRepositoryTailSaveTest {
         val onDisk = repository(tmp.root).apply { load() }.readAll("heal")
         assertEquals("恢复消息必须落盘", listOf("m1"), onDisk.map { it.id })
     }
+
+    @Test
+    fun `a shorter list over an existing log is refused and leaves the bytes alone`() = runBlocking {
+        // 评审 17 指出：上一个用例（空日志）根本没进护栏分支（`diskHasLog == false` ⇒ 整段跳过），
+        // 它只证明了"新建会话能首次写入"。**这条**才真正打到"既不是全量也不是尾部 ⇒ 拒写"那道分支
+        // —— 而它在全仓原本 0 条测试。
+        val repository = repository(tmp.root)
+        repository.save(
+            Conversation(
+                id = "guard", title = "t", createdAt = 1L, updatedAt = 1L,
+                messages = (1..4).map { msg("g$it") },
+            ),
+        )
+        val log = File(tmp.root, "chats/store").listFiles { f -> f.name.startsWith("guard.") && f.name.endsWith(".jsonl") }!!.single()
+        val bytes = log.length()
+
+        val outcome = repository.save(
+            Conversation(
+                id = "guard", title = "t", createdAt = 1L, updatedAt = 1L,
+                // **末尾也对不上**（盘上最后是 g4、首条是 g1）：这才是"既不是全量也不是尾部"。
+                // 注意：只留 g4 会走"尾部窗口"分支（追加空列表、no-op），并不是拒绝 —— 我第一次就写错了。
+                messages = listOf(msg("g2")),
+            ),
+        )
+        // **绑到具体那条分支**，而不是只判"被拒"：拒绝原因来自
+        // `ChatRepository.kt:739-746`（"既不是完整历史、也不是盘上末尾的一段"）。
+        assertTrue("必须被拒", outcome is ChatRepository.SaveResult.Refused)
+        val reason = (outcome as ChatRepository.SaveResult.Refused).reason
+        assertTrue(
+            "必须是被『既不是全量也不是尾部』那条拒绝，而不是别的路径：$reason",
+            reason.contains("既不是完整历史"),
+        )
+        assertEquals("日志一个字节都不能变", bytes, log.length())
+    }
 }
