@@ -43,4 +43,25 @@ class LiveDraftRecoveryTest {
         )
         assertTrue(liveDraftRecovery(draft, listOf(stored)).isEmpty())
     }
+
+    @Test
+    fun `a stale thinking draft does not duplicate a card that grew after the last tick`() {
+        // **主场景**（评审 10 的 M1）：草稿是"最多 1 秒前"的快照，落盘那条比它**更长**
+        // （停止前最后一秒还在想）。用相等判重会认为"没落盘" ⇒ 再补一张重复的思考卡。
+        val draft = LiveDraft(chatId = "c1", runId = "r1", at = 1L, text = "", reasoning = "我想")
+        val grown = StoredMessage(
+            id = "m1", role = Roles.ASSISTANT, text = "", reasoning = "我想了很久", runId = "r1",
+        )
+        assertTrue("草稿是前缀 ⇒ 已经落过，不该再补", liveDraftRecovery(draft, listOf(grown)).isEmpty())
+    }
+
+    @Test
+    fun `a draft that is NOT a prefix still comes back`() {
+        // 反向：草稿里有一段盘上没有的内容 ⇒ 必须补回来（不能因为"同 runId 有 thinking"就丢掉）。
+        val draft = LiveDraft(chatId = "c1", runId = "r1", at = 1L, text = "", reasoning = "完全不同的想法")
+        val other = StoredMessage(
+            id = "m1", role = Roles.ASSISTANT, text = "", reasoning = "我想了很久", runId = "r1",
+        )
+        assertEquals("内容不同 ⇒ 必须恢复", 1, liveDraftRecovery(draft, listOf(other)).size)
+    }
 }

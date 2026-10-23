@@ -2935,7 +2935,16 @@ class ChatViewModel : ViewModel() {
         // Nothing this draft holds is missing from the transcript; clearing it is all that is
         // left.
         if (restored.isEmpty()) {
-            Core.chats.clearLive(chatId)
+            // **只有"手里这份来自磁盘"时才清草稿**（评审 10 的 M2）。
+            // `messages` 可能来自活会话或 LRU 缓存 —— 里面可能有**保存失败、只在内存里**的消息
+            // （`endSession` 把内存版写进了缓存）。判重命中它们就删草稿，等于把"唯一副本"
+            // 在一个不可逆的方向上扔掉。宁可留着（下次还能再判一次）。
+            val fromDisk = live == null && shown == null
+            if (fromDisk) {
+                Core.chats.clearLive(chatId)
+            } else {
+                Log.i(TAG, "live draft kept for $chatId: its content is not disk-backed yet")
+            }
             return
         }
         val next = messages + restored
@@ -3256,9 +3265,16 @@ internal fun liveDraftRecovery(
     // 草稿的 text 也是空 ⇒ `probe` 为空 ⇒ 原来判 delivered=false ⇒ 再补一条
     // 带同样思考内容的助理消息 ⇒ 用户看到**重复的思考卡**（而 0.8.372 的 `?: false`
     // 让"用户按停止"这条路每次都会留下草稿，所以更容易走到）。
+    // **必须用 `startsWith`，不能用相等**（评审 10 的 M1）：草稿是"最多 1 秒前"的快照，
+    // 而落盘那条 = 草稿 + 最后一个 tick 之后到达的增量。只要用户按停止时它还在想
+    // （这恰恰是最常见的场景），相等永远不成立 ⇒ 还是会补一张重复的思考卡。
+    // 方向与正文分支一致（那边一直用 `startsWith`），注释里也早写明"用相等会把每次正常结束
+    // 都判成未落盘"。不做 trim：两边都没有规范化，逐字前缀关系是可靠的。
     val reasoningDelivered = probe.isEmpty() && !draft.reasoning.isNullOrBlank() &&
         messages.any { message ->
-            message.runId == draft.runId && message.reasoning == draft.reasoning
+            message.runId == draft.runId &&
+                message.role == Roles.ASSISTANT &&
+                message.reasoning?.startsWith(draft.reasoning) == true
         }
     val delivered = reasoningDelivered || (probe.isNotEmpty() && messages.any { message ->
         message.runId == draft.runId &&

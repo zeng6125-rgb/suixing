@@ -657,7 +657,8 @@ class ChatRepository(private val context: Context) {
                                 "${conversation.messages.size} of $known and does not start where the log does",
                         )
                         return@withLock SaveResult.Refused(
-                            "声明了完整历史但内容对不上（手里 ${conversation.messages.size} 条 < 盘上 $known 条）；" +
+                            "声明了完整历史但内容对不上（手里 ${conversation.messages.size} 条、" +
+                                "盘上 $known 条，末尾也对不上）；" +
                                 "为避免截断没有写入",
                         )
                     }
@@ -808,6 +809,13 @@ class ChatRepository(private val context: Context) {
             // A deleted chat's draft is garbage nobody will ever read: the conversation it
             // belongs to is gone from the list, so nothing will look for it again.
             liveFile(id).delete()
+            // **顺带清掉它留下的坏草稿**（评审 10 的 S3）：删会话是用户的明确意图，
+            // 而 `.live.json.<millis>.corrupt` 不会被任何清理路径碰到，会永久残留。
+            runCatching {
+                liveFile(id).parentFile?.listFiles { f ->
+                    f.name.startsWith("${liveFile(id).name}.") && f.name.endsWith(".corrupt")
+                }?.forEach { it.delete() }
+            }
             // A marker pointing at a chat that no longer exists would only send the next
             // launch down the fallback path anyway, so it is cleared rather than left lying.
             if (readLastOpenedMarker() == id) lastOpenedFile.delete()
