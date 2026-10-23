@@ -40,9 +40,44 @@ class EstimateTokensTest {
     }
 
     @Test
-    fun `a long message still divides as before`() {
-        // 300 能被 3 整除 ⇒ 与旧实现一致（既有断言不受影响）。
+    fun `a length divisible by three is the only case identical to the old floor`() {
+        // **注意**（issue #39 问题 4）：`(n+2)/3` 是向上取整，不是"只把 0 补成 1"。
+        // 只有 n 是 3 的倍数时与旧的 `n/3` 相同（约占 1/3 的情形）；其余全部上调。
         assertEquals(100, estimateTokens(msg("字".repeat(300))))
+    }
+
+    @Test
+    fun `the ceiling costs at most one token per message, not a third`() {
+        // **更正 issue #39 的「+33% 全局膨胀」**：`(n+2)/3` 相对旧的 `n/3`，
+        // 每条消息**最多多算 1 token**（n % 3 == 0 时相同，否则 +1），不是按比例膨胀。
+        // 均匀长度分布下整体比值 ≈ 1.008；只有极短消息（1~2 字）从 0 变 1 的相对涨幅看起来大。
+        for (n in 0..2_000) {
+            val delta = estimateTokens(msg("x".repeat(n))) -
+                (n / 3)
+            assertTrue("n=$n 的差值只能是 0 或 1（实测 $delta）", delta == 0 || delta == 1)
+        }
+        var floorTotal = 0
+        var ceilTotal = 0
+        for (n in 1..500) {
+            floorTotal += n / 3
+            ceilTotal += estimateTokens(msg("x".repeat(n)))
+        }
+        val ratio = ceilTotal.toDouble() / floorTotal
+        assertTrue("整体比值接近 1（实测 $ratio）", ratio in 1.00..1.02)
+    }
+
+    @Test
+    fun `an image costs the same whether it comes from the list or the single field`() {
+        // `imageCount` 是 `allImages.size` 的零分配替代，两者必须给出同一个数。
+        val list = StoredMessage(id = "a", role = Roles.USER, text = "x", imagesBase64 = listOf("1", "2"))
+        val single = StoredMessage(id = "b", role = Roles.USER, text = "x", imageBase64 = "1")
+        val none = StoredMessage(id = "c", role = Roles.USER, text = "x")
+        assertEquals(2, list.imageCount)
+        assertEquals(1, single.imageCount)
+        assertEquals(0, none.imageCount)
+        assertEquals(list.allImages.size, list.imageCount)
+        assertEquals(single.allImages.size, single.imageCount)
+        assertEquals(none.allImages.size, none.imageCount)
     }
 
     @Test

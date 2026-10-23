@@ -72,6 +72,17 @@ data class StoredMessage(
     /** 单值与列表的聚合读侧：旧盘数据 / 工具截图（单值）与多附件（列表）都不丢。 */
     val allImages: List<String> get() = imagesBase64.ifEmpty { listOfNotNull(imageBase64) }
 
+    /**
+     * 图片**张数**，不分配任何对象（issue #39 问题 1）。
+     *
+     * `allImages` 每次访问都会 `ifEmpty { listOfNotNull(...) }` —— 而**绝大多数消息没有图片**，
+     * 于是每次调用都白白新建一个空 List。`trim` 每轮对全 history 调一次、圆环再对全 messages 调一次
+     * ⇒ 每轮 2n 次分配，全是垃圾。
+     * 需要图片**内容**的调用方（发送路径）继续用 [allImages]；只数张数的（估算）用这个。
+     */
+    val imageCount: Int
+        get() = if (imagesBase64.isNotEmpty()) imagesBase64.size else if (imageBase64 != null) 1 else 0
+
     val totalTokens: Int get() = promptTokens + completionTokens
 
     /** True when the endpoint never told us what this message cost. */

@@ -2515,7 +2515,9 @@ private const val INTERRUPTED_TOOL_OUTPUT = "（已中断：任务被停止，�
  */
 internal fun estimateTokens(message: StoredMessage): Int {
     val text = message.text.length + message.toolOutput.orEmpty().length + message.toolArgs.orEmpty().length
-    val image = IMAGE_TOKENS * message.allImages.size
+    // 用 `imageCount`（零分配）而不是 `allImages.size`：后者每次访问都会新建一个 List，
+    // 而 `trim` 每轮要把全 history 过一遍（issue #39 问题 1）。
+    val image = IMAGE_TOKENS * message.imageCount
     // **向上取整**（issue #37）：整数除法会让 1~2 个字符的消息算成 **0 token**，
     // 几十条短消息累积起来就会让预算判断系统性偏低 —— 而低估的后果是**超预算的请求**，
     // 端点直接拒绝。向上取整只会让估算**不小于**原来（裁剪更保守、显示略大），
