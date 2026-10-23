@@ -1132,17 +1132,25 @@ class AgentEngine(
         val window = settings.contextWindowFor(settings.model)
         val checkpoint = checkpoints.lastOrNull()
         val resumeAt = checkpoint?.let { saved -> history.indexOfFirst { it.id == saved.toMessageId } }
-        val replayed = if (checkpoint != null && resumeAt != null && resumeAt >= 0) {
-            wire += ChatMessage.system("[上下文摘要] ${checkpoint.summary}")
-            // **裁完必须仍有人问的那句话**（issue #37 第一条）：若裁出来的只有一条超大工具结果，
-            // `sanitize` 会把它当孤儿丢掉 ⇒ 请求里没有任何 user，模型答非所问。
-            sanitize(ensureQuestionKept(trim(history.drop(resumeAt + 1), window), history))
-        } else {
-            // No checkpoint, or one whose message is no longer in the transcript: the transcript is
-            // what decides the prompt, so a checkpoint that no longer lines up is ignored rather
-            // than half-applied.
-            sanitize(ensureQuestionKept(trim(history, window), history))
+        val hasCheckpoint = checkpoint != null && resumeAt != null && resumeAt >= 0
+        // **这段纯计算挪出主线程**（issue #36）：`trim` 要对历史做 O(条数) 的 token 估算与列表切片，
+        // `sanitize`/`ensureQuestionKept` 再各扫一遍 —— 大会话每轮几十万字符。
+        // 而 `runLoop` 的调用上下文是 `viewModelScope`（Main），于是**每一轮**都在主线程上做这件事，
+        // 正撞上用户在别的会话里滑动（用户反馈：「有会话在跑时，切到别的会话滑动会卡」）。
+        // 只搬纯计算：wire 的追加与事件顺序都在块外，线程归属不变。
+        val replayed = withContext(Dispatchers.Default) {
+            if (hasCheckpoint) {
+                // **裁完必须仍有人问的那句话**（issue #37 第一条）：若裁出来的只有一条超大工具结果，
+                // `sanitize` 会把它当孤儿丢掉 ⇒ 请求里没有任何 user，模型答非所问。
+                sanitize(ensureQuestionKept(trim(history.drop(resumeAt!! + 1), window), history))
+            } else {
+                // No checkpoint, or one whose message is no longer in the transcript: the transcript is
+                // what decides the prompt, so a checkpoint that no longer lines up is ignored rather
+                // than half-applied.
+                sanitize(ensureQuestionKept(trim(history, window), history))
+            }
         }
+        if (hasCheckpoint) wire += ChatMessage.system("[上下文摘要] ${checkpoint!!.summary}")
         // The messages themselves are never removed from the conversation — the usage watermark
         // counts them — which is why the span is found by id and the replay is a slice, not a rewrite.
         replayed.forEach { message ->
