@@ -3328,6 +3328,23 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
     other.messages == messages
 
 /**
+ * 合并草稿时，**base 为空**要不要放弃这一次（先不动磁盘，把草稿留到下次）。
+ *
+ * 为什么需要这条：`shown` 在"合并读盘期间用户切走"时会变 null，而 `stored.messages` 恒为空
+ * （#30 之后会话列表只带 meta）⇒ 手里只剩那条恢复消息。若照旧写盘，会把一份**截短的历史**
+ * 写进缓存并标"已落盘"，切回来命中缓存、不再读盘 ⇒ 屏幕只显示那几条。
+ *
+ * **但有一个例外必须放过**：`baseFromDisk == true`（尾部确实从盘上读到了）且盘上**本来就没有
+ * 任何消息**（`diskMessageCount == 0`）—— 这时把恢复消息当整份历史写回不可能截断任何东西，
+ * 而它正是"新建会话首发后约 1 秒内被杀"那条**本来能自愈**的路径。
+ *
+ * @param baseEmpty 手里的 base 是否为空
+ * @param baseFromDisk base 是否确实来自磁盘（`readTail` 成功，且调用点 gate 在 `opened != null`）
+ * @param listMessageCount 会话列表里那份 meta 的条数（**不是磁盘字节数**；未知传 null）。
+ *   在 store 的自有不变式下 `count == 0 ⟺ logBytes == 0`（count 与 logBytes 同一个 list 写出），
+ *   而真正的字节级把关仍在 `ChatRepository.save` 的 `diskHasLog = logBytes > 0`。
+ */
+/**
  * 合并草稿时，手里这份 `messages` 是不是**确实在磁盘上**（决定能不能清掉草稿）。
  *
  * 这条判据关系不可逆：判成"是"就去删草稿，而草稿是进程被杀后唯一的副本。所以它必须覆盖
@@ -3353,23 +3370,6 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * is not already there; nothing else can say the answer is unfinished, because StoredMessage
  * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
  * for no reason.
- */
-/**
- * 合并草稿时，**base 为空**要不要放弃这一次（先不动磁盘，把草稿留到下次）。
- *
- * 为什么需要这条：`shown` 在"合并读盘期间用户切走"时会变 null，而 `stored.messages` 恒为空
- * （#30 之后会话列表只带 meta）⇒ 手里只剩那条恢复消息。若照旧写盘，会把一份**截短的历史**
- * 写进缓存并标"已落盘"，切回来命中缓存、不再读盘 ⇒ 屏幕只显示那几条。
- *
- * **但有一个例外必须放过**：`baseFromDisk == true`（尾部确实从盘上读到了）且盘上**本来就没有
- * 任何消息**（`diskMessageCount == 0`）—— 这时把恢复消息当整份历史写回不可能截断任何东西，
- * 而它正是"新建会话首发后约 1 秒内被杀"那条**本来能自愈**的路径。
- *
- * @param baseEmpty 手里的 base 是否为空
- * @param baseFromDisk base 是否确实来自磁盘（`readTail` 成功，且调用点 gate 在 `opened != null`）
- * @param listMessageCount 会话列表里那份 meta 的条数（**不是磁盘字节数**；未知传 null）。
- *   在 store 的自有不变式下 `count == 0 ⟺ logBytes == 0`（count 与 logBytes 同一个 list 写出），
- *   而真正的字节级把关仍在 `ChatRepository.save` 的 `diskHasLog = logBytes > 0`。
  */
 internal fun shouldSkipEmptBaseMerge(
     baseEmpty: Boolean,

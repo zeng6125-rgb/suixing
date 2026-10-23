@@ -93,4 +93,21 @@ class ChatRepositoryTailSaveTest {
         assertEquals("标题要更新", "新标题", meta.title)
         assertEquals("条数要更新", 6, meta.messageCount)
     }
+
+    @Test
+    fun `a restored message over an empty log is accepted`() = runBlocking {
+        // "新会话发出后 1 秒内进程被杀"的自愈路径：盘上 0 条（meta 0/0），草稿里有一条恢复消息。
+        // 这条测试证明那次 save **真的被接受**（不是被"既不是全量也不是尾部"的护栏拒掉）——
+        // 否则 `shouldSkipEmptBaseMerge` 里那个例外只是纸面自愈。
+        val repository = repository(tmp.root)
+        val first = StoredMessage(id = "m1", role = Roles.ASSISTANT, text = "（由「任务被停止」原因，对话中断）")
+        val written = repository.save(
+            Conversation(
+                id = "heal", title = "t", createdAt = 1L, updatedAt = 1L, messages = listOf(first),
+            ),
+        )
+        assertTrue("必须真的写下去", written is ChatRepository.SaveResult.Written)
+        val onDisk = repository(tmp.root).apply { load() }.readAll("heal")
+        assertEquals("恢复消息必须落盘", listOf("m1"), onDisk.map { it.id })
+    }
 }
