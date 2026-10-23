@@ -2421,7 +2421,6 @@ private fun ChatInfoDialog(info: ChatRepository.ChatFile?, onDismiss: () -> Unit
     )
 }
 
-/** A labelled control: the label and the why-line above it, the way the cards stacked them. */
 /**
  * A folded block of settings that are set once and then left alone.
  *
@@ -2507,7 +2506,7 @@ private fun RenameDialog(
     )
 }
 
-/** The token count behind the context window's 自定义 segment. */
+/** 一个带说明的控件块：标题、why 行在上，控件在下（卡片式设置页的统一骨架）。 */
 @Composable
 private fun LabeledBlock(
     label: String,
