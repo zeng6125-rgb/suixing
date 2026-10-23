@@ -406,16 +406,29 @@ internal data class Usage(
 
     companion object {
         fun of(rounds: List<StoredMessage>): Usage? {
-            if (rounds.none { it.usageKnown }) return null
+            // **一遍遍历算完**：原来是 `none` + 4 次 `sumOf`，同一份列表扫了 5 遍。
+            var known = false
+            var completion = 0
+            var reasoning = 0
+            var elapsed = 0L
+            var decode = 0L
+            for (round in rounds) {
+                if (round.usageKnown) known = true
+                completion += round.completionTokens
+                reasoning += round.reasoningTokens
+                elapsed += round.elapsedMs
+                // 官方多轮聚合＝ΣdecodeTokens/ΣdecodeMs：逐轮求 decode 段再相加，不是各轮速率取平均。
+                decode += Tps.decodeMs(round.elapsedMs, round.firstTokenMs)
+            }
+            if (!known) return null
             val newest = rounds.last()
             return Usage(
                 prompt = newest.promptTokens,
-                completion = rounds.sumOf { it.completionTokens },
-                reasoning = rounds.sumOf { it.reasoningTokens },
+                completion = completion,
+                reasoning = reasoning,
                 cached = newest.cachedTokens,
-                elapsedMs = rounds.sumOf { it.elapsedMs },
-                // 官方多轮聚合＝ΣdecodeTokens/ΣdecodeMs（client.js:8331-8333）：逐轮求 decode 段再相加。
-                decodeMs = rounds.sumOf { Tps.decodeMs(it.elapsedMs, it.firstTokenMs) },
+                elapsedMs = elapsed,
+                decodeMs = decode,
             )
         }
     }
