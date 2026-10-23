@@ -399,30 +399,9 @@ fun SuixingApp() {
         LaunchedEffect(surfaceArgb) {
             activity?.window?.setBackgroundDrawable(ColorDrawable(surfaceArgb))
         }
-        // Painted on the window, not on the scaffold: the scaffold is inset by the keyboard, so
-        // the strip behind the keyboard was left unpainted and the window's own white showed
-        // through the keyboard's rounded corners as a pale seam. This box is not inset, so
-        // everything the keyboard covers is already the app's own background.
-        // 窗口底色不在这里管：MainActivity 明确把它设成透明（MainActivity.kt:94-100，键盘圆角要
-        // 露后面那层，不该由窗口去画），这里再按 surface 画一遍就是把那条接缝换了个颜色而已。
-        // The strip behind the keyboard stays unpainted: other apps' rounded keyboard corners
-        // show the wallpaper there, and ours showed our own canvas because the root painted the
-        // whole window. Insetting the painted layer by the IME (and making the window background
-        // transparent in MainActivity) is the adaptation they have and we were missing.
-        // Two siblings, each inset once: the painted layer stops at the keyboard's top edge so
-        // the strip behind it — and the keyboard's rounded corners — stay unpainted and show
-        // whatever is behind the (transparent) window, which is the see-through the adapted
-        // apps have. Painting the whole window instead put our gradient's own colour in those
-        // corners, and a gradient can never match itself at two different heights, which is
-        // why every full-window attempt read as "lighter but not the same".
-        // Painted over the whole window, and the gradient's end is pinned to the canvas's own
-        // bottom edge (window height minus the keyboard). Two gradients over two different
-        // spans can never agree where they meet: with the root running 0..window and the canvas
-        // 0..canvasBottom, the strip behind the keyboard showed the root at 62% of its ramp
-        // while the canvas just above it sat at 100% — the colour mismatch at the keyboard's
-        // rounded corners. Ending the root's ramp where the canvas ends (and clamping past it,
-        // which is the ramp's own last colour) makes the corners exactly the canvas's bottom
-        // colour, continuous with the pixel row above the keyboard.
+        // 底色只画到键盘上沿，键盘后面（含它的圆角）留白给壁纸 —— 这是其它 App 的做法；
+        // 铺满整窗会让渐变的结束色出现在圆角里，和画布顶边对不上。渐变终点钉在画布底边
+        // （窗高 − 键盘高），两段渐变才在交界处同色。
         val gradientEndPx = with(rootDensity) {
             (LocalConfiguration.current.screenHeightDp.dp.toPx() - heldImePx).coerceAtLeast(1f)
         }

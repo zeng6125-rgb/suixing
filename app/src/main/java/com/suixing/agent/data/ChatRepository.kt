@@ -697,29 +697,10 @@ class ChatRepository(private val context: Context) {
     private val lastOpenedFile: File get() = File(dir, "last-opened")
 
     /**
-     * Saves [conversation] as the single `<id>.json` file this app has always written, and drops
-     * any copy the append-only store holds for the same chat.
+     * 一次保存：按水位**只追加尾部**，不能追加（编辑重答/中段插入）才换代重写（#31）。
      *
-     * The store is not the write path yet: 0.8.307 shipped with it half-connected, so a chat
-     * could end up existing only in `chats/store/`, where an older build — and this app's own
-     * export button — cannot see it. Until the migration is switched on deliberately, writing the
-     * plain file and dropping the store copy **heals** any chat that build already moved.
-     *
-     * The order is the whole point: file written, then read back, and only then is the other copy
-     * discarded. Discarding first would leave a chat with no copy at all if the write failed.
-     */
-    /**
-     * 一次保存：**追加写**，不再全量重写（#31 的写侧）。
-     *
-     * 原来的实现是 `encodeToString(整个 Conversation)` → 写临时文件 → rename：30 MB 的会话
-     * 每轮就是 30 MB 序列化 + 30 MB 写 + rename，一次保存两份 IO。issue #30 把它和读侧并列为
-     * 同一个病根的两半。
-     *
-     * 现在交给 [ChatStore.save]：它按水位（`messageCount` / `lastMessageId`）判断能不能**只追加
-     * 尾部**；不能追加时（编辑重答、中段插入）才换代重写，旧代留着当回退。
-     *
-     * **读回校验保留**：写完之后把整份读出来比对，不一致就抛 —— 这是"不丢历史"的最后一道闸，
-     * 比省一次 IO 重要得多。只在追加路径上做（rewrite 由 ChatStore 自己校验）。
+     * 原来的实现每轮都把整份 `Conversation` 序列化再 rename：30 MB 的会话就是 30 MB 序列化 +
+     * 30 MB 写。现在交给 [ChatStore.save] 判断。
      */
     /**
      * Appends only the messages that are new since the log's last one.
