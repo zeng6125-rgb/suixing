@@ -1568,7 +1568,12 @@ fun ChatScreen(
                             // 输入框这一侧。
                             // 读历史期间用冻结值（见 heldFootprint）。
                             // 没种过就退回当前值（**不要退回 0.dp**，那会让恢复位置被推移一次）。
-                            bottom = if (scroll.stickToBottom) {
+                            bottom = if (scroll.stickToBottom || !state.runningHere) {
+                                // **没有 run 时永远用实时值**（真机反馈：生成结束后滑到底，
+                                // 按住期间最底卡片与输入框的间距不是 16dp，松手才恢复 ——
+                                // 因为按压保护强制 stickToBottom=false，吃到了「运行中」
+                                // 冻结的旧 heldFootprint。冻结只为流式期间输入框高度变化
+                                // 不推内容；没有 run 时高度根本不会变，冻结只剩这个 bug）。
                                 stackFootprint
                             } else {
                                 heldFootprint ?: stackFootprint
