@@ -2157,6 +2157,11 @@ internal fun ConversationManagerScreen(
         topBar = { PageTopBar(title = SettingsPage.CHATS.title, onBack = onBack) },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
+        // 排序/过滤只依赖这两个输入：算一次，别跟着每次重组重来。
+        val sections = remember(conversations, drawerOrder) { drawerSections(conversations, drawerOrder) }
+        val archivedList = remember(conversations) {
+            conversations.filter { it.archived }.sortedByDescending { it.updatedAt }
+        }
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -2167,9 +2172,8 @@ internal fun ConversationManagerScreen(
         ) {
             // 与抽屉共用同一套排序（drawerSections）：置顶在前、置顶区按手动顺序、普通区按
             // updatedAt。这一页原来是纯时间序、也不显示置顶 —— 同一枚置顶两个页面两个样子。
-            val sections = drawerSections(conversations, drawerOrder)
             val active = sections.pinned + sections.normal
-            val archived = conversations.filter { it.archived }.sortedByDescending { it.updatedAt }
+            val archived = archivedList
             if (active.isEmpty() && archived.isEmpty()) {
                 item {
                     EmptyState(

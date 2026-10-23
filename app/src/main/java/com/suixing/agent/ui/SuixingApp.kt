@@ -1035,7 +1035,10 @@ private fun Drawer(
             // 置顶区在上、普通区在下（用户：「置顶的就是最上面的呀」）。顺序来自两张 id 表：
             // 置顶区只在置顶表里挪；普通区「新会话/新消息在前 + 手动基线」；跨区拖动在
             // reorderWithinSection 里被直接拒掉，所以怎么拖都越不过置顶那条线。
-            val sections = drawerSections(conversations, orderState.value)
+            // 排序要 filter + associateBy + 两次 sortedBy：不该每次重组都重算。
+            val sections = remember(conversations, orderState.value) {
+                drawerSections(conversations, orderState.value)
+            }
             // 两个区块共用同一行（只差顺序，不差样子）：抽成局部 lambda，免得把二十来行
             // 回调抄两遍。animateItem 只在 item 作用域里拿得到，所以由调用处传进来。
             val drawerRow: @Composable (Conversation, Modifier) -> Unit = { conversation, anim ->
