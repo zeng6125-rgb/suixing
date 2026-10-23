@@ -550,8 +550,14 @@ class ChatViewModel : ViewModel() {
      */
     private val windowStarts = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
 
-    /** 正在合并草稿的会话（S3）：三个入口可能并发进来，重复合并会各造一份 id ⇒ 撞护栏或触发整份重写。 */
-    private val mergingLive = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /**
+     * 正在合并草稿的会话（S3）：三个入口可能并发进来，重复合并会各造一份 id ⇒ 撞护栏或触发整份重写。
+     * 抽成 `InFlightGuard` 以便单测（`ChatViewModel` 本身构造依赖整个 `Core`，写不了单测）。
+     */
+    private val mergingLive = InFlightGuard()
+
+    /** 哪些会话的**缓存**内容确认已经在磁盘上（S1 水位）。由 [cacheMessages] 维护。 */
+    private val diskBackedCache = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /**
      * The conversation this process last showed, remembered so a new screen instance can adopt
@@ -584,10 +590,26 @@ class ChatViewModel : ViewModel() {
     private fun cachedMessages(chatId: String): List<StoredMessage>? =
         synchronized(messageCacheLock) { messageCache[chatId] }
 
-    private fun cacheMessages(chatId: String, messages: List<StoredMessage>) {
+    /**
+     * @param diskBacked 这份 `messages` 是不是**已经在磁盘上**（决定合并草稿时能不能清草稿）。
+     *   从盘读回来的窗口、以及"保存成功之后"的快照都是 true；`endSession` 把内存里的会话写进缓存时
+     *   是 false —— 那份可能含保存失败的、只在内存的消息。
+     */
+    private fun cacheMessages(
+        chatId: String,
+        messages: List<StoredMessage>,
+        diskBacked: Boolean = false,
+    ) {
         if (chatId.isEmpty() || messages.isEmpty()) return
-        synchronized(messageCacheLock) { messageCache[chatId] = messages }
+        synchronized(messageCacheLock) {
+            messageCache[chatId] = messages
+            // 水位跟缓存一起走：同一格被"内存版"覆盖时必须降级，否则会拿旧水位去清草稿。
+            if (diskBacked) diskBackedCache.add(chatId) else diskBackedCache.remove(chatId)
+        }
     }
+
+    /** 缓存里的那份是否确认已落盘（S1 的水位）。 */
+    private fun cacheIsDiskBacked(chatId: String): Boolean = chatId in diskBackedCache
 
     /**
      * Text waiting to be published, per conversation; see [handleEvent] and [DELTA_PUBLISH_MS].
@@ -1064,7 +1086,7 @@ class ChatViewModel : ViewModel() {
                     current
                 } else {
                     val merged = older + current.messages
-                    cacheMessages(chatId, merged)
+                    cacheMessages(chatId, merged, diskBacked = true)
                     current.copy(messages = merged)
                 }
             }
@@ -1209,7 +1231,7 @@ class ChatViewModel : ViewModel() {
             if (opened != null && _state.value.conversationId == conversation.id &&
                 _state.value.messages.isEmpty()
             ) {
-                cacheMessages(conversation.id, opened.messages)
+                cacheMessages(conversation.id, opened.messages, diskBacked = true)
                 _state.update {
                     it.copy(
                         messages = opened.messages,
@@ -1688,14 +1710,14 @@ class ChatViewModel : ViewModel() {
             // 「编辑本该丢掉的旧回答」会被当成尾部追加回日志，等于**把编辑撤销**。
             if (_state.value.conversationId != snapshot.conversationId) {
                 Log.w(TAG, "edit not started: the conversation changed while saving")
-                cacheMessages(snapshot.conversationId, kept)
+                cacheMessages(snapshot.conversationId, kept, diskBacked = true)
                 return@launch
             }
             if (Core.engine.isRunning(snapshot.conversationId)) {
                 Log.w(TAG, "edit not started: a run began while saving")
                 // 那一轮的 session 是按**编辑前**的状态建的，这里不再起跑；
                 // 至少把编辑后的窗口写进缓存 + 把文字还回输入框，并明确告诉用户。
-                cacheMessages(snapshot.conversationId, kept)
+                cacheMessages(snapshot.conversationId, kept, diskBacked = true)
                 backfillDraftText(snapshot.conversationId, body)
                 _state.update {
                     if (it.conversationId != snapshot.conversationId) it
@@ -2826,7 +2848,8 @@ class ChatViewModel : ViewModel() {
         val live = sessions.remove(chatId)
         // 一轮结束：`sessions` 里那份没了，切回来只能靠 LRU 缓存 ⇒ 在这里刷一次
         // （#35：原来是在 `putSession` 里每 80ms 刷，太频繁）。
-        if (live != null) cacheMessages(chatId, live.messages)
+        // **内存版**：可能含保存失败、只在内存的消息 ⇒ 水位显式降级，别拿去清草稿。
+        if (live != null) cacheMessages(chatId, live.messages, diskBacked = false)
         val failure = error ?: live?.error
         // A run that failed while another conversation was on screen has no state to land
         // in — its own copy is gone a line above — so the reason waits here until that
@@ -2936,11 +2959,11 @@ class ChatViewModel : ViewModel() {
         // 排在后面等于每次切进来都白读+解析一遍。
         if (sessions[chatId] != null) return
         // 多个入口（冷启动 / 切回 / 缓存命中）可能并发进这里（S3）。
-        if (!mergingLive.add(chatId)) return
+        if (!mergingLive.tryEnter(chatId)) return
         try {
             mergeLiveDraftLocked(chatId, baseFromDisk)
         } finally {
-            mergingLive.remove(chatId)
+            mergingLive.leave(chatId)
         }
     }
 
@@ -2983,6 +3006,7 @@ class ChatViewModel : ViewModel() {
             val fromDisk = draftIsDiskBacked(
                 shownPresent = shown != null,
                 baseFromDisk = baseFromDisk,
+                cacheDiskBacked = cacheIsDiskBacked(chatId),
             )
             if (fromDisk) {
                 Core.chats.clearLive(chatId)
@@ -3009,7 +3033,7 @@ class ChatViewModel : ViewModel() {
         if (written != null) {
             // **回写 LRU**（S2）：合并只改了 `_state` 与 `sessions`，而切走再切回走的是缓存 ——
             // 不回写的话，本进程内会少那条刚恢复的消息（盘上是对的，重启才看得见）。
-            cacheMessages(chatId, next)
+            cacheMessages(chatId, next, diskBacked = true)
             Core.chats.clearLive(chatId)
         } else {
             Log.w(TAG, "live draft kept for $chatId: the merged copy was not written")
@@ -3311,8 +3335,17 @@ internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null
  * has no field for it and a bubble that looks complete reads as the model stopping mid-sentence
  * for no reason.
  */
-internal fun draftIsDiskBacked(shownPresent: Boolean, baseFromDisk: Boolean): Boolean =
-    !shownPresent || baseFromDisk
+internal fun draftIsDiskBacked(
+    shownPresent: Boolean,
+    baseFromDisk: Boolean,
+    /**
+     * 缓存里的那份是否**确认已落盘**（S1 的水位）。
+     *
+     * 这是缓存路径上唯一可信的证据：只看"屏幕上有没有会话"无法区分"这份来自磁盘"与
+     * "这份含保存失败、只在内存的消息"。
+     */
+    cacheDiskBacked: Boolean = false,
+): Boolean = !shownPresent || baseFromDisk || cacheDiskBacked
 
 internal fun liveDraftRecovery(
     draft: LiveDraft,

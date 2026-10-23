@@ -30,4 +30,20 @@ class DraftDiskBackedTest {
         // 组合补齐（评审 12 的 S3）：这一格原来没测。`shown == null` 且声明来自磁盘 ⇒ 仍是 true。
         assertTrue(draftIsDiskBacked(shownPresent = false, baseFromDisk = true))
     }
+
+    @Test
+    fun `a cached list that is known to be on disk counts as disk-backed`() {
+        // S1 的水位：缓存路径原来恒判"非磁盘来源" ⇒ 判重命中时草稿整个进程内都不清。
+        assertTrue(
+            draftIsDiskBacked(shownPresent = true, baseFromDisk = false, cacheDiskBacked = true),
+        )
+    }
+
+    @Test
+    fun `a cached list from memory is still not disk-backed`() {
+        // 反向：缓存里可能含"保存失败、只在内存"的消息 ⇒ 水位没立起来就不能清草稿。
+        assertFalse(
+            draftIsDiskBacked(shownPresent = true, baseFromDisk = false, cacheDiskBacked = false),
+        )
+    }
 }
