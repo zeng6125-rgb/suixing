@@ -1104,8 +1104,16 @@ class ChatRepository(private val context: Context) {
         }.getOrElse { cause ->
             Log.e(TAG, "migrate-failed id=$id bytes=$bytes reason=unwritable", cause)
             markMigrateFailed(id, cause)
-            // A half-written entry would otherwise shadow the legacy file it failed to replace.
-            runCatching { store.discard(id) }
+            // **日志还在就别删**（评审 8 第 3 条）：`store.discard` 会把 meta 和**所有代次的日志**
+            // 一起删掉 —— 那正是"孤儿日志"场景里唯一的一份完整历史。
+            // 只有"日志本身就是坏的/半写"时清理才是对的；`ConversationLogDamagedException`
+            // 恰恰说明"日志里有内容、只是元数据对不上"，删了就是不可逆。
+            if (cause !is ConversationLogDamagedException) {
+                // A half-written entry would otherwise shadow the legacy file it failed to replace.
+                runCatching { store.discard(id) }
+            } else {
+                Log.w(TAG, "kept the log for id=$id: metadata disagreed, the bytes may be the only copy")
+            }
             false
         }
     }

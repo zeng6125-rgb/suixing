@@ -336,7 +336,13 @@ internal class ChatStore(private val root: File) {
             // `store.append(newMeta(...), legacyMessages)`；而 `newMeta` 的 `logBytes = 0`
             // ⇒ 下面的 `setLength(0)` 会把**还在那儿的孤儿日志**清空再写进去。
             // 直接抛：宁可让迁移失败并留下痕迹，也不要静默清掉一份完整日志。
-            if (committed.logBytes == 0L && committed.messageCount == 0 && raf.length() > 0L) {
+            // 判据里**必须带上"meta 文件不在了"**（评审 8 第 2 条）：
+            // 「首次追加快写完、meta 还没改名就崩了」也会留下 `newMeta`(0/0) + 非空日志，
+            // 而那是本类规则 1 明确允许的**自愈残留**（下一个 writer 截回水位即可）。
+            // 只有 meta 文件真的不见（被隔离成 `.meta.corrupt`）才是孤儿，才该拒绝。
+            if (committed.logBytes == 0L && committed.messageCount == 0 && raf.length() > 0L &&
+                !metaFile(committed.id).isFile
+            ) {
                 throw ConversationLogDamagedException(
                     "chat ${committed.id}: meta says empty but the log holds ${raf.length()} bytes " +
                         "— refusing to truncate an orphan log",

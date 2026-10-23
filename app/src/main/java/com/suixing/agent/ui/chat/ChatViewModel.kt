@@ -1643,6 +1643,18 @@ class ChatViewModel : ViewModel() {
                 fullHistory = true,
             )
             if (written == null) return@launch
+            // **两次 IO 之后必须复检前置条件**（评审 8 第 4 条）：`readAll` + `save` 在大会话上
+            // 是百毫秒到秒级，这期间用户可能切走了会话、或已经发起了另一轮 —— 那时再 `start()`
+            // 会拿**旧会话的全文**当新会话的 wire 发出去（回答写进别人的会话），
+            // 或与已在跑的那一轮撞车（引擎回 Failed，第二个 run 的 finally 还会把会话摘掉）。
+            if (_state.value.conversationId != snapshot.conversationId) {
+                Log.w(TAG, "edit not started: the conversation changed while saving")
+                return@launch
+            }
+            if (Core.engine.isRunning(snapshot.conversationId)) {
+                Log.w(TAG, "edit not started: a run began while saving")
+                return@launch
+            }
             // 写成了：更新屏幕，然后**用全文版**起这一轮（模型才看得到改后的句子）。
             _state.update {
                 if (it.conversationId != snapshot.conversationId) it
@@ -2267,7 +2279,12 @@ class ChatViewModel : ViewModel() {
                     flushDeltas(chatId)
                     // **写成功才清草稿**（评审 M-1，不可逆）：`saveSession` 现在返回结果；
                     // 保存被拒/抛异常时草稿是磁盘上唯一的副本，绝不能删。
-                    val written = sessions[chatId]?.let { saveSession(it) } ?: true
+                    // **会话已不在时按"没写成"处理**（评审 8 第 1 条）：用户按停止走的是
+                    // `RunState.Cancelled` 观察者 —— 它 fire-and-forget 一次保存（返回值被丢）、
+                    // 再 `endSession` 把会话摘掉。等这段 `finally` 跑到时 `sessions` 已经 null，
+                    // 而那次保存**可能被拒或抛异常** ⇒ 回答盘上一份不剩。宁可留草稿：
+                    // 下次打开时 `liveDraftRecovery` 会按前缀判重，不会出现两条。
+                    val written = sessions[chatId]?.let { saveSession(it) } ?: false
                     // 性能记录：**这一轮真的发生了什么**。首字延迟、缓存命中、prompt/completion
                     // 都取自本轮落下的那条回答（StoredMessage 本身就带着端点的回报），不另做估算。
                     // 请求体大小目前没有采集点，留 0 —— 监测页会把它显示成「—」，不是「测到零」。
