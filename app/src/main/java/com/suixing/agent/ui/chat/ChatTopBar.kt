@@ -1023,9 +1023,13 @@ internal fun AssistantRow(
                             // answer read as a stack of blocks. Live it still streams here.
                             // 正在长的那一块才走打字机；已经结束的思考块一次给全（关掉开关时
                             // rememberTypedText 直接原样返回，这条分支等于不存在）。
+                            // **打字机条件绝不能带 `&& last`**：思考块一旦不再是最后一个
+                            // （正文/工具开始流），它当场退出打字机 ⇒ 没打完的字一次性全出 ——
+                            // 这就是「先逐字、后瞬移」（用户连续反馈三轮）。
+                            // `streaming` 本身够了：块还在屏幕上就继续把剩下的字打完。
                             val thinkingLive = streaming && last
                             ReasoningBlock(
-                                text = rememberTypedText(part.text, thinkingLive),
+                                text = rememberTypedText(part.text, streaming),
                                 // A live block is the one still growing; a settled round's
                                 // thinking is complete even while the run continues.
                                 streaming = thinkingLive,
