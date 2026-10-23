@@ -86,10 +86,6 @@ class ChatRepository(private val context: Context) {
     }
 
 
-
-
-
-
     /**
      * Updates a conversation's **fields only** — title, pinned, archived, checkpoints, the model
      * pick — without touching the transcript.
@@ -615,11 +611,6 @@ class ChatRepository(private val context: Context) {
     }
 
     /**
-     * The draft a killed run left behind, or null when there is none. A draft that does not
-     * parse is deleted rather than quarantined: unlike a transcript there is nothing in it
-     * worth recovering by hand, and keeping it would mean failing on it at every launch.
-     */
-    /**
      * 这个会话有没有草稿文件（`chats/<id>.live.json`）。
      *
      * 给「切会话」用（#35）：绝大多数会话没有草稿，先 stat 一下就能省掉一个协程 + 一次读盘。
@@ -628,6 +619,13 @@ class ChatRepository(private val context: Context) {
     fun hasLiveDraft(chatId: String): Boolean =
         chatId.isNotEmpty() && liveFile(chatId).isFile
 
+    /**
+     * 被中断的 run 留下的草稿；没有就返回 null。
+     *
+     * 解析失败时**改名留档**（`<id>.live.json.<时间戳>.corrupt`），不是删除、也不是原地保留：
+     * 原地保留会让每次启动都在同一个坏文件上失败；直接删掉则丢掉了唯一能人工找回的半截图。
+     * 改名之后 [readLive] 再也读不到它，[delete] 清会话时一并清掉。
+     */
     suspend fun readLive(chatId: String): LiveDraft? = withContext(Dispatchers.IO) {
         val file = liveFile(chatId)
         if (!file.exists()) return@withContext null
