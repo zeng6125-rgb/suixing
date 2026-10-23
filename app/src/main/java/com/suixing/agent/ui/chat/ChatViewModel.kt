@@ -1219,12 +1219,21 @@ class ChatViewModel : ViewModel() {
             } else if (_state.value.conversationId == conversation.id) {
                 _state.update { it.copy(loading = false) }
             }
+            // **尾部读完再合并草稿**（评审 10 的 S4）：这两件事原来各起一个协程，
+            // 而草稿是小文件、往往先读完 ⇒ `mergeLiveDraft` 手里 `messages` 还是空
+            // ⇒ 两个判重分支都看不到那条消息 ⇒ 又补一条（重复）。串起来之后才真正生效。
+            if (_state.value.conversationId == conversation.id &&
+                Core.chats.hasLiveDraft(conversation.id)
+            ) {
+                mergeLiveDraft(conversation.id)
+            }
         }
         // A run that was killed left its half-written answer in a draft file: it belongs to
         // this conversation, so it is picked up the moment the conversation is.
         // 绝大多数会话**没有草稿**（`.live.json` 只在一轮跑到一半被杀时才有），
         // 所以先 stat 一下再决定要不要起协程（#35）。
-        if (Core.chats.hasLiveDraft(conversation.id)) {
+        if (cached != null && Core.chats.hasLiveDraft(conversation.id)) {
+            // 命中 LRU 缓存时正文已经在手里（不需要读盘），可以直接合并。
             viewModelScope.launch { mergeLiveDraft(conversation.id) }
         }
         // Where the user is, for the next launch.
