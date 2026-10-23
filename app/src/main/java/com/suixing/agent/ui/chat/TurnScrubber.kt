@@ -251,6 +251,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import androidx.compose.runtime.mutableFloatStateOf
 
 /**
  * Which line a finger at [y] is on. Rows are found by their centre rather than by their box,
@@ -472,19 +473,20 @@ internal fun TypingDots() {
 
 @Composable
 internal fun BlinkingCursor() {
-    val transition = rememberInfiniteTransition(label = "cursor")
-    val alpha by transition.animateFloat(
-        initialValue = 0.15f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 480),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "cursorAlpha",
-    )
+    // **不要用 `rememberInfiniteTransition` + tween**：那会让界面按**屏幕刷新率**持续重绘。
+    // 真机实测（0.8.382，一轮在跑、手指不动）：15 秒 3194 帧 ≈ 213 fps、单核 42%
+    // —— 长回答/长工具调用时就是持续发热与耗电，而同屏还有悬浮窗在同时动画。
+    // 闪烁只需要"两档"，用 480ms 的步进替代：观感一样，重绘从 ~120 次/秒降到 ~2 次/秒。
+    val alpha = remember { mutableFloatStateOf(1f) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(480)
+            alpha.floatValue = if (alpha.floatValue > 0.5f) 0.15f else 1f
+        }
+    }
     Text(
         text = "▍",
-        modifier = Modifier.alpha(alpha),
+        modifier = Modifier.alpha(alpha.floatValue),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.primary,
     )

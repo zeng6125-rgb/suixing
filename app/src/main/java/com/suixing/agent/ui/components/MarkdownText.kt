@@ -67,6 +67,7 @@ import com.suixing.agent.R
 import kotlinx.coroutines.delay
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableFloatStateOf
 
 // ---------------------------------------------------------------------------
 // Block model + parser. Pure Kotlin: no Android or Compose types are involved,
@@ -1014,16 +1015,17 @@ private const val CURSOR_WIDTH_PX = 4f
  */
 @Composable
 private fun blinkingCursorAlphaState(): State<Float> {
-    val transition = rememberInfiniteTransition(label = "inlineCursor")
-    return transition.animateFloat(
-        initialValue = 0.15f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 480),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "inlineCursorAlpha",
-    )
+    // 与 [com.suixing.agent.ui.chat.BlinkingCursor] 同一节奏，但**步进而非补间**：
+    // 无限 tween 会让绘制按屏幕刷新率持续失效（真机实测一轮在跑时 ≈213~256 fps、单核 42%）。
+    // 闪烁只需要两档 ⇒ 480ms 切一次，重绘从 ~120 次/秒降到 ~2 次/秒。
+    val alpha = remember { mutableFloatStateOf(1f) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(480)
+            alpha.floatValue = if (alpha.floatValue > 0.5f) 0.15f else 1f
+        }
+    }
+    return alpha
 }
 
 @Composable
