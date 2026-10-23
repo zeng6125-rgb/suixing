@@ -276,36 +276,14 @@ private const val FX_LIGHT_TRACE_MS = 10_000L
 private val FX_TRACE_TEXT = Regex("""input\s+text\s+.*""")
 
 /**
- * Shows the user what the agent is doing to their screen.
+ * 把「Agent 正在操作你的屏幕」画出来：点击画环、拖动画线、手势开始时边缘闪一下。
  *
- * The request was one sentence — 「要有点击特效和边缘闪动，这样我才知道在操控手机」 — and that
- * is the whole job: a ring where it touches, a line where it drags, and a flash around
- * the edge when a gesture starts. An agent that taps silently is indistinguishable from
- * one that is stuck, which is exactly the confusion this removes.
+ * 闪 = 刚刚发生了一次动作；呼吸 = UI 自动化回合仍在进行（整轮 run 结束就灭，非 UI 工具是中性的）。
+ * 只在真正驱动屏幕时亮 —— 只看屏幕或只回答文字的 run 不亮。
  *
- * The flash says "something just happened"; the faint breath of the same rainbow ring that
- * [noteDriving] switches on says "it is still happening". Only driving earns the breath — a run
- * that reads the screen or only answers in words shows nothing, because the user asked to see
- * their phone being operated, not to be told that someone is looking at it. 随行自己在前台时**也亮**
- * （issue #6，用户：「随行自己在前台时也要显示」）：前台不再是熄灭条件，亮不亮只看这一轮驱动过
- * 屏幕的 run 还活不活着。
- *
- * 亮的语义是**一次 UI 自动化回合正在进行**（spec v2 §1）：任意 UI 操作（含读屏）开启/续期它，
- * 整轮 run 结束就灭，非 UI 工具是中性的。回合的判定见 [armEpisode] / [episodeEnd] / [apply]。
- *
- * Nothing here steers anything: the accessibility service calls it after it has decided
- * to dispatch a gesture, so the drawing can never claim something the phone did not do.
- *
- * The window is hosted by the connected accessibility service when there is one
- * ([TYPE_ACCESSIBILITY_OVERLAY]) and falls back to the application context otherwise. The first
- * needs no permission at all — an enabled accessibility service is already trusted to draw over
- * other apps — and MIUI does not hide it when this app goes to the background, which is when the
- * agent is operating a different app. The fallback still needs SYSTEM_ALERT_WINDOW, and without
- * either host every entry point does nothing: a window the system will reject is not worth asking
- * for. If a host goes away while the window is up — the permission is revoked, or the service is
- * disconnected — [bindService]/[unbindService] and [release] drop the stale window so the next
- * effect rebuilds from whatever is available, rather than drawing into a view the system has
- * already destroyed.
+ * 本类不参与决策：无障碍服务在**决定要派发手势之后**才调用它。窗口优先挂在无障碍服务上
+ * （TYPE_ACCESSIBILITY_OVERLAY，无需权限、MIUI 后台也不隐藏），否则回退到应用上下文
+ * （需 SYSTEM_ALERT_WINDOW）。宿主消失时 bind/unbind/release 丢掉陈旧窗口，下次重建。
  */
 object TouchFx {
 
