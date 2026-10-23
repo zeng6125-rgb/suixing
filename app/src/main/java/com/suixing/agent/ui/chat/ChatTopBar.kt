@@ -898,17 +898,6 @@ internal fun MetricButton(icon: ImageVector, text: String, label: String, onClic
     }
 }
 
-/**
- * 相邻两块**类型相同**时不插间距 —— 同一段连续的思考/正文被工具行切开时，
- * 视觉上仍该是连着的，而不是三张独立卡片（用户反馈：「新块怎么是独立的啊」）。
- */
-private fun sameKind(a: Part, b: Part): Boolean = when {
-    a is Part.Thinking && b is Part.Thinking -> true
-    a is Part.Text && b is Part.Text -> true
-    a is Part.Tools && b is Part.Tools -> true
-    else -> false
-}
-
 @Composable
 internal fun AssistantRow(
     /** The reply's pieces in arrival order: thinking, tools, prose, thinking again… */
@@ -1055,9 +1044,7 @@ internal fun AssistantRow(
                                 maxHeight = reasoningMaxHeight,
                                 followReasoning = followReasoning,
                             )
-                            if (!last && (index + 1 >= parts.size || !sameKind(part, parts[index + 1]))) {
-                                Spacer(Modifier.height(6.dp))
-                            }
+                            if (!last) Spacer(Modifier.height(6.dp))
                         }
 
                         is Part.Tools -> {
@@ -1086,9 +1073,7 @@ internal fun AssistantRow(
                                 runningTool = runningTool.takeIf { cursor > parts.lastIndex },
                                 startExpanded = expandTools,
                             )
-                            if (!last && (index + 1 >= parts.size || !sameKind(part, parts[index + 1]))) {
-                                Spacer(Modifier.height(6.dp))
-                            }
+                            if (!last) Spacer(Modifier.height(6.dp))
                         }
 
                         is Part.Text -> {
@@ -1128,9 +1113,7 @@ internal fun AssistantRow(
                                 Spacer(Modifier.height(4.dp))
                                 BlinkingCursor()
                             }
-                            if (!last && (index + 1 >= parts.size || !sameKind(part, parts[index + 1]))) {
-                                Spacer(Modifier.height(6.dp))
-                            }
+                            if (!last) Spacer(Modifier.height(6.dp))
                         }
 
                         is Part.Steer -> {
@@ -1142,9 +1125,7 @@ internal fun AssistantRow(
                             ) {
                                 UserBubble(message = part.message, onEdit = onEdit)
                             }
-                            if (!last && (index + 1 >= parts.size || !sameKind(part, parts[index + 1]))) {
-                                Spacer(Modifier.height(6.dp))
-                            }
+                            if (!last) Spacer(Modifier.height(6.dp))
                         }
 
                         // 重试留痕：与思考块/工具块同一套栅格（36dp 行高 + 24dp 图标槽 + 8dp +
@@ -1152,17 +1133,13 @@ internal fun AssistantRow(
                         // 那 6dp，不再自己加边距、也不做位移。
                         is Part.Trace -> {
                             TraceBlock(part.note)
-                            if (!last && (index + 1 >= parts.size || !sameKind(part, parts[index + 1]))) {
-                                Spacer(Modifier.height(6.dp))
-                            }
+                            if (!last) Spacer(Modifier.height(6.dp))
                         }
 
                         // 压缩块：位置就是它发生的地方。
                         is Part.Compress -> {
                             CompressionBlock(part.checkpoint)
-                            if (!last && (index + 1 >= parts.size || !sameKind(part, parts[index + 1]))) {
-                                Spacer(Modifier.height(6.dp))
-                            }
+                            if (!last) Spacer(Modifier.height(6.dp))
                         }
                     }
                 }
