@@ -31,6 +31,19 @@ internal object SseFrames {
 
         /** 一个 JSON 完整了：括号归零且不在字符串里。 */
         fun isComplete(): Boolean = depth == 0 && !inString
+
+        /**
+         * 丢掉当前事件的全部配平状态。
+         *
+         * 缓冲区被**强制**清掉时必须一起调（空行 flush、流尾 flush）：否则残留的
+         * `depth` 会算进下一个事件，那个事件就永远配不平、被当作"没解析"丢掉。
+         */
+        fun reset() {
+            depth = 0
+            inString = false
+            escaped = false
+            closed = false
+        }
     }
 
     /**

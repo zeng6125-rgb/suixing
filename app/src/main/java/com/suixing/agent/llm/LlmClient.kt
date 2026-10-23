@@ -451,6 +451,9 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                     // 表现就是「思考块一结束就停住」（用户判断：是 SSE 的问题）。
                     // 现在两派都兼容：单行能解析就当场解析；解析不了就先攒着，碰到空行再拼起来。
                     val pending = StringBuilder()
+                    // 多行 JSON 的配平状态：**必须和 pending 同寿命** ——
+                    // 放在读行循环里会每行重置，多行 JSON 永远配不平、整条事件丢失。
+                    val frame = SseFrames.State()
                     var unparsed = 0
                     fun acceptPayload(payload: String) {
                         val chunk = runCatching { Json.parseToJsonElement(payload).jsonObject }.getOrNull()
@@ -475,14 +478,13 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         if (stream.hasToolCalls()) received = true
                     }
                     while (true) {
-                        // 多行 JSON 的配平状态（见下面 SseFrames 处）
-                        val frame = SseFrames.State()
                         val line = source.readUtf8Line() ?: break
                         if (line.isEmpty()) {
                             // 事件边界：把攒着的多行 data 拼成一条再解析。
                             if (pending.isNotEmpty()) {
                                 acceptPayload(pending.toString())
                                 pending.clear()
+                                frame.reset()
                             }
                             continue
                         }
@@ -511,12 +513,14 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         if (SseFrames.feed(frame, data)) {
                             acceptPayload(pending.toString())
                             pending.clear()
+                            frame.reset()
                         }
                     }
                     // 流尾没有空行收尾的那条事件也别丢。
                     if (pending.isNotEmpty()) {
                         acceptPayload(pending.toString())
                         pending.clear()
+                        frame.reset()
                     }
                     // 一个字符都没收到、却有解析不了的载荷：那是端点 SSE 格式不兼容，
                     // 不是"模型没说话"——明确报出来，别再静默收场。
