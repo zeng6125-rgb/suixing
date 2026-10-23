@@ -26,6 +26,7 @@ import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
 import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.ConversationLogShrunkException
+import com.suixing.agent.data.MessageCache
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.describeError
@@ -573,52 +574,26 @@ class ChatViewModel : ViewModel() {
      * 容量 5（用户定的数）：足够覆盖"在几个会话间来回看"，最坏内存 = 5 × 12 轮，
      * 与"全部常驻"不是一个量级。存的是**读出来的那一页**（`readTail` 的结果），与屏幕一致。
      */
-    private val messageCache = object : LinkedHashMap<String, CacheEntry>(
-        MESSAGE_CACHE_SIZE, 0.75f, true,
-    ) {
-        override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<String, CacheEntry>?,
-        ): Boolean = size > MESSAGE_CACHE_SIZE
-    }
-
     /**
-     * 缓存里的一格：**内容 + 它是否已经在磁盘上**。
+     * 最近打开过的会话正文，LRU（容量 [MESSAGE_CACHE_SIZE]）。
      *
-     * 两件事放进同一个值，是为了让"内容和标记脱节"这种 bug 物理上不可能发生 ——
-     * 本项目已经因为"同一个概念写两遍"出过四次事故（`ListSlots` 两处各数一遍、
-     * 平台水位、`messageCache` 与 `diskBackedCache` 各存一份）。
-     *
-     * [diskBacked] 决定合并草稿时能不能清草稿：从盘读回来的窗口、以及"保存成功之后"的快照是 true；
-     * `endSession` 把内存里的会话写进缓存时是 false（那份可能含保存失败、只在内存的消息）。
+     * 逻辑在 `data/MessageCache` 里（纯 Kotlin、可单测）—— 原来这里有一份**内联实现**，
+     * 而 `MessageCache` 是另一份**零引用**的重复实现，只有它自己的 5 条测试在用
+     * ⇒ 测试测的不是生产代码（评审两次指出）。现在只有一份。
      */
-    private data class CacheEntry(
-        val messages: List<StoredMessage>,
-        val diskBacked: Boolean,
-    )
+    private val messageCache = MessageCache(MESSAGE_CACHE_SIZE)
 
-    /** [messageCache] 的锁：它会同时被 UI 线程和读盘协程碰到。 */
-    private val messageCacheLock = Any()
-
-    private fun cachedMessages(chatId: String): List<StoredMessage>? =
-        synchronized(messageCacheLock) { messageCache[chatId]?.messages }
+    private fun cachedMessages(chatId: String): List<StoredMessage>? = messageCache.get(chatId)
 
     /**
      * @param diskBacked 这份 `messages` 是不是**已经在磁盘上**（决定合并草稿时能不能清草稿）。
-     *   从盘读回来的窗口、以及"保存成功之后"的快照都是 true；`endSession` 把内存里的会话写进缓存时
-     *   是 false —— 那份可能含保存失败的、只在内存的消息。
      */
     private fun cacheMessages(
         chatId: String,
         messages: List<StoredMessage>,
         diskBacked: Boolean = false,
     ) {
-        // 空列表不入缓存（保持原契约）⇒ **空列表也无法把已有标记降级**；
-        // 唯一的降级点是 `endSession` 写内存版那份，而它恒非空，所以当前不可达。
-        if (chatId.isEmpty() || messages.isEmpty()) return
-        synchronized(messageCacheLock) {
-            // 内容与标记同批写入：同一格被"内存版"覆盖时标记自动降级。
-            messageCache[chatId] = CacheEntry(messages, diskBacked)
-        }
+        messageCache.put(chatId, messages, diskBacked)
     }
 
     /**
@@ -629,9 +604,7 @@ class ChatViewModel : ViewModel() {
      * 读一个标记不该改变淘汰顺序（将来若有清理全量会话的调用，会给后台会话续命）。
      * 容量只有 5，线性找也是常数级。
      */
-    private fun cacheIsDiskBacked(chatId: String): Boolean = synchronized(messageCacheLock) {
-        messageCache.entries.firstOrNull { it.key == chatId }?.value?.diskBacked == true
-    }
+    private fun cacheIsDiskBacked(chatId: String): Boolean = messageCache.isDiskBacked(chatId)
 
     /**
      * Text waiting to be published, per conversation; see [handleEvent] and [DELTA_PUBLISH_MS].
@@ -3052,6 +3025,15 @@ class ChatViewModel : ViewModel() {
             } else {
                 Log.i(TAG, "live draft kept for $chatId: its content is not disk-backed yet")
             }
+            return
+        }
+        // **base 为空就别动磁盘**（评审 14 建议 6）：`shown` 在合并读盘期间可能变 null，
+        // 而 `stored.messages` 恒为空（#30 之后列表只带 meta）⇒ `messages` 是空的 ⇒
+        // `next` 只剩那条恢复消息。若此时 save 成功，会把一份**截短的历史**写进缓存并标"已落盘"，
+        // 切回来命中缓存、不再读盘 ⇒ 屏幕上只显示那几条。
+        // 草稿留着，等下一次真正带着 base 的合并。
+        if (messages.isEmpty()) {
+            Log.i(TAG, "live draft kept for $chatId: no base to merge into yet")
             return
         }
         val next = messages + restored

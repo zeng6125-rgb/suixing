@@ -3,6 +3,7 @@ package com.suixing.agent.data
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -72,5 +73,27 @@ class MessageCacheTest {
         cache.put("b", messages("b"))
         cache.remove("a")
         assertEquals(listOf("b"), cache.keys())
+    }
+
+    @Test
+    fun `the disk-backed flag travels with its own entry`() {
+        // 内容与标记同一格：写内存版就把标记降级，不会拿旧标记去清草稿。
+        val cache = MessageCache(capacity = 2)
+        cache.put("a", messages("a", 1), diskBacked = true)
+        assertTrue(cache.isDiskBacked("a"))
+        cache.put("a", messages("a"), diskBacked = false)
+        assertFalse("same slot overwritten from memory must lose the flag", cache.isDiskBacked("a"))
+    }
+
+    @Test
+    fun `reading the flag does not move the entry to most-recently-used`() {
+        // 读一个标记不该改变淘汰顺序（否则一次遍历就会把后台会话续命）。
+        val cache = MessageCache(capacity = 2)
+        cache.put("a", messages("a", 1), diskBacked = true)
+        cache.put("b", messages("b", 1), diskBacked = true)
+        cache.isDiskBacked("a")          // 若这条会续命，下面被淘汰的就是 b
+        cache.put("c", messages("c", 1))
+        assertFalse("a should still be the least recently used", cache.keys().contains("a"))
+        assertTrue(cache.keys().contains("b"))
     }
 }
