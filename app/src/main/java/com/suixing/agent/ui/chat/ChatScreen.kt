@@ -1138,11 +1138,10 @@ fun ChatScreen(
     // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
     val streamingKey = "streaming:${state.conversationId}"
     // 有活内容（正文/思考/工具）才值得钉住 —— 空的行不钉。
-    // 正文只存一份（issue #38）：`state.streaming` 现在是派生值、不再单独保存 ⇒
-    // "这一轮有没有活内容"要看 liveParts 里有没有正文/思考块。
-    val liveForPin = state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking } ||
-        state.reasoning.isNotEmpty() ||
-        state.liveParts.isNotEmpty()
+    // 正文只存一份（#38）：`streaming` 是派生值、不再单独保存 ⇒ "有没有活内容"看 liveParts。
+    // 这个子表达式下面还要用一次，别写两遍（写两遍就会有天改了一处忘了另一处）。
+    val hasLiveText = state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking }
+    val liveForPin = hasLiveText || state.reasoning.isNotEmpty() || state.liveParts.isNotEmpty()
     // **`liveForPin` 必须用 rememberUpdatedState 取最新值**（第二轮评审的关键发现）：
     // 它是个普通 `val`，若被 `snapshotFlow` 的 lambda 直接捕获，捕获的是**首次组合**那一帧的值，
     // 而 ChatScreen 常驻、不随会话重建（`SuixingApp.kt:569`）⇒ 首帧没有活内容时它永远是 false
@@ -1256,8 +1255,7 @@ fun ChatScreen(
     // **没有活内容就不启动**：没有一轮在跑时，流式行不会长高，也就不需要每帧唤醒。
     // 原写法只在 `!readingHistory` 时退出，于是"读历史但没任务在跑"这个**最常见**的场景里，
     // 它每帧空转 120 次/秒 —— 那正是拖慢滚动的东西（#26/#35 的同类）。
-    val liveGrowing = state.runningHere ||
-        state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking }
+    val liveGrowing = state.runningHere || hasLiveText
     LaunchedEffect(listState, readingHistory, liveGrowing) {
         if (!readingHistory || !liveGrowing) {
             anchorTop[0] = Float.NaN
