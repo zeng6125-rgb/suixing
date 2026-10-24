@@ -1170,6 +1170,31 @@ fun ChatScreen(
     //
     // 所以：**钉住期间只要流式行还在视野内就立刻释放**（宁可那一刻跳一下，也不要持续显示被裁的输出）。
     // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
+    // **常驻帧诊断**（零配合成本）：只把掉帧的帧写进 filesDir/frame.log，正常帧不产生 IO。
+    // 每行带「是否在滚 / 距最新多少像素 / 第几轮 / 是否在跑 / 是否有流式正文」——
+    // 掉帧发生在哪个区域、是否与转圈动画同现，读文件即可判断，不需要用户配合计时。
+    val frameProbe = rememberUpdatedState {
+        val off = listState.firstVisibleItemScrollOffset
+        val fed = TurnMarks.topFedIndex(
+            offsetFromBottom = off,
+            viewport = listState.layoutInfo.viewportSize.height,
+            heightsOldestFirst = rowHeights,
+        )
+        val turn = TurnMarks.current(
+            firstVisibleFed = fed,
+            feedPrefix = feedPrefix,
+            visibleSize = visible.size,
+            rowOffset = rowOffset,
+            turnIndices = turnIndices,
+        )
+        "scroll=${listState.isScrollInProgress} off=$off turn=$turn" +
+            " run=${state.runningHere} live=${state.liveParts.isNotEmpty()}"
+    }
+    val appCtx = LocalContext.current.applicationContext
+    LaunchedEffect(appCtx) {
+        FrameTrace.install(appCtx) { frameProbe.value() }
+    }
+
     val streamingKey = "streaming:${state.conversationId}"
     // 有活内容（正文/思考/工具）才值得钉住 —— 空的行不钉。
     // 正文只存一份（#38）：`streaming` 是派生值、不再单独保存 ⇒ "有没有活内容"看 liveParts。
