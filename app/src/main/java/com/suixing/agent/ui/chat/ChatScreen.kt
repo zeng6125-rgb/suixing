@@ -429,10 +429,9 @@ fun ChatScreen(
         // Compose 的修饰符顺序让 padding 先吃掉空间，所以测到的不含这 12dp。
         // 这里把它加回来才是输入框真实的占位 —— **不要删**（我删过一次，是错的）。
         composerH + COMPOSER_BOTTOM_PAD + navBarPad(heldIme).toDp() +
-            // **恒定 16dp，不随 run 状态切换**（真机反馈：流式结束瞬间整列上移 1-2dp ——
-            // 就是这里 12↔16 的切换改变了底部让位。让位恒定 ⇒ run 结束时几何完全不变。
-            // 代价：流式期间状态行与输入框的间隙从 12dp 变为 16dp —— 与静止时一致，更统一）。
-            16.dp
+            // **恒定 12dp**（用户定案：所有垂直间距统一 12dp —— 静态项间距、状态行上下、
+            // 底部让位全一致；顺带保持「run 结束时几何完全不变」）。
+            12.dp
     }
 
     var voiceOpen by remember { mutableStateOf(false) }
@@ -1599,7 +1598,7 @@ fun ChatScreen(
                         // 风险（issue 自己提的）：当年从 Top 改回 Bottom，注释写的是「短对话被顶到上面、
                         // 最后一张卡片长高就还是往下长」—— 那正是用户现在要的行为，所以大概率是当年
                         // 判断反了。若满屏那一刻有跳变，退回 `Alignment.Bottom` + offset 方案。
-                        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Top),
+                        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Top),
                     ) {
                         if (live) {
                             // Keyed by conversation: the live row keeps its slot for as long
@@ -1706,8 +1705,7 @@ fun ChatScreen(
                                                 reasoningExpansion = reasoningExpansion,
                                             )
                                             }
-                                            // 上 12dp（用户要求）：气泡白底 → 状态行顶。
-                                            // 下：让位恒定 16dp（见 stackFootprint），这里 bottom = 0。
+                                            // 上 12dp：气泡白底 → 状态行顶。下：让位恒定 12dp（见 stackFootprint）。
                                             if (state.runningHere) {
                                                 RunStatusLine(
                                                     text = liveStatusText,
@@ -1741,10 +1739,8 @@ fun ChatScreen(
                                     text = liveStatusText,
                                     startedAt = runStartedAt[runKey] ?: 0L,
                                     timed = true,
-                                    // 上下都 12dp（用户：「状态行的空隙也是错的，12dp 啊」）：
-                                    // 下 = contentPadding(12dp) 直接给；上 = 16dp 项间距 − lift 4dp。
+                                    // 上下都 12dp：项间距已是 12dp，无需再 lift（原 lift 是从 16 里吃 4）。
                                     modifier = Modifier
-                                        .liftIntoGap(4.dp)
                                         .padding(start = 4.dp, top = 0.dp, bottom = 0.dp),
                                 )
                             }
