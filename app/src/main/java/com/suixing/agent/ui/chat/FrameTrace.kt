@@ -86,6 +86,16 @@ internal object FrameTrace {
         flush()
     }
 
+    /**
+     * 记一条**事件**（不是帧）：用来把掉帧和"当时发生了什么"对齐。
+     * 例如切会话、开场动画 —— 只有这样才能知道某次 141ms 的卡顿到底属于哪个动作。
+     */
+    fun mark(event: String) {
+        val target = file ?: return
+        val line = "mark frames=" + frames + " " + event + "\n"
+        io.execute { runCatching { target.appendText(line) } }
+    }
+
     /** 由 ChatScreen 每次成功重组时调用（`SideEffect`）。 */
     fun countRecomposition() {
         recompositions++

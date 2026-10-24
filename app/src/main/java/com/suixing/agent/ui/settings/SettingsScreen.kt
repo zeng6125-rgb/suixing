@@ -241,8 +241,9 @@ private fun SettingsRoot(
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            // 72dp 的页尾：最后一行不被导航条压住。
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            // **只留 12dp 呼吸位**：不被导航条压住是上面 `.navigationBarsPadding()` 的职责，
+            // 再固定垫 72dp 就是同一件事做两遍 —— 滚到底会多出近两行空白（旧值即此）。
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item { SettingsStatusCard(capabilities, settings) }
@@ -651,7 +652,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             // 从顶栏搬下来的「有未保存的改动」（顶栏不再有副标题）：dirty 时才出现，放在内容区
@@ -1359,7 +1360,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item { SectionHeader("输入") }
@@ -1778,7 +1779,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
@@ -1947,7 +1948,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
@@ -2055,7 +2056,7 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
@@ -2171,7 +2172,7 @@ internal fun ConversationManagerScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 72.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // 与抽屉共用同一套排序（drawerSections）：置顶在前、置顶区按手动顺序、普通区按

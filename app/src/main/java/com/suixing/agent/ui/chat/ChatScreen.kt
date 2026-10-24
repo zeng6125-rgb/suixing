@@ -1242,6 +1242,12 @@ fun ChatScreen(
     // 每次成功重组计数（`SideEffect` 在组合成功提交后调用）—— 用来量化
     // 「ChatScreen 在流式期被重跑了多少次」，改前改后对比这个数。
     SideEffect { FrameTrace.countRecomposition() }
+    // 切会话打一条事件：开场动画掉帧到底发生在切换前后，靠这行对齐（见 FrameTrace.mark）。
+    LaunchedEffect(state.conversationId) {
+        if (state.conversationId.isNotEmpty()) {
+            FrameTrace.mark("switch conv=${state.conversationId.take(8)} rows=${visible.size}")
+        }
+    }
 
     LaunchedEffect(visible, scroll.stickToBottom) {
         val total = visible.size

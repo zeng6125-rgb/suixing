@@ -323,7 +323,7 @@ fun FilesScreen(onBack: () -> Unit) {
                     }
                 }
             }
-            item { Spacer(Modifier.height(72.dp)) }
+            item { Spacer(Modifier.height(12.dp)) }
         }
     }
 

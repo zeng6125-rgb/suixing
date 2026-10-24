@@ -470,7 +470,7 @@ private fun WelcomePage(scroll: ScrollState) {
             title = "能做什么由你决定",
             body = "聊天、工具、技能、定时任务都在，但要不要开、开到哪一档，权限页和设置页都写得很清楚。",
         )
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -536,7 +536,7 @@ private fun ReadyPage(draft: OnboardingDraft, scroll: ScrollState) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(16.dp))
     }
 }
 
