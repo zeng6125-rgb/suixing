@@ -559,7 +559,6 @@ fun ChatScreen(
     // 没有回执的失败（发送阶段错误等）的实时行，画在最后一轮下面。去重见 [isSameFailure]：
     // 只按完全相等比会漏，同一次失败被两条路径各写一遍时屏幕上是两张提示。
     val errorLine = state.error?.let { err -> receipts.none { isSameFailure(it.text, err) } } ?: false
-    val reasoning = if (settings.showReasoning) state.reasoning else ""
     // Whatever the run produces first — a tool call, a thought or a word — opens the live
     // bubble. Waiting for text is what used to leave a tool call stranded on its own until
     // the reply arrived and merged the two into one.
