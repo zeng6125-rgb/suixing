@@ -127,7 +127,13 @@ fun FilesScreen(onBack: () -> Unit) {
     LaunchedEffect(current, reload) {
         listing = true
         val children = withContext(Dispatchers.IO) {
-            current.listFiles()?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+            // 先取排序键再排序：`isDirectory` 是一次 stat、`name.lowercase()` 是一次分配，
+            // 放在比较器里会变成 O(n log n) 次 syscall（1000 个文件约 1 万次）。
+            // sortedWith 是稳定排序，键与顺序都和原来逐项相同。
+            current.listFiles()
+                ?.map { Triple(it, !it.isDirectory, it.name.lowercase()) }
+                ?.sortedWith(compareBy({ it.second }, { it.third }))
+                ?.map { it.first }
         }
         if (children == null) {
             listError = "无法读取该目录，可能缺少「所有文件访问权限」"

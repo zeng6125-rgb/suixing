@@ -174,6 +174,22 @@ class ChatRepository(private val context: Context) {
      * 0.8.317 迁移之后那个文件已经不存在了，详情弹窗因此对**每个**会话都显示
      * 「这个会话在磁盘上没有对应的文件」（用户实测）。
      */
+    /**
+     * 只取日志文件尺寸（会话列表每行显示用）。
+     *
+     * **为什么单独开一个入口**：`chatFile` 为了 `tail` 会把**整份日志**读成 String
+     * （30MB 会话 = 30MB 读 + 最多 60MB 中间字符串），而列表只需要 `length()`。
+     * 会话行是 LazyColumn 的 item，滚出视口即销毁 ⇒ 原文每次滚回来都重读一遍整份日志。
+     * 返回的字节数与 `chatFile().bytes` 同源同值（同一个文件、同一个 `length()`）。
+     */
+    internal suspend fun chatSize(id: String): Long? = withContext(Dispatchers.IO) {
+        lock.withLock {
+            val meta = store.readMeta(id) ?: return@withLock null
+            val log = store.logFileOf(meta) ?: return@withLock null
+            if (log.isFile) log.length() else null
+        }
+    }
+
     internal suspend fun chatFile(id: String): ChatFile? = withContext(Dispatchers.IO) {
         lock.withLock {
             val meta = store.readMeta(id)

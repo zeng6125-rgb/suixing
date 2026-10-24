@@ -2191,12 +2191,17 @@ internal fun ConversationManagerScreen(
                     )
                 }
             } else {
-                items(active, key = { it.id }) { conversation ->
+                items(
+                    active,
+                    key = { it.id },
+                    contentType = { "conversation-row" },
+                ) { conversation ->
                     // **读 store 里的日志**（#40 之后磁盘上已无 `<id>.json`，旧路径恒返回 -1）
                     // ⇒ 副标题里的"体积"一直不显示。`chatFile` 给的就是 meta 指向的那份日志。
                     var bytes by remember(conversation.id) { mutableStateOf(-1L) }
                     LaunchedEffect(conversation.id) {
-                        bytes = withContext(Dispatchers.IO) { Core.chats.chatFile(conversation.id)?.bytes } ?: -1L
+                        // 只要字节数：原来走 chatFile，它会为 tail 把整份日志读成字符串。
+                        bytes = withContext(Dispatchers.IO) { Core.chats.chatSize(conversation.id) } ?: -1L
                     }
                     ConversationRow(
                         title = conversation.title,
@@ -2217,7 +2222,7 @@ internal fun ConversationManagerScreen(
                 // 入口 —— 用户指定「已归档的显示搞到会话管理那里」。分组排在活动会话下面，
                 // 每行多一枚「取消归档」，其余动作（详情/导出/删除）与活动行一致。
                 if (archived.isNotEmpty()) {
-                    item(key = "archived-header") {
+                    item(key = "archived-header", contentType = "header") {
                         Text(
                             text = "已归档（${archived.size}）",
                             style = MaterialTheme.typography.titleSmall,
@@ -2225,7 +2230,11 @@ internal fun ConversationManagerScreen(
                             modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
                         )
                     }
-                    items(archived, key = { it.id }) { conversation ->
+                    items(
+                        archived,
+                        key = { it.id },
+                        contentType = { "conversation-row" },
+                    ) { conversation ->
                         ConversationRow(
                             title = conversation.title,
                             // **用 meta 的 messageCount**：`messages` 是空列表
