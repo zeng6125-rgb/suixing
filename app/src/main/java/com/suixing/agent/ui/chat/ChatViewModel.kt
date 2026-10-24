@@ -2354,6 +2354,10 @@ class ChatViewModel : ViewModel() {
                         ?.lastOrNull { it.role == Roles.ASSISTANT && it.promptTokens > 0 }
                     val runStats = _state.value.stats
                     if (answered != null || runStats != null) {
+                        // **IO 线程落盘**（审计 3§5）：record 里 writeText+delete+renameTo
+                        // 是整轮唯一确定的主线程阻塞写；PerfMonitor 的测试契约要求
+                        // record 后立即可 load，所以不改成异步类，改在调用点切 IO。
+                        withContext(kotlinx.coroutines.Dispatchers.IO) {
                         Core.perf.record(
                             PerfRecord(
                                 at = System.currentTimeMillis(),
@@ -2365,6 +2369,7 @@ class ChatViewModel : ViewModel() {
                                 cachedTokens = answered?.cachedTokens ?: 0,
                             ),
                         )
+                        }
                     }
                     endSession(chatId, status, failure)
                     // The run is over for certain here — this coroutine is the one that called

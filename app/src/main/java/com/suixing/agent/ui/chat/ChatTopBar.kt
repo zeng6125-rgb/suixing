@@ -961,7 +961,11 @@ internal fun AssistantRow(
         // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
         // the outline is what separates a near-white card from a white canvas in light
         // mode, where the two surfaces are 8% apart.
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        // 每帧新建 BorderStroke ⇒ remember 住（颜色变才重建；颜色在组合期先读）。
+        border = run {
+            val outline = MaterialTheme.colorScheme.outlineVariant
+            remember(outline) { BorderStroke(1.dp, outline) }
+        },
     ) {
         Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp)) {
             // The avatar sits in the card's header rather than beside it: the reply is one
@@ -1133,7 +1137,7 @@ internal fun AssistantRow(
                                 // ⇒ 缓存被同一条答案的 16 个前缀占满、流式期命中率恒为 0。
                                 MarkdownText(text = shown, settled = !streaming)
                             } else {
-                                SelectionContainer { MarkdownText(text = part.text) }
+                                SelectableWhenArmed { MarkdownText(text = part.text) }
                             }
                             if (streaming && last) {
                                 Spacer(Modifier.height(4.dp))

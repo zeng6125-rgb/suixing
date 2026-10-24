@@ -246,7 +246,11 @@ fun rememberChatScroll(
                 guard = guardNow0.value,
             )
         }.collect { want ->
+            // **惯性期绝不插手**（审计 1§3 实锤）：抬手后 fling 刚起、index≠0 的
+            // 第一帧就满足条件 ⇒ scrollToItem(0) 掐断惯性 = 「手一抬被粘住/发涩」。
+            // 等 fling 自然停下（isScrollInProgress=false）还差着，才补这一跳。
             if (want.stick && !want.pressed && !want.guard &&
+                !listState.isScrollInProgress &&
                 (want.index != 0 || want.offset != 0)
             ) {
                 listState.scrollToItem(0)

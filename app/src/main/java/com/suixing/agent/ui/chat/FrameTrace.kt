@@ -38,7 +38,7 @@ internal object FrameTrace {
     private var lastNanos = 0L
     private var frames = 0L
     private var stalls = 0L
-    private var scrollFrames = 0L
+    private var scrollStalls = 0L
     private var worstMs = 0L
 
     /** ChatScreen 的**重组次数**：这是「流式期整屏重跑」的直接量化指标。 */
@@ -64,22 +64,25 @@ internal object FrameTrace {
         frames++
         if (prev == 0L) return
         val dtMs = (now - prev) / 1_000_000L
-        val info = probe?.invoke().orEmpty()
-        val scrolling = info.startsWith("scroll=true")
-        if (scrolling) scrollFrames++
+        // **probe 必须在掉帧判定之后**（审计发现的原 bug）：probe 本身是 O(rows)
+        // +O(turns)+字符串拼接，好帧也跑等于给每帧加固定税，还污染测量。
         if (dtMs < STALL_MS) {
             if (frames % HEARTBEAT_FRAMES == 0L) heartbeat()
             return
         }
         stalls++
         if (dtMs > worstMs) worstMs = dtMs
+        val info = probe?.invoke().orEmpty()
+        if (info.startsWith("scroll=true")) scrollStalls++
         pending += "stall dt=${dtMs}ms frames=${frames} $info"
         if (pending.size >= FLUSH_EVERY) flush()
     }
 
     private fun heartbeat() {
-        pending += "beat frames=$frames scroll=$scrollFrames stalls=$stalls" +
-            " worst=${worstMs}ms recomp=$recompositions"
+        // 心跳里的 now= 是**采样值**（只有心跳/掉帧时刻才探测），不是逐帧计数。
+        val info = probe?.invoke().orEmpty()
+        pending += "beat frames=$frames stalls=$stalls scrollStalls=$scrollStalls" +
+            " worst=${worstMs}ms recomp=$recompositions now=$info"
         flush()
     }
 

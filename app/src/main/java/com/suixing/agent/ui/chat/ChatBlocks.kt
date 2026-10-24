@@ -539,7 +539,7 @@ internal fun ProcessCard(
                 // nothing in the row wraps (every text is maxLines 1).
                 .height(36.dp)
                 // 整块按下反馈（见 blockPress）：这一行是折叠条的入口，涟漪是一颗小圆角矩形。
-                .blockPress(RoundedCornerShape(8.dp)) {
+                .blockPress(ProcessHeaderShape) {
                     onToggle()
                 }
                 .padding(horizontal = 0.dp),
@@ -645,10 +645,14 @@ internal fun ProcessCard(
  * Expressed off labelMedium rather than as a bare 12.sp so the user's 字号 still applies:
  * the theme scales every slot, and a hard size would opt this text out of it.
  */
+/** 折叠条表头统一圆角：文件级常量，避免每次组合分配。 */
+private val ProcessHeaderShape = RoundedCornerShape(8.dp)
+
 @Composable
-internal fun metaStyle(): TextStyle = MaterialTheme.typography.labelMedium.copy(
-    fontSize = MaterialTheme.typography.labelMedium.fontSize * (12f / 13f),
-)
+internal fun metaStyle(): TextStyle {
+    val base = MaterialTheme.typography.labelMedium
+    return remember(base) { base.copy(fontSize = base.fontSize * (12f / 13f)) }
+}
 
 /** The trailing status of a [ProcessCard]: a short phrase, never a sentence. */
 @Composable
@@ -925,8 +929,9 @@ internal fun ReasoningBlock(
                         // 下面还有一点空白」的来源。
                         if (index < lines.lastIndex) Spacer(Modifier.height(4.dp))
                     } else {
-                        // 思考链每一行都可选中复制（用户：「确实所有情况都要可复制」）。
-                        SelectionContainer {
+                        // 思考链每一行都可选中复制（用户：「确实所有情况都要可复制」）——
+                        // 由长按武装制满足：不按时零选区成本，长按那一刻容器就位。
+                        SelectableWhenArmed {
                         MarkdownText(
                             text = line,
                             // 13sp with roomier leading than bodySmall's: a long chain of
@@ -1087,10 +1092,18 @@ internal fun ReasoningBlock(
 internal val BLOCK_CONTENT_TOP = 6.dp
 
 /** 13sp / 20sp leading, scaled off bodySmall so 字号 still applies to both. */
+// 两个补偿是纯配置对象，提为常量（原来每次调用新建 3 个对象）。
+private val NoFontPadStyle = PlatformTextStyle(includeFontPadding = false)
+private val FirstLineTopTrim = LineHeightStyle(
+    alignment = LineHeightStyle.Alignment.Center,
+    trim = LineHeightStyle.Trim.FirstLineTop,
+)
+
 @Composable
 internal fun thinkingStyle(): TextStyle {
     val body = MaterialTheme.typography.bodySmall
-    return body.copy(
+    return remember(body) {
+        body.copy(
         lineHeight = body.fontSize * (20f / 13f),
         // 两个补偿缺一不可：
         //  · includeFontPadding = false 去掉**字体自带**的上下 padding；
@@ -1098,12 +1111,10 @@ internal fun thinkingStyle(): TextStyle {
         //    首行上方原本还有约 3.5dp）。
         // 少了第二条，思考块的首行空隙就是 BLOCK_CONTENT_TOP + 3.5dp，而工具块只有
         // BLOCK_CONTENT_TOP —— 仍然是「不一致」，只是数值换了。
-        platformStyle = PlatformTextStyle(includeFontPadding = false),
-        lineHeightStyle = LineHeightStyle(
-            alignment = LineHeightStyle.Alignment.Center,
-            trim = LineHeightStyle.Trim.FirstLineTop,
-        ),
-    )
+        platformStyle = NoFontPadStyle,
+            lineHeightStyle = FirstLineTopTrim,
+        )
+    }
 }
 
 /**
@@ -1127,22 +1138,27 @@ internal fun ToolBundle(
     // 代价（issue #20 自己提的）：多个 `RevealHeight` 会同时跑动画，位置补偿的负载上升，
     // 与 #13 是同一处风险 —— 若实测位置跳动更明显，再考虑限制「最多同时开 N 个」。
     var openTools by remember { mutableStateOf(emptySet<String>()) }
+    // **摘要只依赖 tools 本身**：count/标题/预览 remember 住，折叠条常驻，
+    // 原来每帧都重算一遍（审计 2§A14）。
     val failures = tools.count { it.done && !it.ok }
-    // One call is its own name; several are a count, because the names are what the
-    // expanded list is for.
-    val title = if (tools.size == 1) {
-        tools.first().name.ifBlank { "调用 1 个工具" }
-    } else {
-        "调用 ${tools.size} 个工具"
+    val (title, preview) = remember(tools) {
+        // One call is its own name; several are a count, because the names are what the
+        // expanded list is for.
+        val t = if (tools.size == 1) {
+            tools.first().name.ifBlank { "调用 1 个工具" }
+        } else {
+            "调用 ${tools.size} 个工具"
+        }
+        // Folded, the header still says what the call is doing: the first argument line of
+        // the newest call (a shell command, a path), which is the row's own content anyway.
+        val p = tools.lastOrNull()
+            ?.args
+            ?.lineSequence()
+            ?.firstOrNull { it.isNotBlank() }
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "{}" }
+        t to p
     }
-    // Folded, the header still says what the call is doing: the first argument line of
-    // the newest call (a shell command, a path), which is the row's own content anyway.
-    val preview = tools.lastOrNull()
-        ?.args
-        ?.lineSequence()
-        ?.firstOrNull { it.isNotBlank() }
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() && it != "{}" }
     ProcessCard(
         icon = ImageVector.vectorResource(R.drawable.ic_wrench),
         title = title,
@@ -1194,6 +1210,8 @@ internal fun ToolBundle(
                     key(key) {
                         ToolRow(
                             line = tool,
+                            // 只有这一轮还在跑才转圈；历史 done=false 是中断遗留。
+                            running = runningTool != null,
                             expanded = key in openTools,
                             onToggle = {
                                 openTools = if (key in openTools) openTools - key else openTools + key
@@ -1225,8 +1243,8 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
     // 两处刻意的差别（用户要求）：
     //  · 命令**不截断**（原来 maxLines = 2 + Ellipsis，长命令根本读不全）；
     //  · 输出不再用「固定 132dp 的滚动 Text」，而是逐行进入虚拟列表，长输出不会一次性排版。
-    // 命令与输出都可选中复制（用户：「确实所有情况都要可复制」）。
-    SelectionContainer {
+    // 命令与输出都可选中复制（用户：「确实所有情况都要可复制」）——同上，武装制。
+    SelectableWhenArmed {
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         if (args != null) {
             item(key = "args") {
@@ -1315,7 +1333,13 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
 }
 
 @Composable
-internal fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
+internal fun ToolRow(
+    line: ToolLine,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    /** 这一轮是否还在跑：历史里被中断落盘的 `done=false` 行不是在跑，不能永久转圈。 */
+    running: Boolean = false,
+) {
     val tone = when {
         !line.done -> MaterialTheme.colorScheme.primary
         line.ok -> MaterialTheme.colorScheme.secondary
@@ -1346,13 +1370,22 @@ internal fun ToolRow(line: ToolLine, expanded: Boolean, onToggle: () -> Unit) {
                         tint = tone,
                         modifier = Modifier.size(16.dp),
                     )
-                } else {
+                } else if (running) {
                     // A call in flight is a spinner, not a dot: the row has to say "still
                     // working" while the model waits on it.
                     CircularProgressIndicator(
                         modifier = Modifier.size(12.dp),
                         strokeWidth = 1.5.dp,
                         color = tone,
+                    )
+                } else {
+                    // 历史遗留的 done=false（run 被杀后落盘）：静态扳手，不再转。
+                    // 不定式进度圈按屏幕刷新率重绘，常驻卡片挂着它 = 读历史一直烧帧。
+                    Icon(
+                        imageVector = ImageVector.vectorResource(R.drawable.ic_wrench),
+                        contentDescription = null,
+                        tint = tone,
+                        modifier = Modifier.size(14.dp),
                     )
                 }
             }
@@ -1558,7 +1591,7 @@ internal fun TurnSummary(
                         // body, not as a row of the grid, and 2dp of vertical air plus the
                         // column's 8dp keeps it off its neighbours.
                         is Part.Text -> Column(Modifier.padding(vertical = 2.dp)) {
-                            SelectionContainer { MarkdownText(text = part.text) }
+                            SelectableWhenArmed { MarkdownText(text = part.text) }
                         }
 
                         is Part.Steer -> Row(
