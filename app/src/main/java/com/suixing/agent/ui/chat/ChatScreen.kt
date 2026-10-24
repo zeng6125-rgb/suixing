@@ -429,7 +429,10 @@ fun ChatScreen(
         // Compose 的修饰符顺序让 padding 先吃掉空间，所以测到的不含这 12dp。
         // 这里把它加回来才是输入框真实的占位 —— **不要删**（我删过一次，是错的）。
         composerH + COMPOSER_BOTTOM_PAD + navBarPad(heldIme).toDp() +
-            if (state.runningHere) 12.dp else 16.dp
+            // **恒定 16dp，不随 run 状态切换**（真机反馈：流式结束瞬间整列上移 1-2dp ——
+            // 就是这里 12↔16 的切换改变了底部让位。让位恒定 ⇒ run 结束时几何完全不变。
+            // 代价：流式期间状态行与输入框的间隙从 12dp 变为 16dp —— 与静止时一致，更统一）。
+            16.dp
     }
 
     var voiceOpen by remember { mutableStateOf(false) }
@@ -1694,8 +1697,8 @@ fun ChatScreen(
                                                 reasoningExpansion = reasoningExpansion,
                                             )
                                             }
-                                            // 上下都 12dp（用户要求）：气泡白底 → 状态行顶 = top = 12dp；
-                                            // 状态行底 → 输入框顶 = 下方让位（跑的时候 12dp），所以这里 bottom = 0。
+                                            // 上 12dp（用户要求）：气泡白底 → 状态行顶。
+                                            // 下：让位恒定 16dp（见 stackFootprint），这里 bottom = 0。
                                             if (state.runningHere) {
                                                 RunStatusLine(
                                                     text = liveStatusText,
