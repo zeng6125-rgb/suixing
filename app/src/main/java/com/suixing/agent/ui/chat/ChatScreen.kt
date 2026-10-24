@@ -1188,7 +1188,12 @@ fun ChatScreen(
             turnIndices = turnIndices,
         )
         "scroll=${listState.isScrollInProgress} off=$off turn=$turn" +
-            " run=${state.runningHere} live=${state.liveParts.isNotEmpty()}"
+            // 精确到「有没有流式正文」：`liveParts` 里还有工具调用 part，
+            // 用 isNotEmpty 会把「工具执行中」也算成有正文 —— 那一列正是用来和
+            // TypingDots/ProcessSpinner（等待态才可见）对照的，不能宽。
+            // 自包含判定：`hasLiveText` 在本函数里声明得更靠后，前向引用编译不过。
+            " run=${state.runningHere}" +
+            " liveText=${state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking }}"
     }
     val appCtx = LocalContext.current.applicationContext
     LaunchedEffect(appCtx) {
