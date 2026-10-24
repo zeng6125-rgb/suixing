@@ -58,11 +58,20 @@ object Transcript {
         activeRuns: Map<String, String>,
         /** 调用方已经算过的 `turnOf`：这一层每次重算都是 O(条数)，而组行时会被连着调好几次。 */
         turnOf: Map<String, String> = turnOf(messages),
-    ): Map<String, String> {
-        return runsByTurn(messages, turnOf).mapValues { (turn, runs) ->
-            activeRuns[turn]?.takeIf { it in runs }
-                ?: runs.lastOrNull { it.isNotEmpty() }
-                ?: runs.last()
+    ): Map<String, String> = chosenFrom(runsByTurn(messages, turnOf), activeRuns)
+
+    /**
+     * 与 [chosenRuns] 同一套选择规则，但**复用已经算好的 [runs]**。
+     *
+     * `groupRows` 本来就会先算 `runsByTurn` 再调 `chosenRuns`，而后者内部又算了一遍
+     * —— 每落盘一条消息就白付一趟全量扫描 + 一张 `LinkedHashMap<String, MutableList>`。
+     * 选择规则逐字照抄（active 命中优先，否则最后一个非空 run，再否则最后一个）。
+     */
+    fun chosenFrom(runs: Map<String, List<String>>, activeRuns: Map<String, String>): Map<String, String> {
+        return runs.mapValues { (turn, list) ->
+            activeRuns[turn]?.takeIf { it in list }
+                ?: list.lastOrNull { it.isNotEmpty() }
+                ?: list.last()
         }
     }
 

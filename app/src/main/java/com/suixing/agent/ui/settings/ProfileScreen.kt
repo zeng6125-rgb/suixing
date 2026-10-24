@@ -274,12 +274,21 @@ fun ProfileScreen(onBack: () -> Unit) {
  * 「最近更新」的时间戳：今天的只给时分（12:03），更早的带上月日——只写 12:03 会让一周前的
  * 一次总结看起来像刚发生的。
  */
+// 两种 pattern 各留一个（ThreadLocal 保线程安全）：原来每次调用都 new 一个
+// SimpleDateFormat（要解析 pattern）。输出逐字节相同。
+private val SAME_DAY_STAMP = object : ThreadLocal<SimpleDateFormat>() {
+    override fun initialValue() = SimpleDateFormat("HH:mm", Locale.getDefault())
+}
+private val OTHER_DAY_STAMP = object : ThreadLocal<SimpleDateFormat>() {
+    override fun initialValue() = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
+}
+
 private fun stamp(at: Long): String {
     val calendar = Calendar.getInstance()
     val today = calendar.get(Calendar.DAY_OF_YEAR)
     val year = calendar.get(Calendar.YEAR)
     calendar.timeInMillis = at
     val sameDay = calendar.get(Calendar.YEAR) == year && calendar.get(Calendar.DAY_OF_YEAR) == today
-    val pattern = if (sameDay) "HH:mm" else "M月d日 HH:mm"
-    return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(at))
+    val format = if (sameDay) SAME_DAY_STAMP.get()!! else OTHER_DAY_STAMP.get()!!
+    return format.format(Date(at))
 }

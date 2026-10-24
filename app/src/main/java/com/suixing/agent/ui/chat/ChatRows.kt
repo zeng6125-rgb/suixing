@@ -485,7 +485,8 @@ internal fun groupRows(
     val turnOf = Transcript.turnOf(messages)
     val runs = Transcript.runsByTurn(messages, turnOf)
     // `turnOf` 是 O(条数) 的扫描，下面几处都要它 —— 算一次传下去（原来被重复算了 4 次）。
-    val chosen = Transcript.chosenRuns(messages, activeRuns, turnOf)
+    // 复用上面已经算好的 `runs`：`chosenRuns` 内部会再算一遍 `runsByTurn`。
+    val chosen = Transcript.chosenFrom(runs, activeRuns)
     val shown = Transcript.active(messages, activeRuns, turnOf)
     // A steer line is the user talking mid-answer, not a new question: only a real
     // question can be re-answered or own the branch switcher.

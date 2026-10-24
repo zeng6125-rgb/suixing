@@ -349,10 +349,16 @@ private fun RecordRow(record: PerfRecord) {
     }
 }
 
+// SimpleDateFormat 的构造很贵（解析 pattern），而这里是**列表每一行**都在调。
+// 非线程安全 ⇒ ThreadLocal 各持一个；输出与「每次新建」逐字节相同。
+private val CLOCK_FORMAT = object : ThreadLocal<java.text.SimpleDateFormat>() {
+    override fun initialValue() =
+        java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+}
+
 private fun clock(at: Long): String {
     if (at <= 0) return "—"
-    val format = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
-    return format.format(java.util.Date(at))
+    return CLOCK_FORMAT.get()!!.format(java.util.Date(at))
 }
 
 /** 供页面之外（例如诊断日志）复用同一份摘要形状。 */
