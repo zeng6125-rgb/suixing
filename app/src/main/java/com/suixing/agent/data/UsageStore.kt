@@ -150,11 +150,12 @@ class UsageStore(private val context: Context) {
      */
     suspend fun refresh(): UsageSnapshot = withContext(Dispatchers.IO) {
         val cache = readCache()
-        val slices = loadSlices(cache)
+        // **目录只扫一次**：原来 loadSlices 与这里各 listFiles 一遍同一个目录。
         // 盘上仍有的会话（meta 在即算）：retainAll 的「确认删除」依据（issue #41 真问题 3）
-        val onDisk = File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
-            ?.mapTo(mutableSetOf()) { it.name.removeSuffix(META_SUFFIX) }
-            ?: emptySet()
+        val metaFiles = File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
+            ?: emptyArray()
+        val onDisk = metaFiles.mapTo(mutableSetOf()) { it.name.removeSuffix(META_SUFFIX) }
+        val slices = loadSlices(cache, metaFiles)
         // 显式打上当前版本：cache 若刚被版本校验丢弃，这里就是"重建一次"的落点。
         val next = accumulateSlices(cache, slices, onDiskIds = onDisk)
             .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION)
@@ -172,12 +173,11 @@ class UsageStore(private val context: Context) {
     fun byModel(): List<ModelUsage> = byModelOf(snapshot)
 
     /** 每个会话**尚未计数**的那部分（#30）：只从上次数到的字节偏移续读、只解析新增。 */
-    private fun loadSlices(snapshot: UsageSnapshot): List<UsageSlice> {
+    private fun loadSlices(snapshot: UsageSnapshot, metaFiles: Array<File>): List<UsageSlice> {
         val out = ArrayList<UsageSlice>()
         // 旧格式 `<id>.json` 已随 #40 删除（loadConversations 全量解析路径是死代码，一并删了），
         // 这里只扫 store 的 meta；增量续扫见下面的 slicedFrom。
-        File(chatsDir, STORE_DIR).listFiles { file -> file.name.endsWith(META_SUFFIX) }
-            ?.forEach { file ->
+        metaFiles.forEach { file ->
                 val id = file.name.removeSuffix(META_SUFFIX)
                 runCatching {
                     val meta = store.readMeta(id) ?: return@runCatching
