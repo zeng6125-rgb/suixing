@@ -1526,6 +1526,14 @@ fun ChatScreen(
                                         // 惯性滚动：这期间有一个逐帧协程在跑，还冻结着外壳的 IME clamp。
                                         // 现在改由下面的 `LaunchedEffect(pressed)` 在**真的到长按**时才 arm。
                                         pressMoved = false
+                                        // **但 reveal 拦截要在按下瞬间就开**（长按回归根因，实测 lp_trace.log）：
+                                        // 文本选区的 bringIntoView 比长按超时早 ~28ms 到达，头 5 条放行请求
+                                        // 把列表推走 228px —— 等 guard-on 再拦已经晚了。上面注释否掉的是
+                                        // 「arm 整套守护」（逐帧协程 + IME 冻结，会盖住惯性滚动）；
+                                        // 这里只置 revealBlocked 标志（零成本、只拦 reveal 请求），
+                                        // 识别为滚动时立刻解除 —— 与那条教训不冲突。
+                                        revealBlocked.value = true
+                                        lastRevealRequestAt.longValue = SystemClock.uptimeMillis()
                                         var moved = false
                                         var released = false
                                         while (!released) {
@@ -1546,6 +1554,8 @@ fun ChatScreen(
                                                 scroll.stickToBottom = false
                                                 moved = true
                                                 pressMoved = true
+                                                // 滚动不是选字：解除 reveal 拦截
+                                                revealBlocked.value = false
                                             }
                                             released = next.changes.none { it.pressed }
                                         }
@@ -2262,3 +2272,4 @@ private fun Modifier.liveRowLagHeight(
         val height = laggedBubbleHeight(reported = reported, outside = outside[0], natural = placeable.height)
         layout(placeable.width, height) { placeable.place(0, 0) }
     }
+
