@@ -212,9 +212,14 @@ fun rememberChatScroll(
                 // 追底逻辑紧接着 `scrollToItem(0)` 把列表拉回底部 —— 日志里 `guard-off idx=0/624`，
                 // 两秒后 `guard-on idx=0/0`，中间没有任何手势。
                 // 250ms 的持续性是区分「用户真的滚到底」和「布局瞬闪」的关键。
+                // **锚点 index 前后必须相同**（issue #42，pin.log 实测）：重卡区域掉帧时
+                // canScrollBackward 瞬时 false，而惯性像素还在滑 —— isScrollInProgress 已是
+                // false 但 firstVisibleItemIndex 在动。只看前两个条件会误判「持续到底」⇒
+                // pin 误释放 ⇒ 内容瞬展 993~2397px（用户看到的跳变）。index 没动才是真停。
+                val indexAtStart = listState.firstVisibleItemIndex
                 delay(250)
                 if (!listState.canScrollBackward && !listState.isScrollInProgress &&
-                    !scroll.restoring
+                    !scroll.restoring && listState.firstVisibleItemIndex == indexAtStart
                 ) {
                     // 钉住期间走到这里 = 用户自己滚回了底部 ⇒ 解除钉住（下一帧内容就会展开）。
                     if (scroll.pinActive) {
