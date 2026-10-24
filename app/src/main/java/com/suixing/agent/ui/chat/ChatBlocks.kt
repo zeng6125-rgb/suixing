@@ -308,6 +308,13 @@ internal val REVEAL_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 internal val LocalChatListState = compositionLocalOf<androidx.compose.foundation.lazy.LazyListState?> { null }
 
 /**
+ * 文本选区是否「武装」（#27/#42③）：`SelectionContainer` 包着重卡时，命中测试与组合成本
+ * 随文本长度涨，是重卡区滚动掉帧的主要构成之一。平时不包；长按武装（选区操作要它），
+ * 滚动开始即解除（滚动本身就会取消文本选区，解除无副作用）。
+ */
+internal val LocalTextSelectionArmed = compositionLocalOf { false }
+
+/**
  * 外观 → 打字机效果（默认开）。只落在**两个**流式渲染点上：正文的 Markdown 与思考块。
  * 用 composition local 而不是逐层传参，是因为这两点离设置有好几层，而参数要穿过折叠卡片、
  * 工具块、轮次渲染器。

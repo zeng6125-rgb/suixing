@@ -551,7 +551,8 @@ internal fun MessageRow(
         // 整张卡片包一层 SelectionContainer（用户：「气泡外层没包」）：只包 MarkdownText 时，
         // 从回答拖到思考块/工具块就断在边界上。**只对已落地的行**加 —— 流式行的守卫见
         // AssistantRow 里 Part.Text 分支的注释（实时气泡每帧重测会闪），那一处不动。
-        Roles.ASSISTANT -> SelectionContainer {
+        // 按需挂载（#27/#42③）：平时不包（重卡组合减负），长按武装后才可选中。
+        Roles.ASSISTANT -> SelectableWhenArmed {
             AssistantRow(
                 // The setting hides thinking entirely; everything else keeps its place in
                 // the sequence either way.
@@ -592,7 +593,7 @@ internal fun MessageRow(
         // `row.parts` rather than the row's own message: once this card is the run's open
         // bubble, the calls that followed it — and a 插话 typed while they ran — live in the
         // parts, and rebuilding from the message alone would draw only the first of them.
-        else -> SelectionContainer {
+        else -> SelectableWhenArmed {
             AssistantRow(
                 parts = row.parts,
                 streaming = false,
@@ -645,7 +646,7 @@ internal fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit)
                 // assistant body's, so the two bubbles agree on size and leading.
                 // Selectable: long-press is how a phone copies text, and the bubble used to
                 // spend that gesture on the edit dialog instead.
-                SelectionContainer {
+                SelectableWhenArmed {
                     Text(message.text, style = markdownBody())
                 }
             }
@@ -896,6 +897,17 @@ internal fun MetricButton(icon: ImageVector, text: String, label: String, onClic
             maxLines = 1,
         )
     }
+}
+
+@Composable
+/**
+ * 选区按需挂载（#27/#42③）：`SelectionContainer` 包着重卡时命中测试与组合成本随文本
+ * 长度涨（重卡区滚动掉帧的主要构成之一）。平时直接放行内容；长按武装后才包。
+ * 滚动开始即解除武装（见 ChatScreen 的 selectionArmed）—— 滚动本身会取消文本选区。
+ */
+@Composable
+internal fun SelectableWhenArmed(content: @Composable () -> Unit) {
+    if (LocalTextSelectionArmed.current) SelectionContainer { content() } else content()
 }
 
 @Composable
