@@ -31,6 +31,23 @@ internal fun AppSettings.differsOutsideEndpoint(other: AppSettings): Boolean {
     return mine != other.withoutNames()
 }
 
+/**
+ * 与 [differsOutsideEndpoint] 等价，但 [other] 由调用方预先 `withoutNames()` 过 ——
+ * 草稿每改一个字都会重算 dirty，而 `other` 在键入期间不变：把它的规范化结果
+ * `remember` 起来，就省掉每次的两份 `AppSettings` 拷贝 + 一份 providers 列表。
+ */
+internal fun AppSettings.differsOutsideEndpointNormalized(otherNormalized: AppSettings): Boolean {
+    val mine = copy(
+        baseUrl = otherNormalized.baseUrl,
+        apiKey = otherNormalized.apiKey,
+        model = otherNormalized.model,
+    ).withoutNames()
+    return mine != otherNormalized
+}
+
+/** 供调用方 `remember(stored)` 复用：把 provider 名字抹掉（见 [withoutNames]）。 */
+internal fun AppSettings.normalizedForDirty(): AppSettings = withoutNames()
+
 /** The same settings with every provider name blanked, so names can be compared out. */
 private fun AppSettings.withoutNames(): AppSettings =
     copy(providers = providers.map { it.copy(name = "") })

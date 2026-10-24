@@ -505,7 +505,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     // so counting it would call a plain switch "unsaved"; a hand edit there is exactly what
     // `endpointEdited` reports. Saving writes the draft (a blank address keeps the live
     // endpoint — see forSaving), so this clears by itself.
-    val dirty = seeded && (endpointEdited || form.differsOutsideEndpoint(stored))
+    // **记忆化右边那个**：`stored` 在键入期间不变，而 dirty 每改一个字都要重算；
+    // 原来每次都要 copy 两份 AppSettings + 建一份 providers 列表再做整棵深比较。
+    val storedNormalized = remember(stored) { stored.normalizedForDirty() }
+    val dirty = seeded && (endpointEdited || form.differsOutsideEndpointNormalized(storedNormalized))
     // The name is a write-through field — nothing to save — but one DataStore transaction per
     // keystroke made every observer of the settings flow recompose, which is what turned the
     // subtitle above into a flicker and the title into a shake. So the draft takes the
