@@ -549,6 +549,9 @@ fun ChatScreen(
     }
     // 底锚的喂序是反的；反转结果记住，别每次重组都新建包装对象。
     val reversedVisible = remember(visible) { visible.asReversed() }
+    // 每行实测高度（visible 正序，已含 12dp 行间距）：单 item 化后
+    // `firstVisibleItemIndex` 恒为 0，读数导航改为「像素偏移 → 第几轮」反查。
+    val rowHeights = remember(visible) { IntArray(visible.size) }
     // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
     // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
     // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
@@ -791,7 +794,19 @@ fun ChatScreen(
     // 每跨一个 item 就变一次，一旦在这里读，整个 ChatScreen（1600 行、几十个 Composable 调用）
     // 就要重跑一遍。把读取推迟到 `TurnScrubber` 内部（见下面 `current = { … }`），
     // 跨边界时只有导航条自己重组。用 `remember` 持有 State 对象而不是 `by` —— `by` 一取就立刻读了。
-    val firstVisible = remember { derivedStateOf { listState.firstVisibleItemIndex } }
+    // **单 item 化之后 `firstVisibleItemIndex` 恒为 0**，读数导航必须改口径：
+    // 用「距最新的像素偏移 + 视口高」反查视口顶部是哪一行（`TurnMarks.topFedIndex`，
+    // 带单测）。仍然用 `remember` 持有 State、把 `.value` 的读取推迟到 `TurnScrubber`
+    // 内部（issue #26 原因一），滚动时只有导航条自己重组。
+    val firstVisibleFed = remember {
+        derivedStateOf {
+            TurnMarks.topFedIndex(
+                offsetFromBottom = listState.firstVisibleItemScrollOffset,
+                viewport = listState.layoutInfo.viewportSize.height,
+                heightsOldestFirst = rowHeights,
+            )
+        }
+    }
 
     // ===== 滚动与阅读位置：底锚列表，逻辑全在 ChatScroll.kt =====
     // 底锚（index 0 = 视觉最底）下长高向上、底边不动；追底＝回到 index 0；取消＝手指轻扫 4dp。
@@ -1375,7 +1390,9 @@ fun ChatScreen(
             )
             pinTrace("restore key=$savedKey approx=$approx rows=${visibleNow.size} prefix=$feedPrefixNow")
             if (targetFed != null) {
-                listState.scrollToItem(targetFed, saved.second)
+                // 单 item 化：item 0 就是整页，`saved.second`（原先的 item 内偏移）
+                // 正好等于「距最新端多少像素」⇒ 按它滚即可，比按 key 查索引更准。
+                listState.scrollToItem(0, saved.second)
                 withFrameNanos { }
             }
             // ② 精确校正：按 **key** 在 layoutInfo 里找全局 index（issue #16 第三步）。
@@ -1795,13 +1812,27 @@ fun ChatScreen(
                         // 列表混着助手卡/用户气泡/系统回执/工具卡，没有 contentType 时 Compose
                         // 在不同形状的行之间复用组合槽 = 类型一换就整槽拆了重建。
                         // key 管身份，contentType 管复用 —— 两个都要。
-                        items(reversedVisible, key = { it.message.id }, contentType = { it.message.role }) { row ->
+                        // **整页装进单个 item**（滚动卡顿的结构解，方案 A）：`items()` 让每张卡
+                        // 在被滚到视口时才第一次组合+排版（实测 6~8ms，跨 8.3ms 预算 ⇒ 每秒
+                        // 7~10 次掉一拍，issue #43）。一页 12 轮（PAGE_TURNS），装进一个 item 后
+                        // 永远在组合里 ⇒ 进入视口成本 0。流式内容仍在**独立** item
+                        // （`streaming:`）里，每 token 的重组范围不变。`visible` 是正序
+                        // （旧→新）：本 item 底边贴视口底 ⇒ 最后一行（最新）落在底部。
+                        // 行间距从 LazyColumn 的 arrangement 搬进这里的 Column。
+                        item(key = "transcript") {
+                            val gapPx = with(LocalDensity.current) { 12.dp.roundToPx() }
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            visible.forEachIndexed { visibleIndex, row ->
                             // One placeable per item: the list's own 16dp spacing applies
                             // between the placeables of a single item as well, which is what
                             // held the timestamp a full 16dp above the bubble it belongs to.
                             // Inside this Column the two sit 3dp apart, and the 16dp goes back
                             // to meaning what it says — the air between messages.
-                            Column {
+                            Column(
+                                Modifier.onGloballyPositioned { coords ->
+                                    rowHeights[visibleIndex] = coords.size.height + gapPx
+                                },
+                            ) {
                                 // 外观 → 显示时间: off means no labels at all, not fewer.
                                 if (settings.showTimestamps && row.showTimeLabel) {
                                     TimeLabel(row.message.timestamp)
@@ -1870,6 +1901,8 @@ fun ChatScreen(
                                         originals = originals,
                                     )
                                 }
+                            }
+                        }
                             }
                         }
                         // 底锚：「加载更早」在**大索引端**（视觉顶部）。更老的轮次追加在喂序末尾，
@@ -1961,7 +1994,7 @@ fun ChatScreen(
                 // 比较时要补 `rowOffset` —— 两处都漏过一次（#16 的"偏一两项"）。
                 current = {
                     TurnMarks.current(
-                        firstVisibleFed = firstVisible.value,
+                        firstVisibleFed = firstVisibleFed.value,
                         feedPrefix = feedPrefix,
                         visibleSize = visible.size,
                         rowOffset = rowOffset,

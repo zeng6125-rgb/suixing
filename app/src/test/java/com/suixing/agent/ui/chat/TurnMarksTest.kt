@@ -60,4 +60,32 @@ class TurnMarksTest {
         assertEquals(1, TurnMarks.current(0, 0, 0, 0, emptyList()))
         assertEquals(1, TurnMarks.current(0, 0, 5, 0, emptyList()))
     }
+
+    // ===== 单 item 转录：像素偏移 → 喂序下标（issue #43 方案 A）=====
+
+    @Test
+    fun `top row is newest when the newest rows fill the viewport`() {
+        // 视口 250、行高各 100、贴底（offset 0）：只装得下最新的 2.5 行 ⇒ 顶部是喂序 2。
+        assertEquals(2, TurnMarks.topFedIndex(0, 250, intArrayOf(100, 100, 100, 100, 100)))
+    }
+
+    @Test
+    fun `scrolling up walks back through the feed`() {
+        val heights = intArrayOf(100, 100, 100, 100, 100)
+        assertEquals(3, TurnMarks.topFedIndex(100, 250, heights))
+        assertEquals(4, TurnMarks.topFedIndex(200, 250, heights))
+    }
+
+    @Test
+    fun `past the top clamps to the oldest row`() {
+        // 滚到最早一端还继续给更大的偏移：钳到最后一行，不越界。
+        assertEquals(4, TurnMarks.topFedIndex(9_999, 300, intArrayOf(100, 100, 100, 100, 100)))
+    }
+
+    @Test
+    fun `unmeasured rows fall back to the current approximation`() {
+        // 高度还是 0（布局尚未量到）：返回当前下标而不是崩溃/越界。
+        assertEquals(0, TurnMarks.topFedIndex(0, 300, intArrayOf(0, 0)))
+        assertEquals(0, TurnMarks.topFedIndex(0, 300, IntArray(0)))
+    }
 }
