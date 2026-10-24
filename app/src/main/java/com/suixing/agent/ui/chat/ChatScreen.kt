@@ -940,12 +940,17 @@ fun ChatScreen(
         }
     }
     // 安静期：请求停止 500ms（远长于 60fps 的一帧）才放行，避免动画收尾时把剩下的距离滚掉。
-    LaunchedEffect(revealBlocked.value) {
-        if (!revealBlocked.value) return@LaunchedEffect
-        while (revealBlocked.value) {
-            delay(100)
-            if (SystemClock.uptimeMillis() - lastRevealRequestAt.longValue > 500L) {
-                revealBlocked.value = false
+    // **组合期不读 `revealBlocked`**：原来 `LaunchedEffect(revealBlocked.value)` 把
+    // 一个 State 当 key —— 每次长按武装/解除各重组一次整屏，而这台机器上长按/甩动都在
+    // 手势热路径上。改成协程内 snapshotFlow 订阅：读发生在协程，组合期零订阅。
+    LaunchedEffect(Unit) {
+        snapshotFlow { revealBlocked.value }.collectLatest { blocked ->
+            if (!blocked) return@collectLatest
+            while (revealBlocked.value) {
+                delay(100)
+                if (SystemClock.uptimeMillis() - lastRevealRequestAt.longValue > 500L) {
+                    revealBlocked.value = false
+                }
             }
         }
     }
