@@ -899,7 +899,6 @@ internal fun MetricButton(icon: ImageVector, text: String, label: String, onClic
     }
 }
 
-@Composable
 /**
  * 选区按需挂载（#27/#42③）：`SelectionContainer` 包着重卡时命中测试与组合成本随文本
  * 长度涨（重卡区滚动掉帧的主要构成之一）。平时直接放行内容；长按武装后才包。
