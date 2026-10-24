@@ -903,13 +903,19 @@ internal fun MetricButton(icon: ImageVector, text: String, label: String, onClic
 }
 
 /**
- * 选区按需挂载（#27/#42③）：`SelectionContainer` 包着重卡时命中测试与组合成本随文本
- * 长度涨（重卡区滚动掉帧的主要构成之一）。平时直接放行内容；长按武装后才包。
- * 滚动开始即解除武装（见 ChatScreen 的 selectionArmed）—— 滚动本身会取消文本选区。
+ * 文本选区容器。
+ *
+ * **曾经做过「按需武装」（长按超时才挂 `SelectionContainer`）—— 已废弃并回退**：
+ * 真机反馈长按复制响应变慢、偶尔长按不出菜单、选区出现后滑动卡。原因是挂载时机错了：
+ * 武装发生在长按超时**之后**，而选区手势在超时那一刻已经开始，容器在同一手势中途
+ * 出现/嵌套重挂会把选区取消掉。选区容器必须在**内容出现时就在**。
+ *
+ * 滚动成本的账单因此回到「常驻」—— 但这是用户明确选择的取舍：复制是高频手势，
+ * 滚动优化不能拿它换。
  */
 @Composable
 internal fun SelectableWhenArmed(content: @Composable () -> Unit) {
-    if (LocalTextSelectionArmed.current) SelectionContainer { content() } else content()
+    SelectionContainer { content() }
 }
 
 @Composable
