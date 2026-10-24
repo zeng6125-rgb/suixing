@@ -782,10 +782,15 @@ internal fun ringReading(
     newestStored: Int,
     liveEstimate: Int,
     transcriptEstimate: Int = 0,
+    /** meta 里缓存的「最近一条报了用量的消息」的 prompt（issue #41 真问题 1）。 */
+    persistedContext: Int = 0,
 ): RingReading = when {
     // 实测口径优先：网关回报（含按会话保持的最近一次）→ 落盘回报。
     liveReported > 0 -> RingReading(liveReported, estimated = false)
     newestStored > 0 -> RingReading(newestStored, estimated = false)
+    // run 结束瞬间前两级同时归零，而落盘的实测值还在（meta.contextTokens）——
+    // 用它接住圆环，别掉到估算（实测曾 498K → 370K 掉 26%）。
+    persistedContext > 0 -> RingReading(persistedContext, estimated = false)
     // 从没实测过（网关不报用量）才用粗估兜底，并标「约」。
     liveEstimate > 0 -> RingReading(liveEstimate, estimated = true)
     transcriptEstimate > 0 -> RingReading(transcriptEstimate, estimated = true)

@@ -81,14 +81,9 @@ fun UsageScreen(onBack: () -> Unit) {
         // Every chat's every message is walked here — the heaviest step on this page, so it
         // stays off the main thread like the store refresh above.
         longestTurn = withContext(Dispatchers.IO) {
+            // 列表只带 meta（#30），单轮数据从 sessionTotals 拿（meta 里缓存，backfill 才读盘）。
             chats.maxOfOrNull { chat ->
-                chat.messages
-                    .filter { it.role == Roles.ASSISTANT }
-                    .groupBy { message -> Transcript.runOf(message).ifEmpty { message.id } }
-                    .values
-                    .maxOfOrNull { rounds ->
-                        rounds.last().promptTokens.toLong() + rounds.sumOf { it.completionTokens.toLong() }
-                    } ?: 0L
+                Core.chats.sessionTotals(chat.id)?.longestTurnTokens ?: 0L
             } ?: 0L
         }
         loaded = true

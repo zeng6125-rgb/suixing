@@ -617,11 +617,22 @@ fun ChatScreen(
     LaunchedEffect(reported) {
         if (reported > 0) heldPrompt.intValue = reported
     }
+    // 落盘的实测上下文（issue #41 真问题 1）：run 结束瞬间前两级归零，这一档接住圆环。
+    // meta 里 O(1) 命中（totalsAt==messageCount 时），每轮落盘自动更新。
+    var persistedContext by remember(state.conversationId) { mutableIntStateOf(0) }
+    LaunchedEffect(state.conversationId, state.messagesRevision) {
+        persistedContext = withContext(Dispatchers.IO) {
+            runCatching {
+                Core.chats.sessionTotals(state.conversationId)?.contextTokens ?: 0
+            }.getOrDefault(0)
+        }
+    }
     val reading = ringReading(
         liveReported = if (reported > 0) reported else heldPrompt.intValue,
         newestStored = newestUsage?.prompt ?: 0,
         liveEstimate = state.stats?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
         transcriptEstimate = transcriptEstimate,
+        persistedContext = persistedContext,
     )
     // 切会话时算一次兜底读数（网关没报过用量时那两行占比要有数）。
     LaunchedEffect(state.conversationId) {

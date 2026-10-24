@@ -140,7 +140,12 @@ class UsageStore(private val context: Context) {
      */
     suspend fun refresh(): UsageSnapshot = withContext(Dispatchers.IO) {
         val cache = readCache()
-        val next = accumulateSlices(cache, loadSlices(cache))
+        val slices = loadSlices(cache)
+        // 盘上仍有的会话（meta 在即算）：retainAll 的「确认删除」依据（issue #41 真问题 3）
+        val onDisk = File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
+            ?.mapTo(mutableSetOf()) { it.name.removeSuffix(META_SUFFIX) }
+            ?: emptySet()
+        val next = accumulateSlices(cache, slices, onDiskIds = onDisk)
         snapshot = next
         writeCache(next)
         next
@@ -267,12 +272,16 @@ internal fun accumulateSlices(
     snapshot: UsageSnapshot,
     slices: List<UsageSlice>,
     zone: ZoneId = ZoneId.systemDefault(),
+    /** 盘上仍存在（meta 在）的会话 id；默认空集 = 旧行为，生产调用方必传。 */
+    onDiskIds: Set<String> = emptySet(),
 ): UsageSnapshot {
     val chats = snapshot.chats.toMutableMap()
 
     // A chat the user deleted takes its tokens with it: the totals have to describe the
     // chats still on disk, or the header keeps counting conversations that are gone.
-    chats.keys.retainAll(slices.mapTo(mutableSetOf<String>()) { it.id })
+    // **「在盘上」以 meta 文件为准，不以本次扫描为准**（issue #41 真问题 3）：
+    // 只按 slices 清会把「meta 在、这次扫描失败/被跳过」的会话用量也抹掉。
+    chats.keys.retainAll((slices.mapTo(mutableSetOf<String>()) { it.id }) + onDiskIds)
 
     for (slice in slices) {
         val previous = chats[slice.id] ?: ChatUsage()

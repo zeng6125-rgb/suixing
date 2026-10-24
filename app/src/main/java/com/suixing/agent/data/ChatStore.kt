@@ -39,6 +39,8 @@ internal data class ChatTotals(
     val firstTokenMs: Long = 0,
     /** 最近一条**报了用量**的消息的 prompt tokens。 */
     val contextTokens: Int = 0,
+    /** 单轮最大 token（末轮 prompt + 该轮 completion 之和）。按 runId 分组，与用量页口径一致。 */
+    val longestTurnTokens: Long = 0,
 ) {
     operator fun plus(other: ChatTotals): ChatTotals = ChatTotals(
         turns = turns + other.turns,
@@ -55,6 +57,39 @@ internal data class ChatTotals(
     companion object {
         val EMPTY = ChatTotals()
     }
+}
+
+/**
+ * 顺序折叠加出整份 [ChatTotals]：除逐条求和外，还要算「单轮最大」——
+ * 它需要跨消息的 runId 分组（末轮 prompt + 该轮 completion 之和），
+ * `plus` 做不到，只能在这种有序折叠里顺路算。
+ */
+internal fun foldTotals(messages: List<StoredMessage>): ChatTotals {
+    var acc = ChatTotals.EMPTY
+    var runId = ""
+    var runPrompt = 0L
+    var runCompletion = 0L
+    var longest = acc.longestTurnTokens
+    fun settle() {
+        if (runId.isNotEmpty()) {
+            val turn = runPrompt + runCompletion
+            if (turn > longest) longest = turn
+        }
+    }
+    for (message in messages) {
+        acc += totalsOfMessage(message)
+        val id = message.runId.orEmpty()
+        if (id != runId) {
+            settle()
+            runId = id
+            runPrompt = 0L
+            runCompletion = 0L
+        }
+        if (message.promptTokens > 0) runPrompt = message.promptTokens.toLong()
+        runCompletion += message.completionTokens.toLong()
+    }
+    settle()
+    return if (longest > acc.longestTurnTokens) acc.copy(longestTurnTokens = longest) else acc
 }
 
 /** 一条消息贡献的统计量。 */
@@ -347,7 +382,11 @@ internal class ChatStore(private val root: File) {
             turnCount = committed.turnCount + tail.count { isTurnStart(it) },
             lastMessageId = tail.last().id,
             // 会话统计跟着追加走：只累加**新落盘**这几条，不重扫日志。
-            totals = tail.fold(committed.totals) { acc, m -> acc + totalsOfMessage(m) },
+            // longestTurn 跨 runId，顺序折叠才能算 —— 起点带 committed 的旧值，新 tail 并入
+            totals = tail.fold(committed.totals) { acc, m -> acc + totalsOfMessage(m) }
+                .let { merged ->
+                    merged.copy(longestTurnTokens = maxOf(merged.longestTurnTokens, foldTotals(tail).longestTurnTokens))
+                },
             // **只有原统计本来就是全量时，追加后的才是全量**（评审 S-4）。
             // 旧 meta 的 `totalsAt` 可能落后于 `messageCount`（历史版本没维护这两列），
             // 那种情况下累加出来的是"残缺基数 + 新尾巴"，若把 `totalsAt` 写成新的条数，

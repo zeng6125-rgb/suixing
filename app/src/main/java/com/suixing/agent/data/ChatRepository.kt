@@ -216,9 +216,7 @@ class ChatRepository(private val context: Context) {
                 val meta = store.readMeta(id) ?: return@withLock ChatTotals.EMPTY
                 if (meta.totalsAt == meta.messageCount) return@withLock meta.totals
                 val totals = runCatching {
-                    store.all(meta).fold(ChatTotals.EMPTY) { acc, message ->
-                        acc + totalsOfMessage(message)
-                    }
+                    foldTotals(store.all(meta))
                 }.onFailure {
                     Log.w(TAG, "totals backfill failed for $id", it)
                 }.getOrNull() ?: return@withLock meta.totals
@@ -799,7 +797,10 @@ class ChatRepository(private val context: Context) {
                     "bytes=${saved.meta.logBytes} ms=$elapsed",
             )
         }
-        return saved.meta.toConversation(conversation.messages)
+        // **meta-only**（用量数据振荡的根因）：这里曾把「带完整消息」的会话放回列表，
+        // 而置顶/改名/重启放回的都是 meta-only ⇒ 列表里那个会话的消息忽有忽无，
+        // 用量页「最长单轮」（读 chat.messages）就在真值与 0 之间跳。列表统一 meta-only。
+        return saved.meta.toConversation()
     }
 
     /**
