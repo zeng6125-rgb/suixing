@@ -165,8 +165,11 @@ private data class FollowWant(
 fun rememberChatScroll(
     listState: LazyListState,
     autoFollow: Boolean,
-    pressed: Boolean,
-    pressGuardOn: Boolean,
+    /** 手指在屏上与否：**收 lambda**（审计 1§3）—— 收值会让 ChatScreen 在按下/抬起
+     *  各重组一次；追底判定本来就在协程里读，读 lambda 一样准。 */
+    pressedNow: () -> Boolean,
+    /** 长按守护是否武装：同样收 lambda（见 [pressedNow]）。 */
+    guardNow: () -> Boolean,
     /**
      * 会话 id。阅读锚点按它隔离 —— 切换会话时锚点必须作废重来，
      * 否则旧会话的锚会被拿去"纠正"新会话的位置（用户：「各会话要隔离」）。
@@ -182,8 +185,8 @@ fun rememberChatScroll(
     // 底锚下判据就是 (0, 0)：底 padding 不参与 —— index 0 的底边本来就压在让位之上，
     // 不像顶锚那样会出现"看着在底、canScrollForward 仍为真"。
     // 手指按着 / 长按守护期间的引用：先于 collector 声明（原来在下面）。
-    val downNow0 = rememberUpdatedState(pressed)
-    val guardNow0 = rememberUpdatedState(pressGuardOn)
+    val downNow0 = pressedNow
+    val guardNow0 = guardNow
     LaunchedEffect(listState) {
         // **`pinActive` 必须在读取集里**（评审确证）：只在 collect 体内读它时，钉住解除那一刻
         // 若 `canBack`/`isScrollInProgress` 都没变，collector 就不会重跑 ⇒ 人已经在底部、
@@ -242,8 +245,8 @@ fun rememberChatScroll(
                 index = listState.firstVisibleItemIndex,
                 offset = listState.firstVisibleItemScrollOffset,
                 stick = scroll.stickToBottom,
-                pressed = downNow0.value,
-                guard = guardNow0.value,
+                pressed = downNow0(),
+                guard = guardNow0(),
             )
         }.collect { want ->
             // **惯性期绝不插手**（审计 1§3 实锤）：抬手后 fling 刚起、index≠0 的

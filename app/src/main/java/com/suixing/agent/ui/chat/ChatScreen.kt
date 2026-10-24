@@ -604,6 +604,11 @@ fun ChatScreen(
     // 键用 **messagesRevision**，不是 rowsKey：`rowsKey` 是（会话, 条数, 末条 id），
     // 编辑某条消息、或流式把文本追加进已落盘消息时，条数与末条 id 都不变 ⇒ 估算值不刷新，
     // 圆环读数会停在旧数字。revision 是 ViewModel 在每次发布时统一盖的章。
+    // **逐条缓存 token 估算**（审计 1§2）：`estimateTokens` 对正文做逐字符 CJK 判定，
+    // 12 轮 + 工具输出可达 5~20 万字符 ⇒ 每次 revision 一次几 ms 的主线程尖峰，
+    // 与 frame.log 里「成对 24ms+16ms、每 100~350 帧一次」的形态吻合。
+    // 消息是不可变值对象 ⇒ 按 id 缓存，用 text.hashCode()（String 自带缓存）验证内容未变。
+    val tokenMemo = remember(state.conversationId) { HashMap<String, LongArray>() }
     val transcriptEstimate = remember(state.messagesRevision, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
         val start = last?.let { cp ->
@@ -615,7 +620,20 @@ fun ChatScreen(
         } else {
             state.messages
         }
-        kept.sumOf { estimateTokens(it) } + (last?.summary?.length ?: 0) / 3
+        var sum = 0
+        kept.forEach { message ->
+            val stamp = message.text.hashCode().toLong() * 31 +
+                message.toolOutput.orEmpty().length +
+                message.toolArgs.orEmpty().length * 7
+            val cached = tokenMemo[message.id]
+            val tokens = if (cached != null && cached[0] == stamp) {
+                cached[1].toInt()
+            } else {
+                estimateTokens(message).also { tokenMemo[message.id] = longArrayOf(stamp, it.toLong()) }
+            }
+            sum += tokens
+        }
+        sum + (last?.summary?.length ?: 0) / 3
     }
     // 圆环读数＝**真实数字**：当前会话的上下文大小 / 模型窗口（用户：「就是按照真实数字啊…
     // 当前会话上下文/上下文窗口的数字」）。分子只认实测口径：网关回报的本轮 prompt_tokens
@@ -687,16 +705,20 @@ fun ChatScreen(
     val checkpointsByRow = remember(state.checkpoints, visible) {
         val byId = visible.associateBy { it.message.id }
         val indexOf = visible.withIndex().associate { (index, row) -> row.message.id to index }
+        val roundOwner = HashMap<String, Int>()
+        visible.forEachIndexed { index, row ->
+            row.rounds.forEach { round -> roundOwner[round.id] = index }
+        }
         val orphanToTop = mutableListOf<ContextCheckpoint>()
         val placed = state.checkpoints.mapNotNull { checkpoint ->
             // **锚点是压缩发生的位置**（anchorId），不是被折叠掉的最后一条（toMessageId）：
             // 按后者定位，压缩块会跑到旧历史里，跑完这一轮就"消失"在屏幕上方（用户反馈）。
             // 旧盘没有 anchorId（空串）⇒ 回落到 toMessageId，行为与以前一致。
             val anchor = checkpoint.anchorId.ifEmpty { checkpoint.toMessageId }
-            val owner = byId[anchor]
-                ?: visible.firstOrNull { row ->
-                    row.rounds.any { it.id == anchor }
-                }
+            // **rounds 反查用索引**（审计 1§2）：原来是每个 checkpoint 都
+            // `visible.firstOrNull { row.rounds.any { … } }` = O(checkpoints×rows×rounds)，
+            // 一张图里几十个 checkpoint 时是纯重复劳动。建一次索引即可。
+            val owner = byId[anchor] ?: roundOwner[anchor]?.let { visible.getOrNull(it) }
             if (owner == null) {
                 // 锚点落在当前页窗口之外（转录按页后缀加载）：旧行为是**丢掉不画** —— 用户看到
                 // 的就是「压缩记录时有时无、过几轮就消失」。改挂到**本页最旧一行**顶上：折叠发生
@@ -837,10 +859,15 @@ fun ChatScreen(
     // 正好落在惯性滚动期，观感就是「滑完发涩」。
     // 长按阈值：composable 作用域里没有 `PointerInputScope.viewConfiguration`，要取 Local。
     val viewConfig = androidx.compose.ui.platform.LocalViewConfiguration.current
-    LaunchedEffect(pressed) {
-        if (!pressed) return@LaunchedEffect
-        delay(viewConfig.longPressTimeoutMillis)
-        if (pressed && !pressMoved) pressGuardOn = true
+    // **组合期不订阅 `pressed`**（审计 1§3）：原来 `LaunchedEffect(pressed)` 的 key
+    // 是状态读 —— 每次按下/抬起都把整个 ChatScreen（58 个子组合）重组一遍，反向手势
+    // 100ms 内 3~4 次。改成在协程里 snapshotFlow 订阅：读发生在协程，组合期零订阅。
+    LaunchedEffect(Unit) {
+        snapshotFlow { pressed }.collectLatest { down ->
+            if (!down) return@collectLatest
+            delay(viewConfig.longPressTimeoutMillis)
+            if (!pressMoved) pressGuardOn = true
+        }
     }
     // composition local 只能在组合里读：先在组合层捕获，守护协程里用这个引用。
     val setSelectionActive = LocalSetSelectionActive.current
@@ -857,8 +884,8 @@ fun ChatScreen(
     val scroll = rememberChatScroll(
         listState = listState,
         autoFollow = settings.autoFollow,
-        pressed = pressed,
-        pressGuardOn = pressGuardOn,
+        pressedNow = { pressed },
+        guardNow = { pressGuardOn },
         // `listState` 来自 `rememberLazyListState()`（第 273 行），**全应用共用一个实例**，
         // 切会话时不重建 —— 所以阅读锚点必须自己按会话隔离，否则旧锚会去纠正新会话。
         conversationId = state.conversationId,
