@@ -914,11 +914,6 @@ fun ChatScreen(
     // 之后的帧照样把剩下的距离滚掉。所以每次被挡的请求都续期，请求停止 500ms 后才放行。
     // 选区按需武装（#27/#42③）：guard 武装（长按建立选区）→ true；
     // 滚动开始且手指不在屏上 → false（滚动会取消文本选区，解除安全）。
-    val selectionArmed = remember { mutableStateOf(false) }
-    LaunchedEffect(pressGuardOn) { if (pressGuardOn) selectionArmed.value = true }
-    LaunchedEffect(listState.isScrollInProgress, pressed) {
-        if (listState.isScrollInProgress && !pressed) selectionArmed.value = false
-    }
     val revealBlocked = remember { mutableStateOf(false) }
     val lastRevealRequestAt = remember { mutableLongStateOf(0L) }
     val defaultBringIntoView = LocalBringIntoViewSpec.current
@@ -1597,8 +1592,6 @@ fun ChatScreen(
                         LocalTypewriter provides settings.typewriter,
                         // 不在底部时展开要"向下展开"（块顶边钉住），需要摸到主列表状态。
                         LocalChatListState provides listState,
-                        // 选区按需挂载（#27/#42③）：见 LocalTextSelectionArmed 的说明。
-                        LocalTextSelectionArmed provides selectionArmed.value,
                         // 按下期间拦住「把选中内容滚进视口」的请求（issue #14 的修法，见上面的说明）。
                         LocalBringIntoViewSpec provides revealGuardSpec,
                     ) {
