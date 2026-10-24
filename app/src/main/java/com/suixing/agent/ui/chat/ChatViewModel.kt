@@ -3018,7 +3018,17 @@ class ChatViewModel : ViewModel() {
             checkpoint.copy(anchorId = live?.messages?.lastOrNull()?.id.orEmpty())
         }
         val current = live?.checkpoints ?: shown?.checkpoints ?: stored?.checkpoints.orEmpty()
-        val next = (current + anchored).distinctBy { it.id }.takeLast(MAX_CHECKPOINTS)
+        // 一趟完成「保序去重 + 取末尾 K 个」：原来 `current + anchored` 拷一次、
+        // `distinctBy` 建 LinkedHashSet 再拷一次、`takeLast` 再拷一次。
+        // distinctBy 保首次出现，所以先按 id 记首次位置，再取末尾 K 个。
+        val unique = ArrayList<ContextCheckpoint>(current.size + 1)
+        val seen = HashSet<String>(current.size + 1)
+        for (item in current) if (seen.add(item.id)) unique.add(item)
+        // `anchored` 是单个 checkpoint（原来靠 `List + 元素` 运算符追加到末尾），
+        // 去重规则相同：id 已出现过就不再追加（distinctBy 保首次出现）。
+        if (seen.add(anchored.id)) unique.add(anchored)
+        val next = if (unique.size <= MAX_CHECKPOINTS) unique
+        else unique.subList(unique.size - MAX_CHECKPOINTS, unique.size).toList()
         // Mirrored onto every live copy first, so the next save carries it whether the run
         // is still going or has just landed.
         if (shown != null) _state.update { it.copy(checkpoints = next) }

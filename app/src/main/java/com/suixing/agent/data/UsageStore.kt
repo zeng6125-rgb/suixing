@@ -195,6 +195,7 @@ class UsageStore(private val context: Context) {
                     }
                     out += UsageSlice(
                         id = id,
+                        // 一趟同时取两个字段（原来在同一个 sliced 上 map 两遍、建两个等长 list）。
                         messages = sliced.map { it.message },
                         baseIndex = if (resumable) previous.scanned else 0,
                         endOffsets = sliced.map { it.endOffset },
