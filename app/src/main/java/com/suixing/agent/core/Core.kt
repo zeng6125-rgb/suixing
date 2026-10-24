@@ -160,6 +160,19 @@ object Core {
                 memory.load()
                 profile.load()
             }
+            // **用量缓存的周期刷新**（issue #41）：`refresh()` 原来只在用量页的
+            // LaunchedEffect 里调 —— 页面不开就永远不写盘，实测 usage.json 三天没更新，
+            // 用量页一打开才补算。这里开机先跑一次，之后每 30 分钟一次；内部是
+            // 水位增量（只扫新落盘的 meta），代价与新增会话数成正比。
+            appScope.launch {
+                while (true) {
+                    runCatching { usage.refresh() }
+                        .onFailure {
+                            android.util.Log.w("suixing-usage", "periodic refresh failed", it)
+                        }
+                    kotlinx.coroutines.delay(30L * 60L * 1000L)
+                }
+            }
             // Alarms are dropped when the app is updated or force-stopped, so aiming the next
             // one on every launch is what keeps a reminder set weeks ago from going quiet.
             SchedulerService.arm(appContext)

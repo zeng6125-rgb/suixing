@@ -97,8 +97,18 @@ data class ChatUsage(
  */
 @Serializable
 data class UsageSnapshot(
+    // **缓存格式版本**（issue #41）：读缓存时版本不匹配就整份丢弃重建。一次性成本
+    // （重扫一遍 chats/），换来之后一直走增量水位。没有这个字段时，格式一变就是
+    // "旧字段静默当默认值用" —— 比重建更糟：数字悄悄错，且不会被发现。
+    // 默认 **0**（哨兵），不是 SCHEMA_VERSION：旧缓存里没有这个字段，序列化会填默认值，
+    // 若默认等于当前版本就永远判成"版本匹配" —— 校验形同虚设。新快照在
+    // accumulateSlices 重建时显式写入当前版本。
+    val schemaVersion: Int = 0,
     val chats: Map<String, ChatUsage> = emptyMap(),
 ) {
+    companion object {
+        const val SCHEMA_VERSION = 2
+    }
     val days: Map<String, TokenTally>
         get() = merge { it.days }
 
@@ -145,7 +155,9 @@ class UsageStore(private val context: Context) {
         val onDisk = File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
             ?.mapTo(mutableSetOf()) { it.name.removeSuffix(META_SUFFIX) }
             ?: emptySet()
+        // 显式打上当前版本：cache 若刚被版本校验丢弃，这里就是"重建一次"的落点。
         val next = accumulateSlices(cache, slices, onDiskIds = onDisk)
+            .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION)
         snapshot = next
         writeCache(next)
         next
@@ -197,6 +209,8 @@ class UsageStore(private val context: Context) {
         snapshot.let { if (it != UsageSnapshot()) return it }
         if (!cacheFile.isFile) return UsageSnapshot()
         return runCatching { json.decodeFromString<UsageSnapshot>(cacheFile.readText()) }
+            // 版本不匹配 ⇒ 当作没有缓存（下一次 refresh 按全量重建）。见 SCHEMA_VERSION。
+            .map { if (it.schemaVersion == UsageSnapshot.SCHEMA_VERSION) it else UsageSnapshot() }
             .getOrDefault(UsageSnapshot())
     }
 

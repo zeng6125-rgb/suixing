@@ -65,7 +65,13 @@ fun UsageScreen(onBack: () -> Unit) {
     // 首帧 days/models 还是空表：没有这一位就会先说「还没有用量记录」再冒数据。
     var loaded by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        val snapshot = withContext(Dispatchers.IO) { store.refresh() }
+        // **失败不能静默**（issue #41）：原来没有 catch，refresh() 一抛异常就永远
+        // `loaded = false`，页面停在"还没有用量记录"且没有任何线索。
+        val snapshot = withContext(Dispatchers.IO) {
+            runCatching { store.refresh() }
+                .onFailure { android.util.Log.w("suixing-usage", "refresh failed", it) }
+                .getOrDefault(com.suixing.agent.data.UsageSnapshot())
+        }
         days = store.byDay(30)
         models = store.byModel()
         totals = snapshot.totals
