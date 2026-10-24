@@ -154,72 +154,14 @@ class UsageStore(private val context: Context) {
     /** Per-model subtotals, heaviest first. */
     fun byModel(): List<ModelUsage> = byModelOf(snapshot)
 
-    /**
-     * Every conversation on disk, from whichever format it is in.
-     *
-     * Both are read on purpose. A chat that has been migrated only exists in `chats/store/`, and
-     * one that has not only exists as `<id>.json`; reading just the old files after a migration
-     * would hand [accumulate] an empty list, and its `retainAll` would then drop every chat's
-     * tokens — the day chart, the model chart and the totals would all read zero.
-     */
-    private fun loadConversations(): List<Conversation> {
-        val byId = LinkedHashMap<String, Conversation>()
-        // A live draft ends in `.json` too; reading it as a conversation would hand
-        // accumulate() an id that no transcript has.
-        // The plain files win while the store is not the write path: a `.json` is the newer copy,
-        // and the store can only hold what the build that wrote there left behind.
-        chatsDir.listFiles { file -> file.extension == "json" && !file.name.endsWith(LIVE_SUFFIX) }
-            ?.forEach { file ->
-                val conversation = runCatching {
-                    json.decodeFromString<Conversation>(file.readText())
-                }.getOrNull() ?: return@forEach
-                byId[conversation.id] = conversation
-            }
-        File(chatsDir, STORE_DIR).listFiles { file -> file.name.endsWith(META_SUFFIX) }
-            ?.forEach { file ->
-                val id = file.name.removeSuffix(META_SUFFIX)
-                if (byId.containsKey(id)) return@forEach
-                runCatching {
-                    val meta = store.readMeta(id) ?: return@runCatching
-                    byId[id] = meta.toConversation(store.all(meta))
-                }
-            }
-        return byId.values.toList()
-    }
-
-    /**
-     * The part of every conversation that has **not** been counted yet (#30).
-     *
-     * The old [loadConversations] parsed every transcript in full — 10 chats, 54 MB, a
-     * second of IO and a heap spike every time the usage screen opened — only to look at
-     * the messages past the watermark. Now each chat contributes just that part:
-     *
-     *  - **the log format**: read from the byte offset after the last counted message.
-     *    Only the new bytes are read and only those are parsed.
-     *  - **the old single-file format**: still read whole (there is no log to seek in),
-     *    but those are the not-yet-migrated chats, and they are migrated away shortly.
-     */
+    /** 每个会话**尚未计数**的那部分（#30）：只从上次数到的字节偏移续读、只解析新增。 */
     private fun loadSlices(snapshot: UsageSnapshot): List<UsageSlice> {
         val out = ArrayList<UsageSlice>()
-        // A live draft ends in `.json` too; reading it as a conversation would hand
-        // accumulate() an id that no transcript has.
-        chatsDir.listFiles { file -> file.extension == "json" && !file.name.endsWith(LIVE_SUFFIX) }
-            ?.forEach { file ->
-                val conversation = runCatching {
-                    json.decodeFromString<Conversation>(file.readText())
-                }.getOrNull() ?: return@forEach
-                out += UsageSlice(
-                    id = conversation.id,
-                    messages = conversation.messages,
-                    baseIndex = 0,
-                    endOffsets = null,
-                    gen = -1,
-                )
-            }
+        // 旧格式 `<id>.json` 已随 #40 删除（loadConversations 全量解析路径是死代码，一并删了），
+        // 这里只扫 store 的 meta；增量续扫见下面的 slicedFrom。
         File(chatsDir, STORE_DIR).listFiles { file -> file.name.endsWith(META_SUFFIX) }
             ?.forEach { file ->
                 val id = file.name.removeSuffix(META_SUFFIX)
-                if (out.any { it.id == id }) return@forEach
                 runCatching {
                     val meta = store.readMeta(id) ?: return@runCatching
                     val previous = snapshot.chats[id]
