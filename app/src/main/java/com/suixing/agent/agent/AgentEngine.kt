@@ -1456,8 +1456,15 @@ class AgentEngine(
                 // only the endpoint knows how big the prompt really was.
                 usage?.promptTokens?.takeIf { it > 0 }?.let { reported ->
                     lastPromptTokens = reported
-                    lastPromptChars = wireChars(wire)
-                    lastPromptImages = wire.count { it.imageCount > 0 }
+                    // 一趟同时取字符数与图片数（原来是两次全历史扫描）。
+                    var chars = 0
+                    var images = 0
+                    for (message in wire) {
+                        chars += messageChars(message)
+                        if (message.imageCount > 0) images++
+                    }
+                    lastPromptChars = chars
+                    lastPromptImages = images
                 }
                 val thinking = turn.reasoning.takeIf { it.isNotBlank() }
                 // A truncated turn can end mid-tool-call, so say so instead of silently
@@ -2002,8 +2009,17 @@ class AgentEngine(
      * Before the first usage arrives there is nothing to anchor to, so the whole wire is estimated
      * the pessimistic way.
      */
-    private fun estimatePromptTokens(wire: List<ChatMessage>): Int =
-        estimatePromptTokens(wireChars(wire), wire.count { it.imageCount > 0 })
+    private fun estimatePromptTokens(wire: List<ChatMessage>): Int {
+        // **一趟同时得两个数**（原来是 `wireChars(wire)` + `count{…}` 各扫一遍全历史）：
+        // 大会话几十万字符时这是每轮两遍纯重复。数值与原来逐位相同。
+        var chars = 0
+        var images = 0
+        for (message in wire) {
+            chars += messageChars(message)
+            if (message.imageCount > 0) images++
+        }
+        return estimatePromptTokens(chars, images)
+    }
 
     /**
      * 同一个估算，但字符数与图片数由调用方提供 —— 调用点已经遍历过一遍 wire 时用它，
