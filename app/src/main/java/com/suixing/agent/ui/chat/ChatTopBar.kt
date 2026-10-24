@@ -613,12 +613,15 @@ internal fun MessageRow(
  * bubble — never from a long press: that gesture belongs to text selection, which is what a
  * user reaches for when they want to copy what they wrote.
  */
+/** 气泡统一圆角：文件级常量，避免每次组合分配。 */
+private val BubbleShape = RoundedCornerShape(24.dp)
+
 @Composable
 internal fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit) {
     Surface(
         modifier = Modifier
             .widthIn(max = 300.dp),
-        shape = RoundedCornerShape(24.dp),
+        shape = BubbleShape,
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
     ) {
@@ -953,7 +956,7 @@ internal fun AssistantRow(
         modifier = Modifier
             .widthIn(max = bubbleMaxWidth)
             .fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
+        shape = BubbleShape,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
         // the outline is what separates a near-white card from a white canvas in light
