@@ -1097,10 +1097,18 @@ internal fun AssistantRow(
                             // the frame that then still paints the old layout is the ghost
                             // at the end of every stream. One frame later the same wrap costs
                             // its measure and nothing is drawn stale.
-                            var selectable by remember { mutableStateOf(false) }
-                            LaunchedEffect(Unit) {
-                                withFrameNanos { }
-                                selectable = true
+                            // **初值按进入组合时的状态定**（滚动跳变的根因，用户实测
+                            // 「助手→用户→助手」区滚动不连续）：原来是恒 false、下一帧翻 true，
+                            // 滚动时每条已定型的行进入视口都会经历「无选区→有选区」的重新测量，
+                            // 一行跳一帧。已定型的行从第一帧就是选区版 ⇒ 不再跳；
+                            // 流式行保持原节奏（首帧无选区、下一帧加上，护住流结束那一帧的
+                            // 「文本+选区同帧变化」重影）。
+                            var selectable by remember { mutableStateOf(!streaming) }
+                            if (!selectable) {
+                                LaunchedEffect(Unit) {
+                                    withFrameNanos { }
+                                    selectable = true
+                                }
                             }
                             // 流式时逐字放（外观 → 打字机效果）；settled 直接全文，选区也用全文。
                             val shown = rememberTypedText(part.text, streaming)
