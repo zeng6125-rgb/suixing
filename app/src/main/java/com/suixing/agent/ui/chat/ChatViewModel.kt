@@ -39,6 +39,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -185,7 +186,6 @@ data class ChatUiState(
      * live bubble reads it; once the reply is stored, its own usage numbers are the
      * frozen record and this is ignored.
      */
-    val stats: StreamStats? = null,
     /**
      * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）的**当前窗口**读数，不依赖 run：打开面板时
      * 按当前上下文算一次（[refreshContextBreakdown]），所以没有 run 也常驻显示。有 run 时面板优先
@@ -414,6 +414,34 @@ class ChatViewModel : ViewModel() {
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, _state.value)
+
+    /**
+     * 流式统计，**独立于 [state]**（审计 3§1 Top1）：引擎的 stats ticker 每 120ms 发一次
+     * `RunState.Running(stats())`，`elapsedMs` 走墙钟必变 —— 它原先被并进 ChatUiState，
+     * 等于让整个 ChatScreen（58 个子组合）跟着 8.3 次/秒整屏重组。现在只有显示秒数的
+     * 小叶子（Composer 的环、顶栏 chip）收集 [liveStats]。
+     */
+    private val _liveStats = MutableStateFlow<StreamStats?>(null)
+    val liveStats: StateFlow<StreamStats?> = _liveStats.asStateFlow()
+
+    /**
+     * **请求级**统计：剥掉逐 tick 变化的 `elapsedMs` 后去重 —— 只在一次真实请求
+     * （promptTokens/breakXxx/tokensOut 变化）时发射。屏幕 body 的环读数收集这个，
+     * 不收 [liveStats]。
+     */
+    val requestStats: StateFlow<StreamStats?> = _liveStats
+        .map { it?.copy(elapsedMs = 0L) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null)
+
+    /**
+     * 「有没有活内容」的布尔：流式气泡开关与 pin 信号都只认它。活内容增长期间
+     * state 因 equals 去重不发射，布尔天然稳定；只在开始/结束翻转时重组屏幕。
+     */
+    val liveActive: StateFlow<Boolean> = _state
+        .map { it.liveParts.isNotEmpty() || it.reasoning.isNotEmpty() }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
 
@@ -882,8 +910,11 @@ class ChatViewModel : ViewModel() {
                     var wasRunning = false
                     Core.engine.stateOf(chatId).collect { run ->
                     when (run) {
-                        is RunState.Running -> _state.update {
-                            it.copy(runningHere = true, stats = run.stats)
+                        is RunState.Running -> {
+                            _liveStats.value = run.stats
+                            // runningHere 只在首帧真翻转；后续 120ms 的 copy 结果 equals，
+                            // StateFlow 去重，不再触发屏幕重组。
+                            _state.update { it.copy(runningHere = true) }
                         }
 
                         // Back to typing the moment the run is stopped, without waiting
@@ -2352,7 +2383,7 @@ class ChatViewModel : ViewModel() {
                     // 请求体大小目前没有采集点，留 0 —— 监测页会把它显示成「—」，不是「测到零」。
                     val answered = sessions[chatId]?.messages
                         ?.lastOrNull { it.role == Roles.ASSISTANT && it.promptTokens > 0 }
-                    val runStats = _state.value.stats
+                    val runStats = _liveStats.value
                     if (answered != null || runStats != null) {
                         // **IO 线程落盘**（审计 3§5）：record 里 writeText+delete+renameTo
                         // 是整轮唯一确定的主线程阻塞写；PerfMonitor 的测试契约要求
@@ -2742,6 +2773,7 @@ class ChatViewModel : ViewModel() {
      * left exactly as it was.
      */
     private fun endSession(chatId: String, status: String, error: String? = null) {
+        _liveStats.value = null
         // **先把攒着的 delta 冲进去，再摘会话**（0.8.333 引入的风险）：后台会话的 delta 现在
         // 只缓冲不发布（屏幕上看不到它，发布只是白做 O(n) 拼接）。而一轮结束是
         // `sessions.remove(chatId)` —— 若此时缓冲里还有没应用的尾巴，那段文字既不会进
@@ -2764,7 +2796,6 @@ class ChatViewModel : ViewModel() {
                 snapshot.copy(
                     streaming = "",
                     reasoning = "",
-                    stats = null,
                     status = status,
                     runningTool = null,
                     liveParts = emptyList(),

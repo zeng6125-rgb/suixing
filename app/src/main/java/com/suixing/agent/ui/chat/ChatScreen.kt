@@ -568,7 +568,9 @@ fun ChatScreen(
     // Whatever the run produces first — a tool call, a thought or a word — opens the live
     // bubble. Waiting for text is what used to leave a tool call stranded on its own until
     // the reply arrived and merged the two into one.
-    val live = state.liveParts.isNotEmpty()
+    // 流式气泡开关与 pin 信号都只需要「有没有活内容」这个布尔：
+    // 收 VM 的 liveActive（distinct 去抖），思考期的 40ms 批次不再重组整屏。
+    val live by viewModel.liveActive.collectAsState()
     val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
     // The chain a run takes, resolved once for the whole screen. The context readouts
     // below divide by the window of the model that actually sends, which is not the
@@ -620,7 +622,9 @@ fun ChatScreen(
     // （含按会话保持的最近一次）→ 落盘回报；只有整个会话从没被网关报过用量时才用 /4 估算兜底
     // 并标「约」。跳变的老根因是两个口径轮流上屏，所以估算值绝不与实测值并列成链。
     val heldPrompt = rememberSaveable(state.conversationId) { mutableIntStateOf(0) }
-    val reported = state.stats?.lastPromptTokens ?: 0
+    // 请求级快照（prompt/breaks 变才发射）——body 不再订阅 120ms 的 elapsedMs。
+    val runStatsNow by viewModel.requestStats.collectAsState()
+    val reported = runStatsNow?.lastPromptTokens ?: 0
     LaunchedEffect(reported) {
         if (reported > 0) heldPrompt.intValue = reported
     }
@@ -637,7 +641,7 @@ fun ChatScreen(
     val reading = ringReading(
         liveReported = if (reported > 0) reported else heldPrompt.intValue,
         newestStored = newestUsage?.prompt ?: 0,
-        liveEstimate = state.stats?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
+        liveEstimate = runStatsNow?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
         transcriptEstimate = transcriptEstimate,
         persistedContext = persistedContext,
     )
@@ -1225,9 +1229,9 @@ fun ChatScreen(
     val streamingKey = "streaming:${state.conversationId}"
     // 有活内容（正文/思考/工具）才值得钉住 —— 空的行不钉。
     // 正文只存一份（#38）：`streaming` 是派生值、不再单独保存 ⇒ "有没有活内容"看 liveParts。
-    // 这个子表达式下面还要用一次，别写两遍（写两遍就会有天改了一处忘了另一处）。
-    val hasLiveText = state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking }
-    val liveForPin = hasLiveText || state.reasoning.isNotEmpty() || state.liveParts.isNotEmpty()
+    // 这个子表达式下面还要用一次，别写两遍 —— 现在它就是 VM 的 liveActive（布尔 flow，
+    // distinct 去重）：思考期的 40ms 批次不再把 body 拖进重组。
+    val liveForPin by viewModel.liveActive.collectAsState()
     // **`liveForPin` 必须用 rememberUpdatedState 取最新值**（第二轮评审的关键发现）：
     // 它是个普通 `val`，若被 `snapshotFlow` 的 lambda 直接捕获，捕获的是**首次组合**那一帧的值，
     // 而 ChatScreen 常驻、不随会话重建（`SuixingApp.kt:569`）⇒ 首帧没有活内容时它永远是 false
@@ -2033,7 +2037,7 @@ fun ChatScreen(
                         sessionPerSecond = session?.perSecond ?: 0.0,
                         sessionCachePercent = session?.cachePercent ?: 0.0,
                         sessionElapsedMs = sessionElapsedMs,
-                        live = state.stats,
+                        statsFlow = viewModel.liveStats,
                     )
                 },
             )
@@ -2100,14 +2104,14 @@ fun ChatScreen(
                     onInput = { setDraft(text = it) },
                     onRestoreSteer = { steer -> scope.launch { restoreQueuedSteer(steer) } },
                     running = state.runningHere,
-                    stats = state.stats,
+                    statsFlow = viewModel.liveStats,
                     settings = settings,
                     assistantId = state.assistantId,
                     contextWindow = contextWindow,
                     contextUsed = contextUsed,
                     contextEstimated = reading.estimated,
                     // 面板三行：run 中用实测三块，空闲用按当前上下文算出来的那份（打开面板时刷新）。
-                    contextBreak = state.stats?.let {
+                    contextBreak = runStatsNow?.let {
                         Triple(it.breakSystem, it.breakTools, it.breakHistory)
                     } ?: state.contextBreakdown,
                     onContextPanelOpen = { viewModel.refreshContextBreakdown() },

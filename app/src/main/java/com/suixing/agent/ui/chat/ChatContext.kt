@@ -118,6 +118,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -268,8 +269,9 @@ internal fun TopBarContextEntry(
     sessionPerSecond: Double,
     sessionCachePercent: Double,
     sessionElapsedMs: Long,
-    live: StreamStats?,
+    statsFlow: StateFlow<StreamStats?>,
 ) {
+    val live by statsFlow.collectAsState()
     var open by remember { mutableStateOf(false) }
     BackHandler(enabled = open) { open = false }
     var anchorCentreX by remember { mutableStateOf(0f) }

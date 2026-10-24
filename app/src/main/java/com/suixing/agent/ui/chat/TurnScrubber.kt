@@ -120,6 +120,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -572,8 +573,10 @@ internal fun Composer(
      */
     onRestoreSteer: (PendingSteer) -> Unit,
     running: Boolean,
-    /** The live run's stats; the context ring reads its note. */
-    stats: StreamStats?,
+    /** The live run's stats; the context ring reads its note.
+     *  传 **flow** 而不是值：本叶子每 120ms 重组一次没问题（就一个环），
+     *  但不能拖着整个 ChatScreen 陪跑（审计 3§1）。 */
+    statsFlow: StateFlow<StreamStats?>,
     settings: AppSettings,
     /** The persona this conversation runs with, not the app-wide active one. */
     assistantId: String,
@@ -673,6 +676,8 @@ internal fun Composer(
     /** Called once the stack has been placed for this frame: the caller's follow pin rides it. */
     onPlaced: () -> Unit,
 ) {
+    // 每 120ms 重组的只有这一个环（含时间读数），不拖别人。
+    val stats by statsFlow.collectAsState()
     val scheme = MaterialTheme.colorScheme
     // 发送后键盘退避（用户：「抬起输入法发送时，对话框也会挡住」）：不收键盘的话 composer 悬在
     // 键盘上方、把列表尾的状态行盖在后面。发送＝这句话说完了，收键盘让整条栈落回去；「停止」
