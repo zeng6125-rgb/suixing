@@ -476,7 +476,12 @@ private fun RevealHeight(
         }
     }
 
-    Layout(
+    // **折叠静止时内容不进组合**（issue #42 补充，13ms 帧的主因）：`Layout(content=)` 原来
+    // 无条件组合内容 —— 折叠只是测量跳过，节点创建照付。用户「历史思考块默认展开=关」⇒
+    // 每张卡里的思考块都是折叠态 ⇒ 每次进视口都白付内层 LazyColumn+snapshotFlow 的组合成本
+    // ⇒ 帧时 13ms > 8.3ms（120Hz 预算）⇒ 掉半帧率的「顿」。展开/收起动画期间（progress>0）
+    // 照常组合，动画不受影响。
+    if (visible || progress > 0f) Layout(
         content = content,
         modifier = Modifier
             .fillMaxWidth()
