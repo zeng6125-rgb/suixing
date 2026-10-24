@@ -1654,26 +1654,26 @@ internal fun TurnSummary(
 internal fun ContextChip(tokens: Int, window: Int, live: StreamStats? = null) {
     var open by remember { mutableStateOf(false) }
     val full = window > 0 && tokens * 100 / window >= 80
-    val tone = if (full) {
-        MaterialTheme.colorScheme.tertiary
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
+    val scheme = MaterialTheme.colorScheme
+    val tone = if (full) scheme.tertiary else scheme.onSurfaceVariant
+    // 挂在**每张**助手卡的表头上 ⇒ 每帧都在付这两下；值不变就复用（审计 2§A17）。
+    val chipColor = remember(full, scheme) {
+        if (full) scheme.tertiary.copy(alpha = 0.14f) else scheme.surfaceContainer
+    }
+    val label = remember(tokens, window) {
+        if (window > 0) {
+            "上下文 ${tokens / 1000}k / ${window / 1000}k"
+        } else {
+            "上下文 ${tokens / 1000}k"
+        }
     }
     Surface(
         onClick = { open = true },
         shape = CircleShape,
-        color = if (full) {
-            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.14f)
-        } else {
-            MaterialTheme.colorScheme.surfaceContainer
-        },
+        color = chipColor,
     ) {
         Text(
-            text = if (window > 0) {
-                "上下文 ${tokens / 1000}k / ${window / 1000}k"
-            } else {
-                "上下文 ${tokens / 1000}k"
-            },
+            text = label,
             style = metaStyle(),
             color = tone,
             // One line, never wrapped: a squeezed chip used to stack its characters

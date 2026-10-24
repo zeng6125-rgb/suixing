@@ -759,7 +759,7 @@ internal fun TurnMetrics(
             if (total > 0) {
                 MetricButton(
                     icon = ImageVector.vectorResource(R.drawable.ic_database),
-                    text = "用量 ${shortTokens(total)} tok",
+                    text = remember(total) { "用量 ${shortTokens(total)} tok" },
                     label = "用量详情",
                     onClick = { open = MetricCard.USAGE },
                 )
