@@ -302,6 +302,10 @@ private data class PinSignals(
 // 那要靠"把流式内容移出列表"来根治（issue #25 的做法，只移流式那一行）。
 private const val PIN_LIVE_HEIGHT = false
 
+/** 分批填充：首批行数 / 之后每帧补几行（打开会话的 150ms 摊到几帧里）。 */
+private const val CHUNK_FIRST = 4
+private const val CHUNK_STEP = 3
+
 /**
  * #17 验收用的**轻量痕迹**：只在状态翻转时写一行。
  *
@@ -841,6 +845,11 @@ fun ChatScreen(
     // 还是列表自己重新锚定的。
     val traceCtx = LocalContext.current
 
+    // **分批填充**（打开/切换会话时 12 轮一次性组合 = 100~150ms，frame.log 实测：
+    // 掉帧全在 `scroll=false off=0` 且 dt 108~149ms）。先出最近几轮、之后每帧补一批，
+    // 把那 150ms 摊到几帧里。只在「贴底打开」时分批 —— 要恢复具体位置时必须一次填满，
+    // 否则偏移对应的内容还没组合出来，恢复会落空。
+    val filledRows = remember(visible) { mutableIntStateOf(0) }
     val scroll = rememberChatScroll(
         listState = listState,
         autoFollow = settings.autoFollow,
@@ -1198,6 +1207,16 @@ fun ChatScreen(
     val appCtx = LocalContext.current.applicationContext
     LaunchedEffect(appCtx) {
         FrameTrace.install(appCtx) { frameProbe.value() }
+    }
+
+    LaunchedEffect(visible, scroll.stickToBottom) {
+        val total = visible.size
+        if (total == 0) return@LaunchedEffect
+        filledRows.intValue = if (scroll.stickToBottom) CHUNK_FIRST.coerceAtMost(total) else total
+        while (filledRows.intValue < total) {
+            withFrameNanos { }
+            filledRows.intValue = (filledRows.intValue + CHUNK_STEP).coerceAtMost(total)
+        }
     }
 
     val streamingKey = "streaming:${state.conversationId}"
@@ -1852,7 +1871,10 @@ fun ChatScreen(
                         item(key = "transcript") {
                             val gapPx = with(LocalDensity.current) { 12.dp.roundToPx() }
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            val filledFrom =
+                                (visible.size - filledRows.intValue).coerceAtLeast(0)
                             visible.forEachIndexed { visibleIndex, row ->
+                            if (visibleIndex >= filledFrom) {
                             // One placeable per item: the list's own 16dp spacing applies
                             // between the placeables of a single item as well, which is what
                             // held the timestamp a full 16dp above the bubble it belongs to.
@@ -1931,6 +1953,7 @@ fun ChatScreen(
                                         originals = originals,
                                     )
                                 }
+                            }
                             }
                         }
                             }
