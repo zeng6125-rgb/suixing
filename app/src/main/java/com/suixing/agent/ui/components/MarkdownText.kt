@@ -730,7 +730,10 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
  * 「来回翻看最近几屏」这个场景，且总内存有界（最坏 16 × 单条长度）。
  */
 internal object SettledBlocks {
-    private const val MAX_ENTRIES = 16
+    // **64**（原 16，真机实测卡顿的根因）：一张重卡（思考链逐行 + 正文 + 工具参数，
+    // 每行一个 MarkdownText）就占 20+ 条 —— 16 条连一张卡都装不下，滚过
+    // 「助手→用户→助手」区即冲爆逐出，每遍回来都重解析（每行 2~10ms）= 每一遍都卡。
+    private const val MAX_ENTRIES = 64
 
     private val map = object : LinkedHashMap<String, List<MdBlock>>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MdBlock>>?): Boolean =

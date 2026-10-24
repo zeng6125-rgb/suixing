@@ -1786,7 +1786,11 @@ fun ChatScreen(
                         }
                         // `asReversed()` 每次调用都返回一个**新包装对象**；`visible` 本身按
                         // revision 记忆，所以这里记住反转结果就够了。
-                        items(reversedVisible, key = { it.message.id }) { row ->
+                        // **contentType 不能省**（滚动卡顿，用户实测「助手→用户→助手」区每遍都卡）：
+                        // 列表混着助手卡/用户气泡/系统回执/工具卡，没有 contentType 时 Compose
+                        // 在不同形状的行之间复用组合槽 = 类型一换就整槽拆了重建。
+                        // key 管身份，contentType 管复用 —— 两个都要。
+                        items(reversedVisible, key = { it.message.id }, contentType = { it.message.role }) { row ->
                             // One placeable per item: the list's own 16dp spacing applies
                             // between the placeables of a single item as well, which is what
                             // held the timestamp a full 16dp above the bubble it belongs to.
