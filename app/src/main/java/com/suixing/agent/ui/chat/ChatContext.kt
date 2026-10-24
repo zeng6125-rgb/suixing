@@ -1490,21 +1490,24 @@ internal fun ImageBlock(base64: String) {
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh),
         )
     } else {
-        Image(
-            bitmap = bitmap,
-            contentDescription = "工具截图",
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 240.dp)
-                .clip(shape)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = ripple(),
-                    onClick = { full = true },
-                ),
-        )
-        if (full) ImagePreviewDialog(bitmap, contentDescription = "工具截图") { full = false }
+        val decoded = bitmap
+        if (decoded != null) {
+            Image(
+                bitmap = decoded,
+                contentDescription = "工具截图",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+                    .clip(shape)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = ripple(),
+                        onClick = { full = true },
+                    ),
+            )
+            if (full) ImagePreviewDialog(decoded, contentDescription = "工具截图") { full = false }
+        }
     }
 }
 
