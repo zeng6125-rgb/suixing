@@ -180,7 +180,10 @@ fun SuixingCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val shape = MaterialTheme.shapes.large
-    val border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    // 全站每张卡都走这里：BorderStroke 每次新建（值相等类型，可直接 remember）。
+    // `MaterialTheme.colorScheme` 是 @Composable 读取，必须先取值再 remember。
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    val border = remember(outline) { BorderStroke(1.dp, outline) }
     if (onClick == null) {
         Surface(
             modifier = modifier.fillMaxWidth(),
@@ -248,8 +251,8 @@ fun SoftIcon(
     Box(
         modifier = modifier
             .size(size)
-            .clip(RoundedCornerShape(size / 3.2f))
-            .background(tint.copy(alpha = 0.14f)),
+            .clip(remember(size) { RoundedCornerShape(size / 3.2f) })
+            .background(remember(tint) { tint.copy(alpha = 0.14f) }),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(size * 0.52f))
@@ -455,11 +458,13 @@ fun SuixingTopBar(
                 // 没有叠 surfaceContainerLow(0.35) 的平铺：平铺在渐变最淡的栏底仍是满值，
                 // 栏底会立刻撞回页面的 surface，正好把这条渐变要消掉的那条硬边又画回来。
                 // 「有底」由 26% 的起步和下面那条 1dp 收边一起给，不需要再加一层。
-                Brush.verticalGradient(
-                    0f to scheme.primary.copy(alpha = 0.26f),
-                    0.55f to scheme.primary.copy(alpha = 0.10f),
-                    1f to Color.Transparent,
-                ),
+                remember(scheme.primary) {
+                    Brush.verticalGradient(
+                        0f to scheme.primary.copy(alpha = 0.26f),
+                        0.55f to scheme.primary.copy(alpha = 0.10f),
+                        1f to Color.Transparent,
+                    )
+                },
             ),
     ) {
         Row(

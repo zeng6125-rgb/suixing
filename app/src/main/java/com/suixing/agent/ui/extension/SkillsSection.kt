@@ -83,6 +83,9 @@ fun SkillsSection(
 
     val loaded = skills
     val failure = error
+    // 分组结果与 `loaded` 一一对应：`LazyListScope` 里不能 remember，所以在这里取一次
+    // （原来在列表内容 lambda 里每次重组都跑 2 次 filter + 建 2 个 List）。
+    val groups = remember(loaded) { loaded?.let { groupSkills(it) }.orEmpty() }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
@@ -116,7 +119,7 @@ fun SkillsSection(
                 // Grouped by where the skill came from. The switch is a badge on the card, not
                 // a group of its own: a switched-off download is still a download, and a user
                 // who turned something off is looking for it where they left it.
-                for (group in groupSkills(loaded)) {
+                for (group in groups) {
                     item(key = "group-${group.title}") { SkillGroupHeader(group.title, group.skills.size) }
                     items(group.skills, key = { it.path }) { skill ->
                         SkillCard(

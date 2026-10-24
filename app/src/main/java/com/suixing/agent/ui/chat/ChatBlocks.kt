@@ -1239,12 +1239,17 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
     //  · 输出不再用「固定 132dp 的滚动 Text」，而是逐行进入虚拟列表，长输出不会一次性排版。
     // 命令与输出都可选中复制（用户：「确实所有情况都要可复制」）——同上，武装制。
     SelectableWhenArmed {
+    // 12sp 等宽正文样式：`MaterialTheme.typography` 是 @Composable 读取，**不能**写在
+    // remember 的 lambda 里（编译器报 “@Composable invocations can only happen from …”）。
+    // 先取出 typography，再 remember 派生值；下面逐行复用它。
+    val bodySmall = MaterialTheme.typography.bodySmall
+    val monoStyle = remember(bodySmall) { bodySmall.copy(fontSize = 12.sp) }
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         if (args != null) {
             item(key = "args") {
                 Text(
                     text = args,
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                    style = monoStyle,
                     fontFamily = FontFamily.Monospace,
                     color = scheme.onSurfaceVariant,
                     // 上 6dp：卡片内容区顶部现在是 0，命令直接贴着折叠条分割线太挤
@@ -1312,7 +1317,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
             items(rows.size, key = { index -> "out-$index" }) { index ->
                 Text(
                     text = rows[index],
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                    style = monoStyle,
                     fontFamily = FontFamily.Monospace,
                     color = scheme.onSurfaceVariant,
                     modifier = Modifier
@@ -1603,7 +1608,9 @@ internal fun TurnSummary(
                     }
                 }
             }
-            val detail = buildList {
+            // 每次重组都 buildList + joinToString（兄弟串 :1510 已经 remember 了，这里漏了）。
+            val detailText = remember(settled, live) {
+                buildList {
                 if (settled != null) {
                     if (settled.prompt > 0) add("输入 ${settled.prompt}")
                     if (settled.completion > 0) add("输出 ${settled.completion}")
@@ -1613,12 +1620,13 @@ internal fun TurnSummary(
                     add("输出 ${live.tokensOut}")
                     if (live.thinkingTokens > 0) add("思考 ${live.thinkingTokens}")
                 }
+                }.joinToString(" · ")
             }
-            if (detail.isNotEmpty() || context > 0) {
+            if (detailText.isNotEmpty() || context > 0) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (detail.isNotEmpty()) {
+                    if (detailText.isNotEmpty()) {
                         Text(
-                            text = detail.joinToString(" · "),
+                            text = detailText,
                             style = metaStyle(),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -1631,7 +1639,7 @@ internal fun TurnSummary(
                         )
                     }
                     if (context > 0) {
-                        if (detail.isNotEmpty()) Spacer(Modifier.width(6.dp))
+                        if (detailText.isNotEmpty()) Spacer(Modifier.width(6.dp))
                         ContextChip(tokens = context, window = contextWindow, live = live)
                     }
                 }
