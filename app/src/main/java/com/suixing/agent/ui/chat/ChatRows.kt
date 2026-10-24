@@ -302,6 +302,7 @@ internal data class ChatRow(
  * the model is still working and the same call after it lands are the same widget — which
  * is what stops the tool block from flickering into a different shape when the run ends.
  */
+@Immutable
 internal data class ToolLine(
     val name: String,
     val args: String,
@@ -332,6 +333,9 @@ internal data class ToolLine(
     }
 }
 
+// `@Immutable`：`Tools` 里有 `List<ToolLine>`，不标注时 `Part` 被推断成 unstable ⇒
+// `AssistantRow(parts: List<Part>)` 不可跳过 ⇒ 每个流式 tick 重跑全部历史卡。
+@Immutable
 internal sealed interface Part {
     /**
      * One round of thinking, with that round's own numbers.

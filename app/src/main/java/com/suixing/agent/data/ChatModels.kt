@@ -1,7 +1,15 @@
 package com.suixing.agent.data
 
+import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
 
+/**
+ * **`@Immutable` 是性能关键**：类里有 `List` 字段（`imagesBase64`/`toolCalls`），不标注时
+ * Compose 把它推断成 unstable ⇒ `MessageRow`/`UserBubble`/`ToolLine`/`Part` 全链路不可跳过
+ * ⇒ 流式每个 tick 整屏重组时 12 张历史卡都要重跑一遍（frame.log 实测 16~41ms）。
+ * 它本来就是不可变值对象（只在加载/写入时新建，从不原地改），承诺成立。
+ */
+@Immutable
 @Serializable
 data class StoredMessage(
     val id: String,
@@ -91,6 +99,7 @@ data class StoredMessage(
 
 /** The tool calls an assistant turn asked for; replayed back to the API verbatim. */
 @Serializable
+@Immutable
 data class StoredToolCall(
     val id: String,
     val name: String,
