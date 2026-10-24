@@ -1129,7 +1129,11 @@ private fun Drawer(
                             modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
                         )
                     }
-                    items(sections.pinned, key = { it.id }) { drawerRow(it, Modifier.animateItem()) }
+                    items(sections.pinned, key = { it.id }) { // 只保留位移动画：默认外观动画会让**滚进视口的每一行**都跑一段淡入，滚动时每行都带一个动画（子代理审计 B2）。
+drawerRow(
+                        it,
+                        Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null),
+                    ) }
                     if (sections.normal.isNotEmpty()) {
                         item(key = "drawer-section-divider") {
                             HorizontalDivider(
@@ -1139,7 +1143,11 @@ private fun Drawer(
                         }
                     }
                 }
-                items(sections.normal, key = { it.id }) { drawerRow(it, Modifier.animateItem()) }
+                items(sections.normal, key = { it.id }) { // 只保留位移动画：默认外观动画会让**滚进视口的每一行**都跑一段淡入，滚动时每行都带一个动画（子代理审计 B2）。
+drawerRow(
+                        it,
+                        Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null),
+                    ) }
             }
 
             Spacer(Modifier.height(6.dp))
