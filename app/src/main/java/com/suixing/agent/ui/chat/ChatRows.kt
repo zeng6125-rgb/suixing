@@ -703,17 +703,27 @@ internal data class TurnPage(
  * single turn is read as one: a page with nothing in it is not a page.
  */
 internal fun turnPage(messages: List<StoredMessage>, want: Int): TurnPage {
-    val starts = messages.indices.filter {
-        messages[it].role == Roles.USER && !messages[it].steer
+    // **一趟扫描 + 环形缓冲**（原先是 `messages.indices.filter{}`：为取最后几个起点，
+    // 给整份 transcript 建了一个 Int 列表）。ring 只留最后 cap 个起点下标；
+    // 下面取的 `first` 必然 ≥ 总数-cap，所以一定落在 ring 里，取模即得，逐值等价。
+    val cap = if (want < 1) 1 else want
+    val ring = IntArray(cap)
+    var total = 0
+    for (i in messages.indices) {
+        val m = messages[i]
+        if (m.role == Roles.USER && !m.steer) {
+            ring[total % cap] = i
+            total++
+        }
     }
-    if (starts.isEmpty()) return TurnPage(from = 0, turns = 0, drawn = 0)
-    val drawn = want.coerceIn(1, starts.size)
-    val first = starts.size - drawn
+    if (total == 0) return TurnPage(from = 0, turns = 0, drawn = 0)
+    val drawn = want.coerceIn(1, total)
+    val first = total - drawn
     // A conversation that opens with something other than a question keeps it, as long as its
     // first turn is drawn; from the second turn on, the page starts at the question itself.
     return TurnPage(
-        from = if (first == 0) 0 else starts[first],
-        turns = starts.size,
+        from = if (first == 0) 0 else ring[first % cap],
+        turns = total,
         drawn = drawn,
     )
 }

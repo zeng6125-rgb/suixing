@@ -428,11 +428,23 @@ data class SessionSplit(val uncached: Long, val cached: Long, val output: Long)
  * Sums [SessionSplit] off the stored usage rows, the same rows [SessionStats] divides its hit
  * rate by, so the parts and the rate are two readings of one measurement.
  */
-internal fun sessionSplitOf(messages: List<StoredMessage>): SessionSplit = SessionSplit(
-    uncached = messages.sumOf { it.promptTokens.toLong() - it.cachedTokens.toLong() }.coerceAtLeast(0L),
-    cached = messages.sumOf { it.cachedTokens.toLong() },
-    output = messages.sumOf { it.completionTokens.toLong() },
-)
+internal fun sessionSplitOf(messages: List<StoredMessage>): SessionSplit {
+    // **一趟扫完**（原先是同一个 list 上三趟 sumOf）：逐条累加，语义与三次 sumOf 等价
+    // （整数加法可交换，最后再 coerceAtLeast）。
+    var uncached = 0L
+    var cached = 0L
+    var output = 0L
+    for (m in messages) {
+        uncached += m.promptTokens.toLong() - m.cachedTokens.toLong()
+        cached += m.cachedTokens.toLong()
+        output += m.completionTokens.toLong()
+    }
+    return SessionSplit(
+        uncached = uncached.coerceAtLeast(0L),
+        cached = cached,
+        output = output,
+    )
+}
 
 /**
  * The messages a compression record covers, or null when this transcript no longer holds
