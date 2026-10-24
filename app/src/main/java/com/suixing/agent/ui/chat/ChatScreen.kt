@@ -1050,14 +1050,22 @@ fun ChatScreen(
     //
     // 常驻的代价是一个 RenderNode 参与合成；省掉它的做法是让层在恒等状态不再改变像素
     // （见下面 `graphicsLayer` 里的 `p >= 1f` 分支），而不是摘掉它。
+    // 切换动画是否在跑：只在开始/结束时各变一次（**不在组合期逐帧读**
+    // `switchAlpha.value`，那会把整页重组拉到 60fps）。它决定要不要挂离屏层。
+    var switchRunning by remember(state.conversationId) { mutableStateOf(switchAlpha.value < 1f) }
     LaunchedEffect(state.conversationId) {
         // 初值已经是 0，这里只负责把它推到 1：从 0 起跑，不需要 `snapTo`，
         // 也就没有「snapTo 生效之前先露一帧」的窗口。
         // 260ms（用户 2026-10-21 定）：210ms 显得赶，260ms 的淡入+上浮更从容；
         // 这是**唯一的时长来源**，改这里就够（位移 24dp / 缩放 0.92 在同一段的 graphicsLayer 里）。
         // 冷启动时 Animatable 初值就是 1f：不播动画，也不挂层。
-        if (switchAlpha.value >= 1f) return@LaunchedEffect
+        if (switchAlpha.value >= 1f) {
+            switchRunning = false
+            return@LaunchedEffect
+        }
+        switchRunning = true
         switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
+        switchRunning = false
     }
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     //
@@ -1624,23 +1632,23 @@ fun ChatScreen(
                             // （p == 1f）后把 alpha 等写回默认值即可 —— 层还在（不会重建修饰符链、
                             // 不会有残影），但不再改变任何像素，合成器可以直接跳过它。
                             // 动画那 260ms 内行为完全不变。
-                            .graphicsLayer {
-                                // 形态 = 淡入 + 从下方 24dp 升起 + 缩放 0.92→1.0（issue #12）。
-                                val p = switchAlpha.value
-                                if (p >= 1f) {
-                                    // 恒等：显式写回默认值，避免上一帧的非默认值被缓存住。
-                                    alpha = 1f
-                                    translationY = 0f
-                                    scaleX = 1f
-                                    scaleY = 1f
+                            // **离屏层只在切换动画期间挂**：动画结束时层上是恒等变换，
+                            // 摘掉它渲染结果逐像素相同；正常滚动（尤其碰界时 stretch 会把
+                            // 整个滚动容器重录进 RenderNode）因此少一层离屏成本。
+                            .then(
+                                if (switchRunning) {
+                                    Modifier.graphicsLayer {
+                                        val p = switchAlpha.value
+                                        alpha = p
+                                        translationY = (1f - p) * 24.dp.toPx()
+                                        val sc = 0.92f + 0.08f * p
+                                        scaleX = sc
+                                        scaleY = sc
+                                    }
                                 } else {
-                                    alpha = p
-                                    translationY = (1f - p) * 24.dp.toPx()
-                                    val sc = 0.92f + 0.08f * p
-                                    scaleX = sc
-                                    scaleY = sc
-                                }
-                            }
+                                    Modifier
+                                },
+                            )
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {
