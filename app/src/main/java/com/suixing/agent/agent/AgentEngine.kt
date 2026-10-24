@@ -26,6 +26,7 @@ import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.plugins.HookDecl
 import com.suixing.agent.plugins.HookVerdict
 import com.suixing.agent.plugins.PluginSpec
+import com.suixing.agent.tools.ToolSpec
 import com.suixing.agent.core.Core
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.service.TouchFx
@@ -1294,10 +1295,18 @@ class AgentEngine(
                 // 接线点 A（HOST-DEV §5）：内置工具之后**追加启用插件的工具**（`<id>.<tool>`）。
                 // 重名的插件工具在 PluginRuntime.toolSpecs 里被跳过并记日志 —— 内置优先，绝不覆盖。
                 // 实时读盘：用户刚启用的插件，下一个请求就该出现在工具表里。
-                val builtinSpecs = registry.all().map { it.spec } + COMPRESS_CONTEXT_SPEC
-                val pluginSpecs = PluginRuntime.enabledPlugins()
-                val toolSpecs = builtinSpecs +
-                    PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
+                // **拼装下放 Default**（#36 A）：enabledPlugins() 在 TTL 过期时扫目录 + 逐插件
+                // readText + JSON 解析；breakTools 的 parameters.toString() 是全量序列化。每轮
+                // 一遍，原来全在 Main。字段赋值（breakToolsSig/breakTools）仍留在调用线程。
+                val assembled = withContext(Dispatchers.Default) {
+                    val builtinSpecs = registry.all().map { it.spec } + COMPRESS_CONTEXT_SPEC
+                    val pluginSpecs = PluginRuntime.enabledPlugins()
+                    val toolSpecs = builtinSpecs +
+                        PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
+                    ToolTable(pluginSpecs, toolSpecs)
+                }
+                val pluginSpecs = assembled.plugins
+                val toolSpecs = assembled.specs
                 // 接线点 B（HOST-DEV §5）：这一轮的 hooks 快照，与工具表同一次读盘。分发处每条
                 // 调用都过一遍 [PluginRuntime.preExecute] —— 每轮读一次目录是刻意的（热插拔），
                 // 每条调用查一次 hook 是纯函数、不碰磁盘。
@@ -1572,7 +1581,10 @@ class AgentEngine(
                         }
                         val outcomes = coroutineScope {
                             val deferreds = chunk.map { call ->
-                                async {
+                                // **指定 IO**（#36 C）：`async` 不带 dispatcher 会继承 runLoop 的
+                                // Main —— 所谓「并行」实际是「在 Main 上交错排队」。gate（ConcurrentHashMap
+                                // + StateFlow）与 TouchFx（内部 Handler post Main）都线程安全，可整体下放。
+                                async(Dispatchers.IO) {
                                     executeOneTool(
                                         call, registry, pluginSpecs, hooks, capabilities, gate, settings, chatId, onEvent,
                                     )
@@ -2593,3 +2605,8 @@ private fun StoredMessage.withUsage(
     )
 }
 
+/** 工具表拼装的结果对（Default 块里一次算完带回，避免在后台线程写引擎字段）。 */
+private class ToolTable(
+    val plugins: List<PluginSpec>,
+    val specs: List<ToolSpec>,
+)
