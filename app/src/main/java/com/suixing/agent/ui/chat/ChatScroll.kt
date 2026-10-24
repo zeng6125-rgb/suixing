@@ -220,7 +220,12 @@ fun rememberChatScroll(
                 // false 但 firstVisibleItemIndex 在动。只看前两个条件会误判「持续到底」⇒
                 // pin 误释放 ⇒ 内容瞬展 993~2397px（用户看到的跳变）。index 没动才是真停。
                 val indexAtStart = listState.firstVisibleItemIndex
-                delay(250)
+                // **碰界甩动的 A 步**（子代理实测机制）：手指碰到底继续甩时，系统在跑
+                // stretch 的 release 回弹动画，而它**不计入 isScrollInProgress**。250ms
+                // 后我们立刻做「pin 释放展开 + padding 切换 + scrollToItem(0)」，
+                // 而 applyToScroll 第一步就是 stopOverscrollAnimation() ⇒ 回弹被掐断，
+                // 观感就是「碰底再甩发涩」。这里把收尾延后到 420ms，让回弹先跑完。
+                delay(420)
                 if (!listState.canScrollBackward && !listState.isScrollInProgress &&
                     !scroll.restoring && listState.firstVisibleItemIndex == indexAtStart
                 ) {

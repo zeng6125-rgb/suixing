@@ -115,7 +115,11 @@ fun SchedulesScreen(onBack: () -> Unit) {
                     )
                 }
             }
-            items(schedules, key = { it.id }) { schedule ->
+            items(
+                schedules,
+                key = { it.id },
+                contentType = { "schedule-row" },
+            ) { schedule ->
                 ScheduleRow(
                     schedule = schedule,
                     onToggle = { on ->

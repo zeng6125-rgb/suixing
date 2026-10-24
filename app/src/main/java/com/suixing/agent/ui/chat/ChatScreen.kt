@@ -1237,7 +1237,9 @@ fun ChatScreen(
     }
     val appCtx = LocalContext.current.applicationContext
     LaunchedEffect(appCtx) {
-        FrameTrace.install(appCtx) { frameProbe.value() }
+        // 全局已由 Application 安装，这里只挂富探针（滚动位置/轮次/运行态）。
+        FrameTrace.install(appCtx)
+        FrameTrace.setProbe { frameProbe.value() }
     }
     // 每次成功重组计数（`SideEffect` 在组合成功提交后调用）—— 用来量化
     // 「ChatScreen 在流式期被重跑了多少次」，改前改后对比这个数。

@@ -308,7 +308,11 @@ fun FilesScreen(onBack: () -> Unit) {
         }
 
         LazyColumn(Modifier.fillMaxSize()) {
-            items(entries, key = { it.file.absolutePath }) { entry ->
+            items(
+                entries,
+                key = { it.file.absolutePath },
+                contentType = { "file-row" },
+            ) { entry ->
                 EntryRow(entry) {
                     if (entry.file.isDirectory) {
                         current = entry.file

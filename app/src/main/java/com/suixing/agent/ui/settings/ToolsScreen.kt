@@ -538,7 +538,11 @@ private fun ToolsTab() {
             ) {
                 grouped.forEach { (group, groupTools) ->
                     item(key = "group-$group") { GroupHeader(group, groupTools.size) }
-                    items(groupTools, key = { it.spec.name }) { tool ->
+                    items(
+                        groupTools,
+                        key = { it.spec.name },
+                        contentType = { "tool-row" },
+                    ) { tool ->
                         ToolRow(
                             name = tool.spec.name,
                             description = toolCopyZh(tool.spec.name, tool.spec.description),
@@ -686,7 +690,11 @@ private fun McpSection(
             }
         }
 
-        items(servers, key = { it.config.name }) { state ->
+        items(
+            servers,
+            key = { it.config.name },
+            contentType = { "mcp-row" },
+        ) { state ->
             ServerCard(
                 state = state,
                 onToggleEnabled = { enabled ->

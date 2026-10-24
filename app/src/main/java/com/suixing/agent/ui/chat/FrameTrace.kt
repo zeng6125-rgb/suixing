@@ -44,6 +44,14 @@ internal object FrameTrace {
     /** ChatScreen 的**重组次数**：这是「流式期整屏重跑」的直接量化指标。 */
     private var recompositions = 0L
 
+    /** 全局安装（不带探针）：任何页面都能被计数，`mark` 用来标页面。 */
+    fun install(context: Context) = install(context, { "" })
+
+    /** 聊天页进来后把富探针挂上（滚动位置/轮次/运行态）；离开时可不撤。 */
+    fun setProbe(next: () -> String) {
+        probe = next
+    }
+
     fun install(context: Context, probe: () -> String) {
         if (!installed.compareAndSet(false, true)) return
         this.file = File(context.filesDir, "frame.log")
