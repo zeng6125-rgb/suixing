@@ -831,7 +831,14 @@ private fun Drawer(
     // 手势回调里要读最新的会话列表与分区，但 pointerInput 的 block 只能建一次
     // （中途换实例会把进行中的手势取消），所以这两份最新值走 rememberUpdatedState 转发。
     val conversationsNow = rememberUpdatedState(conversations)
-    val sectionsNow = rememberUpdatedState(drawerSections(conversations, orderState.value))
+    // **先 remember 再转发**（性能审计 #5）：原来把 `drawerSections(...)` 写在
+    // `rememberUpdatedState` 的参数位 —— 那只包住了「转发最新值」，没包住计算，
+    // 于是外壳每次重组都白算一遍 filter + associateBy + 2×sortedBy（O(n log n)）。
+    // 同文件 :1001 已是正确写法。
+    val sections = remember(conversations, orderState.value) {
+        drawerSections(conversations, orderState.value)
+    }
+    val sectionsNow = rememberUpdatedState(sections)
     // 导出与「设置 → 会话」页同一套：系统选择器（SAF），不碰 FileProvider、不改 manifest。
     var pendingExport by remember { mutableStateOf<Conversation?>(null) }
     val exporter = rememberLauncherForActivityResult(

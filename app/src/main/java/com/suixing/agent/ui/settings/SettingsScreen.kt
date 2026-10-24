@@ -58,6 +58,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -3079,9 +3080,17 @@ private fun LabeledSlider(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        // **拖动期间只改本地态，松手才落盘**（性能审计 #1）：`onValueChange` 是每个
+        // delta 一次回调，原来直接进 `persist{}` —— 而 Settings 的写入是
+        // 「整份 JSON 编码 + Keystore 加密 + 文件重写 + 广播」，且 9 处订阅者会整屏重组
+        // ⇒ 拖一秒 = 60 次全量写盘 + 60 次全 app 重组。这就是拖滑杆卡顿的直接原因。
+        var local by remember(range) { mutableFloatStateOf(value) }
+        // 外部值变化（重置/切换配置）时同步进来；拖动期间外部不会变。
+        LaunchedEffect(value) { local = value }
         Slider(
-            value = value,
-            onValueChange = onValueChange,
+            value = local,
+            onValueChange = { local = it },
+            onValueChangeFinished = { onValueChange(local) },
             valueRange = range,
             steps = steps,
         )
