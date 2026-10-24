@@ -1177,7 +1177,12 @@ fun ChatScreen(
             // 第一个是**会话身份**：它决定 `livePin` 是哪个实例，必须参与触发。
             PinSignals(
                 chatId = state.conversationId,
-                notAtBottom = !scroll.stickToBottom && !scroll.restoring,
+                // **arm 迟滞带**（issue #42 补充的振荡环）：pin 的 arm 收缩布局会把用户
+                // 弹回 index 0，弹回触发 release，release 又推出去 —— 自激振荡（pin.log
+                // 同位置 4 对 arm/release 循环）。要求离底 ≥2 个 item 才算 notAtBottom：
+                // 被 arm 弹回 index 0 时不再立刻 re-arm，环断。
+                notAtBottom = !scroll.stickToBottom && !scroll.restoring &&
+                    listState.firstVisibleItemIndex >= 2,
                 hasLiveContent = liveForPinNow,
                 pinActive = scroll.pinActive,
             )
