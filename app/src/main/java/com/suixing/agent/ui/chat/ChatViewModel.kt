@@ -2209,7 +2209,11 @@ class ChatViewModel : ViewModel() {
                     // gone from the table, and gone from the UI, so it must not go out here.
                     // One snapshot under the lock, not a lookup per line.
                     val stillWaiting = steersOf(chatId)
-                    carried.filter { line -> stillWaiting.any { it.id == line.id } }
+                    // O(n×m) 的字符串两两比较 → 建一次集合后 O(n+m)。
+                    run {
+                        val waitingIds = stillWaiting.mapTo(HashSet(stillWaiting.size)) { it.id }
+                        carried.filter { it.id in waitingIds }
+                    }
                         .forEach { queued ->
                             // The picture rides along: a steer carries text *and* image, and
                             // re-sending only the text dropped the screenshot without a word.

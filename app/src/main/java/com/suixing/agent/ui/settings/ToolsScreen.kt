@@ -102,8 +102,9 @@ private fun groupOf(name: String): String = when {
 }
 
 /** 组的显示顺序＝工具包的注册顺序；MCP 与「其它」垫底。 */
-private fun groupRank(group: String): Int {
-    val order = Core.tools.groupOrder()
+// `order` 由调用方 hoist 一次传进来：原来这个函数在**比较器里**被反复调用，
+// 每次 `Core.tools.groupOrder()` 都要 `filter + distinct` 建两个 list。
+private fun groupRank(order: List<String>, group: String): Int {
     val declared = order.indexOf(group)
     return when {
         declared >= 0 -> declared
@@ -482,9 +483,11 @@ private fun ToolsTab() {
         }
     }
     val grouped = remember(filtered) {
+        // 分组顺序只与工具表有关：每个 filtered 变化只取一次，不再「每次比较取一次」。
+        val groupOrder = Core.tools.groupOrder()
         filtered.groupBy { groupOf(it.spec.name) }
             .toList()
-            .sortedBy { (group, _) -> groupRank(group) }
+            .sortedBy { (group, _) -> groupRank(groupOrder, group) }
     }
 
     Column(Modifier.fillMaxSize()) {
