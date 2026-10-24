@@ -13,8 +13,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 448
-        versionName = "0.8.425"
+        versionCode = 449
+        versionName = "0.8.426"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -49,6 +49,17 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+        // **Compose 编译器度量**（性能审计用）：产出模块报告与类报告，逐个 Composable
+        // 标明 skippable/restartable。是判断「有没有实际优化」的唯一硬指标 —— 只写文件，
+        // 不影响产物行为。报告位置：app/build/compose-reports/。
+        freeCompilerArgs = freeCompilerArgs + listOf(
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=" +
+                layout.buildDirectory.get().asFile.path + "/compose-reports",
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:metricsDestination=" +
+                layout.buildDirectory.get().asFile.path + "/compose-metrics",
+        )
     }
 
     buildFeatures {

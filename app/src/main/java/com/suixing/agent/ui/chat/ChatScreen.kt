@@ -1208,6 +1208,9 @@ fun ChatScreen(
     LaunchedEffect(appCtx) {
         FrameTrace.install(appCtx) { frameProbe.value() }
     }
+    // 每次成功重组计数（`SideEffect` 在组合成功提交后调用）—— 用来量化
+    // 「ChatScreen 在流式期被重跑了多少次」，改前改后对比这个数。
+    SideEffect { FrameTrace.countRecomposition() }
 
     LaunchedEffect(visible, scroll.stickToBottom) {
         val total = visible.size

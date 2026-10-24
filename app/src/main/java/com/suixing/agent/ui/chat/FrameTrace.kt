@@ -41,6 +41,9 @@ internal object FrameTrace {
     private var scrollFrames = 0L
     private var worstMs = 0L
 
+    /** ChatScreen 的**重组次数**：这是「流式期整屏重跑」的直接量化指标。 */
+    private var recompositions = 0L
+
     fun install(context: Context, probe: () -> String) {
         if (!installed.compareAndSet(false, true)) return
         this.file = File(context.filesDir, "frame.log")
@@ -75,8 +78,14 @@ internal object FrameTrace {
     }
 
     private fun heartbeat() {
-        pending += "beat frames=$frames scroll=$scrollFrames stalls=$stalls worst=${worstMs}ms"
+        pending += "beat frames=$frames scroll=$scrollFrames stalls=$stalls" +
+            " worst=${worstMs}ms recomp=$recompositions"
         flush()
+    }
+
+    /** 由 ChatScreen 每次成功重组时调用（`SideEffect`）。 */
+    fun countRecomposition() {
+        recompositions++
     }
 
     private fun flush() {
