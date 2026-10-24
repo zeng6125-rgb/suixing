@@ -64,7 +64,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -1938,49 +1937,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
 private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
     val stored by Core.settings.flow.collectAsState(initial = AppSettings())
     val scope = rememberCoroutineScope()
-    // **输入框本地态 + 去抖**（性能审计 #2）：原来每个按键都 `scope.persist{}` ——
-    // 而一次设置写入是「整份 JSON 编码 + Keystore 加密 + 文件重写 + 广播」，且 9 处
-    // collectAsState 订阅者会跟着重组。现在文字即时上屏，停止输入 400ms 落盘一次；
-    // 离开页面时立即 flush（见下面的 DisposableEffect），最终落盘值与逐键写完全相同。
-    var endpointDraft by remember(stored.searchEndpoint) { mutableStateOf(stored.searchEndpoint) }
-    var apiKeyDraft by remember(stored.searchApiKey) { mutableStateOf(stored.searchApiKey) }
-    var asrDraft by remember(stored.asrModel) { mutableStateOf(stored.asrModel) }
-    LaunchedEffect(endpointDraft) {
-        if (endpointDraft != stored.searchEndpoint) {
-            delay(400)
-            scope.persist { it.copy(searchEndpoint = endpointDraft) }
-        }
-    }
-    LaunchedEffect(apiKeyDraft) {
-        if (apiKeyDraft != stored.searchApiKey) {
-            delay(400)
-            scope.persist { it.copy(searchApiKey = apiKeyDraft) }
-        }
-    }
-    LaunchedEffect(asrDraft) {
-        if (asrDraft != stored.asrModel) {
-            delay(400)
-            scope.persist { it.copy(asrModel = asrDraft) }
-        }
-    }
-    // 离开页面时把还没落盘的那一版写掉（否则「改完就返回」会丢最后一次输入）。
-    val flush = rememberUpdatedState(Triple(endpointDraft, apiKeyDraft, asrDraft))
-    DisposableEffect(Unit) {
-        onDispose {
-            val (e, k, a) = flush.value
-            Core.appScope.launch {
-                // update 收的是「变换函数」，在 DataStore 的 edit 里执行 ⇒ 读-改-写是一次事务。
-                Core.settings.update { current ->
-                    when {
-                        e != current.searchEndpoint -> current.copy(searchEndpoint = e)
-                        k != current.searchApiKey -> current.copy(searchApiKey = k)
-                        a != current.asrModel -> current.copy(asrModel = a)
-                        else -> current
-                    }
-                }
-            }
-        }
-    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -1998,8 +1954,8 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             item {
                 OutlinedTextField(
                     textStyle = settingsFieldText,
-                    value = endpointDraft,
-                    onValueChange = { value -> endpointDraft = value },
+                    value = stored.searchEndpoint,
+                    onValueChange = { value -> scope.persist { it.copy(searchEndpoint = value) } },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
                     label = { Text("搜索接口（可留空）") },
                     placeholder = { Text("https://api.tavily.com/search") },
@@ -2013,8 +1969,8 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             item {
                 OutlinedTextField(
                     textStyle = settingsFieldText,
-                    value = apiKeyDraft,
-                    onValueChange = { value -> apiKeyDraft = value },
+                    value = stored.searchApiKey,
+                    onValueChange = { value -> scope.persist { it.copy(searchApiKey = value) } },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
                     label = { Text("搜索接口 Key（可留空）") },
                     singleLine = true,
@@ -2064,8 +2020,8 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                 item {
                     OutlinedTextField(
                         textStyle = settingsFieldText,
-                        value = asrDraft,
-                        onValueChange = { value -> asrDraft = value },
+                        value = stored.asrModel,
+                        onValueChange = { value -> scope.persist { it.copy(asrModel = value) } },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
                         label = { Text("语音转写模型") },
                         placeholder = { Text("whisper-1") },
