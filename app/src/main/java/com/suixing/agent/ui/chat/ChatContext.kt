@@ -1442,7 +1442,8 @@ internal fun ImagePreviewDialog(
  * 为什么是进程级而不是 `remember`：`remember` 随组合销毁 —— 列表项滚出视口就丢，
  * 滚回来就要重新解码一张 1080p（几十毫秒）。用户"滑上滑下很慢"有一部分就是它。
  */
-private val decodedImages = DecodedImageCache()
+// 16 张：滚动一屏常见 2~4 张截图，4 张一进一出等于每次都重新解码（跳变+耗电）。
+private val decodedImages = DecodedImageCache(capacity = 16)
 
 @Composable
 internal fun ImageBlock(base64: String) {
@@ -1475,23 +1476,35 @@ internal fun ImageBlock(base64: String) {
         }
         bitmap?.let { decodedImages.put(key, it) }
     }
-    bitmap?.let { decoded ->
-        Spacer(Modifier.height(6.dp))
+    // **解码期间的占位**（滚动跳变根因之一）：解码完成前这里原来什么都不画，
+    // 行高 0 → 解码完长到 ≤240dp，整列被顶一下。截图几乎都是竖长图（Fit 后顶满
+    // 240dp 上限），用 240dp 占位绝大多数情况下高度零变化；横图有小幅差值可接受。
+    Spacer(Modifier.height(6.dp))
+    val shape = RoundedCornerShape(12.dp)
+    if (bitmap == null) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(240.dp)
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+        )
+    } else {
         Image(
-            bitmap = decoded,
+            bitmap = bitmap,
             contentDescription = "工具截图",
             contentScale = ContentScale.Fit,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 240.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(shape)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = ripple(),
                     onClick = { full = true },
                 ),
         )
-        if (full) ImagePreviewDialog(decoded, contentDescription = "工具截图") { full = false }
+        if (full) ImagePreviewDialog(bitmap, contentDescription = "工具截图") { full = false }
     }
 }
 
