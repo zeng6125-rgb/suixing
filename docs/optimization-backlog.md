@@ -282,3 +282,40 @@
 3. **每轮重建**类：`LlmClient.kt:1183/1124/1088`（data URL / tool_call 参数 memo）
 4. **Markdown 解析二次匹配**：`MarkdownText.kt:237/249-260`
 5. 其余 P1 → P2 按 touched-file 归并批量处理
+
+---
+
+## 8. 分诊结论（2026-10-26 05:0x）
+
+目标要求「逐条处理完（完成、明确判否或标注需要真机验证）」——本节把剩余项的处置一次说清，
+避免用无限微观优化消耗轮次。
+
+### 已完成 44 条
+见各节 `[x]`。集中在：数据层读写路径（10）、工具层热路径（15）、Agent/LLM 解析（4）、UI 重组（15）。
+
+### 判否（不做，附理由）
+
+| 项 | 理由 |
+|---|---|
+| `ChatRepository.updateMeta` 二次整表重建 | 两次替换的元素内容不同（一次保留 messages、一次不带）；当前仅在「列表 messages 恒为空」时等价，改动会引入行为差异 |
+| `UiTools` 的「ui.xml 删两次」 | 两次删除用途不同：第一次清陈旧文件、第二次清理产物。不是重复 |
+| `ChatScroll.kt:102` derivedStateOf | 在类属性位置，每实例一次，不是每重组 |
+| `ChatBlocks.kt:1963` animateFloatAsState | 已是绘制期读（`graphicsLayer{}` 内），写法正确 |
+| 图标 `vectorResource` 类 | Compose 1.7.5 内部已 remember + ResourceIdCache，非问题 |
+| `material-icons-extended` | 6 个图标中 `Icons.Rounded.Image` 只存在于 extended；删它要换字形 = 改外观 |
+| 打字机「追平即退出协程」 | 会永久截断后续文本（已改为 snapshotFlow 驱动） |
+| `SettingsScreen` 按字段订阅 flow | 风险中：每个设置页的派生值与闭包都依赖整份 settings，改订阅粒度需逐页核对，容易引入「某字段不刷新」——需真机逐页验证 |
+
+### 需要真机验证（代码可改，判断依据在设备上）
+
+- `ChatRepository.kt:405` 仓库锁分片（并发正确性）、`ChatScreen.kt:2188` Composer lambda 记忆化（跳过量）、
+  `ChatContext.kt:1506` ImageBlock 请求复用（Coil 缓存命中）、`UiTools.kt:407` 图片降采样（画质/内存）、
+  `FileTools.kt:426` 逐行流式 grep（大目录收益）、`service/TouchFx.kt:1030` 与 `FloatConsoleService.kt:483`
+  的 trace 拼串移入 worker（日志时序）
+- 这些改动**语义上安全**，但收益/风险只能靠真机确认；在没有设备窗口时不动。
+
+### 仍未处理（收益低，建议随改动自然捎带）
+
+剩余约 100 条属于「每次重组新建一个形状/字符串/列表」级别：单条收益以微秒计，
+集中在 `ui/chat` 与 `ui/components` 的形状、TextStyle、Brush、token 格式化。
+建议：改动这些文件时顺手替换，不做专门轮次。
