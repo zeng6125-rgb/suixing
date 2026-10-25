@@ -644,7 +644,14 @@ internal fun GenerationSheet(
     // 这张卡关着也保持 composed（为了进出动画），页状态不会随卸载重置，所以显式在 visible 落
     // false 时清掉。只清页、不清 [folded]：折叠是用户对着列表做的选择，重开还在更顺手。
     LaunchedEffect(visible) {
-        if (!visible) picking = false
+        if (!visible) {
+            // **等退场动画跑完再回第一页**：原来这里立刻复位，于是卡片正在淡出/缩回的那 110ms
+            // 里，内容从「模型列表页」瞬间变成「小的第一页」—— 尺寸和内容一起跳一次，
+            // 看起来就像关闭动画坏了（用户：「二级浮层的关闭动画好像有点问题」）。
+            // 退场结束再复位，退出过程中卡片保持关闭前的样子。
+            delay(MENU_EXIT_MS)
+            picking = false
+        }
     }
     // Providers whose list is folded away. The one answering this conversation starts open:
     // the list is what the page is for, and folding everything would hide it.

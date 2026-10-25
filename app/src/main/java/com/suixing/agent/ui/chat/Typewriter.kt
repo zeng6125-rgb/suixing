@@ -40,9 +40,15 @@ internal fun rememberTypedText(
     // **一旦开始打就一直打完**（含流式结束之后）。原来 `enabled=false` 立刻返回全文 ——
     // 模型一停，屏幕上剩下没打的尾巴会被一次性补上，那正是「一下子全部显示」的最后一段。
     // 用普通数组记「这块打过没有」：写它不通知快照，不会引起重组循环。
-    val everStreamed = remember { booleanArrayOf(false) }
-    if (enabled) everStreamed[0] = true
-    if (!everStreamed[0]) return text
+    // **`startAtZero` 的调用方跳过这道门**：正文/思考的最后一段常常是「run 结束、整段一次性
+    // 落到 part 里」才第一次组合，那时 `streaming` 已经是 false —— 走下面这道门就直接返回
+    // 全文了，用户看到的就是「最后一轮大总结没有逐字、整段直接结束」。live 块既然要求从 0
+    // 开始，就不该因为"没赶上流式"而放弃打字。
+    if (!startAtZero) {
+        val everStreamed = remember { booleanArrayOf(false) }
+        if (enabled) everStreamed[0] = true
+        if (!everStreamed[0]) return text
+    }
     val target = rememberUpdatedState(text)
     // 初值见 [initialRevealed]（issue #46）：刚诞生的块从 0 打，早就存在的块直接给全文。
     var revealed by remember {
