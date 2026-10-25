@@ -23,7 +23,12 @@
 
 ## 进度（2026-10-26 04:xx 起）
 
-- 已完成：issue #49 + 11 条清单项（见下节「已完成」与各节里打勾的 `[x]`）
+- 已完成：issue #49 + **22 条**清单项（各节里打勾的 `[x]`）
+  - 数据层：尾部按字节读、meta 缓存、JobStore 两处
+  - 工具/服务：截图离开主线程、TouchFx 光晕两处、FileTools 三处、settings 正则
+  - Agent/LLM：SSE 双解析
+  - UI：Markdown 空行短路 + 按行缓存 + 无 CR 不复制、三处 PopupPositionProvider、
+    TypingDots 绘制期读、打字机 snapshotFlow、胶囊/语音条常量、14 行无用 import、heldIme/heavyRow
 - 进行中：按 P0 → P1 → P2 逐条推进（goal-a3468e21）
 - 每批次均以 `./gradlew :app:testDebugUnitTest` 全绿 + `git push` 收尾
 
@@ -207,7 +212,7 @@
 - [ ] `MarkdownText.kt:1179-1185` 每个标题每次重组 `scaled()+copy()`
 - [ ] `MarkdownText.kt:1328-1331` 代码块每次重组新建 `TextStyle`
 - [ ] `MarkdownText.kt:1382-1386` 表头每次重组新建 `TextStyle`
-- [ ] `Common.kt:909` `PressPill` 每次 `new RoundedCornerShape(50)`
+- [x] `Common.kt:909` `PressPill` 每次 `new RoundedCornerShape(50)`
 - [ ] `Common.kt:183,221,325` 默认参数 `PaddingValues(16.dp)/(0.dp)` 每次重组重新分配
 - [ ] `components/Logo.kt:81-85,109-114` 绘制块内每帧新建 `listOf(颜色)` + `Brush.linearGradient`
 - [ ] `components/PopupMotion.kt:62-71` 每次调用新建 `graphicsLayer` 元素与 lambda
@@ -229,9 +234,9 @@
 
 - [ ] `ChatScreen.kt:2292` — 组合期读 `scroll.atBottom`（`ChatScroll.kt:102` `derivedStateOf{!canScrollBackward}`）⇒ 每次离开/回到列表底整屏重组，连带上面那个不可跳过的 Composer。改：把 `if (!scroll.atBottom)` 与圆钮下沉成独立 `@Composable`。
 - [ ] `TurnScrubber.kt:452` — `TypingDots` 用 `rememberInfiniteTransition` + `alpha by animateFloat`（455-463）在**组合期**读值再 `.alpha(alpha)`（468）⇒ 可见期间按刷新率持续重组+重绘；同文件 477-489 的 `BlinkingCursor` 已因同款写法实测 213fps 改掉，**此处漏改**。
-- [ ] `Typewriter.kt:62` — `LaunchedEffect(Unit){ while(true){ delay(16) } }` **没有出口**：打完字后每个参与过流式的块仍每 16ms 醒一次。
+- [x] `Typewriter.kt:62` — `LaunchedEffect(Unit){ while(true){ delay(16) } }` **没有出口**：打完字后每个参与过流式的块仍每 16ms 醒一次。
 - [ ] `ChatContext.kt:1506` — `ImageBlock` 每次重组重建 `ImageRequest.Builder(...).build()`，`:1500` 的 `ByteBuffer` 也每次新建 ⇒ model 身份每帧变，Coil 当新请求重跑。改：`remember(bytes)` 保住请求，位点用 `asReadOnlyBuffer()`/`duplicate()`。
-- [ ] `ChatTopBar.kt:801` / `ChatComposer.kt:673` / `ChatContext.kt:320` — **三处 `PopupPositionProvider` 在组合体里 `new`**，未 `remember`（同仓库 `ChatComposer.kt:1117` 是正确写法）。
+- [x] `ChatTopBar.kt:801` / `ChatComposer.kt:673` / `ChatContext.kt:320` — **三处 `PopupPositionProvider` 在组合体里 `new`**，未 `remember`（同仓库 `ChatComposer.kt:1117` 是正确写法）。
 - [ ] `ChatComposer.kt:619` — `GenerationSheet` 每次重组重算整条选择链（`choiceFor` + 三次 providers 线性扫描 + `reasoningWire` + `indexOfFirst`）；拖滑杆每档都跑一遍。
 
 ### P2（24 条，择要做）
@@ -243,13 +248,13 @@
 - [ ] `ChatComposer.kt:576` `Brush.horizontalGradient(listOf(...))` 写在 Canvas draw lambda 里
 - [ ] `ChatScreen.kt:1577` 浅色画布 `Brush.verticalGradient` 每次重组新建
 - [ ] `ChatScreen.kt:2097` 顶部渐隐层 `Brush.verticalGradient(colorStops = arrayOf(...))`
-- [ ] `VoiceOverlay.kt:561` `listOf(0.45f,…)` + forEach 里 `RoundedCornerShape(2.dp)`
+- [x] `VoiceOverlay.kt:561` `listOf(0.45f,…)` + forEach 里 `RoundedCornerShape(2.dp)`
 - [ ] `ChatContext.kt:1053/1055/1070/1087` 四个 shape/BorderStroke 每次新建
 - [ ] `ChatContext.kt:708` `TodoQueueRow` 的 `RoundedCornerShape(14.dp)` 与 body lambda
 - [ ] `ChatContext.kt:393` `labelSmall.copy(fontWeight=…)`（同型：`ChatComposer.kt:735`、`TurnScrubber.kt:572`）
 - [ ] `ChatContext.kt:907` `items(todos)` **缺 key 与 contentType**
 - [x] `ChatScreen.kt:1966` `heavyRow` 的 remember 键用 `row.message.allImages`（每次访问重建 list）⇒ 换 `imageCount`
-- [ ] `ChatScreen.kt:432` `remember(imePxState){ derivedStateOf { imePxState.value } }` 是多出来的一层派生
+- [x] `ChatScreen.kt:432` `remember(imePxState){ derivedStateOf { imePxState.value } }` 是多出来的一层派生
 - [ ] `ChatScreen.kt:1298` 与 `:589` 对同一 `liveActive` 两次 `collectAsState`
 - [ ] `ChatBlocks.kt:1534-1554` `TurnSummary` 两个 `buildList` 每次重组都跑（`:1558` 的 remember 只省了 join）
 - [ ] `ChatBlocks.kt:884/991/997` 三个 composable lambda 每次新建 ⇒ `ProcessCard` 不可跳过
