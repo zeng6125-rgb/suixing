@@ -733,10 +733,7 @@ internal fun Composer(
     // 纯遮罩：三张卡片都是 [MenuCard]，进出场在卡片自己身上，这层什么都不画、也不加动画修饰符。
     // `keeping` 只做一件事：卡片退场那段让遮罩留在组合里，否则「点卡片外面」会在卡片还看得见的
     // 时候漏到下面的对话流上。
-    val anyOpen = menuOpen || sheetOpen || approvalOpen
-    val popupMotion = rememberPopupMotion()
-    LaunchedEffect(anyOpen) { if (anyOpen) popupMotion.enter() else popupMotion.exit() }
-    if (anyOpen || popupMotion.keeping) {
+    if (menuOpen || sheetOpen || approvalOpen) {
         Popup(properties = PopupProperties(focusable = false)) {
             Box(
                 Modifier

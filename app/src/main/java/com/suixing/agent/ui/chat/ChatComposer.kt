@@ -1041,9 +1041,10 @@ internal fun ContextRing(
             //
             // 小浮层进出场（用户：「用量统计这些弹窗出现得太生硬」）。`keeping` 让退场动画期间窗口
             // 仍留在组合里：遮罩和卡片都挂在它上面，否则退场的第一帧窗口就被销毁、动画看不到。
+            // 遮罩层保持原样（用户明确：不需要改小浮层的阴影/遮罩）。只有卡片本身有动效。
             val popupMotion = rememberPopupMotion()
             LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
-            if (open || popupMotion.keeping) {
+            if (open) {
                 Popup(properties = PopupProperties(focusable = false)) {
                     Box(
                         Modifier

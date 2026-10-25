@@ -777,10 +777,7 @@ internal fun TurnMetrics(
             // 纯遮罩：它只负责接住卡片的退场时间（卡片自己的 140ms 动画在 [MenuCard] 里），所以
             // 这里不加动画修饰符 —— 它本来就什么都不画。`keeping` 只做一件事：退场那 110ms 让这层
             // 仍在组合里，别让「点卡片外面」在卡片还看得见的时候漏到下面的对话流上。
-            val openNow = open != null
-            val popupMotion = rememberPopupMotion()
-            LaunchedEffect(openNow) { if (openNow) popupMotion.enter() else popupMotion.exit() }
-            if (openNow || popupMotion.keeping) {
+            if (open != null) {
                 Popup(properties = PopupProperties(focusable = false)) {
                     Box(
                         Modifier

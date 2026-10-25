@@ -1431,9 +1431,7 @@ private fun ConversationRow(
         // 纯遮罩：面板本身是 [MenuCard]，进出场已经在它身上；这一层什么都不画、也不加动画修饰符。
         // `keeping` 只做一件事：面板退场那段让遮罩仍留在组合里，否则「点面板外面」会在面板还看得见
         // 的时候漏到抽屉下面的列表上。
-        val popupMotion = rememberPopupMotion()
-        LaunchedEffect(menuOpen) { if (menuOpen) popupMotion.enter() else popupMotion.exit() }
-        if (menuOpen || popupMotion.keeping) {
+        if (menuOpen) {
             Popup(properties = PopupProperties(focusable = false)) {
                 Box(
                     Modifier

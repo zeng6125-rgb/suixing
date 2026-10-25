@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.components
 
+import android.view.WindowManager
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.graphics.Color
@@ -97,7 +98,14 @@ internal fun SuixingDialog(
     // 自绘遮罩，两者就会一起渐变。
     val view = LocalView.current
     SideEffect {
-        (view.parent as? DialogWindowProvider)?.window?.setDimAmount(0f)
+        // **把窗口自带的遮罩旗标清掉**，不是只把 dim 调成 0：只调 0 时窗口一旦走自己的
+        // 淡出路径，那层黑还是会整体闪一下 —— 用户说的「退场阴影断开」就是它。
+        // 清掉之后，屏幕上唯一的变暗来源就是下面这层自绘遮罩，它和卡片共用同一条进度。
+        runCatching {
+            val window = (view.parent as? DialogWindowProvider)?.window ?: return@runCatching
+            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window.setDimAmount(0f)
+        }
     }
 
     BasicAlertDialog(
@@ -123,7 +131,15 @@ internal fun SuixingDialog(
                         indication = null,
                     ) { scope.closeThen { latestDismiss() } },
             )
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            // **左右各留 24dp**：窗口铺满之后，卡片内部的 `Row(fillMaxWidth)` 会把 Surface
+            // 撑到整屏宽 —— 这正是「对话框贴着屏幕两边」的原因。系统默认窗口本来就有这圈留白，
+            // 改成自绘遮罩后必须自己补上。
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp, vertical = 24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
         Surface(
             modifier = Modifier
                 .sizeIn(minWidth = 280.dp, maxWidth = 560.dp)

@@ -304,7 +304,7 @@ internal fun TopBarContextEntry(
         // `keeping` 让退场动画期间浮层仍留在组合里，否则窗口先被销毁、动画根本看不到。
         val popupMotion = rememberPopupMotion()
         LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
-        if (open || popupMotion.keeping) {
+        if (open) {
             Popup(properties = PopupProperties(focusable = false)) {
                 Box(
                     Modifier
