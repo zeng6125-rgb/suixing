@@ -24,6 +24,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -320,20 +321,19 @@ internal fun MenuCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     var keepMounted by remember { mutableStateOf(false) }
-    // 入场/退场进度：0 = 退场终点，1 = 静止。
+    // 入场进度：0 = 刚从下方 12dp 上来，1 = 落位。
     //
-    // **内容始终组合**，动画只改绘制属性（位移/缩放/透明度）—— 这正是"位置一次算对"的关键：
-    // 原来用 `AnimatedVisibility` + `appeared` 让内容"先空后有"，**空帧把 Popup 量成 0 宽**，
-    // 于是 Popup 先按"卡片宽 0"定位在按钮右缘，内容出现后再滑到左边：用户看到的就是
-    // 「卡片从右边进来」而且「偏左」。内容一直在 ⇒ 首帧就是真实尺寸 ⇒ 位置一次算对。
-    val motion = remember { Animatable(1f) }
+    // **内容始终组合**：原来这里用 `AnimatedVisibility(visible = visible && appeared)` 加一个
+    // `appeared` 状态机，让内容"先空后有"——**空帧把 Popup 量成 0 宽**，于是 Popup 先按
+    // "卡片宽 0"定位在按钮右缘，内容出现后再滑到左边：用户看到的就是「卡片从右边进来」
+    // 而且「偏左」。现在内容一直在，首帧就是真实尺寸 ⇒ 位置一次算对。
+    val enterProgress = remember { Animatable(0f) }
     LaunchedEffect(visible) {
         if (visible) {
             keepMounted = true
-            motion.snapTo(0f)
-            motion.animateTo(1f, tween(POPUP_ANIM_MS))
+            enterProgress.snapTo(0f)
+            enterProgress.animateTo(1f, tween(POPUP_ANIM_MS))
         } else {
-            motion.animateTo(0f, tween(POPUP_ANIM_MS))
             delay(MENU_EXIT_MS)
             keepMounted = false
         }
@@ -360,36 +360,34 @@ internal fun MenuCard(
     val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { 12.dp.roundToPx() }
     // 定位二选一：同时传 alignment/offset 与 provider 编译不过。
     val cardBody: @Composable () -> Unit = {
-        Column(
-            modifier = modifier
-                .popupCardSurface(containerColor)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {},
-                )
-                .padding(horizontal = 18.dp, vertical = 14.dp)
-                // **入场只上浮**（用户：直接上浮不行吗）：位移 12dp → 0，**不缩放、不淡入**。
-                // 缩放会让卡片"从中间长出来"、淡入会让纯白底半透明（压在深色抽屉上发灰）——
-                // 两者都去掉后，入场就是干干净净的一次上浮。
-                // 退场保持原样：淡出 + 缩回 + 下落。
-                .graphicsLayer {
-                    val p = motion.value
-                    if (visible) {
-                        translationY = (1f - p) * slidePx
-                        alpha = 1f
-                        scaleX = 1f
-                        scaleY = 1f
-                    } else {
-                        alpha = p
-                        val s = 0.92f + 0.08f * p
-                        scaleX = s
-                        scaleY = s
-                        translationY = (1f - p) * slidePx
-                    }
-                },
-            content = content,
-        )
+        AnimatedVisibility(
+            visible = visible,
+            // 入场**只上浮**（用户：直接上浮不行吗）：位移 12dp → 0，不缩放、不淡入。
+            // 缩放是"从中间长出来"，淡入让纯白底半透明（压在深色抽屉上发灰）。
+            // 入场由下面的 graphicsLayer 驱动，这里必须置 None，否则两者叠加成两段位移。
+            enter = EnterTransition.None,
+            // 退场**原样保留**（用户没让改）：淡出 + 缩回 + 下落。
+            exit = fadeOut(tween(POPUP_ANIM_MS)) +
+                scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
+                slideOutVertically(tween(POPUP_ANIM_MS)) { slidePx },
+        ) {
+            Column(
+                modifier = modifier
+                    .popupCardSurface(containerColor)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    )
+                    .padding(horizontal = 18.dp, vertical = 14.dp)
+                    // 只读绘制期、不触发重组。退场时进度已是 1，这一层是恒等变换 ⇒ 退场观感
+                    // 与改动前逐项一致。
+                    .graphicsLayer {
+                        translationY = (1f - enterProgress.value) * slidePx
+                    },
+                content = content,
+            )
+        }
     }
     val provider = popupPositionProvider
     if (provider != null) {
