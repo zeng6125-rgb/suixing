@@ -195,6 +195,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.agent.estimateTokens
+import com.suixing.agent.ui.components.popupCardSurface
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.voice.Dictation
@@ -277,6 +278,9 @@ internal fun statusLineStyle(): TextStyle = MaterialTheme.typography.labelMedium
 /** How long a popup card's exit animation runs before the popup is taken down. */
 internal const val MENU_EXIT_MS = 140L
 
+/** 全站小浮层统一时长（用户：所有统一为七处那一套，140ms）。 */
+internal const val POPUP_ANIM_MS = 140
+
 /**
  * The app's one popup card: rounded, shadowed, and animated in and out.
  *
@@ -337,19 +341,13 @@ internal fun MenuCard(
         }
         AnimatedVisibility(
             visible = visible && appeared,
-            enter = fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.92f),
-            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.92f),
+            // **全站小浮层统一 140ms**（用户：「所有统一为和七处一致动画 140ms」）。
+            enter = fadeIn(tween(POPUP_ANIM_MS)) + scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f),
+            exit = fadeOut(tween(POPUP_ANIM_MS)) + scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f),
         ) {
             Column(
                 modifier = modifier
-                    .shadow(
-                        elevation = 8.dp,
-                        shape = RoundedCornerShape(20.dp),
-                        ambientColor = Color.Black.copy(alpha = 0.25f),
-                        spotColor = Color.Black.copy(alpha = 0.25f),
-                    )
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(scheme.surface)
+                    .popupCardSurface(scheme.surface)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -1087,7 +1085,7 @@ internal fun ContextRing(
                     properties = PopupProperties(focusable = false),
                 ) {
                     Box(
-                        popupMotion.modifier(fade = false)
+                        popupMotion.modifier()
                             // A focus-less window only receives what lands inside it, and drawing
                             // its own background is not the same as consuming a touch: without
                             // this the tap on the card would fall through to the transcript the
@@ -1140,14 +1138,7 @@ internal fun ContextRingCard(
             // transcript's full width. Capped against the window, so a split-screen window
             // gets a card that fits it rather than one that hangs off its edge.
             .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
-            .shadow(
-                elevation = 8.dp,
-                shape = RoundedCornerShape(16.dp),
-                ambientColor = Color.Black.copy(alpha = 0.25f),
-                spotColor = Color.Black.copy(alpha = 0.25f),
-            )
-            .clip(RoundedCornerShape(16.dp))
-            .background(scheme.surface)
+            .popupCardSurface(scheme.surface)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -1267,14 +1258,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
     Column(
         modifier = Modifier
             .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
-            .shadow(
-                elevation = 8.dp,
-                shape = RoundedCornerShape(16.dp),
-                ambientColor = Color.Black.copy(alpha = 0.25f),
-                spotColor = Color.Black.copy(alpha = 0.25f),
-            )
-            .clip(RoundedCornerShape(16.dp))
-            .background(scheme.surface)
+            .popupCardSurface(scheme.surface)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {

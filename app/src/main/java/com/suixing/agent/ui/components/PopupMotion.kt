@@ -59,18 +59,17 @@ internal class PopupMotion {
      * （含投影）走离屏层合成，投影看起来比没有动画的那张薄 —— 用户看到的就是「两个浮层的阴影
      * 不一样」。只缩放不改透明度时，投影与静止时逐像素一致。
      */
-    fun modifier(fade: Boolean = true): Modifier = Modifier.graphicsLayer {
+    fun modifier(): Modifier = Modifier.graphicsLayer {
         val p = animation.value
-        if (fade) alpha = p
-        val scale = 0.94f + 0.06f * p
+        alpha = p
+        val scale = 0.92f + 0.08f * p
         scaleX = scale
         scaleY = scale
-        translationY = (1f - p) * 8.dp.toPx()
     }
 }
 
 @Composable
 internal fun rememberPopupMotion(): PopupMotion = remember { PopupMotion() }
 
-private const val POPUP_IN_MS = 150
+private const val POPUP_IN_MS = 140
 private const val POPUP_OUT_MS = 140

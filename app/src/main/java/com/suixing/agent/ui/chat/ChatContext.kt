@@ -333,7 +333,7 @@ internal fun TopBarContextEntry(
                 properties = PopupProperties(focusable = false),
             ) {
                 Box(
-                    popupMotion.modifier(fade = false)
+                    popupMotion.modifier()
                         .onSizeChanged { cardWidth = it.width }
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
