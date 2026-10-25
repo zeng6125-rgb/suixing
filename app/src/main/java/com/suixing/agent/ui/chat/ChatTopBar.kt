@@ -1086,9 +1086,10 @@ internal fun AssistantRow(
                             // `streaming` 本身够了：块还在屏幕上就继续把剩下的字打完。
                             val thinkingLive = streaming && last
                             ReasoningBlock(
-                                // **必须带诞生时刻**：`rememberTypedText` 默认 bornAtMs = 0 会被判成"很久以前"
-                                // ⇒ 直接给全文、一个字都不打（思考块从上线起就是这样）。
-                                text = rememberTypedTextFromBirth(part.text, streaming),
+                                // **直接渲染，不做打字机**（与正文、与 DSH 的流式一致）：
+                                // 改文本式的打字机每拍都要重解析 Markdown，而且一旦起点被算成
+                                // 全文就完全不逐字（表现随版本漂移）。光标直接贴真实末尾。
+                                text = part.text,
                                 // A live block is the one still growing; a settled round's
                                 // thinking is complete even while the run continues.
                                 streaming = thinkingLive,
@@ -1175,17 +1176,19 @@ internal fun AssistantRow(
                             // 就会被判成"很久以前"，于是整段直接给全、一个字都不打。改用
                             // [rememberTypedTextFromBirth]：块首次组合时记下时刻，live 块必然
                             // 年龄≈0 ⇒ 永远从 0 开始打。
-                            // **只有"来自流式块"的正文才打字**：`part.bornAtMs > 0` 是
-                            // 「这块由 LivePart.Text 映射而来」的唯一标记（历史消息一律 0）。
-                            // 用它当判据既能让 run 结束那一刻才落到 part 里的最后一段照常逐字，
-                            // 又不会把已定型/历史内容重播一遍（用户：「为什么对已输出的旧内容
-                            // 逐字出现，我要的是对话进行中的流式」）。
-                            val livePart = part.bornAtMs > 0L
-                            val shown = rememberTypedText(
-                                text = part.text,
-                                enabled = streaming || livePart,
-                                startAtZero = livePart,
-                            )
+                            // **直接渲染正文，不做打字机**（用户：「参考 dsh 的思考流式和正文流式」）。
+                            //
+                            // 原来的打字机是"改文本"实现的：每 16ms 用 `text.take(revealed)`
+                            // 生成一个新前缀喂给 MarkdownText ⇒ 每拍重新解析 Markdown、重建
+                            // AnnotatedString、重新排版（issue #44 记录的 0.8.405 停用原因）。
+                            // 更糟的是 `revealed` 一旦被初始化成全文（槽位复用 / 门控 / 开关），
+                            // 就一个字都不打 —— 用户反复看到"整段突然出现"就是它，且不同版本
+                            // 表现不一致，无法定位。
+                            //
+                            // 现在 chunk 到达多少就画多少：与 DSH 的流式一致，光标自然贴在真实
+                            // 文本末尾，不滞后、不失配。逐字观感若要恢复，按 issue #44 §5 的
+                            // 绘制裁剪方案做（不改 text state，只裁剪 TextLayoutResult）。
+                            val shown = part.text
                             // 流式结束后打字机可能还没打完（恒定 75 字/秒，慢于模型）——
                             // 那段时间仍然要画 `shown`，否则剩下的尾巴会一次性补上。
                             val typing = shown.length < part.text.length
