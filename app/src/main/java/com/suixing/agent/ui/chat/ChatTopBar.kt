@@ -788,31 +788,37 @@ internal fun TurnMetrics(
                 }
                 BackHandler { open = null }
             }
+            val density = LocalDensity.current
+            val topBarCardProvider = remember(density) {
+                val gap = with(density) { 8.dp.roundToPx() }
+                val edge = with(density) { 8.dp.roundToPx() }
+                object : androidx.compose.ui.window.PopupPositionProvider {
+                    override fun calculatePosition(
+                        anchorBounds: androidx.compose.ui.unit.IntRect,
+                        windowSize: androidx.compose.ui.unit.IntSize,
+                        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                        popupContentSize: androidx.compose.ui.unit.IntSize,
+                    ): androidx.compose.ui.unit.IntOffset {
+                        // 与触发按钮左沿对齐（原来贴屏幕右边，所以都从右侧出现）。
+                        val x = anchorBounds.left.coerceIn(
+                            edge,
+                            (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge),
+                        )
+                        val y = anchorBounds.top - popupContentSize.height - gap
+                        return androidx.compose.ui.unit.IntOffset(x, y)
+                    }
+                }
+            }
+
             MenuCard(
                 visible = open != null,
                 onDismiss = { open = null },
                 alignment = Alignment.TopStart,
                 // **出现在按钮下方**（用户截图：原来盖在按钮上/上方）。8dp 间距，横向夹在屏幕内。
-                popupPositionProvider = run {
-                    val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
-                    val edge = with(LocalDensity.current) { 8.dp.roundToPx() }
-                    object : androidx.compose.ui.window.PopupPositionProvider {
-                        override fun calculatePosition(
-                            anchorBounds: androidx.compose.ui.unit.IntRect,
-                            windowSize: androidx.compose.ui.unit.IntSize,
-                            layoutDirection: androidx.compose.ui.unit.LayoutDirection,
-                            popupContentSize: androidx.compose.ui.unit.IntSize,
-                        ): androidx.compose.ui.unit.IntOffset {
-                            // 与触发按钮左沿对齐（原来贴屏幕右边，所以都从右侧出现）。
-                            val x = anchorBounds.left.coerceIn(
-                                edge,
-                                (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge),
-                            )
-                            val y = anchorBounds.top - popupContentSize.height - gap
-                            return androidx.compose.ui.unit.IntOffset(x, y)
-                        }
-                    }
-                },
+                // **provider 必须 remember**（优化清单 chat-P1）：原来这里在组合体里
+                // `run { … }` 现造一个匿名对象，每次重组都是新实例 ⇒ `MenuCard` 参数恒变、
+                // 弹卡开着时每次都重跑定位。
+                popupPositionProvider = topBarCardProvider,
                 offset = IntOffset.Zero,
                 // The card's own Column already swallows the taps that land on it (see MenuCard).
                 focusable = false,
