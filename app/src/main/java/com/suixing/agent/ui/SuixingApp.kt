@@ -1472,6 +1472,7 @@ private fun ConversationRow(
                 focusable = false,
                 // 与模型选择浮层同一底色（用户：把会话列表改成和模型列表一致）。
                 containerColor = MaterialTheme.colorScheme.surface,
+                debugTag = "drawer",
             ) {
                 DrawerMenuAction("改名", iconRes = R.drawable.ic_square_pen, onClick = onRename)
                 DrawerMenuAction(

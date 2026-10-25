@@ -317,6 +317,8 @@ internal fun MenuCard(
     scrim: Boolean = true,
     /** 卡片底色；默认与其它浮层一致（theme 的 surface）。 */
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
+    /** 临时诊断：标出是哪个浮层。 */
+    debugTag: String = "",
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -344,6 +346,14 @@ internal fun MenuCard(
                         indication = null,
                         onClick = onDismiss,
                     ),
+            )
+        }
+    }
+    if (debugTag.isNotEmpty() && visible) {
+        androidx.compose.runtime.LaunchedEffect(debugTag, visible) {
+            com.suixing.agent.ui.components.PopupDiag.log(
+                debugTag,
+                "visible color=#%08X".format(containerColor.value.toULong()),
             )
         }
     }
@@ -680,6 +690,7 @@ internal fun GenerationSheet(
         // BottomStart ＋ (nudge, −8dp) —— 卡片底边贴锚点、向上长。
         alignment = Alignment.BottomStart,
         offset = with(density) { IntOffset(nudge.roundToInt(), -8.dp.roundToPx()) },
+        debugTag = "model",
         // Focus-less: opening this card must not take the keyboard off the field, or the
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].

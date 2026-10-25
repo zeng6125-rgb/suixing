@@ -306,48 +306,24 @@ internal fun TopBarContextEntry(
         LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
         // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
         // 同一套 110ms 进出场。这里需要显式定位，所以传 popupPositionProvider。
-        // 定位在组合期算好：PopupPositionProvider 里没有 Density 作用域。
-        // **定位要相对锚点算**：原来的 y 是写死的像素、x 是"让卡片居中到圆环"，Popup 自身的锚点
-        // 在左上 ⇒ 卡片出现在屏幕左上角（用户截图）。这里改成：x 右对齐到窗口右边，
-        // y = 锚点下沿 + 8dp，两者都夹在屏幕内。
-        val edgePxForPopup = with(density) { 12.dp.roundToPx() }
-        val gapPxForPopup = with(density) { 8.dp.roundToPx() }
-        val belowGlyphPx = gapPxForPopup
         MenuCard(
             visible = open,
             onDismiss = { open = false },
+            // **恢复原来的定位方式**（用户：之前位置是对的）：Popup 以 TopCenter 对齐锚点，
+            // 卡片出现在图表按钮正下方并水平居中；offset 只做水平微调 + 36dp 的下移。
             alignment = Alignment.TopCenter,
-            offset = IntOffset.Zero,
-            focusable = false,
-            popupPositionProvider = remember(cardWidth) {
-                object : PopupPositionProvider {
-                    override fun calculatePosition(
-                        anchorBounds: IntRect,
-                        windowSize: IntSize,
-                        layoutDirection: LayoutDirection,
-                        popupContentSize: IntSize,
-                    ): IntOffset {
-                        com.suixing.agent.ui.components.PopupDiag.log(
-                            "ring",
-                            "anchor=$anchorBounds window=$windowSize card=$popupContentSize",
-                        )
-                        // **以按钮左沿对齐**（不是贴屏幕右边）—— 之前写死 windowSize.width 会让
-                        // 卡片一律从右侧出现。
-                        // **卡片右缘对齐按钮右缘**（诊断日志实测：按钮在 x 814~898，卡片宽 769；
-                        // 用左缘对齐会把它推出屏幕、再被夹回右边，就成了"从右边弹出来"）。
-                        val x = (anchorBounds.right - popupContentSize.width).coerceIn(
-                            edgePxForPopup,
-                            (windowSize.width - edgePxForPopup - popupContentSize.width)
-                                .coerceAtLeast(edgePxForPopup),
-                        )
-                        val y = (anchorBounds.bottom + gapPxForPopup).coerceAtMost(
-                            (windowSize.height - edgePxForPopup - popupContentSize.height)
-                                .coerceAtLeast(edgePxForPopup),
-                        )
-                        return IntOffset(x, y)
-                    }
-                }
+            offset = with(density) {
+                IntOffset(
+                    popupNudgeCentred(
+                        anchorCentre = anchorCentreX,
+                        width = cardWidth,
+                        windowPx = screenPx,
+                        edgePx = edgePx,
+                    ).roundToInt(),
+                    28.dp.roundToPx() + 8.dp.roundToPx(),
+                )
             },
+            focusable = false,
         ) {
             Box(Modifier.onSizeChanged { cardWidth = it.width }) {
                 ContextRingCard(
