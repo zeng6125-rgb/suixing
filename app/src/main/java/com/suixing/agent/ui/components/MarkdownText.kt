@@ -1010,27 +1010,44 @@ private fun InlineText(
     // 与 `ChatScreen` 的 `switchAlpha` 都是同一个写法）。
     val caret = remember { arrayOfNulls<TextLayoutResult>(1) }
     val caretAlpha = if (cursor) blinkingCursorAlphaState() else null
+    // **光标直接接在文字末尾**（用户：「直接往文字最后加不就行了吗」）：
+    // 在文本末尾追加一个**带背景色的窄字符段**（▏），排版器会为它留出位置并把它算作
+    // 最后一行的一部分 —— 于是光标的位置由排版给出，精确贴着最后一个字，不会因为
+    // 折行数变化而跳（原来画在 `getLineRight(最后一行)` 上，那只是"折行后末行的右端"，
+    // 与"正在增长的那个字"不是一回事，所以显得跟不上）。
+    // 闪烁的透明度在**绘制期**叠加，不进 AnnotatedString ⇒ 不触发重组与重新排版。
+    val textWithCaret = remember(annotated, cursor) {
+        if (!cursor) {
+            annotated
+        } else {
+            buildAnnotatedString {
+                append(annotated)
+                // **零宽空格**：它不占宽度、不可能被渲染成豆腐块，但它的位置就是
+                // "最后一个字后面" —— 绘制时用 getBoundingBox 取它的 x，精确到像素。
+                append(CARET_PLACEHOLDER)
+            }
+        }
+    }
     Text(
-        text = annotated,
+        text = textWithCaret,
         modifier = if (caretAlpha == null) {
             modifier
         } else {
             modifier.drawBehind {
                 val layout = caret[0] ?: return@drawBehind
                 if (layout.lineCount == 0) return@drawBehind
-                val line = layout.lineCount - 1
-                // **高度按字号算，不用整行行框**（用户：「光标的高度有时候有点太高了吧，对于正文来说」）：
-                // `getLineBottom - getLineTop` 含行间距（leading），13sp 正文的行框比字形高不少，
-                // 竖条于是上下都冒出去。这里取基线与字号：高度 = 字号的 1.15 倍，
-                // 底边坐在基线上、向上取 0.95 倍字号 —— 与字形墨迹基本齐平。
-                // 高度与**那一行文字**对应（用户：「改回和那一行文字对应的高度」）：
-                // 用行框上下沿。行框含行间距，但这就是"一行"的占位，和文字块的节奏一致。
-                val top = layout.getLineTop(line)
-                val h = (layout.getLineBottom(line) - top).toFloat()
-                // **RTL 要用 getLineLeft**：`getLineRight` 在从右往左的行里是行的左端起点，
-                // 直接把光标画到行首去了。按行方向选端点。
+                // **画在末尾那个占位符的位置上**：占位符是文本的最后一个字符，
+                // 它的位置就是"最后一个字后面" —— 与折行无关，精确且不会跳。
+                // 占位符是文本的**最后一个字符**，它的包围盒左缘就是"最后一个字后面"。
+                val caretOffset = layout.getLineEnd(layout.lineCount - 1, false) - 1
+                if (caretOffset < 0) return@drawBehind
+                val lineIndex = layout.getLineForOffset(caretOffset)
+                val box = layout.getBoundingBox(caretOffset)
+                val top = layout.getLineTop(lineIndex)
+                val h = (layout.getLineBottom(lineIndex) - top).toFloat()
                 val rtl = layout.layoutInput.layoutDirection == LayoutDirection.Rtl
-                val x = if (rtl) layout.getLineLeft(line) - CURSOR_WIDTH_PX else layout.getLineRight(line)
+                // 零宽 ⇒ 包围盒左右缘相同；RTL 时竖条画在左边。
+                val x = if (rtl) box.left - CURSOR_WIDTH_PX else box.left
                 drawRect(
                     color = palette.linkColor.copy(alpha = caretAlpha.value),
                     topLeft = Offset(x, top),
@@ -1046,6 +1063,9 @@ private fun InlineText(
 
 /** 光标宽度：绘制阶段用（1.5dp @3x ≈ 4.5px，取 4px 与旧的 ▍ 视觉接近）。 */
 private const val CURSOR_WIDTH_PX = 4f
+
+/** 光标占位符：接在文本末尾，让排版器为它留出位置（宽度接近一个细竖条）。 */
+private const val CARET_PLACEHOLDER = "​"
 
 /** 诊断用换行（避免字符串模板里的转义被工具截断）。 */
 private val CHR_NL = System.lineSeparator()
