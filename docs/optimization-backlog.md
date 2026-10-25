@@ -63,41 +63,41 @@
 
 ### P1（同一次操作内重复读同一个 meta 文件，可一次性收掉）
 
-- [ ] `data/ChatRepository.kt:442` / `:726` — `save()` 已读盘中 meta，`writeTail()` 再 `readMeta` 一次。 〔暂缓·低收益〕
-- [ ] `data/ChatRepository.kt:769` / `:781` — `write()` 先 `readMeta` 判空、紧接着再读同一文件；`:755` `logExists()` 为判断某代日志把整个 `store/` 列一遍。 〔暂缓·低收益〕
+- [ ] `data/ChatRepository.kt:442` / `:726` — `save()` 已读盘中 meta，`writeTail()` 再 `readMeta` 一次。 〔判否·收益低于成本〕
+- [ ] `data/ChatRepository.kt:769` / `:781` — `write()` 先 `readMeta` 判空、紧接着再读同一文件；`:755` `logExists()` 为判断某代日志把整个 `store/` 列一遍。 〔判否·收益低于成本〕
 - [x] `data/ChatStore.kt:216` — `readMeta` 每次 `isFile + readText + decode`，无缓存，被 6 个入口各调一次。
 
 ### P1（其余单点）
 
-- [ ] `data/ChatRepository.kt:127` — `updateMeta` 整表 `.map` 一次，`:565/:579/:590` 的 `setPinned/rename/setArchived` 再整表 `.map` 一次（两次结果相等、第二次被 StateFlow 去重）。 〔暂缓·低收益〕
-- [ ] `data/ChatRepository.kt:544` — 每次 save 都 `filterNot` + `listOf` + `sortedByDescending`：3 份 List + 一次排序，只为把一条挪到首位。 〔暂缓·低收益〕
-- [ ] `data/ChatRepository.kt:65` — `load()` 把目录列了多遍：`:830` `chats/`、`:844` `store/`、`:864` 再列 `store/`。 〔暂缓·低收益〕
+- [ ] `data/ChatRepository.kt:127` — `updateMeta` 整表 `.map` 一次，`:565/:579/:590` 的 `setPinned/rename/setArchived` 再整表 `.map` 一次（两次结果相等、第二次被 StateFlow 去重）。 〔判否·收益低于成本〕
+- [ ] `data/ChatRepository.kt:544` — 每次 save 都 `filterNot` + `listOf` + `sortedByDescending`：3 份 List + 一次排序，只为把一条挪到首位。 〔判否·收益低于成本〕
+- [ ] `data/ChatRepository.kt:65` — `load()` 把目录列了多遍：`:830` `chats/`、`:844` `store/`、`:864` 再列 `store/`。 〔判否·收益低于成本〕
 - [x] `data/ChatStore.kt:710` — `encode()` 先 `buildString` 拼整份日志再 `toByteArray`，峰值容量翻倍。
 - [x] `data/JobStore.kt:136` — `lastLineOf` 走 `readJobLog(tail=1)` 每次读末尾 256KB 再 `lines()` 全拆。
 - [x] `data/JobStore.kt:98` — `find(id)` 实现为 `list().firstOrNull`，为一个 job 把每个 job 的 256KB 日志都读一遍。
-- [ ] `data/ChatRepository.kt:621` — `saveLive` 流式期间每秒调用一次（`ChatViewModel.kt:2884,2908`），持锁时先 `encodeToString` 整份草稿再 `fd.sync` + 目录 fsync。 〔暂缓·低收益〕
-- [ ] `data/ChatRepository.kt:185` — `chatSize()` 只为拿 gen 与尺寸就 `readMeta`（含 checkpoints/activeRuns 全解析），会话列表每行都调。 〔暂缓·低收益〕
+- [ ] `data/ChatRepository.kt:621` — `saveLive` 流式期间每秒调用一次（`ChatViewModel.kt:2884,2908`），持锁时先 `encodeToString` 整份草稿再 `fd.sync` + 目录 fsync。 〔判否·收益低于成本〕
+- [ ] `data/ChatRepository.kt:185` — `chatSize()` 只为拿 gen 与尺寸就 `readMeta`（含 checkpoints/activeRuns 全解析），会话列表每行都调。 〔判否·收益低于成本〕
 
 ### P2（19 条，择要做）
 
-- [ ] `ChatStore.kt:386` 同一条 tail 折叠两遍（`tail.fold` + `foldTotals(tail)`） 〔暂缓·低收益〕
-- [ ] `ChatStore.kt:485` `slicedFrom` 给每条消息建 `SlicedMessage`，`UsageStore.kt:199/:201` 又各 map 一份 〔暂缓·低收益〕
-- [ ] `ChatStore.kt:497` `from()` = `readEntries().map{it.message}` 全量复制 〔暂缓·低收益〕
-- [ ] `ChatStore.kt:520` `window()` 每轮重试把更大区间从磁盘重读重解析 〔暂缓·低收益〕
-- [ ] `ChatStore.kt:605` `offsetOf` 反扫每 1MB 新建 `ByteArray` 〔暂缓·低收益〕
-- [ ] `Transcript.kt:88` `active()` 内部重建两张全量表（调用方已算过） 〔暂缓·低收益〕
-- [ ] `Transcript.kt:102` `withoutLastAnswer` 为丢最后一轮构建整份 `turnOf` 〔暂缓·低收益〕
-- [ ] `WireSanitize.kt:21` `apply()` 对整份历史 4 遍遍历、5+ 中间集合 〔暂缓·低收益〕
-- [ ] `UsageStore.kt:112` `days/models/totals` 计算型 getter 每次重新合并 〔暂缓·低收益〕
-- [ ] `UsageStore.kt:163` `refresh()` 无变化也整份 prettyPrint 重写 〔暂缓·低收益〕
-- [ ] `ScheduleStore.kt:161` 同一次调度 2~3 次全量 stat+解析 〔暂缓·低收益〕
-- [ ] `PerfMonitor.kt:93` `record()` 在 `synchronized` 内 persist 〔暂缓·低收益〕
-- [ ] `PerfMonitor.kt:113` `summary()` 4 条 `filter{}.map{}.average()`、8 个中间 List 〔暂缓·低收益〕
-- [ ] `OffsetCache.kt:29` 键用 `chatId to gen`，每条消息分配一个 Pair 〔暂缓·低收益〕
-- [ ] `ChatRepository.kt:600` `delete()` 里 `liveFile(id)` 重算 3 次 + 整个 `chats/` listFiles 〔暂缓·低收益〕
-- [ ] `ChatRepository.kt:39` `dir` getter 每次访问做一次 `exists()` 〔暂缓·低收益〕
-- [ ] `JobStore.kt:58` `start()` 每次起 job 都 `mkdirs + pruneLogs()`（全目录 stat + 排序） 〔暂缓·低收益〕
-- [ ] 死代码（只列）：`ChatRepository.kt:224` 不可达分支；`:939` 空函数 `pruneQuarantine` + 仅存于文档的 `CORRUPT_KEEP_MS(:947)` 〔暂缓·低收益〕
+- [ ] `ChatStore.kt:386` 同一条 tail 折叠两遍（`tail.fold` + `foldTotals(tail)`） 〔判否·收益低于成本〕
+- [ ] `ChatStore.kt:485` `slicedFrom` 给每条消息建 `SlicedMessage`，`UsageStore.kt:199/:201` 又各 map 一份 〔判否·收益低于成本〕
+- [ ] `ChatStore.kt:497` `from()` = `readEntries().map{it.message}` 全量复制 〔判否·收益低于成本〕
+- [ ] `ChatStore.kt:520` `window()` 每轮重试把更大区间从磁盘重读重解析 〔判否·收益低于成本〕
+- [ ] `ChatStore.kt:605` `offsetOf` 反扫每 1MB 新建 `ByteArray` 〔判否·收益低于成本〕
+- [ ] `Transcript.kt:88` `active()` 内部重建两张全量表（调用方已算过） 〔判否·收益低于成本〕
+- [ ] `Transcript.kt:102` `withoutLastAnswer` 为丢最后一轮构建整份 `turnOf` 〔判否·收益低于成本〕
+- [ ] `WireSanitize.kt:21` `apply()` 对整份历史 4 遍遍历、5+ 中间集合 〔判否·收益低于成本〕
+- [ ] `UsageStore.kt:112` `days/models/totals` 计算型 getter 每次重新合并 〔判否·收益低于成本〕
+- [ ] `UsageStore.kt:163` `refresh()` 无变化也整份 prettyPrint 重写 〔判否·收益低于成本〕
+- [ ] `ScheduleStore.kt:161` 同一次调度 2~3 次全量 stat+解析 〔判否·收益低于成本〕
+- [ ] `PerfMonitor.kt:93` `record()` 在 `synchronized` 内 persist 〔判否·收益低于成本〕
+- [ ] `PerfMonitor.kt:113` `summary()` 4 条 `filter{}.map{}.average()`、8 个中间 List 〔判否·收益低于成本〕
+- [ ] `OffsetCache.kt:29` 键用 `chatId to gen`，每条消息分配一个 Pair 〔判否·收益低于成本〕
+- [ ] `ChatRepository.kt:600` `delete()` 里 `liveFile(id)` 重算 3 次 + 整个 `chats/` listFiles 〔判否·收益低于成本〕
+- [ ] `ChatRepository.kt:39` `dir` getter 每次访问做一次 `exists()` 〔判否·收益低于成本〕
+- [ ] `JobStore.kt:58` `start()` 每次起 job 都 `mkdirs + pruneLogs()`（全目录 stat + 排序） 〔判否·收益低于成本〕
+- [ ] 死代码（只列）：`ChatRepository.kt:224` 不可达分支；`:939` 空函数 `pruneQuarantine` + 仅存于文档的 `CORRUPT_KEEP_MS(:947)` 〔判否·收益低于成本〕
 
 ---
 
@@ -110,38 +110,38 @@
 
 ### P1
 
-- [ ] `tools/WebTools.kt:293` — `readText` 每次编译 2 条 Regex，且为嗅探 charset 把 ≤1MB 正文整体 `ISO_8859_1` 解码 ⇒ 只解码前 4KB 嗅探。风险中。 〔暂缓·低收益〕
-- [ ] `tools/WebTools.kt:150` — 下载写盘用裸 `part.outputStream()` + 默认 8KB 缓冲 ⇒ `BufferedOutputStream(64KB)`。 〔暂缓·低收益〕
-- [ ] `tools/FileTools.kt:181` — 同一份 ≤4MB 字节解码两次（`:181` 得 lines、`:191` 得 revision），两份大 String 同时存活。 〔暂缓·低收益〕
+- [ ] `tools/WebTools.kt:293` — `readText` 每次编译 2 条 Regex，且为嗅探 charset 把 ≤1MB 正文整体 `ISO_8859_1` 解码 ⇒ 只解码前 4KB 嗅探。风险中。 〔判否·收益低于成本〕
+- [ ] `tools/WebTools.kt:150` — 下载写盘用裸 `part.outputStream()` + 默认 8KB 缓冲 ⇒ `BufferedOutputStream(64KB)`。 〔判否·收益低于成本〕
+- [ ] `tools/FileTools.kt:181` — 同一份 ≤4MB 字节解码两次（`:181` 得 lines、`:191` 得 revision），两份大 String 同时存活。 〔判否·收益低于成本〕
 - [ ] `tools/FileTools.kt:426` — `search_in_files` 每文件 `readBytes()+lines()`，上限 400 文件 × 2MB ⇒ `BufferedReader.useLines`。风险中。 〔需真机验证〕
-- [ ] `service/SchedulerService.kt:69` — `onStartCommand` 在 `Core.appScope`(Default) 上调 `arm()`，`:214` 读 `schedules.json` ⇒ `withContext(Dispatchers.IO)`。 〔暂缓·低收益〕
-- [ ] `service/TouchFx.kt:1532` — `drawGlow` **每帧**调 `edgeShape()` 重建 `edgePath`，而 band 缓存只在几何变化时重建 ⇒ 移进 `haloCacheKey` 变化分支。 〔暂缓·低收益〕
-- [ ] `service/TouchFx.kt:1550` — 每帧用字符串插值拼 `haloCacheKey`（6 个数值）只做相等比较 ⇒ 改存 6 个数值字段。 〔暂缓·低收益〕
-- [ ] `tools/FileTools.kt:292` — `lineOf` 用 `substring(0,index)` 复制前缀再 `count` 换行，`:253/:271` 各调一次 ⇒ 单次顺序扫描。 〔暂缓·低收益〕
+- [ ] `service/SchedulerService.kt:69` — `onStartCommand` 在 `Core.appScope`(Default) 上调 `arm()`，`:214` 读 `schedules.json` ⇒ `withContext(Dispatchers.IO)`。 〔判否·收益低于成本〕
+- [ ] `service/TouchFx.kt:1532` — `drawGlow` **每帧**调 `edgeShape()` 重建 `edgePath`，而 band 缓存只在几何变化时重建 ⇒ 移进 `haloCacheKey` 变化分支。 〔判否·收益低于成本〕
+- [ ] `service/TouchFx.kt:1550` — 每帧用字符串插值拼 `haloCacheKey`（6 个数值）只做相等比较 ⇒ 改存 6 个数值字段。 〔判否·收益低于成本〕
+- [ ] `tools/FileTools.kt:292` — `lineOf` 用 `substring(0,index)` 复制前缀再 `count` 换行，`:253/:271` 各调一次 ⇒ 单次顺序扫描。 〔判否·收益低于成本〕
 
 ### P2（25 条，择要做）
 
-- [ ] `WebTools.kt:256` `parseDuckDuckGo` 每次搜索编译 2 条 Regex 〔暂缓·低收益〕
-- [ ] `WebTools.kt:128` 每次 `web_download` 都 `sweepStaleParts`（`walkTopDown` depth 6） 〔暂缓·低收益〕
-- [ ] `WebTools.kt:319` `ByteArrayOutputStream` 无初始容量（`contentLength` 已在 `:317`） 〔暂缓·低收益〕
-- [ ] `FileTools.kt:178` `bytes.take(4096)` 把 Byte 装箱成 `List<Byte>`（`:427` 同样） 〔暂缓·低收益〕
-- [ ] `FileTools.kt:237` 未给 `expected_revision` 时也算全文 `revisionOf(text)` 〔暂缓·低收益〕
-- [ ] `FileTools.kt:421` `walk` 停止条件与 `:420` 逐字相同，每文件算两遍 〔暂缓·低收益〕
-- [ ] `FileTools.kt:295/:304` `deleteRecursive`/`copyRecursive` 在 `tools/` 内无调用点（`:496` 注释还写着「已删掉」） 〔暂缓·低收益〕
-- [ ] `ShellTools.kt:178` 一次 `run_shell` 里 `Shell.bundledBash()` 最多探两次 〔暂缓·低收益〕
-- [ ] `ShellTools.kt:374` 单引号转义与 `:408` `quote()` 是同一实现第二份 〔暂缓·低收益〕
-- [ ] `UiTools.kt:306` `renderUiNodes/parseUiDump(:329)` 在 IO 上做纯 CPU 正则 XML 解析 ⇒ Default 〔暂缓·低收益〕
-- [ ] `UiTools.kt:344` `Base64.encodeToString` 三处在 `withContext(IO)` 之外 〔暂缓·低收益〕
+- [ ] `WebTools.kt:256` `parseDuckDuckGo` 每次搜索编译 2 条 Regex 〔判否·收益低于成本〕
+- [ ] `WebTools.kt:128` 每次 `web_download` 都 `sweepStaleParts`（`walkTopDown` depth 6） 〔判否·收益低于成本〕
+- [ ] `WebTools.kt:319` `ByteArrayOutputStream` 无初始容量（`contentLength` 已在 `:317`） 〔判否·收益低于成本〕
+- [ ] `FileTools.kt:178` `bytes.take(4096)` 把 Byte 装箱成 `List<Byte>`（`:427` 同样） 〔判否·收益低于成本〕
+- [ ] `FileTools.kt:237` 未给 `expected_revision` 时也算全文 `revisionOf(text)` 〔判否·收益低于成本〕
+- [ ] `FileTools.kt:421` `walk` 停止条件与 `:420` 逐字相同，每文件算两遍 〔判否·收益低于成本〕
+- [ ] `FileTools.kt:295/:304` `deleteRecursive`/`copyRecursive` 在 `tools/` 内无调用点（`:496` 注释还写着「已删掉」） 〔判否·收益低于成本〕
+- [ ] `ShellTools.kt:178` 一次 `run_shell` 里 `Shell.bundledBash()` 最多探两次 〔判否·收益低于成本〕
+- [ ] `ShellTools.kt:374` 单引号转义与 `:408` `quote()` 是同一实现第二份 〔判否·收益低于成本〕
+- [ ] `UiTools.kt:306` `renderUiNodes/parseUiDump(:329)` 在 IO 上做纯 CPU 正则 XML 解析 ⇒ Default 〔判否·收益低于成本〕
+- [ ] `UiTools.kt:344` `Base64.encodeToString` 三处在 `withContext(IO)` 之外 〔判否·收益低于成本〕
 - [ ] `UiTools.kt:407` `encodeJpeg` 先整张 decode 再 `createScaledBitmap`，两张全尺寸 ARGB 并存 〔需真机验证〕
-- [ ] `UiTools.kt:322` 同一张 ui.xml 在 `:322` 与 `:327` 各删一次（`:371/:376` 同） 〔暂缓·低收益〕
-- [ ] `UiTools.kt:437` `clickText` 对节点列表两趟 `firstOrNull` 〔暂缓·低收益〕
-- [ ] `UiTools.kt:504` 每次 `ui_key` 新建 `listOf("back"…)`，与 `:146` spec 重复 〔暂缓·低收益〕
-- [ ] `UiTools.kt:253` `scratch()` 每次 `getExternalFilesDir(null)`（`FileTools.kt:21/:505` 同） 〔暂缓·低收益〕
-- [ ] `SystemTools.kt:345` `onMainThread` 每次 `new Handler` 〔暂缓·低收益〕
-- [ ] `SystemTools.kt:171` `listApps` 过滤里每包 `label.lowercase()/pkg.lowercase()` 〔暂缓·低收益〕
-- [ ] `Tool.kt:232` `all()` 每次新建列表，`names()/promptSummary()` 每轮请求都走 〔暂缓·低收益〕
-- [ ] `UiDump.kt:115` `unescape` 每属性 6 次全文替换 〔暂缓·低收益〕
-- [ ] `ScheduleTools.kt:151` `TIMING_KEYS.filter` 三处各算一次 〔暂缓·低收益〕
+- [ ] `UiTools.kt:322` 同一张 ui.xml 在 `:322` 与 `:327` 各删一次（`:371/:376` 同） 〔判否·收益低于成本〕
+- [ ] `UiTools.kt:437` `clickText` 对节点列表两趟 `firstOrNull` 〔判否·收益低于成本〕
+- [ ] `UiTools.kt:504` 每次 `ui_key` 新建 `listOf("back"…)`，与 `:146` spec 重复 〔判否·收益低于成本〕
+- [ ] `UiTools.kt:253` `scratch()` 每次 `getExternalFilesDir(null)`（`FileTools.kt:21/:505` 同） 〔判否·收益低于成本〕
+- [ ] `SystemTools.kt:345` `onMainThread` 每次 `new Handler` 〔判否·收益低于成本〕
+- [ ] `SystemTools.kt:171` `listApps` 过滤里每包 `label.lowercase()/pkg.lowercase()` 〔判否·收益低于成本〕
+- [ ] `Tool.kt:232` `all()` 每次新建列表，`names()/promptSummary()` 每轮请求都走 〔判否·收益低于成本〕
+- [ ] `UiDump.kt:115` `unescape` 每属性 6 次全文替换 〔判否·收益低于成本〕
+- [ ] `ScheduleTools.kt:151` `TIMING_KEYS.filter` 三处各算一次 〔判否·收益低于成本〕
 - [ ] `TouchFx.kt:1030` `trace()` 在调用线程拼整行（含每行新建 `SimpleDateFormat`、`caller()` 全栈） 〔需真机验证〕
 - [ ] `FloatConsoleService.kt:483` `trace()` 在调用线程做检查 + 拼整行 〔需真机验证〕
 
@@ -156,31 +156,31 @@
 
 ### P1（都是「每轮重建」）
 
-- [ ] `llm/LlmClient.kt:1183` / `:1124` — 每轮为每张历史截图重建 `"data:image/jpeg;base64,…"`（几十万字/张，图片预算 2MB）。 〔暂缓·低收益〕
-- [ ] `llm/LlmClient.kt:1088` — 每轮对每个历史 `tool_call` 重跑 `arguments.toJsonObjectOrEmpty()`。 〔暂缓·低收益〕
-- [ ] `llm/LlmClient.kt:909` — 每轮 `messages.map { encodeMessage(it) }` 重建整份历史 JsonObject 树（`:981` 还两次 filter）。风险中。 〔暂缓·低收益〕
-- [ ] `llm/LlmClient.kt:396` — `payload.toString().toRequestBody()` 整份 body（含 2MB base64）序列化成 String 再拷 ByteArray，每轮两份全量拷贝。风险中。 〔暂缓·低收益〕
+- [ ] `llm/LlmClient.kt:1183` / `:1124` — 每轮为每张历史截图重建 `"data:image/jpeg;base64,…"`（几十万字/张，图片预算 2MB）。 〔判否·收益低于成本〕
+- [ ] `llm/LlmClient.kt:1088` — 每轮对每个历史 `tool_call` 重跑 `arguments.toJsonObjectOrEmpty()`。 〔判否·收益低于成本〕
+- [ ] `llm/LlmClient.kt:909` — 每轮 `messages.map { encodeMessage(it) }` 重建整份历史 JsonObject 树（`:981` 还两次 filter）。风险中。 〔判否·收益低于成本〕
+- [ ] `llm/LlmClient.kt:396` — `payload.toString().toRequestBody()` 整份 body（含 2MB base64）序列化成 String 再拷 ByteArray，每轮两份全量拷贝。风险中。 〔判否·收益低于成本〕
 - [x] `agent/RequestImages.kt:25` — 每轮 `wire.withIndex().filter{…}` 即使零截图也造全量 `IndexedValue`。
-- [ ] `agent/AgentEngine.kt:1897` — 每轮无条件 `estimatePromptTokens(wire)`，而 `realPromptTokens>0` 时它多数轮算完即弃。 〔暂缓·低收益〕
+- [ ] `agent/AgentEngine.kt:1897` — 每轮无条件 `estimatePromptTokens(wire)`，而 `realPromptTokens>0` 时它多数轮算完即弃。 〔判否·收益低于成本〕
 
 ### P2（16 条，择要做）
 
-- [ ] `AgentEngine.kt:1381` 每 delta `streamed.takeLast(40).toString()` ⇒ `substring(max(0,len-40))` 〔暂缓·低收益〕
-- [ ] `AgentEngine.kt:1334` 每轮 `toolSpecs.joinToString(",")`，而工具表整 run 已冻结在 `:1319` 〔暂缓·低收益〕
-- [ ] `AgentEngine.kt:1329` 每轮 `PluginRuntime.hooksFor(pluginSpecs)` 〔暂缓·低收益〕
-- [ ] `AgentEngine.kt:1474-1481` usage 到达后再扫一遍 wire（同轮 `:1347-1356` 已扫过） 〔暂缓·低收益〕
-- [ ] `AgentEngine.kt:645` 120ms ticker 常驻，runs 为空也每 120ms 唤醒 〔暂缓·低收益〕
-- [ ] 死代码：`AgentEngine.kt:2100` `wireChars` 无调用点 〔暂缓·低收益〕
-- [ ] `AgentEngine.kt:2024` `summarize` 的 `joinToString{renderForSummary(it)}` ⇒ 单 `StringBuilder` 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:699/:706` 每 delta `containsKey + get` 两次查表 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:478` 每 chunk `hasToolCalls()` 全表扫 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:757` 为比 `!= "{}"` 序列化两次 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:1371` `parseUsage` 的 `path.split('.')` 每次现切 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:1521` `textOf` JsonArray 分支中间 List 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:872` `toTurn` 的 `toSortedMap().values.filter{}.mapIndexed{}` 三份中间集合 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:434` 非 2xx 取证再 `payload.toString()`（`:396` 已有同串） 〔暂缓·低收益〕
-- [ ] `LlmClient.kt:1625` `describeError` 无条件拼整条 cause 链 〔暂缓·低收益〕
-- [ ] `ToolOutputSpill.kt:53` 每次落盘成功都 `listFiles()+sortedByDescending` 〔暂缓·低收益〕
+- [ ] `AgentEngine.kt:1381` 每 delta `streamed.takeLast(40).toString()` ⇒ `substring(max(0,len-40))` 〔判否·收益低于成本〕
+- [ ] `AgentEngine.kt:1334` 每轮 `toolSpecs.joinToString(",")`，而工具表整 run 已冻结在 `:1319` 〔判否·收益低于成本〕
+- [ ] `AgentEngine.kt:1329` 每轮 `PluginRuntime.hooksFor(pluginSpecs)` 〔判否·收益低于成本〕
+- [ ] `AgentEngine.kt:1474-1481` usage 到达后再扫一遍 wire（同轮 `:1347-1356` 已扫过） 〔判否·收益低于成本〕
+- [ ] `AgentEngine.kt:645` 120ms ticker 常驻，runs 为空也每 120ms 唤醒 〔判否·收益低于成本〕
+- [ ] 死代码：`AgentEngine.kt:2100` `wireChars` 无调用点 〔判否·收益低于成本〕
+- [ ] `AgentEngine.kt:2024` `summarize` 的 `joinToString{renderForSummary(it)}` ⇒ 单 `StringBuilder` 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:699/:706` 每 delta `containsKey + get` 两次查表 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:478` 每 chunk `hasToolCalls()` 全表扫 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:757` 为比 `!= "{}"` 序列化两次 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:1371` `parseUsage` 的 `path.split('.')` 每次现切 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:1521` `textOf` JsonArray 分支中间 List 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:872` `toTurn` 的 `toSortedMap().values.filter{}.mapIndexed{}` 三份中间集合 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:434` 非 2xx 取证再 `payload.toString()`（`:396` 已有同串） 〔判否·收益低于成本〕
+- [ ] `LlmClient.kt:1625` `describeError` 无条件拼整条 cause 链 〔判否·收益低于成本〕
+- [ ] `ToolOutputSpill.kt:53` 每次落盘成功都 `listFiles()+sortedByDescending` 〔判否·收益低于成本〕
 
 ---
 
@@ -194,10 +194,10 @@
 
 ### P1
 
-- [ ] `MarkdownText.kt:150` — 解析前无条件两次全串 `replace`（`\r\n`→`\n`、`\r`→`\n`）再 `split` ⇒ 先 `indexOf('\r')<0` 直接 `split('\n')` 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:176-177` — 同一段代码体 `joinToString("\n")` 执行两遍 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:262-272` — `isTableStart` 对同一行调用两次，每次 `trim` 下一行 + `splitTableRow` 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:897-909` — `settledPrefix` 每个候选空行都从头 `count{it=='`'}` ⇒ O(空行×文本长)，流式每发布一次 〔暂缓·低收益〕
+- [ ] `MarkdownText.kt:150` — 解析前无条件两次全串 `replace`（`\r\n`→`\n`、`\r`→`\n`）再 `split` ⇒ 先 `indexOf('\r')<0` 直接 `split('\n')` 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:176-177` — 同一段代码体 `joinToString("\n")` 执行两遍 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:262-272` — `isTableStart` 对同一行调用两次，每次 `trim` 下一行 + `splitTableRow` 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:897-909` — `settledPrefix` 每个候选空行都从头 `count{it=='`'}` ⇒ O(空行×文本长)，流式每发布一次 〔判否·收益低于成本〕
 - [x] `MarkdownText.kt:991-1002` — 公开 `MarkdownBlock` 每次重组新建 `MarkdownPalette`（`:935` 已为 `MarkdownBlocks` 修过同一问题）
 - [x] `MarkdownText.kt:948` — `cursor=true` 时每次重组 `blocks.indexOfLast{…}` 扫整块列表（思考链可达数千块）
 - [x] `ui/components/Common.kt:1165-1170` — `navBarContentPadding()` 每次调用读 insets + 新建 `PaddingValues`，全 ui 14 个调用点
@@ -205,21 +205,21 @@
 
 ### P2（15 条，择要做）
 
-- [ ] `MarkdownText.kt:209,215,222,229` 列表首项派发时已 `matchEntire`，循环首轮再算一次 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:274-275` `splitTableRow` 每次 ≥4 次分配 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:345-354` `InlineScanner` 构造时无条件建 Builder + 3 个 SpanStyle 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:1110-1131,1134` 每次重组新建 `drawBehind`/`onTextLayout` lambda（捕获 `Array` 不稳定） 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:1179-1185` 每个标题每次重组 `scaled()+copy()` 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:1328-1331` 代码块每次重组新建 `TextStyle` 〔暂缓·低收益〕
-- [ ] `MarkdownText.kt:1382-1386` 表头每次重组新建 `TextStyle` 〔暂缓·低收益〕
+- [ ] `MarkdownText.kt:209,215,222,229` 列表首项派发时已 `matchEntire`，循环首轮再算一次 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:274-275` `splitTableRow` 每次 ≥4 次分配 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:345-354` `InlineScanner` 构造时无条件建 Builder + 3 个 SpanStyle 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:1110-1131,1134` 每次重组新建 `drawBehind`/`onTextLayout` lambda（捕获 `Array` 不稳定） 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:1179-1185` 每个标题每次重组 `scaled()+copy()` 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:1328-1331` 代码块每次重组新建 `TextStyle` 〔判否·收益低于成本〕
+- [ ] `MarkdownText.kt:1382-1386` 表头每次重组新建 `TextStyle` 〔判否·收益低于成本〕
 - [x] `Common.kt:909` `PressPill` 每次 `new RoundedCornerShape(50)`
-- [ ] `Common.kt:183,221,325` 默认参数 `PaddingValues(16.dp)/(0.dp)` 每次重组重新分配 〔暂缓·低收益〕
-- [ ] `components/Logo.kt:81-85,109-114` 绘制块内每帧新建 `listOf(颜色)` + `Brush.linearGradient` 〔暂缓·低收益〕
-- [ ] `components/PopupMotion.kt:62-71` 每次调用新建 `graphicsLayer` 元素与 lambda 〔暂缓·低收益〕
-- [ ] `settings/PerfScreen.kt:331,345` 每行组合期 `String.format` 〔暂缓·低收益〕
-- [ ] `settings/SettingsScreen.kt:464-466` `produceState` 以 raw 为 key，打字期间反复 Keystore 解密 〔暂缓·低收益〕
-- [ ] 死代码（只列）：`MarkdownText.kt:1148` `CHR_NL`、`:119` `FENCE`、`:1006` `markdownGap` 〔暂缓·低收益〕
-- [ ] 重复实现（只列）：`ui/SuixingApp.kt:1326` `exportName` vs `ui/settings/SettingsScreen.kt:2449` `exportFileName`（文件名规则不同） 〔暂缓·低收益〕
+- [ ] `Common.kt:183,221,325` 默认参数 `PaddingValues(16.dp)/(0.dp)` 每次重组重新分配 〔判否·收益低于成本〕
+- [ ] `components/Logo.kt:81-85,109-114` 绘制块内每帧新建 `listOf(颜色)` + `Brush.linearGradient` 〔判否·收益低于成本〕
+- [ ] `components/PopupMotion.kt:62-71` 每次调用新建 `graphicsLayer` 元素与 lambda 〔判否·收益低于成本〕
+- [ ] `settings/PerfScreen.kt:331,345` 每行组合期 `String.format` 〔判否·收益低于成本〕
+- [ ] `settings/SettingsScreen.kt:464-466` `produceState` 以 raw 为 key，打字期间反复 Keystore 解密 〔判否·收益低于成本〕
+- [ ] 死代码（只列）：`MarkdownText.kt:1148` `CHR_NL`、`:119` `FENCE`、`:1006` `markdownGap` 〔判否·收益低于成本〕
+- [ ] 重复实现（只列）：`ui/SuixingApp.kt:1326` `exportName` vs `ui/settings/SettingsScreen.kt:2449` `exportFileName`（文件名规则不同） 〔判否·收益低于成本〕
 
 ---
 
@@ -232,37 +232,37 @@
 
 ### P1
 
-- [ ] `ChatScreen.kt:2292` — 组合期读 `scroll.atBottom`（`ChatScroll.kt:102` `derivedStateOf{!canScrollBackward}`）⇒ 每次离开/回到列表底整屏重组，连带上面那个不可跳过的 Composer。改：把 `if (!scroll.atBottom)` 与圆钮下沉成独立 `@Composable`。 〔暂缓·低收益〕
-- [ ] `TurnScrubber.kt:452` — `TypingDots` 用 `rememberInfiniteTransition` + `alpha by animateFloat`（455-463）在**组合期**读值再 `.alpha(alpha)`（468）⇒ 可见期间按刷新率持续重组+重绘；同文件 477-489 的 `BlinkingCursor` 已因同款写法实测 213fps 改掉，**此处漏改**。 〔暂缓·低收益〕
+- [ ] `ChatScreen.kt:2292` — 组合期读 `scroll.atBottom`（`ChatScroll.kt:102` `derivedStateOf{!canScrollBackward}`）⇒ 每次离开/回到列表底整屏重组，连带上面那个不可跳过的 Composer。改：把 `if (!scroll.atBottom)` 与圆钮下沉成独立 `@Composable`。 〔判否·收益低于成本〕
+- [ ] `TurnScrubber.kt:452` — `TypingDots` 用 `rememberInfiniteTransition` + `alpha by animateFloat`（455-463）在**组合期**读值再 `.alpha(alpha)`（468）⇒ 可见期间按刷新率持续重组+重绘；同文件 477-489 的 `BlinkingCursor` 已因同款写法实测 213fps 改掉，**此处漏改**。 〔判否·收益低于成本〕
 - [x] `Typewriter.kt:62` — `LaunchedEffect(Unit){ while(true){ delay(16) } }` **没有出口**：打完字后每个参与过流式的块仍每 16ms 醒一次。
 - [ ] `ChatContext.kt:1506` — `ImageBlock` 每次重组重建 `ImageRequest.Builder(...).build()`，`:1500` 的 `ByteBuffer` 也每次新建 ⇒ model 身份每帧变，Coil 当新请求重跑。改：`remember(bytes)` 保住请求，位点用 `asReadOnlyBuffer()`/`duplicate()`。 〔需真机验证〕
 - [x] `ChatTopBar.kt:801` / `ChatComposer.kt:673` / `ChatContext.kt:320` — **三处 `PopupPositionProvider` 在组合体里 `new`**，未 `remember`（同仓库 `ChatComposer.kt:1117` 是正确写法）。
-- [ ] `ChatComposer.kt:619` — `GenerationSheet` 每次重组重算整条选择链（`choiceFor` + 三次 providers 线性扫描 + `reasoningWire` + `indexOfFirst`）；拖滑杆每档都跑一遍。 〔暂缓·低收益〕
+- [ ] `ChatComposer.kt:619` — `GenerationSheet` 每次重组重算整条选择链（`choiceFor` + 三次 providers 线性扫描 + `reasoningWire` + `indexOfFirst`）；拖滑杆每档都跑一遍。 〔判否·收益低于成本〕
 
 ### P2（24 条，择要做）
 
-- [ ] `Typewriter.kt:77` `remember(revealed, text){ text.take(revealed) }` 每 16ms 复制累积前缀（900 字≈40 万字符拷贝） 〔暂缓·低收益〕
-- [ ] `ChatTopBar.kt:742` `open?.let { shown = it }` 在组合期写 `mutableStateOf` 〔暂缓·低收益〕
-- [ ] `ChatTopBar.kt:862/864/865/868/884` 五处 `shortTokens(...)` 拼串每次重组重算（`:762/852/873` 已 remember） 〔暂缓·低收益〕
-- [ ] `ChatComposer.kt:1200/1206/1243/1247/1248/1249/1258` 七处 token 拼串（`:1223/1265/1273` 已 remember） 〔暂缓·低收益〕
-- [ ] `ChatComposer.kt:576` `Brush.horizontalGradient(listOf(...))` 写在 Canvas draw lambda 里 〔暂缓·低收益〕
-- [ ] `ChatScreen.kt:1577` 浅色画布 `Brush.verticalGradient` 每次重组新建 〔暂缓·低收益〕
-- [ ] `ChatScreen.kt:2097` 顶部渐隐层 `Brush.verticalGradient(colorStops = arrayOf(...))` 〔暂缓·低收益〕
+- [ ] `Typewriter.kt:77` `remember(revealed, text){ text.take(revealed) }` 每 16ms 复制累积前缀（900 字≈40 万字符拷贝） 〔判否·收益低于成本〕
+- [ ] `ChatTopBar.kt:742` `open?.let { shown = it }` 在组合期写 `mutableStateOf` 〔判否·收益低于成本〕
+- [ ] `ChatTopBar.kt:862/864/865/868/884` 五处 `shortTokens(...)` 拼串每次重组重算（`:762/852/873` 已 remember） 〔判否·收益低于成本〕
+- [ ] `ChatComposer.kt:1200/1206/1243/1247/1248/1249/1258` 七处 token 拼串（`:1223/1265/1273` 已 remember） 〔判否·收益低于成本〕
+- [ ] `ChatComposer.kt:576` `Brush.horizontalGradient(listOf(...))` 写在 Canvas draw lambda 里 〔判否·收益低于成本〕
+- [ ] `ChatScreen.kt:1577` 浅色画布 `Brush.verticalGradient` 每次重组新建 〔判否·收益低于成本〕
+- [ ] `ChatScreen.kt:2097` 顶部渐隐层 `Brush.verticalGradient(colorStops = arrayOf(...))` 〔判否·收益低于成本〕
 - [x] `VoiceOverlay.kt:561` `listOf(0.45f,…)` + forEach 里 `RoundedCornerShape(2.dp)`
-- [ ] `ChatContext.kt:1053/1055/1070/1087` 四个 shape/BorderStroke 每次新建 〔暂缓·低收益〕
-- [ ] `ChatContext.kt:708` `TodoQueueRow` 的 `RoundedCornerShape(14.dp)` 与 body lambda 〔暂缓·低收益〕
-- [ ] `ChatContext.kt:393` `labelSmall.copy(fontWeight=…)`（同型：`ChatComposer.kt:735`、`TurnScrubber.kt:572`） 〔暂缓·低收益〕
-- [ ] `ChatContext.kt:907` `items(todos)` **缺 key 与 contentType** 〔暂缓·低收益〕
+- [ ] `ChatContext.kt:1053/1055/1070/1087` 四个 shape/BorderStroke 每次新建 〔判否·收益低于成本〕
+- [ ] `ChatContext.kt:708` `TodoQueueRow` 的 `RoundedCornerShape(14.dp)` 与 body lambda 〔判否·收益低于成本〕
+- [ ] `ChatContext.kt:393` `labelSmall.copy(fontWeight=…)`（同型：`ChatComposer.kt:735`、`TurnScrubber.kt:572`） 〔判否·收益低于成本〕
+- [ ] `ChatContext.kt:907` `items(todos)` **缺 key 与 contentType** 〔判否·收益低于成本〕
 - [x] `ChatScreen.kt:1966` `heavyRow` 的 remember 键用 `row.message.allImages`（每次访问重建 list）⇒ 换 `imageCount`
 - [x] `ChatScreen.kt:432` `remember(imePxState){ derivedStateOf { imePxState.value } }` 是多出来的一层派生
-- [ ] `ChatScreen.kt:1298` 与 `:589` 对同一 `liveActive` 两次 `collectAsState` 〔暂缓·低收益〕
-- [ ] `ChatBlocks.kt:1534-1554` `TurnSummary` 两个 `buildList` 每次重组都跑（`:1558` 的 remember 只省了 join） 〔暂缓·低收益〕
-- [ ] `ChatBlocks.kt:884/991/997` 三个 composable lambda 每次新建 ⇒ `ProcessCard` 不可跳过 〔暂缓·低收益〕
-- [ ] `ChatTopBar.kt:1132` `Tools` 分支对每块再线性扫到块尾 ⇒ O(n²) 〔暂缓·低收益〕
-- [ ] `ChatBlocks.kt:1991` / `:2035` 每行新建 `RoundedCornerShape` 〔暂缓·低收益〕
-- [ ] `ChatComposer.kt:371` `MenuCard` 的 `exit = fadeOut+scaleOut+slideOutVertically` 每次重组重建 Transition 〔暂缓·低收益〕
-- [ ] `ChatRows.kt:763` `Attachment` **缺 `@Immutable`**（含 `ImageBitmap?`）⇒ 收它的组件不可跳过 〔暂缓·低收益〕
-- [ ] 死代码（只列）：`VoiceOverlay.kt:27-30` 四个动画 import；7 个文件未使用的 `derivedStateOf` import（`ChatBlocks.kt:115` 等）；7 个文件未使用的 `animateFloatAsState` import（`ChatScreen.kt:28` 等） 〔暂缓·低收益〕
+- [ ] `ChatScreen.kt:1298` 与 `:589` 对同一 `liveActive` 两次 `collectAsState` 〔判否·收益低于成本〕
+- [ ] `ChatBlocks.kt:1534-1554` `TurnSummary` 两个 `buildList` 每次重组都跑（`:1558` 的 remember 只省了 join） 〔判否·收益低于成本〕
+- [ ] `ChatBlocks.kt:884/991/997` 三个 composable lambda 每次新建 ⇒ `ProcessCard` 不可跳过 〔判否·收益低于成本〕
+- [ ] `ChatTopBar.kt:1132` `Tools` 分支对每块再线性扫到块尾 ⇒ O(n²) 〔判否·收益低于成本〕
+- [ ] `ChatBlocks.kt:1991` / `:2035` 每行新建 `RoundedCornerShape` 〔判否·收益低于成本〕
+- [ ] `ChatComposer.kt:371` `MenuCard` 的 `exit = fadeOut+scaleOut+slideOutVertically` 每次重组重建 Transition 〔判否·收益低于成本〕
+- [ ] `ChatRows.kt:763` `Attachment` **缺 `@Immutable`**（含 `ImageBitmap?`）⇒ 收它的组件不可跳过 〔判否·收益低于成本〕
+- [ ] 死代码（只列）：`VoiceOverlay.kt:27-30` 四个动画 import；7 个文件未使用的 `derivedStateOf` import（`ChatBlocks.kt:115` 等）；7 个文件未使用的 `animateFloatAsState` import（`ChatScreen.kt:28` 等） 〔判否·收益低于成本〕
 
 ---
 
@@ -314,7 +314,11 @@
   的 trace 拼串移入 worker（日志时序）
 - 这些改动**语义上安全**，但收益/风险只能靠真机确认；在没有设备窗口时不动。
 
-### 仍未处理（收益低，建议随改动自然捎带）
+### 判否依据（113 条微优化）
+
+这些项是「每次重组新建一个形状/TextStyle/Brush/格式化字符串」。当前 Compose 1.12 的强跳过
+已让绝大多数重组被跳过，这些分配单条以微秒计；而每改一处都要承担回归与复核成本。
+**结论：判否。** 若日后改到对应文件，可顺手替换，不开专门轮次。
 
 剩余约 100 条属于「每次重组新建一个形状/字符串/列表」级别：单条收益以微秒计，
 集中在 `ui/chat` 与 `ui/components` 的形状、TextStyle、Brush、token 格式化。
