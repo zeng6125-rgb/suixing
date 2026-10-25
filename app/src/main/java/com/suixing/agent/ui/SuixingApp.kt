@@ -1490,7 +1490,7 @@ private fun ConversationRow(
 }
 
 /** 抽屉长按菜单的面板宽度：锚点与面板同宽，菜单才贴着行的右缘弹出（见 ConversationRow）。 */
-private val DrawerMenuWidth = 200.dp
+private val DrawerMenuWidth = 300.dp  // 与模型选择卡同宽（用户要求小浮层一致）
 
 /**
  * 面板高度：6 个 40dp 的项 + MenuCard 的上下各 14dp 内边距（项之间不再有外层 padding）。

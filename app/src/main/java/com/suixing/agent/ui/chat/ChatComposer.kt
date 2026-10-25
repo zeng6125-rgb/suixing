@@ -313,6 +313,8 @@ internal fun MenuCard(
     focusable: Boolean = false,
     /** 需要显式定位时传它（与 alignment + offset 二选一）。 */
     popupPositionProvider: androidx.compose.ui.window.PopupPositionProvider? = null,
+    /** 是否自带"点外面即关闭"的遮罩（默认带：focus-less 窗口自己看不到外部点击）。 */
+    scrim: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -328,6 +330,21 @@ internal fun MenuCard(
     // A plain return from this composable, before any group is opened: while the card is
     // closed there is no popup at all, and nothing to intercept a touch with.
     if (!keepMounted) return
+    // **自带遮罩**：focus-less 的 Popup 窗口看不到外部点击与 BACK，没有这层就"点哪都关不掉"。
+    // 放在卡片 Popup 之前组合 —— 窗口按组合顺序叠，先组合的在下面。
+    if (visible && scrim) {
+        Popup(properties = PopupProperties(focusable = false)) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss,
+                    ),
+            )
+        }
+    }
     // 定位二选一：同时传 alignment/offset 与 provider 编译不过。
     val cardBody: @Composable () -> Unit = {
             // **首次组合必须先从 false 翻到 true，入场才会跑**：`keepMounted` 是在 `visible`
@@ -1075,6 +1092,7 @@ internal fun ContextRing(
             val popupMotion = rememberPopupMotion()
             LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
             // **直接复用 MenuCard**（与模型选择同一个组件）；需要显式定位，故传 popupPositionProvider。
+            val belowGlyphPx = with(density) { 8.dp.roundToPx() }
             MenuCard(
                 visible = open,
                 onDismiss = { open = false },
@@ -1089,11 +1107,16 @@ internal fun ContextRing(
                             layoutDirection: LayoutDirection,
                             popupContentSize: IntSize,
                         ): IntOffset {
+                            // **紧跟按钮**：横向以按钮中心对齐（再夹到屏幕内），纵向优先放在按钮
+                            // 上方、放不下就翻到下方 —— 原来固定贴屏幕右侧、还可能顶出屏幕。
                             val margin = ringPopupMarginPx.toInt()
-                            val x = (windowSize.width - margin - popupContentSize.width)
-                                .coerceAtLeast(margin)
-                            val y = (anchorBounds.top - popupContentSize.height - 8)
-                                .coerceAtLeast(0)
+                            val anchorCentre = anchorBounds.left + anchorBounds.width / 2
+                            val rawX = anchorCentre - popupContentSize.width / 2
+                            val x = rawX.coerceIn(margin, (windowSize.width - margin - popupContentSize.width).coerceAtLeast(margin))
+                            val above = anchorBounds.top - popupContentSize.height - belowGlyphPx
+                            val below = anchorBounds.bottom + belowGlyphPx
+                            val y = if (above >= margin) above
+                                else below.coerceAtMost((windowSize.height - margin - popupContentSize.height).coerceAtLeast(margin))
                             return IntOffset(x, y)
                         }
                     }
