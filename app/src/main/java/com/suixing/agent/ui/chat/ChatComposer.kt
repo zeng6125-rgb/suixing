@@ -391,6 +391,8 @@ internal fun MenuCard(
                         val s = 0.92f + 0.08f * p
                         scaleX = s
                         scaleY = s
+                        // 入场淡入（用户：淡入也要）。
+                        alpha = p
                     },
                 content = content,
             )
@@ -667,10 +669,10 @@ internal fun GenerationSheet(
                 // **左缘对齐按钮左沿**（与添加菜单、审批菜单、圆环菜单同一套）：卡片从按钮
                 // 左边伸出、向上长。右缘对齐按钮右缘是错的 —— 模型按钮的框只包住模型名
                 // （很窄），卡片会被推到屏幕左侧，用户看到的就是"偏左"。
-                // 右移 16dp（用户：模型选择器再右移 16dp）。
-                val nudgeRight = with(density) { 16.dp.roundToPx() }
+                // 左移 16dp（用户：模型选择器左移 16dp）。
+                val nudgeLeft = with(density) { 16.dp.roundToPx() }
                 val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
-                val x = (anchorBounds.left + nudgeRight).coerceIn(edge, maxLeft)
+                val x = (anchorBounds.left - nudgeLeft).coerceIn(edge, maxLeft)
                 val y = (anchorBounds.top - popupContentSize.height - gap).coerceAtLeast(edge)
                 return IntOffset(x, y)
             }
