@@ -42,6 +42,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * 把窗口钉在屏幕支持的最高刷新率上（这台机器是 120Hz）。
+     *
+     * 为什么需要：系统的自适应刷新会让静止画面降到 60Hz、一滑动再切回 120Hz。帧耗时本身没问题
+     * （实测纯滚动 p99=7ms，120Hz 的预算是 8.33ms），但**切换那一刻**的观感就是"忽然不顺"——
+     * 用户报的"没有满帧"其实是这个。钉住显式模式后不再来回切。
+     *
+     * 只设 `preferredDisplayModeId` + `preferredRefreshRate`：前者选那个 120Hz 的显示模式
+     * （真正决定面板跑多少），后者是给系统的一个明确偏好。窗口级 `setFrameRate` 在这个
+     * compileSdk 下解析不到（它是 Surface/更高 API 上的接口），而这两项在本机已经够用
+     * —— `dumpsys display` 里 `appRequest render: (0.0 120.0)` 说明系统认这个请求。
+     * API 30 以下没有这些接口（minSdk 26），直接跳过 —— 那时系统本来也不会自适应。
+     *
+     * 代价是耗电：这个 app 的界面本来就是滚动/流式为主，钉高刷是对的取舍（用户明确要求）。
+     */
+    private fun pinToHighestRefreshRate() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val best = display?.supportedModes?.maxByOrNull { it.refreshRate } ?: return
+        val attributes = window.attributes
+        if (attributes.preferredDisplayModeId != best.modeId) {
+            attributes.preferredDisplayModeId = best.modeId
+            attributes.preferredRefreshRate = best.refreshRate
+            window.attributes = attributes
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从后台回来时系统可能已经恢复了自适应模式，重钉一次（幂等）。
+        pinToHighestRefreshRate()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // 启动窗口的底色来自主题，而主题里的 @color/window_background 是 uiMode 限定符
         // （values-night 里换）：用户**在 app 里强制深色**、而系统是浅色时，系统会先按浅色画
@@ -60,6 +92,7 @@ class MainActivity : ComponentActivity() {
         // The app draws its own headers and a floating nav bar, so it owns the
         // whole window instead of leaving two system-coloured strips behind.
         enableEdgeToEdge()
+        pinToHighestRefreshRate()
         // enableEdgeToEdge already asks for this, but saying it outright keeps the
         // gesture-bar strip out of the layout in both themes even if a future
         // enableEdgeToEdge call drops the flag.
