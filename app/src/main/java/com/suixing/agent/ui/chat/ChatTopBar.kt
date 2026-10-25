@@ -1186,10 +1186,21 @@ internal fun AssistantRow(
                             // 直接渲染 `part.text`，不做打字机；`settled = false` 走
                             // `rememberGrowingMarkdown` 的**增量解析**路径（只重解析尾部），
                             // 而不是后来新增的 settled 分支。
-                            if (streaming || !selectable) {
+                            // **逐字显影**（用户要"流式必须做好"）：流式通道修通之后
+                            // （LiveParts 的版本号修复），打字机终于能真正工作 —— 之前它
+                            // "不生效"是因为屏幕压根没在重组。
+                            // live 块（bornAtMs > 0）从 0 开始逐字放；已定型/历史内容直接全文，
+                            // 不重播。速度随积压自适应（Typewriter.typeStep），chunk 再大也连续。
+                            val liveText = part.bornAtMs > 0L
+                            val shown = rememberTypedText(
+                                text = part.text,
+                                enabled = streaming || liveText,
+                                startAtZero = liveText,
+                            )
+                            if (streaming || !selectable || shown.length < part.text.length) {
                                 MarkdownText(
-                                    text = part.text,
-                                    settled = false,
+                                    text = shown,
+                                    settled = !streaming,
                                     cursor = streaming,
                                 )
                             } else {

@@ -6,6 +6,25 @@ import com.suixing.agent.data.StoredMessage
 /**
  * 流式气泡里画的东西，以及它们的**增量更新**规则（issue #38）。
  *
+ * ## ⚠️ 易复发：可变缓冲 + 列表判等 = 屏幕冻结
+ *
+ * 2026-10-26 用户连续十余轮报「正文流式是整段整段地出」，根因就在这里：
+ *
+ * `GrowableText` 是**可变**的，`appendText` 追加后把**同一个对象**放回列表 ⇒ 新旧列表里逐元素
+ * `===` ⇒ `List.equals` 为 true ⇒ `_state.update { copy(liveParts = …) }` 判等 ⇒
+ * **StateFlow 不发射 ⇒ 不重组 ⇒ 屏幕冻结**，直到列表结构变化（段落结束）才一次性吐出。
+ *
+ * 思考流式当时看着正常，只是因为 `reasoning` 字段每次都变、整个 state 判不等才顺带发射；
+ * 正文没有这个字段，所以整个 state 判等 ⇒ 冻结。**症状与"渲染慢/打字机没生效"极像，
+ * 但原因在数据层。**
+ *
+ * 修复：`Text` / `Thinking` 带 `version`，追加时放回**新实例**（`version + 1`）⇒ 列表判等为
+ * false ⇒ state 发射。缓冲仍然共享 ⇒ 仍是 O(1) 追加，没有回到 O(n²) 整串复制。
+ * 回归由 `LivePartsFreezeTest` 守住。
+ *
+ * **教训**：改这块之前先读 `app/src/test/.../LivePartsFreezeTest.kt` —— 它把机制写得很死，
+ * 而当时没人去读它。
+ *
  * 为什么单独成文件：这些函数处在**每个 delta 都会走的路径**上（`applyPending` 每 80ms 一批，
  * 一轮几千个 delta）。它们原来散在 `ChatViewModel`（3,600 行、依赖整个 `Core`、无法单测）里，
  * 于是"改坏一处不会有人发现"——而这里恰好已经出过两次 O(n²) 事故。
