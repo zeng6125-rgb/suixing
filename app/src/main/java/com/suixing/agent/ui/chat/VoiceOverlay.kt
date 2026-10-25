@@ -556,7 +556,8 @@ internal fun formatDictationTime(millis: Long): String {
  */
 @Composable
 internal fun VoiceBars(level: Float, active: Boolean, tint: Color) {
-    val shape = listOf(0.45f, 0.75f, 1f, 0.75f, 0.45f)
+    // 权重表与圆角提到文件级：录音期间 level 每 100ms 变一次。
+    val shape = VoiceBarWeights
     val shown = if (active) level else 0.12f
     Row(
         modifier = Modifier.height(22.dp),
@@ -568,9 +569,15 @@ internal fun VoiceBars(level: Float, active: Boolean, tint: Color) {
                 Modifier
                     .width(3.dp)
                     .height((6f + 14f * shown * weight).dp)
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(VoiceBarShape)
                     .background(tint.copy(alpha = if (active) 1f else 0.5f)),
             )
         }
     }
 }
+
+/** 语音条权重（中间最高）。 */
+private val VoiceBarWeights = floatArrayOf(0.45f, 0.75f, 1f, 0.75f, 0.45f)
+
+/** 语音条圆角。 */
+private val VoiceBarShape = RoundedCornerShape(2.dp)

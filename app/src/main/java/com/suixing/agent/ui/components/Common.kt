@@ -906,7 +906,8 @@ fun PressPill(
     elevation: Dp = 8.dp,
     content: @Composable RowScope.() -> Unit,
 ) {
-    val shape = RoundedCornerShape(50)
+    // 常量形状（原来每次重组都 new 一个，全站胶囊共用）。
+    val shape = PillShape
     val shadowed = modifier.shadow(
         elevation = elevation,
         shape = shape,
@@ -1168,3 +1169,6 @@ internal fun navBarContentPadding(extra: Dp = 12.dp): PaddingValues {
     val bottom: Dp = with(density) { bottomPx.toDp() }
     return PaddingValues(bottom = bottom + extra)
 }
+
+/** 胶囊圆角：PressPill 共用，避免每次重组新建。 */
+private val PillShape = RoundedCornerShape(50)
