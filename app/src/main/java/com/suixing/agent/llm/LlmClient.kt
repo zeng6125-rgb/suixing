@@ -883,15 +883,23 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
         fun hasToolCalls(): Boolean = calls.values.any { it.name.isNotBlank() }
 
         fun toTurn(): AssistantTurn {
-            val requests = calls.toSortedMap().values
-                .filter { it.name.isNotBlank() }
-                .mapIndexed { index, call ->
-                    ToolCallRequest(
-                        id = call.id.ifBlank { "call_$index" },
-                        name = call.name,
-                        arguments = call.arguments.toString().ifBlank { "{}" },
+            // **一趟建表**（优化清单 llm-P2）：原来 `toSortedMap().values.filter{}.mapIndexed{}`
+            // 会建三份中间集合；排序一次后直接 buildList，结果与顺序完全相同。
+            val ordered = calls.toSortedMap().values
+            val requests = buildList {
+                var index = 0
+                for (call in ordered) {
+                    if (call.name.isBlank()) continue
+                    add(
+                        ToolCallRequest(
+                            id = call.id.ifBlank { "call_$index" },
+                            name = call.name,
+                            arguments = call.arguments.toString().ifBlank { "{}" },
+                        ),
                     )
+                    index++
                 }
+            }
             return AssistantTurn(text.toString(), requests, finishReason, thinking.toString(), usage)
         }
     }
