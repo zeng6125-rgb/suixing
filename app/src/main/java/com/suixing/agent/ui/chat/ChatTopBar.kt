@@ -1124,17 +1124,24 @@ internal fun AssistantRow(
                             // 开了 strong skipping 时按 **equals（结构）** 比较：复用同一实例能让
                             // `AbstractList.equals` 首行 `o === this` 短路，省掉逐条 `ToolLine` 的深比较
                             // （每条带 toolArgs / toolOutput 字符串，工具输出可能几十 KB）。
-                            val tools = remember(parts, index) {
-                                buildList {
+                            // **合并结果与"块尾下标"同一趟算完并 remember**（优化清单 chat-P2）：
+                            // 原来 `tools` 在 remember 里扫一遍、紧接着又在组合体里线性扫到块尾
+                            // 找 cursor ⇒ 多块 Tool 时是 O(n²)，且 cursor 每次重组都重算。
+                            val bundle = remember(parts, index) {
+                                val calls = buildList {
                                     var c = index
                                     while (c < parts.size && parts[c] is Part.Tools) {
                                         addAll((parts[c] as Part.Tools).calls)
                                         c++
                                     }
                                 }
+                                // cursor = 这一串 Tools 之后的第一块。
+                                var cursor = index
+                                while (cursor < parts.size && parts[cursor] is Part.Tools) cursor++
+                                calls to cursor
                             }
-                            var cursor = index + 1
-                            while (cursor < parts.size && parts[cursor] is Part.Tools) cursor++
+                            val tools = bundle.first
+                            val cursor = bundle.second
                             ToolBundle(
                                 tools = tools,
                                 // Only the newest block can be the one waiting on a tool.
