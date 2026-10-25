@@ -309,19 +309,26 @@ internal fun TopBarContextEntry(
         MenuCard(
             visible = open,
             onDismiss = { open = false },
-            // **恢复原来的定位方式**（用户：之前位置是对的）：Popup 以 TopCenter 对齐锚点，
-            // 卡片出现在图表按钮正下方并水平居中；offset 只做水平微调 + 36dp 的下移。
-            alignment = Alignment.TopCenter,
-            offset = with(density) {
-                IntOffset(
-                    popupNudgeCentred(
-                        anchorCentre = anchorCentreX,
-                        width = cardWidth,
-                        windowPx = screenPx,
-                        edgePx = with(density) { 24.dp.toPx() },
-                    ).roundToInt(),
-                    28.dp.roundToPx() + 8.dp.roundToPx(),
-                )
+            // **显式定位**：锚点就是这个 28dp 的图表按钮，卡片顶边 = 按钮下沿 + 8dp（向下长），
+            // 右缘 = 按钮右缘，横纵都留 16dp 边距。全程只用 Popup 给的 anchorBounds 与卡片实际
+            // 尺寸，不依赖 cardWidth 之类的测量状态 ⇒ 打开后位置不会再变一次。
+            alignment = Alignment.TopStart,
+            offset = IntOffset.Zero,
+            popupPositionProvider = object : PopupPositionProvider {
+                override fun calculatePosition(
+                    anchorBounds: IntRect,
+                    windowSize: IntSize,
+                    layoutDirection: LayoutDirection,
+                    popupContentSize: IntSize,
+                ): IntOffset {
+                    val gap = with(density) { 8.dp.roundToPx() }
+                    val edge = with(density) { POPUP_EDGE_AIR.roundToPx() }
+                    val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
+                    val x = (anchorBounds.right - popupContentSize.width).coerceIn(edge, maxLeft)
+                    val maxTop = (windowSize.height - edge - popupContentSize.height).coerceAtLeast(edge)
+                    val y = (anchorBounds.bottom + gap).coerceAtMost(maxTop)
+                    return IntOffset(x, y)
+                }
             },
             focusable = false,
         ) {
@@ -634,9 +641,8 @@ internal fun SteerQueueRow(
                 ImagePreviewDialog(
                     bitmap = picture,
                     contentDescription = "排队中的图片",
-                    // **与已发出消息里的图片预览完全一致**（用户确认基准是 B）：
-                    // B 走默认的 Dialog 形态（有系统遮罩、可点外部关闭）。这里显式写 false。
-                    keepKeyboard = false,
+                    // 与输入框附件预览相同：Popup、不抢键盘，viewer 自己绘制黑色遮罩。
+                    keepKeyboard = true,
                 ) { fullPicture = null }
             }
             Text(

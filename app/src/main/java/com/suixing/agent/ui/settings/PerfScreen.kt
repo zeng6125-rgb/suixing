@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -37,6 +38,7 @@ import com.suixing.agent.data.PerfHealth
 import com.suixing.agent.data.PerfRecord
 import com.suixing.agent.data.PerfSummary
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.navBarContentPadding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -125,8 +127,9 @@ internal fun PerfScreen(onBack: () -> Unit) {
             Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .navigationBarsPadding()
                 .padding(horizontal = 16.dp),
+            // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
+            contentPadding = PaddingValues(bottom = navBarContentPadding().calculateBottomPadding()),
         ) {
             item(key = "summary") {
                 Column(Modifier.padding(vertical = 12.dp)) {

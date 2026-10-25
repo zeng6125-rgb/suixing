@@ -1253,22 +1253,6 @@ internal fun Composer(
                                 // capsule. Hung on the capsule box itself, BottomStart put the
                                 // popup's bottom on the capsule's bottom — covering the button
                                 // that opened it, which is what the user photographed.
-                                Box(Modifier.fillMaxWidth().height(0.dp)) {
-                                    GenerationSheet(
-                                        settings = settings,
-                                        assistantId = assistantId,
-                                        conversationProviderId = conversationProviderId,
-                                        conversationModel = conversationModel,
-                                        conversationReasoningEffort = conversationReasoningEffort,
-                                        onChooseReasoning = onChooseReasoning,
-                                        visible = sheetOpen,
-                                        capsuleRight = capsuleRight,
-                                        capsuleTop = capsuleTop,
-                                        onPickModel = onPickModel,
-                                        onOpenSettings = onOpenSettings,
-                                        onDismiss = { sheetOpen = false },
-                                    )
-                                }
                                 // The capsule's own right edge, measured: the sheet hangs off
                                 // the button that opened it, and the free space around the
                                 // button is wider than the button whenever the model name is
@@ -1280,6 +1264,22 @@ internal fun Composer(
                                         capsuleTop = it.boundsInWindow().top
                                     },
                                 ) {
+                                // **卡片挂在按钮自己的 Box 里**（与添加菜单、审批菜单同构）：Popup 的
+                                // 锚点就是这个 28dp 高的按钮框，于是卡片底边落在按钮上沿 −8dp、
+                                // 右缘对齐按钮右缘。原来它挂在一个整行宽的零高探针上，锚点是屏幕
+                                // 左边那条线，卡片因此跑到别的位置。
+                                GenerationSheet(
+                                    settings = settings,
+                                    assistantId = assistantId,
+                                    conversationProviderId = conversationProviderId,
+                                    conversationModel = conversationModel,
+                                    conversationReasoningEffort = conversationReasoningEffort,
+                                    onChooseReasoning = onChooseReasoning,
+                                    visible = sheetOpen,
+                                    onPickModel = onPickModel,
+                                    onOpenSettings = onOpenSettings,
+                                    onDismiss = { sheetOpen = false },
+                                )
                                 UnifiedSelector(
                                 settings = settings,
                                 assistantId = assistantId,

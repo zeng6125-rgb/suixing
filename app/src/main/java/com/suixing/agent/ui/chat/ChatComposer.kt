@@ -588,18 +588,8 @@ internal fun GenerationSheet(
     conversationReasoningEffort: String?,
     /** Writes a level onto this conversation alone; see the view model's chooseReasoning. */
     onChooseReasoning: (String) -> Unit,
-    /** The model button's centre, in window pixels; 0 until the composer has measured it. */
     /** Whether the card is open. It animates in and out on this, so it stays composed. */
     visible: Boolean,
-    /** The model capsule's TOP edge in window pixels, or 0 before it is measured. */
-    capsuleTop: Float = 0f,
-    /**
-     * The model capsule's right edge in window pixels, or 0 before the composer has measured
-     * it. The sheet is right-aligned to this edge rather than to the free space around the
-     * capsule: the free space is wider than the button whenever the model name is short, and
-     * the card then sat that far to the right of the control it belongs to.
-     */
-    capsuleRight: Float,
     onPickModel: (ProviderConfig, String) -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
@@ -627,38 +617,7 @@ internal fun GenerationSheet(
         modelOffers(settings.providers, choice.model, provider)
     }
     val density = LocalDensity.current
-    // The anchor's own left edge and the sheet's own width, both measured: the first is
-    // where the popup's alignment starts counting from, the second is what decides how far
-    // a centred sheet would hang off an edge.
-    var anchorLeft by remember { mutableStateOf(0f) }
-    var anchorRight by remember { mutableStateOf(0f) }
-    var sheetWidth by remember { mutableStateOf(0) }
     val windowWidth = LocalConfiguration.current.screenWidthDp.dp
-    val screenPx = with(density) { windowWidth.toPx() }
-    val edge = with(density) { POPUP_EDGE_AIR.toPx() }
-    // Right-aligned to the capsule that opened it, not centred: centred put the sheet's mass to
-    // the left of the ring, which read as left-aligned. Falls back to the free space's own right
-    // edge until the capsule has been measured — the two agree whenever the name is long enough
-    // to fill the row, which is the case the old anchor was written for.
-    val nudge = if (sheetWidth <= 0 || anchorLeft == 0f) {
-        0f
-    } else {
-        val width = sheetWidth.toFloat()
-        val right = if (capsuleRight > 0f) capsuleRight else anchorRight
-        val left = (right - width)
-            .coerceIn(edge, (screenPx - edge - width).coerceAtLeast(edge))
-        left - anchorLeft
-    }
-    // Zero-height, full-width probe inside the composer's anchor box: it reads that box's
-    // edges, which are the origin the popup's own alignment is measured from.
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .onGloballyPositioned {
-                anchorLeft = it.boundsInWindow().left
-                anchorRight = it.boundsInWindow().right
-            },
-    )
     // Which page the sheet is on: the light one — the model that will answer and how hard it
     // thinks — or the full list of models. The list became a page of its own because the user
     // asked for the first page to stay small.
@@ -681,16 +640,25 @@ internal fun GenerationSheet(
         // how the card ends up centred on the model button.
         visible = visible,
         onDismiss = onDismiss,
-        // **不用 provider**：provider 依赖 popupContentSize，首帧卡片尺寸还没量出来时会被
-        // 摆到屏幕右边再跳回来（用户看到的"从右侧进场"）。改成 alignment + 常量偏移：
-        // 锚点是胶囊顶部的零高探针，BottomEnd 让卡片**向上长**；水平偏移只由 capsuleRight
-        // 与窗口宽算出，不需要卡片尺寸 ⇒ 第一帧就在最终位置。
+        // **显式定位**（不用 alignment）：锚点就是模型按钮自己的框（见 [TurnScrubber] 的挂点），
+        // 于是卡片底边 = 按钮上沿 −8dp（长在按钮上方，不盖住它）、右缘 = 按钮右缘。
+        // 全程只用 Popup 给的 anchorBounds 与卡片实际尺寸，不依赖任何测量状态 ⇒ 不会跳位。
         alignment = Alignment.BottomEnd,
-        offset = with(density) {
-            IntOffset(
-                (capsuleRight - screenPx + 24.dp.toPx()).roundToInt(),
-                -8.dp.roundToPx(),
-            )
+        offset = IntOffset.Zero,
+        popupPositionProvider = object : PopupPositionProvider {
+            override fun calculatePosition(
+                anchorBounds: IntRect,
+                windowSize: IntSize,
+                layoutDirection: LayoutDirection,
+                popupContentSize: IntSize,
+            ): IntOffset {
+                val gap = with(density) { 8.dp.roundToPx() }
+                val edge = with(density) { POPUP_EDGE_AIR.roundToPx() }
+                val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
+                val x = (anchorBounds.right - popupContentSize.width).coerceIn(edge, maxLeft)
+                val y = (anchorBounds.top - popupContentSize.height - gap).coerceAtLeast(edge)
+                return IntOffset(x, y)
+            }
         },
         // Focus-less: opening this card must not take the keyboard off the field, or the
         // composer falls by the keyboard's height under a card anchored to where it used to
@@ -704,8 +672,7 @@ internal fun GenerationSheet(
         // to find a model, and 264dp of content cut the long ones at the card's edge. The 340dp
         // that first fixed this is back, but only while the list is up.
         modifier = Modifier
-            .widthIn(max = popupCap(if (picking) 340.dp else 300.dp, windowWidth))
-            .onSizeChanged { sheetWidth = it.width },
+            .widthIn(max = popupCap(if (picking) 340.dp else 300.dp, windowWidth)),
     ) {
         if (!picking) {
             // Page one: one big name to tap, one slider to drag, nothing else.

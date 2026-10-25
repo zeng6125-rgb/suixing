@@ -46,6 +46,7 @@ import com.suixing.agent.data.PROFILE_MIN_TURNS
 import com.suixing.agent.data.PROFILE_STEP_TURNS
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.components.SettingRow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -91,9 +92,14 @@ fun ProfileScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
+                .padding(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 0.dp,
+                    // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
+                    bottom = navBarContentPadding().calculateBottomPadding(),
+                ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(

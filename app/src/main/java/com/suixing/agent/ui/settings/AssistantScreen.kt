@@ -22,6 +22,7 @@ import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantListContent
 import com.suixing.agent.ui.components.FullScreenOverlay
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.navBarContentPadding
 
 /**
  * 助手：一整页，不再是半屏的表。
@@ -73,9 +74,9 @@ fun AssistantScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
-                    // 列表自己滚动，导航栏的内边距就留在滚动区之外：最后一行不会被手势条压住。
-                    .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 10.dp),
+                // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
+                bottomPadding = navBarContentPadding().calculateBottomPadding(),
             )
         }
         editing?.let { target ->

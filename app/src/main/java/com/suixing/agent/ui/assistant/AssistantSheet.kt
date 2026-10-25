@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
@@ -114,6 +115,11 @@ fun AssistantListContent(
     modifier: Modifier = Modifier,
     /** Null when the host's own bar already carries the title. */
     title: String? = "助手",
+    /**
+     * 滚动区底部额外避让（issue #47）：整页形态下让内容穿到手势条底下、只有末行避让；
+     * 半屏表没有这个需求，传 0。
+     */
+    bottomPadding: Dp = 0.dp,
 ) {
     // 两两一行是布局用的中间结果，不是状态：不 remember 就每次重组都重建一层嵌套 List。
     val rows = remember(assistants) { assistants.chunked(2) }
@@ -144,7 +150,8 @@ fun AssistantListContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = false)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = bottomPadding),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             rows.forEach { pair ->

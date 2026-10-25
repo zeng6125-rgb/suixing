@@ -22,7 +22,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -1145,4 +1147,24 @@ fun EmptyState(
             content()
         }
     }
+}
+
+/**
+ * 列表底部的手势条避让（issue #47 评论区：设置页「没有 edge to edge」「手势条没沉浸」）。
+ *
+ * 原来列表用 `Modifier.navigationBarsPadding()`：那块空间把内容**裁掉**了，于是内容从
+ * 来不穿到手势条底下，滚到底时手势条区域是一条空的背景带 —— 与 MIUI 系统设置的观感不同。
+ *
+ * 现在内容画满到手势条下面（沉浸），只有**最后一行**通过 contentPadding 避让：滚动中内容
+ * 从手势条底下穿过，停到底时末行浮在导航条上方。`Scaffold` 的
+ * `contentWindowInsets = WindowInsets(0,0,0,0)` 已经把窗口让出来了，只差这一步。
+ *
+ * [extra] 是列表自己额外的呼吸位（原来那 12dp）。
+ */
+@Composable
+internal fun navBarContentPadding(extra: Dp = 12.dp): PaddingValues {
+    val density = LocalDensity.current
+    val bottomPx = WindowInsets.navigationBars.getBottom(density)
+    val bottom: Dp = with(density) { bottomPx.toDp() }
+    return PaddingValues(bottom = bottom + extra)
 }

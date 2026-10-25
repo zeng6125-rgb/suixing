@@ -65,6 +65,7 @@ import com.suixing.agent.tools.TIER_ROOT
 import com.suixing.agent.tools.TIER_SHELL
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
@@ -187,7 +188,7 @@ fun ToolsScreen(onBack: () -> Unit) {
     // 根节点必须自己铺不透明底：转场里进页是**不淡入**的（见 SuixingApp 顶部那段），这一页
     // 若透出外壳的底，进页的那一帧就会看到上一页的残影。
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        Column(Modifier.fillMaxSize()) {
             PageTopBar(
                 title = "工具",
                 // 副标题（每个 tab 一句说明）去掉：顶栏不带副标题，而当前 tab 由下面的
@@ -540,7 +541,13 @@ private fun ToolsTab() {
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
+                // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            top = 0.dp,
+            bottom = navBarContentPadding().calculateBottomPadding(),
+        ),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 grouped.forEach { (group, groupTools) ->
@@ -575,7 +582,13 @@ private fun ToolsTab() {
 private fun PluginsTab(onNotify: (String) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
+        // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            top = 0.dp,
+            bottom = navBarContentPadding().calculateBottomPadding(),
+        ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { PluginsIntroCard() }
@@ -682,7 +695,13 @@ private fun McpSection(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
+        // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            top = 0.dp,
+            bottom = navBarContentPadding().calculateBottomPadding(),
+        ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { McpIntroCard() }
