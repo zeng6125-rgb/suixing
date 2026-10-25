@@ -31,6 +31,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
@@ -315,8 +316,6 @@ internal fun MenuCard(
     scrim: Boolean = true,
     /** 卡片底色；默认与其它浮层一致（theme 的 surface）。 */
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
-    /** 临时诊断：标出是哪个浮层。 */
-    debugTag: String = "",
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -347,14 +346,6 @@ internal fun MenuCard(
             )
         }
     }
-    if (debugTag.isNotEmpty() && visible) {
-        androidx.compose.runtime.LaunchedEffect(debugTag, visible) {
-            com.suixing.agent.ui.components.PopupDiag.log(
-                debugTag,
-                "visible color=#%08X".format(containerColor.value.toULong()),
-            )
-        }
-    }
     // 定位二选一：同时传 alignment/offset 与 provider 编译不过。
     val cardBody: @Composable () -> Unit = {
             // **首次组合必须先从 false 翻到 true，入场才会跑**：`keepMounted` 是在 `visible`
@@ -375,7 +366,9 @@ internal fun MenuCard(
                 // 就显得发灰 —— 用户对比两个浮层看到的"底色不一样"就是它。
                 enter = scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
                     slideInVertically(tween(POPUP_ANIM_MS)) { it / 6 },
-                exit = scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
+                // 退场**保持原样**（用户没让改）：淡出 + 缩回 + 下落。
+                exit = fadeOut(tween(POPUP_ANIM_MS)) +
+                    scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
                     slideOutVertically(tween(POPUP_ANIM_MS)) { it / 6 },
             ) {
                 Column(
@@ -707,7 +700,6 @@ internal fun GenerationSheet(
                 }
             }
         } else null,
-        debugTag = "model",
         // Focus-less: opening this card must not take the keyboard off the field, or the
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].

@@ -805,10 +805,6 @@ internal fun TurnMetrics(
                             layoutDirection: androidx.compose.ui.unit.LayoutDirection,
                             popupContentSize: androidx.compose.ui.unit.IntSize,
                         ): androidx.compose.ui.unit.IntOffset {
-                            com.suixing.agent.ui.components.PopupDiag.log(
-                                "topbar",
-                                "anchor=$anchorBounds window=$windowSize card=$popupContentSize",
-                            )
                             // 与触发按钮左沿对齐（原来贴屏幕右边，所以都从右侧出现）。
                             val x = anchorBounds.left.coerceIn(
                                 edge,
