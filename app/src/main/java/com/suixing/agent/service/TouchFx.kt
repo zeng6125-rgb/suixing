@@ -1333,7 +1333,13 @@ private class FxView(
     /** 预计算好的 16 个 band 形状；几何不变就一直复用（issue #26）。 */
     private val haloBandCache = arrayOfNulls<Path>(FX_HALO_BANDS)
     /** 缓存对应的几何签名：屏幕矩形 + 圆角 + 光晕宽度，任何一项变了才重建。 */
-    private var haloCacheKey: String? = null
+    // 几何缓存键：**数字字段直接比较**，不拼字符串（每帧一次插值＝每帧一次分配）。
+    private var haloKeyLeft = Float.NaN
+    private var haloKeyTop = Float.NaN
+    private var haloKeyRight = Float.NaN
+    private var haloKeyBottom = Float.NaN
+    private var haloKeyCorner = Float.NaN
+    private var haloKeyFade = Float.NaN
     private var edgeStart = 0L
 
     /** The ring's shader, rebuilt only when the screen's shape changes — see [rainbow]. */
@@ -1526,7 +1532,6 @@ private class FxView(
      */
     private fun drawGlow(canvas: Canvas, alpha: Float, now: Long) {
         if (alpha <= 0.01f) return
-        val outer = edgeShape()
         // Proportional to the short side, then capped: the fraction alone keeps growing with the
         // panel, and past [FX_HALO_MAX_WIDTH_DP] the light reads as a bar laid on the screen.
         val fadeWidth = (minOf(edgeRect.width(), edgeRect.height()) * FX_HALO_WIDTH_FRACTION)
@@ -1536,10 +1541,21 @@ private class FxView(
         // **band 形状与时间/透明度无关**（只依赖屏幕几何），所以缓存在几何变化前绝不重建。
         // 原来每帧 16 次「复制外轮廓 + 重建内轮廓 + Path.op」是要掉帧的主因（issue #26 原因二）；
         // 现在每帧只剩「设 alpha + drawPath」，画出来的东西逐像素不变。
-        val key = "${edgeRect.left},${edgeRect.top},${edgeRect.right},${edgeRect.bottom}," +
-            "$cornerPx,$fadeWidth"
-        if (haloCacheKey != key) {
-            haloCacheKey = key
+        //
+        // 两处每帧白付的代价（优化清单 tools-P1）已改掉：
+        //  · `edgeShape()` 每帧重建外轮廓路径 —— 它只依赖几何，移进缓存分支；
+        //  · 每帧用字符串插值拼 6 个数值做相等比较 —— 改为直接比较数字字段，零分配。
+        if (haloKeyLeft != edgeRect.left || haloKeyTop != edgeRect.top ||
+            haloKeyRight != edgeRect.right || haloKeyBottom != edgeRect.bottom ||
+            haloKeyCorner != cornerPx || haloKeyFade != fadeWidth
+        ) {
+            haloKeyLeft = edgeRect.left
+            haloKeyTop = edgeRect.top
+            haloKeyRight = edgeRect.right
+            haloKeyBottom = edgeRect.bottom
+            haloKeyCorner = cornerPx
+            haloKeyFade = fadeWidth
+            val outer = edgeShape()
             for (band in 0 until FX_HALO_BANDS) {
                 val endT = (band + 1) / FX_HALO_BANDS.toFloat()
                 val path = haloBandCache[band] ?: Path().also { haloBandCache[band] = it }

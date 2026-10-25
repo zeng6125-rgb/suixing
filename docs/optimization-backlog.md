@@ -21,6 +21,12 @@
 | `ui/chat` | 33 | 1 | 8 | 24 |
 | **合计** | **149** | **7** | **42** | **100** |
 
+## 进度（2026-10-26 04:xx 起）
+
+- 已完成：issue #49 + 11 条清单项（见下节「已完成」与各节里打勾的 `[x]`）
+- 进行中：按 P0 → P1 → P2 逐条推进（goal-a3468e21）
+- 每批次均以 `./gradlew :app:testDebugUnitTest` 全绿 + `git push` 收尾
+
 ## 0. 已完成（本次已落地并验证）
 
 | 项 | 位置 | 说明 |
@@ -45,7 +51,7 @@
 
 ### P0
 
-- [ ] `data/ChatRepository.kt:203` — 为取 4000 字尾部把整份日志 `readText()`（30MB 会话＝30MB 读 + 最多 60MB 中间串），且发生在仓库级锁内（`:194`）。
+- [x] `data/ChatRepository.kt:203` — 为取 4000 字尾部把整份日志 `readText()`（30MB 会话＝30MB 读 + 最多 60MB 中间串），且发生在仓库级锁内（`:194`）。
   改：`RandomAccessFile` seek 到 `len-20KB` 只读末段再 decode + `takeLast(4000)`。风险低。
 - [ ] `data/ChatRepository.kt:405` — 整个 `save()` 在单把 Mutex 内完成追加写 + `raf.fd.sync()`（`ChatStore.kt:371`）+ meta 写 + 目录 `fsync`（`ChatStore.kt:789,803`），期间所有会话的 `readTail/readWire/chatSize` 排队。
   改：按 chatId 分锁，列表状态另用一把锁。风险中。
@@ -54,7 +60,7 @@
 
 - [ ] `data/ChatRepository.kt:442` / `:726` — `save()` 已读盘中 meta，`writeTail()` 再 `readMeta` 一次。
 - [ ] `data/ChatRepository.kt:769` / `:781` — `write()` 先 `readMeta` 判空、紧接着再读同一文件；`:755` `logExists()` 为判断某代日志把整个 `store/` 列一遍。
-- [ ] `data/ChatStore.kt:216` — `readMeta` 每次 `isFile + readText + decode`，无缓存，被 6 个入口各调一次。
+- [x] `data/ChatStore.kt:216` — `readMeta` 每次 `isFile + readText + decode`，无缓存，被 6 个入口各调一次。
 
 ### P1（其余单点）
 
@@ -62,8 +68,8 @@
 - [ ] `data/ChatRepository.kt:544` — 每次 save 都 `filterNot` + `listOf` + `sortedByDescending`：3 份 List + 一次排序，只为把一条挪到首位。
 - [ ] `data/ChatRepository.kt:65` — `load()` 把目录列了多遍：`:830` `chats/`、`:844` `store/`、`:864` 再列 `store/`。
 - [ ] `data/ChatStore.kt:710` — `encode()` 先 `buildString` 拼整份日志再 `toByteArray`，峰值容量翻倍。
-- [ ] `data/JobStore.kt:136` — `lastLineOf` 走 `readJobLog(tail=1)` 每次读末尾 256KB 再 `lines()` 全拆。
-- [ ] `data/JobStore.kt:98` — `find(id)` 实现为 `list().firstOrNull`，为一个 job 把每个 job 的 256KB 日志都读一遍。
+- [x] `data/JobStore.kt:136` — `lastLineOf` 走 `readJobLog(tail=1)` 每次读末尾 256KB 再 `lines()` 全拆。
+- [x] `data/JobStore.kt:98` — `find(id)` 实现为 `list().firstOrNull`，为一个 job 把每个 job 的 256KB 日志都读一遍。
 - [ ] `data/ChatRepository.kt:621` — `saveLive` 流式期间每秒调用一次（`ChatViewModel.kt:2884,2908`），持锁时先 `encodeToString` 整份草稿再 `fd.sync` + 目录 fsync。
 - [ ] `data/ChatRepository.kt:185` — `chatSize()` 只为拿 gen 与尺寸就 `readMeta`（含 checkpoints/activeRuns 全解析），会话列表每行都调。
 
@@ -94,7 +100,7 @@
 
 ### P0
 
-- [ ] `service/SuixingAccessibilityService.kt:383` — `takeScreenshot` 回调注册在 `mainExecutor`，`onSuccess(:366-374)` 在**主线程**做 `wrapHardwareBuffer` → `copy(ARGB_8888)` → `createScaledBitmap` → JPEG 压缩。
+- [x] `service/SuixingAccessibilityService.kt:383` — `takeScreenshot` 回调注册在 `mainExecutor`，`onSuccess(:366-374)` 在**主线程**做 `wrapHardwareBuffer` → `copy(ARGB_8888)` → `createScaledBitmap` → JPEG 压缩。
   改：整段挪到后台线程，只把 `ByteArray` resume 回 continuation。风险低。
 
 ### P1
@@ -140,7 +146,7 @@
 
 ### P0
 
-- [ ] `llm/LlmClient.kt:503` — 单行 `data:` 帧先**探针解析**一次，成功后又交 `acceptPayload(:458-459)` 解析同一字符串 ⇒ 最热路径每 delta 两次全量 JSON 解析。
+- [x] `llm/LlmClient.kt:503` — 单行 `data:` 帧先**探针解析**一次，成功后又交 `acceptPayload(:458-459)` 解析同一字符串 ⇒ 最热路径每 delta 两次全量 JSON 解析。
   改：让 `acceptPayload` 返回 `JsonObject?`/布尔，探针复用其返回值。风险中。
 
 ### P1（都是「每轮重建」）
@@ -179,7 +185,7 @@
 
 - [x] `ui/components/MarkdownText.kt:156-159` **已修** — 每行（含空行）在 `when` 之前先跑完 `MD_FENCE/HEADING/BULLET/ORDERED` 四条 `matchEntire`，而首支就是 `trimmed.isEmpty()` ⇒ 空行白跑 4 次。
   改：把测试挪进对应 `when` 分支，顺序不变。风险低。
-- [ ] `ui/components/MarkdownText.kt:237,249-260` — 段落扫描 `opensBlock` 对同一行再跑 6 条正则，派发阶段已跑过其中 4 条 ⇒ 每正文行 ≥10 次匹配；块边界行被三轮重测。风险中。
+- [x] `ui/components/MarkdownText.kt:237,249-260` — 段落扫描 `opensBlock` 对同一行再跑 6 条正则，派发阶段已跑过其中 4 条 ⇒ 每正文行 ≥10 次匹配；块边界行被三轮重测。风险中。
 
 ### P1
 
@@ -242,7 +248,7 @@
 - [ ] `ChatContext.kt:708` `TodoQueueRow` 的 `RoundedCornerShape(14.dp)` 与 body lambda
 - [ ] `ChatContext.kt:393` `labelSmall.copy(fontWeight=…)`（同型：`ChatComposer.kt:735`、`TurnScrubber.kt:572`）
 - [ ] `ChatContext.kt:907` `items(todos)` **缺 key 与 contentType**
-- [ ] `ChatScreen.kt:1966` `heavyRow` 的 remember 键用 `row.message.allImages`（每次访问重建 list）⇒ 换 `imageCount`
+- [x] `ChatScreen.kt:1966` `heavyRow` 的 remember 键用 `row.message.allImages`（每次访问重建 list）⇒ 换 `imageCount`
 - [ ] `ChatScreen.kt:432` `remember(imePxState){ derivedStateOf { imePxState.value } }` 是多出来的一层派生
 - [ ] `ChatScreen.kt:1298` 与 `:589` 对同一 `liveActive` 两次 `collectAsState`
 - [ ] `ChatBlocks.kt:1534-1554` `TurnSummary` 两个 `buildList` 每次重组都跑（`:1558` 的 remember 只省了 join）
