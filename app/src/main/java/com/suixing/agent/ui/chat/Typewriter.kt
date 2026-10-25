@@ -30,7 +30,13 @@ import kotlin.math.ceil
  */
 @Composable
 internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 0L): String {
-    if (!enabled || !LocalTypewriter.current) return text
+    if (!LocalTypewriter.current) return text
+    // **一旦开始打就一直打完**（含流式结束之后）。原来 `enabled=false` 立刻返回全文 ——
+    // 模型一停，屏幕上剩下没打的尾巴会被一次性补上，那正是「一下子全部显示」的最后一段。
+    // 用普通数组记「这块打过没有」：写它不通知快照，不会引起重组循环。
+    val everStreamed = remember { booleanArrayOf(false) }
+    if (enabled) everStreamed[0] = true
+    if (!everStreamed[0]) return text
     val target = rememberUpdatedState(text)
     // 初值见 [initialRevealed]（issue #46）：刚诞生的块从 0 打，早就存在的块直接给全文。
     var revealed by remember {
@@ -75,32 +81,18 @@ private const val TYPE_FRESH_MS = 500L
 /**
  * 这一拍放几个字（40ms 一拍 ⇒ 25 拍/秒）。
  *
- * **第三次修（2026-10-25，用户仍报「正文一下全部显示」）**：旧规则 `backlog/4` 第一拍能推 75 个字；
- * 上一轮改成「上限 6 字/拍（150 字/秒）」，但设备实测（`files/perf.json`）生成速度是
- * **51~175 tokens/s，典型 ~100** —— 中文约 100~200 字/秒。**揭示速度 ≥ 到达速度 ⇒ 永远追得平
- * ⇒ 每一拍正好把新到的字放完，看起来就是「一次性出来」**。问题不是"追不及时会掉队"，而是
- * "追得太快就没有打字感"。
+ * **2026-10-25 第四次修（用户：不要分档，任何长度都要逐字）**：
+ * 恒定 5 字/拍（125 字/秒），**不再按落后量提速**。前几版分别用 `backlog/4`、上限 6 字/拍、
+ * 按落后量分档 —— 设备实测生成速度 51~175 tokens/s（中文约 100~200 字/秒），只要揭示速度
+ * 接近或超过到达速度，每一拍就会把新到的字一次放完，看着就是整块出现。恒定慢速才始终逐字。
  *
- * 所以改成**分档**（按积压量，模拟过 300 / 600 / 2000 字整块与 62、200 字/秒两种流）：
- * - 常态 [TYPE_BASE_STEP] 字/拍（75 字/秒）：明显慢于到达速度 ⇒ 看得见逐字；
- * - 积压 >[TYPE_LAG_SMALL] 提到 6 字/拍，>[TYPE_LAG_BIG] 提到 10，>[TYPE_LAG_HUGE] 提到 16：
- *   只为避免一次超长输出把显示吊在后面几分钟，正常流式走不到前两档。
+ * 代价（用户明确接受）：整段答完的速度会比模型慢。900 字的回答约 12 秒打完。
  *
- * 实测：300 字 3.6 秒、600 字 5.6 秒、2000 字 10 秒；62 字/秒的慢流不落后，200 字/秒的快流
- * 最多落后 3 秒。
+ * 另外**流式结束后继续打完**（见下面的 [TextTyper]）：否则模型一停，剩下的尾巴会被一次性
+ * 补上 —— 那正是「一下子全部显示」的最后一段。
  */
-internal fun typeStep(backlog: Int): Int = when {
-    backlog <= 0 -> TYPE_MIN_STEP
-    backlog > TYPE_LAG_HUGE -> 16
-    backlog > TYPE_LAG_BIG -> 10
-    backlog > TYPE_LAG_SMALL -> 6
-    else -> TYPE_BASE_STEP
-}
+internal fun typeStep(backlog: Int): Int = TYPE_STEP
 
-/** 常态推进量：3 字/拍 = 75 字/秒。低于设备实测的到达速度（100~200 字/秒），逐字才看得见。 */
-private const val TYPE_BASE_STEP = 3
-
-/** 积压到这么多字（约 3 秒）就升一档，往上还有两档兜底。 */
-private const val TYPE_LAG_SMALL = 240
-private const val TYPE_LAG_BIG = 600
-private const val TYPE_LAG_HUGE = 1200
+/** 每拍放几个字，恒定不变：5 字/拍 = 125 字/秒。**任何长度的正文都按这个速度逐字**，
+ * 不按落后量提速 —— 分档会让「积压多的时候又快成整块」，那等于没有打字机。 */
+private const val TYPE_STEP = 5

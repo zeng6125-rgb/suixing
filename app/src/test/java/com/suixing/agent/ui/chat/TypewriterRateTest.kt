@@ -4,84 +4,82 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 打字机速度规则的可验证判据。
+ * 打字机速度的可验证判据。
  *
- * 上一轮（0.8.430）用 `backlog / 4`：正文一个 delta 带几百字时，**第一拍就推上去 75 个字**
- * —— 视觉上整屏刷出来，这就是「正文没能逐字」；思考块的 delta 小，所以一直看着正常。
+ * 用户的要求（2026-10-25 第四次）：**任何长度都逐字，不要分档**。
  *
- * 这组测试不测"手感"（那要真机看），只把手感背后的三条**可量化**性质钉死：
+ * 这一组测试守着三条性质：
  *
- * 1. **不许一次刷一屏**：常态单拍 3 个字。
- * 2. **看得出在打**：300 字必须打 3 秒以上 —— 比设备实测的到达速度（100~200 字/秒）慢，
- *    否则揭示追得上到达就看不见逐字（这正是前两轮没修好的原因）。
- * 3. **不许吊着**：超长整块要分档提速，2000 字 12 秒内放完。
- * 4. **稳态不落后**：正常到达速率下（每 80ms 5 个字 ≈ 62 字/秒），显示落后不超过 ~1.5 秒的量。
- *
- * 真机验收仍然需要：录一次「思考刚结束、正文首片较大」的流，看是否逐字、结束时是否瞬移。
+ * 1. **恒定速度**：单拍推进量永远是 [TYPE_STEP_FOR_TEST]，不随积压变化（分档会让积压多时
+ *    又快成整块，等于没有打字机）。
+ * 2. **慢于到达速度**：设备实测生成 51~175 tokens/s（中文约 100~200 字/秒）；揭示速度必须
+ *    明显低于它，否则每一拍正好把新到的字放完，看着就是整块出现。
+ * 3. **代价被记录**：恒定 3 字/拍意味着长答案会比模型慢 —— 2000 字约 27 秒。这是用户明确
+ *    接受的取舍，写成断言是为了防止以后有人"顺手"把速度提上去又毁掉逐字。
  */
 class TypewriterRateTest {
 
     private data class Sim(val drainMs: Int, val worstLagMs: Int, val firstJump: Int)
 
-    /**
-     * 模拟一次流式：每 [chunkEveryMs] 到达 [chunk] 个字，打字机每 40ms 一拍。
-     * 返回放完全部内容用了多久、过程中最大落后（换算成毫秒）、以及第一次推进的字数。
-     */
     private fun simulate(totalChars: Int, chunk: Int, chunkEveryMs: Int = 80): Sim {
         var arrived = 0
         var revealed = 0
         var t = 0
         var worstLagMs = 0
         var firstJump = -1
-        while (revealed < totalChars && t < 200_000) {
+        while (revealed < totalChars && t < 600_000) {
             t += TICK
             if (t % chunkEveryMs == 0 && arrived < totalChars) {
                 arrived = minOf(totalChars, arrived + chunk)
             }
+            val step = typeStep(arrived - revealed)
             val before = revealed
-            revealed = minOf(arrived, revealed + typeStep(arrived - revealed))
+            revealed = minOf(arrived, revealed + step)
             if (firstJump < 0 && revealed > before) firstJump = revealed - before
-            // 落后量换算成"按当前到达速率还要等多久"
             worstLagMs = maxOf(worstLagMs, (arrived - revealed) * chunkEveryMs / chunk)
         }
-        return Sim(drainMs = t, worstLagMs = worstLagMs, firstJump = firstJump)
+        return Sim(t, worstLagMs, firstJump)
     }
 
     @Test
-    fun `a few hundred characters never appear in one wall of text`() {
-        // 正文最常见的坏场景：思考刚结束，首片正文一次到 300 字。
+    fun `单拍推进量与积压无关`() {
+        // 从 0 到几千字的积压，推进量必须完全一样。
+        val steps = listOf(0, 1, 10, 100, 300, 1000, 5000, 100_000).map { typeStep(it) }
+        assertTrue("推进量必须恒定，实际 $steps", steps.all { it == TYPE_STEP_FOR_TEST })
+    }
+
+    @Test
+    fun `三百字的整块仍然逐字`() {
         val sim = simulate(totalChars = 300, chunk = 300)
         assertTrue(
-            // 整块 300 字一到达就已越过 240 的档位 ⇒ 第一拍走 6 字档；旧规则这里是 75。
-            "第一拍最多 6 个字（旧规则是 75 个），实际 ${sim.firstJump}",
-            sim.firstJump in 1..TYPE_LAG_STEP_FOR_TEST,
+            "第一拍只该推 ${TYPE_STEP_FOR_TEST} 个字，实际 ${sim.firstJump}",
+            sim.firstJump == TYPE_STEP_FOR_TEST,
         )
-        assertTrue(
-            "300 字要在 3~6 秒内逐字放完（快于这个就看不出在打），实际 ${sim.drainMs}ms",
-            sim.drainMs in 3_000..6_000,
-        )
+        // 300 / 5 * 40ms = 2.4s
+        assertTrue("300 字应打 2.2~4 秒，实际 ${sim.drainMs}ms", sim.drainMs in 2_000..3_000)
     }
 
     @Test
-    fun `a big chunk still finishes in seconds rather than crawling`() {
-        // 2000 字一次性到达：加速档必须介入，不能按 125 字/秒慢慢爬 16 秒。
+    fun `长答案按同一速度打完（代价已接受）`() {
         val sim = simulate(totalChars = 2_000, chunk = 2_000)
-        // 积压到 1200 字就进最快档（16 字/拍 = 400 字/秒），不能吊几分钟。
-        assertTrue("2000 字应在 12 秒内放完，实际 ${sim.drainMs}ms", sim.drainMs <= 12_000)
+        // 2000 / 5 * 40ms = 16s —— 恒定速度的必然结果，不再有加速档。
+        assertTrue(
+            "2000 字应是 14~18 秒（恒定速度），实际 ${sim.drainMs}ms",
+            sim.drainMs in 15_000..17_000,
+        )
     }
 
     @Test
-    fun `a normal stream does not fall behind`() {
-        // 正常流式：每 80ms 5 个字（62 字/秒）。显示最多落后 1.5 秒的量。
+    fun `正常流式不会越积越多`() {
+        // 每 80ms 5 个字 = 62 字/秒 < 75 字/秒的揭示速度 ⇒ 不会掉队。
         val sim = simulate(totalChars = 3_000, chunk = 5)
         assertTrue("稳态落后应 ≤1500ms，实际 ${sim.worstLagMs}ms", sim.worstLagMs <= 1_500)
     }
 
     @Test
-    fun `a slow endpoint still shows visible motion`() {
-        // 慢端点：每 80ms 1 个字。每一拍至少推进，不能停住。
+    fun `慢端点也看得见在动`() {
+        // 每 80ms 1 个字：揭示速度远高于到达速度，随到随打。
         val sim = simulate(totalChars = 40, chunk = 1)
-        // 40 个字按 1 个/80ms 到达本身就要 3200ms；显示最多再拖半秒。
         assertTrue("慢端点最多比到达晚 0.5 秒，实际 ${sim.drainMs}ms", sim.drainMs <= 40 * 80 + 500)
     }
 
@@ -89,7 +87,7 @@ class TypewriterRateTest {
         /** 与 Typewriter.kt 的 TYPE_TICK_MS 一致（改动时两边一起改）。 */
         const val TICK = 40
 
-        /** 单拍上限的测试侧副本：Typewriter.kt 里是 private，这里按同样口径断言。 */
-        const val TYPE_LAG_STEP_FOR_TEST = 6
+        /** 与 Typewriter.kt 的 TYPE_STEP 一致。 */
+        const val TYPE_STEP_FOR_TEST = 5
     }
 }

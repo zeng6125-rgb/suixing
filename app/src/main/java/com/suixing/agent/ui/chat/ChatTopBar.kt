@@ -1144,12 +1144,16 @@ internal fun AssistantRow(
                             }
                             // 流式时逐字放（外观 → 打字机效果）；settled 直接全文，选区也用全文。
                             val shown = rememberTypedText(part.text, streaming, part.bornAtMs)
-                            if (streaming || !selectable) {
+                            // 流式结束后打字机可能还没打完（恒定 75 字/秒，慢于模型）——
+                            // 那段时间仍然要画 `shown`，否则剩下的尾巴会一次性补上。
+                            val typing = shown.length < part.text.length
+                            if (streaming || !selectable || typing) {
                                 // **`settled = !streaming`**（第四轮评审 M1）：live 正文不传 `cursor`
                                 // （光标由下面的 `BlinkingCursor()` 单独画），若让它按 `!cursor`
                                 // 默认成"定稿"，打字机 25 Hz 每拍一个新前缀都会塞进进程级 LRU
                                 // ⇒ 缓存被同一条答案的 16 个前缀占满、流式期命中率恒为 0。
-                                MarkdownText(text = shown, settled = !streaming)
+                                // 还在打的时候不能标 settled：那会把每一个前缀写进进程级 LRU。
+                                MarkdownText(text = shown, settled = !streaming && !typing)
                             } else {
                                 SelectableWhenArmed { MarkdownText(text = part.text) }
                             }
