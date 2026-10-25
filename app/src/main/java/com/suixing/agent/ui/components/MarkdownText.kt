@@ -989,7 +989,10 @@ fun MarkdownBlocks(
         )
     }
     // 光标挂在**最后一个 block 是段落**时；否则不画（列表/代码块尾部挂光标排版会怪）。
-    val cursorAt = if (cursor) blocks.indexOfLast { it is MdBlock.Paragraph } else -1
+    // **光标下标要缓存**（优化清单 ui-P1）：思考链可达数千块，`indexOfLast` 每次重组都要扫一遍。
+    val cursorAt = remember(blocks, cursor) {
+        if (cursor) blocks.indexOfLast { it is MdBlock.Paragraph } else -1
+    }
     // **空文本也要有光标**（用户：思考流式光标"还是有滞后性"）：思考文本经常以换行结尾，
     // 此时最新那一行是空串 ⇒ 这里解析出 0 个块 ⇒ `cursorAt = -1` ⇒ 光标根本不画，
     // 换行后的一段时间里看起来"光标落后了"。补一个空段落承载光标。
@@ -1032,16 +1035,23 @@ fun MarkdownBlock(
     onUrlClick: ((String) -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // **palette 要 remember**（优化清单 ui-P1）：它是 data class，原来每次重组都新建一份 ⇒
+    // 内联扫描缓存的 key（按值比较）虽然仍能命中，但对象本身每帧都在分配。
+    // 同文件 `MarkdownBlocks` 早就这么做了，这里漏改。
+    val codeFontSize = MaterialTheme.typography.bodySmall.fontSize
+    val palette = remember(scheme, codeFontSize) {
+        MarkdownPalette(
+            codeBackground = scheme.surfaceContainerHigh,
+            codeColor = scheme.onSurfaceVariant,
+            linkColor = scheme.primary,
+            codeFontSize = codeFontSize,
+        )
+    }
     MarkdownBlock(
         block = block,
         style = style,
         color = color,
-        palette = MarkdownPalette(
-            codeBackground = scheme.surfaceContainerHigh,
-            codeColor = scheme.onSurfaceVariant,
-            linkColor = scheme.primary,
-            codeFontSize = MaterialTheme.typography.bodySmall.fontSize,
-        ),
+        palette = palette,
         onUrlClick = onUrlClick,
     )
 }
