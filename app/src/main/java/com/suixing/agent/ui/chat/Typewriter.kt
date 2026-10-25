@@ -56,8 +56,9 @@ internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 
     return remember(revealed, text) { text.take(revealed) }
 }
 
-/** 一个节拍多久放一次字。40ms＝25 次/秒：够顺，又不至于每秒重新解析 60 次 Markdown。 */
-private const val TYPE_TICK_MS = 40L
+/** 一个节拍多久放一次字。16ms＝62 次/秒：一屏文字每秒只变 25 次时，人眼看到的是「成串蹦字」
+ * （30 字/秒的 5 字一跳）——这才是「逐字效果差」的真因，不是速度。16ms 下每次只多 2 个字。 */
+private const val TYPE_TICK_MS = 16L
 
 /** 每个节拍至少放几个字：慢端点（一个 delta 一两个字）也要看得见在动。 */
 private const val TYPE_MIN_STEP = 2
@@ -93,6 +94,6 @@ private const val TYPE_FRESH_MS = 500L
  */
 internal fun typeStep(backlog: Int): Int = TYPE_STEP
 
-/** 每拍放几个字，恒定不变：5 字/拍 = 125 字/秒。**任何长度的正文都按这个速度逐字**，
+/** 每拍放几个字，恒定不变：2 字/拍 × 62.5 拍/秒 = 125 字/秒。**任何长度的正文都按这个速度逐字**，
  * 不按落后量提速 —— 分档会让「积压多的时候又快成整块」，那等于没有打字机。 */
-private const val TYPE_STEP = 5
+private const val TYPE_STEP = 2

@@ -485,11 +485,23 @@ internal fun BlinkingCursor() {
             alpha.floatValue = if (alpha.floatValue > 0.5f) 0.15f else 1f
         }
     }
-    Text(
-        text = "▍",
-        modifier = Modifier.alpha(alpha.floatValue),
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.primary,
+    // 光标画成一条**细线**而不是字符「▍」：那个字形本身有宽度（一个全角块的宽度），
+    // 用户反馈「光标太宽」。线宽 1.5dp ≈ 一个字笔画的粗细，高度取正文行高。
+    val body = MaterialTheme.typography.bodyMedium
+    // 高度跟着字号走（乘 1.4 约等于正文行高），这样系统字体缩放时光标也跟着变；
+    // 不直接读 lineHeight，是因为它在个别主题下是 Unspecified。
+    val lineHeight = with(LocalDensity.current) {
+        (body.fontSize.value * 1.4f).sp.toDp()
+    }
+    Box(
+        modifier = Modifier
+            .width(1.5.dp)
+            .height(lineHeight)
+            .alpha(alpha.floatValue)
+            .background(
+                color = MaterialTheme.colorScheme.primary,
+                shape = RoundedCornerShape(1.dp),
+            ),
     )
 }
 

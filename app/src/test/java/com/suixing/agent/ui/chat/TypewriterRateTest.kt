@@ -59,7 +59,8 @@ class TypewriterRateTest {
         // 断言只允许一个节拍的误差（收尾那一拍），所以改 TYPE_STEP 不需要改这里。
         assertTrue(
             "300 字应约 ${expectedMs(300)}ms，实际 ${sim.drainMs}ms",
-            sim.drainMs in (expectedMs(300) - TICK)..(expectedMs(300) + TICK),
+            // 允许"首个 delta 晚到"这一个发布间隔（默认 80ms）的余量。
+            sim.drainMs in (expectedMs(300) - TICK)..(expectedMs(300) + PUBLISH_MS),
         )
     }
 
@@ -69,7 +70,7 @@ class TypewriterRateTest {
         // 恒定速度的必然结果（2000 字 ≈ 16 秒），不再有加速档。
         assertTrue(
             "2000 字应约 ${expectedMs(2_000)}ms，实际 ${sim.drainMs}ms",
-            sim.drainMs in (expectedMs(2_000) - TICK)..(expectedMs(2_000) + TICK),
+            sim.drainMs in (expectedMs(2_000) - TICK)..(expectedMs(2_000) + PUBLISH_MS),
         )
     }
 
@@ -103,9 +104,12 @@ class TypewriterRateTest {
         fun expectedMs(totalChars: Int): Int = (totalChars + TYPE_STEP_FOR_TEST - 1) / TYPE_STEP_FOR_TEST * TICK
 
         /** 与 Typewriter.kt 的 TYPE_TICK_MS 一致（改动时两边一起改）。 */
-        const val TICK = 40
+        const val TICK = 16
+
+        /** 与 ChatViewModel 的 DELTA_PUBLISH_MS 一致：首次到达最多晚一个发布间隔。 */
+        const val PUBLISH_MS = 80
 
         /** 与 Typewriter.kt 的 TYPE_STEP 一致。 */
-        const val TYPE_STEP_FOR_TEST = 5
+        const val TYPE_STEP_FOR_TEST = 2
     }
 }
