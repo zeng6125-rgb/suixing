@@ -1109,16 +1109,13 @@ internal fun ContextRing(
                             layoutDirection: LayoutDirection,
                             popupContentSize: IntSize,
                         ): IntOffset {
-                            // **按钮正下方**，间距 8dp；横纵都留 ≥12dp、不碰屏幕边。
+                            // 恢复成**原来那一版**的算法（用户：改布局之前位置是对的）。
+                            // 只额外保证不贴屏幕边：横纵各留 edgePxForPopup。
                             val margin = edgePxForPopup
-                            val gap = belowGlyphPx
-                            val x = anchorBounds.left.coerceIn(
-                                margin,
-                                (windowSize.width - margin - popupContentSize.width).coerceAtLeast(margin),
-                            )
-                            val y = (anchorBounds.bottom + gap).coerceAtMost(
-                                (windowSize.height - margin - popupContentSize.height).coerceAtLeast(margin),
-                            )
+                            val x = (windowSize.width - margin - popupContentSize.width)
+                                .coerceAtLeast(margin)
+                            val y = (anchorBounds.top - popupContentSize.height - belowGlyphPx)
+                                .coerceAtLeast(margin)
                             return IntOffset(x, y)
                         }
                     }
