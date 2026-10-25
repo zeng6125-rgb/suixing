@@ -307,7 +307,7 @@ internal fun TopBarContextEntry(
         // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
         // 同一套 110ms 进出场。这里需要显式定位，所以传 popupPositionProvider。
         // 定位在组合期算好：PopupPositionProvider 里没有 Density 作用域。
-        val belowGlyphPx = with(density) { 8.dp.roundToPx() }   // 按钮正下方 8dp（用户指定）
+        val belowGlyphPx = with(density) { 28.dp.roundToPx() + 8.dp.roundToPx() }   // 恢复原值
         MenuCard(
             visible = open,
             onDismiss = { open = false },

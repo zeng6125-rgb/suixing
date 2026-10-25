@@ -805,10 +805,9 @@ internal fun TurnMetrics(
                             layoutDirection: androidx.compose.ui.unit.LayoutDirection,
                             popupContentSize: androidx.compose.ui.unit.IntSize,
                         ): androidx.compose.ui.unit.IntOffset {
-                            val x = anchorBounds.left.coerceIn(
-                                edge,
-                                (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge),
-                            )
+                            // 锚点是标题那一行的 Box（在左边），按钮在右边 —— 用锚点左沿对齐会把
+                            // 卡片甩到屏幕左侧。右对齐到窗口右边，就落在按钮下方。
+                            val x = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
                             val y = anchorBounds.bottom + gap
                             return androidx.compose.ui.unit.IntOffset(x, y)
                         }
