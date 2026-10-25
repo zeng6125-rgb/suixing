@@ -66,6 +66,12 @@ class FileTools(private val context: Context) : ToolGroup() {
                     "old_string" to Schema.string("Exact text to replace; include surrounding lines to make it unique"),
                     "new_string" to Schema.string("Replacement text"),
                     "replace_all" to Schema.boolean("Replace every occurrence, default false", default = false),
+                    // **乐观锁**（issue #44 第八项）：带上 read_file 返回的 revision，
+                    // 文件在你读完之后被改过就拒绝，避免改到别人刚写的内容上。
+                    "expected_revision" to Schema.string(
+                        "Optional: the revision read_file reported for this file. If the file changed " +
+                            "since then the edit is refused instead of writing over it.",
+                    ),
                 ),
                 required = listOf("path", "old_string", "new_string"),
             ),
@@ -179,7 +185,10 @@ class FileTools(private val context: Context) : ToolGroup() {
                 return@withContext ToolResult.failure("起始行 $offset 超出文件总行数 ${lines.size}")
             }
             val slice = lines.subList(offset - 1, minOf(lines.size, offset - 1 + limit))
-            val header = "${file.absolutePath}（共 ${lines.size} 行，显示 $offset-${offset + slice.size - 1}）\n"
+            val header = "${file.absolutePath}（共 ${lines.size} 行，显示 $offset-${offset + slice.size - 1}）\n" +
+                // **revision 交给模型**（issue #44 第八项）：edit_file 带上它就能做乐观锁，
+                // 读到与改写之间文件被改过会被拒绝，而不是静默覆盖。
+                "revision=${revisionOf(bytes.toString(Charsets.UTF_8))}\n"
             ToolResult.success(header + slice.joinToString("\n"))
         } catch (error: Exception) {
             ToolResult.failure("读取失败：${error.message ?: error.javaClass.simpleName}")
@@ -221,6 +230,18 @@ class FileTools(private val context: Context) : ToolGroup() {
                 return@withContext ToolResult.failure("文件过大（${humanSize(file.length())}），请改用 read_file 分段处理后重写")
             }
             val text = file.readText()
+            // **乐观锁校验**（issue #44 第八项）：给了 expected_revision 就比对当前内容摘要，
+            // 不一致直接拒绝。模型常常先 read_file 再 edit_file，中间这个文件可能被用户、
+            // 被别的工具、或被上一轮 run 改过 —— 覆盖掉就是静默丢失。
+            val expected = args.str("expected_revision")
+            val current = revisionOf(text)
+            if (!expected.isNullOrBlank() && expected != current) {
+                return@withContext ToolResult.failure(
+                    "FILE_CHANGED：${file.absolutePath} 在你读取之后已被修改" +
+                        "（expected_revision=$expected，当前=$current）。" +
+                        "请重新 read_file 拿到最新内容与 revision 后再改。",
+                )
+            }
             val hits = occurrences(text, old)
             if (hits.isEmpty()) {
                 return@withContext ToolResult.failure(
@@ -247,7 +268,8 @@ class FileTools(private val context: Context) : ToolGroup() {
                 }
             }.trim()
             ToolResult.success(
-                "已修改 ${file.absolutePath}（第 ${lineOf(text, hits.first())} 行，替换 ${hits.size} 处）：\n$preview",
+                "已修改 ${file.absolutePath}（第 ${lineOf(text, hits.first())} 行，替换 ${hits.size} 处）：\n$preview" +
+                    "\nrevision=${revisionOf(changed)}",
             )
         } catch (error: Exception) {
             ToolResult.failure("修改失败：${error.message ?: error.javaClass.simpleName}")
@@ -541,6 +563,17 @@ internal fun sweepStaleParts(
             .filter { it.isFile && it.name.endsWith(PART_SUFFIX) && now - it.lastModified() > olderThanMs }
             .forEach { it.delete() }
     }
+}
+
+/**
+ * 文件内容的**版本标识**（issue #44 第八项，乐观锁用）。
+ *
+ * 不是时间戳：`mtime` 在部分文件系统上只有秒级精度，同一次 run 内的两次写入可能拿到同一个值。
+ * 用「长度 + 内容哈希」—— 内容变了它就变，且不需要额外的文件元数据。
+ */
+internal fun revisionOf(text: String): String {
+    val hash = text.hashCode().toUInt().toString(16)
+    return "${text.length.toString(16)}-$hash"
 }
 
 internal fun humanSize(bytes: Long): String = when {
