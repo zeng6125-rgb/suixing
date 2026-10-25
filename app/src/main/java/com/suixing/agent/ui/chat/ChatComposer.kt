@@ -315,6 +315,8 @@ internal fun MenuCard(
     popupPositionProvider: androidx.compose.ui.window.PopupPositionProvider? = null,
     /** 是否自带"点外面即关闭"的遮罩（默认带：focus-less 窗口自己看不到外部点击）。 */
     scrim: Boolean = true,
+    /** 卡片底色；默认与其它浮层一致（theme 的 surface）。 */
+    containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -370,7 +372,7 @@ internal fun MenuCard(
             ) {
                 Column(
                     modifier = modifier
-                        .popupCardSurface(scheme.surface)
+                        .popupCardSurface(containerColor)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,

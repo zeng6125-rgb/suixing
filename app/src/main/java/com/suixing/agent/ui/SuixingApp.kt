@@ -435,7 +435,7 @@ fun SuixingApp() {
             Box(
                 Modifier
                     .matchParentSize()
-                    .imePaddingBottom(heldImeState)
+                    .padding(bottom = with(rootDensity) { heldImeState.intValue.toDp() })
                     .background(MaterialTheme.colorScheme.surface),
             )
             // 推进时下面那层（抽屉 + 聊天）跟着往左让 10%：**两层一起动**才读成"推上来"，
@@ -522,7 +522,7 @@ fun SuixingApp() {
                 // 留在组合里，其余页面改成**盖在它上面的覆盖层**：进设置是往覆盖层 push，
                 // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
                 // 键盘让位只作用在聊天内容上（抽屉不再被顶起，见上面 Scaffold 的说明）。
-                Box(Modifier.imePaddingBottom(heldImeState)) {
+                Box(Modifier.padding(bottom = with(rootDensity) { heldImeState.intValue.toDp() })) {
                     // **首启的引导还没走完时，先别组合 chat**（用户：「第一次出现引导页感觉卡卡的」）。
                     // 冷启动时 chat 要做 turnPage、receipts/transcript 统计、每条消息的 Markdown
                     // 渲染（ChatScreen.kt:465/512/560/621、ChatBlocks.kt:895/1519），
@@ -1470,6 +1470,8 @@ private fun ConversationRow(
                 },
                 modifier = Modifier.width(DrawerMenuWidth),
                 focusable = false,
+                // 与模型选择浮层同一底色（用户：把会话列表改成和模型列表一致）。
+                containerColor = MaterialTheme.colorScheme.surface,
             ) {
                 DrawerMenuAction("改名", iconRes = R.drawable.ic_square_pen, onClick = onRename)
                 DrawerMenuAction(
