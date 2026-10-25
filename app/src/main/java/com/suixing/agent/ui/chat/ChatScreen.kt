@@ -649,7 +649,12 @@ fun ChatScreen(
     val heldPrompt = rememberSaveable(state.conversationId) { mutableIntStateOf(0) }
     // 请求级快照（prompt/breaks 变才发射）——body 不再订阅 120ms 的 elapsedMs。
     val runStatsNow by viewModel.requestStats.collectAsState()
-    val reported = runStatsNow?.lastPromptTokens ?: 0
+    // **实时统计属于"正在跑的那一次请求"**：它挂在 ViewModel 上全局共享，切会话/新建会话时
+    // 不会自己清空。原来直接拿它当圆环读数 ⇒ 新建的空会话会显示上一个会话的 40% / 409.5K
+    // （用户实测截图）。所以只在**这个会话自己正在跑**时才认它；其余场合交给下面三档
+    // （本会话的实测快照 heldPrompt / 落盘实测 persistedContext / 估算兜底）。
+    val liveStatsHere = runStatsNow.takeIf { state.runningHere }
+    val reported = liveStatsHere?.lastPromptTokens ?: 0
     LaunchedEffect(reported) {
         if (reported > 0) heldPrompt.intValue = reported
     }
@@ -666,7 +671,7 @@ fun ChatScreen(
     val reading = ringReading(
         liveReported = if (reported > 0) reported else heldPrompt.intValue,
         newestStored = newestUsage?.prompt ?: 0,
-        liveEstimate = runStatsNow?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
+        liveEstimate = liveStatsHere?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
         transcriptEstimate = transcriptEstimate,
         persistedContext = persistedContext,
     )
@@ -2155,7 +2160,7 @@ fun ChatScreen(
                     contextUsed = contextUsed,
                     contextEstimated = reading.estimated,
                     // 面板三行：run 中用实测三块，空闲用按当前上下文算出来的那份（打开面板时刷新）。
-                    contextBreak = runStatsNow?.let {
+                    contextBreak = liveStatsHere?.let {
                         Triple(it.breakSystem, it.breakTools, it.breakHistory)
                     } ?: state.contextBreakdown,
                     onContextPanelOpen = { viewModel.refreshContextBreakdown() },

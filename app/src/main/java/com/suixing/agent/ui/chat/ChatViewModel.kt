@@ -1089,6 +1089,9 @@ class ChatViewModel : ViewModel() {
     }
 
     fun newConversation() {
+        // 上一轮的实时统计挂在这个 ViewModel 上、全局共享：不清掉的话，新建的空会话在第一次
+        // stats tick 之前仍会显示**上一个会话**的圆环读数（用户实测：新会话显示 40% / 409.5K）。
+        _liveStats.value = null
         viewModelScope.launch {
             val settings = Core.settings.current()
             val created = Core.chats.create()
@@ -1133,6 +1136,9 @@ class ChatViewModel : ViewModel() {
     private var lastOpenedJob: Job? = null
 
     fun openConversation(conversation: Conversation) {
+        // 与 newConversation 同理：切过去的会话在它自己第一条 stats 到达前，不能顶着上一个
+        // 会话的读数（圆环 / 三块占比都读这份）。
+        _liveStats.value = null
         // Anything the conversation on screen was still holding is published before the
         // display moves: a buffered tail would otherwise land in the conversation being
         // opened, or be lost with the one being left.
