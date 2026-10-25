@@ -151,10 +151,41 @@ class ShellTools(
         }
         val prefix = "[$label] exit=${result.exitCode}\n"
         if (result.ok) {
-            ToolResult.success(prefix + result.render())
+            // **写系统状态要读回核验**（issue #44 第一项）：`exit=0` 不等于生效 ——
+            // SELinux 拒绝、namespace 写错（system/secure/global）、wrong user 都可能静默失败。
+            // 模型看到 success 就继续下一步，要等几轮后才暴露。
+            val verify = verifySettingWrite(command, chosen)
+            ToolResult.success(prefix + result.render() + (verify ?: ""))
         } else {
             ToolResult.failure(prefix + result.render())
         }
+    }
+
+    /**
+     * [command] 若是 `settings put <ns> <key> <value>`，读回一次并把核对结果附在输出里。
+     *
+     * 读回走**同一档位**（root 写就 root 读）：换身份读会读不到或读到别人的值，误报成"未生效"。
+     * 不匹配写命令时返回 null（读命令、普通命令不加任何东西，避免噪音）。
+     */
+    private suspend fun verifySettingWrite(command: String, chosen: String): String? {
+        val write = parseSettingWrite(command) ?: return null
+        val getCmd = "settings get ${write.ns} ${write.key}"
+        val actual = runCatching {
+            val r = when (chosen) {
+                "root" -> Shell.root(getCmd)
+                "shizuku" -> Shell.shizuku(getCmd)
+                else -> Shell.local(getCmd)
+            }
+            r.stdout.trim().trim('"')
+        }.getOrNull()
+        if (actual == null) {
+            return "\n[verify] ${write.ns}/${write.key}: 读回失败，无法确认是否生效 —— 请勿假设已修改"
+        }
+        // `settings get` 对不存在的键返回 null；写了空值也会是 null，都算"达到了预期"。
+        val verified = actual == write.value || actual == "null"
+        return "\n[verify] ${write.ns}/${write.key}: expected=${write.value} actual=$actual " +
+            "verified=$verified" +
+            if (!verified) " — 写入未生效，请勿假设已修改" else ""
     }
 
     /**
@@ -266,6 +297,31 @@ class ShellTools(
  * The comparison uses [ShellTier]'s own declaration order (LOCAL < SHIZUKU < ROOT, ascending
  * privilege), so the two orderings cannot drift apart.
  */
+/**
+ * 一条 `settings put <ns> <key> <value>` 写命令（issue #44 第一项）。
+ *
+ * [value] 是**去掉引号后**的期望值，与 `settings get` 的输出直接可比。
+ */
+internal data class SettingWrite(val ns: String, val key: String, val value: String)
+
+/**
+ * 识别 `settings put <namespace> <key> <value>`。
+ *
+ * 只认这一条写路径（随行最常用的），`settings delete` / `cmd` / `wm` / `pm` 不认 ——
+ * 不认识的命令不加核验，避免给读命令和普通命令添噪音。
+ * 值两侧的引号要去掉：`settings put global adb_enabled "1"` 的期望值是 `1`。
+ */
+internal fun parseSettingWrite(command: String): SettingWrite? {
+    val m = Regex("""^\s*settings\s+put\s+(system|secure|global)\s+(\S+)\s+(.+)$""")
+        .find(command) ?: return null
+    val raw = m.groupValues[3].trim()
+    return SettingWrite(
+        ns = m.groupValues[1],
+        key = m.groupValues[2],
+        value = raw.trim('"').trim('\'').trim(),
+    )
+}
+
 internal fun shellChannel(mode: String, resolved: ShellTier): String {
     // What the caller asked for, as a tier. Nothing asked for (auto, or a value this build does not
     // know) asks for exactly what the device resolved.

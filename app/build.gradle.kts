@@ -1,20 +1,19 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 android {
     namespace = "com.suixing.agent"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.suixing.agent"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 519
-        versionName = "0.8.496"
+        targetSdk = 37
+        versionCode = 520
+        versionName = "0.8.497"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -49,19 +48,23 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-        // **Compose 编译器度量**（性能审计用）：产出模块报告与类报告，逐个 Composable
-        // 标明 skippable/restartable。是判断「有没有实际优化」的唯一硬指标 —— 只写文件，
-        // 不影响产物行为。报告位置：app/build/compose-reports/。
-        freeCompilerArgs = freeCompilerArgs + listOf(
-            "-P",
-            "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=" +
-                layout.buildDirectory.get().asFile.path + "/compose-reports",
-            "-P",
-            "plugin:androidx.compose.compiler.plugins.kotlin:metricsDestination=" +
-                layout.buildDirectory.get().asFile.path + "/compose-metrics",
-        )
+    // **Kotlin 2.4 起 `kotlinOptions` 已被移除**（报 "Using 'jvmTarget: String' is an error"），
+    // 迁移到 compilerOptions DSL。本次升 BOM 2026.09.00 + Kotlin 2.4.21 时同步改的。
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+            // **Compose 编译器度量**（性能审计用）：产出模块报告与类报告，逐个 Composable
+            // 标明 skippable/restartable。是判断「有没有实际优化」的唯一硬指标 —— 只写文件，
+            // 不影响产物行为。报告位置：app/build/compose-reports/。
+            freeCompilerArgs.addAll(
+                "-P",
+                "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=" +
+                    layout.buildDirectory.get().asFile.path + "/compose-reports",
+                "-P",
+                "plugin:androidx.compose.compiler.plugins.kotlin:metricsDestination=" +
+                    layout.buildDirectory.get().asFile.path + "/compose-metrics",
+            )
+        }
     }
 
     buildFeatures {
@@ -103,7 +106,7 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
 
-    implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
