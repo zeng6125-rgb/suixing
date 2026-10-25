@@ -1109,18 +1109,16 @@ internal fun ContextRing(
                             layoutDirection: LayoutDirection,
                             popupContentSize: IntSize,
                         ): IntOffset {
-                            // **紧跟按钮**：横向以按钮中心对齐（再夹到屏幕内），纵向优先放在按钮
-                            // 上方、放不下就翻到下方 —— 原来固定贴屏幕右侧、还可能顶出屏幕。
-                            // 至少留 12dp：原来用的是 ringPopupMarginPx，那个值可能是 0，
-                            // 卡片就会贴着屏幕边（用户截图）。
+                            // **按钮正下方**，间距 8dp；横纵都留 ≥12dp、不碰屏幕边。
                             val margin = edgePxForPopup
-                            val anchorCentre = anchorBounds.left + anchorBounds.width / 2
-                            val rawX = anchorCentre - popupContentSize.width / 2
-                            val x = rawX.coerceIn(margin, (windowSize.width - margin - popupContentSize.width).coerceAtLeast(margin))
-                            val above = anchorBounds.top - popupContentSize.height - belowGlyphPx
-                            val below = anchorBounds.bottom + belowGlyphPx
-                            val y = if (above >= margin) above
-                                else below.coerceAtMost((windowSize.height - margin - popupContentSize.height).coerceAtLeast(margin))
+                            val gap = belowGlyphPx
+                            val x = anchorBounds.left.coerceIn(
+                                margin,
+                                (windowSize.width - margin - popupContentSize.width).coerceAtLeast(margin),
+                            )
+                            val y = (anchorBounds.bottom + gap).coerceAtMost(
+                                (windowSize.height - margin - popupContentSize.height).coerceAtLeast(margin),
+                            )
                             return IntOffset(x, y)
                         }
                     }
