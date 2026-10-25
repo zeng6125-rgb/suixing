@@ -306,6 +306,12 @@ private const val PIN_LIVE_HEIGHT = false
 private const val CHUNK_FIRST = 4
 private const val CHUNK_STEP = 3
 
+/** 自适应填充每帧补几行的上限（下限是 1）。 */
+private const val CHUNK_MAX_STEP = 5
+
+/** 填充的帧预算（ms）：超过它就说明这一帧补多了，下一帧少补一行。 */
+private const val STALL_FRAME_MS = 12L
+
 /**
  * #17 验收用的**轻量痕迹**：只在状态翻转时写一行。
  *
@@ -1241,6 +1247,7 @@ fun ChatScreen(
             // TypingDots/ProcessSpinner（等待态才可见）对照的，不能宽。
             // 自包含判定：`hasLiveText` 在本函数里声明得更靠后，前向引用编译不过。
             " run=${state.runningHere}" +
+            " anim=$switchRunning" +
             " liveText=${state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking }}"
     }
     val appCtx = LocalContext.current.applicationContext
@@ -1263,9 +1270,23 @@ fun ChatScreen(
         val total = visible.size
         if (total == 0) return@LaunchedEffect
         filledRows.intValue = if (scroll.stickToBottom) CHUNK_FIRST.coerceAtMost(total) else total
+        // **按上一帧节奏自适应**：固定每帧补 3 条时，遇到大卡片就是 16~41ms 的超时帧
+        // （实测切会话后连续几帧）。上一帧超预算就少补一条、宽裕就多补一条：峰值被压平，
+        // 填完的总条数与最终布局完全不变（只是先后节奏）。
+        var step = CHUNK_STEP
+        var prevFrame = 0L
         while (filledRows.intValue < total) {
-            withFrameNanos { }
-            filledRows.intValue = (filledRows.intValue + CHUNK_STEP).coerceAtMost(total)
+            val frameAt = withFrameNanos { it }
+            if (prevFrame != 0L) {
+                val dtMs = (frameAt - prevFrame) / 1_000_000L
+                step = when {
+                    dtMs > STALL_FRAME_MS -> (step - 1).coerceAtLeast(1)
+                    dtMs < STALL_FRAME_MS / 2 -> (step + 1).coerceAtMost(CHUNK_MAX_STEP)
+                    else -> step
+                }
+            }
+            prevFrame = frameAt
+            filledRows.intValue = (filledRows.intValue + step).coerceAtMost(total)
         }
     }
 

@@ -136,6 +136,7 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.service.FloatConsoleService
 import com.suixing.agent.data.Assistant
+import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.components.FullScreenOverlay
@@ -806,6 +807,9 @@ private fun Drawer(
     onNavigate: (String) -> Unit,
     onAssistants: () -> Unit,
 ) {
+    // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「随行」标。
+    val drawerSettings by Core.settings.flow.collectAsState(initial = AppSettings())
+    val drawerAssistant = drawerSettings.activeAssistant()
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -963,7 +967,11 @@ private fun Drawer(
                 modifier = Modifier.padding(start = 20.dp, end = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                SuixingMark(size = 30.dp)
+                if (drawerAssistant?.avatarPath.isNullOrBlank()) {
+                    SuixingMark(size = 30.dp)
+                } else {
+                    AssistantAvatar(assistant = drawerAssistant, size = 30.dp)
+                }
                 Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
                     Text("随行", style = MaterialTheme.typography.titleMedium)
