@@ -6,53 +6,55 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * **瞬移机制的确证**（0.8.36x~0.8.405，用户连续九轮反馈）。
+ * **冻结机制与它的修复**（0.8.36x~0.405 用户连续九轮反馈；2026-10-26 复核仍是真凶）。
  *
- * 假说：GrowableText 改造后，一次发布产生的新 liveParts 列表与上一份
- * **逐元素是同一个对象**（只追加、不换实例）。Compose 的 `remember(keys)`
- * 用 equals 比较 key —— 新旧列表逐元素 === 相等 ⇒ 列表相等 ⇒
- * key「没变」⇒ 映射不重算 ⇒ **屏幕冻结**，直到列表结构变化（新块诞生）
+ * 假说：GrowableText 改造后，一次发布产生的新 liveParts 列表与上一份**逐元素是同一个对象**
+ * （只追加、不换实例）。Compose 的 `remember(keys)` 用 equals 比较 key —— 新旧列表逐元素
+ * === 相等 ⇒ 列表相等 ⇒ key「没变」⇒ 映射不重算 ⇒ **屏幕冻结**，直到列表结构变化（新块诞生）
  * 才刷新一次并把该块积累的全部文本一次性放出。
  *
- * 这个文件用真代码把每一步钉死。
+ * **修复**：追加时放回**新实例**（version +1），列表判等为 false ⇒ state 真的发射 ⇒ 重组。
+ * 缓冲仍然共享，O(1) 追加，没有回到 O(n²) 整串复制。
  */
 class LivePartsFreezeTest {
 
     @Test
-    fun `appendText returns a list whose elements are the same objects`() {
+    fun `appending text produces a NEW instance so the list compares unequal`() {
         val before = listOf<LivePart>(LivePart.Text("abc"))
         val after = before.appendText("def", 0)
-        // 对象身份：同一实例被放回列表（这就是 GrowableText 的设计）
-        assertTrue("元素必须是同一对象", before[0] === after[0])
+        // 修复后：元素**不再是同一对象** ⇒ 列表判等为 false ⇒ remember 会失效、state 会发射。
+        assertFalse("追加后必须换实例，否则列表判等为 true、屏幕冻结", before[0] === after[0])
+        assertFalse("列表必须判不等", before == after)
     }
 
     @Test
-    fun `a mutated part makes the old and new lists compare EQUAL - remember never invalidates`() {
+    fun `content change makes the lists compare UNEQUAL`() {
         val before = listOf<LivePart>(LivePart.Text("abc"))
         val after = before.appendText("defghi", 0)   // 内容从 3 字长到 9 字
-        // **这就是冻结的证据**：内容已不同，但列表 equals 为 true
-        // （逐元素 === 短路，长度比较根本轮不到参与）
-        assertEquals("内容变了但列表判等 —— remember 的 key 永远命中缓存", before, after)
+        assertFalse("内容变了，列表必须判不等", before == after)
     }
 
     @Test
-    fun `thinking parts have the same problem`() {
+    fun `thinking parts behave the same way`() {
         val before = listOf<LivePart>(LivePart.Thinking("想"))
         val after = before.appendThinking("了更多", 0)
-        assertEquals(before, after)
+        assertFalse(before == after)
     }
 
     @Test
-    fun `pre-GrowableText style immutable parts DID invalidate`() {
-        // 0.8.359 之前的写法：每次发布创建新对象，内容不同 ⇒ equals false ⇒ remember 重算
+    fun `the buffer is shared - appending is not a full string copy`() {
         val before = listOf<LivePart>(LivePart.Text("abc"))
-        val after = listOf<LivePart>(LivePart.Text("abcdefghi"))
-        assertFalse("不可变对象按内容判等 —— 这就是 0.8.359 流式正常的原因", before == after)
+        val after = before.appendText("def", 0)
+        // 缓冲共享（O(1) 追加），只是外层实例换了。
+        assertTrue(
+            "缓冲应当共享",
+            (before[0] as LivePart.Text).buffer === (after[0] as LivePart.Text).buffer,
+        )
+        assertEquals("abcdef", (after[0] as LivePart.Text).text)
     }
 
     @Test
-    fun `structure change does invalidate - matching the one-frame dump`() {
-        // 列表长度变化（新块诞生）时 equals 为 false —— 对应「一次性吐出」恰好发生的新块时刻
+    fun `structure change still invalidates`() {
         val before = listOf<LivePart>(LivePart.Text("abc"))
         val after = before.appendText("def", 0) + LivePart.Tools(emptyList())
         assertFalse(before == after)

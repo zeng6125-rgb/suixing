@@ -26,23 +26,34 @@ class Thinking(
     val buffer: GrowableText = GrowableText(),
     val tokens: Int = 0,
     val elapsedMs: Long = 0,
+    /**
+     * **版本号**：每次追加 +1。
+     *
+     * 为什么必须有它（用户反复报「正文流式是整段整段地出」的真凶，见 [LivePartsFreezeTest]）：
+     * 缓冲是**可变**的，追加只改它、不换实例 ⇒ 新旧列表里是**同一个对象** ⇒ `equals` 里
+     * `this === other` 短路为 true ⇒ 列表判等 ⇒ `_state.update { copy(liveParts = …) }` 判等 ⇒
+     * **StateFlow 不发射、不重组、屏幕冻结**，直到列表结构变化（段落结束）才一次性吐出。
+     * 思考流式看起来正常，只是因为 `reasoning` 字段每次都变，整个 state 判不等才顺带发射。
+     *
+     * 有了版本号：追加时产生**新实例**且 version 不同 ⇒ 列表判等为 false ⇒ state 发射 ⇒
+     * 重组 ⇒ 读到的就是最新文本。缓冲仍然共享（O(1) 追加），没有回到 O(n²) 整串复制。
+     */
+    val version: Int = 0,
 ) : LivePart {
     constructor(text: String, tokens: Int = 0, elapsedMs: Long = 0) :
-        this(GrowableText(text), tokens, elapsedMs)
+        this(GrowableText(text), tokens, elapsedMs, 0)
 
     val text: String get() = buffer.toString()
 
-    /**
-     * **必须自己定义相等性。** 这个类持有可变缓冲、流式期间对象始终是同一个（只 append），
-     * 默认按引用比较 ⇒ `remember(liveParts)` 认为列表没变、不重算映射 ⇒ 界面只在结构变化时
-     * 整块刷新（真机表现："思考内容一下子全出来"）。用长度判断变化，代价 O(1)。
-     */
-    override fun equals(other: Any?): Boolean =
-        this === other ||
-            (other is Thinking && other.buffer.length() == buffer.length() &&
-                other.tokens == tokens && other.elapsedMs == elapsedMs)
+    /** 追加后的新实例（缓冲共享，版本 +1）。 */
+    internal fun appended(): Thinking = Thinking(buffer, tokens, elapsedMs, version + 1)
 
-    override fun hashCode(): Int = buffer.length() * 31 + tokens
+    override fun equals(other: Any?): Boolean =
+        other is Thinking && other.version == version &&
+            other.buffer.length() == buffer.length() &&
+            other.tokens == tokens && other.elapsedMs == elapsedMs
+
+    override fun hashCode(): Int = version * 31 + buffer.length() * 31 + tokens
 }
 
 data class Tools(val calls: List<LiveTool>) : LivePart
@@ -60,16 +71,23 @@ data class Tools(val calls: List<LiveTool>) : LivePart
 class Text(
     val buffer: GrowableText = GrowableText(),
     val bornAtMs: Long = nowMs(),
+    /** 见 [Thinking] 的 version：每次追加 +1，让列表判等为 false，从而让 state 真的发射。 */
+    val version: Int = 0,
 ) : LivePart {
-    constructor(text: String) : this(GrowableText(text))
+    constructor(text: String) : this(GrowableText(text), nowMs(), 0)
 
     val text: String get() = buffer.toString()
 
-    // 同 [Thinking]：持有可变缓冲，必须按内容长度参与相等性，否则界面感知不到每次发布。
-    override fun equals(other: Any?): Boolean =
-        this === other || (other is Text && other.buffer.length() == buffer.length())
+    /** 追加后的新实例（缓冲共享，版本 +1）。 */
+    internal fun appended(): Text = Text(buffer, bornAtMs, version + 1)
 
-    override fun hashCode(): Int = buffer.length()
+    // bornAtMs **不参与**相等性（它的原契约：时间戳塞进 equals 会让每次重建都判"不等"）；
+    // 版本号已经足够区分"内容变了"。
+    override fun equals(other: Any?): Boolean =
+        other is Text && other.version == version &&
+            other.buffer.length() == buffer.length()
+
+    override fun hashCode(): Int = version * 31 + buffer.length()
 }
 
 data class Steer(val message: StoredMessage) : LivePart
@@ -118,9 +136,10 @@ internal fun List<LivePart>.appendText(delta: String, segmentStart: Int): List<L
         if (tailIdx < 0) return this + LivePart.Text(delta)
         val idx = from + tailIdx
         val part = this[idx] as LivePart.Text
-        // **只追加增量**（不是整串复制）：文本块本体原地增长，列表只复制"前段 + 这一项"。
+        // **只追加增量**（不是整串复制）：缓冲原地增长，列表只复制"前段 + 这一项"。
+        // 放回的是**新实例**（version +1）—— 否则列表判等为 true、state 不发射、屏幕冻结。
         part.buffer.append(delta)
-        return take(idx) + part + subList(idx + 1, size)
+        return take(idx) + part.appended() + subList(idx + 1, size)
 }
 
 /**
@@ -141,7 +160,7 @@ internal fun List<LivePart>.appendThinking(delta: String, segmentStart: Int): Li
         val idx = from + tailIdx
         val part = this[idx] as LivePart.Thinking
         part.buffer.append(delta)
-        return take(idx) + part + subList(idx + 1, size)
+        return take(idx) + part.appended() + subList(idx + 1, size)
 }
 
 /** 当前段里是否已有思考块（决定这一段的思考钟是续走还是重置）。 */

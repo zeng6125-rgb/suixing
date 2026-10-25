@@ -19,10 +19,16 @@ class LivePartsTest {
     @Test
     fun `appending text keeps the same block instead of making a new one`() {
         val first = parts().appendText("你", 0)
-        val block = first.single() as LivePart.Text
         val second = first.appendText("好", 0)
-        assertSame("同一段里必须是同一个文本块（整串复制会新建对象）", block, second.single())
+        // **仍是同一个"块"**（列表长度不变，缓冲共享 ⇒ 不是整串复制），
+        // 但**实例会换**（version +1）—— 这正是让 state 判等为 false、屏幕不再冻结的关键。
+        assertEquals("同一段里只有一个文本块", 1, second.size)
         assertEquals("你好", (second.single() as LivePart.Text).text)
+        assertTrue(
+            "版本号必须递增，否则列表判等为 true、state 不发射",
+            (second.single() as LivePart.Text).version >
+                (first.single() as LivePart.Text).version,
+        )
     }
 
     @Test
