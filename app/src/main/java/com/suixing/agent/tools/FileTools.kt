@@ -163,6 +163,13 @@ class FileTools(private val context: Context) : ToolGroup() {
         else -> "[文件 ${humanSize(file.length())}]"
     }
 
+    /** 前 [limit] 字节里有没有 NUL（判定二进制），不装箱、不复制。 */
+    private fun hasNulByte(bytes: ByteArray, limit: Int): Boolean {
+        val end = minOf(bytes.size, limit)
+        for (i in 0 until end) if (bytes[i] == 0.toByte()) return true
+        return false
+    }
+
     private suspend fun readFile(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         try {
             val file = resolve(args.str("path"))
@@ -175,10 +182,14 @@ class FileTools(private val context: Context) : ToolGroup() {
                 )
             }
             val bytes = file.readBytes()
-            if (bytes.take(4096).any { it == 0.toByte() }) {
+            // 只看前 4096 字节，且**不装箱**：`bytes.take(4096)` 会把每个 Byte 装成 List<Byte>。
+            if (hasNulByte(bytes, 4096)) {
                 return@withContext ToolResult.success("二进制文件：${file.absolutePath}（${humanSize(file.length())}），无法按文本读取")
             }
-            val lines = bytes.toString(Charsets.UTF_8).lines()
+            // **整份字节只解码一次**（原来 toString 两次：一次得 lines、一次算 revision，
+            // ≤4MB 的文件会有两份大 String 同时存活）。
+            val text = bytes.toString(Charsets.UTF_8)
+            val lines = text.lines()
             val offset = args.int("offset", 1).coerceAtLeast(1)
             val limit = args.int("limit", 400).coerceIn(1, 5000)
             if (offset > lines.size) {
@@ -188,7 +199,7 @@ class FileTools(private val context: Context) : ToolGroup() {
             val header = "${file.absolutePath}（共 ${lines.size} 行，显示 $offset-${offset + slice.size - 1}）\n" +
                 // **revision 交给模型**（issue #44 第八项）：edit_file 带上它就能做乐观锁，
                 // 读到与改写之间文件被改过会被拒绝，而不是静默覆盖。
-                "revision=${revisionOf(bytes.toString(Charsets.UTF_8))}\n"
+                "revision=${revisionOf(text)}\n"
             ToolResult.success(header + slice.joinToString("\n"))
         } catch (error: Exception) {
             ToolResult.failure("读取失败：${error.message ?: error.javaClass.simpleName}")
@@ -234,7 +245,8 @@ class FileTools(private val context: Context) : ToolGroup() {
             // 不一致直接拒绝。模型常常先 read_file 再 edit_file，中间这个文件可能被用户、
             // 被别的工具、或被上一轮 run 改过 —— 覆盖掉就是静默丢失。
             val expected = args.str("expected_revision")
-            val current = revisionOf(text)
+            // **只在真的要做乐观锁时才算哈希**：revisionOf 要遍历整份文本，多数编辑不带它。
+            val current = if (expected.isNullOrBlank()) "" else revisionOf(text)
             if (!expected.isNullOrBlank() && expected != current) {
                 return@withContext ToolResult.failure(
                     "FILE_CHANGED：${file.absolutePath} 在你读取之后已被修改" +
