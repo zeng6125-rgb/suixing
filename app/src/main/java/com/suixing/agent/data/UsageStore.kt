@@ -160,7 +160,10 @@ class UsageStore(private val context: Context) {
         val next = accumulateSlices(cache, slices, onDiskIds = onDisk)
             .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION)
         snapshot = next
-        writeCache(next)
+        // **没有变化就不重写缓存**（优化清单 data-P2）：`writeCache` 会把整份快照
+        // prettyPrint 成 JSON 再落盘；定时刷新时绝大多数次扫描都没有新消息。
+        // 比较的是值相等（data class），结果与"总是写"完全一致 —— 只是少一次写盘。
+        if (next != cache) writeCache(next)
         next
     }
 
