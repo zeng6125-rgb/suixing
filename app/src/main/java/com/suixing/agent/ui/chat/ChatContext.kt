@@ -94,7 +94,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -232,6 +231,7 @@ import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.PressPill
 import com.suixing.agent.ui.components.REASONING_LEVELS
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
 import com.suixing.agent.ui.components.suixingClickable
@@ -1337,7 +1337,7 @@ internal fun EditDialog(
     onResend: ((String) -> Unit)?,
 ) {
     var draft by remember(message.id) { mutableStateOf(message.text) }
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (message.role == Roles.USER) "修改这条消息" else "修改这条回复") },
         text = {
@@ -1360,24 +1360,24 @@ internal fun EditDialog(
                 }
             }
         },
-        confirmButton = {
+        confirmButton = { scope ->
             if (onResend != null) {
                 TextButton(
-                    onClick = { onResend(draft) },
+                    onClick = { scope.closeThen { onResend(draft) } },
                     enabled = draft.isNotBlank(),
                 ) { Text("重新发送") }
             } else {
-                TextButton(onClick = { onSave(draft) }, enabled = draft.isNotBlank()) { Text("保存") }
+                TextButton(onClick = { scope.closeThen { onSave(draft) } }, enabled = draft.isNotBlank()) { Text("保存") }
             }
         },
-        dismissButton = {
+        dismissButton = { scope ->
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (onResend != null) {
-                    TextButton(onClick = { onSave(draft) }, enabled = draft.isNotBlank()) {
+                    TextButton(onClick = { scope.closeThen { onSave(draft) } }, enabled = draft.isNotBlank()) {
                         Text("只保存")
                     }
                 }
-                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") }
             }
         },
     )

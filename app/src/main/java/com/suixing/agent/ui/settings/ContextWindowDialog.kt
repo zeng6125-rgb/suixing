@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
+import com.suixing.agent.ui.components.SuixingDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -61,7 +61,7 @@ internal fun ContextWindowDialog(
         null
     }
     val suggested = suggestedContextWindow(model)
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("上下文窗口") },
         text = {
@@ -110,15 +110,15 @@ internal fun ContextWindowDialog(
                 )
             }
         },
-        confirmButton = {
+        confirmButton = { scope ->
             // 非法时不写回：这个按钮会一直显示，点了却没有反应比不显示更让人困惑，所以
             // 只在合法时启用。
             TextButton(
-                onClick = { onConfirm(parseWindowTokens(text) ?: 0) },
+                onClick = { scope.closeThen { onConfirm(parseWindowTokens(text) ?: 0) } },
                 enabled = !invalid,
             ) { Text("确定") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
     )
 }
 

@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +37,7 @@ import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -182,22 +182,24 @@ fun MemorySection(
     }
 
     deleting?.let { key ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { deleting = null },
             title = { Text("删除这条备忘") },
             text = { Text("「$key」会从模型下次看到的记忆里消失。") },
-            confirmButton = {
+            confirmButton = { dialog ->
                 TextButton(
                     onClick = {
-                        deleting = null
-                        scope.launch {
-                            val ok = Core.memory.remove(key)
-                            onNotify(if (ok) "已删除「$key」" else "删除失败")
+                        dialog.closeThen {
+                            deleting = null
+                            scope.launch {
+                                val ok = Core.memory.remove(key)
+                                onNotify(if (ok) "已删除「$key」" else "删除失败")
+                            }
                         }
                     },
                 ) { Text("删除") }
             },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } },
+            dismissButton = { dialog -> TextButton(onClick = { dialog.closeThen { deleting = null } }) { Text("取消") } },
         )
     }
 }
@@ -215,7 +217,7 @@ private fun MemoryEditorDialog(
     var saving by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (draft.isNew) "新增记忆" else "修改记忆") },
         text = {
@@ -249,7 +251,7 @@ private fun MemoryEditorDialog(
                 }
             }
         },
-        confirmButton = {
+        confirmButton = { dialog ->
             TextButton(
                 enabled = key.isNotBlank() && !saving,
                 onClick = {
@@ -261,7 +263,7 @@ private fun MemoryEditorDialog(
                 },
             ) { Text("保存") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { dialog -> TextButton(onClick = { dialog.closeThen(onDismiss) }) { Text("取消") } },
     )
 }
 

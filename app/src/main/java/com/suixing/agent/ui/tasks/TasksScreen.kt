@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -48,6 +47,7 @@ import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TODO_PENDING
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -129,17 +129,19 @@ fun TasksScreen(onBack: () -> Unit) {
 
     // 长按删除要过一道确认：整表覆盖写回，误触就永久丢一条。
     pendingDelete?.let { target ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除任务") },
             text = { Text("确定要删除「${target.subject}」吗？") },
-            confirmButton = {
+            confirmButton = { scope ->
                 TextButton(onClick = {
-                    pendingDelete = null
-                    save(items.filterNot { it.id == target.id })
+                    scope.closeThen {
+                        pendingDelete = null
+                        save(items.filterNot { it.id == target.id })
+                    }
                 }) { Text("删除") }
             },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+            dismissButton = { scope -> TextButton(onClick = { scope.closeThen { pendingDelete = null } }) { Text("取消") } },
         )
     }
 }

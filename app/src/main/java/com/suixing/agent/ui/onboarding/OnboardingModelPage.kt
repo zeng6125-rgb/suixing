@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -42,6 +41,7 @@ import com.suixing.agent.llm.ProviderModel
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.suixingClickable
+import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.launch
 
 /**
@@ -207,7 +207,7 @@ private fun ModelPickerDialog(
     onDismiss: () -> Unit,
     onPick: (ProviderModel) -> Unit,
 ) {
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("选模型") },
         text = {
@@ -253,6 +253,6 @@ private fun ModelPickerDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("关闭") } },
     )
 }

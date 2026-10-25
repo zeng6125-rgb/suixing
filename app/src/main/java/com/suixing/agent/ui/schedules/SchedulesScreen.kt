@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -52,6 +51,7 @@ import com.suixing.agent.tools.describeSchedule
 import com.suixing.agent.tools.formatScheduleMoment
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -131,18 +131,20 @@ fun SchedulesScreen(onBack: () -> Unit) {
         }
     }
     pendingDelete?.let { target ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除定时任务") },
             text = { Text("确定要删除「${target.title}」吗？删除后无法恢复。") },
-            confirmButton = {
+            confirmButton = { scope ->
                 TextButton(onClick = {
-                    pendingDelete = null
-                    apply(schedules.filterNot { it.id == target.id })
+                    scope.closeThen {
+                        pendingDelete = null
+                        apply(schedules.filterNot { it.id == target.id })
+                    }
                 }) { Text("删除") }
             },
-            dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            dismissButton = { scope ->
+                TextButton(onClick = { scope.closeThen { pendingDelete = null } }) { Text("取消") }
             },
         )
     }

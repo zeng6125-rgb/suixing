@@ -32,7 +32,6 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -76,6 +75,7 @@ import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.DEFAULT_SYSTEM_PROMPT
 import com.suixing.agent.ui.components.LocalOpenSidebar
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SettingRow
@@ -284,18 +284,20 @@ fun AssistantEditor(
 
     // 名字用 label：空名字的助手在卡片上显示的就是它，弹窗里报一个空引号等于没说是谁。
     if (confirmingDelete && onDelete != null) {
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { confirmingDelete = false },
             title = { Text("删除这个助手") },
             text = { Text("确定要删除「${draft.label}」吗？它的提示词和头像会一起删除，无法恢复。") },
-            confirmButton = {
+            confirmButton = { scope ->
                 TextButton(onClick = {
-                    confirmingDelete = false
-                    onDelete()
+                    scope.closeThen {
+                        confirmingDelete = false
+                        onDelete()
+                    }
                 }) { Text("删除") }
             },
-            dismissButton = {
-                TextButton(onClick = { confirmingDelete = false }) { Text("取消") }
+            dismissButton = { scope ->
+                TextButton(onClick = { scope.closeThen { confirmingDelete = false } }) { Text("取消") }
             },
         )
     }

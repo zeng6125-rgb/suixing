@@ -32,7 +32,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ripple
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -119,6 +118,7 @@ import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.suixingClickable
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
@@ -1293,36 +1293,40 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     }
 
     pendingSwitch?.let { id ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { pendingSwitch = null },
             title = { Text("切换提供方？") },
             text = { Text("当前提供方的接口地址、API Key 或模型还没保存，切过去会丢掉这些改动。") },
-            confirmButton = {
+            confirmButton = { scope ->
                 TextButton(
                     onClick = {
-                        pendingSwitch = null
-                        form.providers.firstOrNull { it.id == id }?.let(switchProvider)
+                        scope.closeThen {
+                            pendingSwitch = null
+                            form.providers.firstOrNull { it.id == id }?.let(switchProvider)
+                        }
                     },
                 ) { Text("继续") }
             },
-            dismissButton = { TextButton(onClick = { pendingSwitch = null }) { Text("取消") } },
+            dismissButton = { scope -> TextButton(onClick = { scope.closeThen { pendingSwitch = null } }) { Text("取消") } },
         )
     }
 
     pendingDelete?.let { id ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除提供方？") },
             text = { Text("当前提供方还有未保存的改动，删除会连同这些改动一起丢掉，并切到下一个提供方。") },
-            confirmButton = {
+            confirmButton = { scope ->
                 TextButton(
                     onClick = {
-                        pendingDelete = null
-                        form.providers.firstOrNull { it.id == id }?.let(deleteProvider)
+                        scope.closeThen {
+                            pendingDelete = null
+                            form.providers.firstOrNull { it.id == id }?.let(deleteProvider)
+                        }
                     },
                 ) { Text("删除") }
             },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+            dismissButton = { scope -> TextButton(onClick = { scope.closeThen { pendingDelete = null } }) { Text("取消") } },
         )
     }
 }
@@ -2279,7 +2283,7 @@ internal fun ConversationManagerScreen(
         }
     }
     pendingDelete?.let { chat ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除这个会话？") },
             text = {
@@ -2288,18 +2292,20 @@ internal fun ConversationManagerScreen(
                         "不能撤销。工作区里的文件不受影响。",
                 )
             },
-            confirmButton = {
+            confirmButton = { dialog ->
                 TextButton(
                     onClick = {
-                        pendingDelete = null
-                        scope.launch {
-                            Core.chats.delete(chat.id)
-                            snackbar.showSnackbar("已删除「${chat.title}」")
+                        dialog.closeThen {
+                            pendingDelete = null
+                            scope.launch {
+                                Core.chats.delete(chat.id)
+                                snackbar.showSnackbar("已删除「${chat.title}」")
+                            }
                         }
                     },
                 ) { Text("删除") }
             },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+            dismissButton = { dialog -> TextButton(onClick = { dialog.closeThen { pendingDelete = null } }) { Text("取消") } },
         )
     }
     pendingInfo?.let { chat ->
@@ -2427,7 +2433,7 @@ private fun humanBytes(bytes: Long): String = when {
 /** 会话详情弹窗：文件三要素 + 原始 JSON 尾部（可滚动、等宽）。 */
 @Composable
 private fun ChatInfoDialog(info: ChatRepository.ChatFile?, onDismiss: () -> Unit) {
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("会话文件") },
         text = {
@@ -2449,7 +2455,7 @@ private fun ChatInfoDialog(info: ChatRepository.ChatFile?, onDismiss: () -> Unit
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("关闭") } },
     )
 }
 
@@ -2518,7 +2524,7 @@ private fun RenameDialog(
     onConfirm: (String) -> Unit,
 ) {
     var name by remember { mutableStateOf(initial) }
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("重命名提供方") },
         text = {
@@ -2531,10 +2537,10 @@ private fun RenameDialog(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
             )
         },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(name) }) { Text("确定") }
+        confirmButton = { scope ->
+            TextButton(onClick = { scope.closeThen { onConfirm(name) } }) { Text("确定") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
     )
 }
 
@@ -2630,7 +2636,7 @@ private fun ModelPickerDialog(
         }
         groupModels(shown)
     }
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("选择模型") },
         text = {
@@ -2696,12 +2702,12 @@ private fun ModelPickerDialog(
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(models.filter { it in picked }) }) {
+        confirmButton = { scope ->
+            TextButton(onClick = { scope.closeThen { onConfirm(models.filter { it in picked }) } }) {
                 Text("确定（${picked.size}）")
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
     )
 
     aliasing?.let { id ->
@@ -2997,7 +3003,7 @@ private fun ProtocolPicker(protocol: String, onPick: (String) -> Unit) {
 @Composable
 private fun AliasDialog(initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var value by remember { mutableStateOf(initial) }
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("模型别名") },
         text = {
@@ -3011,8 +3017,8 @@ private fun AliasDialog(initial: String, onDismiss: () -> Unit, onConfirm: (Stri
                 modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
             )
         },
-        confirmButton = { TextButton(onClick = { onConfirm(value.trim()) }) { Text("保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen { onConfirm(value.trim()) } }) { Text("保存") } },
+        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
     )
 }
 
@@ -3020,7 +3026,7 @@ private fun AliasDialog(initial: String, onDismiss: () -> Unit, onConfirm: (Stri
 @Composable
 private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var value by remember { mutableStateOf("") }
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("自定义模型") },
         text = {
@@ -3034,13 +3040,13 @@ private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
                 modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
             )
         },
-        confirmButton = {
+        confirmButton = { scope ->
             TextButton(
                 enabled = value.isNotBlank(),
-                onClick = { onConfirm(value.trim()) },
+                onClick = { scope.closeThen { onConfirm(value.trim()) } },
             ) { Text("添加") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
     )
 }
 

@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -70,6 +69,7 @@ import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.extension.SkillViewDialog
 import com.suixing.agent.ui.extension.SkillsSection
 import com.suixing.agent.ui.theme.LocalDarkTheme
@@ -337,22 +337,24 @@ fun ToolsScreen(onBack: () -> Unit) {
     }
 
     mcpDeleting?.let { target ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { mcpDeleting = null },
             title = { Text("删除服务器") },
             text = { Text("确定要删除「${target.name}」吗？它的连接会被断开。") },
-            confirmButton = {
+            confirmButton = { dialog ->
                 TextButton(onClick = {
-                    mcpDeleting = null
-                    scope.launch {
-                        runCatching { Core.mcp.remove(target.name) }
-                            .onSuccess { notify("已删除 ${target.name}") }
-                            .onFailure { notify("删除失败：${it.message ?: "未知错误"}") }
+                    dialog.closeThen {
+                        mcpDeleting = null
+                        scope.launch {
+                            runCatching { Core.mcp.remove(target.name) }
+                                .onSuccess { notify("已删除 ${target.name}") }
+                                .onFailure { notify("删除失败：${it.message ?: "未知错误"}") }
+                        }
                     }
                 }) { Text("删除") }
             },
-            dismissButton = {
-                TextButton(onClick = { mcpDeleting = null }) { Text("取消") }
+            dismissButton = { dialog ->
+                TextButton(onClick = { dialog.closeThen { mcpDeleting = null } }) { Text("取消") }
             },
         )
     }
@@ -362,27 +364,29 @@ fun ToolsScreen(onBack: () -> Unit) {
     }
 
     skillDeleting?.let { target ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { skillDeleting = null },
             title = { Text("删除技能") },
             text = { Text("确定要删除「${target.name}」吗？删除后模型就读不到它了。") },
-            confirmButton = {
+            confirmButton = { dialog ->
                 TextButton(onClick = {
-                    skillDeleting = null
-                    scope.launch {
-                        // delete 写 state 文件时会抛 IOException：不接住就是协程炸掉 + 没有提示，
-                        // 用户以为删掉了（列表也刷新了），其实磁盘上还在。
-                        runCatching { Core.skills.delete(target.id) }
-                            .onSuccess {
-                                skillRefresh++
-                                notify("已删除 ${target.name}")
-                            }
-                            .onFailure { notify("删除失败：${it.message ?: "未知错误"}") }
+                    dialog.closeThen {
+                        skillDeleting = null
+                        scope.launch {
+                            // delete 写 state 文件时会抛 IOException：不接住就是协程炸掉 + 没有提示，
+                            // 用户以为删掉了（列表也刷新了），其实磁盘上还在。
+                            runCatching { Core.skills.delete(target.id) }
+                                .onSuccess {
+                                    skillRefresh++
+                                    notify("已删除 ${target.name}")
+                                }
+                                .onFailure { notify("删除失败：${it.message ?: "未知错误"}") }
+                        }
                     }
                 }) { Text("删除") }
             },
-            dismissButton = {
-                TextButton(onClick = { skillDeleting = null }) { Text("取消") }
+            dismissButton = { dialog ->
+                TextButton(onClick = { dialog.closeThen { skillDeleting = null } }) { Text("取消") }
             },
         )
     }
@@ -420,7 +424,7 @@ private fun SkillUrlImportDialog(
     var url by remember { mutableStateOf("") }
     val usable = url.trim().startsWith("http://") || url.trim().startsWith("https://")
 
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("从链接导入技能") },
         text = {
@@ -452,11 +456,11 @@ private fun SkillUrlImportDialog(
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = { onImport(url.trim()) }, enabled = usable) { Text("导入") }
+        confirmButton = { scope ->
+            TextButton(onClick = { scope.closeThen { onImport(url.trim()) } }, enabled = usable) { Text("导入") }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+        dismissButton = { scope ->
+            TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") }
         },
     )
 }
@@ -895,7 +899,7 @@ private fun McpEditorDialog(
         enabled = enabled,
     )
 
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) "添加 MCP 服务器" else "编辑 ${initial.name}") },
         text = {
@@ -992,13 +996,13 @@ private fun McpEditorDialog(
                 }
             }
         },
-        confirmButton = {
+        confirmButton = { dialog ->
             TextButton(
-                onClick = { onSave(current()) },
+                onClick = { dialog.closeThen { onSave(current()) } },
                 enabled = nameOk && targetOk,
             ) { Text("保存") }
         },
-        dismissButton = {
+        dismissButton = { dialog ->
             Row {
                 TextButton(
                     onClick = {
@@ -1013,7 +1017,7 @@ private fun McpEditorDialog(
                     enabled = !testing && nameOk && targetOk,
                 ) { Text(if (testing) "测试中…" else "测试") }
                 Spacer(Modifier.width(4.dp))
-                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = { dialog.closeThen(onDismiss) }) { Text("取消") }
             }
         },
     )

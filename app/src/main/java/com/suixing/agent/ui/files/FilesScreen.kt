@@ -28,7 +28,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -64,6 +63,7 @@ import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.FileTypeColors
 import com.suixing.agent.ui.theme.MonoStyle
 import kotlinx.coroutines.Dispatchers
@@ -466,7 +466,7 @@ private fun PreviewDialog(
     onDismiss: () -> Unit,
     onCopy: () -> Unit,
 ) {
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = {
             Column {
@@ -493,8 +493,8 @@ private fun PreviewDialog(
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
-        dismissButton = {
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("关闭") } },
+        dismissButton = { scope ->
             TextButton(onClick = onCopy) {
                 Icon(ImageVector.vectorResource(R.drawable.ic_copy), contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))

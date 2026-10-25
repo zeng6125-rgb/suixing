@@ -15,7 +15,6 @@ import androidx.compose.foundation.horizontalScroll
 import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -46,6 +45,7 @@ import com.suixing.agent.plugins.Severity
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.Tone
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -345,7 +345,7 @@ private fun PluginDetailDialog(
     LaunchedEffect(spec.id) {
         env = runCatching { Core.plugins.env(spec.id) }.getOrDefault(emptyMap())
     }
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text(spec.displayName.zh) },
         text = {
@@ -427,7 +427,7 @@ private fun PluginDetailDialog(
                 }
             }
         },
-        confirmButton = {
+        confirmButton = { scope ->
             // 二选一，不是并排两个：一个插件不可能同时"已启用"和"未启用"，两个按钮同时出现会让
             // 用户以为它们是两个不同的动作（而不是同一个开关的两面）。
             if (enabled) {
@@ -436,7 +436,7 @@ private fun PluginDetailDialog(
                 TextButton(onClick = { onToggle(true) }) { Text("启用") }
             }
         },
-        dismissButton = {
+        dismissButton = { scope ->
             Row {
                 // 只在 manifest 真的声明了 env 时才画：没有 env 的插件上这个按钮点了什么也不会发生，
                 // 一个按不动的按钮比没有按钮更让人困惑。有 env 但**都不是必填**的也画 —— 选填项也是
@@ -444,7 +444,7 @@ private fun PluginDetailDialog(
                 if (spec.env.isNotEmpty()) {
                     TextButton(onClick = onFillEnv) { Text("填 env") }
                 }
-                TextButton(onClick = onUninstall) { Text("卸载") }
+                TextButton(onClick = { scope.closeThen(onUninstall) }) { Text("卸载") }
             }
         },
     )
@@ -464,7 +464,7 @@ private fun InstallConfirmDialog(
     onConfirm: () -> Unit,
 ) {
     val summary = result.summary
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onCancel,
         title = { Text(if (result.ok) "确认安装" else "这个包不能安装") },
         text = {
@@ -520,10 +520,10 @@ private fun InstallConfirmDialog(
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = onConfirm, enabled = result.ok) { Text("安装") }
+        confirmButton = { scope ->
+            TextButton(onClick = { scope.closeThen(onConfirm) }, enabled = result.ok) { Text("安装") }
         },
-        dismissButton = { TextButton(onClick = onCancel) { Text("取消") } },
+        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onCancel) }) { Text("取消") } },
     )
 }
 
@@ -536,7 +536,7 @@ private fun EnvDialog(
 ) {
     val fields = remember(spec.id) { spec.env.filter { it.required } }
     var values by remember(spec.id) { mutableStateOf(fields.associate { it.name to (it.defaultValue ?: "") }) }
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = { Text("填写 ${spec.displayName.zh} 需要的值") },
         text = {
@@ -553,12 +553,12 @@ private fun EnvDialog(
                 }
             }
         },
-        confirmButton = {
+        confirmButton = { scope ->
             TextButton(
-                onClick = { onSave(values.filterValues { it.isNotBlank() }) },
+                onClick = { scope.closeThen { onSave(values.filterValues { it.isNotBlank() }) } },
                 enabled = fields.all { !values[it.name].isNullOrBlank() },
             ) { Text("保存") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
     )
 }

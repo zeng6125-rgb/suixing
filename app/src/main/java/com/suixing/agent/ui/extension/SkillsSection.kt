@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +43,7 @@ import com.suixing.agent.skills.groupSkills
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.MonoStyle
 import com.suixing.agent.ui.theme.Tone
 import java.text.SimpleDateFormat
@@ -321,7 +321,7 @@ private fun SkillCard(
 
 @Composable
 fun SkillViewDialog(skill: Skill, onDismiss: () -> Unit) {
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
         title = {
             Column {
@@ -351,8 +351,8 @@ fun SkillViewDialog(skill: Skill, onDismiss: () -> Unit) {
                 )
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
+        confirmButton = { scope ->
+            TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("关闭") }
         },
     )
 }
