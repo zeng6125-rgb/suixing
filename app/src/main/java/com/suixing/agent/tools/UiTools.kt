@@ -30,7 +30,10 @@ import java.io.File
 /** 落盘的截图只留最近这么多张：够回溯几步，又不会把存储吃光。 */
 private const val SHOTS_KEPT = 20
 
-internal class UiTools(
+/** `ui_key` 支持的按键（与 spec 的 enumValues 同一份事实来源）。 */
+private val SUPPORTED_KEYS = listOf("back", "home", "recents", "notifications")
+
+class UiTools(
     private val context: Context,
     private val capabilities: CapabilityHub,
 ) : ToolGroup() {
@@ -501,7 +504,8 @@ internal class UiTools(
 
     private suspend fun key(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
         val name = args.str("key")?.trim()?.lowercase().orEmpty()
-        val supported = listOf("back", "home", "recents", "notifications")
+        // 常量复用（优化清单 tools-P2）：原来每次 ui_key 都新建这个 list。
+        val supported = SUPPORTED_KEYS
         if (name !in supported) return ToolResult.failure("不支持的按键：$name")
 
         val viaAccessibility = service != null && runCatching {
