@@ -1175,7 +1175,17 @@ internal fun AssistantRow(
                             // 就会被判成"很久以前"，于是整段直接给全、一个字都不打。改用
                             // [rememberTypedTextFromBirth]：块首次组合时记下时刻，live 块必然
                             // 年龄≈0 ⇒ 永远从 0 开始打。
-                            val shown = rememberTypedTextFromBirth(part.text, streaming)
+                            // **只有"来自流式块"的正文才打字**：`part.bornAtMs > 0` 是
+                            // 「这块由 LivePart.Text 映射而来」的唯一标记（历史消息一律 0）。
+                            // 用它当判据既能让 run 结束那一刻才落到 part 里的最后一段照常逐字，
+                            // 又不会把已定型/历史内容重播一遍（用户：「为什么对已输出的旧内容
+                            // 逐字出现，我要的是对话进行中的流式」）。
+                            val livePart = part.bornAtMs > 0L
+                            val shown = rememberTypedText(
+                                text = part.text,
+                                enabled = streaming || livePart,
+                                startAtZero = livePart,
+                            )
                             // 流式结束后打字机可能还没打完（恒定 75 字/秒，慢于模型）——
                             // 那段时间仍然要画 `shown`，否则剩下的尾巴会一次性补上。
                             val typing = shown.length < part.text.length
