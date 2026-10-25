@@ -690,7 +690,7 @@ internal fun GenerationSheet(
         popupPositionProvider = if (capsuleTop > 0f && capsuleRight > 0f) {
             val gap = with(density) { 8.dp.roundToPx() }
             // 用户反馈"位置有点偏左"：整体右移 8dp。只改这一个值就能调。
-            val rightBias = with(density) { 8.dp.roundToPx() }
+            val rightBias = with(density) { 24.dp.roundToPx() }
             object : PopupPositionProvider {
                 override fun calculatePosition(
                     anchorBounds: IntRect,
