@@ -730,13 +730,22 @@ internal class ChatStore(private val root: File) {
             totalsAt = conversation.messages.size,
         )
 
-    /** Encodes [messages] as the log's bytes: one record per line, each newline-terminated. */
-    fun encode(messages: List<StoredMessage>): ByteArray = buildString {
+    /**
+     * Encodes [messages] as the log's bytes: one record per line, each newline-terminated.
+     *
+     * **不再先拼巨型 String**（优化清单 data-P1）：`buildString{…}.toByteArray()` 的峰值是
+     * 「String(UTF-16) + 结果数组」≈3N；改逐条编码进 ByteArrayOutputStream，峰值 2N，
+     * 也不产生几十 MB 的中间字符串。输出字节不变。
+     */
+    fun encode(messages: List<StoredMessage>): ByteArray {
+        val out = java.io.ByteArrayOutputStream(64 * 1024)
+        val newline = 10
         for (message in messages) {
-            append(chatJson.encodeToString(StoredMessage.serializer(), message))
-            append('\n')
+            out.write(chatJson.encodeToString(StoredMessage.serializer(), message).toByteArray(Charsets.UTF_8))
+            out.write(newline)
         }
-    }.toByteArray(Charsets.UTF_8)
+        return out.toByteArray()
+    }
 
     /** Deletes every generation of `id` but [keep]. */
     private fun pruneGens(id: String, keep: Int) {

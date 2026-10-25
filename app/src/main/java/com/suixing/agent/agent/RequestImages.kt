@@ -22,6 +22,10 @@ internal fun pruneRequestImages(
     budgetChars: Int,
 ): List<ChatMessage> {
     if (budgetChars <= 0) return wire
+    // **先做一次零分配的早退**（优化清单 agent-P1）：原来无条件 `withIndex().filter{}`，
+    // 即使整条 wire 里一张截图都没有，也要为每条消息造一个 IndexedValue 再拼一个列表。
+    // 绝大多数请求没有截图，这一步是白付的。
+    if (wire.none { it.toolScreenshot && it.imageCount > 0 }) return wire
     val carriers = wire.withIndex().filter { entry ->
         entry.value.toolScreenshot && entry.value.imageCount > 0
     }
