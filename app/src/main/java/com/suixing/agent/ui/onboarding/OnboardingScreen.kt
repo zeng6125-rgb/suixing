@@ -34,6 +34,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -156,6 +157,14 @@ fun OnboardingHost(onClose: () -> Unit) {
         val mine = draft
         // 用户已经动过草稿就别覆盖：他在填的东西不能被读回来的旧值顶掉。
         if (mine == null || !mine.touched) draft = fresh
+    }
+
+    // **离开这一页就把缓存里的明文密钥丢掉**：`OnboardingCache` 是进程级的，用来让「重新看
+    // 一遍引导」进来时不必再等一次 Keystore（~150ms）。但那份 seed 里带着 `SecretBox.decrypt`
+    // 出来的 apiKey —— 一个不做任何事也会在内存里躺到进程结束的密钥副本。进页面照旧用它
+    // 立刻显示，离开时清空；下次进来重新读盘解密（本来后台也会再读一遍对齐）。
+    DisposableEffect(Unit) {
+        onDispose { OnboardingCache.seed = null }
     }
 
     val current = draft

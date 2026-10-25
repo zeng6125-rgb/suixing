@@ -161,18 +161,40 @@ object AssistantAvatarStore {
         }.getOrNull()
     }
 
+    /**
+     * Decoded pictures, shared by every surface that draws the same one.
+     *
+     * 头像会同时出现在顶栏（92dp）、抽屉、助手列表和每一条消息行里。原来每个调用点各自
+     * `decodeFile` 一次：一屏十几条消息就是十几份同样的 Bitmap（内存翻倍，切会话/滚动时
+     * 又是十几次解码）。路径在每次保存时都会变（[saveCropped] 会盖新名字），所以按路径缓存
+     * 不会把「被替换掉的旧图」留在内存里。
+     *
+     * 上限按条数算（不是字节）：一张头像就是几 MB 的整数倍，16 条足够覆盖所有界面同时可见的
+     * 数量，再多的按 LRU 淘汰。
+     */
+    private val pictures = object : android.util.LruCache<String, Bitmap>(16) {}
+
+    /** Drops the cached decode of [path] (called when the file itself goes away). */
+    private fun forget(path: String) {
+        pictures.remove(path)
+    }
+
     /** The stored picture, or null when it is missing or no longer decodes. */
     suspend fun load(context: Context, path: String): Bitmap? = withContext(Dispatchers.IO) {
         if (path.isBlank()) return@withContext null
+        pictures.get(path)?.let { return@withContext it }
         runCatching {
             val file = File(context.filesDir, path)
             if (!file.isFile) null else BitmapFactory.decodeFile(file.absolutePath)
-        }.getOrNull()
+        }.getOrNull()?.also { pictures.put(path, it) }
     }
 
     /** Drops one picture: restoring the emoji, or deleting the assistant that owned it. */
     suspend fun delete(context: Context, path: String) = withContext(Dispatchers.IO) {
-        if (path.isNotBlank()) runCatching { File(context.filesDir, path).delete() }
+        if (path.isNotBlank()) {
+            forget(path)
+            runCatching { File(context.filesDir, path).delete() }
+        }
         Unit
     }
 
