@@ -685,20 +685,6 @@ fun MarkdownText(
     settled: Boolean = !cursor,
 ) {
     val blocks = rememberGrowingMarkdown(text, settled)
-    // **临时诊断**（流式卡顿定位用，取证后删除）：记录每次组合时的文本长度与块数，
-    // 用来区分「文本没到 UI 层」还是「到了但每帧重复解析」。
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    androidx.compose.runtime.LaunchedEffect(text.length, blocks.size) {
-        runCatching {
-            java.io.File(ctx.filesDir, "md.log")
-                .appendText(
-                    System.currentTimeMillis().toString() +
-                        " len=" + text.length +
-                        " blocks=" + blocks.size +
-                        " settled=" + settled + CHR_NL
-                )
-        }
-    }
     MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
 }
 

@@ -53,8 +53,18 @@ internal fun rememberTypedText(
             if (startAtZero) 0 else initialRevealed(text.length, nowMs() - bornAtMs),
         )
     }
+    // **一旦开始流式就要真的从头打**（用户反复报「正文没有逐字」的根因）：
+    // `revealed` 是 remember 的，初值在块第一次组合时就定死 —— 那一刻 `enabled` 往往还是
+    // false（还没开始流），于是被初始化成"当前全文长度"。之后 streaming 变 true、文本继续增长，
+    // `revealed` 只会从那个大数往上加，永远不会从 0 打起 ⇒ 屏幕上是整段整段地出。
+    // 这里用一个普通标记：第一次看到 enabled=true 时把进度归零，重新起打。
+    var startedTyping = remember { booleanArrayOf(false) }
     LaunchedEffect(Unit) {
         while (true) {
+            if (!startedTyping[0] && enabled) {
+                startedTyping[0] = true
+                revealed = 0
+            }
             delay(TYPE_TICK_MS)
             val goal = target.value.length
             if (revealed >= goal) {
