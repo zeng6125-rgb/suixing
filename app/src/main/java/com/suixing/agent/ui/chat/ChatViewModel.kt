@@ -1088,11 +1088,35 @@ class ChatViewModel : ViewModel() {
         return true
     }
 
+    /**
+     * 有没有必要删掉一个**空会话**：误点"新建"、什么都没发就切走，会在列表里留一个空壳。
+     *
+     * 四条都要满足才删（任何一条不满足都保留）：
+     *  · 盘上这条会话没有消息（`messageCount == 0`）；
+     *  · 屏幕上它也没有消息（读到一半的会话不能因为内存里是空就当空壳）；
+     *  · 它没有正在跑的 run（跑着的会话删了会把结果丢掉）；
+     *  · 它**没有草稿** —— 用户打了字但没发送，那是有内容的，不能丢。
+     */
+    /** 离开会话时顺手回收"从未使用过"的空会话。失败就算了（下次切走再试）。 */
+    private suspend fun discardIfUntouched(chatId: String) {
+        if (chatId.isEmpty()) return
+        if (sessions[chatId] != null) return
+        val snapshot = _state.value
+        val inMemory = if (snapshot.conversationId == chatId) snapshot.messages.size else 0
+        val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }?.messageCount ?: return
+        val hasDraft = Core.chats.hasLiveDraft(chatId)
+        if (!shouldDiscardEmptyChat(stored, inMemory, snapshot.runningHere, hasDraft)) return
+        runCatching { Core.chats.delete(chatId) }
+    }
+
     fun newConversation() {
         // 上一轮的实时统计挂在这个 ViewModel 上、全局共享：不清掉的话，新建的空会话在第一次
         // stats tick 之前仍会显示**上一个会话**的圆环读数（用户实测：新会话显示 40% / 409.5K）。
         _liveStats.value = null
         viewModelScope.launch {
+            // 误点「新建」再点别的会话会留下空壳，所以先回收正被离开的那一个（判据见
+            // shouldDiscardEmptyChat：无消息、无草稿、无 run 才删）。
+            discardIfUntouched(_state.value.conversationId)
             val settings = Core.settings.current()
             val created = Core.chats.create()
             _state.value = ChatUiState(
@@ -1139,6 +1163,9 @@ class ChatViewModel : ViewModel() {
         // 与 newConversation 同理：切过去的会话在它自己第一条 stats 到达前，不能顶着上一个
         // 会话的读数（圆环 / 三块占比都读这份）。
         _liveStats.value = null
+        // 切走时把"什么都没发过的空会话"回收掉：判据在 shouldDiscardEmptyChat（无消息 /
+        // 无草稿 / 无 run 才删），有草稿的会保留 —— 用户打了字没发那是有内容的。
+        viewModelScope.launch { discardIfUntouched(_state.value.conversationId) }
         // Anything the conversation on screen was still holding is published before the
         // display moves: a buffered tail would otherwise land in the conversation being
         // opened, or be lost with the one being left.
@@ -3504,3 +3531,16 @@ private const val LIVE_DRAFT_PROBE_CHARS = 64
  * screen has no other business with — the tool's own spec is the source of truth either way.
  */
 private const val TODO_TOOL = "todo_write"
+
+/**
+ * 有没有必要删掉一个**空会话**（放顶层是为了能直接单测这条会丢用户数据的判据）。
+ *
+ * 四条都要满足才删：盘上没消息、内存里也没消息、没有正在跑的 run、**没有草稿**。
+ * 删错了是丢用户数据，比留个空壳严重得多。
+ */
+internal fun shouldDiscardEmptyChat(
+    storedCount: Int,
+    inMemoryCount: Int,
+    running: Boolean,
+    hasDraft: Boolean,
+): Boolean = storedCount == 0 && inMemoryCount == 0 && !running && !hasDraft
