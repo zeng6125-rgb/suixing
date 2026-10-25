@@ -107,21 +107,29 @@ class PerfMonitor(private val file: File) {
     fun summary(limit: Int = 50): PerfSummary = synchronized(lock) {
         val window = records.toList().takeLast(limit.coerceAtLeast(1))
         if (window.isEmpty()) return PerfSummary()
+        // **一个循环算四组平均**（优化清单 data-P2）：原来 4 条 `filter{}.map{}.average()`
+        // 会建 8 个中间 List。分组条件与分母完全不变（各算各的样本数）。
+        var ttftSum = 0L
+        var ttftN = 0
+        var totalSum = 0L
+        var totalN = 0
+        var cacheSum = 0.0
+        var cacheN = 0
+        var tpsSum = 0.0
+        var tpsN = 0
+        for (r in window) {
+            if (r.ttftMs > 0) { ttftSum += r.ttftMs; ttftN++ }
+            if (r.totalMs > 0) { totalSum += r.totalMs; totalN++ }
+            if (r.promptTokens > 0) { cacheSum += r.cachePercent; cacheN++ }
+            if (r.tokensPerSecond > 0) { tpsSum += r.tokensPerSecond; tpsN++ }
+        }
         PerfSummary(
             latest = window.last(),
             count = window.size,
-            avgTtftMs = window.filter { it.ttftMs > 0 }.map { it.ttftMs }.average().let {
-                if (it.isNaN()) 0L else it.toLong()
-            },
-            avgTotalMs = window.filter { it.totalMs > 0 }.map { it.totalMs }.average().let {
-                if (it.isNaN()) 0L else it.toLong()
-            },
-            avgCachePercent = window.filter { it.promptTokens > 0 }.map { it.cachePercent }.average().let {
-                if (it.isNaN()) 0.0 else it
-            },
-            avgTokensPerSecond = window.filter { it.tokensPerSecond > 0 }.map { it.tokensPerSecond }.average().let {
-                if (it.isNaN()) 0.0 else it
-            },
+            avgTtftMs = if (ttftN == 0) 0L else (ttftSum.toDouble() / ttftN).toLong(),
+            avgTotalMs = if (totalN == 0) 0L else (totalSum.toDouble() / totalN).toLong(),
+            avgCachePercent = if (cacheN == 0) 0.0 else cacheSum / cacheN,
+            avgTokensPerSecond = if (tpsN == 0) 0.0 else tpsSum / tpsN,
         )
     }
 
