@@ -171,7 +171,7 @@ class SystemTools(
             }
             val filtered = seen.entries
                 .filter { (pkg, label) ->
-                    query.isNullOrEmpty() || label.lowercase().contains(query) || pkg.lowercase().contains(query)
+                    query.isNullOrEmpty() || label.contains(query, ignoreCase = true) || pkg.contains(query, ignoreCase = true)
                 }
                 .sortedBy { it.value }
             if (filtered.isEmpty()) {
