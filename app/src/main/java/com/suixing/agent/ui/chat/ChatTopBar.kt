@@ -808,7 +808,7 @@ internal fun TurnMetrics(
                             // 锚点是标题那一行的 Box（在左边），按钮在右边 —— 用锚点左沿对齐会把
                             // 卡片甩到屏幕左侧。右对齐到窗口右边，就落在按钮下方。
                             val x = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
-                            val y = anchorBounds.bottom + gap
+                            val y = anchorBounds.top - popupContentSize.height - gap
                             return androidx.compose.ui.unit.IntOffset(x, y)
                         }
                     }

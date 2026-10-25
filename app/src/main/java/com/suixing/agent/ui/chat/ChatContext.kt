@@ -647,7 +647,9 @@ internal fun SteerQueueRow(
                 ImagePreviewDialog(
                     bitmap = picture,
                     contentDescription = "排队中的图片",
-                    keepKeyboard = true,
+                    // **与对话里的图片预览一致**（用户要求）：同一个 Dialog 形态、同样的遮罩。
+                    // 原来这里是 keepKeyboard = true（走 Popup、没有遮罩），所以两处观感不同。
+                    keepKeyboard = false,
                 ) { fullPicture = null }
             }
             Text(
