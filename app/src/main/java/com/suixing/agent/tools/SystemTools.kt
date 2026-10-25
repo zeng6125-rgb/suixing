@@ -250,7 +250,25 @@ class SystemTools(
         val done = onMainThread {
             runCatching { manager.setPrimaryClip(ClipData.newPlainText("Suixing", text)) }.isSuccess
         }
-        return if (done) ToolResult.success("已写入剪贴板（${text.length} 字）") else ToolResult.failure("写入剪贴板失败")
+        if (!done) return ToolResult.failure("写入剪贴板失败")
+        // **读回核验**（issue #44 第一条）：`setPrimaryClip` 不抛异常不代表写进去了 ——
+        // 部分 ROM（尤其带剪贴板隐私保护的）会静默丢弃，模型看到"成功"就继续下一步，
+        // 用户粘贴出来是旧内容。写完全文读回比对，不一致就如实报出来。
+        val readBack = onMainThread {
+            runCatching {
+                manager.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+            }.getOrNull()
+        }
+        return when {
+            readBack == text -> ToolResult.success("已写入剪贴板（${text.length} 字，已读回校验）")
+            readBack == null -> ToolResult.failure(
+                "剪贴板写入后读不回内容（写入 ${text.length} 字，读回为空）—— " +
+                    "这台设备可能禁止了剪贴板读取，请改用其它方式把文本送过去",
+            )
+            else -> ToolResult.failure(
+                "剪贴板内容与写入不一致（写入 ${text.length} 字，读回 ${readBack.length} 字）—— 写入未生效",
+            )
+        }
     }
 
     private suspend fun memoryWrite(args: JsonObject): ToolResult {
@@ -266,10 +284,16 @@ class SystemTools(
             )
         }
         val ok = memory.put(key, value)
-        return if (ok) {
-            ToolResult.success("已记住「$key」")
-        } else {
-            ToolResult.failure("写入记忆失败，检查应用存储空间")
+        if (!ok) return ToolResult.failure("写入记忆失败，检查应用存储空间")
+        // **读回核验**（issue #44 第一条）：`put` 返回 true 只代表写文件成功，
+        // 读回来比一次才知道模型下次能不能取到同样的内容。
+        val stored = memory.entries.value[key]?.value
+        return when {
+            stored == value -> ToolResult.success("已记住「$key」（已读回校验）")
+            stored == null -> ToolResult.failure("写入记忆后读不回「$key」—— 本次未记住")
+            else -> ToolResult.failure(
+                "记忆内容与写入不一致（写入 ${value.length} 字，读回 ${stored.length} 字）—— 本次未记住",
+            )
         }
     }
 
@@ -299,10 +323,16 @@ class SystemTools(
         // 模型整篇重写时最容易发生的事：没把旧条目抄全 ⇒ 旧信息被抹掉。闸门在 store 里，
         // 这里只把拒绝原因原样交给模型，让它重写一份带着旧条目的完整版。
         val refused = profile.writeGuarded(text)
-        return if (refused == null) {
-            ToolResult.success("已更新用户画像（${text.length} 字）")
+        if (refused != null) return ToolResult.failure("未写入：$refused")
+        // **读回核验**（issue #44 第一条）：画像每轮请求都会带上，写坏了影响的是之后所有对话，
+        // 所以这里必须确认存进去的就是刚写的那份，而不是"调用没报错"。
+        val stored = profile.text.value
+        return if (stored == text) {
+            ToolResult.success("已更新用户画像（${text.length} 字，已读回校验）")
         } else {
-            ToolResult.failure("未写入：$refused")
+            ToolResult.failure(
+                "画像写入后读回不一致（写入 ${text.length} 字，读回 ${stored.length} 字）—— 本次未生效",
+            )
         }
     }
 

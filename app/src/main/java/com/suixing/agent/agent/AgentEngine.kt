@@ -1259,6 +1259,16 @@ class AgentEngine(
         }
 
         try {
+            // **工具目录在 run 开始时定一次**（issue #44 第三项，见循环内的说明）。
+            // 放 Default 上拼：`enabledPlugins()` 在 TTL 过期时扫目录 + 逐插件 readText +
+            // JSON 解析，`breakTools` 的 parameters.toString() 是全量序列化 —— 都不该在 Main。
+            val frozenTable = withContext(Dispatchers.Default) {
+                val builtinSpecs = registry.all().map { it.spec } + COMPRESS_CONTEXT_SPEC
+                val pluginSpecs = PluginRuntime.enabledPlugins()
+                val toolSpecs = builtinSpecs +
+                    PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
+                ToolTable(pluginSpecs, toolSpecs)
+            }
             while (roundLimit <= 0 || round < roundLimit) {
                 round++
                 // Emptied at the top of the round rather than next to the call: by the time the
@@ -1302,15 +1312,14 @@ class AgentEngine(
                 // **拼装下放 Default**（#36 A）：enabledPlugins() 在 TTL 过期时扫目录 + 逐插件
                 // readText + JSON 解析；breakTools 的 parameters.toString() 是全量序列化。每轮
                 // 一遍，原来全在 Main。字段赋值（breakToolsSig/breakTools）仍留在调用线程。
-                val assembled = withContext(Dispatchers.Default) {
-                    val builtinSpecs = registry.all().map { it.spec } + COMPRESS_CONTEXT_SPEC
-                    val pluginSpecs = PluginRuntime.enabledPlugins()
-                    val toolSpecs = builtinSpecs +
-                        PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
-                    ToolTable(pluginSpecs, toolSpecs)
-                }
-                val pluginSpecs = assembled.plugins
-                val toolSpecs = assembled.specs
+                // **run 期间工具目录冻结**（issue #44 第三项）：原来这里是每轮重新拼装，
+                // 于是无障碍/Shizuku/Root 能力一变化（或插件目录一变化）工具表就换掉 ⇒
+                // prompt 的工具清单前缀全失效，整个上下文缓存作废，下一轮重新计费 + 变慢。
+                // 现在目录在 run 开始时定一次（见循环外的 frozenTable），这里直接复用。
+                // 代价：插件热插拔的粒度从"下一个请求"变成"下一次 run"—— 这是刻意的取舍，
+                // 缓存前缀的稳定性比"中途装个插件立刻能用"更值钱。
+                val pluginSpecs = frozenTable.plugins
+                val toolSpecs = frozenTable.specs
                 // 接线点 B（HOST-DEV §5）：这一轮的 hooks 快照，与工具表同一次读盘。分发处每条
                 // 调用都过一遍 [PluginRuntime.preExecute] —— 每轮读一次目录是刻意的（热插拔），
                 // 每条调用查一次 hook 是纯函数、不碰磁盘。
