@@ -160,6 +160,9 @@ private fun ScheduleRow(
     onDelete: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // 这一行要做两轮日期格式化（describeSchedule + formatScheduleMoment）。Schedule 是数据类，
+    // 整条当 key 最省事也最稳：文案只由它的字段决定，字段没变就不必重算。文案本身完全不变。
+    val line = remember(schedule) { scheduleLine(schedule) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
@@ -184,7 +187,7 @@ private fun ScheduleRow(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = scheduleLine(schedule),
+                    text = line,
                     style = MaterialTheme.typography.labelSmall,
                     color = scheme.onSurfaceVariant,
                     maxLines = 1,

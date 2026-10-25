@@ -121,7 +121,11 @@ fun SkillsSection(
                 // who turned something off is looking for it where they left it.
                 for (group in groups) {
                     item(key = "group-${group.title}") { SkillGroupHeader(group.title, group.skills.size) }
-                    items(group.skills, key = { it.path }) { skill ->
+                    items(
+                        group.skills,
+                        key = { it.path },
+                        contentType = { "skill-row" },
+                    ) { skill ->
                         SkillCard(
                             skill = skill,
                             onView = { onView(skill) },
@@ -237,6 +241,9 @@ private fun SkillCard(
     onDelete: () -> Unit,
     onToggle: (Boolean) -> Unit,
 ) {
+    // 「来源：链接 · 日期」要一次 SimpleDateFormat.format。只跟这两项有关，按它们记住即可：
+    // 开关、正文长度之类变化引起的重组不必再格式化一遍。文案与分隔符完全不变。
+    val downloaded = remember(skill.sourceUrl, skill.sourceAt) { downloadedLine(skill) }
     SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_book_open), tint = MaterialTheme.colorScheme.tertiary)
@@ -282,7 +289,7 @@ private fun SkillCard(
         if (skill.source == SkillSource.DOWNLOADED && skill.sourceUrl.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = downloadedLine(skill),
+                text = downloaded,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,

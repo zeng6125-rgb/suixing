@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suixing.agent.core.Core
@@ -109,10 +110,13 @@ fun UsageScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                StatCards(
-                    titles = listOf("累计 tokens", "会话数", "最长单轮"),
-                    values = listOf(compact(totals.total), "$conversations", compact(longestTurn)),
-                )
+                // 三个标题是常量；三个数值各要一次 String.format（`compact`）。都记在 item 的
+                // remember 里，滚动/重组不再逐次重排格式化 —— 输出的字符串一个字节都没变。
+                val statTitles = remember { listOf("累计 tokens", "会话数", "最长单轮") }
+                val statValues = remember(totals.total, conversations, longestTurn) {
+                    listOf(compact(totals.total), "$conversations", compact(longestTurn))
+                }
+                StatCards(titles = statTitles, values = statValues)
             }
             // #41 真问题 5：三个地方各显示一个数，用户没法知道口径差在哪 —— 这里一行说明
             // 「为什么用量页的数字看起来比网关后台大」：prompt 是按**每次请求**全量累加的，
@@ -142,8 +146,11 @@ fun UsageScreen(onBack: () -> Unit) {
                                 color = scheme.onSurfaceVariant,
                             )
                         }
-                        val peak = days.maxOfOrNull { it.tokens.total } ?: 0L
-                        days.forEach { day ->
+                        // 峰值与每一行的数值字符串只跟 days 走：remember 一次，别跟着重组重算
+                        // （compact 里是一次 String.format）。
+                        val peak = remember(days) { days.maxOfOrNull { it.tokens.total } ?: 0L }
+                        val dayLabels = remember(days) { days.map { compact(it.tokens.total) } }
+                        days.forEachIndexed { index, day ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     // drop 而不是 substring(5)：date 是磁盘缓存 usage.json 的 map key，
@@ -168,7 +175,7 @@ fun UsageScreen(onBack: () -> Unit) {
                                 }
                                 Spacer(Modifier.width(8.dp))
                                 Text(
-                                    text = compact(day.tokens.total),
+                                    text = dayLabels[index],
                                     style = MaterialTheme.typography.labelSmall,
                                     color = scheme.onSurfaceVariant,
                                     modifier = Modifier.width(52.dp),
@@ -195,7 +202,8 @@ fun UsageScreen(onBack: () -> Unit) {
                                 color = scheme.onSurfaceVariant,
                             )
                         }
-                        models.forEach { row ->
+                        val modelTotals = remember(models) { models.map { compact(it.tokens.total) } }
+                        models.forEachIndexed { index, row ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = row.model,
@@ -203,7 +211,7 @@ fun UsageScreen(onBack: () -> Unit) {
                                     modifier = Modifier.weight(1f),
                                 )
                                 Text(
-                                    text = compact(row.tokens.total),
+                                    text = modelTotals[index],
                                     style = MaterialTheme.typography.labelMedium,
                                     color = scheme.onSurfaceVariant,
                                 )
@@ -248,14 +256,54 @@ private fun StatCards(titles: List<String>, values: List<String>) {
         // 卡片内宽 = 行宽 − 两个 8dp 间距，三等分，再扣掉卡片自己的左右 12dp 内边距。
         val inner = (maxWidth - 16.dp) / 3 - 24.dp
         val room = with(density) { inner.toPx() }
-        val fontSize = remember(inner, values) {
-            var size = base.fontSize
-            while (size.value > MIN_STAT_VALUE_SP &&
-                values.any { measurer.measure(it, style = base.copy(fontSize = size)).size.width > room }
-            ) {
-                size = (size.value - 0.5f).sp
+        // key 里带上 `base` 与 `measurer`：字号/字重/字体/字距/语言区域任何一项变了，同一个字的
+        // 宽度就变 —— 只按 inner+values 记会把上一档字号下选出的结果当成新答案（字号档变化后
+        // 字号陈旧的那个 bug）。TextStyle 覆写了 equals（逐字段比较，它自己就区分
+        // hasSameLayoutAffectingAttributes），density 不在 TextStyle 里，但 rememberTextMeasurer
+        // 会随 density/字体解析器重建，所以 measurer 也进 key。
+        val fontSize = remember(inner, values, base, measurer) {
+            // 档位序列与旧循环逐档递减完全一致：每档在上一档基础上减 0.5sp。不用
+            // `k * 0.5` 一次相减 —— 浮点累加的结果才与旧循环逐位相同。
+            fun sizeAt(step: Int): TextUnit {
+                var size = base.fontSize
+                repeat(step) { size = (size.value - 0.5f).sp }
+                return size
             }
-            size
+
+            fun tooWide(size: TextUnit): Boolean =
+                values.any { measurer.measure(it, style = base.copy(fontSize = size)).size.width > room }
+
+            // 旧循环量到「手上这一档已经越过下限」就不再量、直接拿它当答案，先把这条界算出来。
+            var floorStep = 0
+            var cursor = base.fontSize
+            while (cursor.value > MIN_STAT_VALUE_SP) {
+                cursor = (cursor.value - 0.5f).sp
+                floorStep++
+            }
+            if (floorStep == 0) return@remember base.fontSize
+
+            // ① 基准档：三个值各量一次。放得下就交差 —— 旧循环也是这一遍就返回。
+            val widths = values.map { measurer.measure(it, style = base).size.width }
+            if (widths.all { it <= room }) return@remember base.fontSize
+
+            // ② 宽度与字号近似成正比：拿最宽的那条算出要缩几档，一次跳到目标字号；不再从
+            //    base 起一档档往下量（最坏 22 档 × 3 个值 = 66 次完整段落测量，全在主线程）。
+            val widest = widths.max().toFloat()
+            val target = base.fontSize.value * (room / widest)
+            var step = ((base.fontSize.value - target) / 0.5f).toInt().coerceIn(1, floorStep)
+
+            // ③ 跳到的那一档实测校验一次，之后只在实测结果与估算不符时挪 1~2 档：
+            //    跳过头（这一档还宽裕）就往回收，跳不够（仍超宽）就继续退。两个方向都是实测，
+            //    所以停下来的那一档与逐档递减找到的必然是同一档（宽度随字号单调不减）。
+            if (tooWide(sizeAt(step))) {
+                while (step < floorStep) {
+                    step++
+                    if (!tooWide(sizeAt(step))) break
+                }
+            } else {
+                while (step > 1 && !tooWide(sizeAt(step - 1))) step--
+            }
+            sizeAt(step)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             titles.forEachIndexed { index, title ->

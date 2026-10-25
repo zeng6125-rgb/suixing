@@ -176,7 +176,11 @@ private fun LazyListScope.todoGroup(
     // key 里必须带位置：id 由模型自报（TodoTools.kt:79），而 TodoStore 只补空 id、不去重
     // （TodoStore.kt:61 `item.id.ifBlank { "t${index + 1}" }`）——同一个 id 出现两次时
     // LazyColumn 会抛 `Key "t1" was already used`，打开任务页即崩。
-    itemsIndexed(rows, key = { index, row -> "$status#$index#${row.id}" }) { _, row ->
+    itemsIndexed(
+        rows,
+        key = { index, row -> "$status#$index#${row.id}" },
+        contentType = { _, _ -> "todo-row" },
+    ) { _, row ->
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,

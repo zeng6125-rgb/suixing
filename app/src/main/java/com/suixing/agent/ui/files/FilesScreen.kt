@@ -74,7 +74,20 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private class Entry(val file: File, val size: String, val modified: String)
+/**
+ * 一行文件。[isDirectory] / [iconRes] / [tint] / [size] 都在列目录的 IO 循环里算好：
+ * `File.isDirectory` 与 `File.length` 是系统调用，落在组合期就是每行每帧一次主线程 stat。
+ * 图标只存资源 id —— `ImageVector.vectorResource` 是 @Composable，取不出来。
+ */
+private class Entry(
+    val file: File,
+    val name: String,
+    val size: String,
+    val modified: String,
+    val isDirectory: Boolean,
+    val iconRes: Int,
+    val tint: Color,
+)
 
 @Composable
 fun FilesScreen(onBack: () -> Unit) {
@@ -115,7 +128,7 @@ fun FilesScreen(onBack: () -> Unit) {
     var listError by remember { mutableStateOf<String?>(null) }
     var listing by remember { mutableStateOf(true) }
     var reload by remember { mutableIntStateOf(0) }
-    var preview by remember { mutableStateOf<Pair<File, String>?>(null) }
+    var preview by remember { mutableStateOf<Pair<Entry, String>?>(null) }
     var loading by remember { mutableStateOf(false) }
     // 预览读取是异步的，连点两个文件会起两个协程；只认最后一次点击，否则先点的那次
     // 晚回来会把弹窗改成不是用户最后选的文件。
@@ -145,10 +158,18 @@ fun FilesScreen(onBack: () -> Unit) {
                 // 还没跑完（map/format 之间没有挂起点，取消拦不住它），共用一份会写坏结果。
                 val timeFormat = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
                 children.map { file ->
+                    // `isDirectory` 这一次 stat 同时供图标、行尾箭头和大小文案使用：以前
+                    // `iconFor` 和行里各问文件系统一遍，那两次都发生在组合期的主线程上。
+                    val isDir = file.isDirectory
+                    val (iconRes, tint) = iconFor(isDir, file.extension)
                     Entry(
                         file = file,
-                        size = if (file.isDirectory) "文件夹" else humanSize(file.length()),
+                        name = file.name,
+                        size = if (isDir) "文件夹" else humanSize(file.length()),
                         modified = timeFormat.format(Date(file.lastModified())),
+                        isDirectory = isDir,
+                        iconRes = iconRes,
+                        tint = tint,
                     )
                 }
             }
@@ -320,14 +341,14 @@ fun FilesScreen(onBack: () -> Unit) {
                 contentType = { "file-row" },
             ) { entry ->
                 EntryRow(entry) {
-                    if (entry.file.isDirectory) {
+                    if (entry.isDirectory) {
                         current = entry.file
                     } else {
                         val mine = ++previewRequest
                         scope.launch {
                             loading = true
                             val text = withContext(Dispatchers.IO) { readPreview(entry.file) }
-                            if (mine == previewRequest) preview = entry.file to text
+                            if (mine == previewRequest) preview = entry to text
                             loading = false
                         }
                     }
@@ -337,9 +358,11 @@ fun FilesScreen(onBack: () -> Unit) {
         }
     }
 
-    preview?.let { (file, content) ->
+    preview?.let { (entry, content) ->
         PreviewDialog(
-            file = file,
+            name = entry.name,
+            // 大小是列目录时算好的那一份：弹窗里再问一次 `File.length()` 又是一次主线程 stat。
+            size = entry.size,
             content = content,
             onDismiss = { preview = null },
             // 复制按钮不关弹窗，而 notice 渲染在弹窗下面的页面里，此刻看不见；
@@ -418,15 +441,17 @@ private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (F
 
 @Composable
 private fun EntryRow(entry: Entry, onClick: () -> Unit) {
-    val (icon, tint) = iconFor(entry.file)
+    // 图标的选择、颜色、是否目录都是列目录时在 IO 线程上定好的；这里只按资源 id 查一次
+    // Compose 的矢量图缓存（同一个 id 只解析一次），不再碰 `File`。
+    val icon = ImageVector.vectorResource(entry.iconRes)
     // 行本身只有一份实现（Common.SettingRow）。这一页的行不在卡片里，所以横向 16dp
     // 由这里给（SettingRow 自己不加横向 padding）；纵向 12dp、标题 bodyLarge、
     // 副标题 bodySmall 都是全站统一值。
     SettingRow(
-        title = entry.file.name,
+        title = entry.name,
         subtitle = "${entry.size} · ${entry.modified}",
-        leading = { SoftIcon(icon, size = 36.dp, tint = tint) },
-        control = if (entry.file.isDirectory) ({ RowChevron() }) else null,
+        leading = { SoftIcon(icon, size = 36.dp, tint = entry.tint) },
+        control = if (entry.isDirectory) ({ RowChevron() }) else null,
         onClick = onClick,
         modifier = Modifier.padding(horizontal = 16.dp),
         titleMaxLines = 1,
@@ -434,14 +459,20 @@ private fun EntryRow(entry: Entry, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, onCopy: () -> Unit) {
+private fun PreviewDialog(
+    name: String,
+    size: String,
+    content: String,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    text = humanSize(file.length()),
+                    text = size,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -473,20 +504,24 @@ private fun PreviewDialog(file: File, content: String, onDismiss: () -> Unit, on
     )
 }
 
-/** Extension-driven icon and colour, so the list is scannable without reading names. */
-@Composable
-private fun iconFor(file: File): Pair<ImageVector, Color> {
-    if (file.isDirectory) return ImageVector.vectorResource(R.drawable.ic_folder) to FileTypeColors.folder
-    return when (file.extension.lowercase(Locale.ROOT)) {
-        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> ImageVector.vectorResource(R.drawable.ic_image) to FileTypeColors.image
+/**
+ * Extension-driven icon and colour, so the list is scannable without reading names.
+ *
+ * 纯函数，只返回 drawable 资源 id 与颜色：这条规则在列目录的 IO 线程上就要用，不能是
+ * @Composable。判断顺序与配色跟以前逐条相同。
+ */
+private fun iconFor(isDirectory: Boolean, extension: String): Pair<Int, Color> {
+    if (isDirectory) return R.drawable.ic_folder to FileTypeColors.folder
+    return when (extension.lowercase(Locale.ROOT)) {
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic" -> R.drawable.ic_image to FileTypeColors.image
         "kt", "kts", "java", "py", "js", "ts", "tsx", "jsx", "c", "cpp", "h", "rs", "go", "sh",
         "json", "yml", "yaml", "xml", "toml", "gradle", "html", "css", "sql",
-        -> ImageVector.vectorResource(R.drawable.ic_file_code) to FileTypeColors.code
-        "md", "txt", "log", "csv", "ini", "conf", "properties" -> ImageVector.vectorResource(R.drawable.ic_file_text) to FileTypeColors.text
-        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> ImageVector.vectorResource(R.drawable.ic_file_archive) to FileTypeColors.archive
-        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> ImageVector.vectorResource(R.drawable.ic_music) to FileTypeColors.audio
-        "mp4", "mkv", "mov", "avi", "webm" -> ImageVector.vectorResource(R.drawable.ic_film) to FileTypeColors.video
-        else -> ImageVector.vectorResource(R.drawable.ic_file) to FileTypeColors.other
+        -> R.drawable.ic_file_code to FileTypeColors.code
+        "md", "txt", "log", "csv", "ini", "conf", "properties" -> R.drawable.ic_file_text to FileTypeColors.text
+        "zip", "tar", "gz", "rar", "7z", "apk", "jar" -> R.drawable.ic_file_archive to FileTypeColors.archive
+        "mp3", "wav", "ogg", "flac", "m4a", "aac" -> R.drawable.ic_music to FileTypeColors.audio
+        "mp4", "mkv", "mov", "avi", "webm" -> R.drawable.ic_film to FileTypeColors.video
+        else -> R.drawable.ic_file to FileTypeColors.other
     }
 }
 

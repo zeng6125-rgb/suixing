@@ -107,7 +107,11 @@ fun MemorySection(
                 }
             }
 
-            items(rows, key = { it.key }) { row ->
+            items(
+                rows,
+                key = { it.key },
+                contentType = { "memory-row" },
+            ) { row ->
                 SuixingCard(onClick = { editing = MemoryDraft(row.key, row.value.value, isNew = false) }) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
@@ -139,7 +143,11 @@ fun MemorySection(
                     if (row.value.updatedAt > 0L) {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            text = "更新于 ${formatMemoryTime(row.value.updatedAt)}",
+                            // 一次 SimpleDateFormat.format，只跟这个时间戳走：记住它，编辑、
+                            // 开关之类引起的重组不必再格式化一遍。文案与格式完全不变。
+                            text = remember(row.value.updatedAt) {
+                                "更新于 ${formatMemoryTime(row.value.updatedAt)}"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

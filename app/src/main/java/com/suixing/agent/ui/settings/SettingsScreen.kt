@@ -2203,12 +2203,22 @@ internal fun ConversationManagerScreen(
                         // 只要字节数：原来走 chatFile，它会为 tail 把整份日志读成字符串。
                         bytes = withContext(Dispatchers.IO) { Core.chats.chatSize(conversation.id) } ?: -1L
                     }
+                    // 副标题是一次相对时间格式化（DateUtils）+ 一次字节数格式化。按真正影响输出
+                    // 的三个字段记住它：别跟着每次重组重来。文案、分隔符与原来逐字相同。
+                    val subtitle = remember(
+                        conversation.id,
+                        conversation.updatedAt,
+                        conversation.messageCount,
+                        bytes,
+                    ) {
+                        "${lastUpdated(conversation.updatedAt)} · " +
+                            "${conversation.messageCount} 条消息" +
+                            (if (bytes >= 0) " · ${humanBytes(bytes)}" else "")
+                    }
                     ConversationRow(
                         title = conversation.title,
                         pinned = conversation.pinned,
-                        subtitle = "${lastUpdated(conversation.updatedAt)} · " +
-                            "${conversation.messageCount} 条消息" +
-                            (if (bytes >= 0) " · ${humanBytes(bytes)}" else ""),
+                        subtitle = subtitle,
                         onOpen = { onOpenConversation(conversation.id) },
                         onInfo = { pendingInfo = conversation },
                         onExport = {
@@ -2235,12 +2245,20 @@ internal fun ConversationManagerScreen(
                         key = { it.id },
                         contentType = { "conversation-row" },
                     ) { conversation ->
+                        // 同活动会话行：这里的相对时间也只在 updatedAt / 条数变了时才重算。
+                        val subtitle = remember(
+                            conversation.id,
+                            conversation.updatedAt,
+                            conversation.messageCount,
+                        ) {
+                            "已归档 · ${lastUpdated(conversation.updatedAt)} · " +
+                                "${conversation.messageCount} 条消息"
+                        }
                         ConversationRow(
                             title = conversation.title,
                             // **用 meta 的 messageCount**：`messages` 是空列表
                             // （`load()` 只读 meta），拿它算会显示成「0 条消息」。
-                            subtitle = "已归档 · ${lastUpdated(conversation.updatedAt)} · " +
-                                "${conversation.messageCount} 条消息",
+                            subtitle = subtitle,
                             onOpen = { onOpenConversation(conversation.id) },
                             onInfo = { pendingInfo = conversation },
                             onExport = {
