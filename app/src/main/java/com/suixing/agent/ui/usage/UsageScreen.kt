@@ -114,6 +114,17 @@ fun UsageScreen(onBack: () -> Unit) {
                     values = listOf(compact(totals.total), "$conversations", compact(longestTurn)),
                 )
             }
+            // #41 真问题 5：三个地方各显示一个数，用户没法知道口径差在哪 —— 这里一行说明
+            // 「为什么用量页的数字看起来比网关后台大」：prompt 是按**每次请求**全量累加的，
+            // 一轮工具循环 = 十几次请求，而缓存命中的部分网关按约 1/10 计费。
+            item {
+                Text(
+                    text = "tokens 按每次请求全量累加（一轮工具循环 ≈ 十几次请求）；" +
+                        "缓存命中的部分网关按约 1/10 计费 —— 这里的数字和账单金额不是一回事。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                )
+            }
             item {
                 SectionTitle("近 30 天")
                 Surface(
