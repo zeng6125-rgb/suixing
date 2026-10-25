@@ -327,6 +327,10 @@ internal fun TopBarContextEntry(
                         layoutDirection: LayoutDirection,
                         popupContentSize: IntSize,
                     ): IntOffset {
+                        com.suixing.agent.ui.components.PopupDiag.log(
+                            "ring",
+                            "anchor=$anchorBounds window=$windowSize card=$popupContentSize",
+                        )
                         // **以按钮左沿对齐**（不是贴屏幕右边）—— 之前写死 windowSize.width 会让
                         // 卡片一律从右侧出现。
                         val x = anchorBounds.left.coerceIn(
