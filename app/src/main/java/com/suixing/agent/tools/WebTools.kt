@@ -316,7 +316,9 @@ class WebTools(
         val body = response.body ?: return ByteArray(0) to false
         val declared = body.contentLength()
         body.byteStream().use { input ->
-            val out = ByteArrayOutputStream()
+            // 预分配（优化清单 tools-P2）：contentLength 已知时按它开，上限仍由 MAX_FETCH_BYTES 夹住。
+            val initial = if (declared in 1..MAX_FETCH_BYTES.toLong()) declared.toInt() else 16 * 1024
+            val out = ByteArrayOutputStream(initial)
             val buffer = ByteArray(16 * 1024)
             while (out.size() < MAX_FETCH_BYTES) {
                 val room = (MAX_FETCH_BYTES.toLong() - out.size()).coerceAtMost(buffer.size.toLong()).toInt()

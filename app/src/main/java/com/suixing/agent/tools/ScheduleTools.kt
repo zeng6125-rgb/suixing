@@ -148,9 +148,10 @@ class ScheduleTools(
         val prompt = args.str("prompt")?.trim().orEmpty().ifBlank { existing.prompt }
         // "no timing given" means keep the old one; a timing that was given but is wrong is an
         // error, not a silent no-op — otherwise a typo'd time looks like a successful update.
+        // **一次算好传下去**（优化清单 tools-P2）：readTiming / timingError 内部原来各再算一遍。
         val given = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }
-        val timing = readTiming(args)
-        if (given.isNotEmpty() && timing == null) return@withContext timingError(args)
+        val timing = readTiming(args, given)
+        if (given.isNotEmpty() && timing == null) return@withContext timingError(args, given)
         val updated = if (timing == null) {
             existing.copy(title = title, prompt = prompt)
         } else {
@@ -200,8 +201,7 @@ class ScheduleTools(
     )
 
     /** The one timing parameter that was given, or null when it was not exactly one. */
-    private fun readTiming(args: JsonObject): Timing? {
-        val given = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }
+    private fun readTiming(args: JsonObject, given: List<String> = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }): Timing? {
         if (given.size != 1) return null
         return when (given.first()) {
             "at" -> {
@@ -224,8 +224,7 @@ class ScheduleTools(
         }
     }
 
-    private fun timingError(args: JsonObject): ToolResult {
-        val given = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }
+    private fun timingError(args: JsonObject, given: List<String> = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }): ToolResult {
         return when {
             given.isEmpty() -> ToolResult.failure(
                 "缺少时机参数，三选一：at=\"yyyy-MM-dd HH:mm\"、every_seconds=秒数（≥60）、daily=\"HH:mm\"。",

@@ -173,11 +173,14 @@ class ShellTools(
             "shizuku" -> Shell.shizuku(command)
             else -> Shell.local(command, shell = shell)
         }
+        // **bundledBash() 只探一次**（优化清单 tools-P2）：它是 NativeLib 目录上的 file.exists 探测，
+        // 原来在同一次调用里最多探两次。
+        val bundled = Shell.bundledBash() != null
         val label = when (chosen) {
             // root 档现在也走随包 bash（见 Shell.root），前缀照实标出来：没接上时仍写 root。
-            "root" -> if (Shell.bundledBash() != null) "root+bash" else "root"
+            "root" -> if (bundled) "root+bash" else "root"
             "shizuku" -> "shizuku(shell)"
-            else -> if (chosen == "local" && Shell.bundledBash() != null && shell != "sh") {
+            else -> if (chosen == "local" && bundled && shell != "sh") {
                 "local(app)+bash"
             } else {
                 "local(app)"
