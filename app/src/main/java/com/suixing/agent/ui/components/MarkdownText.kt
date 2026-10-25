@@ -707,7 +707,12 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
     // to recompose when the cache moves on, and writing state during composition is exactly
     // the kind of thing that recomposes forever.
     val cache = remember { MarkdownCache() }
-    if (!settled) return cache.blocksFor(text)
+    // **流式文本直接按当前文本解析**（用户：正文流式一直是"整段整段地出"）。
+    // 原来这里返回 `cache.blocksFor(text)` —— 那条增量缓存只在**空行**处合入尾部，
+    // 同一段落内部继续追加字符时它并不刷新，于是屏幕上要等下一个换行才看到新字，
+    // 表现就是一段一段蹦。这里改为每次按当前文本重新解析，保证"到多少显示多少"。
+    // 解析纯函数、文本长度通常几 KB，一次几毫秒；正确性优先，后续如需优化再做块级复用。
+    if (!settled) return remember(text) { parseMarkdown(text) }
     // 定稿文本：先查进程级缓存 —— 滚出去再滚回来就不必重新解析（快速滑动的卡顿来源）。
     SettledBlocks.get(text)?.let { return it }
     val blocks = cache.blocksFor(text)
