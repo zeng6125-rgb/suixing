@@ -1176,37 +1176,16 @@ internal fun AssistantRow(
                             // 就会被判成"很久以前"，于是整段直接给全、一个字都不打。改用
                             // [rememberTypedTextFromBirth]：块首次组合时记下时刻，live 块必然
                             // 年龄≈0 ⇒ 永远从 0 开始打。
-                            // **直接渲染正文，不做打字机**（用户：「参考 dsh 的思考流式和正文流式」）。
-                            //
-                            // 原来的打字机是"改文本"实现的：每 16ms 用 `text.take(revealed)`
-                            // 生成一个新前缀喂给 MarkdownText ⇒ 每拍重新解析 Markdown、重建
-                            // AnnotatedString、重新排版（issue #44 记录的 0.8.405 停用原因）。
-                            // 更糟的是 `revealed` 一旦被初始化成全文（槽位复用 / 门控 / 开关），
-                            // 就一个字都不打 —— 用户反复看到"整段突然出现"就是它，且不同版本
-                            // 表现不一致，无法定位。
-                            //
-                            // 现在 chunk 到达多少就画多少：与 DSH 的流式一致，光标自然贴在真实
-                            // 文本末尾，不滞后、不失配。逐字观感若要恢复，按 issue #44 §5 的
-                            // 绘制裁剪方案做（不改 text state，只裁剪 TextLayoutResult）。
-                            val shown = part.text
-                            // 流式结束后打字机可能还没打完（恒定 75 字/秒，慢于模型）——
-                            // 那段时间仍然要画 `shown`，否则剩下的尾巴会一次性补上。
-                            val typing = shown.length < part.text.length
-                            if (streaming || !selectable || typing) {
-                                // **`settled = !streaming`**（第四轮评审 M1）：live 正文不传 `cursor`
-                                // （光标由下面的 `BlinkingCursor()` 单独画），若让它按 `!cursor`
-                                // 默认成"定稿"，打字机 25 Hz 每拍一个新前缀都会塞进进程级 LRU
-                                // ⇒ 缓存被同一条答案的 16 个前缀占满、流式期命中率恒为 0。
-                                // 还在打的时候不能标 settled：那会把每一个前缀写进进程级 LRU。
-                                // **光标内联进正文**（用户：绿色竖线要统一）：与思考块同一个
-                                // 绘制实现（MarkdownText 的 cursor 参数，drawBehind 画 4px
-                                // linkColor 竖条），不再另起一个 BlinkingCursor。
+                            // **恢复打字机引入之前的渲染方式**（`git log -S rememberTypedText`
+                            // 找到的那一版）：`MarkdownText(text = part.text)` + 默认
+                            // `settled = true`（走块缓存）。那一版流式是正常的 —— 后来为了逐字
+                            // 传入 `settled = !streaming` 把它切到了"每帧重解析"的路径，
+                            // 整段文本每 16ms 重排一次，Compose 合并后就成了"一下子蹦出一大段"。
+                            // 光标仍然内联（`cursor = streaming`），位置 = 真实文本末行末尾。
+                            if (streaming || !selectable) {
                                 MarkdownText(
-                                    text = shown,
-                                    settled = !streaming && !typing,
-                                    // **流式结束就消失**（用户：「输出完的正文光标就应该消失」）。
-                                    // 原来带 `|| typing`，打字机 125 字/秒追不上快模型时尾巴要打好
-                                    // 几秒，那几秒光标一直挂着 —— 内容已经输出完了却还在闪。
+                                    text = part.text,
+                                    settled = true,
                                     cursor = streaming,
                                 )
                             } else {
