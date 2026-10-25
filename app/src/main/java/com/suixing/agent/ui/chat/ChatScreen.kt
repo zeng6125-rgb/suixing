@@ -230,6 +230,7 @@ import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.components.CircleActionButton
+import com.suixing.agent.ui.components.SettledBlocks
 import com.suixing.agent.ui.components.DrawerButton
 import com.suixing.agent.ui.components.FlatIconButton
 import com.suixing.agent.ui.components.FlatPainterButton
@@ -1224,6 +1225,15 @@ fun ChatScreen(
     //
     // 所以：**钉住期间只要流式行还在视野内就立刻释放**（宁可那一刻跳一下，也不要持续显示被裁的输出）。
     // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
+
+    // **切会话前把正文解析预热掉**（换会话后第一帧的主要成本就是这十几份冷解析）。
+    // 键用「会话 + 消息版本」：同一会话里流式更新不会反复触发；后台线程做，命中后进组合即已就绪。
+    // 预热只是把同一份纯函数计算挪出主线程，渲染结果不变。
+    LaunchedEffect(state.conversationId, state.messagesRevision) {
+        val texts = state.messages.mapNotNull { m -> m.text.takeIf { it.isNotBlank() } }
+        if (texts.isEmpty()) return@LaunchedEffect
+        withContext(Dispatchers.Default) { SettledBlocks.prewarm(texts) }
+    }
 
     LaunchedEffect(visible, scroll.stickToBottom) {
         val total = visible.size
