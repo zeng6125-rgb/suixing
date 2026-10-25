@@ -3477,7 +3477,11 @@ private const val LIVE_DRAFT_INTERVAL_MS = 1000L
  * 每拍放的字数也随之变小，逐字感才回来。重解析次数翻倍仍在可接受范围
  * （0.8.382 实测：光标 480ms 步进后单核 42% → 这一项不是发热主因）。
  */
-private const val DELTA_PUBLISH_MS = 40L
+// 发布节流：**16ms ≈ 每帧一次**（用户：流式"一小段一小段出"、感觉不实时）。
+// 原来 40ms ⇒ 每秒最多 25 次，配上网关按几十毫秒批量送 token，屏幕上一跳一跳地长。
+// 正文与思考现在直接渲染 `part.text`（不做打字机），节流就是唯一的颗粒度来源，
+// 所以收到就发。60 次/秒的 state 更新仍在预算内（一次发布只拼一小段字符串）。
+private const val DELTA_PUBLISH_MS = 16L
 
 /**
  * How long to wait before trying a refused 排队 turn again.
