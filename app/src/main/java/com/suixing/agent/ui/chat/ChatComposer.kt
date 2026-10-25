@@ -346,6 +346,8 @@ internal fun MenuCard(
             )
         }
     }
+    // 上浮幅度固定 12dp：原来按卡片高度的 1/6，卡片越高跳得越厉害（用户：幅度太大）。
+    val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { 12.dp.roundToPx() }
     // 定位二选一：同时传 alignment/offset 与 provider 编译不过。
     val cardBody: @Composable () -> Unit = {
             // **首次组合必须先从 false 翻到 true，入场才会跑**：`keepMounted` 是在 `visible`
@@ -365,11 +367,11 @@ internal fun MenuCard(
                 // **不做淡入**：alpha < 1 时卡片（纯白底）是半透明的，压在深色抽屉/正文上
                 // 就显得发灰 —— 用户对比两个浮层看到的"底色不一样"就是它。
                 enter = scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
-                    slideInVertically(tween(POPUP_ANIM_MS)) { it / 6 },
+                    slideInVertically(tween(POPUP_ANIM_MS)) { slidePx },
                 // 退场**保持原样**（用户没让改）：淡出 + 缩回 + 下落。
                 exit = fadeOut(tween(POPUP_ANIM_MS)) +
                     scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
-                    slideOutVertically(tween(POPUP_ANIM_MS)) { it / 6 },
+                    slideOutVertically(tween(POPUP_ANIM_MS)) { slidePx },
             ) {
                 Column(
                     modifier = modifier
@@ -687,6 +689,8 @@ internal fun GenerationSheet(
         // 右缘 = 胶囊右缘。未测量到（=0）时退回 alignment/offset 的老路径。
         popupPositionProvider = if (capsuleTop > 0f && capsuleRight > 0f) {
             val gap = with(density) { 8.dp.roundToPx() }
+            // 用户反馈"位置有点偏左"：整体右移 8dp。只改这一个值就能调。
+            val rightBias = with(density) { 8.dp.roundToPx() }
             object : PopupPositionProvider {
                 override fun calculatePosition(
                     anchorBounds: IntRect,
@@ -694,7 +698,7 @@ internal fun GenerationSheet(
                     layoutDirection: LayoutDirection,
                     popupContentSize: IntSize,
                 ): IntOffset {
-                    val x = (capsuleRight.toInt() - popupContentSize.width).coerceAtLeast(0)
+                    val x = (capsuleRight.toInt() - popupContentSize.width + rightBias).coerceAtLeast(0)
                     val y = (capsuleTop.toInt() - popupContentSize.height - gap).coerceAtLeast(0)
                     return IntOffset(x, y)
                 }
