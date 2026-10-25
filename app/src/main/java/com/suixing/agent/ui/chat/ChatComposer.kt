@@ -1147,7 +1147,8 @@ internal fun ContextRingCard(
             // gets a card that fits it rather than one that hangs off its edge.
             .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
             .popupCardSurface(scheme.surface)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            // 与 MenuCard（模型选择等七处）一致：18/14 —— 用户要求「和七处统一」。
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (used <= 0) {
@@ -1267,7 +1268,8 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
         modifier = Modifier
             .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
             .popupCardSurface(scheme.surface)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            // 与 MenuCard（模型选择等七处）一致：18/14 —— 用户要求「和七处统一」。
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
