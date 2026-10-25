@@ -802,12 +802,15 @@ internal fun ringReading(
     /** meta 里缓存的「最近一条报了用量的消息」的 prompt（issue #41 真问题 1）。 */
     persistedContext: Int = 0,
 ): RingReading = when {
-    // 实测口径优先：网关回报（含按会话保持的最近一次）→ 落盘回报。
+    // 实测口径优先：网关回报（含按会话保持的最近一次）→ **会话级权威值** → UI 现找。
     liveReported > 0 -> RingReading(liveReported, estimated = false)
-    newestStored > 0 -> RingReading(newestStored, estimated = false)
-    // run 结束瞬间前两级同时归零，而落盘的实测值还在（meta.contextTokens）——
-    // 用它接住圆环，别掉到估算（实测曾 498K → 370K 掉 26%）。
+    // **`persistedContext` 必须排在 `newestStored` 前面**（issue #49）：
+    // 后者是从**可见消息里现找**最后一条带 usage 的，一旦某几轮失败（网络错误、切了 provider
+    // 却没成功跑起来）就没有 usage，它会一路退到很早的轮次 ⇒ 圆环从 73% 掉到 4%。
+    // `meta.contextTokens` 由 `ChatStore.appendTail` 维护、语义是「最近一次报了用量的 prompt」，
+    // 失败轮**不会把它变小**，而且跨会话切走再回来是 O(1) 读 meta。
     persistedContext > 0 -> RingReading(persistedContext, estimated = false)
+    newestStored > 0 -> RingReading(newestStored, estimated = false)
     // 从没实测过（网关不报用量）才用粗估兜底，并标「约」。
     liveEstimate > 0 -> RingReading(liveEstimate, estimated = true)
     transcriptEstimate > 0 -> RingReading(transcriptEstimate, estimated = true)

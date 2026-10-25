@@ -594,8 +594,13 @@ fun ChatScreen(
     // below divide by the window of the model that actually sends, which is not the
     // app-wide default's window once a conversation or a persona picks its own.
     // 每次重组都要扫 provider×model（流式期 12.5 Hz），而这三个输入很少变 —— 记住它。
+    // 同一个 remember 里把**生效的模型名**一并取出：圆环面板要用它说明"这个窗口属于谁"
+    // （issue #49 修法 2：切 provider 后分母变了，用户需要看出变的是窗口）。
+    val activeModel = remember(settings, state.providerId, state.model, assistant) {
+        settings.choiceFor(state.providerId, state.model, assistant).model
+    }
     val contextWindow = remember(settings, state.providerId, state.model, assistant) {
-        settings.contextWindowFor(settings.choiceFor(state.providerId, state.model, assistant).model)
+        settings.contextWindowFor(activeModel)
     }
     // Which endpoint a stored round ran on. A message keeps its model id and nothing else, so
     // its owner is whichever endpoint lists that id — the same question the picker asks. Built
@@ -2128,6 +2133,7 @@ fun ChatScreen(
                         sessionCachePercent = session?.cachePercent ?: 0.0,
                         sessionElapsedMs = sessionElapsedMs,
                         statsFlow = viewModel.liveStats,
+                        model = activeModel,
                     )
                 },
             )

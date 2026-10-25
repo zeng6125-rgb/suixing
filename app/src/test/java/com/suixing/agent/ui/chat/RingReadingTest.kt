@@ -85,4 +85,44 @@ class RingReadingTest {
         assertEquals(11_400, reported.tokens)
         assertFalse(reported.estimated)
     }
+    /**
+     * **issue #49**：切 provider 后圆环 73% → 4% → 73%。
+     *
+     * 复现条件：几轮失败（网络错误）没有 usage ⇒ `newestStored` 会退到很久以前的小值。
+     * 会话级权威值 `persistedContext` 不受失败轮影响，必须排在它前面。
+     */
+    @Test
+    fun `a failed round cannot drag the ring back through newestStored`() {
+        val reading = ringReading(
+            liveReported = 0,
+            newestStored = 40_000,      // 失败轮跳过后，退到很早的轮次
+            liveEstimate = 0,
+            persistedContext = 730_000, // 会话级权威值：最近一次真正上报的 prompt
+        )
+        assertEquals("失败轮不该把读数拉到旧轮次", 730_000, reading.tokens)
+        assertFalse(reading.estimated)
+    }
+
+    @Test
+    fun `the live report still wins over the session-level value`() {
+        val reading = ringReading(
+            liveReported = 512_000,
+            newestStored = 900_000,
+            liveEstimate = 0,
+            persistedContext = 730_000,
+        )
+        assertEquals(512_000, reading.tokens)
+    }
+
+    @Test
+    fun `without a session-level value it still falls back to the newest stored one`() {
+        val reading = ringReading(
+            liveReported = 0,
+            newestStored = 90_000,
+            liveEstimate = 0,
+            persistedContext = 0,
+        )
+        assertEquals(90_000, reading.tokens)
+    }
+
 }

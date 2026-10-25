@@ -272,6 +272,8 @@ internal fun TopBarContextEntry(
     sessionCachePercent: Double,
     sessionElapsedMs: Long,
     statsFlow: StateFlow<StreamStats?>,
+    /** 当前模型名，用于在面板里说明"窗口是多少、属于谁"（issue #49）。 */
+    model: String = "",
 ) {
     val live by statsFlow.collectAsState()
     var open by remember { mutableStateOf(false) }
@@ -340,6 +342,7 @@ internal fun TopBarContextEntry(
                     used = used,
                     estimated = estimated,
                     window = window,
+                    model = model,
                     sessionTokens = sessionTokens,
                     sessionEstimate = sessionEstimate,
                     sessionSplit = sessionSplit,

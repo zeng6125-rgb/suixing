@@ -1151,6 +1151,14 @@ internal fun ContextRingCard(
     /** True when [used] is this app's own estimate rather than a count the endpoint sent. */
     estimated: Boolean = false,
     window: Int,
+    /**
+     * 当前模型名（可为空）。
+     *
+     * issue #49 缺陷 2：切换 provider/model 时**分母会变**（1M → 256K），同样的 tokens 百分比
+     * 差好几倍，用户看到的是"上下文突然变满/变空"却不知道原因。把窗口与模型名列出来，
+     * 一眼就能看出变的是窗口而不是上下文。
+     */
+    model: String = "",
     sessionTokens: Int,
     /** The text-based floor for the cumulative row, when nothing in the session was priced. */
     sessionEstimate: Int = 0,
@@ -1204,6 +1212,11 @@ internal fun ContextRingCard(
                     "${if (estimated) "约 " else ""}${shortTokens(used)} · 窗口未设置 · 到设置里填"
                 },
             )
+            // **窗口与模型名**（issue #49 修法 2）：切 provider 后分母变了，这一行让用户
+            // 立刻看出"是窗口变了，不是上下文变了"。
+            if (known && model.isNotBlank()) {
+                RingDetail("模型窗口", "${fullTokens(window.toLong())} tok · $model")
+            }
             // The conversation's own hit rate, not the newest round's: the user asked for
             // 「总缓存命中率」 and a label of exactly 「缓存命中」. SessionStats.cachePercent is
             // the whole session's cached tokens over its whole prompt, so it is the total this
