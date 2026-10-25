@@ -328,11 +328,13 @@ internal fun MenuCard(
     // "卡片宽 0"定位在按钮右缘，内容出现后再滑到左边：用户看到的就是「卡片从右边进来」
     // 而且「偏左」。现在内容一直在，首帧就是真实尺寸 ⇒ 位置一次算对。
     val enterProgress = remember { Animatable(0f) }
+    // 入场时长 130ms（用户：130ms）。
+    val enterMs = 130
     LaunchedEffect(visible) {
         if (visible) {
             keepMounted = true
             enterProgress.snapTo(0f)
-            enterProgress.animateTo(1f, tween(POPUP_ANIM_MS))
+            enterProgress.animateTo(1f, tween(enterMs))
         } else {
             delay(MENU_EXIT_MS)
             keepMounted = false
@@ -362,9 +364,8 @@ internal fun MenuCard(
     val cardBody: @Composable () -> Unit = {
         AnimatedVisibility(
             visible = visible,
-            // 入场**只上浮**（用户：直接上浮不行吗）：位移 12dp → 0，不缩放、不淡入。
-            // 缩放是"从中间长出来"，淡入让纯白底半透明（压在深色抽屉上发灰）。
-            // 入场由下面的 graphicsLayer 驱动，这里必须置 None，否则两者叠加成两段位移。
+            // 入场由下面的 graphicsLayer 驱动（**上浮 12dp + 缩放 0.92→1，不淡入**），
+            // 这里必须置 None，否则两者叠加成两段位移。
             enter = EnterTransition.None,
             // 退场**原样保留**（用户没让改）：淡出 + 缩回 + 下落。
             exit = fadeOut(tween(POPUP_ANIM_MS)) +
@@ -382,8 +383,14 @@ internal fun MenuCard(
                     .padding(horizontal = 18.dp, vertical = 14.dp)
                     // 只读绘制期、不触发重组。退场时进度已是 1，这一层是恒等变换 ⇒ 退场观感
                     // 与改动前逐项一致。
+                    // 入场：上浮 12dp ＋ 缩放 0.92→1，**不淡入**（用户指定）。
+                    // 淡入会让纯白底在半透明帧里发灰（压在深色抽屉上尤其明显）。
                     .graphicsLayer {
-                        translationY = (1f - enterProgress.value) * slidePx
+                        val p = enterProgress.value
+                        translationY = (1f - p) * slidePx
+                        val s = 0.92f + 0.08f * p
+                        scaleX = s
+                        scaleY = s
                     },
                 content = content,
             )
@@ -660,10 +667,10 @@ internal fun GenerationSheet(
                 // **左缘对齐按钮左沿**（与添加菜单、审批菜单、圆环菜单同一套）：卡片从按钮
                 // 左边伸出、向上长。右缘对齐按钮右缘是错的 —— 模型按钮的框只包住模型名
                 // （很窄），卡片会被推到屏幕左侧，用户看到的就是"偏左"。
-                // 再左移 8dp（用户：模型选择器卡片再左一点点）。
-                val nudgeLeft = with(density) { 8.dp.roundToPx() }
+                // 右移 16dp（用户：模型选择器再右移 16dp）。
+                val nudgeRight = with(density) { 16.dp.roundToPx() }
                 val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
-                val x = (anchorBounds.left - nudgeLeft).coerceIn(edge, maxLeft)
+                val x = (anchorBounds.left + nudgeRight).coerceIn(edge, maxLeft)
                 val y = (anchorBounds.top - popupContentSize.height - gap).coerceAtLeast(edge)
                 return IntOffset(x, y)
             }
