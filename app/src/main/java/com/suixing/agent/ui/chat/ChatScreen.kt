@@ -1224,47 +1224,6 @@ fun ChatScreen(
     //
     // 所以：**钉住期间只要流式行还在视野内就立刻释放**（宁可那一刻跳一下，也不要持续显示被裁的输出）。
     // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
-    // **常驻帧诊断**（零配合成本）：只把掉帧的帧写进 filesDir/frame.log，正常帧不产生 IO。
-    // 每行带「是否在滚 / 距最新多少像素 / 第几轮 / 是否在跑 / 是否有流式正文」——
-    // 掉帧发生在哪个区域、是否与转圈动画同现，读文件即可判断，不需要用户配合计时。
-    val frameProbe = rememberUpdatedState {
-        val off = listState.firstVisibleItemScrollOffset
-        val fed = TurnMarks.topFedIndex(
-            offsetFromBottom = off,
-            viewport = listState.layoutInfo.viewportSize.height,
-            heightsOldestFirst = rowHeights,
-        )
-        val turn = TurnMarks.current(
-            firstVisibleFed = fed,
-            feedPrefix = feedPrefix,
-            visibleSize = visible.size,
-            rowOffset = rowOffset,
-            turnIndices = turnIndices,
-        )
-        "scroll=${listState.isScrollInProgress} off=$off turn=$turn" +
-            // 精确到「有没有流式正文」：`liveParts` 里还有工具调用 part，
-            // 用 isNotEmpty 会把「工具执行中」也算成有正文 —— 那一列正是用来和
-            // TypingDots/ProcessSpinner（等待态才可见）对照的，不能宽。
-            // 自包含判定：`hasLiveText` 在本函数里声明得更靠后，前向引用编译不过。
-            " run=${state.runningHere}" +
-            " anim=$switchRunning" +
-            " liveText=${state.liveParts.any { it is LivePart.Text || it is LivePart.Thinking }}"
-    }
-    val appCtx = LocalContext.current.applicationContext
-    LaunchedEffect(appCtx) {
-        // 全局已由 Application 安装，这里只挂富探针（滚动位置/轮次/运行态）。
-        FrameTrace.install(appCtx)
-        FrameTrace.setProbe { frameProbe.value() }
-    }
-    // 每次成功重组计数（`SideEffect` 在组合成功提交后调用）—— 用来量化
-    // 「ChatScreen 在流式期被重跑了多少次」，改前改后对比这个数。
-    SideEffect { FrameTrace.countRecomposition() }
-    // 切会话打一条事件：开场动画掉帧到底发生在切换前后，靠这行对齐（见 FrameTrace.mark）。
-    LaunchedEffect(state.conversationId) {
-        if (state.conversationId.isNotEmpty()) {
-            FrameTrace.mark("switch conv=${state.conversationId.take(8)} rows=${visible.size}")
-        }
-    }
 
     LaunchedEffect(visible, scroll.stickToBottom) {
         val total = visible.size

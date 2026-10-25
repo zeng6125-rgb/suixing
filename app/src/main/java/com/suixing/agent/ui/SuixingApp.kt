@@ -79,7 +79,6 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import com.suixing.agent.ui.chat.FrameTrace
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -832,8 +831,6 @@ private fun Drawer(
     // 每行上次看到的 updatedAt：数值变大 = 那条会话来了新消息 ⇒ 把它从普通表里摘掉，
     // 它就按 updatedAt 冒回普通区顶部（用户：「新会话照常出现在普通会话上面」）。
     val lastSeen = remember { HashMap<String, Long>() }
-    // 页面标记：frame.log 里 stall 行与 route= 行的帧号对齐，就能知道卡在哪个页面。
-    LaunchedEffect(route) { FrameTrace.mark("route=" + route) }
     var orderDirty by remember { mutableStateOf(false) }
     // 手势回调里要读最新的会话列表与分区，但 pointerInput 的 block 只能建一次
     // （中途换实例会把进行中的手势取消），所以这两份最新值走 rememberUpdatedState 转发。
