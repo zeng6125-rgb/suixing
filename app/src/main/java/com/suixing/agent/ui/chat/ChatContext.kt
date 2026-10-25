@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.chat
 
+import com.suixing.agent.ui.components.rememberPopupMotion
 import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
@@ -299,7 +300,11 @@ internal fun TopBarContextEntry(
             modifier = Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (open) {
+        // 小浮层进出场（用户：「用量统计这些弹窗出现得太生硬」）。
+        // `keeping` 让退场动画期间浮层仍留在组合里，否则窗口先被销毁、动画根本看不到。
+        val popupMotion = rememberPopupMotion()
+        LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
+        if (open || popupMotion.keeping) {
             Popup(properties = PopupProperties(focusable = false)) {
                 Box(
                     Modifier
@@ -328,7 +333,7 @@ internal fun TopBarContextEntry(
                 properties = PopupProperties(focusable = false),
             ) {
                 Box(
-                    Modifier
+                    popupMotion.modifier()
                         .onSizeChanged { cardWidth = it.width }
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
