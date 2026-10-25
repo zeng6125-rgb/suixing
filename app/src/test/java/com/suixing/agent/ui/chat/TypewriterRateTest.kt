@@ -11,9 +11,11 @@ import org.junit.Test
  *
  * 这组测试不测"手感"（那要真机看），只把手感背后的三条**可量化**性质钉死：
  *
- * 1. **不许一次刷一屏**：单拍推进量有上限，几百字的 delta 不会在头几拍就全部出现。
- * 2. **不许吊着**：一次几百字的 delta 必须在几秒内放完（不是慢慢爬）。
- * 3. **稳态不落后**：正常到达速率下（每 80ms 5 个字 ≈ 62 字/秒），显示落后不超过 ~1.5 秒的量。
+ * 1. **不许一次刷一屏**：常态单拍 3 个字。
+ * 2. **看得出在打**：300 字必须打 3 秒以上 —— 比设备实测的到达速度（100~200 字/秒）慢，
+ *    否则揭示追得上到达就看不见逐字（这正是前两轮没修好的原因）。
+ * 3. **不许吊着**：超长整块要分档提速，2000 字 12 秒内放完。
+ * 4. **稳态不落后**：正常到达速率下（每 80ms 5 个字 ≈ 62 字/秒），显示落后不超过 ~1.5 秒的量。
  *
  * 真机验收仍然需要：录一次「思考刚结束、正文首片较大」的流，看是否逐字、结束时是否瞬移。
  */
@@ -50,12 +52,13 @@ class TypewriterRateTest {
         // 正文最常见的坏场景：思考刚结束，首片正文一次到 300 字。
         val sim = simulate(totalChars = 300, chunk = 300)
         assertTrue(
-            "第一拍只该推几个字（旧规则是 75 个），实际 ${sim.firstJump}",
-            sim.firstJump in 1..TYPE_MAX_STEP_FOR_TEST,
+            // 整块 300 字一到达就已越过 240 的档位 ⇒ 第一拍走 6 字档；旧规则这里是 75。
+            "第一拍最多 6 个字（旧规则是 75 个），实际 ${sim.firstJump}",
+            sim.firstJump in 1..TYPE_LAG_STEP_FOR_TEST,
         )
         assertTrue(
-            "300 字必须放得完且放得住（1.5~5 秒），实际 ${sim.drainMs}ms",
-            sim.drainMs in 1_500..5_000,
+            "300 字要在 3~6 秒内逐字放完（快于这个就看不出在打），实际 ${sim.drainMs}ms",
+            sim.drainMs in 3_000..6_000,
         )
     }
 
@@ -63,7 +66,8 @@ class TypewriterRateTest {
     fun `a big chunk still finishes in seconds rather than crawling`() {
         // 2000 字一次性到达：加速档必须介入，不能按 125 字/秒慢慢爬 16 秒。
         val sim = simulate(totalChars = 2_000, chunk = 2_000)
-        assertTrue("2000 字应在 6 秒内放完，实际 ${sim.drainMs}ms", sim.drainMs <= 6_000)
+        // 积压到 1200 字就进最快档（16 字/拍 = 400 字/秒），不能吊几分钟。
+        assertTrue("2000 字应在 12 秒内放完，实际 ${sim.drainMs}ms", sim.drainMs <= 12_000)
     }
 
     @Test
@@ -86,6 +90,6 @@ class TypewriterRateTest {
         const val TICK = 40
 
         /** 单拍上限的测试侧副本：Typewriter.kt 里是 private，这里按同样口径断言。 */
-        const val TYPE_MAX_STEP_FOR_TEST = 6
+        const val TYPE_LAG_STEP_FOR_TEST = 6
     }
 }

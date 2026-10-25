@@ -75,29 +75,32 @@ private const val TYPE_FRESH_MS = 500L
 /**
  * 这一拍放几个字（40ms 一拍 ⇒ 25 拍/秒）。
  *
- * 旧规则是 `backlog / 4`：积压多少就按四分之一往下砍。思考块的 delta 小，看着一直正常；但正文
- * 一个 delta 常带几百字，**第一拍就推上去 75 个字** —— 视觉上就是"整屏一次刷出来"，也就是用户报的
- * 「正文没能逐字」。
+ * **第三次修（2026-10-25，用户仍报「正文一下全部显示」）**：旧规则 `backlog/4` 第一拍能推 75 个字；
+ * 上一轮改成「上限 6 字/拍（150 字/秒）」，但设备实测（`files/perf.json`）生成速度是
+ * **51~175 tokens/s，典型 ~100** —— 中文约 100~200 字/秒。**揭示速度 ≥ 到达速度 ⇒ 永远追得平
+ * ⇒ 每一拍正好把新到的字放完，看起来就是「一次性出来」**。问题不是"追不及时会掉队"，而是
+ * "追得太快就没有打字感"。
  *
- * 现在给速度设上下限：
- * - 慢端至少 [TYPE_MIN_STEP] 个字/拍（50 字/秒）：一个 delta 一两个字的端点上，也看得见在动；
- * - 正常积压按 [TYPE_MAX_STEP] 个字/拍（150 字/秒）封顶：看起来仍是"在打"，不是整块刷；
- * - 积压超过 [TYPE_BURST_BACKLOG]（300 字）才额外加速：避免一次超长输出把显示吊在后面几分钟。
+ * 所以改成**分档**（按积压量，模拟过 300 / 600 / 2000 字整块与 62、200 字/秒两种流）：
+ * - 常态 [TYPE_BASE_STEP] 字/拍（75 字/秒）：明显慢于到达速度 ⇒ 看得见逐字；
+ * - 积压 >[TYPE_LAG_SMALL] 提到 6 字/拍，>[TYPE_LAG_BIG] 提到 10，>[TYPE_LAG_HUGE] 提到 16：
+ *   只为避免一次超长输出把显示吊在后面几分钟，正常流式走不到前两档。
  *
- * 为什么不全速追赶：全速等于没有打字机（旧行为）。为什么不让它一直慢：固定速度在快端点上会越积
- * 越多，最后变成一个永远追不上的尾巴（见文件头第 1 条）—— 这里用"上限 + 超量加速"两头都收住。
+ * 实测：300 字 3.6 秒、600 字 5.6 秒、2000 字 10 秒；62 字/秒的慢流不落后，200 字/秒的快流
+ * 最多落后 3 秒。
  */
-internal fun typeStep(backlog: Int): Int {
-    if (backlog <= 0) return TYPE_MIN_STEP
-    // 12 拍 ≈ 0.5 秒追平的斜率，再封顶到 TYPE_MAX_STEP。
-    val normal = ((backlog + 11) / 12).coerceAtMost(TYPE_MAX_STEP)
-    // 积压超过一屏半才动加速档，正常流式永远走不到这里。
-    val burst = if (backlog > TYPE_BURST_BACKLOG) (backlog - TYPE_BURST_BACKLOG) / 30 else 0
-    return (normal + burst).coerceAtLeast(TYPE_MIN_STEP)
+internal fun typeStep(backlog: Int): Int = when {
+    backlog <= 0 -> TYPE_MIN_STEP
+    backlog > TYPE_LAG_HUGE -> 16
+    backlog > TYPE_LAG_BIG -> 10
+    backlog > TYPE_LAG_SMALL -> 6
+    else -> TYPE_BASE_STEP
 }
 
-/** 每拍最多放几个字（正常积压下的封顶）：6 个/拍 = 150 字/秒。 */
-private const val TYPE_MAX_STEP = 6
+/** 常态推进量：3 字/拍 = 75 字/秒。低于设备实测的到达速度（100~200 字/秒），逐字才看得见。 */
+private const val TYPE_BASE_STEP = 3
 
-/** 积压超过这么多字才开始额外加速（大约一屏，正常流式只有几十字）。 */
-private const val TYPE_BURST_BACKLOG = 300
+/** 积压到这么多字（约 3 秒）就升一档，往上还有两档兜底。 */
+private const val TYPE_LAG_SMALL = 240
+private const val TYPE_LAG_BIG = 600
+private const val TYPE_LAG_HUGE = 1200

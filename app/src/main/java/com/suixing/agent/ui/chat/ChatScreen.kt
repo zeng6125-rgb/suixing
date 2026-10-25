@@ -1908,10 +1908,23 @@ fun ChatScreen(
                             // held the timestamp a full 16dp above the bubble it belongs to.
                             // Inside this Column the two sit 3dp apart, and the 16dp goes back
                             // to meaning what it says — the air between messages.
+                            // **重行独立成一个 RenderNode**（issue #47 方向 2）：整页装进单个
+                            // item 之后，整页共用一棵绘制树 —— 任何一处内容变化、以及每一次
+                            // 滚动/动画，RenderThread 都要把这棵树整个重录（实测是主线程的
+                            // 3.4 倍）。给「含思考块/工具卡」的重行挂一层，内容没变时它自己的
+                            // 绘制列表可以被直接复用，整页重录退化成「只有脏行重录」。
+                            //
+                            // 只在重行上挂：轻行（用户气泡、纯正文）的绘制列表本来就短，多一层
+                            // 反而增加合成开销和内存。层上不带任何视觉属性 ⇒ 渲染结果逐像素相同。
+                            val heavyRow = remember(row.parts) {
+                                row.parts.any { it is Part.Thinking || it is Part.Tools }
+                            }
                             Column(
-                                Modifier.onGloballyPositioned { coords ->
-                                    rowHeights[visibleIndex] = coords.size.height + gapPx
-                                },
+                                Modifier
+                                    .then(if (heavyRow) Modifier.graphicsLayer() else Modifier)
+                                    .onGloballyPositioned { coords ->
+                                        rowHeights[visibleIndex] = coords.size.height + gapPx
+                                    },
                             ) {
                                 // 外观 → 显示时间: off means no labels at all, not fewer.
                                 if (settings.showTimestamps && row.showTimeLabel) {
