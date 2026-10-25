@@ -1149,7 +1149,7 @@ internal fun ContextRingCard(
             .popupCardSurface(scheme.surface)
             // 与 MenuCard（模型选择等七处）一致：18/14 —— 用户要求「和七处统一」。
             .padding(horizontal = 18.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        // 与 MenuCard（那七处）一致：**不设 verticalArrangement**（用户：和那几处一样）。
     ) {
         if (used <= 0) {
             // A brand-new conversation has nothing to report yet, and saying so is not the same
@@ -1270,7 +1270,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
             .popupCardSurface(scheme.surface)
             // 与 MenuCard（模型选择等七处）一致：18/14 —— 用户要求「和七处统一」。
             .padding(horizontal = 18.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        // 与 MenuCard（那七处）一致：**不设 verticalArrangement**（用户：和那几处一样）。
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(

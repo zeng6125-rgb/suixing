@@ -32,20 +32,3 @@ internal fun Modifier.popupCardSurface(color: Color): Modifier = this
     )
     .clip(PopupCardShape)
     .background(color)
-
-/**
- * 小浮层的**唯一**卡片实现。七处 `MenuCard` 与圆环明细、会话统计三张卡全部调它。
- *
- * 用户的要求是「和七处统一」：不是"三张卡彼此一样、但和七处不一样"，而是**全部**同一个
- * 组合函数 —— 圆角、投影、底色、内外边距只有这一份代码，不可能再长出第二种观感。
- */
-@Composable
-internal fun PopupCard(
-    modifier: Modifier = Modifier,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Column(
-        modifier = modifier.popupCardSurface(MaterialTheme.colorScheme.surface),
-        content = content,
-    )
-}
