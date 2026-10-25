@@ -15,9 +15,11 @@ import kotlin.math.ceil
  *
  * 三条约束决定了它长这样：
  *
- * 1. **不许落后**。积压越多放得越快（每个节拍放 backlog/4 个字，至少 2 个），稳态落后
- *    大约 4 个节拍 ≈ 160ms —— 看得见在打字，但读完不会被吊在后面。固定速度（比如每帧 1 字）
- *    在快端点上会越积越多，最后变成一个永远追不上的尾巴，那是比整块跳更糟的体验。
+ * 1. **看得见在打，但不许掉队**。每拍 2~6 个字（50~150 字/秒）：慢端点也看得见在动，正常
+ *    积压下封顶 150 字/秒。旧公式 `backlog/4` 会在第一拍就推上去几十上百个字（正文一个 delta
+ *    常带几百字）—— 「正文没能逐字」就是它；思考块的 delta 小，所以一直看着正常。
+ *    积压超过一屏（300 字）才额外加速，避免长尾巴吊着。反过来，固定速度在快端点上会越积越多、
+ *    变成一个永远追不上的尾巴，那是比整块跳更糟的体验 —— 所以是"上限 + 超量加速"，不是纯固定。
  * 2. **不许逐帧重排 Markdown**。节拍是 40ms（25 次/秒），不是每一帧：正文每换一次前缀都要
  *    整段重新解析，60fps 会把这个代价翻一倍多（见 ChatViewModel 里 `DELTA_PUBLISH_MS` 的注释，
  *    渲染缓存是按文本内容做键的，文本一变就是一次 miss）。
@@ -41,9 +43,7 @@ internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 
             if (revealed >= goal) {
                 revealed = goal
             } else {
-                val backlog = goal - revealed
-                revealed = (revealed + maxOf(TYPE_MIN_STEP, ceil(backlog / 4.0).toInt()))
-                    .coerceAtMost(goal)
+                revealed = (revealed + typeStep(goal - revealed)).coerceAtMost(goal)
             }
         }
     }
@@ -71,3 +71,33 @@ internal fun initialRevealed(textLength: Int, ageMs: Long): Int =
 
 /** 块诞生后多久内算「刚出现」：覆盖一次 delta 发布（80ms）加一两帧组合延迟。 */
 private const val TYPE_FRESH_MS = 500L
+
+/**
+ * 这一拍放几个字（40ms 一拍 ⇒ 25 拍/秒）。
+ *
+ * 旧规则是 `backlog / 4`：积压多少就按四分之一往下砍。思考块的 delta 小，看着一直正常；但正文
+ * 一个 delta 常带几百字，**第一拍就推上去 75 个字** —— 视觉上就是"整屏一次刷出来"，也就是用户报的
+ * 「正文没能逐字」。
+ *
+ * 现在给速度设上下限：
+ * - 慢端至少 [TYPE_MIN_STEP] 个字/拍（50 字/秒）：一个 delta 一两个字的端点上，也看得见在动；
+ * - 正常积压按 [TYPE_MAX_STEP] 个字/拍（150 字/秒）封顶：看起来仍是"在打"，不是整块刷；
+ * - 积压超过 [TYPE_BURST_BACKLOG]（300 字）才额外加速：避免一次超长输出把显示吊在后面几分钟。
+ *
+ * 为什么不全速追赶：全速等于没有打字机（旧行为）。为什么不让它一直慢：固定速度在快端点上会越积
+ * 越多，最后变成一个永远追不上的尾巴（见文件头第 1 条）—— 这里用"上限 + 超量加速"两头都收住。
+ */
+internal fun typeStep(backlog: Int): Int {
+    if (backlog <= 0) return TYPE_MIN_STEP
+    // 12 拍 ≈ 0.5 秒追平的斜率，再封顶到 TYPE_MAX_STEP。
+    val normal = ((backlog + 11) / 12).coerceAtMost(TYPE_MAX_STEP)
+    // 积压超过一屏半才动加速档，正常流式永远走不到这里。
+    val burst = if (backlog > TYPE_BURST_BACKLOG) (backlog - TYPE_BURST_BACKLOG) / 30 else 0
+    return (normal + burst).coerceAtLeast(TYPE_MIN_STEP)
+}
+
+/** 每拍最多放几个字（正常积压下的封顶）：6 个/拍 = 150 字/秒。 */
+private const val TYPE_MAX_STEP = 6
+
+/** 积压超过这么多字才开始额外加速（大约一屏，正常流式只有几十字）。 */
+private const val TYPE_BURST_BACKLOG = 300
