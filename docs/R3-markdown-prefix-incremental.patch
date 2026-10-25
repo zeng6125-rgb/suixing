@@ -1,0 +1,218 @@
+--- a/app/src/main/java/com/suixing/agent/ui/components/MarkdownText.kt
++++ b/app/src/main/java/com/suixing/agent/ui/components/MarkdownText.kt
+@@ -782,49 +782,92 @@
+ internal class MarkdownCache {
+     private var text = ""
+     private var prefix = ""
++    /** [prefix] 里反引号的个数（只关心奇偶）：新候选只需在它之上加新增那一段。 */
++    private var prefixTicks = 0
+     private var prefixBlocks: List<MdBlock> = emptyList()
+     private var blocks: List<MdBlock> = emptyList()
++    /** [settledPrefixLength] 选中的那个前缀的反引号个数，由扫描顺手写下。 */
++    private var settledTicks = 0
+ 
+     fun blocksFor(next: String): List<MdBlock> {
+         if (next == text) return blocks
+-        val settled = settledPrefix(next)
+-        if (settled.isNotEmpty() && settled == prefix) {
+-            blocks = prefixBlocks + parseMarkdown(next.removePrefix(settled))
++        // 旧前缀还在不在：先比长度、再比前缀。语义与原来的 `settled == prefix` 相同（`settled`
++        // 本身就是 `next` 的前缀，所以「前 prefix.length 个字符相同」⇔ 两串相等），但不再为
++        // 每一拍分配一个 settled 字符串。
++        val keepPrefix =
++            prefix.isNotEmpty() && next.length >= prefix.length && next.startsWith(prefix)
++        val settledLen = settledPrefixLength(next, if (keepPrefix) prefix.length else 0)
++        if (settledLen > 0 && settledLen == prefix.length && keepPrefix) {
++            blocks = prefixBlocks + parseMarkdown(next.substring(settledLen))
+         } else {
+-            prefixBlocks = if (settled.isEmpty()) emptyList() else parseMarkdown(settled)
+-            blocks = if (settled.isEmpty()) {
++            prefix = if (settledLen == 0) "" else next.substring(0, settledLen)
++            prefixTicks = settledTicks
++            prefixBlocks = if (settledLen == 0) emptyList() else parseMarkdown(prefix)
++            blocks = if (settledLen == 0) {
+                 parseMarkdown(next)
+             } else {
+-                prefixBlocks + parseMarkdown(next.removePrefix(settled))
++                prefixBlocks + parseMarkdown(next.substring(settledLen))
+             }
+-            prefix = settled
+         }
+         text = next
+         return blocks
+     }
+ 
+     /**
+-     * The part of [text] that can never change again, ending just past a blank line.
++     * [settledPrefix] 的**长度版**：同样找「最后一条可以定稿的空行」，但只数新增那一段的反引号。
+      *
+      * A blank line normally ends a block, which is what makes the split safe — except inside a
+      * fenced code block, where it does not: cutting a fence in half would render one code block
+      * as two, one of them unterminated. So the last blank line with an even number of fences
+      * before it is the one taken, and a text whose only blank lines are inside fences simply has
+      * no settled part (it is re-parsed whole, which is what it did before any of this).
++     *
++     * **这个奇偶判据数的是「所有反引号」，不是「围栏行」**（行内代码、正文里的零散反引号都算）。
++     * 这一条从第一版就是这样，本次只改「怎么数」不改「数什么」：多算的反引号只会让前缀被判成
++     * 围栏内部 ⇒ 退回整段重解析，是**性能**退化（回到这条优化之前），不是渲染错误。真正的
++     * 边界（`MD_FENCE`）在 [parseMarkdown] 里，这里只做保守裁剪。
++     *
++     * 每拍真正变化的只有末尾那一小段，所以候选的反引号个数可以从 [prefixTicks] 起算：反引号是
++     * **可加的**，前缀不变时它的计数也不变。[base] 就是那个「计数已知」的前缀长度（0 = 旧前缀
++     * 已经不在，只能从头数）。
+      */
+-    private fun settledPrefix(text: String): String {
++    private fun settledPrefixLength(text: String, base: Int): Int {
++        val baseTicks = if (base > 0) prefixTicks else 0
+         var searchFrom = text.length
+         while (true) {
+-            val at = text.lastIndexOf("\n\n", searchFrom - 1)
+-            // at == 0 is a blank line at the very top of the answer, and "\n\n" is a settled
++            val at = text.lastIndexOf("
++
++", searchFrom - 1)
++            // at == 0 is a blank line at the very top of the answer, and "
++
++" is a settled
+             // prefix like any other (its parse is empty). Treating it as "nothing settled"
+             // re-parsed the whole answer on every publish for as long as it was there.
+-            if (at < 0) return ""
+-            val candidate = text.substring(0, at + 2)
+-            if (candidate.count { it == '`' } % 2 == 0) return candidate
++            if (at < 0) {
++                settledTicks = 0
++                return 0
++            }
++            val candidateLen = at + 2
++            val ticks = if (candidateLen >= base) {
++                baseTicks + countTicks(text, base, candidateLen)
++            } else {
++                // 比已知前缀还靠前的候选（文本变短/换块时才会走到）：只能从头数。
++                countTicks(text, 0, candidateLen)
++            }
++            if (ticks % 2 == 0) {
++                settledTicks = ticks
++                return candidateLen
++            }
+             searchFrom = at
+         }
+     }
++
++    /** `[from, to)` 里的反引号个数：不分配中间字符串（原来是每拍 `count {}` 一遍整条前缀）。 */
++    private fun countTicks(text: String, from: Int, to: Int): Int {
++        var n = 0
++        for (i in from until to) if (text[i] == '`') n++
++        return n
++    }
+ }
+ 
+ /**
+--- /dev/null
++++ b/app/src/test/java/com/suixing/agent/ui/components/MarkdownPrefixEdgeTest.kt
+@@ -0,0 +1,106 @@
++package com.suixing.agent.ui.components
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++/**
++ * [MarkdownCache] 改「增量前缀」前后的**逐块等价**：边界形状逐一与旧实现对拍。
++ *
++ * 为什么拿旧实现当答案、而不是 `parseMarkdown`：这条缓存只负责「复用已定稿的前缀、只解析尾巴」，
++ * 它该输出什么由旧实现定义 —— 新实现与旧实现同输出，才是纯粹的**性能**改动。与一次性解析相等
++ * 是另一条不变式，`MarkdownCacheTest` 已经在守。
++ *
++ * 覆盖的形状：空串、全是反引号、前缀正好落在行边界、文本变短 / 换块 / 重放。
++ */
++class MarkdownPrefixEdgeTest {
++
++    /** 改动前的 `MarkdownCache`，原样留在这里当参照物（**不要跟着改**）。 */
++    private class LegacyCache {
++        private var text = ""
++        private var prefix = ""
++        private var prefixBlocks: List<MdBlock> = emptyList()
++        private var blocks: List<MdBlock> = emptyList()
++
++        fun blocksFor(next: String): List<MdBlock> {
++            if (next == text) return blocks
++            val settled = settledPrefix(next)
++            if (settled.isNotEmpty() && settled == prefix) {
++                blocks = prefixBlocks + parseMarkdown(next.removePrefix(settled))
++            } else {
++                prefixBlocks = if (settled.isEmpty()) emptyList() else parseMarkdown(settled)
++                blocks = if (settled.isEmpty()) {
++                    parseMarkdown(next)
++                } else {
++                    prefixBlocks + parseMarkdown(next.removePrefix(settled))
++                }
++                prefix = settled
++            }
++            text = next
++            return blocks
++        }
++
++        private fun settledPrefix(text: String): String {
++            var searchFrom = text.length
++            while (true) {
++                val at = text.lastIndexOf("\n\n", searchFrom - 1)
++                if (at < 0) return ""
++                val candidate = text.substring(0, at + 2)
++                if (candidate.count { it == '`' } % 2 == 0) return candidate
++                searchFrom = at
++            }
++        }
++    }
++
++    /** 同一串输入按顺序喂给两个实现，**每一步**的输出都必须相等（状态机是跨步的）。 */
++    private fun assertSameAsLegacy(steps: List<String>) {
++        val legacy = LegacyCache()
++        val cache = MarkdownCache()
++        for ((i, step) in steps.withIndex()) {
++            assertEquals(
++                "第 $i 步（长度 ${step.length}）与改动前不一致",
++                legacy.blocksFor(step),
++                cache.blocksFor(step),
++            )
++        }
++    }
++
++    /** 逐字符喂一段文本：每一步都是上一步的前缀，走的是增量分支。 */
++    private fun feedCharByChar(text: String) =
++        (0..text.length).map { text.substring(0, it) }
++
++    @Test
++    fun `an empty text and the first characters`() {
++        assertSameAsLegacy(listOf("", "", "a", "a\n", "\n\n", ""))
++    }
++
++    @Test
++    fun `a text made only of backticks`() {
++        // 奇偶判据就是"数下来的反引号是偶数吗"，这里让每个候选前缀的奇偶一路交错。
++        assertSameAsLegacy(feedCharByChar("``\n\n```\n\n````\n\n`````"))
++    }
++
++    @Test
++    fun `a prefix landing exactly on a line boundary`() {
++        assertSameAsLegacy(
++            listOf("一\n\n二\n\n三", "一\n\n二\n\n三\n", "一\n\n二\n\n三\n\n"),
++        )
++    }
++
++    @Test
++    fun `a shorter or replaced text rebuilds`() {
++        assertSameAsLegacy(
++            listOf(
++                "第一段\n\n第二段\n\n第三段",
++                "第一段\n\n第二段", // 变短：旧前缀比新文本还长
++                "另一段\n\n再来一段", // 换块：不是前缀
++                "第一段\n\n第二段\n\n第三段", // 重放：再长回去
++            ),
++        )
++    }
++
++    @Test
++    fun `every prefix of a mixed text matches`() {
++        // 正文里夹着成对的与**未闭合**的行内反引号（后者只让判据更保守，不该改变输出）。
++        assertSameAsLegacy(feedCharByChar("有 `code` 的一段。\n\n```kotlin\nval a = 1\n\nval b = 2\n```\n\n`未闭合"))
++    }
++}

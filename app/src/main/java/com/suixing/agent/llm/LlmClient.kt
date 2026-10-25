@@ -1498,8 +1498,11 @@ internal fun extractApiError(body: String): String {
             ?: parsed["msg"].asText()
         if (!message.isNullOrBlank()) return message.take(300)
     }
-    return trimmed.take(200).replace(Regex("\\s+"), " ")
+    return trimmed.take(200).replace(WHITESPACE_RUN, " ")
 }
+
+/** 连续空白折叠：错误信息清洗用它，原来每次失败都现场编译一遍正则。 */
+private val WHITESPACE_RUN = Regex("\\s+")
 
 private fun JsonElement?.asText(): String? =
     (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content?.takeIf { it.isNotBlank() }

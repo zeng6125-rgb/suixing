@@ -442,9 +442,16 @@ private val SETTING_NAMESPACES = setOf("system", "secure", "global")
 /** settings 键名的合法形状：挡掉带空格/引号/分号的注入面。 */
 private val SETTING_KEY = Regex("""^[A-Za-z0-9_.\-]+$""")
 
+/**
+ * `settings put` 的识别正则。
+ *
+ * **提到文件级**：它在**每次 `run_shell` 成功之后**都会被调用一次（写状态读回核验），
+ * 原来每次都编译一遍正则。行为完全相同，只是不再重复编译。
+ */
+private val SETTING_PUT = Regex("""^\s*settings\s+put\s+(system|secure|global)\s+(\S+)\s+(.+)$""")
+
 internal fun parseSettingWrite(command: String): SettingWrite? {
-    val m = Regex("""^\s*settings\s+put\s+(system|secure|global)\s+(\S+)\s+(.+)$""")
-        .find(command) ?: return null
+    val m = SETTING_PUT.find(command) ?: return null
     val raw = m.groupValues[3].trim()
     return SettingWrite(
         ns = m.groupValues[1],

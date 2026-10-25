@@ -2,6 +2,9 @@ package com.suixing.agent.agent
 
 import java.io.File
 
+/** 文件名安全字符集：工具名里的非法字符替换成下划线（原为每次写盘现场编译）。 */
+private val UNSAFE_FILENAME = Regex("[^A-Za-z0-9_.-]")
+
 /** 一次落盘的结果：[kept] 是要放进 wire 的文本（头部 + 提示），[path] 是完整输出所在文件。 */
 internal data class SpilledToolOutput(val kept: String, val path: String)
 
@@ -28,7 +31,7 @@ internal fun spillToolOutput(
     maxKept: Int,
 ): SpilledToolOutput? {
     if (maxKept <= 0 || output.length <= maxKept) return null
-    val safeName = tool.ifBlank { "tool" }.replace(Regex("[^A-Za-z0-9_.-]"), "_").take(40)
+    val safeName = tool.ifBlank { "tool" }.replace(UNSAFE_FILENAME, "_").take(40)
     val file = File(dir.apply { mkdirs() }, "$safeName-${System.currentTimeMillis()}.txt")
     val written = runCatching { file.writeText(output); true }.getOrDefault(false)
     if (!written) {

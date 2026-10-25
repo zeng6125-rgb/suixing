@@ -353,19 +353,25 @@ class WebTools(
     }
 }
 
+private val RE_SCRIPT = Regex("(?is)<script[^>]*>.*?</script>")
+private val RE_STYLE = Regex("(?is)<style[^>]*>.*?</style>")
+private val RE_NOSCRIPT = Regex("(?is)<noscript[^>]*>.*?</noscript>")
+private val RE_COMMENT = Regex("(?s)<!--.*?-->")
+private val RE_LI = Regex("(?i)<li[^>]*>")
+private val RE_BLOCK_END = Regex("(?i)<(br|/p|/div|/li|/tr|/h[1-6]|/table|/section|/article|/header|/footer)[^>]*>")
+private val RE_TAG = Regex("(?s)<[^>]+>")
+
 /** Turns a page into something worth spending context on. */
 internal fun htmlToText(html: String): String {
     var text = html
-    text = text.replace(Regex("(?is)<script[^>]*>.*?</script>"), " ")
-    text = text.replace(Regex("(?is)<style[^>]*>.*?</style>"), " ")
-    text = text.replace(Regex("(?is)<noscript[^>]*>.*?</noscript>"), " ")
-    text = text.replace(Regex("(?s)<!--.*?-->"), " ")
-    text = text.replace(Regex("(?i)<li[^>]*>"), "\n- ")
-    text = text.replace(
-        Regex("(?i)<(br|/p|/div|/li|/tr|/h[1-6]|/table|/section|/article|/header|/footer)[^>]*>"),
-        "\n",
-    )
-    text = text.replace(Regex("(?s)<[^>]+>"), " ")
+    // 这些正则原来是**每次转换都现场编译**一遍（每抓一个页面一次）。提到文件级，行为不变。
+    text = text.replace(RE_SCRIPT, " ")
+    text = text.replace(RE_STYLE, " ")
+    text = text.replace(RE_NOSCRIPT, " ")
+    text = text.replace(RE_COMMENT, " ")
+    text = text.replace(RE_LI, "\n- ")
+    text = text.replace(RE_BLOCK_END, "\n")
+    text = text.replace(RE_TAG, " ")
     text = decodeEntities(text)
     text = text.replace(Regex("[ \\t\\u00A0\\u3000]+"), " ")
     text = text.replace(Regex(" *\\n *"), "\n")
