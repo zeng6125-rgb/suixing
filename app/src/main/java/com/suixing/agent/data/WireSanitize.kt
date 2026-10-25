@@ -17,26 +17,32 @@ package com.suixing.agent.data
 internal object WireSanitize {
 
     fun apply(messages: List<StoredMessage>): List<StoredMessage> {
-        // ① 哪些 toolCallId 真的拿到了结果。
-        val answered = messages
-            .filter { it.role == Roles.TOOL }
-            .mapNotNull { it.toolCallId }
-            .toSet()
-        // ② 丢掉"有呼叫但结果不全"的助手（并行里缺一条就不行）。
-        val assistants = messages.filterNot { message ->
-            message.role == Roles.ASSISTANT && message.toolCalls.any { it.id !in answered }
+        // ① 哪些 toolCallId 真的拿到了结果 —— **一趟扫完**（原来 filter+mapNotNull+toSet
+        // 三份中间集合）。② 丢掉"有呼叫但结果不全"的助手（并行里缺一条就不行）。
+        val answered = HashSet<String>()
+        for (message in messages) {
+            if (message.role == Roles.TOOL) message.toolCallId?.let { answered.add(it) }
         }
-        // ③ 反过来：哪些 toolCallId 还有人问过。
-        val asked = assistants
-            .filter { it.role == Roles.ASSISTANT }
-            .flatMap { it.toolCalls }
-            .map { it.id }
-            .toSet()
+        val assistants = ArrayList<StoredMessage>(messages.size)
+        // ③ 反过来：哪些 toolCallId 还有被保留的助手问过（同一趟里顺手收集）。
+        val asked = HashSet<String>()
+        for (message in messages) {
+            if (message.role == Roles.ASSISTANT) {
+                if (message.toolCalls.any { it.id !in answered }) continue
+                for (call in message.toolCalls) asked.add(call.id)
+            }
+            assistants.add(message)
+        }
         // ④ 丢掉没人问过的工具结果（含 toolCallId 缺失的那种）。
-        return assistants.filter { message ->
-            if (message.role != Roles.TOOL) return@filter true
-            val id = message.toolCallId ?: return@filter false
-            id in asked
+        val out = ArrayList<StoredMessage>(assistants.size)
+        for (message in assistants) {
+            if (message.role != Roles.TOOL) {
+                out.add(message)
+                continue
+            }
+            val id = message.toolCallId ?: continue
+            if (id in asked) out.add(message)
         }
+        return out
     }
 }
