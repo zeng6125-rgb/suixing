@@ -450,7 +450,11 @@ internal fun TypingDots() {
     val transition = rememberInfiniteTransition(label = "typing")
     Row(verticalAlignment = Alignment.CenterVertically) {
         repeat(3) { index ->
-            val alpha by transition.animateFloat(
+            // **不要 `by` 委托**（优化清单 chat-P1）：`by` 会在**组合期**读值 ⇒ 只要这三点
+            // 可见就按屏幕刷新率持续重组+重绘。同文件 `BlinkingCursor` 已因同款写法实测
+            // 213fps / 单核 42% 改掉，这里漏改了。改成拿 State、在 `graphicsLayer` 的
+            // **绘制期**读 —— 视觉逐帧相同，但不再触发重组。
+            val alphaState = transition.animateFloat(
                 initialValue = 0.25f,
                 targetValue = 1f,
                 animationSpec = infiniteRepeatable(
@@ -463,7 +467,7 @@ internal fun TypingDots() {
                 Modifier
                     .padding(end = 5.dp)
                     .size(7.dp)
-                    .alpha(alpha)
+                    .graphicsLayer { alpha = alphaState.value }
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary),
             )
