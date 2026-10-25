@@ -455,12 +455,15 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                     // 放在读行循环里会每行重置，多行 JSON 永远配不平、整条事件丢失。
                     val frame = SseFrames.State()
                     var unparsed = 0
-                    fun acceptPayload(payload: String) {
-                        val chunk = runCatching { Json.parseToJsonElement(payload).jsonObject }.getOrNull()
-                        if (chunk == null) {
-                            unparsed++
-                            return
-                        }
+                    /**
+                     * 已经解析好的 chunk 交给 stream。
+                     *
+                     * **单独拆出来**（优化清单 llm-P0）：热路径（单行 data 帧，每 delta 一条）原来
+                     * 先做一次"探针解析"判断能否当场处理，成功后又把同一个字符串交给
+                     * `acceptPayload` 再解析一遍 —— 每条 delta 两次全量 JSON 解析。
+                     * 现在探针的解析结果直接复用。
+                     */
+                    fun acceptChunk(chunk: JsonObject) {
                         chunk["error"]?.let { error ->
                             val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.content
                                 ?: error.toString()
@@ -476,6 +479,16 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         // retried, which is a second request for a turn the endpoint already
                         // answered, and a second round of tool calls on top of it.
                         if (stream.hasToolCalls()) received = true
+                    }
+
+                    /** 字符串入口（多行事件拼接后走这里），解析失败计入 [unparsed]。 */
+                    fun acceptPayload(payload: String) {
+                        val chunk = runCatching { Json.parseToJsonElement(payload).jsonObject }.getOrNull()
+                        if (chunk == null) {
+                            unparsed++
+                            return
+                        }
+                        acceptChunk(chunk)
                     }
                     while (true) {
                         val line = source.readUtf8Line() ?: break
@@ -498,12 +511,13 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                             sawDone = true
                             break
                         }
-                        if (
-                            pending.isEmpty() &&
-                            runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull() != null
-                        ) {
-                            acceptPayload(data)
-                            continue
+                        if (pending.isEmpty()) {
+                            // 单行即完整事件的常见情况：解析一次、直接交给 stream（不再二次解析）。
+                            val quick = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull()
+                            if (quick != null) {
+                                acceptChunk(quick)
+                                continue
+                            }
                         }
                         if (pending.isNotEmpty()) pending.append('\n')
                         pending.append(data)

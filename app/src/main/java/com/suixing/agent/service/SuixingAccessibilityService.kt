@@ -16,7 +16,9 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.annotation.RequiresApi
 import com.suixing.agent.core.Core
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
@@ -363,17 +365,24 @@ class SuixingAccessibilityService : AccessibilityService() {
         suspendCancellableCoroutine { continuation ->
             val callback = object : TakeScreenshotCallback {
                 override fun onSuccess(screenshot: ScreenshotResult) {
-                    val bytes = runCatching {
-                        val buffer = screenshot.hardwareBuffer
-                        val wrapped = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
-                        val software = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
-                        buffer.close()
-                        software?.let { bitmap ->
-                            val scaled = scaleTo(bitmap, maxWidth)
-                            toJpeg(scaled, quality)
-                        }
-                    }.getOrNull()
-                    if (continuation.isActive) continuation.resume(bytes)
+                    // **整段解码/缩放/压缩挪到后台线程**（优化清单 tools-P0）：
+                    // 回调注册在 `mainExecutor` 上，原来这一整串（wrapHardwareBuffer →
+                    // copy(ARGB_8888) → createScaledBitmap → JPEG 压缩）都在**主线程**跑，
+                    // 一张全尺寸位图就是几十毫秒，期间 UI 完全不动。
+                    // ScreenshotResult 的 hardwareBuffer 在 close 之前有效，可以跨线程使用。
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                        val bytes = runCatching {
+                            val buffer = screenshot.hardwareBuffer
+                            val wrapped = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                            val software = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
+                            buffer.close()
+                            software?.let { bitmap ->
+                                val scaled = scaleTo(bitmap, maxWidth)
+                                toJpeg(scaled, quality)
+                            }
+                        }.getOrNull()
+                        if (continuation.isActive) continuation.resume(bytes)
+                    }
                 }
 
                 override fun onFailure(errorCode: Int) {
