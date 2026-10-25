@@ -281,7 +281,7 @@ internal fun statusLineStyle(): TextStyle = MaterialTheme.typography.labelMedium
 internal const val MENU_EXIT_MS = 140L
 
 /** 全站小浮层统一时长（用户：所有统一为七处那一套，140ms）。 */
-internal const val POPUP_ANIM_MS = 140
+internal const val POPUP_ANIM_MS = 110
 
 /**
  * The app's one popup card: rounded, shadowed, and animated in and out.
@@ -311,6 +311,8 @@ internal fun MenuCard(
      * scrim and BackHandler in [Composer], the ring's card, and the metric card's call site.
      */
     focusable: Boolean = false,
+    /** 需要显式定位时传它（与 alignment + offset 二选一）。 */
+    popupPositionProvider: androidx.compose.ui.window.PopupPositionProvider? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -326,45 +328,58 @@ internal fun MenuCard(
     // A plain return from this composable, before any group is opened: while the card is
     // closed there is no popup at all, and nothing to intercept a touch with.
     if (!keepMounted) return
-    Popup(
-        alignment = alignment,
-        offset = offset,
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = focusable),
-    ) {
-        // **首次组合必须先从 false 翻到 true，入场才会跑**：`keepMounted` 是在 `visible`
-        // 变 true 之后才挂上这个 Popup 的，所以第一帧 `visible` 已经是 true ——
-        // `AnimatedVisibility(visible = true)` 在首次组合时**不播入场**（它只对"变化"做过渡）。
-        // 这就是「小浮层只有个别几个看得到动画」的原因：其余卡片都是"啪"一下出现。
-        var appeared by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) {
-            withFrameNanos { }
-            appeared = true
-        }
-        AnimatedVisibility(
-            visible = visible && appeared,
-            // **全站小浮层统一 140ms**（用户：「所有统一为和七处一致动画 140ms」）。
-            // 除了淡入 + 缩放，还要**上浮**：只有淡入时 140ms 在锚点上看不出任何变化，
-            // 用户看到的仍然是"啪一下出现"。位移从下方 12dp 起，落到位。
-            enter = fadeIn(tween(POPUP_ANIM_MS)) +
-                scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
-                slideInVertically(tween(POPUP_ANIM_MS)) { it / 6 },
-            exit = fadeOut(tween(POPUP_ANIM_MS)) +
-                scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
-                slideOutVertically(tween(POPUP_ANIM_MS)) { it / 6 },
-        ) {
-            Column(
-                modifier = modifier
-                    .popupCardSurface(scheme.surface)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {},
-                    )
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
-                content = content,
-            )
-        }
+    // 定位二选一：同时传 alignment/offset 与 provider 编译不过。
+    val cardBody: @Composable () -> Unit = {
+            // **首次组合必须先从 false 翻到 true，入场才会跑**：`keepMounted` 是在 `visible`
+            // 变 true 之后才挂上这个 Popup 的，所以第一帧 `visible` 已经是 true ——
+            // `AnimatedVisibility(visible = true)` 在首次组合时**不播入场**（它只对"变化"做过渡）。
+            // 这就是「小浮层只有个别几个看得到动画」的原因：其余卡片都是"啪"一下出现。
+            var appeared by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                withFrameNanos { }
+                appeared = true
+            }
+            AnimatedVisibility(
+                visible = visible && appeared,
+                // **全站小浮层统一 110ms**（用户改成 110）。
+                // 除了淡入 + 缩放，还要**上浮**：只有淡入时 110ms 在锚点上看不出任何变化，
+                // 用户看到的仍然是"啪一下出现"。位移从下方 12dp 起，落到位。
+                enter = fadeIn(tween(POPUP_ANIM_MS)) +
+                    scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
+                    slideInVertically(tween(POPUP_ANIM_MS)) { it / 6 },
+                exit = fadeOut(tween(POPUP_ANIM_MS)) +
+                    scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
+                    slideOutVertically(tween(POPUP_ANIM_MS)) { it / 6 },
+            ) {
+                Column(
+                    modifier = modifier
+                        .popupCardSurface(scheme.surface)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {},
+                        )
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                    content = content,
+                )
+            }
+    }
+    val provider = popupPositionProvider
+    if (provider != null) {
+        Popup(
+            popupPositionProvider = provider,
+            onDismissRequest = onDismiss,
+            properties = PopupProperties(focusable = focusable),
+            content = cardBody,
+        )
+    } else {
+        Popup(
+            alignment = alignment,
+            offset = offset,
+            onDismissRequest = onDismiss,
+            properties = PopupProperties(focusable = focusable),
+            content = cardBody,
+        )
     }
 }
 
@@ -1059,60 +1074,38 @@ internal fun ContextRing(
             // 遮罩层保持原样（用户明确：不需要改小浮层的阴影/遮罩）。只有卡片本身有动效。
             val popupMotion = rememberPopupMotion()
             LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
-            if (open) {
-                Popup(properties = PopupProperties(focusable = false)) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                            ) { open = false },
-                    )
-                }
-                Popup(
-                    // *显式定位**（不再用 alignment）：真机截图量到面板落在屏幕**左侧**
-                    popupPositionProvider = remember(ringPopupMarginPx) {
-                        object : PopupPositionProvider {
-                            override fun calculatePosition(
-                                anchorBounds: IntRect,
-                                windowSize: IntSize,
-                                layoutDirection: LayoutDirection,
-                                popupContentSize: IntSize,
-                            ): IntOffset {
-                                val margin = ringPopupMarginPx.toInt()
-                                val x = (windowSize.width - margin - popupContentSize.width)
-                                    .coerceAtLeast(margin)
-                                val y = (anchorBounds.top - popupContentSize.height - 8)
-                                    .coerceAtLeast(0)
-                                return IntOffset(x, y)
-                            }
+            // **直接复用 MenuCard**（与模型选择同一个组件）；需要显式定位，故传 popupPositionProvider。
+            MenuCard(
+                visible = open,
+                onDismiss = { open = false },
+                alignment = Alignment.TopCenter,
+                offset = IntOffset.Zero,
+                focusable = false,
+                popupPositionProvider = remember(ringPopupMarginPx) {
+                    object : PopupPositionProvider {
+                        override fun calculatePosition(
+                            anchorBounds: IntRect,
+                            windowSize: IntSize,
+                            layoutDirection: LayoutDirection,
+                            popupContentSize: IntSize,
+                        ): IntOffset {
+                            val margin = ringPopupMarginPx.toInt()
+                            val x = (windowSize.width - margin - popupContentSize.width)
+                                .coerceAtLeast(margin)
+                            val y = (anchorBounds.top - popupContentSize.height - 8)
+                                .coerceAtLeast(0)
+                            return IntOffset(x, y)
                         }
-                    },
-                    onDismissRequest = { open = false },
-                    properties = PopupProperties(focusable = false),
-                ) {
-                    Box(
-                        popupMotion.modifier()
-                            // A focus-less window only receives what lands inside it, and drawing
-                            // its own background is not the same as consuming a touch: without
-                            // this the tap on the card would fall through to the transcript the
-                            // card is floating over.
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                            ) {},
-                    ) {
-                        ContextPanelCard(
-                            used = used,
-                            window = window,
-                            // 实测优先（run 中），空闲用上层按当前上下文算出来的那份。
-                            split = live?.let {
-                                Triple(it.breakSystem, it.breakTools, it.breakHistory)
-                            } ?: breakSplit,
-                        )
                     }
-                }
+                },
+            ) {
+                ContextPanelCard(
+                    used = used,
+                    window = window,
+                    split = live?.let {
+                        Triple(it.breakSystem, it.breakTools, it.breakHistory)
+                    } ?: breakSplit,
+                )
             }
         }
     }
@@ -1146,9 +1139,7 @@ internal fun ContextRingCard(
             // transcript's full width. Capped against the window, so a split-screen window
             // gets a card that fits it rather than one that hangs off its edge.
             .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
-            .popupCardSurface(scheme.surface)
-            // 与 MenuCard（模型选择等七处）一致：18/14 —— 用户要求「和七处统一」。
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+                // 卡片外框由 MenuCard 提供，这里只画内容。
         // 与 MenuCard（那七处）一致：**不设 verticalArrangement**（用户：和那几处一样）。
     ) {
         if (used <= 0) {
@@ -1267,9 +1258,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
     Column(
         modifier = Modifier
             .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
-            .popupCardSurface(scheme.surface)
-            // 与 MenuCard（模型选择等七处）一致：18/14 —— 用户要求「和七处统一」。
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+                // 卡片外框由 MenuCard 提供，这里只画内容。
         // 与 MenuCard（那七处）一致：**不设 verticalArrangement**（用户：和那几处一样）。
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

@@ -73,5 +73,5 @@ internal class PopupMotion {
 @Composable
 internal fun rememberPopupMotion(): PopupMotion = remember { PopupMotion() }
 
-private const val POPUP_IN_MS = 140
-private const val POPUP_OUT_MS = 140
+private const val POPUP_IN_MS = 110
+private const val POPUP_OUT_MS = 110

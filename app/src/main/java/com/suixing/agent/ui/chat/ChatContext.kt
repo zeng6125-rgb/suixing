@@ -304,56 +304,49 @@ internal fun TopBarContextEntry(
         // `keeping` 让退场动画期间浮层仍留在组合里，否则窗口先被销毁、动画根本看不到。
         val popupMotion = rememberPopupMotion()
         LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
-        if (open) {
-            Popup(properties = PopupProperties(focusable = false)) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { open = false },
-                )
-            }
-            Popup(
-                alignment = Alignment.TopCenter,
-                offset = with(density) {
-                    IntOffset(
-                        popupNudgeCentred(
+        // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
+        // 同一套 110ms 进出场。这里需要显式定位，所以传 popupPositionProvider。
+        // 定位在组合期算好：PopupPositionProvider 里没有 Density 作用域。
+        val belowGlyphPx = with(density) { 28.dp.roundToPx() + 8.dp.roundToPx() }
+        MenuCard(
+            visible = open,
+            onDismiss = { open = false },
+            alignment = Alignment.TopCenter,
+            offset = IntOffset.Zero,
+            focusable = false,
+            popupPositionProvider = remember(cardWidth) {
+                object : PopupPositionProvider {
+                    override fun calculatePosition(
+                        anchorBounds: IntRect,
+                        windowSize: IntSize,
+                        layoutDirection: LayoutDirection,
+                        popupContentSize: IntSize,
+                    ): IntOffset {
+                        val x = popupNudgeCentred(
                             anchorCentre = anchorCentreX,
                             width = cardWidth,
                             windowPx = screenPx,
                             edgePx = edgePx,
-                        ).roundToInt(),
-                        // Below the glyph, clear of the capsule: the icon box is 28dp tall.
-                        28.dp.roundToPx() + 8.dp.roundToPx(),
-                    )
-                },
-                onDismissRequest = { open = false },
-                properties = PopupProperties(focusable = false),
-            ) {
-                Box(
-                    popupMotion.modifier()
-                        .onSizeChanged { cardWidth = it.width }
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) {},
-                ) {
-                    ContextRingCard(
-                        used = used,
-                        estimated = estimated,
-                        window = window,
-                        sessionTokens = sessionTokens,
-                        sessionEstimate = sessionEstimate,
-                        sessionSplit = sessionSplit,
-                        sessionTurns = sessionTurns,
-                        sessionPerSecond = sessionPerSecond,
-                        sessionCachePercent = sessionCachePercent,
-                        sessionElapsedMs = sessionElapsedMs,
-                        live = live,
-                    )
+                        ).roundToInt()
+                        return IntOffset(x, belowGlyphPx)
+                    }
                 }
+            },
+        ) {
+            Box(Modifier.onSizeChanged { cardWidth = it.width }) {
+                ContextRingCard(
+                    used = used,
+                    estimated = estimated,
+                    window = window,
+                    sessionTokens = sessionTokens,
+                    sessionEstimate = sessionEstimate,
+                    sessionSplit = sessionSplit,
+                    sessionTurns = sessionTurns,
+                    sessionPerSecond = sessionPerSecond,
+                    sessionCachePercent = sessionCachePercent,
+                    sessionElapsedMs = sessionElapsedMs,
+                    live = live,
+                )
             }
         }
     }
