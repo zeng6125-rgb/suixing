@@ -36,7 +36,6 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -164,6 +163,10 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.Image
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.onSizeChanged
@@ -1395,6 +1398,28 @@ internal fun EditDialog(
  * and a second implementation would drift from it. A `Dialog` and not a focusable overlay, so it
  * cannot take the keyboard away from the field — the same rule the composer's own cards follow.
  */
+/**
+ * 全屏预览 [bytes]：只在**用户点击**时解码一次（不在滚动路径上）。
+ *
+ * Coil 负责列表里的缩略显示；全屏要看原图，这里就地解一张交给既有的
+ * [ImagePreviewDialog]（黑色遮罩 + 双指缩放 + 点哪关哪，行为不变）。
+ */
+@Composable
+internal fun ImagePreviewBytes(
+    bytes: ByteArray?,
+    contentDescription: String,
+    keepKeyboard: Boolean = false,
+    onDismiss: () -> Unit,
+) {
+    var bitmap by remember(bytes) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(bytes) {
+        bitmap = withContext(Dispatchers.Default) {
+            bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
+        }
+    }
+    bitmap?.let { ImagePreviewDialog(it, contentDescription, keepKeyboard, onDismiss) }
+}
+
 @Composable
 internal fun ImagePreviewDialog(
     bitmap: ImageBitmap,
@@ -1453,78 +1478,53 @@ internal fun ImagePreviewDialog(
     }
 }
 
-/**
- * 已解码截图的**进程级**小缓存（4 张）。
- *
- * 为什么是进程级而不是 `remember`：`remember` 随组合销毁 —— 列表项滚出视口就丢，
- * 滚回来就要重新解码一张 1080p（几十毫秒）。用户"滑上滑下很慢"有一部分就是它。
- */
-// 16 张：滚动一屏常见 2~4 张截图，4 张一进一出等于每次都重新解码（跳变+耗电）。
-private val decodedImages = DecodedImageCache(capacity = 16)
 
 @Composable
 internal fun ImageBlock(base64: String) {
-    // Decoding a 1080p screenshot costs tens of milliseconds; doing it inside
-    // composition stalls the frame and can ANR while the list scrolls.
-    var bitmap by remember(base64) { mutableStateOf<ImageBitmap?>(null) }
+    // **图片加载换 Coil 3**（issue #44 第 10 项）：原来这里是手写的 64 行 ——
+    // BitmapFactory 手动降采样 + 容量 4 的 LRU（滚出 4 张就丢，滚回来重新解码一张 1080p）。
+    // Coil 3 覆盖同样的事并且更强：内存 + 磁盘双缓存、按目标尺寸自动采样、生命周期感知、
+    // 解码在它自己的 Dispatcher 上 ⇒ 组合期零阻塞。手写的那套已删除（ImageDecode.kt）。
     var full by remember { mutableStateOf(false) }
-    LaunchedEffect(base64) {
-        val key = decodedImages.keyOf(base64)
-        // 命中缓存直接显示：滚出视口再滚回来时不必重新解码（issue #38 方向 7）。
-        (decodedImages.get(key) as? ImageBitmap)?.let {
-            bitmap = it
-            return@LaunchedEffect
-        }
-        bitmap = withContext(Dispatchers.Default) {
-            runCatching {
-                val bytes = Base64.decode(base64, Base64.DEFAULT)
-                // **只解析尺寸，先算降采样倍率**：显示上限 240dp（约 720px），
-                // 直接解 1080p 原图既慢又占内存，而这一张图最终只会显示成那么高。
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                val sample = ImageDecode.sampleSizeFor(
-                    width = bounds.outWidth,
-                    height = bounds.outHeight,
-                    maxHeight = 720,
-                )
-                val options = BitmapFactory.Options().apply { inSampleSize = sample }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
-            }.getOrNull()
-        }
-        bitmap?.let { decodedImages.put(key, it) }
+    val context = LocalContext.current
+    // 图片是内存里的 base64（不是 URL），解码成字节交给 Coil 当 data：
+    // 它按内容做内存缓存键，滚出视口再滚回来直接命中，不必重新解码。
+    val bytes = remember(base64) {
+        runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull()
     }
-    // **解码期间的占位**（滚动跳变根因之一）：解码完成前这里原来什么都不画，
-    // 行高 0 → 解码完长到 ≤240dp，整列被顶一下。截图几乎都是竖长图（Fit 后顶满
-    // 240dp 上限），用 240dp 占位绝大多数情况下高度零变化；横图有小幅差值可接受。
+    // **必须包成 ByteBuffer**：Coil 3 的 fetcher 里没有 `ByteArray` 这一种 data 类型
+    // （只有 ByteBuffer / File / Uri / String 等）。直接传 ByteArray 编译不报错、
+    // 运行时静默不出图 —— 这个坑换成 ByteBuffer 才绕过去。
+    // **每次组合新建一个视图**（`wrap` 是 O(1)、不拷贝字节）：ByteBuffer 有读位置，
+    // 复用同一个实例时 Coil 读过一次后位置就到底了，第二次拿到的会是空。
+    val model = bytes?.let { java.nio.ByteBuffer.wrap(it) }
     Spacer(Modifier.height(6.dp))
     val shape = RoundedCornerShape(12.dp)
-    if (bitmap == null) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(240.dp)
-                .clip(shape)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-        )
-    } else {
-        val decoded = bitmap
-        if (decoded != null) {
-            Image(
-                bitmap = decoded,
-                contentDescription = "工具截图",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 240.dp)
-                    .clip(shape)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = ripple(),
-                        onClick = { full = true },
-                    ),
-            )
-            if (full) ImagePreviewDialog(decoded, contentDescription = "工具截图") { full = false }
-        }
+    // **固定占位高度**（滚动跳变根因之一，与替换前一致）：截图几乎都是竖长图，Fit 后顶满
+    // 240dp 上限。等 Coil 解码期间保持这个高度，行高不变 ⇒ 整列不会被顶一下。
+    AsyncImage(
+        model = ImageRequest.Builder(context)
+            .data(model)
+            // 不做淡入：这里要的是"到位就是到位"，交叉淡入在滚动中反而像闪烁。
+            .crossfade(false)
+            .build(),
+        contentDescription = "工具截图",
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 240.dp, max = 240.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = { full = true },
+            ),
+    )
+    if (full) {
+        // 全屏预览仍用手上这份字节，走同一个对话框（Coil 重新解码一次比传 bitmap 更省事，
+        // 而全屏只发生在一次点击里，不在滚动路径上）。
+        ImagePreviewBytes(bytes, contentDescription = "工具截图") { full = false }
     }
 }
 

@@ -12,8 +12,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 37
-        versionCode = 520
-        versionName = "0.8.497"
+        versionCode = 521
+        versionName = "0.8.498"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -115,6 +115,12 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // **图片加载换 Coil 3**（issue #44 第 10 项）：替代手写的 BitmapFactory 降采样 +
+    // 容量 4 的 LRU。Coil 提供内存/磁盘双缓存、按目标尺寸自动采样、生命周期感知，
+    // 且解码在自己 Dispatcher 上（组合期零阻塞）。只装 compose 适配，不装网络层：
+    // 随行的图片都来自内存里的 base64，没有远程 URL。
+    implementation("io.coil-kt.coil3:coil-compose:3.6.3")
 
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
