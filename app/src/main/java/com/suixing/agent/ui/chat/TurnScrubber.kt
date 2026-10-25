@@ -96,7 +96,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -234,6 +233,7 @@ import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.PressPill
 import com.suixing.agent.ui.components.REASONING_LEVELS
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
 import com.suixing.agent.ui.components.suixingClickable
@@ -356,9 +356,9 @@ internal fun ContextBreakdownDialog(
     onDismiss: () -> Unit,
 ) {
     val percent = if (window > 0) tokens * 100 / window else 0
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } },
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("知道了") } },
         title = { Text(if (window > 0) "上下文已用 $percent%" else "上下文用量") },
         text = {
             Column {
@@ -751,6 +751,10 @@ internal fun Composer(
         sheetOpen = false
         approvalOpen = false
     }
+    // 手势条高度在**组合期**算一次：它是 @Composable 调用，布局 lambda 里不能调；
+    // 而它在键盘动画期间不变化，捕获下来即可。键盘高度本身在布局期读（见下面的 .layout）。
+    val navBarBottomPx = with(density) { WindowInsets.navigationBars.getBottom(this) }
+    val imePxState = LocalHeldImePx.current
     // Nothing here paints a background: the transcript scrolls right down to the gesture
     // bar behind the pill, so the composer reads as something floating over the
     // conversation rather than an opaque strip that cuts it off.
@@ -762,13 +766,14 @@ internal fun Composer(
             // navigation bar's height above the keyboard — the band the user photographed.
             // The shell's clamped keyboard height is what to subtract (clamped, so the
             // platform's end-of-animation rebound cannot flicker the band back for a frame).
-            .padding(
-                bottom = with(density) {
-                    (WindowInsets.navigationBars.getBottom(this) - LocalHeldImePx.current)
-                        .coerceAtLeast(0)
-                        .toDp()
-                },
-            )
+            // **读数在布局期完成**（键盘动画期间不重组）：这一处原来在组合期减键盘高度，
+            // 键盘抬起/收起时输入框每帧重组一次 —— 用户报的「输入法一抬一收就掉帧」。
+            .layout { measurable, constraints ->
+                val bottom = (navBarBottomPx - imePxState.value).coerceAtLeast(0)
+                val inner = (constraints.maxHeight - bottom).coerceAtLeast(0)
+                val placeable = measurable.measure(constraints.copy(maxHeight = inner))
+                layout(placeable.width, placeable.height + bottom) { placeable.place(0, 0) }
+            }
             .padding(horizontal = 16.dp)
             // The air under the pill, named: the list's own padding is this plus the strip
             // above, and it is measured here, inside the padding (see COMPOSER_BOTTOM_PAD).

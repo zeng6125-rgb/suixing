@@ -55,6 +55,7 @@ import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.SecretBox
 import com.suixing.agent.ui.chat.REVEAL_EASING
 import com.suixing.agent.ui.components.LocalHeldImePx
+import com.suixing.agent.ui.components.imePaddingBottom
 import com.suixing.agent.ui.components.SuixingOrb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -208,7 +209,7 @@ fun OnboardingHost(onClose: () -> Unit) {
             // 用外壳给的那个**夹过的**键盘高度（LocalHeldImePx），与聊天页同一套算法——
             // 自己读 WindowInsets.ime 会遇到那个夹紧逻辑（短促的回落）带来的跳动。
             // 挂在根上 ⇒ 五页全都让位，不用每页各写一遍。
-            .padding(bottom = with(LocalDensity.current) { LocalHeldImePx.current.toDp() })
+            .imePaddingBottom(LocalHeldImePx.current)
             // **吃掉落在空白处的点击**：引导层是盖在导航宿主之上的，而 chat 常驻在宿主之下
             // 且还在组合里——不挡这一下，点在引导页的空白处就会打到下面的输入框、消息行上，
             // 左缘拖动还会把抽屉拉出来。（与 SuixingApp 里 NavHost 那一层同一招。）

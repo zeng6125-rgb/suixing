@@ -2,6 +2,7 @@
 
 package com.suixing.agent.ui
 
+import com.suixing.agent.ui.components.imePaddingBottom
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.widget.Toast
@@ -58,7 +59,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -149,6 +149,7 @@ import com.suixing.agent.ui.chat.MenuCard
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.LocalOpenSidebar
+import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
@@ -339,7 +340,10 @@ fun SuixingApp() {
     // transition frames are 30-80px and pass untouched.
     val rootDensity = LocalDensity.current
     val imeRawPx = WindowInsets.ime.getBottom(rootDensity)
-    var heldImePx by remember { mutableIntStateOf(0) }
+    // 保留**状态对象本身**（而不是用 `by` 解包）：下发的是引用，读点自己在布局期取 .value，
+    // 这样键盘动画的每一帧不会让整棵树重组（见 LocalHeldImePx 的说明）。
+    val heldImeState = remember { mutableIntStateOf(0) }
+    val heldImePx = heldImeState.intValue
     var imeDir by remember { mutableIntStateOf(0) }
     // 长按/选择期间冻结 clamp（用户：「抬起时对话框与输入法的高度有时变得很大」）：抬手那一刻
     // 选择手柄/菜单出现，这台 ROM 把它的高度报进 IME inset，clamp 一接受、输入框底垫就暴涨。
@@ -353,7 +357,7 @@ fun SuixingApp() {
         val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
         if (imeDir != 0 && dir != imeDir && rebound) return@LaunchedEffect
         imeDir = dir
-        heldImePx = imeRawPx
+        heldImeState.intValue = imeRawPx
     }
     LaunchedEffect(imeRawPx) {
         delay(300)
@@ -370,7 +374,7 @@ fun SuixingApp() {
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
-        LocalHeldImePx provides heldImePx,
+        LocalHeldImePx provides heldImeState,
         LocalSetSelectionActive provides { active -> selectionActive = active },
     ) {
         // 用户明确要求保留这一段（2026-10-11：先被自审删掉，用户看到键盘后面那块颜色变了，要求回退）。
@@ -430,7 +434,7 @@ fun SuixingApp() {
             Box(
                 Modifier
                     .matchParentSize()
-                    .padding(bottom = with(rootDensity) { heldImePx.toDp() })
+                    .imePaddingBottom(heldImeState)
                     .background(MaterialTheme.colorScheme.surface),
             )
             // 推进时下面那层（抽屉 + 聊天）跟着往左让 10%：**两层一起动**才读成"推上来"，
@@ -517,7 +521,7 @@ fun SuixingApp() {
                 // 留在组合里，其余页面改成**盖在它上面的覆盖层**：进设置是往覆盖层 push，
                 // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
                 // 键盘让位只作用在聊天内容上（抽屉不再被顶起，见上面 Scaffold 的说明）。
-                Box(Modifier.padding(bottom = with(rootDensity) { heldImePx.toDp() })) {
+                Box(Modifier.imePaddingBottom(heldImeState)) {
                     // **首启的引导还没走完时，先别组合 chat**（用户：「第一次出现引导页感觉卡卡的」）。
                     // 冷启动时 chat 要做 turnPage、receipts/transcript 统计、每条消息的 Markdown
                     // 渲染（ChatScreen.kt:465/512/560/621、ChatBlocks.kt:895/1519），
@@ -1213,7 +1217,7 @@ drawerRow(
     // 改名：空标题或取消 ⇒ 一个字都不改（这里没有「清空标题」这种需求，标题是行的身份）。
     pendingRename?.let { target ->
         var draft by remember(target.id) { mutableStateOf(target.title) }
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { pendingRename = null },
             title = { Text("重命名会话") },
             text = {
@@ -1226,20 +1230,22 @@ drawerRow(
                     modifier = Modifier.fillMaxWidth(),
                 )
             },
-            confirmButton = {
+            confirmButton = { scope ->
                 TextButton(
                     onClick = {
-                        pendingRename = null
-                        onRenameConversation(target, draft)
+                        scope.closeThen {
+                            pendingRename = null
+                            onRenameConversation(target, draft)
+                        }
                     },
                     enabled = draft.isNotBlank(),
                 ) { Text("保存") }
             },
-            dismissButton = { TextButton(onClick = { pendingRename = null }) { Text("取消") } },
+            dismissButton = { scope -> TextButton(onClick = { scope.closeThen { pendingRename = null } }) { Text("取消") } },
         )
     }
     pendingDelete?.let { target ->
-        AlertDialog(
+        SuixingDialog(
             onDismissRequest = { pendingDelete = null },
             // 与「设置 → 会话」页同一句话：说清删掉的是什么、有多少、能不能撤销。
             title = { Text("删除这个会话？") },
@@ -1252,16 +1258,18 @@ drawerRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             },
-            confirmButton = {
+            confirmButton = { scope ->
                 TextButton(onClick = {
-                    onDeleteConversation(target)
-                    pendingDelete = null
+                    scope.closeThen {
+                        onDeleteConversation(target)
+                        pendingDelete = null
+                    }
                 }) {
                     Text("删除", color = scheme.primary)
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) {
+            dismissButton = { scope ->
+                TextButton(onClick = { scope.closeThen { pendingDelete = null } }) {
                     Text("取消")
                 }
             },
@@ -1627,7 +1635,7 @@ private fun ApprovalDialog(
     // A deleted or untitled conversation still has to be named: a blank line would leave
     // the user unable to tell the card apart from the chat they are looking at.
     val from = sourceTitle?.takeIf { it.isNotBlank() } ?: "另一个会话"
-    AlertDialog(
+    SuixingDialog(
         onDismissRequest = { Core.gate.resolve(chatId, false) },
         icon = { Icon(ImageVector.vectorResource(R.drawable.ic_shield_alert), contentDescription = null) },
         title = {
@@ -1676,11 +1684,11 @@ private fun ApprovalDialog(
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { Core.gate.resolve(chatId, true) }) { Text("允许一次") } },
-        dismissButton = {
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, true) } }) { Text("允许一次") } },
+        dismissButton = { scope ->
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { Core.gate.resolve(chatId, true, always = true) }) { Text("总是允许") }
-                TextButton(onClick = { Core.gate.resolve(chatId, false) }) { Text("拒绝") }
+                TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, true, always = true) } }) { Text("总是允许") }
+                TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, false) } }) { Text("拒绝") }
             }
         },
     )

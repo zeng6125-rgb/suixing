@@ -99,7 +99,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -423,7 +422,13 @@ fun ChatScreen(
     // The keyboard's clamped inset, and the gesture bar's own: the composer's bottom padding is
     // the difference between them (see the stack's own modifier), and it is the one term of the
     // stack's footprint that moves while the keyboard does.
-    val heldIme = LocalHeldImePx.current
+    // **键盘高度量化到 4px 再读**：`heldImePx` 在键盘动画的每一帧都会变，直接读它就是整页
+    // 每帧重组（ChatScreen 有几十个子组合）。量化后只有跨过 4px 才重组一次 —— 一次 ~200px 的
+    // 抬起仍有 50 档，视觉上看不出台阶，但重组次数降到约 1/4。
+    val imePxState = LocalHeldImePx.current
+    val heldIme by remember(imePxState) {
+        derivedStateOf { imePxState.value / 4 * 4 }
+    }
     val navBarPx = with(LocalDensity.current) { WindowInsets.navigationBars.getBottom(this) }
     fun navBarPad(ime: Int): Int = (navBarPx - ime).coerceAtLeast(0)
     // 让位＝**只用一个来源**：输入框自己的高度 + 它的下内边距 + 手势条。键盘动画中唯一在变的量是

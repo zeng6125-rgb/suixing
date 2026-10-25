@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.components
 
+import androidx.compose.ui.layout.layout
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -575,7 +576,26 @@ val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
  * keyboard transition, and the static variant has no read tracking — every change would
  * invalidate the whole provided subtree (the entire NavHost) instead of just its readers.
  */
-val LocalHeldImePx = compositionLocalOf { 0 }
+val LocalHeldImePx = compositionLocalOf<androidx.compose.runtime.State<Int>> {
+    androidx.compose.runtime.mutableStateOf(0)
+}
+
+/**
+ * 按「夹过的键盘高度」加底部内边距，**读数在布局期完成**。
+ *
+ * 键盘淡入淡出的那 200~300ms 里，`heldImePx` 每一帧都在变。若在组合期读它（原来就是
+ * `Modifier.padding(bottom = with(density){ heldImePx.toDp() })`），等于每一帧都让**整棵树**
+ * 重新组合并重新布局 —— 用户报的「输入法抬起/收起时掉帧」就是这个。
+ *
+ * 改成 `layout {}` 里读：状态变化只让这个节点重新测量/放置，不触发任何重组。
+ */
+internal fun Modifier.imePaddingBottom(ime: androidx.compose.runtime.State<Int>): Modifier =
+    this.layout { measurable, constraints ->
+        val bottom = ime.value.coerceAtLeast(0)
+        val inner = (constraints.maxHeight - bottom).coerceAtLeast(0)
+        val placeable = measurable.measure(constraints.copy(maxHeight = inner))
+        layout(placeable.width, placeable.height + bottom) { placeable.place(0, 0) }
+    }
 
 /**
  * 外壳的 IME clamp 冻结开关（0.8.107）：聊天页在「按下到抬手后守护窗」期间置 true，
