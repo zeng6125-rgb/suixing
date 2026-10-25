@@ -230,6 +230,7 @@ import com.suixing.agent.ui.components.PressPill
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
+import com.suixing.agent.ui.components.rememberPopupMotion
 import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
@@ -772,7 +773,14 @@ internal fun TurnMetrics(
             // were already focus-less. A focus-less window can see neither a tap outside itself
             // nor BACK, so both are handled here: the scrim is a window of its own and is composed
             // before the card, because windows stack in composition order.
-            if (open != null) {
+            //
+            // 纯遮罩：它只负责接住卡片的退场时间（卡片自己的 140ms 动画在 [MenuCard] 里），所以
+            // 这里不加动画修饰符 —— 它本来就什么都不画。`keeping` 只做一件事：退场那 110ms 让这层
+            // 仍在组合里，别让「点卡片外面」在卡片还看得见的时候漏到下面的对话流上。
+            val openNow = open != null
+            val popupMotion = rememberPopupMotion()
+            LaunchedEffect(openNow) { if (openNow) popupMotion.enter() else popupMotion.exit() }
+            if (openNow || popupMotion.keeping) {
                 Popup(properties = PopupProperties(focusable = false)) {
                     Box(
                         Modifier

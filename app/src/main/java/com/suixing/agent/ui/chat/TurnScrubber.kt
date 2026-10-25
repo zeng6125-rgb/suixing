@@ -236,6 +236,7 @@ import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
+import com.suixing.agent.ui.components.rememberPopupMotion
 import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
@@ -728,7 +729,14 @@ internal fun Composer(
     // window cannot see a tap outside its own bounds and cannot see BACK, so both are caught
     // here. The scrim is a window of its own, composed before the cards: windows stack in
     // composition order, so a scrim composed after them would cover them instead.
-    if (menuOpen || sheetOpen || approvalOpen) {
+    //
+    // 纯遮罩：三张卡片都是 [MenuCard]，进出场在卡片自己身上，这层什么都不画、也不加动画修饰符。
+    // `keeping` 只做一件事：卡片退场那段让遮罩留在组合里，否则「点卡片外面」会在卡片还看得见的
+    // 时候漏到下面的对话流上。
+    val anyOpen = menuOpen || sheetOpen || approvalOpen
+    val popupMotion = rememberPopupMotion()
+    LaunchedEffect(anyOpen) { if (anyOpen) popupMotion.enter() else popupMotion.exit() }
+    if (anyOpen || popupMotion.keeping) {
         Popup(properties = PopupProperties(focusable = false)) {
             Box(
                 Modifier

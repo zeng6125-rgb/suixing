@@ -30,7 +30,7 @@ import androidx.compose.ui.unit.dp
  * ```
  * 关键点是 [keeping]：退场动画期间浮层**必须仍在组合里**，否则用户看不到退场。
  *
- * 入场 150ms（`LinearOutSlowInEasing`，与全站同一条曲线）、退场 110ms（进慢出快）；
+ * 入场 150ms（`LinearOutSlowInEasing`，与全站同一条曲线）、退场 140ms（与 MenuCard 的 MENU_EXIT_MS 对齐，避免遮罩比卡片早消失）（进慢出快）；
  * 缩放 0.94→1、上浮 8dp、透明度 0→1 —— 小浮层比对话框更轻，幅度也更小。
  */
 @Stable
@@ -67,4 +67,4 @@ internal class PopupMotion {
 internal fun rememberPopupMotion(): PopupMotion = remember { PopupMotion() }
 
 private const val POPUP_IN_MS = 150
-private const val POPUP_OUT_MS = 110
+private const val POPUP_OUT_MS = 140

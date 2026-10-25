@@ -1417,9 +1417,19 @@ internal fun ImagePreviewDialog(
         scale = (scale * zoom).coerceIn(1f, 4f)
         offset = if (scale > 1f) offset + pan else Offset.Zero
     }
+    // 小浮层的进出场：这层没有自己的 `open` —— 在不在组合里由调用方（`fullPicture != null` /
+    // `full`）决定，撤下那一帧整块就被移除了，退场根本没有时间跑。所以 keepKeyboard 的 Popup 先把
+    // 110ms 的退场播完再回落调用方的状态（`keeping` 期间窗口还在）；`Dialog` 那条照旧立即关闭。
+    val popupMotion = rememberPopupMotion()
+    val scope = rememberCoroutineScope()
+    val dismiss: () -> Unit = if (keepKeyboard) {
+        { scope.launch { popupMotion.exit(); onDismiss() } }
+    } else {
+        { onDismiss() }
+    }
     val viewer: @Composable () -> Unit = {
         // 手势返回也要关（用户：「预览图片的时候，手势返回为什么不会关闭图片」）。keepKeyboard 那条
-        BackHandler(onBack = onDismiss)
+        BackHandler(onBack = dismiss)
         Box(
             Modifier
                 .fillMaxSize()
@@ -1427,7 +1437,7 @@ internal fun ImagePreviewDialog(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = onDismiss,
+                    onClick = dismiss,
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -1449,7 +1459,10 @@ internal fun ImagePreviewDialog(
     if (keepKeyboard) {
         // Focus-less, like the composer's own cards: it cannot see BACK, which is why the scrim
         // above closes on a tap anywhere — the same trade the model sheet makes.
-        Popup(properties = PopupProperties(focusable = false)) { viewer() }
+        LaunchedEffect(Unit) { popupMotion.enter() }
+        Popup(properties = PopupProperties(focusable = false)) {
+            Box(popupMotion.modifier()) { viewer() }
+        }
     } else {
         Dialog(onDismissRequest = onDismiss) { viewer() }
     }

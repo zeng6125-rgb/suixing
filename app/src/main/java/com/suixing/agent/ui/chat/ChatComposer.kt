@@ -232,6 +232,7 @@ import com.suixing.agent.ui.components.PressPill
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
+import com.suixing.agent.ui.components.rememberPopupMotion
 import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
@@ -1037,7 +1038,12 @@ internal fun ContextRing(
             // the composer's own cards do it (see [MenuCard]'s `focusable`). The scrim is a window
             // of its own, composed before the card: windows stack in composition order, so a scrim
             // composed after it would cover it instead.
-            if (open) {
+            //
+            // 小浮层进出场（用户：「用量统计这些弹窗出现得太生硬」）。`keeping` 让退场动画期间窗口
+            // 仍留在组合里：遮罩和卡片都挂在它上面，否则退场的第一帧窗口就被销毁、动画看不到。
+            val popupMotion = rememberPopupMotion()
+            LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
+            if (open || popupMotion.keeping) {
                 Popup(properties = PopupProperties(focusable = false)) {
                     Box(
                         Modifier
@@ -1071,7 +1077,7 @@ internal fun ContextRing(
                     properties = PopupProperties(focusable = false),
                 ) {
                     Box(
-                        Modifier
+                        popupMotion.modifier()
                             // A focus-less window only receives what lands inside it, and drawing
                             // its own background is not the same as consuming a touch: without
                             // this the tap on the card would fall through to the transcript the

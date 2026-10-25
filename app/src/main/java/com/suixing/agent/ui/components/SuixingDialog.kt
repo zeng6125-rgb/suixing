@@ -1,5 +1,13 @@
 package com.suixing.agent.ui.components
 
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.SideEffect
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -84,10 +92,38 @@ internal fun SuixingDialog(
         }
     }
 
+    // **遮罩自己画**：系统的 dial 窗口遮罩是整体出现/消失的，卡片淡入时它已经全黑、卡片淡出时
+    // 它已经全亮 —— 用户说的「关闭时阴影不连续」就是这个。把窗口自身遮罩关掉，换成同一进度驱动的
+    // 自绘遮罩，两者就会一起渐变。
+    val view = LocalView.current
+    SideEffect {
+        (view.parent as? DialogWindowProvider)?.window?.setDimAmount(0f)
+    }
+
     BasicAlertDialog(
         onDismissRequest = { scope.closeThen { latestDismiss() } },
-        properties = properties,
+        // 自己铺满：默认 280~560dp 的窗口宽度会把自绘遮罩裁掉。
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = properties.dismissOnBackPress,
+            dismissOnClickOutside = false,
+            securePolicy = properties.securePolicy,
+        ),
     ) {
+        Box(Modifier.fillMaxSize()) {
+            // 遮罩：同一进度 ⇒ 与卡片同步淡入淡出。点它即关闭（走同一套退场动画）。
+            Box(
+                Modifier
+                    .matchParentSize()
+                    // 用 graphicsLayer 读进度：绘制期取值，遮罩渐变时不触发重组。
+                    .graphicsLayer { alpha = SCRIM_ALPHA * progress.value }
+                    .background(Color.Black)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { scope.closeThen { latestDismiss() } },
+            )
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Surface(
             modifier = Modifier
                 .sizeIn(minWidth = 280.dp, maxWidth = 560.dp)
@@ -132,6 +168,8 @@ internal fun SuixingDialog(
                 }
             }
         }
+            }
+        }
     }
 }
 
@@ -149,3 +187,6 @@ internal class DialogScope {
 /** 退场比入场快（Material 的「进慢出快」）。 */
 private const val DIALOG_IN_MS = 180
 private const val DIALOG_OUT_MS = 130
+
+/** 遮罩最深时的黑度（与系统默认观感对齐）。 */
+private const val SCRIM_ALPHA = 0.32f

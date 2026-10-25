@@ -151,6 +151,7 @@ import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
+import com.suixing.agent.ui.components.rememberPopupMotion
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.onboarding.OnboardingHost
@@ -1426,7 +1427,13 @@ private fun ConversationRow(
         // MenuCard 的弹窗是 focusable = false（它自己的注释写了原因：抢焦点的弹窗会把输入法从
         // 输入框上拿走），这样的窗口既看不到「点在外面」也看不到 BACK —— 两件事都由调用方接，
         // 写法照 ChatTopBar 那张用量卡：遮罩是另一个弹窗，且**先**组合（弹窗按组合顺序叠）。
-        if (menuOpen) {
+        //
+        // 纯遮罩：面板本身是 [MenuCard]，进出场已经在它身上；这一层什么都不画、也不加动画修饰符。
+        // `keeping` 只做一件事：面板退场那段让遮罩仍留在组合里，否则「点面板外面」会在面板还看得见
+        // 的时候漏到抽屉下面的列表上。
+        val popupMotion = rememberPopupMotion()
+        LaunchedEffect(menuOpen) { if (menuOpen) popupMotion.enter() else popupMotion.exit() }
+        if (menuOpen || popupMotion.keeping) {
             Popup(properties = PopupProperties(focusable = false)) {
                 Box(
                     Modifier
