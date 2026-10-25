@@ -65,6 +65,8 @@ internal class PopupMotion {
         val scale = 0.92f + 0.08f * p
         scaleX = scale
         scaleY = scale
+        // 上浮 12dp：与 MenuCard 的 slideInVertically 同一观感（那边按自身高度的 1/6 起）。
+        translationY = (1f - p) * 12.dp.toPx()
     }
 }
 

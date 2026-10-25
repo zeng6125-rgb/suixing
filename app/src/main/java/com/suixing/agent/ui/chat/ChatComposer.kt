@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.chat
 
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.slideInVertically
 import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
@@ -342,8 +344,14 @@ internal fun MenuCard(
         AnimatedVisibility(
             visible = visible && appeared,
             // **全站小浮层统一 140ms**（用户：「所有统一为和七处一致动画 140ms」）。
-            enter = fadeIn(tween(POPUP_ANIM_MS)) + scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f),
-            exit = fadeOut(tween(POPUP_ANIM_MS)) + scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f),
+            // 除了淡入 + 缩放，还要**上浮**：只有淡入时 140ms 在锚点上看不出任何变化，
+            // 用户看到的仍然是"啪一下出现"。位移从下方 12dp 起，落到位。
+            enter = fadeIn(tween(POPUP_ANIM_MS)) +
+                scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
+                slideInVertically(tween(POPUP_ANIM_MS)) { it / 6 },
+            exit = fadeOut(tween(POPUP_ANIM_MS)) +
+                scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
+                slideOutVertically(tween(POPUP_ANIM_MS)) { it / 6 },
         ) {
             Column(
                 modifier = modifier
