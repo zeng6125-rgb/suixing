@@ -888,6 +888,22 @@ fun MarkdownBlocks(
     }
     // 光标挂在**最后一个 block 是段落**时；否则不画（列表/代码块尾部挂光标排版会怪）。
     val cursorAt = if (cursor) blocks.indexOfLast { it is MdBlock.Paragraph } else -1
+    // **空文本也要有光标**（用户：思考流式光标"还是有滞后性"）：思考文本经常以换行结尾，
+    // 此时最新那一行是空串 ⇒ 这里解析出 0 个块 ⇒ `cursorAt = -1` ⇒ 光标根本不画，
+    // 换行后的一段时间里看起来"光标落后了"。补一个空段落承载光标。
+    if (cursor && cursorAt < 0 && blocks.isEmpty()) {
+        Column(modifier) {
+            InlineText(
+                text = "",
+                style = style,
+                color = color,
+                palette = palette,
+                onUrlClick = onUrlClick,
+                cursor = true,
+            )
+        }
+        return
+    }
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
             if (index > 0) {
