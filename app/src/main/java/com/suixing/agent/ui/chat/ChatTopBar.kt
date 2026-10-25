@@ -1182,10 +1182,20 @@ internal fun AssistantRow(
                             // 传入 `settled = !streaming` 把它切到了"每帧重解析"的路径，
                             // 整段文本每 16ms 重排一次，Compose 合并后就成了"一下子蹦出一大段"。
                             // 光标仍然内联（`cursor = streaming`），位置 = 真实文本末行末尾。
-                            if (streaming || !selectable) {
+                            // **正文恢复显影层**（用户：「流式必须给我做好」）：chunk 可能一次
+                            // 到几十上百字，直接渲染就只能是"一段一段蹦"。这里把已到达的文本
+                            // 按打字机逐字放出（速度随积压自适应，见 Typewriter.typeStep），
+                            // 于是无论 chunk 多大，屏幕上都连续。
+                            val liveText = part.bornAtMs > 0L
+                            val shown = rememberTypedText(
+                                text = part.text,
+                                enabled = streaming || liveText,
+                                startAtZero = liveText,
+                            )
+                            if (streaming || !selectable || shown.length < part.text.length) {
                                 MarkdownText(
-                                    text = part.text,
-                                    settled = true,
+                                    text = shown,
+                                    settled = !streaming,
                                     cursor = streaming,
                                 )
                             } else {

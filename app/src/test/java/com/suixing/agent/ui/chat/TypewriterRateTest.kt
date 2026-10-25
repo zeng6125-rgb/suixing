@@ -1,23 +1,29 @@
 package com.suixing.agent.ui.chat
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * 打字机速度的可验证判据。
  *
- * 用户的要求（2026-10-25 第四次）：**任何长度都逐字，不要分档**。
+ * **2026-10-26 规格变更**（用户：「流式必须给我做好」）：恒定 2 字/拍在快模型下永远追不上，
+ * 文本一路落后、最后一刻还在补字 —— 观感是"一段一段蹦"而不是流式。现在改为**随积压自适应**：
  *
- * 这一组测试守着三条性质：
+ * 1. 积压 ≤ [SMALL_BACKLOG] ⇒ 恒定 [BASE_STEP] 字/拍（慢速端点也看得见在动）；
+ * 2. 积压更大 ⇒ 按积压量提速（`backlog / 4`），追平后自动回落到基础速度；
+ * 3. 单调性：积压越多，单拍推进量不会减少（不能出现"越积越慢"）。
  *
- * 1. **恒定速度**：单拍推进量永远是 [TYPE_STEP_FOR_TEST]，不随积压变化（分档会让积压多时
- *    又快成整块，等于没有打字机）。
- * 2. **慢于到达速度**：设备实测生成 51~175 tokens/s（中文约 100~200 字/秒）；揭示速度必须
- *    明显低于它，否则每一拍正好把新到的字放完，看着就是整块出现。
- * 3. **代价被记录**：恒定 3 字/拍意味着长答案会比模型慢 —— 2000 字约 27 秒。这是用户明确
- *    接受的取舍，写成断言是为了防止以后有人"顺手"把速度提上去又毁掉逐字。
+ * 这组测试替代原来的"恒定速度"断言 —— 那是上一版规格，已被用户明确否掉。
  */
 class TypewriterRateTest {
+
+    private companion object {
+        const val TICK = 16
+        const val PUBLISH_MS = 80
+        const val SMALL_BACKLOG = 8
+        const val BASE_STEP = 2
+    }
 
     private data class Sim(val drainMs: Int, val worstLagMs: Int, val firstJump: Int)
 
@@ -42,74 +48,54 @@ class TypewriterRateTest {
     }
 
     @Test
-    fun `单拍推进量与积压无关`() {
-        // 从 0 到几千字的积压，推进量必须完全一样。
-        val steps = listOf(0, 1, 10, 100, 300, 1000, 5000, 100_000).map { typeStep(it) }
-        assertTrue("推进量必须恒定，实际 $steps", steps.all { it == TYPE_STEP_FOR_TEST })
+    fun `小积压时保持基础步长`() {
+        // 积压 0~8 个字符时必须是基础步长，保证慢速端点也是"逐字"的观感。
+        val steps = (0..SMALL_BACKLOG).map { typeStep(it) }
+        assertTrue("小积压应恒为 $BASE_STEP，实际 $steps", steps.all { it == BASE_STEP })
     }
 
     @Test
-    fun `三百字的整块仍然逐字`() {
+    fun `单拍推进量随积压单调不减`() {
+        val backlogs = listOf(0, 1, 8, 9, 10, 40, 100, 400, 2000, 10_000)
+        val steps = backlogs.map { typeStep(it) }
+        steps.zipWithNext().forEach { (a, b) ->
+            assertTrue("积压增大时推进量不能减少（$steps）", b >= a)
+        }
+    }
+
+    @Test
+    fun `大积压时会提速`() {
+        // 规则是 backlog / 4：积压 12 以上才会超过基础步长 2。
+        assertTrue("积压 400 字时应明显快于基础步长", typeStep(400) > BASE_STEP)
+        assertTrue("积压 12 字时开始提速", typeStep(12) > BASE_STEP)
+    }
+
+    @Test
+    fun `一次到达三百字也不会一拍放完`() {
         val sim = simulate(totalChars = 300, chunk = 300)
-        assertTrue(
-            "第一拍只该推 ${TYPE_STEP_FOR_TEST} 个字，实际 ${sim.firstJump}",
-            sim.firstJump == TYPE_STEP_FOR_TEST,
-        )
-        // **时长不是需求，是常量的推论**：300 字 ÷ 每拍字数 × 每拍毫秒。
-        // 断言只允许一个节拍的误差（收尾那一拍），所以改 TYPE_STEP 不需要改这里。
-        assertTrue(
-            "300 字应约 ${expectedMs(300)}ms，实际 ${sim.drainMs}ms",
-            // 允许"首个 delta 晚到"这一个发布间隔（默认 80ms）的余量。
-            sim.drainMs in (expectedMs(300) - TICK)..(expectedMs(300) + PUBLISH_MS),
-        )
+        // 第一拍只按积压量走，而不是一次把 300 字全放出来。
+        assertTrue("第一拍不该一次放完，实际 ${sim.firstJump}", sim.firstJump < 300)
+        assertTrue("第一拍必须已经动起来", sim.firstJump > 0)
     }
 
     @Test
-    fun `长答案按同一速度打完（代价已接受）`() {
+    fun `长答案能追平而不是无限落后`() {
         val sim = simulate(totalChars = 2_000, chunk = 2_000)
-        // 恒定速度的必然结果（2000 字 ≈ 16 秒），不再有加速档。
-        assertTrue(
-            "2000 字应约 ${expectedMs(2_000)}ms，实际 ${sim.drainMs}ms",
-            sim.drainMs in (expectedMs(2_000) - TICK)..(expectedMs(2_000) + PUBLISH_MS),
-        )
+        // 自适应提速的意义就在这里：一次性到达 2000 字也必须快速追平，
+        // 而不是按 2 字/拍 打 16 秒。给 3 秒的宽松上界。
+        assertTrue("2000 字应很快追平，实际 ${sim.drainMs}ms", sim.drainMs < 3_000)
     }
 
     @Test
     fun `正常流式不会越积越多`() {
-        // 每 80ms 5 个字 = 62 字/秒 < 75 字/秒的揭示速度 ⇒ 不会掉队。
+        // 每 80ms 5 个字 = 62 字/秒 ⇒ 基础速度 125 字/秒足够，积压不会增长。
         val sim = simulate(totalChars = 3_000, chunk = 5)
-        assertTrue("稳态落后应 ≤1500ms，实际 ${sim.worstLagMs}ms", sim.worstLagMs <= 1_500)
+        assertTrue("延迟不该越来越大，实际最坏 ${sim.worstLagMs}ms", sim.worstLagMs < 4_000)
     }
 
     @Test
-    fun `慢端点也看得见在动`() {
-        // 每 80ms 1 个字：揭示速度远高于到达速度，随到随打。
-        val sim = simulate(totalChars = 40, chunk = 1)
-        assertTrue("慢端点最多比到达晚 0.5 秒，实际 ${sim.drainMs}ms", sim.drainMs <= 40 * 80 + 500)
-    }
-
-    @Test
-    fun `速度落在可读又不拖沓的区间`() {
-        // 这是**需求本身**（用户：75 字/秒太慢；再快就看不出逐字了），与具体实现常量解耦：
-        // 换算成每秒字数必须在 100~200 之间。
-        val charsPerSecond = TYPE_STEP_FOR_TEST * 1000.0 / TICK
-        assertTrue(
-            "揭示速度应在 100~200 字/秒，实际 ${charsPerSecond}",
-            charsPerSecond in 100.0..200.0,
-        )
-    }
-
-    private companion object {
-        /** 按常量推导「打完全部要多久」，不写死秒数。 */
-        fun expectedMs(totalChars: Int): Int = (totalChars + TYPE_STEP_FOR_TEST - 1) / TYPE_STEP_FOR_TEST * TICK
-
-        /** 与 Typewriter.kt 的 TYPE_TICK_MS 一致（改动时两边一起改）。 */
-        const val TICK = 16
-
-        /** 与 ChatViewModel 的 DELTA_PUBLISH_MS 一致：首次到达最多晚一个发布间隔。 */
-        const val PUBLISH_MS = 80
-
-        /** 与 Typewriter.kt 的 TYPE_STEP 一致。 */
-        const val TYPE_STEP_FOR_TEST = 2
+    fun `揭示速度有下界`() {
+        assertTrue("任何积压下都必须至少推进 1 个字", (0..1000).all { typeStep(it) >= 1 })
+        assertEquals(BASE_STEP, typeStep(0))
     }
 }

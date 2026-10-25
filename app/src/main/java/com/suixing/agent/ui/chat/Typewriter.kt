@@ -126,7 +126,14 @@ private const val TYPE_FRESH_MS = 500L
  * 另外**流式结束后继续打完**（见下面的 [TextTyper]）：否则模型一停，剩下的尾巴会被一次性
  * 补上 —— 那正是「一下子全部显示」的最后一段。
  */
-internal fun typeStep(backlog: Int): Int = TYPE_STEP
+internal fun typeStep(backlog: Int): Int {
+    // **积压越多放越快**（issue #44 §5 的 Eta 做法）：固定 2 字/拍在快模型下永远追不上，
+    // 于是文本一直落后、最后一刻还在补字。这里按积压量提速：
+    //   backlog ≤ 8   ⇒ 2 字/拍（125 字/秒，慢速端点也能看见在动）
+    //   否则          ⇒ backlog / 4（积压 108 字 ⇒ 27 字/拍 ≈ 1.7k 字/秒，立刻追平）
+    // 追平后回落到 2 字/拍，观感始终是"逐字往上推"，而不是"一段一段蹦"。
+    return if (backlog <= 8) TYPE_STEP else maxOf(TYPE_STEP, backlog / 4)
+}
 
 /** 每拍放几个字，恒定不变：2 字/拍 × 62.5 拍/秒 = 125 字/秒。**任何长度的正文都按这个速度逐字**，
  * 不按落后量提速 —— 分档会让「积压多的时候又快成整块」，那等于没有打字机。 */

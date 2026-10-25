@@ -691,8 +691,12 @@ fun MarkdownText(
     androidx.compose.runtime.LaunchedEffect(text.length, blocks.size) {
         runCatching {
             java.io.File(ctx.filesDir, "md.log")
-                .appendText("${System.currentTimeMillis()} len=${text.length} blocks=${blocks.size} settled=$settled
-")
+                .appendText(
+                    System.currentTimeMillis().toString() +
+                        " len=" + text.length +
+                        " blocks=" + blocks.size +
+                        " settled=" + settled + CHR_NL
+                )
         }
     }
     MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
@@ -1051,6 +1055,9 @@ private fun InlineText(
 
 /** 光标宽度：绘制阶段用（1.5dp @3x ≈ 4.5px，取 4px 与旧的 ▍ 视觉接近）。 */
 private const val CURSOR_WIDTH_PX = 4f
+
+/** 诊断用换行（避免字符串模板里的转义被工具截断）。 */
+private val CHR_NL = System.lineSeparator()
 
 /**
  * 与 [com.suixing.agent.ui.chat.BlinkingCursor] 同一节奏（480ms 往返）的光标透明度，但**返回 `State`**：绘制阶段要读它（`.value`），
