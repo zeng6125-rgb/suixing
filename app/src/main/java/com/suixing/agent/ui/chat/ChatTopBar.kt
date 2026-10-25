@@ -1201,7 +1201,10 @@ internal fun AssistantRow(
                                 MarkdownText(
                                     text = shown,
                                     settled = !streaming,
-                                    cursor = streaming,
+                                    // **正文不画光标**（用户：「正文要不就不要那个光标效果」）：
+                                    // 正文是逐字显影的，光标跟着打字进度走本来就容易显得滞后；
+                                    // 思考块保留光标（那里更新是逐行、观感更稳）。
+                                    cursor = false,
                                 )
                             } else {
                                 SelectableWhenArmed { MarkdownText(text = part.text) }
