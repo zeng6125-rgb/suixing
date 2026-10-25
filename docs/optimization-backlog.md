@@ -23,7 +23,7 @@
 
 ## 进度（2026-10-26 04:xx 起）
 
-- 已完成：issue #49 + **22 条**清单项（各节里打勾的 `[x]`）
+- 已完成：issue #49 + **27 条**清单项（各节里打勾的 `[x]`）
   - 数据层：尾部按字节读、meta 缓存、JobStore 两处
   - 工具/服务：截图离开主线程、TouchFx 光晕两处、FileTools 三处、settings 正则
   - Agent/LLM：SSE 双解析
@@ -72,7 +72,7 @@
 - [ ] `data/ChatRepository.kt:127` — `updateMeta` 整表 `.map` 一次，`:565/:579/:590` 的 `setPinned/rename/setArchived` 再整表 `.map` 一次（两次结果相等、第二次被 StateFlow 去重）。
 - [ ] `data/ChatRepository.kt:544` — 每次 save 都 `filterNot` + `listOf` + `sortedByDescending`：3 份 List + 一次排序，只为把一条挪到首位。
 - [ ] `data/ChatRepository.kt:65` — `load()` 把目录列了多遍：`:830` `chats/`、`:844` `store/`、`:864` 再列 `store/`。
-- [ ] `data/ChatStore.kt:710` — `encode()` 先 `buildString` 拼整份日志再 `toByteArray`，峰值容量翻倍。
+- [x] `data/ChatStore.kt:710` — `encode()` 先 `buildString` 拼整份日志再 `toByteArray`，峰值容量翻倍。
 - [x] `data/JobStore.kt:136` — `lastLineOf` 走 `readJobLog(tail=1)` 每次读末尾 256KB 再 `lines()` 全拆。
 - [x] `data/JobStore.kt:98` — `find(id)` 实现为 `list().firstOrNull`，为一个 job 把每个 job 的 256KB 日志都读一遍。
 - [ ] `data/ChatRepository.kt:621` — `saveLive` 流式期间每秒调用一次（`ChatViewModel.kt:2884,2908`），持锁时先 `encodeToString` 整份草稿再 `fd.sync` + 目录 fsync。
@@ -160,7 +160,7 @@
 - [ ] `llm/LlmClient.kt:1088` — 每轮对每个历史 `tool_call` 重跑 `arguments.toJsonObjectOrEmpty()`。
 - [ ] `llm/LlmClient.kt:909` — 每轮 `messages.map { encodeMessage(it) }` 重建整份历史 JsonObject 树（`:981` 还两次 filter）。风险中。
 - [ ] `llm/LlmClient.kt:396` — `payload.toString().toRequestBody()` 整份 body（含 2MB base64）序列化成 String 再拷 ByteArray，每轮两份全量拷贝。风险中。
-- [ ] `agent/RequestImages.kt:25` — 每轮 `wire.withIndex().filter{…}` 即使零截图也造全量 `IndexedValue`。
+- [x] `agent/RequestImages.kt:25` — 每轮 `wire.withIndex().filter{…}` 即使零截图也造全量 `IndexedValue`。
 - [ ] `agent/AgentEngine.kt:1897` — 每轮无条件 `estimatePromptTokens(wire)`，而 `realPromptTokens>0` 时它多数轮算完即弃。
 
 ### P2（16 条，择要做）
@@ -198,9 +198,9 @@
 - [ ] `MarkdownText.kt:176-177` — 同一段代码体 `joinToString("\n")` 执行两遍
 - [ ] `MarkdownText.kt:262-272` — `isTableStart` 对同一行调用两次，每次 `trim` 下一行 + `splitTableRow`
 - [ ] `MarkdownText.kt:897-909` — `settledPrefix` 每个候选空行都从头 `count{it=='`'}` ⇒ O(空行×文本长)，流式每发布一次
-- [ ] `MarkdownText.kt:991-1002` — 公开 `MarkdownBlock` 每次重组新建 `MarkdownPalette`（`:935` 已为 `MarkdownBlocks` 修过同一问题）
-- [ ] `MarkdownText.kt:948` — `cursor=true` 时每次重组 `blocks.indexOfLast{…}` 扫整块列表（思考链可达数千块）
-- [ ] `ui/components/Common.kt:1165-1170` — `navBarContentPadding()` 每次调用读 insets + 新建 `PaddingValues`，全 ui 14 个调用点
+- [x] `MarkdownText.kt:991-1002` — 公开 `MarkdownBlock` 每次重组新建 `MarkdownPalette`（`:935` 已为 `MarkdownBlocks` 修过同一问题）
+- [x] `MarkdownText.kt:948` — `cursor=true` 时每次重组 `blocks.indexOfLast{…}` 扫整块列表（思考链可达数千块）
+- [x] `ui/components/Common.kt:1165-1170` — `navBarContentPadding()` 每次调用读 insets + 新建 `PaddingValues`，全 ui 14 个调用点
 - [ ] `ui/settings/SettingsScreen.kt:230,458,1358,1791,1965`（另 `SuixingApp.kt:273,840`、`settings/ProfileScreen.kt:72`）— 每页订阅整份 settings flow，任意字段写入整页 body 重跑。风险中。
 
 ### P2（15 条，择要做）
