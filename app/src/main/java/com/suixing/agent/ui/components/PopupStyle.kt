@@ -34,10 +34,13 @@ internal val PopupCardShape = RoundedCornerShape(20.dp)
  */
 internal fun Modifier.popupCardSurface(color: Color): Modifier = this
     .shadow(
-        elevation = 3.dp,
+        // 扩散加大（用户：「阴影扩散再大一点，现在感觉聚在一起没有质感」）：elevation 决定
+        // 模糊半径，从 3dp 提到 10dp 光晕摊得更开；浓度同时从 18% 降到 10%，否则摊开之后
+        // 会发黑发脏。ambient 与 spot 同色 ⇒ 没有方向性偏移。
+        elevation = 10.dp,
         shape = PopupCardShape,
-        ambientColor = Color.Black.copy(alpha = 0.18f),
-        spotColor = Color.Black.copy(alpha = 0.18f),
+        ambientColor = Color.Black.copy(alpha = 0.10f),
+        spotColor = Color.Black.copy(alpha = 0.10f),
     )
     .clip(PopupCardShape)
     .background(color)

@@ -56,6 +56,23 @@ internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 
     return remember(revealed, text) { text.take(revealed) }
 }
 
+/**
+ * 不知道诞生时刻的调用方用这个（目前只有思考块）。
+ *
+ * [rememberTypedText] 的 [initialRevealed] 靠 `nowMs() - bornAtMs` 判断「刚诞生还是早就在」。
+ * 传默认值 `bornAtMs = 0L` 时年龄等于开机到现在（极大）⇒ 判定成「很久以前」⇒ **直接给全文，
+ * 一个字都不打**。思考块那一处（ChatTopBar.kt 的 `Part.Thinking` 分支）就是漏传了它，
+ * 所以思考从上线起就没有逐字。
+ *
+ * 这里在块首次组合时记下时刻：live 块是诞生即组合，于是年龄≈0 ⇒ 从 0 打；历史块不会走这条
+ * 分支（`enabled=false` 时 [rememberTypedText] 本来就返回全文）。
+ */
+@Composable
+internal fun rememberTypedTextFromBirth(text: String, enabled: Boolean): String {
+    val born = remember { nowMs() }
+    return rememberTypedText(text, enabled, born)
+}
+
 /** 一个节拍多久放一次字。16ms＝62 次/秒：一屏文字每秒只变 25 次时，人眼看到的是「成串蹦字」
  * （30 字/秒的 5 字一跳）——这才是「逐字效果差」的真因，不是速度。16ms 下每次只多 2 个字。 */
 private const val TYPE_TICK_MS = 16L

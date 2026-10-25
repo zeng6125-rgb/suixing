@@ -1086,7 +1086,9 @@ internal fun AssistantRow(
                             // `streaming` 本身够了：块还在屏幕上就继续把剩下的字打完。
                             val thinkingLive = streaming && last
                             ReasoningBlock(
-                                text = rememberTypedText(part.text, streaming),
+                                // **必须带诞生时刻**：`rememberTypedText` 默认 bornAtMs = 0 会被判成"很久以前"
+                                // ⇒ 直接给全文、一个字都不打（思考块从上线起就是这样）。
+                                text = rememberTypedTextFromBirth(part.text, streaming),
                                 // A live block is the one still growing; a settled round's
                                 // thinking is complete even while the run continues.
                                 streaming = thinkingLive,
@@ -1168,7 +1170,12 @@ internal fun AssistantRow(
                                 }
                             }
                             // 流式时逐字放（外观 → 打字机效果）；settled 直接全文，选区也用全文。
-                            val shown = rememberTypedText(part.text, streaming, part.bornAtMs)
+                            // **与思考块完全同一套**（用户：正文的打字机一直不正常，「直接用思考
+                            // 流式那一套」）：不再依赖 `part.bornAtMs` —— 那个值一旦大于 500ms
+                            // 就会被判成"很久以前"，于是整段直接给全、一个字都不打。改用
+                            // [rememberTypedTextFromBirth]：块首次组合时记下时刻，live 块必然
+                            // 年龄≈0 ⇒ 永远从 0 开始打。
+                            val shown = rememberTypedTextFromBirth(part.text, streaming)
                             // 流式结束后打字机可能还没打完（恒定 75 字/秒，慢于模型）——
                             // 那段时间仍然要画 `shown`，否则剩下的尾巴会一次性补上。
                             val typing = shown.length < part.text.length
@@ -1178,14 +1185,18 @@ internal fun AssistantRow(
                                 // 默认成"定稿"，打字机 25 Hz 每拍一个新前缀都会塞进进程级 LRU
                                 // ⇒ 缓存被同一条答案的 16 个前缀占满、流式期命中率恒为 0。
                                 // 还在打的时候不能标 settled：那会把每一个前缀写进进程级 LRU。
-                                MarkdownText(text = shown, settled = !streaming && !typing)
+                                // **光标内联进正文**（用户：绿色竖线要统一）：与思考块同一个
+                                // 绘制实现（MarkdownText 的 cursor 参数，drawBehind 画 4px
+                                // linkColor 竖条），不再另起一个 BlinkingCursor。
+                                MarkdownText(
+                                    text = shown,
+                                    settled = !streaming && !typing,
+                                    cursor = streaming || typing,
+                                )
                             } else {
                                 SelectableWhenArmed { MarkdownText(text = part.text) }
                             }
-                            if (streaming && last) {
-                                Spacer(Modifier.height(4.dp))
-                                BlinkingCursor()
-                            }
+
                             if (!last) Spacer(Modifier.height(6.dp))
                         }
 

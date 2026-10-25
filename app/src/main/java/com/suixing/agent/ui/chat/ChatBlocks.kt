@@ -861,7 +861,21 @@ internal fun ReasoningBlock(
     // 绝对行号（`indexOfLast`）与它差一个 `lastIndex - i` 的换算，混用会让光标挂到最旧那一行 ——
     // 长的思考链里甚至直接移出视口（真机症状：「光标没有跟在思考链后面」）。
     // 全空行时 `indexOfLast` 为 -1 ⇒ cursorAt = lastIndex + 1，永远不会等于任何 index（正确）。
-    val cursorAt = remember(lines) { lines.lastIndex - lines.indexOfLast { it.isNotBlank() } }
+    // **光标永远挂在「已显示文本的最后一行」**（用户：「思考流式过程中光标不能稳定出现在末尾」）。
+    //
+    // 原来的算法是「最后一个非空行」：`lines.lastIndex - lines.indexOfLast { it.isNotBlank() }`。
+    // 问题出在**刚换行、下一个字还没打出来**的那一段：
+    //   · 打字机每拍只放 2 个字（TYPE_STEP=2 / TYPE_TICK_MS=16），换行符被放出来的那一拍，
+    //     末行是空串；
+    //   · 空串让 `indexOfLast { it.isNotBlank() }` 退回**上一行**，于是 cursorAt 指向上一行，
+    //     内联光标画在上一行末尾 —— 屏幕上的光标比真正的文本末尾高一行；
+    //   · 而空行那条 item 走的是 `Spacer`（不画字也不画光标），所以末尾那一行什么都没有。
+    //   · 模型常在段落/列表项之间停顿（换行之后停几百毫秒很常见），这段时间光标一直停在
+    //     上一行 ⇒ 就是「不稳定出现在末尾」。
+    //
+    // 现在：流式时**恒定挂最新行（视觉行号 0）**；最新行有字时内联在字后面，最新行是空行时
+    // 由下面的空白分支画一个同样的光标。行号 0 = 底锚倒序里的最新行，与 `items` 的 index 同义。
+    val cursorAt = if (streaming) 0 else -1
     val firstLine = remember(lines) { lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty() }
     // The chain itself, shared by both shapes: a think with no text at all (the
     // endpoint reported time but no chain) must not render as an empty slab, and a
@@ -930,9 +944,22 @@ internal fun ReasoningBlock(
                     // 底锚：index 0 是**最新一行**（视觉最底），越往上 index 越大。
                     val line = lines[lines.lastIndex - index]
                     if (line.isBlank()) {
-                        // 视觉首行（倒序里的最后一条）是空行时不占位：那 4dp 就是「分割线
-                        // 下面还有一点空白」的来源。
-                        if (index < lines.lastIndex) Spacer(Modifier.height(4.dp))
+                        // **最新行是空行时，光标就画在这里**：它才是「已显示文本的末尾」
+                        // （刚换行、下一个字还没被打字机放出来）。原来是 `Spacer`，光标于是
+                        // 跳回上一行末尾 —— 见 cursorAt 上面的说明。
+                        if (streaming && index == cursorAt) {
+                            // 与有字那行同一个光标实现（内联绘制），空串也会画出竖条。
+                            MarkdownText(
+                                text = "",
+                                style = thinkingStyle(),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                cursor = true,
+                            )
+                        } else if (index < lines.lastIndex) {
+                            // 视觉首行（倒序里的最后一条）是空行时不占位：那 4dp 就是「分割线
+                            // 下面还有一点空白」的来源。
+                            Spacer(Modifier.height(4.dp))
+                        }
                     } else {
                         // 思考链每一行都可选中复制（用户：「确实所有情况都要可复制」）——
                         // 由长按武装制满足：不按时零选区成本，长按那一刻容器就位。
@@ -1042,7 +1069,6 @@ internal fun ReasoningBlock(
                         // eats the leftover so the chevron sits on the right edge.
                         modifier = Modifier.weight(1f),
                     )
-                    if (streaming) BlinkingCursor()
                 }
                 Icon(
                     imageVector = if (expanded) {

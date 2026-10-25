@@ -1356,9 +1356,14 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
                         color = scheme.onSurfaceVariant,
                         maxLines = 1,
                         softWrap = false,
-                        // **自适应宽度**（用户：「数字过长时会被截断，568.3K 右边被截了一点点」）：
-                        // 原来固定 44.dp，「568.3K」放不下就被切掉。改成按内容取宽。
-                        modifier = Modifier.width(IntrinsicSize.Max),
+                        // **统一固定宽度**（用户：「数字左侧没对齐，三行的进度条长度和两侧也没对齐」）：
+                        // 上一步用 IntrinsicSize.Max 让每行各按自身内容取宽 —— 于是「~22.1K」与
+                        // 「~568.3K」左缘不齐、后面小条起点也随之错位。给三行同一个宽度，
+                        // 值右对齐 + 小条同起点同长度。
+                        // 56dp 是按最长可能值（「~999.9K」，7 字符 @ labelSmall）定的，
+                        // 原来的 44dp 放不下「568.3K」才被切掉。
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.width(56.dp),
                     )
                     Spacer(Modifier.width(10.dp))
                     Box(
