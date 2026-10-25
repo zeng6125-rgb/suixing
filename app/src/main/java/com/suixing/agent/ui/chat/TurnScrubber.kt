@@ -717,6 +717,8 @@ internal fun Composer(
     // hangs off the button that opened it rather than off the free space around it. Measured
     // here because the capsule is this row's child, and read by [GenerationSheet].
     var capsuleRight by remember { mutableStateOf(0f) }
+    // 胶囊上沿（窗口坐标）：模型卡要贴在它上方 8dp。
+    var capsuleTop by remember { mutableStateOf(0f) }
     // Where the model button's centre sits, in window pixels: the 生成设置 sheet is centred
     // on it rather than on the composer or the screen, which is what "right above the model
     // button" means. Read from the layout, because the row's paddings and the label's own
@@ -1261,6 +1263,7 @@ internal fun Composer(
                                         onChooseReasoning = onChooseReasoning,
                                         visible = sheetOpen,
                                         capsuleRight = capsuleRight,
+                                        capsuleTop = capsuleTop,
                                         onPickModel = onPickModel,
                                         onOpenSettings = onOpenSettings,
                                         onDismiss = { sheetOpen = false },
@@ -1274,6 +1277,7 @@ internal fun Composer(
                                 Box(
                                     Modifier.onGloballyPositioned {
                                         capsuleRight = it.boundsInWindow().right
+                                        capsuleTop = it.boundsInWindow().top
                                     },
                                 ) {
                                 UnifiedSelector(

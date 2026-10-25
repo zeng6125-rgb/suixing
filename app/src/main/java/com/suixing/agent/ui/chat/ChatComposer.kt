@@ -29,8 +29,6 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
@@ -371,13 +369,13 @@ internal fun MenuCard(
             AnimatedVisibility(
                 visible = visible && appeared,
                 // **全站小浮层统一 110ms**（用户改成 110）。
-                // 除了淡入 + 缩放，还要**上浮**：只有淡入时 110ms 在锚点上看不出任何变化，
+                // 缩放 + 上浮：只有缩放时 110ms 在锚点上看不出任何变化，
                 // 用户看到的仍然是"啪一下出现"。位移从下方 12dp 起，落到位。
-                enter = fadeIn(tween(POPUP_ANIM_MS)) +
-                    scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
+                // **不做淡入**：alpha < 1 时卡片（纯白底）是半透明的，压在深色抽屉/正文上
+                // 就显得发灰 —— 用户对比两个浮层看到的"底色不一样"就是它。
+                enter = scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
                     slideInVertically(tween(POPUP_ANIM_MS)) { it / 6 },
-                exit = fadeOut(tween(POPUP_ANIM_MS)) +
-                    scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
+                exit = scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
                     slideOutVertically(tween(POPUP_ANIM_MS)) { it / 6 },
             ) {
                 Column(
@@ -598,6 +596,8 @@ internal fun GenerationSheet(
     /** The model button's centre, in window pixels; 0 until the composer has measured it. */
     /** Whether the card is open. It animates in and out on this, so it stays composed. */
     visible: Boolean,
+    /** The model capsule's TOP edge in window pixels, or 0 before it is measured. */
+    capsuleTop: Float = 0f,
     /**
      * The model capsule's right edge in window pixels, or 0 before the composer has measured
      * it. The sheet is right-aligned to this edge rather than to the free space around the
@@ -690,6 +690,23 @@ internal fun GenerationSheet(
         // BottomStart ＋ (nudge, −8dp) —— 卡片底边贴锚点、向上长。
         alignment = Alignment.BottomStart,
         offset = with(density) { IntOffset(nudge.roundToInt(), -8.dp.roundToPx()) },
+        // **按实测的胶囊位置定位**（用户：要正上方、边缘要对齐）：底边 = 胶囊上沿 − 8dp，
+        // 右缘 = 胶囊右缘。未测量到（=0）时退回 alignment/offset 的老路径。
+        popupPositionProvider = if (capsuleTop > 0f && capsuleRight > 0f) {
+            val gap = with(density) { 8.dp.roundToPx() }
+            object : PopupPositionProvider {
+                override fun calculatePosition(
+                    anchorBounds: IntRect,
+                    windowSize: IntSize,
+                    layoutDirection: LayoutDirection,
+                    popupContentSize: IntSize,
+                ): IntOffset {
+                    val x = (capsuleRight.toInt() - popupContentSize.width).coerceAtLeast(0)
+                    val y = (capsuleTop.toInt() - popupContentSize.height - gap).coerceAtLeast(0)
+                    return IntOffset(x, y)
+                }
+            }
+        } else null,
         debugTag = "model",
         // Focus-less: opening this card must not take the keyboard off the field, or the
         // composer falls by the keyboard's height under a card anchored to where it used to
