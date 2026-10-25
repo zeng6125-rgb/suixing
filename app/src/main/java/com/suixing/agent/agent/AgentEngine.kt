@@ -1581,7 +1581,11 @@ class AgentEngine(
                     // 回写，再放下一块。块与块之间是一道屏障 —— 换来的是「顺序回写」这条硬约束的
                     // 简单实现，且取消检查落在每块开头与每条执行的开头。coroutineScope 保证块里的
                     // async 都收干净才往下走（含异常路径）。
-                    for (chunk in turn.toolCalls.chunked(parallel)) {
+                    // **不可并行的工具自成一组**（GUI 手势 / 会话式 shell / 特权写操作）：
+                    // 它们改的是同一块屏幕或同一个 shell 会话，并发提交会互相踩。纯读类照旧
+                    // 并行 —— 分块宽度不变，只是把这些调用前后切开了（见 ToolBatching.kt）。
+                    val groups = batchGroups(turn.toolCalls.map { it.name }, parallel)
+                    for (chunk in groups.map { g -> g.map { turn.toolCalls[it] } }) {
                         if (cancelled.get()) {
                             finishCancelled(onEvent, streamed, reasoning, openCalls)
                             return produced
