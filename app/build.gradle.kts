@@ -21,6 +21,8 @@ android {
     signingConfigs {
         create("sideload") {
             storeFile = file("sideload.keystore")
+            // 别名/密码是更名前的旧名，**不能改**：app/sideload.keystore 就是用这个名字生成的，
+            // 改了等于换签名 ⇒ 已安装的版本无法覆盖安装。
             storePassword = "lingshu"
             keyAlias = "lingshu"
             keyPassword = "lingshu"

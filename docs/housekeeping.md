@@ -77,7 +77,7 @@
 
 ### 3.1 `docs/v0.8-contract.md` 已过期，但**仍被工作记忆当作现行契约引用**（重要性：高）
 
-- 过期证据：① 仓库路径写的是改名前的 `D:\dsh\fixbug\lingshu`；② 写域划分里的 `ui-shell` / `phone-runtime` / `eco-plugins` 三个 teammate 早就不存在；③ 文中版本口径停在 0.8.2 轮（最后提交 2026-10-09），现已是 0.8.299。
+- 过期证据：① ~~仓库路径写的是改名前的 `D:\dsh\fixbug\lingshu`~~（2026-10-25 已改为 `suixing`）；② 写域划分里的 `ui-shell` / `phone-runtime` / `eco-plugins` 三个 teammate 早就不存在；③ 文中版本口径停在 0.8.2 轮（最后提交 2026-10-09），现已是 0.8.299。
 - **仍然有效的部分**：禁打包（需用户放行）、禁 git 写操作、增量编译假故障自救、子代理写序、写域互不越界。这几条已被 `TODO_NEXT.md` 第四节吸收，**不需要再保留一份契约文件**。
 - **不一致点**：`WORK_MEMORY_suixing-agent.md:39` 仍写「团队契约 | `docs/v0.8-contract.md`（§0 teammate 禁打包/禁 git 写…）」，把它当活契约。**新写的 `docs/README.md` 已把它标为「已过期（见 TODO_NEXT.md）」——两处现在是对不上的，需要 Lead 统一口径。**
 - 处置：**文件保留不删**（已在 `docs/README.md` 标注状态）。待 Lead 决定：改记忆的引用行，还是把契约刷新成现行版。

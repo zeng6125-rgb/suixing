@@ -237,7 +237,7 @@ gradle :app:assembleRelease
 - **出包纪律**：只出 release，不构建 debug——debug 的 `applicationId` 带 `.debug` 后缀，装上去会变成另一个应用。打包要等放行。
 - 装机前必须 `aapt dump badging` 核对 APK 的 `versionName` / `versionCode`（历史上出过一次「构建没跑、把旧包当新包装机」的事故；几个版本的 APK 字节数完全相同，光看大小分不出来）。发错了用 `gh release upload --clobber` 覆盖附件。
 - 推送到 GitHub 后 `.github/workflows/android.yml` 会自动跑：`gradle :app:testDebugUnitTest` → 上传测试报告 → `gradle :app:assembleDebug :app:assembleRelease` → 上传 `suixing-debug` / `suixing-release` 两个 APK artifact。
-- release 用仓库内的 `app/sideload.keystore` 自签（alias / 密码均为 `lingshu`）——这是自用侧载包，不是上架包；该 keystore 必须入库，否则覆盖安装会失败。release 目前不开 minify（`isMinifyEnabled = false`），`proguard-rules.pro` 里的规则是为将来开混淆准备的。
+- release 用仓库内的 `app/sideload.keystore` 自签（alias / 密码都是更名前的 `lingshu`。**不要改**：keystore 就是用这个名字生成的，改了等于换签名，已装的版本将无法覆盖安装）——这是自用侧载包，不是上架包；该 keystore 必须入库，否则覆盖安装会失败。release 目前不开 minify（`isMinifyEnabled = false`），`proguard-rules.pro` 里的规则是为将来开混淆准备的。
 
 ## 目录结构
 
