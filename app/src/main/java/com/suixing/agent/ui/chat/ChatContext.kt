@@ -333,7 +333,9 @@ internal fun TopBarContextEntry(
                         )
                         // **以按钮左沿对齐**（不是贴屏幕右边）—— 之前写死 windowSize.width 会让
                         // 卡片一律从右侧出现。
-                        val x = anchorBounds.left.coerceIn(
+                        // **卡片右缘对齐按钮右缘**（诊断日志实测：按钮在 x 814~898，卡片宽 769；
+                        // 用左缘对齐会把它推出屏幕、再被夹回右边，就成了"从右边弹出来"）。
+                        val x = (anchorBounds.right - popupContentSize.width).coerceIn(
                             edgePxForPopup,
                             (windowSize.width - edgePxForPopup - popupContentSize.width)
                                 .coerceAtLeast(edgePxForPopup),
