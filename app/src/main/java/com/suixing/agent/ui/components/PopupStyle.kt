@@ -22,13 +22,22 @@ import androidx.compose.ui.unit.dp
  */
 internal val PopupCardShape = RoundedCornerShape(20.dp)
 
-/** 投影：8dp，同色相的 25% 黑 —— 与抽屉菜单原本的质感一致（用户曾明确说那个阴影「很高级」）。 */
+/**
+ * 投影：**轻**、**不带偏移**（用户：「阴影我不需要很重的，全部改轻，同时阴影不要有偏移，
+ * 要有质感的阴影」）。
+ *
+ * 做法：`ambientColor` 与 `spotColor` 同色同浓度 ⇒ 只有环境光没有方向性偏移，看着是"浮起
+ * 一层纸"而不是"贴在某一边"。elevation 从 8dp 降到 3dp，配合 18% 的黑 ⇒ 轻。
+ *
+ * 用 `ambientColor`/`spotColor` 显式给色，而不是靠 elevation 推算：Material 的默认阴影色
+ * 偏灰且随 elevation 加重，用户看到的"重"就是它。
+ */
 internal fun Modifier.popupCardSurface(color: Color): Modifier = this
     .shadow(
-        elevation = 8.dp,
+        elevation = 3.dp,
         shape = PopupCardShape,
-        ambientColor = Color.Black.copy(alpha = 0.25f),
-        spotColor = Color.Black.copy(alpha = 0.25f),
+        ambientColor = Color.Black.copy(alpha = 0.18f),
+        spotColor = Color.Black.copy(alpha = 0.18f),
     )
     .clip(PopupCardShape)
     .background(color)

@@ -374,10 +374,13 @@ internal fun MenuCard(
         ) {
             Column(
                 modifier = modifier
-                    // **动画层必须排在链首**：graphicsLayer 是外层修饰符，它变换的是它**之后**
-                    // 的全部绘制。排在 popupCardSurface 之后时，白底与阴影画在它之外 ⇒ 卡片
-                    // 先出现、内容后浮现（用户：「感觉卡片比内容先出来」）。排到链首后
-                    // 白底+阴影+内容一起动。
+                    // **阴影画在离屏层之外**（链首，在 graphicsLayer 之前）：阴影若画在
+                    // graphicsLayer 建立的离屏层**内部**，入场缩放会把它一起放大并带上方向性
+                    // 偏移 —— 用户看到的「阴影很重、有偏移」就是这个。画在层外，它始终是那
+                    // 一层轻薄的、有质感的投影。
+                    .popupCardSurface(containerColor)
+                    // **动画层在阴影之后**：graphicsLayer 变换它**之后**的全部绘制（白底+内容），
+                    // 两者一起动 ⇒ 卡片不会先于内容出现（用户：「感觉卡片比内容先出来」）。
                     .graphicsLayer {
                         val p = enterProgress.value
                         translationY = (1f - p) * slidePx
@@ -391,7 +394,6 @@ internal fun MenuCard(
                         // 入场淡入（用户：淡入也要）。
                         alpha = p
                     }
-                    .popupCardSurface(containerColor)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -1302,7 +1304,8 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
             Text(
                 text = if (known) "上下文已用 $percent%" else "上下文用量",
                 style = MaterialTheme.typography.labelMedium,
-                color = scheme.onSurface,
+                // 与数字同一个颜色（用户：「这几个字的颜色都改为和数字一样的颜色」）。
+                color = scheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f, fill = false),
             )
             Spacer(Modifier.width(8.dp))
@@ -1319,6 +1322,8 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
             )
         }
         if (known) {
+            // 标题与进度条之间留大一点的空（用户：「离下面那个进度条间距再大一点点」）。
+            Spacer(Modifier.height(6.dp))
             LinearProgressIndicator(
                 progress = { (percent / 100f).coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth(),
@@ -1339,6 +1344,8 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
                     Text(
                         text = label,
                         style = MaterialTheme.typography.bodySmall,
+                        // 与数字同一个颜色（用户：「这几个字的颜色都改为和数字一样的颜色」）。
+                        color = scheme.onSurfaceVariant,
                         // *fill = true**（用户：「进度条没有对齐」）：fill=false 时标签列只占自己
                         modifier = Modifier.weight(1f),
                     )
@@ -1349,9 +1356,9 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
                         color = scheme.onSurfaceVariant,
                         maxLines = 1,
                         softWrap = false,
-                        // 定宽（用户：「进度条，长度对齐」）：值列宽窄不一会把后面的小条挤得参差；
-                        // 定宽后三行的条同起点同长度，右端与顶部进度条对齐。
-                        modifier = Modifier.width(44.dp),
+                        // **自适应宽度**（用户：「数字过长时会被截断，568.3K 右边被截了一点点」）：
+                        // 原来固定 44.dp，「568.3K」放不下就被切掉。改成按内容取宽。
+                        modifier = Modifier.width(IntrinsicSize.Max),
                     )
                     Spacer(Modifier.width(10.dp))
                     Box(
