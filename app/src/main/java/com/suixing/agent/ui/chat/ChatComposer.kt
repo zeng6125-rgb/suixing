@@ -326,8 +326,17 @@ internal fun MenuCard(
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = focusable),
     ) {
+        // **首次组合必须先从 false 翻到 true，入场才会跑**：`keepMounted` 是在 `visible`
+        // 变 true 之后才挂上这个 Popup 的，所以第一帧 `visible` 已经是 true ——
+        // `AnimatedVisibility(visible = true)` 在首次组合时**不播入场**（它只对"变化"做过渡）。
+        // 这就是「小浮层只有个别几个看得到动画」的原因：其余卡片都是"啪"一下出现。
+        var appeared by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            withFrameNanos { }
+            appeared = true
+        }
         AnimatedVisibility(
-            visible = visible,
+            visible = visible && appeared,
             enter = fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.92f),
             exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.92f),
         ) {
