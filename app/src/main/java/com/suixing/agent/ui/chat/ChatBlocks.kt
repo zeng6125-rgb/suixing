@@ -777,7 +777,13 @@ internal class ReasoningExpansion(
  */
 internal fun thinkSlot(parts: List<Part>, index: Int, fallback: String): String {
     val part = parts.getOrNull(index) as? Part.Thinking ?: return index.toString()
-    val before = parts.take(index).count { it is Part.Thinking && it.runId == part.runId }
+    // 一次遍历数「同一 run 在这一段之前已经有几段思考」：原来 `parts.take(index)` 每次都分配
+    // 一个中间 list —— 卡片里每段思考调一次，展开体里每段再调一次，纯属白分配。
+    var before = 0
+    for (i in 0 until index) {
+        val earlier = parts[i]
+        if (earlier is Part.Thinking && earlier.runId == part.runId) before++
+    }
     return "${part.runId.ifEmpty { fallback }}:$before"
 }
 
@@ -836,10 +842,16 @@ internal fun ReasoningBlock(
     // think), and one that has settled follows 历史思考块默认展开. Off, a finished think folds to
     // its header — the reader's tap is the way in, and the table remembers it per conversation.
     val expanded = expansion.stored(blockId) ?: (streaming || expandReasoning)
-    val lines = remember(text) { text.split('\n') }
-    val meta = buildList {
-        if (reasoningTokens > 0) add("$reasoningTokens tokens")
-        if (elapsedMs > 0) add(formatDuration(elapsedMs))
+    // **增量切行**（见 [IncrementalLines]）：文本是逐字变长的，`text.split('\n')` 每一拍都在
+    // 全文上重做一次切分 + 分配一个新列表。切分器记住上一次的文本与结果，只切新增那一段。
+    val splitter = remember { IncrementalLines() }
+    val lines = remember(text) { splitter.linesFor(text) }
+    // **remember 真正的依赖**（原来每帧一个 buildList）：`meta` 只由这两个数决定。
+    val meta = remember(reasoningTokens, elapsedMs) {
+        buildList<String> {
+            if (reasoningTokens > 0) add("$reasoningTokens tokens")
+            if (elapsedMs > 0) add(formatDuration(elapsedMs))
+        }
     }
     // The folded header says what the think starts with, so a closed block is still
     // readable; a streaming block adds the cursor right after that line.
@@ -851,7 +863,7 @@ internal fun ReasoningBlock(
     // 长的思考链里甚至直接移出视口（真机症状：「光标没有跟在思考链后面」）。
     // 全空行时 `indexOfLast` 为 -1 ⇒ cursorAt = lastIndex + 1，永远不会等于任何 index（正确）。
     val cursorAt = remember(lines) { lines.lastIndex - lines.indexOfLast { it.isNotBlank() } }
-    val firstLine = lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+    val firstLine = remember(lines) { lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty() }
     // The chain itself, shared by both shapes: a think with no text at all (the
     // endpoint reported time but no chain) must not render as an empty slab, and a
     // monster chain stays bounded at 320dp of lazy list that follows its tail while
@@ -1134,7 +1146,8 @@ internal fun ToolBundle(
     var openTools by remember { mutableStateOf(emptySet<String>()) }
     // **摘要只依赖 tools 本身**：count/标题/预览 remember 住，折叠条常驻，
     // 原来每帧都重算一遍（审计 2§A14）。
-    val failures = tools.count { it.done && !it.ok }
+    // R4：这个 count 也是同一类 —— 它只随 tools 变，而这一行在每次重组都会被求值一遍。
+    val failures = remember(tools) { tools.count { it.done && !it.ok } }
     val (title, preview) = remember(tools) {
         // One call is its own name; several are a count, because the names are what the
         // expanded list is for.
@@ -1415,8 +1428,12 @@ internal fun ToolRow(
             )
             // What the call is doing, on the row itself: a folded tool row that only
             // says 「完成」 is exactly what the user called 「执行什么内容也没有」.
-            val firstArg = line.args.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
-                ?.takeIf { it.isNotEmpty() && it != "{}" }
+            // R4：`line.args` 是这一行唯一的相关输入；逐帧 lineSequence + firstOrNull 只为
+            // 了拿它的第一行，remember 住（外层 ToolDetail 也是一个常驻分支）。
+            val firstArg = remember(line.args) {
+                line.args.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+                    ?.takeIf { it.isNotEmpty() && it != "{}" }
+            }
             if (firstArg != null) {
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -1550,7 +1567,9 @@ internal fun TurnSummary(
             // made one reply read as a stack of the same text; the mid-run transitions — the
             // model's "let me check" before a tool — stay, because the bubble does not show
             // those and the card is their only record.
-            val lastText = parts.indexOfLast { it is Part.Text }
+            // R5：`indexOfLast` 只随 parts 变（列表元素是数据类，新块诞生/追加即 key 变），
+            // 折叠卡展开时却每帧都在整条 parts 上重扫一遍。
+            val lastText = remember(parts) { parts.indexOfLast { it is Part.Text } }
             parts.forEachIndexed { index, part ->
                 // Guarded before key(index), never inside it: a non-local return out of a key
                 // group leaves the group unclosed and Compose aborts with "Start/end

@@ -1027,7 +1027,10 @@ internal fun AssistantRow(
                 // this spacer, so a bubble without a card does not stack two of them.
                 Spacer(Modifier.height(6.dp))
             }
-            val lastText = parts.indexOfLast { it is Part.Text }
+            // R5：只随 parts 变。live 行每拍都会重建 parts（映射本身故意不 remember，
+            // 见 LivePartsFreezeTest），但 `it is Part.Text` 只看元素**类型**、不看内容 ——
+            // 元素实例相等时结果必然相等，所以这条 remember 不会冻住任何仍在增长的文字。
+            val lastText = remember(parts) { parts.indexOfLast { it is Part.Text } }
             // key(index): without it every part's remembered state was allocated by
             // position, so a new round appearing at the front moved one block's switch onto
             // its neighbour.
