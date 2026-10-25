@@ -1288,6 +1288,9 @@ class AgentEngine(
                 compressNow = false
                 compressContext(
                     wire, spans, settings, onCheckpoint, asked,
+                    // **端点实际上报的 prompt token**（issue #44 第七项规则 1）：自动压缩只信这个数，
+                    // 首次请求返回之前它是 0 ⇒ 不触发（"缺少实际 usage 时不猜容量"）。
+                    realPromptTokens = lastPromptTokens,
                     // 摘要要再发一次模型请求，这几秒里状态行必须说"在压缩"，否则看起来像卡死
                     // （用户：「run 的时候状态行也跟上」）。false 时清掉，下一句会覆盖它。
                     onBusy = { onEvent(AgentEvent.Compressing(it)) },
@@ -1868,6 +1871,14 @@ class AgentEngine(
         onCheckpoint: (ContextCheckpoint) -> Unit,
         asked: Boolean,
         /**
+         * 端点**实际上报**的 prompt token 数（issue #44 第七项规则 1）。
+         *
+         * 0 表示还没有任何一次请求返回过 usage（首次请求前）—— 此时不触发自动压缩，
+         * 因为估算值对中文偏低、对截图是全错的两套口径，"猜容量"要么压早要么压晚。
+         * 手动请求（[asked]）不受此限。
+         */
+        realPromptTokens: Int = 0,
+        /**
          * 摘要生成期间的忙碌通知：true＝开始、false＝结束。
          *
          * 状态行据此显示「正在压缩上下文」—— 压缩要再发一次模型请求，几秒钟里什么都不写，
@@ -1887,10 +1898,15 @@ class AgentEngine(
         // The last figure the endpoint itself reported, kept for the note below: when a compression
         // looks wrong, the first question is whether the estimate or the conversation was at fault,
         // and the two numbers side by side answer it without a debugger.
-        val realBefore = lastPromptTokens
+        val realBefore = realPromptTokens
+        // **自动压缩只以实际 usage 触发**（issue #44 第七项规则 1）：估算值 `before` 用来定价与
+        // 报告，但**不用来决定是否压缩**。实际 usage 为 0（还没请求过）时直接跳过 —— 那正是
+        // "首次请求前不估算 token" 要求的：没有实测就不要猜窗口还剩多少。
+        if (!asked && realBefore <= 0) return
+        val triggerTokens = if (realBefore > 0) realBefore else before
         // Threshold from the settings snapshot this run was started with, so a change in
         // 设置 applies from the next run on rather than mid-run.
-        if (!asked && before <= window * settings.compressAtFraction) return
+        if (!asked && triggerTokens <= window * settings.compressAtFraction) return
 
         // The cut never splits an assistant's tool_calls from their results: a lone
         // tool message is a hard 400 on every OpenAI-compatible endpoint.
@@ -1901,7 +1917,7 @@ class AgentEngine(
         val older = wire.subList(1, cut).filter { it.role != ROLE_SYSTEM }
         if (older.isEmpty()) return
 
-        val summary = try {
+        val attempt = try {
             onBusy(true)
             // The whole span, system notes included: the summary this one replaces has to be folded
             // into it. Otherwise the rebuild that resumes from the checkpoint — which can only carry
@@ -1916,6 +1932,11 @@ class AgentEngine(
             inFlight = null
             onBusy(false)
         }
+        // **摘要提交门槛**（issue #44 第七项规则 2）：只提交「完整、有界、且实际变小」的摘要。
+        // 截断 / 空转 / 反而更大的摘要一律不提交 —— 保留原文，下一轮再试。宁可这一轮不压缩
+        // （wire 大一点），也不能拿半截摘要换掉模型真正做过的那些事。
+        if (!attempt.commit) return
+        val summary = attempt.text
         if (summary.isBlank()) return
 
         // The span this summary stands for, named by the messages it covered. Only a span that
@@ -1993,8 +2014,15 @@ class AgentEngine(
         tick()
     }
 
+    /**
+     * 一次摘要尝试的结果。
+     *
+     * [commit] 为 false 表示这份摘要**不该提交**（issue #44 第七项规则 2）：被截断或空转的
+     * 摘要是半成品，把它写进 wire 会把原文丢掉、换成一段读不懂的话，比不压缩更糟。
+     * 调用方据此保留原文，下一轮再试。
+     */
     /** One call to the same endpoint, asking only for prose: no tools, no streaming UI. */
-    private suspend fun summarize(older: List<ChatMessage>, settings: AppSettings): String {
+    private suspend fun summarize(older: List<ChatMessage>, settings: AppSettings): SummaryAttempt {
         val transcript = older.joinToString("\n") { renderForSummary(it) }
         val turn = llm.complete(
             settings = settings,
@@ -2005,7 +2033,19 @@ class AgentEngine(
             tools = emptyList(),
             onCall = { inFlight = it },
         )
-        return turn.text.trim()
+        val text = turn.text.trim()
+        if (text.isBlank()) return SummaryAttempt(text, false, "模型没有返回摘要")
+        // **截断的摘要不提交**：`finish_reason == length` 说明它还没写完就被长度上限掐断，
+        // 后半截丢了。这种摘要覆盖掉原文 = 上下文凭空少一段。
+        if (turn.finishReason == "length") {
+            return SummaryAttempt(text, false, "摘要被长度上限截断")
+        }
+        // **没变小的摘要不提交**：压缩的目的是让 wire 变小，摘要反而更大就只有成本没有收益。
+        // 用 2 倍余量：token 估算对中文偏低，别把好的摘要误判成"更大"。
+        if (text.length * 2 >= transcript.length) {
+            return SummaryAttempt(text, false, "摘要没有比原文更小")
+        }
+        return SummaryAttempt(text, true)
     }
 
     private fun renderForSummary(message: ChatMessage): String = buildString {
@@ -2498,6 +2538,14 @@ class AgentEngine(
  * function and has to price images the same way.
  */
 private const val IMAGE_TOKENS = 1000
+
+/**
+ * 一次摘要尝试的结果（issue #44 第七项规则 2）。
+ *
+ * [commit] 为 false 表示这份摘要**不该提交**：被截断或空转的摘要是半成品，把它写进 wire 会把
+ * 原文丢掉、换成一段读不懂的话，比不压缩更糟。调用方据此保留原文，下一轮再试。
+ */
+private data class SummaryAttempt(val text: String, val commit: Boolean, val why: String = "")
 
 /**
  * 「压缩上下文」虚拟工具的名字（用户：「要有压缩上下文的指令工具」）。
