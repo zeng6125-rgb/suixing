@@ -1612,12 +1612,12 @@ internal fun TurnSummary(
                             SelectableWhenArmed { MarkdownText(text = part.text) }
                         }
 
-                        is Part.Steer -> Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            UserBubble(message = part.message, onEdit = onEdit)
-                        }
+                        // **插话不在这里画**：那是用户自己说的话，任何时候都要在正文流里看得见
+                        // （扁平循环负责），卡片只回放模型的思考/工具/正文。原先两处都画，展开
+                        // 这张卡时同一句插话会出现两份。
+                        // 留一个显式空分支：`when` 是表达式，省掉它编译不过（且比 `else` 更能说明
+                        // 「这一类是故意不画的」）。
+                        is Part.Steer -> Unit
 
                         // 重试留痕：与思考块/工具块同一套栅格（见 TraceBlock），留白不再自己加。
                         is Part.Trace -> TraceBlock(part.note)

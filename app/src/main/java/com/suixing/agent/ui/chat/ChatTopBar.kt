@@ -1041,6 +1041,11 @@ internal fun AssistantRow(
                 if (part is Part.Thinking && !streaming) return@forEachIndexed
                 if (part is Part.Tools && !streaming) return@forEachIndexed
                 if (part is Part.Text && !streaming && index != lastText) return@forEachIndexed
+                // **留痕与压缩块在存盘行只由「过程」卡画**（展开才会组合）：这里再画一次就是
+                // 同一份内容出现两份（用户实测「展开后重试留痕重复」）。插话（Steer）不在此列 ——
+                // 那是用户自己说的话，任何时候都要在正文流里看得见，所以它反而从展开体里删掉了。
+                if (part is Part.Trace && !streaming) return@forEachIndexed
+                if (part is Part.Compress && !streaming) return@forEachIndexed
                 key(index) {
                     val last = index == parts.lastIndex
                     when (part) {
