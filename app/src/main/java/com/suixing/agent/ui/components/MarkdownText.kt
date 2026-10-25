@@ -147,8 +147,32 @@ private const val MAX_LIST_START = 9999
 internal fun listStart(digits: String): Int = (digits.toIntOrNull() ?: 1).coerceIn(0, MAX_LIST_START)
 
 fun parseMarkdown(source: String): List<MdBlock> {
-    val lines = source.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+    // **没有 CR 就不做两次全串 replace**：绝大多数文本只有 \n，原来无条件复制两遍整串。
+    val normalized = if (source.indexOf('\r') < 0) source else source.replace("\r\n", "\n").replace('\r', '\n')
+    val lines = normalized.split('\n')
     val blocks = mutableListOf<MdBlock>()
+    // **每行的"块首判定"只算一次**（优化清单 ui-P0）：原来一行正文要在 opensBlock 里重跑
+    // 6 条正则，其中 4 条在派发阶段已对同一行跑过，边界行还要再跑一遍。
+    val lineInfo = arrayOfNulls<LineInfo>(lines.size)
+    fun info(i: Int): LineInfo = lineInfo[i] ?: run {
+        val rawLine = lines[i]
+        val rawTrimmed = rawLine.trim()
+        LineInfo(
+            empty = rawTrimmed.isEmpty(),
+            fence = MD_FENCE.matchEntire(rawTrimmed),
+            heading = MD_HEADING.matchEntire(rawTrimmed),
+            rule = MD_RULE.matches(rawTrimmed),
+            quote = rawTrimmed.startsWith('>'),
+            table = isTableStart(lines, i),
+            bullet = MD_BULLET.matchEntire(rawLine),
+            ordered = MD_ORDERED.matchEntire(rawLine),
+        ).also { lineInfo[i] = it }
+    }
+    fun opensBlockAt(i: Int): Boolean {
+        val c = info(i)
+        return c.empty || c.fence != null || c.heading != null || c.rule || c.quote ||
+            c.table || c.bullet != null || c.ordered != null
+    }
     var index = 0
     while (index < lines.size) {
         val line = lines[index]
@@ -160,10 +184,11 @@ fun parseMarkdown(source: String): List<MdBlock> {
             index++
             continue
         }
-        val fence = MD_FENCE.matchEntire(trimmed)
-        val heading = MD_HEADING.matchEntire(trimmed)
-        val bullet = MD_BULLET.matchEntire(line)
-        val ordered = MD_ORDERED.matchEntire(line)
+        val cached = info(index)
+        val fence = cached.fence
+        val heading = cached.heading
+        val bullet = cached.bullet
+        val ordered = cached.ordered
         when {
             trimmed.isEmpty() -> index++
             fence != null -> {
@@ -188,11 +213,11 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 blocks += MdBlock.Heading(heading.groupValues[1].length, heading.groupValues[2].trim())
                 index++
             }
-            MD_RULE.matches(trimmed) -> {
+            cached.rule -> {
                 blocks += MdBlock.Rule
                 index++
             }
-            trimmed.startsWith('>') -> {
+            cached.quote -> {
                 val quoted = mutableListOf<String>()
                 while (index < lines.size && lines[index].trimStart().startsWith('>')) {
                     quoted += lines[index].trimStart().removePrefix(">").removePrefix(" ")
@@ -200,7 +225,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 }
                 blocks += MdBlock.Quote(quoted.joinToString("\n"))
             }
-            isTableStart(lines, index) -> {
+            cached.table -> {
                 val header = splitTableRow(trimmed)
                 val rows = mutableListOf<List<String>>()
                 index += 2
@@ -241,7 +266,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
             }
             else -> {
                 val paragraph = mutableListOf<String>()
-                while (index < lines.size && !opensBlock(lines, index)) {
+                while (index < lines.size && !opensBlockAt(index)) {
                     paragraph += lines[index].trim()
                     index++
                 }
@@ -251,6 +276,18 @@ fun parseMarkdown(source: String): List<MdBlock> {
     }
     return blocks
 }
+
+/** 一行在"是不是块首"上的全部判定结果（解析期按行缓存，见 [parseMarkdown]）。 */
+private class LineInfo(
+    val empty: Boolean,
+    val fence: MatchResult?,
+    val heading: MatchResult?,
+    val rule: Boolean,
+    val quote: Boolean,
+    val table: Boolean,
+    val bullet: MatchResult?,
+    val ordered: MatchResult?,
+)
 
 // Must test the same constructs, in the same order, as the dispatch above.
 private fun opensBlock(lines: List<String>, index: Int): Boolean {
