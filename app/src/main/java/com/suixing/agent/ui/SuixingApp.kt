@@ -2,6 +2,7 @@
 
 package com.suixing.agent.ui
 
+import androidx.compose.ui.draw.drawBehind
 import com.suixing.agent.ui.components.imePaddingBottom
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -432,11 +433,16 @@ fun SuixingApp() {
             // 色块（用户：「输入法的圆角 色块怎么又回来了」）。这里把 surface 铺到画布底边
             // （= 屏高 − IME）为止，下面那条缝留给根节点的渐变 —— 和 0.8.229 之前
             // （外壳被 IME 顶起、那条缝根本不画）逐像素一致；键盘收起时 heldImePx=0，铺满全屏。
+            val surfaceColor = MaterialTheme.colorScheme.surface
             Box(
                 Modifier
                     .matchParentSize()
-                    .padding(bottom = with(rootDensity) { heldImeState.intValue.toDp() })
-                    .background(MaterialTheme.colorScheme.surface),
+                    // **绘制期读键盘高度**：只在 draw 阶段取值 ⇒ 键盘动画期间既不重组也不重布局，
+                    // 但绘制范围仍按"画布底边 = 屏高 − IME"裁剪，键盘圆角里那圈色块不会回来。
+                    .drawBehind {
+                        val h = (size.height - heldImeState.intValue).coerceAtLeast(0f)
+                        drawRect(color = surfaceColor, size = androidx.compose.ui.geometry.Size(size.width, h))
+                    },
             )
             // 推进时下面那层（抽屉 + 聊天）跟着往左让 10%：**两层一起动**才读成"推上来"，
             // 只让新页动会像贴上去。只用位移、不做透明度 —— 淡化会露出下面一层，就是残影。
@@ -522,7 +528,7 @@ fun SuixingApp() {
                 // 留在组合里，其余页面改成**盖在它上面的覆盖层**：进设置是往覆盖层 push，
                 // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
                 // 键盘让位只作用在聊天内容上（抽屉不再被顶起，见上面 Scaffold 的说明）。
-                Box(Modifier.padding(bottom = with(rootDensity) { heldImeState.intValue.toDp() })) {
+                Box(Modifier.imePaddingBottom(heldImeState)) {
                     // **首启的引导还没走完时，先别组合 chat**（用户：「第一次出现引导页感觉卡卡的」）。
                     // 冷启动时 chat 要做 turnPage、receipts/transcript 统计、每条消息的 Markdown
                     // 渲染（ChatScreen.kt:465/512/560/621、ChatBlocks.kt:895/1519），
