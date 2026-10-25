@@ -657,6 +657,26 @@ internal fun GenerationSheet(
     val modelLabel = provider?.displayModel(choice.model)
         ?.takeIf { it != choice.model }
         ?: choice.model.substringAfter('/').ifBlank { "选模型" }
+    // provider 提到组合外 remember（几何只依赖 density）。
+    val modelCardProvider = remember(density) {
+        object : PopupPositionProvider {
+            override fun calculatePosition(
+                anchorBounds: IntRect,
+                windowSize: IntSize,
+                layoutDirection: LayoutDirection,
+                popupContentSize: IntSize,
+            ): IntOffset {
+                val gap = with(density) { 8.dp.roundToPx() }
+                val edge = with(density) { POPUP_EDGE_AIR.roundToPx() }
+                val nudgeLeft = with(density) { 32.dp.roundToPx() }
+                val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
+                val x = (anchorBounds.left - nudgeLeft).coerceIn(edge, maxLeft)
+                val y = (anchorBounds.top - popupContentSize.height - gap).coerceAtLeast(edge)
+                return IntOffset(x, y)
+            }
+        }
+    }
+
     MenuCard(
         // Anchored to the composer's own top edge, not a sheet from the screen's bottom:
         // the picker is a control of the row that opened it. Start-aligned plus [nudge] is
@@ -668,26 +688,9 @@ internal fun GenerationSheet(
         // 全程只用 Popup 给的 anchorBounds 与卡片实际尺寸，不依赖任何测量状态 ⇒ 不会跳位。
         alignment = Alignment.BottomEnd,
         offset = IntOffset.Zero,
-        popupPositionProvider = object : PopupPositionProvider {
-            override fun calculatePosition(
-                anchorBounds: IntRect,
-                windowSize: IntSize,
-                layoutDirection: LayoutDirection,
-                popupContentSize: IntSize,
-            ): IntOffset {
-                val gap = with(density) { 8.dp.roundToPx() }
-                val edge = with(density) { POPUP_EDGE_AIR.roundToPx() }
-                // **左缘对齐按钮左沿**（与添加菜单、审批菜单、圆环菜单同一套）：卡片从按钮
-                // 左边伸出、向上长。右缘对齐按钮右缘是错的 —— 模型按钮的框只包住模型名
-                // （很窄），卡片会被推到屏幕左侧，用户看到的就是"偏左"。
-                // 左移 32dp（用户连续两次要求「再左移 16dp」：16dp → 32dp）。
-                val nudgeLeft = with(density) { 32.dp.roundToPx() }
-                val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
-                val x = (anchorBounds.left - nudgeLeft).coerceIn(edge, maxLeft)
-                val y = (anchorBounds.top - popupContentSize.height - gap).coerceAtLeast(edge)
-                return IntOffset(x, y)
-            }
-        },
+        // **provider 必须 remember**（优化清单 chat-P1；同文件 `:1117` 的圆环菜单是正确写法）：
+        // 原来每次重组都在组合体里 new 一个匿名对象 ⇒ 卡片参数恒变，开着时每帧重跑定位。
+        popupPositionProvider = modelCardProvider,
         // Focus-less: opening this card must not take the keyboard off the field, or the
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].

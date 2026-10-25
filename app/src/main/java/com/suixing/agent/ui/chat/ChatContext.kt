@@ -309,15 +309,10 @@ internal fun TopBarContextEntry(
         LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
         // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
         // 同一套 110ms 进出场。这里需要显式定位，所以传 popupPositionProvider。
-        MenuCard(
-            visible = open,
-            onDismiss = { open = false },
-            // **显式定位**：锚点就是这个 28dp 的图表按钮，卡片顶边 = 按钮下沿 + 8dp（向下长），
-            // 右缘 = 按钮右缘，横纵都留 16dp 边距。全程只用 Popup 给的 anchorBounds 与卡片实际
-            // 尺寸，不依赖 cardWidth 之类的测量状态 ⇒ 打开后位置不会再变一次。
-            alignment = Alignment.TopStart,
-            offset = IntOffset.Zero,
-            popupPositionProvider = object : PopupPositionProvider {
+        // **provider 必须 remember**（优化清单 chat-P1）：原来每次重组都在组合体里 new 一个
+        // 匿名对象 ⇒ `MenuCard` 的参数恒变，弹卡开着时每帧都重跑定位。
+        val ringProvider = remember(density) {
+            object : PopupPositionProvider {
                 override fun calculatePosition(
                     anchorBounds: IntRect,
                     windowSize: IntSize,
@@ -326,15 +321,23 @@ internal fun TopBarContextEntry(
                 ): IntOffset {
                     val gap = with(density) { 8.dp.roundToPx() }
                     val edge = with(density) { POPUP_EDGE_AIR.roundToPx() }
-                    // **左缘对齐按钮左沿**（与其它浮层同一套）：按钮框只有 28dp 宽，右缘对齐
-                    // 会把卡片推到屏幕左侧 —— 用户看到的就是"偏左"。
                     val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
                     val x = anchorBounds.left.coerceIn(edge, maxLeft)
                     val maxTop = (windowSize.height - edge - popupContentSize.height).coerceAtLeast(edge)
                     val y = (anchorBounds.bottom + gap).coerceAtMost(maxTop)
                     return IntOffset(x, y)
                 }
-            },
+            }
+        }
+        MenuCard(
+            visible = open,
+            onDismiss = { open = false },
+            // **显式定位**：锚点就是这个 28dp 的图表按钮，卡片顶边 = 按钮下沿 + 8dp（向下长），
+            // 右缘 = 按钮右缘，横纵都留 16dp 边距。全程只用 Popup 给的 anchorBounds 与卡片实际
+            // 尺寸，不依赖 cardWidth 之类的测量状态 ⇒ 打开后位置不会再变一次。
+            alignment = Alignment.TopStart,
+            offset = IntOffset.Zero,
+            popupPositionProvider = ringProvider,
             focusable = false,
         ) {
             Box(Modifier.onSizeChanged { cardWidth = it.width }) {
