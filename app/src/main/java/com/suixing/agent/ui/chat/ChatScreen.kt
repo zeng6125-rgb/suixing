@@ -1083,7 +1083,15 @@ fun ChatScreen(
             switchRunning = false
             return@LaunchedEffect
         }
+        // **先让新会话的内容组合/布局落地，再起动画**（用户：「切换会话的进场动画掉帧和卡顿」）：
+        // 原来这里立刻 `animateTo`，而这一帧同时要做整页冷组合 —— 新会话的可见行都要
+        // 重新 parseMarkdown（长答案 2~10ms/条）、重新测量，动画的头几帧就和这个撞在一起，
+        // 于是 260ms 的动画整体掉帧。等一帧（`withFrameNanos`）让内容先落，
+        // 动画从第二帧起跑，帧预算就归它自己。
+        // 注意：`switchRunning = true` 仍在等帧**之前**——离屏层与大批量布局步长要在
+        // 冷组合那一帧就生效，晚一帧反而更慢。
         switchRunning = true
+        androidx.compose.runtime.withFrameNanos { }
         switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
         switchRunning = false
     }
