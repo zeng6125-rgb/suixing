@@ -153,6 +153,13 @@ fun parseMarkdown(source: String): List<MdBlock> {
     while (index < lines.size) {
         val line = lines[index]
         val trimmed = line.trim()
+        // **空行先返回，四条正则一次都不跑**（原实现把四条 matchEntire 全算完才进 when，
+        // 而 when 的第一支就是 `trimmed.isEmpty()` —— 空行白跑 4 次匹配，流式期间每 40ms
+        // 一次全量解析时这就是纯浪费）。顺序与原来完全一致，只是把空行提前。
+        if (trimmed.isEmpty()) {
+            index++
+            continue
+        }
         val fence = MD_FENCE.matchEntire(trimmed)
         val heading = MD_HEADING.matchEntire(trimmed)
         val bullet = MD_BULLET.matchEntire(line)

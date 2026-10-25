@@ -25,7 +25,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -429,7 +428,10 @@ fun ChatScreen(
     // 不再二次量化。二次量化会让输入框（布局期读原始值）和列表（组合期读量化值）看到
     // 两个不同的数，键盘动画期间两者间距逐帧变化 —— 用户报的「边距在抖」。
     val imePxState = LocalHeldImePx.current
-    val heldIme by remember(imePxState) { derivedStateOf { imePxState.value } }
+    // 量化已经在生产处做过一次（SuixingApp 的 IME_QUANTUM_PX），这里直接读状态本身。
+    // 原来还套了一层 `remember(imePxState){ derivedStateOf { imePxState.value } }` —— 恒等转发，
+    // 只多一层对象与一次空转的失效判断。
+    val heldIme by imePxState
     val navBarPx = with(LocalDensity.current) { WindowInsets.navigationBars.getBottom(this) }
     fun navBarPad(ime: Int): Int = (navBarPx - ime).coerceAtLeast(0)
     // 让位＝**只用一个来源**：输入框自己的高度 + 它的下内边距 + 手势条。键盘动画中唯一在变的量是
@@ -1963,8 +1965,12 @@ fun ChatScreen(
                             //    解码位图是整页绘制列表里最重的一类。
                             // 轻行（用户气泡、纯正文）不挂层：它们的绘制列表本来就短，多一层
                             // 只增加合成开销与内存。层上没有任何视觉属性 ⇒ 渲染结果逐像素相同。
-                            val heavyRow = remember(row.parts, row.message.allImages) {
-                                row.message.allImages.isNotEmpty() ||
+                            // 键用 `imageCount`（Int）而不是 `allImages`：后者是每次访问都重建
+                            // List 的 getter（`ChatModels.kt:81` 的 ifEmpty/listOfNotNull），
+                            // 拿它当 remember 键等于每次重组都换一个新对象、缓存必然失效。
+                            val imageCount = row.message.imageCount
+                            val heavyRow = remember(row.parts, imageCount) {
+                                imageCount > 0 ||
                                     row.parts.any {
                                         it is Part.Thinking || it is Part.Tools || it is Part.Compress
                                     }

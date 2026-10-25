@@ -2,13 +2,24 @@
 
 > 生成时间：2026-10-26 04:1x（Asia/Shanghai）
 > 基线：`main` @ `3d554aa`（0.8.499），代码规模 130 个 Kotlin 文件 / 56,664 行，测试 110 文件。
-> 审计方式：5 个只读子代理分区并行通读 + 主代理交叉复核；行号均为当次快照，
+> 审计方式：5 个只读子代理分区并行通读（130 文件 / 56,664 行全覆盖）+ 主代理交叉复核；行号均为当次快照，
 > 后续编辑会让行号漂移，按「文件 + 附近代码」定位。
 >
 > **硬约束（贯穿全清单）**：只做**行为不变**的优化。凡是会改变可见行为、交互、数据流的建议，
 > 一律标注 `[改变行为]`，不在本次执行范围内。
 
 ---
+
+## 总览
+
+| 区 | 条数 | P0 | P1 | P2 |
+|---|---|---|---|---|
+| `data/` | 32 | 2 | 11 | 19 |
+| `tools/` + `service/` | 34 | 1 | 8 | 25 |
+| `agent/` + `llm/` | 25 | 1 | 7 | 17 |
+| `ui/components` + `ui/settings` | 25 | 2 | 8 | 15 |
+| `ui/chat` | 33 | 1 | 8 | 24 |
+| **合计** | **149** | **7** | **42** | **100** |
 
 ## 0. 已完成（本次已落地并验证）
 
@@ -19,7 +30,12 @@
 | 正则提升 | `llm/LlmClient.kt` `WHITESPACE_RUN` | 错误信息清洗每次失败编译一次 |
 | 正则提升 | `agent/ToolOutputSpill.kt` `UNSAFE_FILENAME` | 每次工具输出落盘编译一次 |
 
-验证：`./gradlew :app:testDebugUnitTest` 全绿。
+| 空行短路 | `ui/components/MarkdownText.kt:156` `parseMarkdown` | 空行原本先跑完 4 条 `matchEntire` 才进 `when`，而首支就是空行判断 |
+| 去掉多余派生层 | `ui/chat/ChatScreen.kt:431` | `remember(imePxState){ derivedStateOf { imePxState.value } }` 是恒等转发 |
+| 修 remember 键 | `ui/chat/ChatScreen.kt:1966` | `heavyRow` 的键原用 `allImages`（每次访问重建 List 的 getter）⇒ 换 `imageCount` |
+| 清理未使用 import | `ui/chat/` 7 个文件 | 14 行 `derivedStateOf` / `animateFloatAsState` 未使用 |
+
+验证：`./gradlew :app:testDebugUnitTest :app:assembleRelease` 全绿（APK 16.9MB）。
 
 ---
 
@@ -161,7 +177,7 @@
 
 ### P0
 
-- [ ] `ui/components/MarkdownText.kt:156-159` — 每行（含空行）在 `when` 之前先跑完 `MD_FENCE/HEADING/BULLET/ORDERED` 四条 `matchEntire`，而首支就是 `trimmed.isEmpty()` ⇒ 空行白跑 4 次。
+- [x] `ui/components/MarkdownText.kt:156-159` **已修** — 每行（含空行）在 `when` 之前先跑完 `MD_FENCE/HEADING/BULLET/ORDERED` 四条 `matchEntire`，而首支就是 `trimmed.isEmpty()` ⇒ 空行白跑 4 次。
   改：把测试挪进对应 `when` 分支，顺序不变。风险低。
 - [ ] `ui/components/MarkdownText.kt:237,249-260` — 段落扫描 `opensBlock` 对同一行再跑 6 条正则，派发阶段已跑过其中 4 条 ⇒ 每正文行 ≥10 次匹配；块边界行被三轮重测。风险中。
 
@@ -196,7 +212,50 @@
 
 ---
 
-## 5. 范围外：审计中发现的**行为缺陷**（按要求未改）
+## 5. 会话页 `ui/chat`（33 条：P0×1 / P1×8 / P2×24）
+
+### P0
+
+- [ ] `ui/chat/ChatScreen.kt:2188` — `Composer` 调用处（2188-2287）约 20 个内联 lambda 与 2198 的 `Triple` **每次重组都是新实例** ⇒ 参数恒不等 ⇒ `Composer`（`TurnScrubber.kt:579-1405`，826 行，含 `:961` 的 `BasicTextField`）**永不可跳过**；ChatScreen 每次 state 发射（流式 ~12.5Hz）都整栈重跑。
+  改：不随帧变的回调 `remember` 住、会变的值走 `rememberUpdatedState`、`Triple` 用 `remember(liveStatsHere, state.contextBreak)` —— 仓库 `ChatScreen.kt:1988-1996` 对 `onBranch/onRegenerate/onEdit` 就是这套写法（属漏改）。风险中。
+
+### P1
+
+- [ ] `ChatScreen.kt:2292` — 组合期读 `scroll.atBottom`（`ChatScroll.kt:102` `derivedStateOf{!canScrollBackward}`）⇒ 每次离开/回到列表底整屏重组，连带上面那个不可跳过的 Composer。改：把 `if (!scroll.atBottom)` 与圆钮下沉成独立 `@Composable`。
+- [ ] `TurnScrubber.kt:452` — `TypingDots` 用 `rememberInfiniteTransition` + `alpha by animateFloat`（455-463）在**组合期**读值再 `.alpha(alpha)`（468）⇒ 可见期间按刷新率持续重组+重绘；同文件 477-489 的 `BlinkingCursor` 已因同款写法实测 213fps 改掉，**此处漏改**。
+- [ ] `Typewriter.kt:62` — `LaunchedEffect(Unit){ while(true){ delay(16) } }` **没有出口**：打完字后每个参与过流式的块仍每 16ms 醒一次。
+- [ ] `ChatContext.kt:1506` — `ImageBlock` 每次重组重建 `ImageRequest.Builder(...).build()`，`:1500` 的 `ByteBuffer` 也每次新建 ⇒ model 身份每帧变，Coil 当新请求重跑。改：`remember(bytes)` 保住请求，位点用 `asReadOnlyBuffer()`/`duplicate()`。
+- [ ] `ChatTopBar.kt:801` / `ChatComposer.kt:673` / `ChatContext.kt:320` — **三处 `PopupPositionProvider` 在组合体里 `new`**，未 `remember`（同仓库 `ChatComposer.kt:1117` 是正确写法）。
+- [ ] `ChatComposer.kt:619` — `GenerationSheet` 每次重组重算整条选择链（`choiceFor` + 三次 providers 线性扫描 + `reasoningWire` + `indexOfFirst`）；拖滑杆每档都跑一遍。
+
+### P2（24 条，择要做）
+
+- [ ] `Typewriter.kt:77` `remember(revealed, text){ text.take(revealed) }` 每 16ms 复制累积前缀（900 字≈40 万字符拷贝）
+- [ ] `ChatTopBar.kt:742` `open?.let { shown = it }` 在组合期写 `mutableStateOf`
+- [ ] `ChatTopBar.kt:862/864/865/868/884` 五处 `shortTokens(...)` 拼串每次重组重算（`:762/852/873` 已 remember）
+- [ ] `ChatComposer.kt:1200/1206/1243/1247/1248/1249/1258` 七处 token 拼串（`:1223/1265/1273` 已 remember）
+- [ ] `ChatComposer.kt:576` `Brush.horizontalGradient(listOf(...))` 写在 Canvas draw lambda 里
+- [ ] `ChatScreen.kt:1577` 浅色画布 `Brush.verticalGradient` 每次重组新建
+- [ ] `ChatScreen.kt:2097` 顶部渐隐层 `Brush.verticalGradient(colorStops = arrayOf(...))`
+- [ ] `VoiceOverlay.kt:561` `listOf(0.45f,…)` + forEach 里 `RoundedCornerShape(2.dp)`
+- [ ] `ChatContext.kt:1053/1055/1070/1087` 四个 shape/BorderStroke 每次新建
+- [ ] `ChatContext.kt:708` `TodoQueueRow` 的 `RoundedCornerShape(14.dp)` 与 body lambda
+- [ ] `ChatContext.kt:393` `labelSmall.copy(fontWeight=…)`（同型：`ChatComposer.kt:735`、`TurnScrubber.kt:572`）
+- [ ] `ChatContext.kt:907` `items(todos)` **缺 key 与 contentType**
+- [ ] `ChatScreen.kt:1966` `heavyRow` 的 remember 键用 `row.message.allImages`（每次访问重建 list）⇒ 换 `imageCount`
+- [ ] `ChatScreen.kt:432` `remember(imePxState){ derivedStateOf { imePxState.value } }` 是多出来的一层派生
+- [ ] `ChatScreen.kt:1298` 与 `:589` 对同一 `liveActive` 两次 `collectAsState`
+- [ ] `ChatBlocks.kt:1534-1554` `TurnSummary` 两个 `buildList` 每次重组都跑（`:1558` 的 remember 只省了 join）
+- [ ] `ChatBlocks.kt:884/991/997` 三个 composable lambda 每次新建 ⇒ `ProcessCard` 不可跳过
+- [ ] `ChatTopBar.kt:1132` `Tools` 分支对每块再线性扫到块尾 ⇒ O(n²)
+- [ ] `ChatBlocks.kt:1991` / `:2035` 每行新建 `RoundedCornerShape`
+- [ ] `ChatComposer.kt:371` `MenuCard` 的 `exit = fadeOut+scaleOut+slideOutVertically` 每次重组重建 Transition
+- [ ] `ChatRows.kt:763` `Attachment` **缺 `@Immutable`**（含 `ImageBitmap?`）⇒ 收它的组件不可跳过
+- [ ] 死代码（只列）：`VoiceOverlay.kt:27-30` 四个动画 import；7 个文件未使用的 `derivedStateOf` import（`ChatBlocks.kt:115` 等）；7 个文件未使用的 `animateFloatAsState` import（`ChatScreen.kt:28` 等）
+
+---
+
+## 6. 范围外：审计中发现的**行为缺陷**（按要求未改）
 
 - `tools/FileTools.kt:432` — `line.contains(query, ignoreCase = caseSensitive)`：`ignoreCase` 绑反了，默认 `case_sensitive=false` 实际是**区分大小写**，与 `:132` spec 文案相反。
 - `ui/settings/ToolsScreen.kt:897-903` — 七个 `remember { mutableStateOf(initial…) }` 全缺 key，`initial` 变化时表单不重置。
@@ -205,7 +264,7 @@
 
 ---
 
-## 6. 执行建议顺序
+## 7. 执行建议顺序
 
 1. **P0 三条低风险**：`MarkdownText.kt:156-159`（空行白跑正则）、`ChatRepository.kt:203`（读尾部整份）、`SuixingAccessibilityService.kt:383`（主线程截图）
 2. **重复读 meta 三合一**：`ChatRepository.kt:442/:726`、`:769/:781`、`ChatStore.kt:216`
