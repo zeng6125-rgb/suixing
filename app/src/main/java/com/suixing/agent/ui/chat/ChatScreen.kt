@@ -1653,23 +1653,21 @@ fun ChatScreen(
                             // （p == 1f）后把 alpha 等写回默认值即可 —— 层还在（不会重建修饰符链、
                             // 不会有残影），但不再改变任何像素，合成器可以直接跳过它。
                             // 动画那 260ms 内行为完全不变。
-                            // **离屏层只在切换动画期间挂**：动画结束时层上是恒等变换，
-                            // 摘掉它渲染结果逐像素相同；正常滚动（尤其碰界时 stretch 会把
-                            // 整个滚动容器重录进 RenderNode）因此少一层离屏成本。
-                            .then(
-                                if (switchRunning) {
-                                    Modifier.graphicsLayer {
-                                        val p = switchAlpha.value
-                                        alpha = p
-                                        translationY = (1f - p) * 24.dp.toPx()
-                                        val sc = 0.92f + 0.08f * p
-                                        scaleX = sc
-                                        scaleY = sc
-                                    }
-                                } else {
-                                    Modifier
-                                },
-                            )
+                            // **常驻，不按 switchRunning 条件挂载**（0.8.284 的定案；此前注释写
+                            // "常驻"、代码却挂在 `if (switchRunning)` 里，两者矛盾 —— 以注释为准）。
+                            // 条件挂载会让整条修饰符链在开关翻转时**重建** ⇒ 重新测量 + 重新挂
+                            // 离屏层，那一下正是切换会话掉帧的来源之一。
+                            // 常驻的代价是一个 RenderNode 参与合成；省掉它的做法是让层在恒等
+                            // 状态不改变任何像素（下面 p >= 1f 直接返回），而不是摘掉它。
+                            .graphicsLayer {
+                                val p = switchAlpha.value
+                                if (p >= 1f) return@graphicsLayer
+                                alpha = p
+                                translationY = (1f - p) * 24.dp.toPx()
+                                val sc = 0.92f + 0.08f * p
+                                scaleX = sc
+                                scaleY = sc
+                            }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {
