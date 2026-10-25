@@ -639,6 +639,10 @@ internal fun ProcessCard(
  */
 /** 折叠条表头统一圆角：文件级常量，避免每次组合分配。 */
 private val ProcessHeaderShape = RoundedCornerShape(8.dp)
+/** 滚动条刻度（列表里每行一个，原来每次重组都 new）。 */
+private val ScrubTickShape = RoundedCornerShape(1.dp)
+/** 滚动条标签卡圆角。 */
+private val ScrubLabelShape = RoundedCornerShape(8.dp)
 
 @Composable
 internal fun metaStyle(): TextStyle {
@@ -1987,7 +1991,7 @@ internal fun TurnScrubber(
                                 scaleY = scale
                                 transformOrigin = TransformOrigin(1f, 0.5f)
                             }
-                            .clip(RoundedCornerShape(1.dp))
+                            .clip(ScrubTickShape)
                             .background(
                                 when {
                                     // Lit while it is the one being previewed, so dragging
@@ -2031,7 +2035,7 @@ internal fun TurnScrubber(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .widthIn(max = scrubberLabelMax(LocalConfiguration.current.screenWidthDp.dp))
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(ScrubLabelShape)
                     .background(scheme.inverseSurface)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
