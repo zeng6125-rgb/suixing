@@ -1899,10 +1899,15 @@ class AgentEngine(
         // looks wrong, the first question is whether the estimate or the conversation was at fault,
         // and the two numbers side by side answer it without a debugger.
         val realBefore = realPromptTokens
-        // **自动压缩只以实际 usage 触发**（issue #44 第七项规则 1）：估算值 `before` 用来定价与
-        // 报告，但**不用来决定是否压缩**。实际 usage 为 0（还没请求过）时直接跳过 —— 那正是
-        // "首次请求前不估算 token" 要求的：没有实测就不要猜窗口还剩多少。
-        if (!asked && realBefore <= 0) return
+        // **优先用实际 usage，但照搬 Eta 的"只信实测"会在这里出事**（借鉴 ≠ 照搬）：
+        // `usage` 是端点**可选**字段（`usage?.promptTokens`），本仓不少兼容端点整个不返回它。
+        // 若照原样写成"实测为 0 就不压缩"，那些端点上自动压缩会**永不触发** —— 比改之前更糟
+        // （原来至少还有估算兜底，只是不准）。
+        //
+        // 所以取 Eta 的**意图**（有实测就别猜）而不是它的字面规则：
+        //  · 有实测 ⇒ 用它判定，估算只用于定价与报告；
+        //  · 没有实测（本次 run 还没拿到过 usage）⇒ 退回估算，保留原有兜底。
+        // "缺少实际 usage 时不猜容量"这条只在**首轮请求之前**成立，那本来也没有容量可言。
         val triggerTokens = if (realBefore > 0) realBefore else before
         // Threshold from the settings snapshot this run was started with, so a change in
         // 设置 applies from the next run on rather than mid-run.
@@ -2014,13 +2019,6 @@ class AgentEngine(
         tick()
     }
 
-    /**
-     * 一次摘要尝试的结果。
-     *
-     * [commit] 为 false 表示这份摘要**不该提交**（issue #44 第七项规则 2）：被截断或空转的
-     * 摘要是半成品，把它写进 wire 会把原文丢掉、换成一段读不懂的话，比不压缩更糟。
-     * 调用方据此保留原文，下一轮再试。
-     */
     /** One call to the same endpoint, asking only for prose: no tools, no streaming UI. */
     private suspend fun summarize(older: List<ChatMessage>, settings: AppSettings): SummaryAttempt {
         val transcript = older.joinToString("\n") { renderForSummary(it) }
@@ -2040,9 +2038,11 @@ class AgentEngine(
         if (turn.finishReason == "length") {
             return SummaryAttempt(text, false, "摘要被长度上限截断")
         }
-        // **没变小的摘要不提交**：压缩的目的是让 wire 变小，摘要反而更大就只有成本没有收益。
-        // 用 2 倍余量：token 估算对中文偏低，别把好的摘要误判成"更大"。
-        if (text.length * 2 >= transcript.length) {
+        // **没变小的摘要通常不提交**：压缩的目的是让 wire 变小，摘要反而更大就只有成本没有收益。
+        // 但**原文很短时不挡**（借鉴 ≠ 照搬 Eta 的"必须缩小才提交"）：一段 200 字的原文摘要出
+        // 300 字很正常，若一律拒绝，这类会话就永远压不掉、wire 一直涨到爆窗口 —— 那比"压缩
+        // 收益小"糟得多。短原文下摘要的绝对开销极小，收下它换来的"这段历史有记录"更值。
+        if (transcript.length >= SHRINK_CHECK_MIN_CHARS && text.length * 2 >= transcript.length) {
             return SummaryAttempt(text, false, "摘要没有比原文更小")
         }
         return SummaryAttempt(text, true)
@@ -2538,6 +2538,14 @@ class AgentEngine(
  * function and has to price images the same way.
  */
 private const val IMAGE_TOKENS = 1000
+
+/**
+ * 摘要「必须比原文更小」这条门槛的**生效下限**（字符数）。
+ *
+ * 低于这个长度的原文不做缩小检查：短原文摘要出更长的内容很正常，若一律拒绝，这类会话就
+ * 永远压不掉、wire 一直涨到爆窗口。见 [summarize] 里的说明。
+ */
+private const val SHRINK_CHECK_MIN_CHARS = 2000
 
 /**
  * 一次摘要尝试的结果（issue #44 第七项规则 2）。
