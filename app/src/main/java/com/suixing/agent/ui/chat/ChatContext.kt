@@ -323,8 +323,10 @@ internal fun TopBarContextEntry(
                 ): IntOffset {
                     val gap = with(density) { 8.dp.roundToPx() }
                     val edge = with(density) { POPUP_EDGE_AIR.roundToPx() }
+                    // **左缘对齐按钮左沿**（与其它浮层同一套）：按钮框只有 28dp 宽，右缘对齐
+                    // 会把卡片推到屏幕左侧 —— 用户看到的就是"偏左"。
                     val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
-                    val x = (anchorBounds.right - popupContentSize.width).coerceIn(edge, maxLeft)
+                    val x = anchorBounds.left.coerceIn(edge, maxLeft)
                     val maxTop = (windowSize.height - edge - popupContentSize.height).coerceAtLeast(edge)
                     val y = (anchorBounds.bottom + gap).coerceAtMost(maxTop)
                     return IntOffset(x, y)
@@ -641,8 +643,9 @@ internal fun SteerQueueRow(
                 ImagePreviewDialog(
                     bitmap = picture,
                     contentDescription = "排队中的图片",
-                    // 与输入框附件预览相同：Popup、不抢键盘，viewer 自己绘制黑色遮罩。
-                    keepKeyboard = true,
+                    // 与**对话里的图片预览**一致（用户：我要跟对话那样的图片全屏预览）：
+                    // keepKeyboard = false ⇒ 走 Dialog，系统遮罩 + 与气泡里那张同一套交互。
+                    keepKeyboard = false,
                 ) { fullPicture = null }
             }
             Text(
@@ -1104,7 +1107,9 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                     ImagePreviewDialog(
                         bitmap = preview,
                         contentDescription = attachment.label,
-                        keepKeyboard = true,
+                        // 与对话里那张图片预览同一形态（Dialog + 系统遮罩）：用户要的是
+                        // 「图1 那个效果」，附件与队列两处都跟它对齐。
+                        keepKeyboard = false,
                     ) { full = false }
                 }
                 IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {

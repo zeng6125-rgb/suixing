@@ -28,6 +28,7 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -318,12 +319,21 @@ internal fun MenuCard(
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val scheme = MaterialTheme.colorScheme
     var keepMounted by remember { mutableStateOf(false) }
+    // 入场/退场进度：0 = 退场终点，1 = 静止。
+    //
+    // **内容始终组合**，动画只改绘制属性（位移/缩放/透明度）—— 这正是"位置一次算对"的关键：
+    // 原来用 `AnimatedVisibility` + `appeared` 让内容"先空后有"，**空帧把 Popup 量成 0 宽**，
+    // 于是 Popup 先按"卡片宽 0"定位在按钮右缘，内容出现后再滑到左边：用户看到的就是
+    // 「卡片从右边进来」而且「偏左」。内容一直在 ⇒ 首帧就是真实尺寸 ⇒ 位置一次算对。
+    val motion = remember { Animatable(1f) }
     LaunchedEffect(visible) {
         if (visible) {
             keepMounted = true
+            motion.snapTo(0f)
+            motion.animateTo(1f, tween(POPUP_ANIM_MS))
         } else {
+            motion.animateTo(0f, tween(POPUP_ANIM_MS))
             delay(MENU_EXIT_MS)
             keepMounted = false
         }
@@ -350,41 +360,36 @@ internal fun MenuCard(
     val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { 12.dp.roundToPx() }
     // 定位二选一：同时传 alignment/offset 与 provider 编译不过。
     val cardBody: @Composable () -> Unit = {
-            // **首次组合必须先从 false 翻到 true，入场才会跑**：`keepMounted` 是在 `visible`
-            // 变 true 之后才挂上这个 Popup 的，所以第一帧 `visible` 已经是 true ——
-            // `AnimatedVisibility(visible = true)` 在首次组合时**不播入场**（它只对"变化"做过渡）。
-            // 这就是「小浮层只有个别几个看得到动画」的原因：其余卡片都是"啪"一下出现。
-            var appeared by remember { mutableStateOf(false) }
-            LaunchedEffect(Unit) {
-                withFrameNanos { }
-                appeared = true
-            }
-            AnimatedVisibility(
-                visible = visible && appeared,
-                // **全站小浮层统一 110ms**（用户改成 110）。
-                // 缩放 + 上浮：只有缩放时 110ms 在锚点上看不出任何变化，
-                // 用户看到的仍然是"啪一下出现"。位移从下方 12dp 起，落到位。
-                // **不做淡入**：alpha < 1 时卡片（纯白底）是半透明的，压在深色抽屉/正文上
-                // 就显得发灰 —— 用户对比两个浮层看到的"底色不一样"就是它。
-                enter = scaleIn(tween(POPUP_ANIM_MS), initialScale = 0.92f) +
-                    slideInVertically(tween(POPUP_ANIM_MS)) { slidePx },
-                // 退场**保持原样**（用户没让改）：淡出 + 缩回 + 下落。
-                exit = fadeOut(tween(POPUP_ANIM_MS)) +
-                    scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
-                    slideOutVertically(tween(POPUP_ANIM_MS)) { slidePx },
-            ) {
-                Column(
-                    modifier = modifier
-                        .popupCardSurface(containerColor)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = {},
-                        )
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
-                    content = content,
+        Column(
+            modifier = modifier
+                .popupCardSurface(containerColor)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
                 )
-            }
+                .padding(horizontal = 18.dp, vertical = 14.dp)
+                // **入场只上浮**（用户：直接上浮不行吗）：位移 12dp → 0，**不缩放、不淡入**。
+                // 缩放会让卡片"从中间长出来"、淡入会让纯白底半透明（压在深色抽屉上发灰）——
+                // 两者都去掉后，入场就是干干净净的一次上浮。
+                // 退场保持原样：淡出 + 缩回 + 下落。
+                .graphicsLayer {
+                    val p = motion.value
+                    if (visible) {
+                        translationY = (1f - p) * slidePx
+                        alpha = 1f
+                        scaleX = 1f
+                        scaleY = 1f
+                    } else {
+                        alpha = p
+                        val s = 0.92f + 0.08f * p
+                        scaleX = s
+                        scaleY = s
+                        translationY = (1f - p) * slidePx
+                    }
+                },
+            content = content,
+        )
     }
     val provider = popupPositionProvider
     if (provider != null) {
@@ -654,8 +659,11 @@ internal fun GenerationSheet(
             ): IntOffset {
                 val gap = with(density) { 8.dp.roundToPx() }
                 val edge = with(density) { POPUP_EDGE_AIR.roundToPx() }
+                // **左缘对齐按钮左沿**（与添加菜单、审批菜单、圆环菜单同一套）：卡片从按钮
+                // 左边伸出、向上长。右缘对齐按钮右缘是错的 —— 模型按钮的框只包住模型名
+                // （很窄），卡片会被推到屏幕左侧，用户看到的就是"偏左"。
                 val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
-                val x = (anchorBounds.right - popupContentSize.width).coerceIn(edge, maxLeft)
+                val x = anchorBounds.left.coerceIn(edge, maxLeft)
                 val y = (anchorBounds.top - popupContentSize.height - gap).coerceAtLeast(edge)
                 return IntOffset(x, y)
             }
