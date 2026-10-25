@@ -310,6 +310,9 @@ private const val CHUNK_STEP = 3
 /** 自适应填充每帧补几行的上限（下限是 1）。 */
 private const val CHUNK_MAX_STEP = 5
 
+/** 切换动画期间的填充步长上限：动画本身要合成整条列表，再叠大块组合就会掉到 60Hz。 */
+private const val SWITCH_MAX_STEP = 2
+
 /** 填充的帧预算（ms）：超过它就说明这一帧补多了，下一帧少补一行。 */
 private const val STALL_FRAME_MS = 12L
 
@@ -1243,7 +1246,10 @@ fun ChatScreen(
     LaunchedEffect(visible, scroll.stickToBottom) {
         val total = visible.size
         if (total == 0) return@LaunchedEffect
-        filledRows.intValue = if (scroll.stickToBottom) CHUNK_FIRST.coerceAtMost(total) else total
+        // 切换动画的第一帧 alpha 还是 0（看不见内容）：这时一次补 4 行纯属白花一帧的预算，
+        // 动画期间先补 2 行，剩下的按 SWITCH_MAX_STEP 在动画里补齐。非动画场合维持原来 4 行。
+        val firstChunk = if (switchRunning) 2 else CHUNK_FIRST
+        filledRows.intValue = if (scroll.stickToBottom) firstChunk.coerceAtMost(total) else total
         // **按上一帧节奏自适应**：固定每帧补 3 条时，遇到大卡片就是 16~41ms 的超时帧
         // （实测切会话后连续几帧）。上一帧超预算就少补一条、宽裕就多补一条：峰值被压平，
         // 填完的总条数与最终布局完全不变（只是先后节奏）。
@@ -1255,6 +1261,12 @@ fun ChatScreen(
                 val dtMs = (frameAt - prevFrame) / 1_000_000L
                 step = when {
                     dtMs > STALL_FRAME_MS -> (step - 1).coerceAtLeast(1)
+                    // **切换动画期间不许加速**（实测结论，见下）：原来只看"上一帧很快"就一帧多补
+                    // 几行（最多 5 行），可切换动画本身正在吃 GPU（整条列表带 alpha/scale 的层要
+                    // 逐帧合成），这时再叠 5 行的组合+测量，正好把 260ms 的动画压进 14ms 的帧
+                    // —— dumpsys gfxinfo 里切会话 p90=14ms、超预算帧占 39%，而滚动只有 0.48%。
+                    // 动画期间压到 2 行/帧：多花两帧补完，但每一帧都留在 120Hz 预算内。
+                    switchRunning -> (step + 1).coerceAtMost(SWITCH_MAX_STEP)
                     dtMs < STALL_FRAME_MS / 2 -> (step + 1).coerceAtMost(CHUNK_MAX_STEP)
                     else -> step
                 }
