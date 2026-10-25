@@ -660,8 +660,10 @@ internal fun GenerationSheet(
                 // **左缘对齐按钮左沿**（与添加菜单、审批菜单、圆环菜单同一套）：卡片从按钮
                 // 左边伸出、向上长。右缘对齐按钮右缘是错的 —— 模型按钮的框只包住模型名
                 // （很窄），卡片会被推到屏幕左侧，用户看到的就是"偏左"。
+                // 再左移 8dp（用户：模型选择器卡片再左一点点）。
+                val nudgeLeft = with(density) { 8.dp.roundToPx() }
                 val maxLeft = (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge)
-                val x = anchorBounds.left.coerceIn(edge, maxLeft)
+                val x = (anchorBounds.left - nudgeLeft).coerceIn(edge, maxLeft)
                 val y = (anchorBounds.top - popupContentSize.height - gap).coerceAtLeast(edge)
                 return IntOffset(x, y)
             }
