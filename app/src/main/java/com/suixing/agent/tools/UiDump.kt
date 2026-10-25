@@ -112,10 +112,29 @@ internal fun focusedPackage(dump: String): String? =
         .firstOrNull { it.contains("mCurrentFocus") || it.contains("mFocusedApp") }
         ?.let { FOCUS_PACKAGE.find(it)?.groupValues?.get(1) }
 
-private fun unescape(raw: String): String = raw
-    .replace("&lt;", "<")
-    .replace("&gt;", ">")
-    .replace("&quot;", "\"")
-    .replace("&apos;", "'")
-    .replace("&#10;", "\n")
-    .replace("&amp;", "&")
+/**
+ * 一遍扫描做 XML 实体反转义。
+ *
+ * 原来是 6 次 `String.replace`，每个属性串要被全文扫 6 遍并产生 6 个中间 String；
+ * ui_dump 每节点 2 个属性、几百个节点，纯浪费。
+ * 语义顺序不变：`&amp;` **最后**处理（否则 "&amp;lt;" 会先还原成 "<"）。
+ */
+private fun unescape(raw: String): String {
+    if (raw.indexOf(38.toChar()) < 0) return raw
+    val out = StringBuilder(raw.length)
+    var i = 0
+    while (i < raw.length) {
+        val c = raw[i]
+        if (c != 38.toChar()) { out.append(c); i++; continue }
+        when {
+            raw.startsWith("&lt;", i) -> { out.append(60.toChar()); i += 4 }
+            raw.startsWith("&gt;", i) -> { out.append(62.toChar()); i += 4 }
+            raw.startsWith("&quot;", i) -> { out.append(34.toChar()); i += 6 }
+            raw.startsWith("&apos;", i) -> { out.append(39.toChar()); i += 6 }
+            raw.startsWith("&#10;", i) -> { out.append(10.toChar()); i += 5 }
+            raw.startsWith("&amp;", i) -> { out.append(38.toChar()); i += 5 }
+            else -> { out.append(c); i++ }
+        }
+    }
+    return out.toString()
+}
