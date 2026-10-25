@@ -52,10 +52,16 @@ internal class PopupMotion {
         keeping = false
     }
 
-    /** 挂到浮层内容的根节点：值只在绘制期读，不触发重组。 */
-    fun modifier(): Modifier = Modifier.graphicsLayer {
+    /**
+     * 挂到浮层内容的根节点：值只在绘制期读，不触发重组。
+     *
+     * [fade] = false 时**不碰透明度**。卡片自带 `shadow` 时这一点很要紧：alpha < 1 会让整块
+     * （含投影）走离屏层合成，投影看起来比没有动画的那张薄 —— 用户看到的就是「两个浮层的阴影
+     * 不一样」。只缩放不改透明度时，投影与静止时逐像素一致。
+     */
+    fun modifier(fade: Boolean = true): Modifier = Modifier.graphicsLayer {
         val p = animation.value
-        alpha = p
+        if (fade) alpha = p
         val scale = 0.94f + 0.06f * p
         scaleX = scale
         scaleY = scale

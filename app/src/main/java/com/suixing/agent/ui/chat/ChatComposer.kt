@@ -1087,7 +1087,7 @@ internal fun ContextRing(
                     properties = PopupProperties(focusable = false),
                 ) {
                     Box(
-                        popupMotion.modifier()
+                        popupMotion.modifier(fade = false)
                             // A focus-less window only receives what lands inside it, and drawing
                             // its own background is not the same as consuming a touch: without
                             // this the tap on the card would fall through to the transcript the
