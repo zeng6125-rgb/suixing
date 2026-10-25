@@ -674,27 +674,10 @@ internal fun GenerationSheet(
         // how the card ends up centred on the model button.
         visible = visible,
         onDismiss = onDismiss,
+        // **与「添加菜单 / 审批菜单 / 圆环菜单」完全相同的定位方式**（用户：那三个是对的）：
+        // BottomStart ＋ (nudge, −8dp) —— 卡片底边贴锚点、向上长。
         alignment = Alignment.BottomStart,
-        // **落在按钮上方、不盖住按钮**：原来用 BottomStart + (nudge, -8dp)，Popup 的底边贴的是
-        // 锚点 Box（整行）的底边，于是卡片压住按钮的上半部分。改成显式定位：底边 = 锚点上沿 - 8dp。
-        popupPositionProvider = run {
-            val gapPx = with(density) { 8.dp.roundToPx() }
-            val nudgePx = nudge.roundToInt()
-            object : PopupPositionProvider {
-                override fun calculatePosition(
-                    anchorBounds: IntRect,
-                    windowSize: IntSize,
-                    layoutDirection: LayoutDirection,
-                    popupContentSize: IntSize,
-                ): IntOffset {
-                    val x = (anchorBounds.left + nudgePx)
-                        .coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
-                    val y = anchorBounds.top - popupContentSize.height - gapPx
-                    return IntOffset(x, y)
-                }
-            }
-        },
-        offset = IntOffset.Zero,
+        offset = with(density) { IntOffset(nudge.roundToInt(), -8.dp.roundToPx()) },
         // Focus-less: opening this card must not take the keyboard off the field, or the
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].

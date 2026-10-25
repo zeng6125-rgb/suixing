@@ -327,8 +327,13 @@ internal fun TopBarContextEntry(
                         layoutDirection: LayoutDirection,
                         popupContentSize: IntSize,
                     ): IntOffset {
-                        val x = (windowSize.width - edgePxForPopup - popupContentSize.width)
-                            .coerceAtLeast(edgePxForPopup)
+                        // **以按钮左沿对齐**（不是贴屏幕右边）—— 之前写死 windowSize.width 会让
+                        // 卡片一律从右侧出现。
+                        val x = anchorBounds.left.coerceIn(
+                            edgePxForPopup,
+                            (windowSize.width - edgePxForPopup - popupContentSize.width)
+                                .coerceAtLeast(edgePxForPopup),
+                        )
                         val y = (anchorBounds.bottom + gapPxForPopup).coerceAtMost(
                             (windowSize.height - edgePxForPopup - popupContentSize.height)
                                 .coerceAtLeast(edgePxForPopup),
