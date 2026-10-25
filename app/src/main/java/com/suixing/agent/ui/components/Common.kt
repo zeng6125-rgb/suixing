@@ -1166,8 +1166,10 @@ fun EmptyState(
 internal fun navBarContentPadding(extra: Dp = 12.dp): PaddingValues {
     val density = LocalDensity.current
     val bottomPx = WindowInsets.navigationBars.getBottom(density)
-    val bottom: Dp = with(density) { bottomPx.toDp() }
-    return PaddingValues(bottom = bottom + extra)
+    // **结果要 remember**（优化清单 ui-P1）：全 ui 有 14 个调用点，每次重组都为同一个
+    // 底部留白新建一个 `PaddingValues`；而它只依赖手势条高度与 extra，几乎不变。
+    val bottom: Dp = with(density) { bottomPx.toDp() } + extra
+    return remember(bottom) { PaddingValues(bottom = bottom) }
 }
 
 /** 胶囊圆角：PressPill 共用，避免每次重组新建。 */
