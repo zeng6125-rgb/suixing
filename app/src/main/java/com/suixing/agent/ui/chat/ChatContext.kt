@@ -634,10 +634,9 @@ internal fun SteerQueueRow(
                 ImagePreviewDialog(
                     bitmap = picture,
                     contentDescription = "排队中的图片",
-                    // **与输入框旁附件那张预览完全一致**（用户要求）：
-                    // 那张用的是 keepKeyboard = true（Popup 形态、不收键盘），原来这里是 false
-                    // （Dialog 形态、有系统遮罩）—— 两边正好相反，所以观感一直不同。
-                    keepKeyboard = true,
+                    // **与已发出消息里的图片预览完全一致**（用户确认基准是 B）：
+                    // B 走默认的 Dialog 形态（有系统遮罩、可点外部关闭）。这里显式写 false。
+                    keepKeyboard = false,
                 ) { fullPicture = null }
             }
             Text(

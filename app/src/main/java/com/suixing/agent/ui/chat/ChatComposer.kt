@@ -681,29 +681,17 @@ internal fun GenerationSheet(
         // how the card ends up centred on the model button.
         visible = visible,
         onDismiss = onDismiss,
-        // **与「添加菜单 / 审批菜单 / 圆环菜单」完全相同的定位方式**（用户：那三个是对的）：
-        // BottomStart ＋ (nudge, −8dp) —— 卡片底边贴锚点、向上长。
-        alignment = Alignment.BottomStart,
-        offset = with(density) { IntOffset(nudge.roundToInt(), -8.dp.roundToPx()) },
-        // **按实测的胶囊位置定位**（用户：要正上方、边缘要对齐）：底边 = 胶囊上沿 − 8dp，
-        // 右缘 = 胶囊右缘。未测量到（=0）时退回 alignment/offset 的老路径。
-        popupPositionProvider = if (capsuleTop > 0f && capsuleRight > 0f) {
-            val gap = with(density) { 8.dp.roundToPx() }
-            // 用户反馈"位置有点偏左"：整体右移 8dp。只改这一个值就能调。
-            val rightBias = with(density) { 24.dp.roundToPx() }
-            object : PopupPositionProvider {
-                override fun calculatePosition(
-                    anchorBounds: IntRect,
-                    windowSize: IntSize,
-                    layoutDirection: LayoutDirection,
-                    popupContentSize: IntSize,
-                ): IntOffset {
-                    val x = (capsuleRight.toInt() - popupContentSize.width + rightBias).coerceAtLeast(0)
-                    val y = (capsuleTop.toInt() - popupContentSize.height - gap).coerceAtLeast(0)
-                    return IntOffset(x, y)
-                }
-            }
-        } else null,
+        // **不用 provider**：provider 依赖 popupContentSize，首帧卡片尺寸还没量出来时会被
+        // 摆到屏幕右边再跳回来（用户看到的"从右侧进场"）。改成 alignment + 常量偏移：
+        // 锚点是胶囊顶部的零高探针，BottomEnd 让卡片**向上长**；水平偏移只由 capsuleRight
+        // 与窗口宽算出，不需要卡片尺寸 ⇒ 第一帧就在最终位置。
+        alignment = Alignment.BottomEnd,
+        offset = with(density) {
+            IntOffset(
+                (capsuleRight - screenPx + 24.dp.toPx()).roundToInt(),
+                -8.dp.roundToPx(),
+            )
+        },
         // Focus-less: opening this card must not take the keyboard off the field, or the
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].
