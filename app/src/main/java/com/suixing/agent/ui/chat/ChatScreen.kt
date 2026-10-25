@@ -425,10 +425,11 @@ fun ChatScreen(
     // **键盘高度量化到 4px 再读**：`heldImePx` 在键盘动画的每一帧都会变，直接读它就是整页
     // 每帧重组（ChatScreen 有几十个子组合）。量化后只有跨过 4px 才重组一次 —— 一次 ~200px 的
     // 抬起仍有 50 档，视觉上看不出台阶，但重组次数降到约 1/4。
+    // **量化已经在生产处做过一次**（`SuixingApp.kt` 的 `IME_QUANTUM_PX`）：这里直接读，
+    // 不再二次量化。二次量化会让输入框（布局期读原始值）和列表（组合期读量化值）看到
+    // 两个不同的数，键盘动画期间两者间距逐帧变化 —— 用户报的「边距在抖」。
     val imePxState = LocalHeldImePx.current
-    val heldIme by remember(imePxState) {
-        derivedStateOf { imePxState.value / 4 * 4 }
-    }
+    val heldIme by remember(imePxState) { derivedStateOf { imePxState.value } }
     val navBarPx = with(LocalDensity.current) { WindowInsets.navigationBars.getBottom(this) }
     fun navBarPad(ime: Int): Int = (navBarPx - ime).coerceAtLeast(0)
     // 让位＝**只用一个来源**：输入框自己的高度 + 它的下内边距 + 手势条。键盘动画中唯一在变的量是

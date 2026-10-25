@@ -201,6 +201,18 @@ private const val NAV_FADE_MS = NAV_EXIT_MS
  * handle is drawn by [com.suixing.agent.ui.components.SuixingTopBar], which is why the
  * shell only has to publish [LocalOpenSidebar] once.
  */
+/**
+ * 键盘高度的量化步长（px）。
+ *
+ * 为什么需要：键盘动画的每一帧都会改变 IME inset，直接下发原始 px 会让整棵树的消费者
+ * 逐帧读到一个一直在变的数（转录列表的底边距在组合期读它 ⇒ 每帧整页重组）。
+ * 量化到 4px（3x 密度约 1.3dp）后，整页重组次数降到约 1/4，而视觉上看不出台阶。
+ *
+ * **必须只有这一处量化**：输入框在布局期读、列表在组合期读，两处各用不同精度正是
+ * 「随键盘抬起收回时边距在抖」的根因（用户 2026-10-26 报）。
+ */
+private const val IME_QUANTUM_PX = 4
+
 @Composable
 fun SuixingApp() {
     val navController = rememberNavController()
@@ -359,7 +371,14 @@ fun SuixingApp() {
         val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
         if (imeDir != 0 && dir != imeDir && rebound) return@LaunchedEffect
         imeDir = dir
-        heldImeState.intValue = imeRawPx
+        // **量化在这里做，只做一次**（用户：「输入框随键盘抬起收回掉帧，边距会抖」）：
+        // 之前下发的是原始 px，而输入框在**布局期**读原始值（逐像素平滑）、转录列表在
+        // **组合期**读着自己又量化了一次的值（4px 台阶）—— 同一份动画被两种精度消费，
+        // 两者之间的间距每帧都在变，于是"边距在抖"。现在唯一来源就是量化后的值，
+        // 所有消费者（输入框、列表让位、滚动条）读到的完全一致，间距在动画全程恒定。
+        // 4px 在 3x 密度下约 1.3dp，视觉上不是台阶；而它把整页重组次数压到约 1/4，
+        // 这是键盘动画期间不整页掉帧的关键。
+        heldImeState.intValue = imeRawPx / IME_QUANTUM_PX * IME_QUANTUM_PX
     }
     LaunchedEffect(imeRawPx) {
         delay(300)

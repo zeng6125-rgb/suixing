@@ -712,7 +712,13 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
     // 同一段落内部继续追加字符时它并不刷新，于是屏幕上要等下一个换行才看到新字，
     // 表现就是一段一段蹦。这里改为每次按当前文本重新解析，保证"到多少显示多少"。
     // 解析纯函数、文本长度通常几 KB，一次几毫秒；正确性优先，后续如需优化再做块级复用。
-    if (!settled) return remember(text) { parseMarkdown(text) }
+    if (!settled) {
+        // **块级复用**（issue #44）：流式文本只有末尾在长，空行以上的块是终值。
+        // 只重解析最后一个未闭合的块，前面的直接复用上次结果 —— 长答案下每次发布的
+        // 解析量从"整段"降到"尾段"，这是打字机 25~60Hz 下保住帧预算的关键。
+        val live = remember { LiveBlocks() }
+        return remember(text) { live.blocksFor(text) }
+    }
     // 定稿文本：先查进程级缓存 —— 滚出去再滚回来就不必重新解析（快速滑动的卡顿来源）。
     SettledBlocks.get(text)?.let { return it }
     val blocks = cache.blocksFor(text)
@@ -721,6 +727,58 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
     // 把正在看的挤掉。`get` 也顺手加了长度门槛（评审 S3）。
     SideEffect { SettledBlocks.putIfSettled(settled, text, blocks) }
     return blocks
+}
+
+/**
+ * 流式文本的**块级复用**解析器（issue #44）。
+ *
+ * 流式答案只有末尾在长，而 Markdown 的块边界由空行决定 ⇒ 最后一个空行以上的内容早已是
+ * 终值。每次发布都 `parseMarkdown(整段)` 是浪费：长答案 2~10ms/次，打字机 25~60Hz 下
+ * 这就是掉帧的主要来源（[MarkdownText] 的注释里也记着这条）。
+ *
+ * 策略：
+ *  · 记住上一次的文本、它的"稳定前缀"（最后一个空行之前的部分）以及该前缀的解析结果；
+ *  · 新文本以旧稳定前缀开头 ⇒ 前缀块直接复用，只 `parseMarkdown(尾段)`；
+ *  · 新出现了空行 ⇒ 前缀变长，重算前缀（每次答案只发生几次，不是每秒几十次）；
+ *  · 不是前缀（换块、重放、变短）⇒ 整体重建。
+ *
+ * 与 `text.split` 式的"按行增量"不同，这里只关心**块**，实现更简单且与
+ * `parseMarkdown` 的语义完全一致（前缀 + 尾段解析 == 整段解析，因为块边界就是空行）。
+ */
+internal class LiveBlocks {
+    private var text = ""
+    private var stablePrefix = ""
+    private var prefixBlocks: List<MdBlock> = emptyList()
+    private var result: List<MdBlock> = emptyList()
+
+    fun blocksFor(next: String): List<MdBlock> {
+        if (next == text) return result
+        if (!next.startsWith(stablePrefix) && stablePrefix.isNotEmpty()) {
+            // 换块/重放：整段重建，前缀从新文本里重新找。
+            text = next
+            stablePrefix = ""
+            prefixBlocks = emptyList()
+            result = parseWithPrefix(next)
+            return result
+        }
+        text = next
+        result = parseWithPrefix(next)
+        return result
+    }
+
+    private fun parseWithPrefix(next: String): List<MdBlock> {
+        // 稳定前缀 = 最后一个空行（含）之前的部分。它里面的块不会再变。
+        val blankLine = NL + NL
+        val cut = next.lastIndexOf(blankLine)
+        val prefix = if (cut >= 0) next.substring(0, cut + 2) else ""
+        if (prefix.isNotEmpty() && prefix != stablePrefix) {
+            stablePrefix = prefix
+            prefixBlocks = parseMarkdown(prefix)
+        }
+        val tail = if (prefix.isEmpty()) next else next.substring(prefix.length)
+        if (tail.isEmpty()) return prefixBlocks
+        return prefixBlocks + parseMarkdown(tail)
+    }
 }
 
 /**
@@ -1079,6 +1137,9 @@ private fun InlineText(
 
 /** 光标宽度：绘制阶段用（1.5dp @3x ≈ 4.5px，取 4px 与旧的 ▍ 视觉接近）。 */
 private const val CURSOR_WIDTH_PX = 4f
+
+/** 换行符常量（LiveBlocks 里要判空行，直接写转义容易被工具链截断）。 */
+private val NL: String = System.lineSeparator()
 
 /** 光标占位符：接在文本末尾，让排版器为它留出位置（宽度接近一个细竖条）。 */
 private const val CARET_PLACEHOLDER = "​"
