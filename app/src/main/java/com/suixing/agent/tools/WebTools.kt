@@ -290,13 +290,12 @@ class WebTools(
     private fun readText(response: Response): String {
         val (bytes, truncated) = readCapped(response)
         if (bytes.isEmpty()) return ""
-        val declared = Regex("charset=[\"']?([A-Za-z0-9_\\-]+)", RegexOption.IGNORE_CASE)
-            .find(response.header("Content-Type").orEmpty())
+        val declared = RE_HEADER_CHARSET.find(response.header("Content-Type").orEmpty())
             ?.groupValues?.get(1)
-        val fromMeta = Regex(
-            "<meta[^>]+charset=[\"']?([A-Za-z0-9_\\-]+)",
-            RegexOption.IGNORE_CASE,
-        ).find(String(bytes, Charsets.ISO_8859_1))?.groupValues?.get(1)
+        // **只解码前 4KB 去嗅探 charset**（优化清单 tools-P1）：原来把 ≤1MB 的整段正文用
+        // ISO_8859_1 解成一个大 String，只为在开头找一个 meta 标签。
+        val head = String(bytes, 0, minOf(bytes.size, 4096), Charsets.ISO_8859_1)
+        val fromMeta = RE_META_CHARSET.find(head)?.groupValues?.get(1)
         val name = declared ?: fromMeta ?: "utf-8"
         val charset = runCatching { Charset.forName(name) }.getOrDefault(Charsets.UTF_8)
         val text = runCatching { String(bytes, charset) }.getOrDefault(String(bytes, Charsets.UTF_8))
@@ -355,6 +354,8 @@ class WebTools(
     }
 }
 
+private val RE_HEADER_CHARSET = Regex("charset=[\"']?([A-Za-z0-9_-]+)", RegexOption.IGNORE_CASE)
+private val RE_META_CHARSET = Regex("<meta[^>]+charset=[\"']?([A-Za-z0-9_-]+)", RegexOption.IGNORE_CASE)
 private val RE_SCRIPT = Regex("(?is)<script[^>]*>.*?</script>")
 private val RE_STYLE = Regex("(?is)<style[^>]*>.*?</style>")
 private val RE_NOSCRIPT = Regex("(?is)<noscript[^>]*>.*?</noscript>")
