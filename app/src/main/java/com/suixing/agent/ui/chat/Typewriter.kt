@@ -6,6 +6,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
@@ -59,17 +60,25 @@ internal fun rememberTypedText(
     // `revealed` 只会从那个大数往上加，永远不会从 0 打起 ⇒ 屏幕上是整段整段地出。
     // 这里用一个普通标记：第一次看到 enabled=true 时把进度归零，重新起打。
     var startedTyping = remember { booleanArrayOf(false) }
+    // **协程要有出口**（优化清单 chat-P1）：原来是 `LaunchedEffect(Unit){ while(true){ delay(16) } }`
+    // —— 打完字之后每个参与过流式的块仍然每 16ms 醒一次，一页十几块常驻组合就是每秒几百次
+    // 空转。现在：追平且不再流式 ⇒ 结束；`enabled` 再变 true（新一轮开始）⇒ 协程重启。
+    // **只在文本真的变长时醒着**（优化清单 chat-P1）：原来是
+    // `LaunchedEffect(Unit){ while(true){ delay(16) } }` —— 打完字之后每个参与过流式的块
+    // 仍然每 16ms 醒一次，一页十几块就是每秒几百次空转。
+    // 现在由 `snapshotFlow` 驱动：长度不变 ⇒ 协程挂起（不占 CPU）；文本一到 ⇒ 继续把尾巴打完。
+    // **不能用"追平就退出"的写法**：退出之后文本若再变长，`text.take(revealed)` 会把新内容
+    // 永久截掉（那样才是真的改行为）。
+    val enabledNow = rememberUpdatedState(enabled)
     LaunchedEffect(Unit) {
-        while (true) {
-            if (!startedTyping[0] && enabled) {
+        snapshotFlow { target.value.length }.collect {
+            if (!startedTyping[0] && enabledNow.value) {
                 startedTyping[0] = true
                 revealed = 0
             }
-            delay(TYPE_TICK_MS)
-            val goal = target.value.length
-            if (revealed >= goal) {
-                revealed = goal
-            } else {
+            while (revealed < target.value.length) {
+                delay(TYPE_TICK_MS)
+                val goal = target.value.length
                 revealed = (revealed + typeStep(goal - revealed)).coerceAtMost(goal)
             }
         }
