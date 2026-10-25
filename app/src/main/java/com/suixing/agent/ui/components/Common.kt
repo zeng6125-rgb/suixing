@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.components
 
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -592,8 +593,23 @@ val LocalHeldImePx = compositionLocalOf<androidx.compose.runtime.State<Int>> {
 internal fun Modifier.imePaddingBottom(ime: androidx.compose.runtime.State<Int>): Modifier =
     this.layout { measurable, constraints ->
         val bottom = ime.value.coerceAtLeast(0)
-        val inner = (constraints.maxHeight - bottom).coerceAtLeast(0)
-        val placeable = measurable.measure(constraints.copy(maxHeight = inner))
+        // **新的 maxHeight 必须落在 [minHeight, maxHeight] 之间**：直接 `maxHeight - bottom`
+        // 会得到比 minHeight 还小的值，Compose 在 `Constraints.copy` 里直接抛
+        // `IllegalArgumentException: maxHeight(n) must be >= minHeight(m)` —— 这是 0.8.434
+        // 一点弹窗就闪退的原因（父约束是精确高度时 minHeight == maxHeight）。
+        val newMax = if (constraints.maxHeight == Constraints.Infinity) {
+            constraints.maxHeight
+        } else {
+            (constraints.maxHeight - bottom).coerceIn(constraints.minHeight, constraints.maxHeight)
+        }
+        val placeable = measurable.measure(
+            androidx.compose.ui.unit.Constraints(
+                minWidth = constraints.minWidth,
+                maxWidth = constraints.maxWidth,
+                minHeight = constraints.minHeight,
+                maxHeight = newMax,
+            ),
+        )
         layout(placeable.width, placeable.height + bottom) { placeable.place(0, 0) }
     }
 

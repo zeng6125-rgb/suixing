@@ -770,8 +770,21 @@ internal fun Composer(
             // 键盘抬起/收起时输入框每帧重组一次 —— 用户报的「输入法一抬一收就掉帧」。
             .layout { measurable, constraints ->
                 val bottom = (navBarBottomPx - imePxState.value).coerceAtLeast(0)
-                val inner = (constraints.maxHeight - bottom).coerceAtLeast(0)
-                val placeable = measurable.measure(constraints.copy(maxHeight = inner))
+                // 同 Common.kt 的 imePaddingBottom：新 maxHeight 必须夹在 [minHeight, maxHeight]，
+                // 否则 `Constraints.copy` 抛 "maxHeight must be >= minHeight"（父约束为精确高度时必现）。
+                val newMax = if (constraints.maxHeight == androidx.compose.ui.unit.Constraints.Infinity) {
+                    constraints.maxHeight
+                } else {
+                    (constraints.maxHeight - bottom).coerceIn(constraints.minHeight, constraints.maxHeight)
+                }
+                val placeable = measurable.measure(
+                    androidx.compose.ui.unit.Constraints(
+                        minWidth = constraints.minWidth,
+                        maxWidth = constraints.maxWidth,
+                        minHeight = constraints.minHeight,
+                        maxHeight = newMax,
+                    ),
+                )
                 layout(placeable.width, placeable.height + bottom) { placeable.place(0, 0) }
             }
             .padding(horizontal = 16.dp)
