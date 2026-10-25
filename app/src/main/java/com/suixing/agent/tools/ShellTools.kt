@@ -115,11 +115,45 @@ class ShellTools(
                 required = listOf("package", "action"),
             ),
         ),
+        ToolSpec(
+            "settings_get",
+            "Read one system setting. Cheaper and safer than assembling `settings get` in run_shell: " +
+                "the namespace is validated here and the value comes back without shell quoting to worry about.",
+            Schema.objectOf(
+                properties = listOf(
+                    "namespace" to Schema.string(
+                        "Which settings table",
+                        enumValues = listOf("system", "secure", "global"),
+                    ),
+                    "key" to Schema.string("Setting name, e.g. screen_brightness"),
+                ),
+                required = listOf("namespace", "key"),
+            ),
+        ),
+        ToolSpec(
+            "settings_put",
+            "Write one system setting and **read it back** to prove it took effect. `settings put` " +
+                "returning 0 does not mean the write landed (SELinux denial, wrong namespace, wrong user). " +
+                "The reply always carries expected/actual/verified.",
+            Schema.objectOf(
+                properties = listOf(
+                    "namespace" to Schema.string(
+                        "Which settings table",
+                        enumValues = listOf("system", "secure", "global"),
+                    ),
+                    "key" to Schema.string("Setting name"),
+                    "value" to Schema.string("New value, exactly as `settings put` should receive it"),
+                ),
+                required = listOf("namespace", "key", "value"),
+            ),
+        ),
     )
 
     override suspend fun execute(name: String, args: JsonObject): ToolResult = when (name) {
         "run_shell" -> runShell(args)
         "app_action" -> appAction(args)
+        "settings_get" -> settingsGet(args)
+        "settings_put" -> settingsPut(args)
         else -> ToolResult.failure("未知工具：$name")
     }
 
@@ -272,8 +306,99 @@ class ShellTools(
         val result = if (root) Shell.root(command) else Shell.shizuku(command)
         val label = if (root) "root" else "shizuku(shell)"
         val prefix = "[$label] exit=${result.exitCode}\n"
-        if (result.ok) ToolResult.success(prefix + result.render()) else ToolResult.failure(prefix + result.render())
+        if (!result.ok) return@withContext ToolResult.failure(prefix + result.render())
+        // **enable/disable 要读回核验**（issue #44 第一项的延伸）：`pm disable-user` 返回 0
+        // 也不代表状态真的变了（用户 0 之外的 profile、系统应用受保护等）。读回一次
+        // `pm list packages -d`（＝已停用列表）对照，不匹配就把"未生效"明确说出来。
+        val verify = when (action) {
+            "disable", "enable" -> {
+                val disabled = runCatching {
+                    val r = if (root) Shell.root("pm list packages -d") else Shell.shizuku("pm list packages -d")
+                    r.render()
+                }.getOrNull()
+                if (disabled == null) {
+                    "\n[verify] 读回失败，无法确认是否生效 —— 请勿假设已修改"
+                } else {
+                    val isDisabled = disabled.lineSequence().any { it.trim() == "package:$pkg" }
+                    val expected = action == "disable"
+                    val ok = isDisabled == expected
+                    "\n[verify] $pkg disabled=$isDisabled expected=$expected verified=$ok" +
+                        if (!ok) " — 未生效，请勿假设已修改" else ""
+                }
+            }
+            else -> ""
+        }
+        ToolResult.success(prefix + result.render() + verify)
     }
+
+    /**
+     * 结构化读一条系统设置（issue #44 第八项「系统 API」）。
+     *
+     * 为什么要有它：模型原先只能在 `run_shell` 里拼 `settings get ...` —— 命名空间写错、
+     * 引号/空格处理失误都会静默出错，而且回执只是一坨 stdout。这里校验命名空间、
+     * 走同一套档位（root/shizuku），并且**顺便把写命令也做成结构化工具**（见 [settingsPut]）。
+     */
+    private suspend fun settingsGet(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        val ns = args.str("namespace")?.trim()?.lowercase().orEmpty()
+        val key = args.str("key")?.trim().orEmpty()
+        if (ns !in SETTING_NAMESPACES) return@withContext ToolResult.failure("namespace 必须是 system / secure / global")
+        if (key.isEmpty()) return@withContext ToolResult.failure("缺少参数 key")
+        if (!SETTING_KEY.matches(key)) {
+            return@withContext ToolResult.failure("key 不合法：$key（只允许字母、数字、下划线、点、短横线）")
+        }
+        val channel = capabilities.shellTier()
+        if (channel == ShellTier.LOCAL) return@withContext privilegeNeeded()
+        val raw = runSetting("settings get $ns $key", channel)
+            ?: return@withContext ToolResult.failure("读取失败：命令没有返回")
+        ToolResult.success("$ns/$key = ${raw.ifEmpty { "(空)" }}")
+    }
+
+    /**
+     * 结构化写一条系统设置，**并读回核验**（issue #44 第八项 + 第一项）。
+     *
+     * `settings put` 返回 0 不代表生效：SELinux 拒绝、命名空间写错、用户不对都可能静默失败。
+     * 回执固定给 `expected / actual / verified`，后者为 false 时明确告诉模型"别假设已修改"。
+     */
+    private suspend fun settingsPut(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        val ns = args.str("namespace")?.trim()?.lowercase().orEmpty()
+        val key = args.str("key")?.trim().orEmpty()
+        val value = args.str("value") ?: return@withContext ToolResult.failure("缺少参数 value")
+        if (ns !in SETTING_NAMESPACES) return@withContext ToolResult.failure("namespace 必须是 system / secure / global")
+        if (key.isEmpty()) return@withContext ToolResult.failure("缺少参数 key")
+        if (!SETTING_KEY.matches(key)) {
+            return@withContext ToolResult.failure("key 不合法：$key（只允许字母、数字、下划线、点、短横线）")
+        }
+        val channel = capabilities.shellTier()
+        if (channel == ShellTier.LOCAL) return@withContext privilegeNeeded()
+        val before = runSetting("settings get $ns $key", channel)
+        val quoted = "'" + value.replace("'", "'\\''") + "'"
+        val write = runSetting("settings put $ns $key $quoted", channel)
+            ?: return@withContext ToolResult.failure("写入失败：命令没有返回")
+        val actual = runSetting("settings get $ns $key", channel)
+        val verified = actual == value || actual == "null"
+        ToolResult.success(
+            buildString {
+                appendLine("$ns/$key")
+                appendLine("before=${before.orEmpty().ifEmpty { "(空)" }}")
+                appendLine("expected=$value")
+                appendLine("actual=${actual.orEmpty().ifEmpty { "(空)" }}")
+                append("verified=$verified")
+                if (!verified) append(" — 写入未生效，请勿假设已修改；可检查 SELinux 或改用 root 档")
+                // 写命令自己的 stdout/stderr 也留着：SELinux 拒绝的话原因通常只在这里。
+                if (write.isNotBlank()) append("\noutput=$write")
+            },
+        )
+    }
+
+    /** 同档位跑一条 settings 命令，返回去掉引号与换行的输出。 */
+    private suspend fun runSetting(command: String, channel: ShellTier): String? = runCatching {
+        val r = if (channel == ShellTier.ROOT) Shell.root(command) else Shell.shizuku(command)
+        r.render().trim().trim('"').trim()
+    }.getOrNull()
+
+    private fun privilegeNeeded(): ToolResult = ToolResult.failure(
+        "该操作需要 Shizuku（shell 用户）或 root 权限。请到「能力」页开启 Shizuku 并授权随行。",
+    )
 
     /**
      * Single quotes around a path that is about to become an argument: a name with a space under
@@ -311,6 +436,12 @@ internal data class SettingWrite(val ns: String, val key: String, val value: Str
  * 不认识的命令不加核验，避免给读命令和普通命令添噪音。
  * 值两侧的引号要去掉：`settings put global adb_enabled "1"` 的期望值是 `1`。
  */
+/** settings 的合法命名空间（结构化读写工具共用）。 */
+private val SETTING_NAMESPACES = setOf("system", "secure", "global")
+
+/** settings 键名的合法形状：挡掉带空格/引号/分号的注入面。 */
+private val SETTING_KEY = Regex("""^[A-Za-z0-9_.\-]+$""")
+
 internal fun parseSettingWrite(command: String): SettingWrite? {
     val m = Regex("""^\s*settings\s+put\s+(system|secure|global)\s+(\S+)\s+(.+)$""")
         .find(command) ?: return null
