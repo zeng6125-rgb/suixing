@@ -12,6 +12,7 @@ import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.TranscriptRedaction
 import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.data.Tps
 import com.suixing.agent.data.WireSanitize
@@ -1219,13 +1220,16 @@ class AgentEngine(
                 maxKept = MAX_TOOL_OUTPUT,
             ) }
             val output = spill?.kept ?: result.output
+            // **落盘的那一份要屏蔽敏感数据，发给模型的那一份仍是原文**（issue #44 第二项）：
+            // 剪贴板内容、用户手打的密码只该存在于这一轮，不该进 chats/store/<id>.jsonl
+            // 跟着会话一直躺在磁盘上（还会随导出/备份走）。下面的 `wire +=` 用的是原始 `output`。
             val stored = StoredMessage(
                 id = UUID.randomUUID().toString(),
                 role = Roles.TOOL,
                 text = "",
                 toolName = call.name,
-                toolArgs = call.arguments,
-                toolOutput = output,
+                toolArgs = TranscriptRedaction.argumentsForTranscript(call.name, call.arguments),
+                toolOutput = TranscriptRedaction.outputForTranscript(call.name, output),
                 toolOk = result.ok,
                 toolCallId = call.id,
                 imageBase64 = result.imageBase64,
@@ -1533,7 +1537,14 @@ class AgentEngine(
                     role = Roles.ASSISTANT,
                     text = turn.text,
                     reasoning = thinking,
-                    toolCalls = turn.toolCalls.map { StoredToolCall(it.id, it.name, it.arguments) },
+                    // 同上：参数落盘前按工具定义屏蔽（剪贴板写入、ui_type 的文本可能是密码）。
+                    toolCalls = turn.toolCalls.map {
+                        StoredToolCall(
+                            it.id,
+                            it.name,
+                            TranscriptRedaction.argumentsForTranscript(it.name, it.arguments),
+                        )
+                    },
                     traceNote = traceNoteOf(retriesThisRound, lastRetryReason, cutNote),
                 ).withUsage(usage, elapsed, settings.model, firstTokenMs)
                 produced += assistant
@@ -1734,7 +1745,7 @@ class AgentEngine(
                         id = UUID.randomUUID().toString(),
                         role = Roles.TOOL,
                         toolName = call.name,
-                        toolArgs = call.arguments,
+                        toolArgs = TranscriptRedaction.argumentsForTranscript(call.name, call.arguments),
                         toolOutput = INTERRUPTED_TOOL_OUTPUT,
                         toolOk = false,
                         toolCallId = call.id,
