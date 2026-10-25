@@ -200,7 +200,10 @@ class ChatRepository(private val context: Context) {
                         path = log.absolutePath,
                         bytes = log.length(),
                         modifiedAt = log.lastModified(),
-                        tail = runCatching { log.readText().takeLast(4000) }.getOrDefault(""),
+                        // **只读尾部字节**（issue #35 清单 P0-1）：原来 `readText().takeLast(4000)`
+                        // 为四千字把整份日志读成 String —— 30MB 会话就是 30MB 读 + 最多 60MB
+                        // 中间串，而且发生在仓库级锁内。20KB 足以覆盖 4000 个 4 字节字符。
+                        tail = runCatching { readTailText(log) }.getOrDefault(""),
                         messageCount = meta.messageCount,
                     )
                 }
@@ -208,6 +211,30 @@ class ChatRepository(private val context: Context) {
             null
         }
     }
+
+/**
+ * 读文件末尾的至多 [TAIL_MAX_CHARS] 个字符，**只读末尾 [TAIL_MAX_BYTES] 字节**。
+ *
+ * 为什么不是 `readText().takeLast(n)`：`readText` 会把整份日志读成一个 String，30MB 会话
+ * 就是 30MB 读 + 最多两倍的内存抖动；而这里只要四千字。
+ * 字节窗口开得比字符数大得多（20KB vs 4000 字）：UTF-8 中文 3 字节、生僻字 4 字节，
+ * 20KB 足够覆盖 4000 字，且从字节中间起读最多只在**开头**产生几个替换字符 ——
+ * 我们取的正是尾部，不受影响。
+ */
+private val TAIL_MAX_CHARS = 4000
+private val TAIL_MAX_BYTES = 20_000L
+
+private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): String {
+    val length = file.length()
+    if (length <= 0L) return ""
+    val window = minOf(length, TAIL_MAX_BYTES).toInt()
+    val bytes = ByteArray(window)
+    java.io.RandomAccessFile(file, "r").use { raf ->
+        raf.seek(length - window)
+        raf.readFully(bytes)
+    }
+    return String(bytes, Charsets.UTF_8).takeLast(maxChars)
+}
 
     /**
      * 导出用：整份会话序列化成 JSON 文本（**不是**直接拷日志 —— 日志是 JSONL，

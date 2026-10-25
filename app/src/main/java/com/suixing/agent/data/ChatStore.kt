@@ -213,10 +213,29 @@ internal class ChatStore(private val root: File) {
      * difference between "not migrated yet" and "this chat's bytes are broken", and only the
      * caller ([ChatRepository]) knows which recovery applies.
      */
+    /**
+     * **带缓存的 meta 读取**（优化清单 data-P1）。
+     *
+     * `readMeta` 原来每次都是 `isFile + readText + decode`，而一次用户操作里会被调用 2~3 遍
+     * （`save()` → `writeTail()` → `write()`，以及 `chatSize()`、列表每行）。缓存键带上
+     * 长度与 mtime，任何写入都会让键变化；`writeMeta` 里另有显式失效，兜住"同毫秒同长度"的
+     * 边角情况。只留最近 16 条。
+     */
+    private data class MetaKey(val path: String, val length: Long, val modified: Long)
+
+    private val metaCache = object : LinkedHashMap<MetaKey, ConversationMeta>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<MetaKey, ConversationMeta>?): Boolean =
+            size > 16
+    }
+
     fun readMeta(id: String): ConversationMeta? {
         val file = metaFile(id)
         if (!file.isFile) return null
-        return chatJson.decodeFromString(ConversationMeta.serializer(), file.readText())
+        val key = MetaKey(file.absolutePath, file.length(), file.lastModified())
+        synchronized(metaCache) { metaCache[key] }?.let { return it }
+        val parsed = chatJson.decodeFromString(ConversationMeta.serializer(), file.readText())
+        synchronized(metaCache) { metaCache[key] = parsed }
+        return parsed
     }
 
     /**
@@ -226,6 +245,11 @@ internal class ChatStore(private val root: File) {
      * which is exactly what used to cost a full re-encode of the transcript.
      */
     fun writeMeta(meta: ConversationMeta) {
+        // 写完立刻让该会话的缓存条目失效：长度与 mtime 恰好都没变时，键不会变。
+        synchronized(metaCache) {
+            val path = metaFile(meta.id).absolutePath
+            metaCache.keys.removeAll { it.path == path }
+        }
         writeAtomically(
             metaFile(meta.id),
             chatJson.encodeToString(ConversationMeta.serializer(), meta).toByteArray(Charsets.UTF_8),

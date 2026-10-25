@@ -95,7 +95,18 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
         )
     }
 
-    fun find(id: String): JobStatus? = list().firstOrNull { it.info.id == id }
+    fun find(id: String): JobStatus? {
+        // 原来写成 `list().firstOrNull { … }` —— 为了一个 job 把**每个 job** 的 256KB 日志都
+        // 读一遍再拆行。这里只构造要的那一条。
+        val job = synchronized(lock) { jobs[id] } ?: return null
+        return JobStatus(
+            info = job.info,
+            status = statusOf(job),
+            elapsedMs = System.currentTimeMillis() - job.info.startedAt,
+            exitCode = job.exitCode,
+            lastLine = lastLineOf(File(job.info.logPath)),
+        )
+    }
 
     /**
      * The log of [id], from byte [since] when that is positive, otherwise its last [tail]
@@ -133,8 +144,14 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
         return if (code == 0) JOB_DONE else JOB_FAILED
     }
 
-    private fun lastLineOf(file: File): String =
-        readJobLog(file, tail = 1, since = 0).lineSequence().lastOrNull().orEmpty().take(160)
+    /**
+     * 日志的最后一行（最多 160 字）。
+     *
+     * 原来走 `readJobLog(tail = 1)` —— 那个函数一次要读**末尾 256KB** 再 `lines()` 拆成整份
+     * 列表，只为取最后一行。这里直接读末尾 [LAST_LINE_WINDOW] 字节、从最后一个换行处切一刀。
+     * 结果与原来等价：窗口远大于一行，且最终只保留 160 字。
+     */
+    private fun lastLineOf(file: File): String = readJobLastLine(file).take(160)
 
     /**
      * Keeps `filesDir/jobs` bounded. One log per job, and a job nobody remembers starting
@@ -180,6 +197,27 @@ private const val MAX_READ_BYTES = 256 * 1024
  * file — so the length the caller is told to pass next time still lines up with what it
  * has actually seen, even when one read could not cover the whole burst.
  */
+/** 取"最后一行"时只读的字节窗口：远大于一行，又远小于 [MAX_READ_BYTES]。 */
+private const val LAST_LINE_WINDOW = 8 * 1024
+
+/** 只读日志末尾的一小段，返回最后一行（不含换行）。 */
+internal fun readJobLastLine(file: File, window: Int = LAST_LINE_WINDOW): String {
+    if (!file.exists()) return ""
+    val length = file.length()
+    if (length <= 0L) return ""
+    val size = minOf(length, window.toLong()).toInt()
+    val bytes = ByteArray(size)
+    RandomAccessFile(file, "r").use { raf ->
+        raf.seek(length - size)
+        raf.readFully(bytes)
+    }
+    val text = String(bytes, Charsets.UTF_8)
+    // 没读到文件开头时，第一行是半截，丢掉。
+    val nl = 10.toChar()
+    val body = if (size < length) text.substringAfter(nl, text) else text
+    return body.lineSequence().lastOrNull { it.isNotEmpty() } ?: ""
+}
+
 internal fun readJobLog(file: File, tail: Int, since: Long): String {
     if (!file.exists()) return ""
     val length = file.length()
