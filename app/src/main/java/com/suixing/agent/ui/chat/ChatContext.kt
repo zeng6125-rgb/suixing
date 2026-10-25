@@ -307,7 +307,12 @@ internal fun TopBarContextEntry(
         // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
         // 同一套 110ms 进出场。这里需要显式定位，所以传 popupPositionProvider。
         // 定位在组合期算好：PopupPositionProvider 里没有 Density 作用域。
-        val belowGlyphPx = with(density) { 28.dp.roundToPx() + 8.dp.roundToPx() }   // 恢复原值
+        // **定位要相对锚点算**：原来的 y 是写死的像素、x 是"让卡片居中到圆环"，Popup 自身的锚点
+        // 在左上 ⇒ 卡片出现在屏幕左上角（用户截图）。这里改成：x 右对齐到窗口右边，
+        // y = 锚点下沿 + 8dp，两者都夹在屏幕内。
+        val edgePxForPopup = with(density) { 12.dp.roundToPx() }
+        val gapPxForPopup = with(density) { 8.dp.roundToPx() }
+        val belowGlyphPx = gapPxForPopup
         MenuCard(
             visible = open,
             onDismiss = { open = false },
@@ -322,13 +327,13 @@ internal fun TopBarContextEntry(
                         layoutDirection: LayoutDirection,
                         popupContentSize: IntSize,
                     ): IntOffset {
-                        val x = popupNudgeCentred(
-                            anchorCentre = anchorCentreX,
-                            width = cardWidth,
-                            windowPx = screenPx,
-                            edgePx = edgePx,
-                        ).roundToInt()
-                        return IntOffset(x, belowGlyphPx)
+                        val x = (windowSize.width - edgePxForPopup - popupContentSize.width)
+                            .coerceAtLeast(edgePxForPopup)
+                        val y = (anchorBounds.bottom + gapPxForPopup).coerceAtMost(
+                            (windowSize.height - edgePxForPopup - popupContentSize.height)
+                                .coerceAtLeast(edgePxForPopup),
+                        )
+                        return IntOffset(x, y)
                     }
                 }
             },
