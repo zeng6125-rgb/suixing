@@ -61,6 +61,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.suixing.agent.R
 import kotlinx.coroutines.delay
 import androidx.compose.ui.unit.LayoutDirection
@@ -1006,8 +1007,16 @@ private fun InlineText(
                 val layout = caret[0] ?: return@drawBehind
                 if (layout.lineCount == 0) return@drawBehind
                 val line = layout.lineCount - 1
-                val top = layout.getLineTop(line)
-                val h = (layout.getLineBottom(line) - top).toFloat()
+                // **高度按字号算，不用整行行框**（用户：「光标的高度有时候有点太高了吧，对于正文来说」）：
+                // `getLineBottom - getLineTop` 含行间距（leading），13sp 正文的行框比字形高不少，
+                // 竖条于是上下都冒出去。这里取基线与字号：高度 = 字号的 1.15 倍，
+                // 底边坐在基线上、向上取 0.95 倍字号 —— 与字形墨迹基本齐平。
+                val baseline = layout.getLineBaseline(line)
+                // 字号取不到时按 14sp 兜底（`takeOrElse` 是 TextUnit 的成员扩展，需显式接收者）。
+                val fontSize = layout.layoutInput.style.fontSize
+                val em = (if (fontSize.isSp) fontSize else 14.sp).toPx()
+                val h = em * 1.15f
+                val top = baseline - em * 0.95f
                 // **RTL 要用 getLineLeft**：`getLineRight` 在从右往左的行里是行的左端起点，
                 // 直接把光标画到行首去了。按行方向选端点。
                 val rtl = layout.layoutInput.layoutDirection == LayoutDirection.Rtl

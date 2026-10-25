@@ -1191,7 +1191,10 @@ internal fun AssistantRow(
                                 MarkdownText(
                                     text = shown,
                                     settled = !streaming && !typing,
-                                    cursor = streaming || typing,
+                                    // **流式结束就消失**（用户：「输出完的正文光标就应该消失」）。
+                                    // 原来带 `|| typing`，打字机 125 字/秒追不上快模型时尾巴要打好
+                                    // 几秒，那几秒光标一直挂着 —— 内容已经输出完了却还在闪。
+                                    cursor = streaming,
                                 )
                             } else {
                                 SelectableWhenArmed { MarkdownText(text = part.text) }

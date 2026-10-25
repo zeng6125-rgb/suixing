@@ -39,8 +39,8 @@ internal fun Modifier.popupCardSurface(color: Color): Modifier = this
         // 会发黑发脏。ambient 与 spot 同色 ⇒ 没有方向性偏移。
         elevation = 10.dp,
         shape = PopupCardShape,
-        ambientColor = Color.Black.copy(alpha = 0.10f),
-        spotColor = Color.Black.copy(alpha = 0.10f),
+        ambientColor = Color.Black.copy(alpha = 0.18f),
+        spotColor = Color.Black.copy(alpha = 0.18f),
     )
     .clip(PopupCardShape)
     .background(color)

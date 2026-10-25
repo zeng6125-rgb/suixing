@@ -29,7 +29,13 @@ import kotlin.math.ceil
  * 文本变短（换到新的一段、新的块）时立刻对齐，绝不回放旧内容。
  */
 @Composable
-internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 0L): String {
+internal fun rememberTypedText(
+    text: String,
+    enabled: Boolean,
+    bornAtMs: Long = 0L,
+    /** live 块强制的起点：true 时**永远从 0 开始**，不吃「诞生多久」那套推断。 */
+    startAtZero: Boolean = false,
+): String {
     if (!LocalTypewriter.current) return text
     // **一旦开始打就一直打完**（含流式结束之后）。原来 `enabled=false` 立刻返回全文 ——
     // 模型一停，屏幕上剩下没打的尾巴会被一次性补上，那正是「一下子全部显示」的最后一段。
@@ -40,7 +46,9 @@ internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 
     val target = rememberUpdatedState(text)
     // 初值见 [initialRevealed]（issue #46）：刚诞生的块从 0 打，早就存在的块直接给全文。
     var revealed by remember {
-        mutableIntStateOf(initialRevealed(text.length, nowMs() - bornAtMs))
+        mutableIntStateOf(
+            if (startAtZero) 0 else initialRevealed(text.length, nowMs() - bornAtMs),
+        )
     }
     LaunchedEffect(Unit) {
         while (true) {
@@ -69,8 +77,14 @@ internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 
  */
 @Composable
 internal fun rememberTypedTextFromBirth(text: String, enabled: Boolean): String {
-    val born = remember { nowMs() }
-    return rememberTypedText(text, enabled, born)
+    // **强制从 0 开始**，不再记诞生时刻。
+    //
+    // 原来记 `remember { nowMs() }` 再用年龄判断，但这条路径挂在 `key(index)` 的循环里：
+    // parts 列表结构一变（新增 Trace / Compress / Tools），index 槽位会错位，`remember`
+    // 里留着的是**上一次占用该槽的旧时刻** ⇒ 年龄被算成几秒 ⇒ 判定"很久以前" ⇒
+    // `revealed` 初始化成全文 ⇒ 一个字都不打。用户反复报「正文没有逐字」就是它。
+    // live 块本来就应该从头打，直接给 0 最稳。
+    return rememberTypedText(text, enabled, startAtZero = true)
 }
 
 /** 一个节拍多久放一次字。16ms＝62 次/秒：一屏文字每秒只变 25 次时，人眼看到的是「成串蹦字」
