@@ -47,8 +47,20 @@ class Thinking(
 
 data class Tools(val calls: List<LiveTool>) : LivePart
 
-/** 正文。同样用可增长缓冲（见 [Thinking] 的说明）。 */
-class Text(val buffer: GrowableText = GrowableText()) : LivePart {
+/**
+ * 正文。同样用可增长缓冲（见 [Thinking] 的说明）。
+ *
+ * [bornAtMs] 是这个块**诞生的时刻**（[nowMs]）。打字机用它区分「刚出现的块」（从 0 开始打）与
+ * 「早就存在、这次才重新组合出来的块」（直接给全文）—— issue #46。
+ *
+ * **它有意不参与相等性**：下面的 `equals` 按缓冲长度比，是为了让「内容没变长度时不重算映射」
+ * 这条契约继续成立（见 [Thinking] 的注释）。把时间戳塞进 equals 会让每次重建都判定为"不等"，
+ * 等于把那条契约废掉。
+ */
+class Text(
+    val buffer: GrowableText = GrowableText(),
+    val bornAtMs: Long = nowMs(),
+) : LivePart {
     constructor(text: String) : this(GrowableText(text))
 
     val text: String get() = buffer.toString()
@@ -195,3 +207,6 @@ internal fun List<LivePart>.attachToolMessage(message: StoredMessage): List<Live
         calls[index] = calls[index].copy(message = message)
         part.copy(calls = calls)
 }
+
+/** 单调时钟（毫秒）。只用来比较「这块诞生到现在多久」，与墙上时间无关。 */
+internal fun nowMs(): Long = System.nanoTime() / 1_000_000

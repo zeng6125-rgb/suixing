@@ -27,11 +27,13 @@ import kotlin.math.ceil
  * 文本变短（换到新的一段、新的块）时立刻对齐，绝不回放旧内容。
  */
 @Composable
-internal fun rememberTypedText(text: String, enabled: Boolean): String {
+internal fun rememberTypedText(text: String, enabled: Boolean, bornAtMs: Long = 0L): String {
     if (!enabled || !LocalTypewriter.current) return text
     val target = rememberUpdatedState(text)
-    // 初值是当前长度：中途打开这个开关（或这一块刚从折叠里出来）时不会把已有文字重播一遍。
-    var revealed by remember { mutableIntStateOf(text.length) }
+    // 初值见 [initialRevealed]（issue #46）：刚诞生的块从 0 打，早就存在的块直接给全文。
+    var revealed by remember {
+        mutableIntStateOf(initialRevealed(text.length, nowMs() - bornAtMs))
+    }
     LaunchedEffect(Unit) {
         while (true) {
             delay(TYPE_TICK_MS)
@@ -53,3 +55,19 @@ private const val TYPE_TICK_MS = 40L
 
 /** 每个节拍至少放几个字：慢端点（一个 delta 一两个字）也要看得见在动。 */
 private const val TYPE_MIN_STEP = 2
+
+/**
+ * 打字机初值（issue #46）：**刚诞生的块从 0 开始打，早就存在的块直接给全文**。
+ *
+ * 原来固定用 `text.length` 当初值：块第一次组合时正文若已经攒了几百字（网关攒批、首片整块
+ * 到达），等于一个字都不用打 —— 用户看到的就是「正文有时一次性全部显示」。反过来固定用 0
+ * 会让上翻回来、中途打开打字机开关、折叠块重新展开时把看过的内容重播一遍。
+ *
+ * 两个场景的差别不在**长度**（同样的长度两种都可能是），而在**年龄**：诞生 500ms 内就第一次
+ * 组合 ⇒ 用户还没见过 ⇒ 从 0 打；超过 500ms 才第一次组合 ⇒ 它早就在那儿了。
+ */
+internal fun initialRevealed(textLength: Int, ageMs: Long): Int =
+    if (ageMs in 0L..TYPE_FRESH_MS) 0 else textLength
+
+/** 块诞生后多久内算「刚出现」：覆盖一次 delta 发布（80ms）加一两帧组合延迟。 */
+private const val TYPE_FRESH_MS = 500L

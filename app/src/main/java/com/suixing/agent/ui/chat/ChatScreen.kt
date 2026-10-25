@@ -1782,7 +1782,7 @@ fun ChatScreen(
                                                         is LivePart.Tools ->
                                                             Part.Tools(part.calls.map(ToolLine::of))
 
-                                                        is LivePart.Text -> Part.Text(part.text)
+                                                        is LivePart.Text -> Part.Text(part.text, part.bornAtMs)
 
                                                         // The stored copy of this line is hidden for as
                                                         // long as the run streams, so the live part is

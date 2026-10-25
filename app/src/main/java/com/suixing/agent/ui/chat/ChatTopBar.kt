@@ -1135,7 +1135,7 @@ internal fun AssistantRow(
                                 }
                             }
                             // 流式时逐字放（外观 → 打字机效果）；settled 直接全文，选区也用全文。
-                            val shown = rememberTypedText(part.text, streaming)
+                            val shown = rememberTypedText(part.text, streaming, part.bornAtMs)
                             if (streaming || !selectable) {
                                 // **`settled = !streaming`**（第四轮评审 M1）：live 正文不传 `cursor`
                                 // （光标由下面的 `BlinkingCursor()` 单独画），若让它按 `!cursor`

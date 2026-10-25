@@ -355,8 +355,13 @@ internal sealed interface Part {
     /** The tool calls made after the part before this one. */
     data class Tools(val calls: List<ToolLine>) : Part
 
-    /** The words the model wrote. */
-    data class Text(val text: String) : Part
+    /**
+     * The words the model wrote.
+     *
+     * [bornAtMs] 只有从流式块映射来的才有意义（issue #46）；历史消息一律 0 = 「很久以前」，
+     * 打字机据此直接给全文，不重播。
+     */
+    data class Text(val text: String, val bornAtMs: Long = 0L) : Part
 
     /**
      * A line the user typed mid-answer.
