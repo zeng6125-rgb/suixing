@@ -864,16 +864,23 @@ fun MarkdownBlocks(
     cursor: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val palette = MarkdownPalette(
-        // **半透明**（用户：「有底色的地方，复制没有选中高亮」）：
-        // 代码片段的底色是 SpanStyle.background，Compose 把它画在**选中高亮之上**，
-        // 不透明就会把高亮整个盖掉 —— 普通文字选中会变绿，代码块却毫无反应。
-        // 降到 60% 后绿色能透出来，不选中时视觉几乎不变。
-        codeBackground = scheme.surfaceContainerHigh.copy(alpha = 0.6f),
-        codeColor = scheme.onSurfaceVariant,
-        linkColor = scheme.primary,
-        codeFontSize = MaterialTheme.typography.bodySmall.fontSize,
-    )
+    // **必须 remember**：之前这里每帧新建一个 MarkdownPalette，于是下面每个
+    // `MarkdownBlock(block, style, color, palette, ...)` 的参数都"变了"，Compose 一块都
+    // 跳不过 —— 流式时每来一段文本，整段 Markdown 的所有块全部重组 + 重新测量。
+    // 这就是正文流式"一下子蹦出一大段"的根因（思考块每行文本短、块数少，所以看着还行）。
+    val codeFontSize = MaterialTheme.typography.bodySmall.fontSize
+    val palette = remember(scheme, codeFontSize) {
+        MarkdownPalette(
+            // **半透明**（用户：「有底色的地方，复制没有选中高亮」）：
+            // 代码片段的底色是 SpanStyle.background，Compose 把它画在**选中高亮之上**，
+            // 不透明就会把高亮整个盖掉 —— 普通文字选中会变绿，代码块却毫无反应。
+            // 降到 60% 后绿色能透出来，不选中时视觉几乎不变。
+            codeBackground = scheme.surfaceContainerHigh.copy(alpha = 0.6f),
+            codeColor = scheme.onSurfaceVariant,
+            linkColor = scheme.primary,
+            codeFontSize = codeFontSize,
+        )
+    }
     // 光标挂在**最后一个 block 是段落**时；否则不画（列表/代码块尾部挂光标排版会怪）。
     val cursorAt = if (cursor) blocks.indexOfLast { it is MdBlock.Paragraph } else -1
     Column(modifier) {
