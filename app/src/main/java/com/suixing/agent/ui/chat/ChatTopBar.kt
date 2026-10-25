@@ -793,8 +793,28 @@ internal fun TurnMetrics(
             MenuCard(
                 visible = open != null,
                 onDismiss = { open = null },
-                alignment = Alignment.BottomStart,
-                offset = with(LocalDensity.current) { IntOffset(0, -8.dp.roundToPx()) },
+                alignment = Alignment.TopStart,
+                // **出现在按钮下方**（用户截图：原来盖在按钮上/上方）。8dp 间距，横向夹在屏幕内。
+                popupPositionProvider = run {
+                    val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+                    val edge = with(LocalDensity.current) { 8.dp.roundToPx() }
+                    object : androidx.compose.ui.window.PopupPositionProvider {
+                        override fun calculatePosition(
+                            anchorBounds: androidx.compose.ui.unit.IntRect,
+                            windowSize: androidx.compose.ui.unit.IntSize,
+                            layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                            popupContentSize: androidx.compose.ui.unit.IntSize,
+                        ): androidx.compose.ui.unit.IntOffset {
+                            val x = anchorBounds.left.coerceIn(
+                                edge,
+                                (windowSize.width - edge - popupContentSize.width).coerceAtLeast(edge),
+                            )
+                            val y = anchorBounds.bottom + gap
+                            return androidx.compose.ui.unit.IntOffset(x, y)
+                        }
+                    }
+                },
+                offset = IntOffset.Zero,
                 // The card's own Column already swallows the taps that land on it (see MenuCard).
                 focusable = false,
             ) {

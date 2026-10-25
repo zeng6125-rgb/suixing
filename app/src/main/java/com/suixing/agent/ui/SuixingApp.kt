@@ -1471,26 +1471,28 @@ private fun ConversationRow(
                 modifier = Modifier.width(DrawerMenuWidth),
                 focusable = false,
             ) {
-                DrawerMenuAction("改名", onClick = onRename)
+                DrawerMenuAction("改名", iconRes = R.drawable.ic_square_pen, onClick = onRename)
                 DrawerMenuAction(
                     if (conversation.pinned) "取消置顶" else "置顶",
+                    iconRes = R.drawable.ic_star,
                     onClick = onTogglePin,
                 )
                 // 归档：从抽屉列表里收起来，数据留着；取消归档在「设置 → 会话管理」那一页。
                 DrawerMenuAction(
                     if (conversation.archived) "取消归档" else "归档",
+                    iconRes = R.drawable.ic_file_archive,
                     onClick = onToggleArchive,
                 )
-                DrawerMenuAction("复制标题", onClick = onCopyTitle)
-                DrawerMenuAction("导出", onClick = onExport)
-                DrawerMenuAction("删除", destructive = true, onClick = onDelete)
+                DrawerMenuAction("复制标题", iconRes = R.drawable.ic_copy, onClick = onCopyTitle)
+                DrawerMenuAction("导出", iconRes = R.drawable.ic_download, onClick = onExport)
+                DrawerMenuAction("删除", destructive = true, iconRes = R.drawable.ic_trash, onClick = onDelete)
             }
         }
     }
 }
 
 /** 抽屉长按菜单的面板宽度：锚点与面板同宽，菜单才贴着行的右缘弹出（见 ConversationRow）。 */
-private val DrawerMenuWidth = 300.dp  // 与模型选择卡同宽（用户要求小浮层一致）
+private val DrawerMenuWidth = 200.dp
 
 /**
  * 面板高度：6 个 40dp 的项 + MenuCard 的上下各 14dp 内边距（项之间不再有外层 padding）。
@@ -1512,6 +1514,8 @@ private val DrawerMenuHeight = 40.dp * 6 + 28.dp
 private fun DrawerMenuAction(
     text: String,
     destructive: Boolean = false,
+    /** 行首图标；没有就只画文字。 */
+    iconRes: Int? = null,
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -1533,6 +1537,15 @@ private fun DrawerMenuAction(
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        iconRes?.let { res ->
+            Icon(
+                painter = painterResource(res),
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = if (destructive) scheme.error else scheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(10.dp))
+        }
         Text(
             text = text,
             style = MaterialTheme.typography.labelLarge,
