@@ -374,17 +374,10 @@ internal fun MenuCard(
         ) {
             Column(
                 modifier = modifier
-                    .popupCardSurface(containerColor)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {},
-                    )
-                    .padding(horizontal = 18.dp, vertical = 14.dp)
-                    // 只读绘制期、不触发重组。退场时进度已是 1，这一层是恒等变换 ⇒ 退场观感
-                    // 与改动前逐项一致。
-                    // 入场：上浮 12dp ＋ 缩放 0.92→1，**不淡入**（用户指定）。
-                    // 淡入会让纯白底在半透明帧里发灰（压在深色抽屉上尤其明显）。
+                    // **动画层必须排在链首**：graphicsLayer 是外层修饰符，它变换的是它**之后**
+                    // 的全部绘制。排在 popupCardSurface 之后时，白底与阴影画在它之外 ⇒ 卡片
+                    // 先出现、内容后浮现（用户：「感觉卡片比内容先出来」）。排到链首后
+                    // 白底+阴影+内容一起动。
                     .graphicsLayer {
                         val p = enterProgress.value
                         translationY = (1f - p) * slidePx
@@ -397,7 +390,14 @@ internal fun MenuCard(
                         transformOrigin = TransformOrigin(0.5f, 1f)
                         // 入场淡入（用户：淡入也要）。
                         alpha = p
-                    },
+                    }
+                    .popupCardSurface(containerColor)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    )
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
                 content = content,
             )
         }
@@ -1281,6 +1281,17 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
     val percent = if (known) used * 100 / window else 0
+    // **三条归一到顶部的总数**（用户：「三条的对应 token 数字对不上总 token 数」）：顶部是端点
+    // 实测的 prompt tokens，三条是本地字符估算（÷4），两个口径不同。按比例缩放到实测总数上，
+    // 最后一条吸收舍入误差 ⇒ 三条相加精确等于顶部那个数。
+    val parts = split?.let { (system, tools, history) ->
+        val (s2, t2, h2) = normaliseContextSplit(system, tools, history, used)
+        listOf(
+            Triple("系统提示词", s2, scheme.primary),
+            Triple("工具定义", t2, scheme.secondary),
+            Triple("对话消息", h2, scheme.tertiary),
+        )
+    }
     Column(
         modifier = Modifier
             .widthIn(max = popupCap(264.dp, LocalConfiguration.current.screenWidthDp.dp))
@@ -1316,12 +1327,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
         // 三行**常驻**（用户：「系统提示词就是当前窗口的 tokens 和占比，不是单个 run 的」）：
         // 数值来自实测（run 中）或按当前上下文的估算（空闲，见 refreshContextBreakdown），
         // 所以打开面板就有；进度条基准是**上下文窗口**（三行占比之和 = 顶部那条的比例）。
-        split?.let { (system, tools, history) ->
-            val parts = listOf(
-                Triple("系统提示词", system, scheme.primary),
-                Triple("工具定义", tools, scheme.secondary),
-                Triple("对话消息", history, scheme.tertiary),
-            )
+        parts?.let {
             Spacer(Modifier.height(4.dp))
             parts.forEach { (label, value, tone) ->
                 Row(

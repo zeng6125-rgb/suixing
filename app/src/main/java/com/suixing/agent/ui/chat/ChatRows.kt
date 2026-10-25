@@ -816,6 +816,34 @@ internal fun ringReading(
     else -> RingReading(0, estimated = false)
 }
 
+/**
+ * 把三块**估算**的 token 归一到端点**实测**的总数上。
+ *
+ * 用户报「圆环的三条的对应 token 数字对不上总 token 数」：顶部那个总数是端点回报的实测
+ * prompt tokens，而三条（系统提示词 / 工具定义 / 对话消息）是本地按字符数 ÷4 估出来的
+ * （见 AgentEngine 的 breakSystem / breakTools / breakHistory）。两个口径不同，加起来当然
+ * 对不上。
+ *
+ * 现在按比例把估算值缩放到实测总数上，**且最后一条吸收舍入误差** ⇒ 三条相加**精确等于**
+ * [total]。返回的第三个数就是给「对话消息」那一行的。
+ *
+ * [total] 为 0（还没有总数）或三块全为 0 时，原样返回，不编造。
+ */
+internal fun normaliseContextSplit(
+    system: Int,
+    tools: Int,
+    history: Int,
+    total: Int,
+): Triple<Int, Int, Int> {
+    val sum = system + tools + history
+    if (sum <= 0 || total <= 0) return Triple(system, tools, history)
+    // 先按比例缩放前两条，最后一条用「总数 − 前两条」兜住误差。
+    val scaledSystem = system.toLong() * total / sum
+    val scaledTools = tools.toLong() * total / sum
+    val scaledHistory = (total - scaledSystem - scaledTools).coerceAtLeast(0)
+    return Triple(scaledSystem.toInt(), scaledTools.toInt(), scaledHistory.toInt())
+}
+
 internal const val TIME_LABEL_GAP_MS = 10 * 60 * 1000L
 
 internal fun needsTimeLabel(previous: StoredMessage?, current: StoredMessage): Boolean {
