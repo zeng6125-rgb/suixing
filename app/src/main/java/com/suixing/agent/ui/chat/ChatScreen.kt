@@ -1957,8 +1957,19 @@ fun ChatScreen(
                             //
                             // 只在重行上挂：轻行（用户气泡、纯正文）的绘制列表本来就短，多一层
                             // 反而增加合成开销和内存。层上不带任何视觉属性 ⇒ 渲染结果逐像素相同。
-                            val heavyRow = remember(row.parts) {
-                                row.parts.any { it is Part.Thinking || it is Part.Tools }
+                            // **重卡判定要覆盖全部重内容**（issue #47 方向 2）：
+                            // 原来只看 `Thinking` / `Tools`，漏掉两类最重的：
+                            //  · `Compress`（上下文压缩卡，内部可含长清单）；
+                            //  · **含图片的消息行** —— 图片不在 `Part` 里，而是消息级的
+                            //    `message.allImages`（`ChatTopBar.kt:645` 逐个 ImageBlock），
+                            //    解码位图是整页绘制列表里最重的一类。
+                            // 轻行（用户气泡、纯正文）不挂层：它们的绘制列表本来就短，多一层
+                            // 只增加合成开销与内存。层上没有任何视觉属性 ⇒ 渲染结果逐像素相同。
+                            val heavyRow = remember(row.parts, row.message.allImages) {
+                                row.message.allImages.isNotEmpty() ||
+                                    row.parts.any {
+                                        it is Part.Thinking || it is Part.Tools || it is Part.Compress
+                                    }
                             }
                             Column(
                                 Modifier
