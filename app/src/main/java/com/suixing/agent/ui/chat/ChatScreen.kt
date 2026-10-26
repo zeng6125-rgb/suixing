@@ -2070,13 +2070,39 @@ fun ChatScreen(
                                 ) {
                                     TextButton(
                                         onClick = {
+                                            // **点「加载更早」就是读历史：先把追底关掉**。
+                                            // 否则 `ChatScroll` 的追底 effect（`stick && 非拖拽 &&
+                                            // index/offset ≠ 0 ⇒ scrollToItem(0)`）会在内容一变的那一帧
+                                            // 把列表拉回底部 —— 正是「加载了，但滚动位置跳到最下面」。
+                                            // 同一条规矩在前面「导航条跳转」用过（issue #21）。
+                                            scroll.stickToBottom = false
+                                            // **同时冻结追底与"到底就贴底"的自动打开**：内容在下一帧
+                                            // 才长出来，中间可能出现"暂时不可向上滚"的一帧，collector
+                                            // 等 420ms 后会把 stickToBottom 翻回 true。restore 闸就是
+                                            // 为这种"布局未定型的几帧"准备的（issue #4 链路 4）。
+                                            scroll.restoring = true
+                                            // 记下当前阅读位（单 item 布局下 offset 就是"距最新端多少像素"）。
+                                            val anchorIndex = listState.firstVisibleItemIndex
+                                            val anchorOffset = listState.firstVisibleItemScrollOffset
                                             // **先真的去磁盘读**（#30）：`state.messages` 现在只是
                                             // 尾部窗口，光把 `shownTurns` 加大不会让旧消息从磁盘长出来。
                                             // 读到了才扩窗口；没得读（已到文件开头）就不动，避免按钮骗人。
-                                            if (viewModel.loadEarlier()) {
+                                            val loaded = viewModel.loadEarlier()
+                                            if (loaded) {
                                                 shownTurnsByConversation =
                                                     shownTurnsByConversation +
                                                         (state.conversationId to shownTurns + PAGE_TURNS)
+                                            }
+                                            // **等两帧让新内容测量完，再把阅读位钉回去**：
+                                            // 老内容接在视觉顶端，同 offset 就还是同一批行 ⇒ 画面不动。
+                                            scope.launch {
+                                                withFrameNanos { }
+                                                withFrameNanos { }
+                                                if (loaded) {
+                                                    listState.scrollToItem(anchorIndex, anchorOffset)
+                                                    withFrameNanos { }
+                                                }
+                                                scroll.restoring = false
                                             }
                                         },
                                     ) {
