@@ -62,4 +62,42 @@ internal object TurnMarks {
         }
         return n - 1
     }
+
+    /**
+     * 视口内 [PROBE_FRACTION] 位置那一行在**喂序**里的下标 —— 这才是"当前读到哪一轮"。
+     *
+     * **口径取自 Aether**（`shared/.../ConversationTimeline.kt` 的 `currentTimelineIndex`）：
+     * ```kotlin
+     * val probe = layout.viewportStartOffset + (layout.viewportEndOffset - layout.viewportStartOffset) * 0.28f
+     * timelineTargets.indexOfLast { … it.offset <= probe … }
+     * ```
+     * 即：取视口**靠上 28%** 处的那一轮当"当前"，而不是顶部、也不是底部。
+     * 之前用顶部（[topFedIndex]）算当前轮，导航条的高亮与条数全都对不上。
+     *
+     * 随行是单 item 化（整页一个 item），没有 item 边界可读，只能按像素反查：从最新端
+     * （底部）往上累加各行高度，第一个跨过「距底偏移 + 视口高 × 0.28」的行就是它。
+     */
+    fun probeFedIndex(
+        offsetFromBottom: Int,
+        viewport: Int,
+        heightsOldestFirst: IntArray,
+    ): Int {
+        val n = heightsOldestFirst.size
+        if (n <= 0) return 0
+        // **方向**：底锚下 `firstVisibleItemScrollOffset` 是「距最新端（底部）的像素」，
+        // 往**上**（朝更旧的内容）走是加法。视口的 28% 处（靠上）距底是 72% 视口高 ——
+        // Aether 那边是顶锚，`offset <= probe` 取的是探针**之上**最后一项，等价于取探针所在行。
+        val target = offsetFromBottom + (viewport * (1f - PROBE_FRACTION)).toInt()
+        var acc = 0
+        for (r in 0 until n) {
+            val h = heightsOldestFirst[n - 1 - r]
+            if (h <= 0) return r
+            if (acc + h > target) return r
+            acc += h
+        }
+        return n - 1
+    }
+
+    /** 视口内取多靠上的位置算"当前轮"（Aether 用 0.28）。 */
+    const val PROBE_FRACTION = 0.28f
 }

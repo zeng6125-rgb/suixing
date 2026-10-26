@@ -893,13 +893,25 @@ fun ChatScreen(
     // **必须 keyed on `rowHeights`**：`remember {}` 无 key 会把第一次那个数组永远捕获在闭包里，
     // 之后内容变化（新数组、按 id 补上的真实高度）它都读不到 ⇒ 反查恒用旧值。
     // 这是"导航条高亮停在最后一轮"的第二个原因（第一个见 rowHeightsById 的注释）。
-    val firstVisibleFed = remember(rowHeights) {
+    // **当前读到哪一轮 = 视口内 28% 位置那一行**（口径取自 Aether 的 `currentTimelineIndex`）。
+    // 原来取的是**视口顶部**那一行 ⇒ 导航条高亮与条数全都对不上（用户：对应轮次很奇怪、
+    // 条数不增加）。单 item 化后没有 item 边界可读，按像素反查。
+    val firstVisibleFed = remember(rowHeights, feedPrefix) {
         derivedStateOf {
-            TurnMarks.topFedIndex(
+            // `probeFedIndex` 返回的是「**从底部往上**数第几行」（r=0 = 最新那行），
+            // 而 `TurnMarks.current` 期望的是**喂序下标**。两者的换算是
+            // `feedIndexOf(oldVisible) = feedPrefix + (visible.size - 1 - oldVisible)`，
+            // 而 `oldVisible = visible.size - 1 - r` ⇒ **喂序下标 = feedPrefix + r**。
+            // 少了这个 feedPrefix（live 卡 / 压缩中 / 错误行，1~2 行），高亮就会偏一两项
+            // （用户：导航条对应轮次不对）。
+            val r = TurnMarks.probeFedIndex(
                 offsetFromBottom = listState.firstVisibleItemScrollOffset,
                 viewport = listState.layoutInfo.viewportSize.height,
                 heightsOldestFirst = rowHeights,
             )
+            val fed = feedPrefix + r
+            // 埋点：当前轮与窗口（验证导航条对应关系）。
+            fed
         }
     }
 
@@ -956,11 +968,18 @@ fun ChatScreen(
         conversationId = state.conversationId,
     )
 
-    // 「加载更早」的阅读锚：点击时记下 (item, offset)，**等内容真的到齐**再钉回去。
-    // 存成状态而不是局部变量：`loadEarlier()` 是异步读盘，内容在几十毫秒后才进 messages。
+    // **只在内容真的变长之后才恢复锚点**（埋点实证）：
+    // 原来 `LaunchedEffect(visible.size, …)` 会在**首次组合**时无条件跑一次 ⇒ 点击后立刻
+    // "恢复"，而那时读盘还没回来、列表还是那么长 ⇒ 锚点被钉成 0（`before=0`），
+    // 等内容真的到了，列表已经贴在底部 —— 这就是「加载更多却跳到最下面」。
+    //
+    // 现在：点击时记下**当时的内容长度**，只有 `visible.size` 真的变大了才恢复。
     var pendingAnchor by remember(state.conversationId) { mutableStateOf<Pair<Int, Int>?>(null) }
-    LaunchedEffect(visible.size, visible.firstOrNull()?.message?.id) {
+    var pendingAnchorFrom by remember(state.conversationId) { mutableIntStateOf(-1) }
+    LaunchedEffect(visible.size) {
         val anchor = pendingAnchor ?: return@LaunchedEffect
+        // 内容还没变长 ⇒ 不是这次加载的结果，继续等。
+        if (visible.size <= pendingAnchorFrom) return@LaunchedEffect
         // 两帧：一帧让新的行进组合、一帧让它们测量完。
         withFrameNanos { }
         withFrameNanos { }
@@ -969,15 +988,17 @@ fun ChatScreen(
         pendingAnchor = null
         scroll.restoring = false
     }
-    // 兜底：万一内容始终没变（读盘失败/到头），1.2 秒后解除冻结，别让列表永久停在"不许跟底"。
-    LaunchedEffect(pendingAnchor) {
-        if (pendingAnchor == null) return@LaunchedEffect
-        kotlinx.coroutines.delay(1200)
-        if (pendingAnchor != null) {
-            pendingAnchor = null
-            scroll.restoring = false
-        }
-    }
+    // **不再有 1.2 秒兜底**（用户：点「加载更早」仍跳到底）。
+    //
+    // 原来这里 1.2 秒后无条件 `restoring = false`。而闸的用途正是"内容还没测量完的那几帧
+    // 不许把列表判定成到底" —— 读盘 + 解析 + 测量完全可能超过 1.2 秒，闸一开，
+    // `ChatScroll` 那个 420ms 的"持续到底"collector 就把 `stickToBottom` 翻回 true，
+    // 紧接着追底 effect `scrollToItem(0)` ⇒ 列表跳到最下面（埋点实证：
+    // `stick=true reason=canBack-false restoring=false` → `follow-scrollToBottom`）。
+    //
+    // 现在：**闸只在锚点恢复成功时开**；`loadEarlier()` 明确返回 false（没有更早内容、
+    // 读盘失败）时立刻开。其余情况闸一直开着 —— 列表停在原位，也不会被判成"到底"。
+    // 万一真卡住（内容永远不来），顶栏的「回到最新」按钮仍然可用（它显式设 stickToBottom=true）。
     // 贴底时持续记住当前占位；离开底部（开始读历史）就冻住它 ——
     // 输入框高度在流式期间会变（状态行出现/消失），不冻住就会把整列内容推几 dp。
     LaunchedEffect(stackFootprint, scroll.stickToBottom) {
@@ -1777,7 +1798,7 @@ fun ChatScreen(
                                             if (!moved && change != null && change.pressed &&
                                                 (dy > CANCEL_FOLLOW_PX || dy < -CANCEL_FOLLOW_PX)
                                             ) {
-                                                scroll.stickToBottom = false
+                                            scroll.stickToBottom = false
                                                 moved = true
                                                 pressMoved = true
                                                 // 滚动不是选字：解除 reveal 拦截
@@ -2151,11 +2172,14 @@ fun ChatScreen(
                                             // 现在把锚点存进状态，由 `LaunchedEffect` 在**内容变化后**钉回去。
                                             pendingAnchor = listState.firstVisibleItemIndex to
                                                 listState.firstVisibleItemScrollOffset
+                                            pendingAnchorFrom = visible.size
                                             // **先真的去磁盘读**（#30）：`state.messages` 现在只是
                                             // 尾部窗口，光把 `shownTurns` 加大不会让旧消息从磁盘长出来。
                                             // 读到了才扩窗口；没得读（已到文件开头）就不动，避免按钮骗人。
                                             val loaded = viewModel.loadEarlier()
                                             if (!loaded) {
+                                                // 没有更早内容可读（或读盘失败）：本次到此为止，
+                                                // 闸立刻开，别把列表永久冻住。
                                                 pendingAnchor = null
                                                 scroll.restoring = false
                                             }

@@ -732,24 +732,38 @@ internal fun turnPage(messages: List<StoredMessage>, want: Int): TurnPage {
 }
 
 /**
- * 导航条显示几条（用户定的规则）：**常驻 5 条**，读到更早的轮次时逐步解锁 —— 读到第 6 轮
- * 显示 6 条、第 7 轮 7 条 … 到第 12 轮封顶 12 条。会话里不足 5 轮就画实际条数。
+ * 导航条显示几条（**用户定的规则**）：
  *
- * [current] 是 1 基的「当前读到第几轮」（[TurnMarks.current] 的口径）。
+ *  · 常驻 5 条 —— 读最新那几轮时就在这 5 条里滚；
+ *  · 读到常驻区之外（更早的轮次）时**逐步解锁**：第 6 条、第 7 条 …… 最多 12 条；
+ *  · 会话本身不足 5 轮就画实际条数。
+ *
+ * 判据是「当前读的这一轮**距最新**多少轮」：[current] 是 1 基的当前轮号（[TurnMarks.current]），
+ * 所以 `turns - current` 就是"往回走了几轮"。
+ *
+ * 参考：Aether 的 `compactTimelineIndices`（`shared/.../ConversationTimeline.kt`）用的是
+ * **恒定 4 条 + 窗口随当前轮滑动**，长按时才展开全部；但 Aether 是整页全量加载、没有分页，
+ * 而随行要分页加载更早的内容，窗口会被新内容顶走，所以这里按"条数随解锁增长"来做。
+ * **"当前轮"的口径取自 Aether**（视口内 28% 位置那一行，见 [TurnMarks.probeFedIndex]）。
  */
 internal fun scrubberRowCount(turns: Int, current: Int): Int {
     if (turns <= 0) return 0
-    // 关键：看的是「当前读的这一轮**距最新**多少轮」，不是它在整个会话里的序号。
-    // 读最新那几轮时 distance=0..4 ⇒ 恒为常驻 5 条；读到倒数第 6 轮时才多一条，依此类推。
     val distance = (turns - current).coerceAtLeast(0)
     return (distance + 1).coerceIn(SCRUBBER_VISIBLE_MIN, SCRUBBER_VISIBLE_MAX).coerceAtMost(turns)
 }
 
+/**
+ * 导航条画哪几轮。
+ *
+ * 口径取自 Aether（`compactTimelineWindowStart`）：**条数固定**（min(总轮数, 常驻条数)），
+ * **窗口起点跟着当前轮**：`start = (current - 1).coerceIn(0, turns - size)`。
+ * 长按时 [forceRows] = 全部轮次（Aether 的 `navigating` 分支画 `entries.size` 格）。
+ */
 internal fun scrubberWindow(
     turns: Int,
     current: Int,
     unlocked: Int,
-    /** 长按时强制展开的条数（0 = 按常驻/解锁规则）。 */
+    /** 长按时强制展开的条数（0 = 按常驻规则）。 */
     forceRows: Int = 0,
 ): IntRange {
     if (turns <= 0) return IntRange.EMPTY

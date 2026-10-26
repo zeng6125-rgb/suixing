@@ -67,13 +67,10 @@ class TurnScrubberWindowTest {
 
     @Test
     fun `the strip stays at five turns until the reader goes past them, then grows to twelve`() {
-        // 最新那一轮：常驻 5 条
+        // 用户定的规则：常驻 5 条；读到更早的轮次逐步解锁，最多 12 条。
         assertEquals(5, scrubberRowCount(turns = 40, current = 40))
-        // 读到倒数第 5 轮，仍然 5 条
         assertEquals(5, scrubberRowCount(turns = 40, current = 36))
-        // 越过常驻区：倒数第 6 轮 → 6 条
         assertEquals(6, scrubberRowCount(turns = 40, current = 35))
-        // 倒数第 11 轮 → 11 条；再往上封顶 12
         assertEquals(11, scrubberRowCount(turns = 40, current = 30))
         assertEquals(12, scrubberRowCount(turns = 40, current = 29))
         assertEquals(12, scrubberRowCount(turns = 40, current = 1))
