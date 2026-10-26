@@ -573,7 +573,16 @@ fun ChatScreen(
     val reversedVisible = remember(visible) { visible.asReversed() }
     // 每行实测高度（visible 正序，已含 12dp 行间距）：单 item 化后
     // `firstVisibleItemIndex` 恒为 0，读数导航改为「像素偏移 → 第几轮」反查。
-    val rowHeights = remember(visible) { IntArray(visible.size) }
+    // **按消息 id 存实测高度，不要随 `visible` 重建数组**：
+    // 原来 `remember(visible) { IntArray(visible.size) }` 在内容一变（流式每来一条、翻页、
+    // 展开折叠块）就换成全 0 数组，而行只在**布局变化**时回调 `onGloballyPositioned` ——
+    // 已经稳定的行不会再报一次高度 ⇒ 数组长期是 0 ⇒ `topFedIndex` 恒返回 0 ⇒
+    // 导航条高亮永远停在最后一轮（用户报「滑到对应轮次没有显示当前对应的导航条」）。
+    // 按 id 存就没有这个生命周期问题：行第一次量到以后一直有效。
+    val rowHeightsById = remember(state.conversationId) { HashMap<String, Int>() }
+    val rowHeights = remember(visible, rowHeightsById) {
+        IntArray(visible.size) { rowHeightsById[visible[it].message.id] ?: 0 }
+    }
     // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
     // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
     // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
@@ -856,7 +865,10 @@ fun ChatScreen(
     // 用「距最新的像素偏移 + 视口高」反查视口顶部是哪一行（`TurnMarks.topFedIndex`，
     // 带单测）。仍然用 `remember` 持有 State、把 `.value` 的读取推迟到 `TurnScrubber`
     // 内部（issue #26 原因一），滚动时只有导航条自己重组。
-    val firstVisibleFed = remember {
+    // **必须 keyed on `rowHeights`**：`remember {}` 无 key 会把第一次那个数组永远捕获在闭包里，
+    // 之后内容变化（新数组、按 id 补上的真实高度）它都读不到 ⇒ 反查恒用旧值。
+    // 这是"导航条高亮停在最后一轮"的第二个原因（第一个见 rowHeightsById 的注释）。
+    val firstVisibleFed = remember(rowHeights) {
         derivedStateOf {
             TurnMarks.topFedIndex(
                 offsetFromBottom = listState.firstVisibleItemScrollOffset,
@@ -1984,7 +1996,8 @@ fun ChatScreen(
                                 Modifier
                                     .then(if (heavyRow) Modifier.graphicsLayer() else Modifier)
                                     .onGloballyPositioned { coords ->
-                                        rowHeights[visibleIndex] = coords.size.height + gapPx
+                                        // 按消息 id 记（见上面 rowHeightsById 的说明）。
+                                        rowHeightsById[row.message.id] = coords.size.height + gapPx
                                     },
                             ) {
                                 // 外观 → 显示时间: off means no labels at all, not fewer.
