@@ -995,6 +995,12 @@ fun ChatScreen(
     //
     // 现在：点击时记下**当时的内容长度**，只有 `visible.size` 真的变大了才恢复。
     var pendingAnchorFrom by remember(state.conversationId) { mutableIntStateOf(-1) }
+    // 「加载更早」前的**首可见项与项内偏移**：新行插入在转录 item 的上缘，会把正在读的内容
+    // 整体往下推（视口锚在首可见项上）。内容变长后用 `requestScrollToItem` 把同一项同一偏移
+    // 送回 —— 它在**下一趟测量**里生效，和内容同一次布局落地，不会被"当前最大滚动量"夹断
+    // （旧版等两帧再 `scrollToItem` 正是因此偏掉，已删）。
+    var pendingAnchorIndex by remember(state.conversationId) { mutableIntStateOf(-1) }
+    var pendingAnchorOffset by remember(state.conversationId) { mutableIntStateOf(0) }
     // **「加载更早」不做任何滚动**（用户：「你为什么要改变位置啊？让历史内容出现不就行了」）。
     //
     // 这个列表是 `reverseLayout` + 整页转录装在**单个 item** 里（`key = "transcript"`）：
@@ -1007,10 +1013,13 @@ fun ChatScreen(
     LaunchedEffect(visible.size) {
         if (pendingAnchorFrom < 0) return@LaunchedEffect
         if (visible.size <= pendingAnchorFrom) return@LaunchedEffect
-        // 让新行完成一次测量，再开闸。
-        withFrameNanos { }
-        withFrameNanos { }
+        if (pendingAnchorIndex >= 0) {
+            // **同一项、同一偏移**：`requestScrollToItem` 把这次滚动记在列表上，下一趟测量时
+            // 与"内容变长"同帧生效 ⇒ 新行出现、视口像素不动。
+            listState.requestScrollToItem(pendingAnchorIndex, pendingAnchorOffset)
+        }
         pendingAnchorFrom = -1
+        pendingAnchorIndex = -1
         scroll.restoring = false
     }
     // **不再有 1.2 秒兜底**（用户：点「加载更早」仍跳到底）。
@@ -1383,7 +1392,7 @@ fun ChatScreen(
     // **抽屉动画期间不动转录**（用户：「切会话这个抽屉的动画都被吞掉和不流畅」
     // 「内容出不出来是一回事」）。
     //
-    // 点抽屉里的一行时，同一帧里同时发生两件事：抽屉收起动画（170ms，每帧一个 offset）
+    // 点抽屉里的一行时，同一帧里同时发生两件事：抽屉收起动画（160ms，每帧一个 offset）
     // 和这一页的冷组合。而这里的 while 循环会**逐帧**组合一批新行、每行还要 parseMarkdown，
     // 正好把动画的帧吃掉 —— 表现就是"抽屉啪一下没了/一顿一顿"。
     // 所以先等抽屉动画落定，再开始分批填充：动画期间这一页只组合第一小批（2~4 行），足够便宜。
@@ -2267,6 +2276,8 @@ fun ChatScreen(
                                             // 上面那个 effect 据此开 restore 闸。**不记滚动位置**
                                             // （上面说明：单个 transcript item 向上长，位置本来就不会动）。
                                             pendingAnchorFrom = visible.size
+                                            pendingAnchorIndex = listState.firstVisibleItemIndex
+                                            pendingAnchorOffset = listState.firstVisibleItemScrollOffset
                                             // **先真的去磁盘读**（#30）：`state.messages` 现在只是
                                             // 尾部窗口，光把 `shownTurns` 加大不会让旧消息从磁盘长出来。
                                             // 读到了才扩窗口；没得读（已到文件开头）就不动，避免按钮骗人。
@@ -2275,6 +2286,7 @@ fun ChatScreen(
                                                 // 没有更早内容可读（或读盘失败）：本次到此为止，
                                                 // 闸立刻开，别把列表永久冻住。
                                                 pendingAnchorFrom = -1
+                                                pendingAnchorIndex = -1
                                                 scroll.restoring = false
                                             }
                                             if (loaded) {
@@ -2373,10 +2385,9 @@ fun ChatScreen(
                 },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
-                    // **离屏幕边缘 2dp**：我中途擅自把它从 4dp 挪到 14dp（想避开系统右缘手势带），
-                    // 那是你没要的改动，先撤；再按你的话贴近一点，4dp → 2dp。
-                    // 观感/位置这条以后**只按你说的数字动**，不再自作主张。
-                    .padding(end = 2.dp),
+                    // **离右边缘 4dp**（用户要求在 4dp 上「稍微收一点」的同时定了这个数）。
+                    // 观感/位置只按你说的数字动。
+                    .padding(end = 4.dp),
                 labelOf = { turn ->
                     // `turn` 是**全局轮号**（1 基），标签直接用它。
                     // 找这一轮的开头文字要换算成**窗口内**下标（0 基）：`turnIndices` 里装的是

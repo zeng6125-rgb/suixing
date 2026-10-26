@@ -942,9 +942,27 @@ internal fun MetricButton(icon: ImageVector, text: String, label: String, onClic
  * 滚动成本的账单因此回到「常驻」—— 但这是用户明确选择的取舍：复制是高频手势，
  * 滚动优化不能拿它换。
  */
+/**
+ * 是否已经在某个 [SelectionContainer] 里了。
+ *
+ * 为什么需要：卡片是**两层**包的 —— 外层（本文件的角色分支）包整张卡，内层（ChatBlocks 的
+ * 气泡 / 分段）又包一次。两层 `SelectionContainer` = 两个选区管理器，各持一个工具栏状态：
+ * 点空白处关掉一个时，另一个会把自己的工具栏**再画一次**（真机：菜单消失后别处又冒出一个
+ * 同样的「复制 / 全选」菜单再自动消失）。嵌套对跨块选择也没有帮助 —— 跨块靠的正是**外层**
+ * 那一个容器。所以这里只允许最外层真正挂载。
+ */
+internal val LocalInSelectable = androidx.compose.runtime.compositionLocalOf { false }
+
 @Composable
 internal fun SelectableWhenArmed(content: @Composable () -> Unit) {
-    SelectionContainer { content() }
+    if (LocalInSelectable.current) {
+        // 已经在一个容器里：只透传内容，不再嵌套第二个。
+        content()
+        return
+    }
+    androidx.compose.runtime.CompositionLocalProvider(LocalInSelectable provides true) {
+        SelectionContainer { content() }
+    }
 }
 
 @Composable

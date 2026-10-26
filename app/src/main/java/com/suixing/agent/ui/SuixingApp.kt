@@ -230,7 +230,7 @@ private const val IME_QUANTUM_PX = 4
 private val DRAWER_SHEET_WIDTH = 300
 
 /**
- * 抽屉收起：**统一一条规格**，170ms + `FastOutLinearInEasing`（用户指定：260 → 210 → 180 → 170）。
+ * 抽屉收起：**统一一条规格**，170ms + `FastOutLinearInEasing`（用户指定：260 → 210 → 180 → 170 → 160）。
  *
  * 之前遮罩那条和助手那条不一样，原因是有两条关闭入口：
  *  · 我们自己的 `closeDrawer()`（点助手、返回键、会话行）—— 参数由我们传；
@@ -246,7 +246,7 @@ private val DRAWER_SHEET_WIDTH = 300
  * `closeDrawer()` ⇒ 与助手 / 返回 / 会话行同一条 [DRAWER_CLOSE_SPEC]。
  * 打开不受影响：打开是显式传 spec 的（260ms 减速进场）。
  */
-private const val DRAWER_CLOSE_MS = 170
+private const val DRAWER_CLOSE_MS = 160
 
 /** 抽屉收起规格（四条关闭路径共用）。`FiniteAnimationSpec` 不可变，顶层单例即可。 */
 private val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
@@ -373,7 +373,7 @@ fun SuixingApp() {
     // 用户自己收起抽屉（遮罩、返回键、左缘拖动）：这是用户自己的动作，走库的动画。同时清掉
     // 出发页标记——用户手动把抽屉收了，返回时就不该再自己弹出来（"状态"是他刚亲手关掉的这个）。
     val closeDrawer: () -> Unit = {
-        // 收起用 [DRAWER_CLOSE_SPEC]（170ms 加速收走）。点遮罩那条也走这里
+        // 收起用 [DRAWER_CLOSE_SPEC]（160ms 加速收走）。点遮罩那条也走这里
         // （自带遮罩层调用本函数），四条路径手感一致。
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         drawerTarget = null
@@ -393,7 +393,7 @@ fun SuixingApp() {
      * 用户原话：「点了侧边栏的切换会话，先有关闭侧边栏（，再）会话」。
      * 之前把 `openConversation` 和收起动画放在同一帧，换会话要整页换状态（分组、解析、冷组合），
      * 主线程被占住、动画的帧被吃掉 ⇒ 收起看着和助手/遮罩那几条不一样。
-     * 现在顺序拨正：动画完整播完（170ms），再 `showChat()` + 换会话。
+     * 现在顺序拨正：动画完整播完（160ms），再 `showChat()` + 换会话。
      */
     // **连点保护**：只有最后一次点击算数（第一次的协程会被第二次的动画取消，令牌随之失效）。
     val drawerSwitchToken = remember { intArrayOf(0) }

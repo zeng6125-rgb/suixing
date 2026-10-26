@@ -2445,12 +2445,14 @@ class AgentEngine(
         // 画像在记忆**之前**（用户：「画像 在记忆前面吧」）：先交代"这是谁"，再说"我记得什么"。
         // 两段都是模型该知道的事，但一段是用户写的、一段是模型自己写的，分开才不会让模型把自己的
         // 笔记当成用户的自述。空画像整段不出现，不留一个空标题。
-        val about = profile.trim()
+        // **两个开关在「对话配置」里**（[AppSettings.injectProfile] / [AppSettings.injectMemory]）：
+        // 关掉＝整段不出现，**连小标题一起**不留 —— 留一个空标题会让模型以为"这里本来该有内容"。
+        val about = if (settings.injectProfile) profile.trim() else ""
         if (about.isNotBlank()) {
             append("\n\n## 关于用户（画像）\n")
             append(about)
         }
-        val remembered = memoryBlock(memory)
+        val remembered = if (settings.injectMemory) memoryBlock(memory) else ""
         if (remembered.isNotBlank()) {
             append("\n\n## 你记得的事\n")
             append(remembered)

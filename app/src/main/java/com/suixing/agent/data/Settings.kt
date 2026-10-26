@@ -239,6 +239,21 @@ data class AppSettings(
      */
     val autoCompress: Boolean = true,
     /**
+     * 是否把「你记得的事」（记忆条目）拼进系统提示词。
+     *
+     * 关掉＝那一段**完全不出现**（不是留一个空标题）：用户可以在「对话配置」里按需关掉，
+     * 比如让模型只看人设、或省下这几百 tokens。默认开，保持原有行为。
+     * 读取处：`AgentEngine.systemPrompt()` 的 `## 你记得的事`。
+     */
+    val injectMemory: Boolean = true,
+    /**
+     * 是否把「关于用户（画像）」拼进系统提示词。
+     *
+     * 与 [injectMemory] 同一套语义：关掉整段不出现，默认开。
+     * 读取处：`AgentEngine.systemPrompt()` 的 `## 关于用户（画像）`。
+     */
+    val injectProfile: Boolean = true,
+    /**
      * 失败后自动重试一轮。
      *
      * 默认开：它覆盖的失败——连接被掐、超时、网关抽风、被限流——本来就是偶发的，而另一种做法

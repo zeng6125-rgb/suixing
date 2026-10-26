@@ -1640,6 +1640,35 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                 )
             }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
+            item { SectionHeader("注入系统提示词") }
+            item {
+                SettingRow(
+                    title = "注入记忆提示词",
+                    subtitle = "开：每次请求都把「你记得的事」（记忆条目）拼进系统提示词；" +
+                        "关：这一段完全不出现，模型不知道你记过什么，但省下这部分上下文。",
+                    control = {
+                        Switch(
+                            checked = stored.injectMemory,
+                            onCheckedChange = { on -> scope.persist { it.copy(injectMemory = on) } },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            item {
+                SettingRow(
+                    title = "注入用户画像提示词",
+                    subtitle = "开：把「关于用户（画像）」拼进系统提示词，模型先知道「这是谁」；" +
+                        "关：整段不出现（画像本身不会被删，只是这次不发给模型）。",
+                    control = {
+                        Switch(
+                            checked = stored.injectProfile,
+                            onCheckedChange = { on -> scope.persist { it.copy(injectProfile = on) } },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             item { SectionHeader("失败处理") }
             item {
                 SettingRow(
