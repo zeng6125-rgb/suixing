@@ -1765,7 +1765,18 @@ internal fun ContextChip(tokens: Int, window: Int, live: StreamStats? = null) {
 internal fun TurnScrubber(
     /** The conversation whose window this is: opening another one resets it. */
     conversationId: String,
-    turns: Int,
+    /**
+     * **会话总轮数**（全局 1 基，最新那轮 = 这个数）。
+     *
+     * 旧参数名叫 `turns`、装的是"窗口里画了几轮"（≤8），而标签按全局轮号算、条数也按全局算 ——
+     * 同一个下标被当两种坐标用，于是条数涨不上去、标签与行错位（用户：导航条对应轮次不对）。
+     * 现在统一：这里给总轮数，窗口由 [scrubberWindow] 从总轮数 + 当前轮推出。
+     */
+    totalTurns: Int,
+    /**
+     * **已经加载出来的轮数**（窗口之外的还在盘上，没加载就不能跳过去）。
+     */
+    drawnTurns: Int,
     // **延迟读**（issue #26 原因一）：值随滚动每跨一个 item 就变；若由调用方在组合体里算好再传，
     // 每次变化都会让整个聊天页重组。改成 lambda 后只有本组件自己读、自己重组。
     current: () -> Int,
@@ -1773,7 +1784,8 @@ internal fun TurnScrubber(
     labelOf: (Int) -> String,
     onJumpTo: (Int) -> Unit,
 ) {
-    if (turns <= 1) return
+    // 一轮都没有 ⇒ 不画（只有一轮时导航条也没有意义）。
+    if (totalTurns <= 1) return
     val scheme = MaterialTheme.colorScheme
     // How far above the window the finger has pulled the strip — the turns it has unlocked in
     // this conversation. Kept for as long as the chat is open, dropped the moment another is
@@ -1784,13 +1796,17 @@ internal fun TurnScrubber(
     // The last few turns, always including the one being read: sampling the whole
     // conversation into five evenly spaced lines is what made "which line is which turn"
     // impossible to tell, and made the jump land somewhere the user did not point at.
+    //
+    // **current() 现在返回全局轮号**（1 基），与 [scrubberWindow] 的坐标一致。
     val currentTurn = current()
-    val window = remember(turns, currentTurn, unlocked, expanded) {
+    val window = remember(totalTurns, drawnTurns, currentTurn, unlocked, expanded) {
         scrubberWindow(
-            turns,
-            currentTurn,
-            unlocked,
-            forceRows = if (expanded) SCRUBBER_VISIBLE_MAX else 0,
+            totalTurns = totalTurns,
+            currentTurn = currentTurn,
+            drawnTurns = drawnTurns,
+            unlocked = unlocked,
+            // 长按展开：把**已加载的全部**轮次都画出来（Aether 的 `navigating` 分支同理）。
+            forceRows = if (expanded) drawnTurns else 0,
         )
     }
     val rows = remember(window) { window.toList() }
@@ -1970,8 +1986,9 @@ internal fun TurnScrubber(
             horizontalAlignment = Alignment.End,
         ) {
             rows.forEachIndexed { row, turn ->
-                val read = turn < currentTurn - 1
-                val active = turn == currentTurn - 1
+                // `turn` 是**全局轮号**（1 基）：比当前轮早的是"已读过"，等于当前轮的是"正在读"。
+                val read = turn < currentTurn
+                val active = turn == currentTurn
                 val chosen = shown && row == selected
                 val scale by animateFloatAsState(
                     targetValue = when {

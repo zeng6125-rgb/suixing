@@ -5,128 +5,127 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The scrubber's window: which turns the strip draws, and how far a finger can pull it up.
+ * 导航条的窗口：**全局轮号**（1 基，最新那轮 = drawnTurns）下的条数与窗口。
  *
- * Two things are being pinned here. First, where a conversation opens — the newest
- * [SCRUBBER_VISIBLE_MIN] turns with nothing unlocked, which is the state every chat is reset to when
- * it is opened and the one the window is rebuilt from after every jump. Second, the unlock
- * itself: sliding to the top line brings the turns above the window within reach, monotonically,
- * so a drag that turns around does not lose what it just reached.
+ * 重构前的契约是"窗口内坐标"（`turns` = 窗口里画了几轮），后来发现同一个下标被当两种坐标用 ——
+ * 条数按窗口轮数算、标签按全局轮号算、跳转按窗口下标算 —— 于是条数涨不上去、标签与行错位。
+ * 现在统一成全局轮号：
+ *  · [scrubberRowCount] 条数：常驻 5 条，读到更早的轮次逐步解锁，最多 12 条；
+ *  · [scrubberWindow] 画哪几轮：窗口跟着当前轮走，当前轮必在窗口里。
  */
 class TurnScrubberWindowTest {
 
-    private val pitchPx = 17f
-    private val rowPx = 14f
+    @Test
+    fun `the strip shows five turns by default`() {
+        assertEquals(5, scrubberRowCount(totalTurns = 40, currentTurn = 40))
+        assertEquals(5, scrubberRowCount(totalTurns = 40, currentTurn = 36))
+        // 读到更早的轮次 ⇒ 逐步解锁。
+        assertEquals(6, scrubberRowCount(totalTurns = 40, currentTurn = 35))
+        assertEquals(11, scrubberRowCount(totalTurns = 40, currentTurn = 30))
+        assertEquals(12, scrubberRowCount(totalTurns = 40, currentTurn = 29))
+        assertEquals(12, scrubberRowCount(totalTurns = 40, currentTurn = 1))
+        // 会话本身不足 5 轮就画实际条数。
+        assertEquals(3, scrubberRowCount(totalTurns = 3, currentTurn = 1))
+    }
 
     @Test
-    fun `a conversation opens on the newest window and nothing unlocked`() {
-        // 每一次进会话都要重新刷新该状态: the window is computed from turns/current with the
-        // unlocked count a conversation starts with, which is none.
-        val window = scrubberWindow(turns = 40, current = 40, unlocked = 0)
+    fun `the window ends at the newest turn and holds the current one`() {
+        // 会话 40 轮、只加载了最后 12 轮（全局 29~40）⇒ 窗口是最新 5 条：36..40。
+        val window = scrubberWindow(
+            totalTurns = 40,
+            currentTurn = 40,
+            drawnTurns = 12,
+        )
+        assertEquals(5, window.count())
+        assertEquals(40, window.last)
+        assertEquals(36, window.first)
+        assertTrue("当前轮必须在窗口里：$window", 40 in window)
+    }
 
-        assertEquals(35 until 40, window)
-        assertEquals(SCRUBBER_VISIBLE_MIN, window.count())
+    @Test
+    fun `reading an older loaded turn slides the window up to it`() {
+        // 已加载 29~40；读到全局第 30 轮 ⇒ 窗口应含 30，且让出最新那几轮。
+        val window = scrubberWindow(totalTurns = 40, currentTurn = 30, drawnTurns = 12)
+        assertTrue("当前轮必须在窗口里：$window", 30 in window)
+        assertEquals(5, window.count())
+        // 窗口围着当前轮 30：29..33（已加载范围是 29~40，窗口不能越过它）。
+        assertEquals(29, window.first)
+        assertEquals(33, window.last)
     }
 
     @Test
     fun `the turn being read is always on the strip`() {
-        for (turns in listOf(1, 6, 7, 20, 40)) {
-            for (current in 1..turns) {
-                val window = scrubberWindow(turns, current, unlocked = 0)
+        // 当前轮必须在已加载范围内。
+        for (drawn in listOf(1, 5, 6, 12, 40)) {
+            val oldest = 40 - drawn + 1
+            for (current in oldest..40) {
+                val window = scrubberWindow(
+                    totalTurns = 40,
+                    currentTurn = current,
+                    drawnTurns = drawn,
+                )
                 assertTrue(
-                    "turn $current of $turns missing from $window",
-                    current - 1 in window,
+                    "current $current of $drawn missing from $window",
+                    current in window,
                 )
             }
         }
     }
 
     @Test
-    fun `reading an older turn slides the window up to it`() {
-        // Turn 8 of 40 is older than the newest six, so the window has left the newest turns.
-        val window = scrubberWindow(turns = 40, current = 8, unlocked = 0)
-
-        assertEquals(7 until 19, window)
-        assertTrue(7 in window)
-    }
-
-    @Test
     fun `unlocking slides the window up by exactly that many turns`() {
-        assertEquals(35 until 40, scrubberWindow(40, 40, unlocked = 0))
-        assertEquals(34 until 39, scrubberWindow(40, 40, unlocked = 1))
-        assertEquals(30 until 35, scrubberWindow(40, 40, unlocked = 5))
+        val base = scrubberWindow(totalTurns = 40, currentTurn = 40, drawnTurns = 40, unlocked = 0)
+        val one = scrubberWindow(totalTurns = 40, currentTurn = 40, drawnTurns = 40, unlocked = 1)
+        val five = scrubberWindow(totalTurns = 40, currentTurn = 40, drawnTurns = 40, unlocked = 5)
+        assertEquals(base.first - 1, one.first)
+        assertEquals(base.first - 5, five.first)
+        assertEquals(5, five.count())
     }
 
     @Test
     fun `the window never slides past the first turn`() {
-        val window = scrubberWindow(turns = 40, current = 40, unlocked = 99)
-
-        assertEquals(0 until SCRUBBER_VISIBLE_MIN, window)
-        assertEquals(SCRUBBER_VISIBLE_MIN, window.count())
-    }
-
-    @Test
-    fun `the strip stays at five turns until the reader goes past them, then grows to twelve`() {
-        // 用户定的规则：常驻 5 条；读到更早的轮次逐步解锁，最多 12 条。
-        assertEquals(5, scrubberRowCount(turns = 40, current = 40))
-        assertEquals(5, scrubberRowCount(turns = 40, current = 36))
-        assertEquals(6, scrubberRowCount(turns = 40, current = 35))
-        assertEquals(11, scrubberRowCount(turns = 40, current = 30))
-        assertEquals(12, scrubberRowCount(turns = 40, current = 29))
-        assertEquals(12, scrubberRowCount(turns = 40, current = 1))
-        // 会话本身不足 5 轮就画实际条数
-        assertEquals(3, scrubberRowCount(turns = 3, current = 1))
-    }
-
-    @Test
-    fun `long press forces the strip to its widest`() {
-        val window = scrubberWindow(turns = 40, current = 40, unlocked = 0, forceRows = SCRUBBER_VISIBLE_MAX)
-        assertEquals(SCRUBBER_VISIBLE_MAX, window.count())
-        assertEquals(28 until 40, window)
+        val window = scrubberWindow(
+            totalTurns = 40,
+            currentTurn = 40,
+            drawnTurns = 40,
+            unlocked = 99,
+        )
+        assertEquals(1, window.first)
     }
 
     @Test
     fun `a negative unlock is read as none`() {
         assertEquals(
-            scrubberWindow(40, 40, unlocked = 0),
-            scrubberWindow(40, 40, unlocked = -3),
+            scrubberWindow(totalTurns = 40, currentTurn = 40, drawnTurns = 40, unlocked = 0),
+            scrubberWindow(totalTurns = 40, currentTurn = 40, drawnTurns = 40, unlocked = -3),
         )
     }
 
     @Test
     fun `a conversation shorter than the strip draws all of it`() {
         for (turns in 1..SCRUBBER_VISIBLE_MIN) {
-            assertEquals(0 until turns, scrubberWindow(turns, turns, unlocked = 0))
+            // 全部轮次都在窗口里（会话比常驻条数还短）。
+            val window = scrubberWindow(totalTurns = turns, currentTurn = turns, drawnTurns = turns)
+            assertEquals(1, window.first)
+            assertEquals(turns, window.last)
+            assertEquals(turns, window.count())
         }
-        assertEquals(IntRange.EMPTY, scrubberWindow(turns = 0, current = 1, unlocked = 0))
+        assertEquals(
+            IntRange.EMPTY,
+            scrubberWindow(totalTurns = 0, currentTurn = 1, drawnTurns = 0),
+        )
     }
 
     @Test
-    fun `reaching the top line unlocks one turn`() {
-        // The centre of the top line's own box.
-        assertEquals(1, scrubberPull(y = rowPx / 2f, rowPx = rowPx, pitchPx = pitchPx, pull = 0))
-        // Its bottom edge is still the top line.
-        assertEquals(1, scrubberPull(y = rowPx, rowPx = rowPx, pitchPx = pitchPx, pull = 0))
-    }
-
-    @Test
-    fun `one row of travel above the rail unlocks one more turn`() {
-        assertEquals(2, scrubberPull(y = -pitchPx / 2f, rowPx = rowPx, pitchPx = pitchPx, pull = 0))
-        assertEquals(3, scrubberPull(y = -2 * pitchPx, rowPx = rowPx, pitchPx = pitchPx, pull = 0))
-    }
-
-    @Test
-    fun `a finger below the top line unlocks nothing new`() {
-        assertEquals(4, scrubberPull(y = rowPx + 1f, rowPx = rowPx, pitchPx = pitchPx, pull = 4))
-        assertEquals(4, scrubberPull(y = 500f, rowPx = rowPx, pitchPx = pitchPx, pull = 4))
-    }
-
-    @Test
-    fun `what has been unlocked is not taken back by coming down again`() {
-        val reached = scrubberPull(y = -3 * pitchPx, rowPx = rowPx, pitchPx = pitchPx, pull = 0)
-        val back = scrubberPull(y = rowPx + 1f, rowPx = rowPx, pitchPx = pitchPx, pull = reached)
-
-        assertEquals(4, reached)
-        assertEquals(4, back)
+    fun `long press forces the strip to show every loaded turn`() {
+        val window = scrubberWindow(
+            totalTurns = 40,
+            currentTurn = 40,
+            drawnTurns = 12,
+            forceRows = 12,
+        )
+        assertEquals(12, window.count())
+        assertEquals(29, window.first)
+        assertEquals(40, window.last)
     }
 }

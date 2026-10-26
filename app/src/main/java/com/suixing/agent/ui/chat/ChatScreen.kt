@@ -569,31 +569,16 @@ fun ChatScreen(
         groupRows(state.messages.drop(page.from), state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
-    // **切会话时先把这一页的 Markdown 解析预热掉**（用户：切换会话动画掉帧、不流畅）。
-    // 新会话的每一行正文/思考都是**第一次**出现，`SettledBlocks` 里没有它们的解析结果 ⇒
-    // 全部要在组合期现解析（长答案 2~10ms/条）。这里在后台把它们解析好塞进进程级缓存，
-    // 于是动画期间陆续进入组合的行直接命中缓存。
-    LaunchedEffect(state.conversationId, visible.firstOrNull()?.message?.id, visible.size) {
-        val texts = buildList {
-            for (row in visible) {
-                for (part in row.parts) {
-                    when (part) {
-                        is Part.Text -> if (part.text.length >= 400) add(part.text)
-                        is Part.Thinking -> if (part.text.length >= 400) add(part.text)
-                        else -> Unit
-                    }
-                }
-            }
-        }
-        if (texts.isEmpty()) return@LaunchedEffect
-        withContext(Dispatchers.Default) {
-            for (text in texts) {
-                if (com.suixing.agent.ui.components.SettledBlocks.get(text) != null) continue
-                val blocks = com.suixing.agent.ui.components.parseMarkdown(text)
-                com.suixing.agent.ui.components.SettledBlocks.putIfSettled(true, text, blocks)
-            }
-        }
-    }
+    // **解析预热已删**（用户：切换会话卡、发热）。
+    //
+    // 原来这里在切会话瞬间把**这一页**的每段正文/思考都在后台 `parseMarkdown` 一遍，理由是
+    // "新会话的行都是第一次出现，没有缓存"。但这是**净负优化**：
+    //  · 预热与主线程的冷组合**同时**进行，总 CPU 一分不少，而后台只有 4 个 Default 线程
+    //    ⇒ 与主线程抢 CPU ⇒ 动画那 260ms 掉帧、发热；
+    //  · `SettledBlocks` 是进程级 LRU（容量 64），预热会把别的会话的缓存挤掉。
+    //
+    // 现在没有预热：内容按 `filledRows` 分批进组合，解析与组合**在同一条主线程路径上**，
+    // 不再有额外的 CPU 争用。
     // 底锚的喂序是反的；反转结果记住，别每次重组都新建包装对象。
     val reversedVisible = remember(visible) { visible.asReversed() }
     // 每行实测高度（visible 正序，已含 12dp 行间距）：单 item 化后
@@ -957,7 +942,16 @@ fun ChatScreen(
     // 掉帧全在 `scroll=false off=0` 且 dt 108~149ms）。先出最近几轮、之后每帧补一批，
     // 把那 150ms 摊到几帧里。只在「贴底打开」时分批 —— 要恢复具体位置时必须一次填满，
     // 否则偏移对应的内容还没组合出来，恢复会落空。
-    val filledRows = remember(visible) { mutableIntStateOf(0) }
+    // **不随 `visible` 归零**（用户：「位置不变是不变啊，为什么会闪一下」）。
+    //
+    // 原来 `remember(visible) { mutableIntStateOf(0) }`：`visible` 每次变化（切会话、流式每来
+    // 一条、展开折叠块）都把计数归零。而渲染是 `if (visibleIndex >= filledFrom)` ⇒ 归零那一帧
+    // **一行都不画** ⇒ 列表空白一帧，再逐帧长出来 ⇒ 就是那一下"闪"。
+    //
+    // 现在：计数**跨 `visible` 保留**（`remember` 不带 key），只在**换会话**时由下面的
+    // LaunchedEffect 重置 —— 换会话本来就要重新填，理应从 0 开始；
+    // 同一会话内 `visible` 变长变短都不归零 ⇒ 不会闪。
+    val filledRows = remember { mutableIntStateOf(0) }
     val scroll = rememberChatScroll(
         listState = listState,
         autoFollow = settings.autoFollow,
@@ -980,7 +974,11 @@ fun ChatScreen(
         val anchor = pendingAnchor ?: return@LaunchedEffect
         // 内容还没变长 ⇒ 不是这次加载的结果，继续等。
         if (visible.size <= pendingAnchorFrom) return@LaunchedEffect
-        // 两帧：一帧让新的行进组合、一帧让它们测量完。
+        // **先把新行组合完再恢复锚点**：新加载的行在顶部，而渲染是
+        // `if (visibleIndex >= filledFrom)` —— `filledRows` 还没跟上时新行**根本没组合**，
+        // 此时的 offset 是按旧内容算的 ⇒ 恢复出来的位置是错的（用户：加载更多位置不对）。
+        // 这里把计数补满（组合发生在下一帧），等两帧让它们测量完，再钉回原位置。
+        filledRows.intValue = visible.size
         withFrameNanos { }
         withFrameNanos { }
         listState.scrollToItem(anchor.first, anchor.second)
@@ -1161,26 +1159,30 @@ fun ChatScreen(
     // 切换动画是否在跑：只在开始/结束时各变一次（**不在组合期逐帧读**
     // `switchAlpha.value`，那会把整页重组拉到 60fps）。它决定要不要挂离屏层。
     var switchRunning by remember(state.conversationId) { mutableStateOf(switchAlpha.value < 1f) }
-    LaunchedEffect(state.conversationId) {
-        // 初值已经是 0，这里只负责把它推到 1：从 0 起跑，不需要 `snapTo`，
-        // 也就没有「snapTo 生效之前先露一帧」的窗口。
-        // 260ms（用户 2026-10-21 定）：210ms 显得赶，260ms 的淡入+上浮更从容；
-        // 这是**唯一的时长来源**，改这里就够（位移 24dp / 缩放 0.92 在同一段的 graphicsLayer 里）。
+    // **动画等内容到位再播**（用户：「切换会话卡、发热」「先有加载会话的字样，加载后才播动画」）。
+    //
+    // 原来这里在 `conversationId` 一变就 `animateTo` —— 而那一刻新会话的内容**还没读回来**
+    // （`openConversation` 先置 `loading = true`，正文由协程补读），于是 260ms 的动画
+    // 跑在"骨架屏 + 内容陆续到达"的过程上：骨架换成正文的那一帧要一次性组合整页
+    // （每行 parseMarkdown + 测量），动画的头几帧正好撞上 ⇒ 掉帧、发热。
+    //
+    // 现在：**loading 变 false（内容到位）才开始动画**，动画只作用在已稳定的内容上。
+    // 已经进内存的会话（`loading` 一开始就是 false）不受影响，照旧播动画。
+    LaunchedEffect(state.conversationId, state.loading) {
         // 冷启动时 Animatable 初值就是 1f：不播动画，也不挂层。
         if (switchAlpha.value >= 1f) {
             switchRunning = false
             return@LaunchedEffect
         }
-        // **先让新会话的内容组合/布局落地，再起动画**（用户：「切换会话的进场动画掉帧和卡顿」）：
-        // 原来这里立刻 `animateTo`，而这一帧同时要做整页冷组合 —— 新会话的可见行都要
-        // 重新 parseMarkdown（长答案 2~10ms/条）、重新测量，动画的头几帧就和这个撞在一起，
-        // 于是 260ms 的动画整体掉帧。等一帧（`withFrameNanos`）让内容先落，
-        // 动画从第二帧起跑，帧预算就归它自己。
-        // 注意：`switchRunning = true` 仍在等帧**之前**——离屏层与大批量布局步长要在
-        // 冷组合那一帧就生效，晚一帧反而更慢。
+        // 还在读盘/补读正文 ⇒ 先显示"加载会话"（骨架），动画等它结束。
+        if (state.loading) {
+            switchRunning = false
+            return@LaunchedEffect
+        }
+        // **先让新会话的内容组合/布局落地，再起动画**：等两帧 —— 第一帧把新会话的行组合
+        // 出来，第二帧让它们测量完 —— 动画跑在已经稳定的内容上，而不是和"首屏解析+测量"
+        // 抢同一段帧预算。
         switchRunning = true
-        // 等两帧：第一帧把新会话的行组合出来，第二帧让它们测量完 —— 动画跑在已经稳定的
-        // 内容上，而不是和"首屏解析+测量"抢同一段帧预算（用户：切换会话掉帧）。
         androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
         switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
@@ -1338,14 +1340,16 @@ fun ChatScreen(
     // 所以：**钉住期间只要流式行还在视野内就立刻释放**（宁可那一刻跳一下，也不要持续显示被裁的输出）。
     // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
 
-    // **切会话前把正文解析预热掉**（换会话后第一帧的主要成本就是这十几份冷解析）。
-    // 键用「会话 + 消息版本」：同一会话里流式更新不会反复触发；后台线程做，命中后进组合即已就绪。
-    // 预热只是把同一份纯函数计算挪出主线程，渲染结果不变。
-    LaunchedEffect(state.conversationId, state.messagesRevision) {
-        val texts = state.messages.mapNotNull { m -> m.text.takeIf { it.isNotBlank() } }
-        if (texts.isEmpty()) return@LaunchedEffect
-        withContext(Dispatchers.Default) { SettledBlocks.prewarm(texts) }
-    }
+    // **不再预热**（用户：切换会话卡、发热）。
+    //
+    // 原来这里在切会话瞬间把**整个会话**的每一段正文都在后台 `parseMarkdown` 一遍：
+    //  · 长会话就是几十 MB 文本的解析量，而 `Dispatchers.Default` 只有 4 个线程 ⇒
+    //    与主线程的冷组合**抢 CPU**，那 260ms 动画期间主线程被抢 ⇒ 掉帧、发热；
+    //  · `SettledBlocks` 是**进程级 LRU（容量 64）**，预热新会话会把**别的会话**的缓存挤掉，
+    //    下次切回去又要重解析 —— 净负优化。
+    //
+    // 真正的解法是让**动画与内容填充错开**：内容按 `filledRows` 分批进组合（见下），
+    // 动画只作用在已经就位的那部分，剩下的行在动画期间逐帧补。
 
     LaunchedEffect(visible, scroll.stickToBottom) {
         val total = visible.size
@@ -1353,7 +1357,25 @@ fun ChatScreen(
         // 切换动画的第一帧 alpha 还是 0（看不见内容）：这时一次补 4 行纯属白花一帧的预算，
         // 动画期间先补 2 行，剩下的按 SWITCH_MAX_STEP 在动画里补齐。非动画场合维持原来 4 行。
         val firstChunk = if (switchRunning) 2 else CHUNK_FIRST
-        filledRows.intValue = if (scroll.stickToBottom) firstChunk.coerceAtMost(total) else total
+        // **一律分批填**（用户：已进内存的会话切过去照样卡）。
+        //
+        // 原来这里 `stickToBottom == false` ⇒ `filledRows = total` ⇒ **整页所有行一次性组合**
+        // （每行要 parseMarkdown + 测量 + 布局）。而"从历史位置切回来"或"切到任何不在底部的
+        // 会话"正是 stickToBottom == false ⇒ 切过去必然全量组合 ⇒ 掉帧发热。
+        // 这就是"会话已经进内存了为什么还卡"的答案：卡的不是读盘，是**组合**。
+        //
+        // 现在：不论贴不贴底，都先填 firstChunk 行，其余按下面的节奏逐帧补。
+        //
+        // **但已经填过的不重填**（用户：「位置不变是不变啊，为什么会闪一下」）：
+        // `visible` 每变一次这个 effect 就重跑，而它原来无条件 `filledRows = firstChunk`
+        // ⇒ 流式每来一条消息，列表就"清空到 2 行"再逐帧长回来 ⇒ 每来一条闪一次。
+        // 现在只在**内容变短**（换会话/窗口缩小）时才从 firstChunk 重新开始；
+        // 变长时保留已有进度，只补新增的那些。
+        filledRows.intValue = if (total < filledRows.intValue) {
+            firstChunk.coerceAtMost(total)
+        } else {
+            filledRows.intValue.coerceAtMost(total)
+        }
         // **按上一帧节奏自适应**：固定每帧补 3 条时，遇到大卡片就是 16~41ms 的超时帧
         // （实测切会话后连续几帧）。上一帧超预算就少补一条、宽裕就多补一条：峰值被压平，
         // 填完的总条数与最终布局完全不变（只是先后节奏）。
@@ -2255,7 +2277,10 @@ fun ChatScreen(
             // composer and fought the status line for width.
             TurnScrubber(
                 conversationId = state.conversationId,
-                turns = turnIndices.size,
+                // **全局轮数**：会话一共多少轮（page.turns），以及其中**已经加载出来**的
+                // 多少轮（page.drawn）。窗口之外的还在盘上，没加载不能跳。
+                totalTurns = page.turns,
+                drawnTurns = page.drawn,
                 // 延迟读（issue #26 原因一）：只有导航条用这个值，就在它内部求值。
                 // 换算走纯函数（`TurnMarks`，带单测）：喂序 → 可见要**倒置**、
                 // 比较时要补 `rowOffset` —— 两处都漏过一次（#16 的"偏一两项"）。
@@ -2266,14 +2291,22 @@ fun ChatScreen(
                         visibleSize = visible.size,
                         rowOffset = rowOffset,
                         turnIndices = turnIndices,
+                        drawnTurns = page.drawn,
+                        totalTurns = page.turns,
                     )
                 },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 4.dp),
                 labelOf = { turn ->
-                    // A number alone cannot tell two turns about the same thing apart, so
-                    val opening = visible.getOrNull(turnIndices.getOrElse(turn) { -1 } - rowOffset)
+                    // `turn` 是**全局轮号**（1 基）⇒ 标签直接用它。
+                    // 找这一轮的开头文字要换算成**窗口内**下标：
+                    // 窗口里装的是最后 drawnTurns 轮，所以窗口内第 k 轮 = 全局
+                    // (totalTurns - drawnTurns + k)。
+                    val inWindow = turn - (page.turns - page.drawn)
+                    val opening = visible.getOrNull(
+                        turnIndices.getOrElse(inWindow) { -1 } - rowOffset,
+                    )
                         ?.message
                         ?.text
                         ?.lineSequence()
@@ -2281,18 +2314,20 @@ fun ChatScreen(
                         ?.trim()
                         .orEmpty()
                     if (opening.isEmpty()) {
-                        "第 ${page.earlier + turn + 1} 轮"
+                        "第 $turn 轮"
                     } else {
-                        "第 ${page.earlier + turn + 1} 轮 · ${opening.take(8)}"
+                        "第 $turn 轮 · ${opening.take(8)}"
                     }
                 },
                 onJumpTo = { turn ->
+                    // `turn` 是**全局轮号** ⇒ 换算成窗口内下标再查 `turnIndices`。
+                    val inWindow = turn - (page.turns - page.drawn)
                     // `getOrNull`, not `turnIndices[turn]`: the row the finger was on is a row of
                     // the window the gesture started in, and a window can shrink under it — a
                     // retracted 插话, a branch switch, another conversation opened by a deep link.
                     // A jump to a turn that is no longer drawn is a no-op, never a crash.
                     // 底锚：turnIndices 是 visible 坐标（含 rowOffset），换算成喂序索引再跳。
-                    turnIndices.getOrNull(turn)?.let { index ->
+                    turnIndices.getOrNull(inWindow)?.let { index ->
                         scope.launch {
                             // **跳历史必须先关追底**（issue #21）：否则 ChatScroll 的追底逻辑
                             // （`if (want.stick && …) scrollToItem(0)`）会在同一帧把列表拉回底部，

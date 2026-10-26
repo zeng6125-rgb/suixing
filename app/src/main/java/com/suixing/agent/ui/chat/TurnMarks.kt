@@ -24,13 +24,26 @@ internal object TurnMarks {
         visibleSize: Int,
         rowOffset: Int,
         turnIndices: List<Int>,
+        /**
+         * **已加载的轮数**（`page.drawn`）与**会话总轮数**（`page.turns`）。
+         *
+         * 导航条统一用**全局轮号**（1 基，最新那轮 = totalTurns）。加载的是最后 [drawnTurns] 轮，
+         * 所以「窗口内第 k 轮」的全局号 = `totalTurns - drawnTurns + k`。
+         */
+        drawnTurns: Int,
+        totalTurns: Int,
     ): Int {
-        if (visibleSize <= 0 || turnIndices.isEmpty()) return 1
+        val newest = totalTurns.coerceAtLeast(1)
+        if (visibleSize <= 0 || turnIndices.isEmpty()) return newest
         val lastVisible = visibleSize - 1
         // 喂序 → 可见：反置。钳到合法范围（首可见项也可能是我们的临时行）。
         val visible = (lastVisible - (firstVisibleFed - feedPrefix)).coerceIn(0, lastVisible)
         val withOffset = visible + rowOffset
-        return turnIndices.indexOfLast { it <= withOffset }.coerceAtLeast(0) + 1
+        // 窗口内第几轮（1 基）
+        val inWindow = turnIndices.indexOfLast { it <= withOffset }.coerceAtLeast(0) + 1
+        // 窗口内 → 全局：加载的是最后 drawnTurns 轮，最旧那轮是 totalTurns - drawnTurns + 1。
+        val oldestLoaded = (totalTurns - drawnTurns + 1).coerceAtLeast(1)
+        return (oldestLoaded + inWindow - 1).coerceIn(1, newest)
     }
 
     /**

@@ -746,10 +746,20 @@ internal fun turnPage(messages: List<StoredMessage>, want: Int): TurnPage {
  * 而随行要分页加载更早的内容，窗口会被新内容顶走，所以这里按"条数随解锁增长"来做。
  * **"当前轮"的口径取自 Aether**（视口内 28% 位置那一行，见 [TurnMarks.probeFedIndex]）。
  */
-internal fun scrubberRowCount(turns: Int, current: Int): Int {
-    if (turns <= 0) return 0
-    val distance = (turns - current).coerceAtLeast(0)
-    return (distance + 1).coerceIn(SCRUBBER_VISIBLE_MIN, SCRUBBER_VISIBLE_MAX).coerceAtMost(turns)
+/**
+ * 导航条显示几条。
+ *
+ * 参数全部是**全局**口径：
+ *  · [totalTurns]  会话总轮数（[TurnPage.turns]）
+ *  · [currentTurn] 当前读到第几轮（全局，1 基）
+ *
+ * 规则（用户定的）：常驻 5 条；读到更早的轮次时逐步解锁 —— 距最新 6 轮时 6 条、7 轮时 7 条 …，
+ * 最多 12 条。会话本身不足 5 轮就画实际条数。
+ */
+internal fun scrubberRowCount(totalTurns: Int, currentTurn: Int): Int {
+    if (totalTurns <= 0) return 0
+    val distance = (totalTurns - currentTurn).coerceAtLeast(0)
+    return (distance + 1).coerceIn(SCRUBBER_VISIBLE_MIN, SCRUBBER_VISIBLE_MAX).coerceAtMost(totalTurns)
 }
 
 /**
@@ -759,26 +769,47 @@ internal fun scrubberRowCount(turns: Int, current: Int): Int {
  * **窗口起点跟着当前轮**：`start = (current - 1).coerceIn(0, turns - size)`。
  * 长按时 [forceRows] = 全部轮次（Aether 的 `navigating` 分支画 `entries.size` 格）。
  */
+/**
+ * 导航条画哪几轮 —— **全部是全局轮号**（1 基，最新那轮 = 总轮数）。
+ *
+ * 旧实现把同一个 `turn` 当两种坐标用：条数按"窗口内轮数"算、标签按"全局轮号"算、
+ * 跳转按"窗口内下标"算 ⇒ 条数涨不上去、标签与行错位。这里统一成全局轮号：
+ *
+ *  · [totalTurns]  会话总轮数
+ *  · [currentTurn] 当前读到第几轮（全局 1 基）
+ *  * [drawnTurns]  已经**加载出来**的轮数（窗口之外的还在盘上，没加载就不能跳）
+ *
+ * 窗口 = 当前轮附近的一段；条数由 [scrubberRowCount] 决定（常驻 5、越往回读越多、最多 12）。
+ * 长按时 [forceRows] = 全部已加载轮数（Aether 的 `navigating` 分支画全部）。
+ */
 internal fun scrubberWindow(
-    turns: Int,
-    current: Int,
-    unlocked: Int,
-    /** 长按时强制展开的条数（0 = 按常驻规则）。 */
+    totalTurns: Int,
+    currentTurn: Int,
+    drawnTurns: Int,
+    unlocked: Int = 0,
     forceRows: Int = 0,
 ): IntRange {
-    if (turns <= 0) return IntRange.EMPTY
+    if (totalTurns <= 0 || drawnTurns <= 0) return IntRange.EMPTY
     val size = if (forceRows > 0) {
-        forceRows.coerceAtMost(turns)
+        forceRows.coerceAtMost(drawnTurns)
     } else {
-        scrubberRowCount(turns, current)
+        scrubberRowCount(drawnTurns, currentTurn)
     }
     if (size <= 0) return IntRange.EMPTY
-    val last = turns - 1
-    val reading = (last - size + 1).coerceAtLeast(0)
-        .coerceAtMost((current - 1).coerceAtLeast(0))
-    // 长按/上拉解锁：窗口整体上移，条数不变。
-    val start = (reading - unlocked.coerceAtLeast(0)).coerceAtLeast(0)
-    return start until (start + size).coerceAtMost(turns)
+    // **窗口里能画的最新的那一轮 = 全局第 totalTurns 轮**（已加载的是最后 drawnTurns 轮，
+    // 最新那轮当然也是全局最新的那一轮）。
+    val newest = totalTurns
+    // 能画的最旧那一轮 = 全局第 (totalTurns - drawnTurns + 1) 轮（更早的还没加载，不能画）。
+    val oldestDrawn = (totalTurns - drawnTurns + 1).coerceAtLeast(1)
+    // 窗口跟着当前轮走，且当前轮必须在窗口里。
+    var start = (currentTurn - size + 1).coerceAtLeast(oldestDrawn)
+    val maxStart = newest - size + 1
+    if (start > maxStart) start = maxStart
+    if (start < oldestDrawn) start = oldestDrawn
+    // 上拉解锁：整体再往上（但不越过"已加载"的最旧那一轮）。
+    start = (start - unlocked.coerceAtLeast(0)).coerceAtLeast(oldestDrawn)
+    val end = (start + size - 1).coerceAtMost(newest)
+    return start..end
 }
 
 /**

@@ -492,8 +492,21 @@ fun SuixingApp() {
                             chatFromDrawer()
                         },
                         onOpenConversation = { conversation ->
-                            chat.openConversation(conversation)
-                            chatFromDrawer()
+                            // **先关抽屉，等它关完，再切会话**（用户：切到 b 后想切回 a，
+                            // 要点好几下）。
+                            //
+                            // 原来的顺序是 `openConversation()` 先、`chatFromDrawer()` 后：
+                            // `openConversation` 同步替换整个 `_state.value`，会话列表随之重排
+                            // （那一行的 updatedAt 变了 ⇒ `animateItem` 的位移动画开始），
+                            // 而**抽屉这时还开着** —— 手指下一次按的位置已经不是那一行了。
+                            //
+                            // 现在顺序反过来：先让抽屉关掉（`close()` 有动画，等它走完），
+                            // 抽屉不在屏幕上之后才切会话 —— 列表怎么重排都与点击无关。
+                            scope.launch {
+                                drawerState.close()
+                                chat.openConversation(conversation)
+                                showChat()
+                            }
                         },
                         onDeleteConversation = { chat.deleteConversation(it) },
                         // 改名必须走 ViewModel：它手里有一份标题拷贝，每轮结束会写回盘（见
