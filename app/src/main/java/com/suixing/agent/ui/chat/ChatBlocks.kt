@@ -1779,12 +1779,19 @@ internal fun TurnScrubber(
     // this conversation. Kept for as long as the chat is open, dropped the moment another is
     // opened: a deep conversation unlocked in one chat must not decide what the next one shows.
     var unlocked by remember(conversationId) { mutableIntStateOf(0) }
+    // **长按展开更多条**（用户：长按应显示更多轮次导航条）。状态不保存：重开应用/切会话都重置。
+    var expanded by remember(conversationId) { mutableStateOf(false) }
     // The last few turns, always including the one being read: sampling the whole
     // conversation into five evenly spaced lines is what made "which line is which turn"
     // impossible to tell, and made the jump land somewhere the user did not point at.
     val currentTurn = current()
-    val window = remember(turns, currentTurn, unlocked) {
-        scrubberWindow(turns, currentTurn, unlocked)
+    val window = remember(turns, currentTurn, unlocked, expanded) {
+        scrubberWindow(
+            turns,
+            currentTurn,
+            unlocked,
+            forceRows = if (expanded) SCRUBBER_VISIBLE_MAX else 0,
+        )
     }
     val rows = remember(window) { window.toList() }
     val rowCount = rows.size
@@ -1872,6 +1879,8 @@ internal fun TurnScrubber(
                                 // finger lifts. This is the "press and hold to see it" half.
                                 waiting = false
                                 shown = true
+                                // 长按到点：顺带把导航条展开到最多条数（松手即恢复）。
+                                expanded = true
                                 continue
                             }
                             val change = event.changes.firstOrNull { it.id == down.id }
@@ -1944,6 +1953,7 @@ internal fun TurnScrubber(
                                 pointer.y > railBottomPx + exitPx
                             )
                         pressRow = -1
+                        expanded = false
                         shown = false
                         // The strip recentres on wherever the jump lands: the unlocked turns
                         // were the ones this drag could reach, and the window goes back to

@@ -731,13 +731,40 @@ internal fun turnPage(messages: List<StoredMessage>, want: Int): TurnPage {
     )
 }
 
-internal fun scrubberWindow(turns: Int, current: Int, unlocked: Int): IntRange {
+/**
+ * 导航条显示几条（用户定的规则）：**常驻 5 条**，读到更早的轮次时逐步解锁 —— 读到第 6 轮
+ * 显示 6 条、第 7 轮 7 条 … 到第 12 轮封顶 12 条。会话里不足 5 轮就画实际条数。
+ *
+ * [current] 是 1 基的「当前读到第几轮」（[TurnMarks.current] 的口径）。
+ */
+internal fun scrubberRowCount(turns: Int, current: Int): Int {
+    if (turns <= 0) return 0
+    // 关键：看的是「当前读的这一轮**距最新**多少轮」，不是它在整个会话里的序号。
+    // 读最新那几轮时 distance=0..4 ⇒ 恒为常驻 5 条；读到倒数第 6 轮时才多一条，依此类推。
+    val distance = (turns - current).coerceAtLeast(0)
+    return (distance + 1).coerceIn(SCRUBBER_VISIBLE_MIN, SCRUBBER_VISIBLE_MAX).coerceAtMost(turns)
+}
+
+internal fun scrubberWindow(
+    turns: Int,
+    current: Int,
+    unlocked: Int,
+    /** 长按时强制展开的条数（0 = 按常驻/解锁规则）。 */
+    forceRows: Int = 0,
+): IntRange {
     if (turns <= 0) return IntRange.EMPTY
+    val size = if (forceRows > 0) {
+        forceRows.coerceAtMost(turns)
+    } else {
+        scrubberRowCount(turns, current)
+    }
+    if (size <= 0) return IntRange.EMPTY
     val last = turns - 1
-    val reading = (last - SCRUBBER_VISIBLE + 1).coerceAtLeast(0)
+    val reading = (last - size + 1).coerceAtLeast(0)
         .coerceAtMost((current - 1).coerceAtLeast(0))
+    // 长按/上拉解锁：窗口整体上移，条数不变。
     val start = (reading - unlocked.coerceAtLeast(0)).coerceAtLeast(0)
-    return start until (start + SCRUBBER_VISIBLE).coerceAtMost(turns)
+    return start until (start + size).coerceAtMost(turns)
 }
 
 /**
@@ -755,8 +782,11 @@ internal fun scrubberPull(y: Float, rowPx: Float, pitchPx: Float, pull: Int): In
     return maxOf(pull, (overshoot / pitchPx).toInt() + 1)
 }
 
-/** How many turns the scrubber draws before the window slides up to the newest ones. */
-internal const val SCRUBBER_VISIBLE = 6
+/** 导航条常驻条数（用户：常驻五条就够）。 */
+internal const val SCRUBBER_VISIBLE_MIN = 5
+
+/** 读到很靠前的轮次时条数的上限（第 12 轮起不再增加）。 */
+internal const val SCRUBBER_VISIBLE_MAX = 12
 
 data class Attachment(
     val base64: String,

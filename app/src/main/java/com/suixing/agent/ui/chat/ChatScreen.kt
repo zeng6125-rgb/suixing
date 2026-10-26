@@ -569,6 +569,31 @@ fun ChatScreen(
         groupRows(state.messages.drop(page.from), state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
+    // **切会话时先把这一页的 Markdown 解析预热掉**（用户：切换会话动画掉帧、不流畅）。
+    // 新会话的每一行正文/思考都是**第一次**出现，`SettledBlocks` 里没有它们的解析结果 ⇒
+    // 全部要在组合期现解析（长答案 2~10ms/条）。这里在后台把它们解析好塞进进程级缓存，
+    // 于是动画期间陆续进入组合的行直接命中缓存。
+    LaunchedEffect(state.conversationId, visible.firstOrNull()?.message?.id, visible.size) {
+        val texts = buildList {
+            for (row in visible) {
+                for (part in row.parts) {
+                    when (part) {
+                        is Part.Text -> if (part.text.length >= 400) add(part.text)
+                        is Part.Thinking -> if (part.text.length >= 400) add(part.text)
+                        else -> Unit
+                    }
+                }
+            }
+        }
+        if (texts.isEmpty()) return@LaunchedEffect
+        withContext(Dispatchers.Default) {
+            for (text in texts) {
+                if (com.suixing.agent.ui.components.SettledBlocks.get(text) != null) continue
+                val blocks = com.suixing.agent.ui.components.parseMarkdown(text)
+                com.suixing.agent.ui.components.SettledBlocks.putIfSettled(true, text, blocks)
+            }
+        }
+    }
     // 底锚的喂序是反的；反转结果记住，别每次重组都新建包装对象。
     val reversedVisible = remember(visible) { visible.asReversed() }
     // 每行实测高度（visible 正序，已含 12dp 行间距）：单 item 化后
@@ -931,6 +956,28 @@ fun ChatScreen(
         conversationId = state.conversationId,
     )
 
+    // 「加载更早」的阅读锚：点击时记下 (item, offset)，**等内容真的到齐**再钉回去。
+    // 存成状态而不是局部变量：`loadEarlier()` 是异步读盘，内容在几十毫秒后才进 messages。
+    var pendingAnchor by remember(state.conversationId) { mutableStateOf<Pair<Int, Int>?>(null) }
+    LaunchedEffect(visible.size, visible.firstOrNull()?.message?.id) {
+        val anchor = pendingAnchor ?: return@LaunchedEffect
+        // 两帧：一帧让新的行进组合、一帧让它们测量完。
+        withFrameNanos { }
+        withFrameNanos { }
+        listState.scrollToItem(anchor.first, anchor.second)
+        withFrameNanos { }
+        pendingAnchor = null
+        scroll.restoring = false
+    }
+    // 兜底：万一内容始终没变（读盘失败/到头），1.2 秒后解除冻结，别让列表永久停在"不许跟底"。
+    LaunchedEffect(pendingAnchor) {
+        if (pendingAnchor == null) return@LaunchedEffect
+        kotlinx.coroutines.delay(1200)
+        if (pendingAnchor != null) {
+            pendingAnchor = null
+            scroll.restoring = false
+        }
+    }
     // 贴底时持续记住当前占位；离开底部（开始读历史）就冻住它 ——
     // 输入框高度在流式期间会变（状态行出现/消失），不冻住就会把整列内容推几 dp。
     LaunchedEffect(stackFootprint, scroll.stickToBottom) {
@@ -1111,6 +1158,9 @@ fun ChatScreen(
         // 注意：`switchRunning = true` 仍在等帧**之前**——离屏层与大批量布局步长要在
         // 冷组合那一帧就生效，晚一帧反而更慢。
         switchRunning = true
+        // 等两帧：第一帧把新会话的行组合出来，第二帧让它们测量完 —— 动画跑在已经稳定的
+        // 内容上，而不是和"首屏解析+测量"抢同一段帧预算（用户：切换会话掉帧）。
+        androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
         switchAlpha.animateTo(1f, tween(260, easing = LinearOutSlowInEasing))
         switchRunning = false
@@ -2094,29 +2144,27 @@ fun ChatScreen(
                                             // 等 420ms 后会把 stickToBottom 翻回 true。restore 闸就是
                                             // 为这种"布局未定型的几帧"准备的（issue #4 链路 4）。
                                             scroll.restoring = true
-                                            // 记下当前阅读位（单 item 布局下 offset 就是"距最新端多少像素"）。
-                                            val anchorIndex = listState.firstVisibleItemIndex
-                                            val anchorOffset = listState.firstVisibleItemScrollOffset
+                                            // **锚点要等新内容真的到齐再钉**：`loadEarlier()` 只是
+                                            // `viewModelScope.launch { 读盘… }` 的启动，返回值只表示"开始读了"，
+                                            // 内容在几十毫秒后才进 `messages`。原来在这里等两帧就恢复 —— 那时
+                                            // 内容还没来，恢复等于没做，等它来了列表已经回到最底（用户实测）。
+                                            // 现在把锚点存进状态，由 `LaunchedEffect` 在**内容变化后**钉回去。
+                                            pendingAnchor = listState.firstVisibleItemIndex to
+                                                listState.firstVisibleItemScrollOffset
                                             // **先真的去磁盘读**（#30）：`state.messages` 现在只是
                                             // 尾部窗口，光把 `shownTurns` 加大不会让旧消息从磁盘长出来。
                                             // 读到了才扩窗口；没得读（已到文件开头）就不动，避免按钮骗人。
                                             val loaded = viewModel.loadEarlier()
+                                            if (!loaded) {
+                                                pendingAnchor = null
+                                                scroll.restoring = false
+                                            }
                                             if (loaded) {
                                                 shownTurnsByConversation =
                                                     shownTurnsByConversation +
                                                         (state.conversationId to shownTurns + PAGE_TURNS)
                                             }
-                                            // **等两帧让新内容测量完，再把阅读位钉回去**：
-                                            // 老内容接在视觉顶端，同 offset 就还是同一批行 ⇒ 画面不动。
-                                            scope.launch {
-                                                withFrameNanos { }
-                                                withFrameNanos { }
-                                                if (loaded) {
-                                                    listState.scrollToItem(anchorIndex, anchorOffset)
-                                                    withFrameNanos { }
-                                                }
-                                                scroll.restoring = false
-                                            }
+
                                         },
                                     ) {
                                         Text(

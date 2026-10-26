@@ -1043,8 +1043,24 @@ private fun Drawer(
             // 置顶区只在置顶表里挪；普通区「新会话/新消息在前 + 手动基线」；跨区拖动在
             // reorderWithinSection 里被直接拒掉，所以怎么拖都越不过置顶那条线。
             // 排序要 filter + associateBy + 两次 sortedBy：不该每次重组都重算。
-            val sections = remember(conversations, orderState.value) {
+            val freshSections = remember(conversations, orderState.value) {
                 drawerSections(conversations, orderState.value)
+            }
+            // **抽屉开着时冻结「顺序」**（用户：切到 b 后想切回 a，要点好几下）：
+            // 切换会话会把那一行的 updatedAt 刷新 ⇒ `conversations` 重新发射 ⇒ 列表重排，
+            // 而 row 用 `animateItem` 做位移动画 —— 动画期间手指点到的是**旧位置**上的行
+            // （或者点到正在移动的行），于是第一下没反应、要多点几下。
+            // 冻结只针对顺序：行的内容（标题/时间/运行态）仍取当前值，删除的行会被过滤掉。
+            val sections = remember(open, freshSections) {
+                if (!open) {
+                    freshSections
+                } else {
+                    val byId = (freshSections.pinned + freshSections.normal).associateBy { it.id }
+                    DrawerSections(
+                        pinned = freshSections.pinned.mapNotNull { byId[it.id] },
+                        normal = freshSections.normal.mapNotNull { byId[it.id] },
+                    )
+                }
             }
             // 两个区块共用同一行（只差顺序，不差样子）：抽成局部 lambda，免得把二十来行
             // 回调抄两遍。animateItem 只在 item 作用域里拿得到，所以由调用处传进来。
