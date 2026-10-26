@@ -101,6 +101,17 @@ internal object TurnMarks {
         // 往**上**（朝更旧的内容）走是加法。视口的 28% 处（靠上）距底是 72% 视口高 ——
         // Aether 那边是顶锚，`offset <= probe` 取的是探针**之上**最后一项，等价于取探针所在行。
         val target = offsetFromBottom + (viewport * (1f - PROBE_FRACTION)).toInt()
+        // **内容总高**：底锚下内容贴着底部排，若探针线落在**内容上方**（内容不足一屏、
+        // 或刚刚切会话还没填满），那个位置根本没有行 —— 此时"正在读的"就是最新那一轮。
+        // 原来这种情况循环跑完返回 `n - 1`（**最旧**那一行），于是导航条把最初一轮当成当前轮：
+        // 高亮错位、条数错、点条跳错。单测 `TurnMarksRealListTest` 里
+        // 「内容不满一屏时当前轮必须是最新那轮」原先失败（expected 2, was 1）就是它。
+        var total = 0
+        for (i in 0 until n) {
+            val h = heightsOldestFirst[i]
+            if (h > 0) total += h
+        }
+        if (target >= total) return 0
         var acc = 0
         for (r in 0 until n) {
             val h = heightsOldestFirst[n - 1 - r]

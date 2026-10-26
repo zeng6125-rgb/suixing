@@ -2013,6 +2013,8 @@ internal fun TurnScrubber(
                             // The turn being read is the longest and the only full-strength
                             // brand line. It used to fall into the "not reached" branch and come
                             // out grey, which is exactly backwards.
+                            // **细条**（用户：上一版"那么大条、那么宽干什么"）。
+                            // 当前轮仍然是"最长 + 实心主色"，但尺寸退回原设计：
                             .width(if (active) 24.dp else if (read) 20.dp else 12.dp)
                             .height(if (active) 3.dp else 2.dp)
                             // Grown out of its right edge: the enlargement then never walks the

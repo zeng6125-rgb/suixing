@@ -227,6 +227,7 @@ import com.suixing.agent.data.choiceFor
 import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
+import com.suixing.agent.ui.components.LocalDrawerBusy
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.SettledBlocks
 import com.suixing.agent.ui.components.DrawerButton
@@ -421,19 +422,22 @@ fun ChatScreen(
     // The keyboard's clamped inset, and the gesture bar's own: the composer's bottom padding is
     // the difference between them (see the stack's own modifier), and it is the one term of the
     // stack's footprint that moves while the keyboard does.
-    // **键盘高度量化到 4px 再读**：`heldImePx` 在键盘动画的每一帧都会变，直接读它就是整页
-    // 每帧重组（ChatScreen 有几十个子组合）。量化后只有跨过 4px 才重组一次 —— 一次 ~200px 的
-    // 抬起仍有 50 档，视觉上看不出台阶，但重组次数降到约 1/4。
-    // **量化已经在生产处做过一次**（`SuixingApp.kt` 的 `IME_QUANTUM_PX`）：这里直接读，
-    // 不再二次量化。二次量化会让输入框（布局期读原始值）和列表（组合期读量化值）看到
-    // 两个不同的数，键盘动画期间两者间距逐帧变化 —— 用户报的「边距在抖」。
+    // **键盘高度不在组合期读**（用户：「输入框被输入法抬起收回时掉帧」的主因）。
+    //
+    // `heldImePx` 在键盘动画的每一帧都变。原来这里有 `val heldIme by imePxState` 一句裸读，
+    // 它进的是 `stackFootprint` → `LazyColumn(contentPadding = …)` ⇒ **每一帧整页 ChatScreen
+    // 重组一次**（这个组合体有几十个子组合，还包括那个 60 参数的 Composer：
+    // 每帧新建 `Triple`、`List`、十来个 lambda）。量化（`IME_QUANTUM_PX` = 4px）只把
+    // 「每 4px 一次」压了一点，一次 900px 的键盘动画仍然是 200 多次整页重组 ——
+    // 用户看到的「一抬一收就掉帧」就是它，而输入框自己早就在**布局期**读了
+    // （`TurnScrubber.kt` 的 `.layout{}`），真正拖后腿的是这一行传给列表的底边距。
+    //
+    // 现在底边距里与键盘有关的那一项（手势条让位）改由 [keyboardAwareBottomPad] 在**布局期**算：
+    // 键盘动画只让列表重新测量一次，零重组，而且间距与输入框逐帧同步（比再量化一次更准）。
     val imePxState = LocalHeldImePx.current
-    // 量化已经在生产处做过一次（SuixingApp 的 IME_QUANTUM_PX），这里直接读状态本身。
-    // 原来还套了一层 `remember(imePxState){ derivedStateOf { imePxState.value } }` —— 恒等转发，
-    // 只多一层对象与一次空转的失效判断。
-    val heldIme by imePxState
+    // 手势条高度在组合期算一次：它是 @Composable 调用（`WindowInsets.navigationBars`），
+    // 而且它在键盘动画期间不变。
     val navBarPx = with(LocalDensity.current) { WindowInsets.navigationBars.getBottom(this) }
-    fun navBarPad(ime: Int): Int = (navBarPx - ime).coerceAtLeast(0)
     // 让位＝**只用一个来源**：输入框自己的高度 + 它的下内边距 + 手势条。键盘动画中唯一在变的量是
     // heldIme，而它正是输入框自身位置的同一个驱动量 ⇒ 两者同步移动，可见空隙在任何一帧都一样
     // （用户要恒定）。原来用「列表底 − 输入框顶」两个节点的测量值相减，两个 onGloballyPositioned
@@ -445,12 +449,16 @@ fun ChatScreen(
     // **按会话 key**（评审）：底边距是"读历史期间冻结的那一个"，不同会话的输入框/让位不同，
     // 不 key 的话切到另一个会话会沿用上一个会话冻结值。
     var heldFootprint by remember(state.conversationId) { mutableStateOf<Dp?>(null) }
+    // **不含手势条那一截**：它在布局期由列表/空状态自己让出来（[keyboardAwareBottomPad]），
+    // 这样这一项不随键盘逐帧变 —— 否则它就是上面说过的「每帧整页重组」。
+    // 几何上与旧写法等价：列表视口少了 navBarPad、正文底边距也少了 navBarPad，
+    // 最后一张卡与输入框之间的距离一分不差（键盘全程恒定）。
     val stackFootprint = with(LocalDensity.current) {
         // `composerH` 是**内边距以内**的高度：`onSizeChanged` 挂在
         // `.padding(bottom = COMPOSER_BOTTOM_PAD)` **之后**（TurnScrubber.kt:757-758），
         // Compose 的修饰符顺序让 padding 先吃掉空间，所以测到的不含这 12dp。
         // 这里把它加回来才是输入框真实的占位 —— **不要删**（我删过一次，是错的）。
-        composerH + COMPOSER_BOTTOM_PAD + navBarPad(heldIme).toDp() +
+        composerH + COMPOSER_BOTTOM_PAD +
             // **恒定 12dp**（用户定案：所有垂直间距统一 12dp —— 静态项间距、状态行上下、
             // 底部让位全一致；顺带保持「run 结束时几何完全不变」）。
             12.dp
@@ -589,10 +597,20 @@ fun ChatScreen(
     // 已经稳定的行不会再报一次高度 ⇒ 数组长期是 0 ⇒ `topFedIndex` 恒返回 0 ⇒
     // 导航条高亮永远停在最后一轮（用户报「滑到对应轮次没有显示当前对应的导航条」）。
     // 按 id 存就没有这个生命周期问题：行第一次量到以后一直有效。
-    val rowHeightsById = remember(state.conversationId) { HashMap<String, Int>() }
-    val rowHeights = remember(visible, rowHeightsById) {
-        IntArray(visible.size) { rowHeightsById[visible[it].message.id] ?: 0 }
-    }
+    // **"正在读哪一行"改成直接量几何**（导航条重写的输入源）。
+    //
+    // 这里存的是每一行在**窗口坐标**里的顶边 y，由行自己的 `onGloballyPositioned` 报上来；
+    // 阅读区（LazyColumn）自己也报一份窗口矩形，探针线 = 阅读区顶边 + 28% 阅读区高
+    // （28% 的口径取自 Aether 的 `currentTimelineIndex`，见 `TurnMarks.PROBE_FRACTION`）。
+    //
+    // 为什么不再用 `firstVisibleItemScrollOffset` 累加行高反查：那套算法有三处隐含前提 ——
+    // 「偏移 = 距最新端的像素」、「行高数组已经完整」、「前缀项高度也算准了」，任何一处
+    // 不成立，"当前轮"就掉回最新那一轮（条数不涨、高亮不动、点条对不上）。而这三处前提
+    // 在这个列表里全都不稳：`reverseLayout` + 单个转录 item + `contentPadding` + 流式行/
+    // 状态行/错误行这些前缀项。直接量 y 就没有任何换算。
+    val rowTopById = remember(state.conversationId) { androidx.compose.runtime.mutableStateMapOf<String, Float>() }
+    val viewportTopY = remember { androidx.compose.runtime.mutableStateOf(0f) }
+    val viewportH = remember { androidx.compose.runtime.mutableIntStateOf(0) }
     // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
     // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
     // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
@@ -650,7 +668,11 @@ fun ChatScreen(
     // 12 轮 + 工具输出可达 5~20 万字符 ⇒ 每次 revision 一次几 ms 的主线程尖峰，
     // 与 frame.log 里「成对 24ms+16ms、每 100~350 帧一次」的形态吻合。
     // 消息是不可变值对象 ⇒ 按 id 缓存，用 text.hashCode()（String 自带缓存）验证内容未变。
-    val tokenMemo = remember(state.conversationId) { HashMap<String, LongArray>() }
+    //
+    // **缓存改成进程级、不再按会话重建**（切换会话卡的主线程开销之一，见 tokenCache 的 KDoc）：
+    // 原来是 `remember(state.conversationId)` ⇒ 每次切会话换一张**空表** ⇒ 整页正文被逐字符
+    // 重估一遍（就发生在组合期、主线程）；切回来再估一遍。内容指纹（stamp）本来就在条目里，
+    // 全局表不会串数据；LRU 上限防内存。纯函数与单测见 TokenEstimateCache。
     val transcriptEstimate = remember(state.messagesRevision, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
         val start = last?.let { cp ->
@@ -667,13 +689,7 @@ fun ChatScreen(
             val stamp = message.text.hashCode().toLong() * 31 +
                 message.toolOutput.orEmpty().length +
                 message.toolArgs.orEmpty().length * 7
-            val cached = tokenMemo[message.id]
-            val tokens = if (cached != null && cached[0] == stamp) {
-                cached[1].toInt()
-            } else {
-                estimateTokens(message).also { tokenMemo[message.id] = longArrayOf(stamp, it.toLong()) }
-            }
-            sum += tokens
+            sum += TokenEstimateCache.tokensFor(message, stamp)
         }
         sum + (last?.summary?.length ?: 0) / 3
     }
@@ -856,11 +872,15 @@ fun ChatScreen(
         visible.lastOrNull()?.message?.id,
         rowOffset,
     ) {
-        visible.indices
+        val starts = visible.indices
             .filter {
                 visible[it].message.role == Roles.USER && !visible[it].message.steer
             }
             .map { it + rowOffset }
+        // **一行用户消息都没认出来时不能留空**：`TurnMarks.current` 见到空表就直接
+        // `return newest` ⇒ "当前轮"恒等于最新那一轮 ⇒ 条数永远 5、高亮永远在最下面、
+        // 点条也全错位（三种反馈同因）。宁可退化成一"行"一轮，也不能让整条导航条失效。
+        if (starts.isEmpty()) visible.indices.map { it + rowOffset } else starts
     }
     // 喂序（底锚倒序，视觉从下往上）：live? → compress-status? → error? → visible 倒序 → load-earlier?。
     // 所以 visible 第 i 行的喂序索引 = 前缀项数 + (visible.size - 1 - i)。
@@ -881,22 +901,23 @@ fun ChatScreen(
     // **当前读到哪一轮 = 视口内 28% 位置那一行**（口径取自 Aether 的 `currentTimelineIndex`）。
     // 原来取的是**视口顶部**那一行 ⇒ 导航条高亮与条数全都对不上（用户：对应轮次很奇怪、
     // 条数不增加）。单 item 化后没有 item 边界可读，按像素反查。
-    val firstVisibleFed = remember(rowHeights, feedPrefix) {
+    val firstVisibleFed = remember(visible, feedPrefix) {
         derivedStateOf {
-            // `probeFedIndex` 返回的是「**从底部往上**数第几行」（r=0 = 最新那行），
-            // 而 `TurnMarks.current` 期望的是**喂序下标**。两者的换算是
-            // `feedIndexOf(oldVisible) = feedPrefix + (visible.size - 1 - oldVisible)`，
-            // 而 `oldVisible = visible.size - 1 - r` ⇒ **喂序下标 = feedPrefix + r**。
-            // 少了这个 feedPrefix（live 卡 / 压缩中 / 错误行，1~2 行），高亮就会偏一两项
-            // （用户：导航条对应轮次不对）。
-            val r = TurnMarks.probeFedIndex(
-                offsetFromBottom = listState.firstVisibleItemScrollOffset,
-                viewport = listState.layoutInfo.viewportSize.height,
-                heightsOldestFirst = rowHeights,
-            )
-            val fed = feedPrefix + r
-            // 埋点：当前轮与窗口（验证导航条对应关系）。
-            fed
+            // 探针线：阅读区靠上 28% 处（Aether 的 `currentTimelineIndex` 口径）。
+            val probeY = viewportTopY.value +
+                viewportH.intValue * TurnMarks.PROBE_FRACTION
+            // 落在这一行：**最后一个顶边不越过探针线的行**（它就是探针线所在的那一行，
+            // 相邻行之间的 12dp 间隙也算给上面那一行）。行是按旧→新排的，所以取最后一个。
+            var at = -1
+            for (i in visible.indices) {
+                val top = rowTopById[visible[i].message.id] ?: continue
+                if (top <= probeY) at = i
+            }
+            // 一行都还没量到（首帧/首帧切换）：按"最新"算，与旧行为一致（不会乱跳）。
+            if (at < 0) return@derivedStateOf feedPrefix
+            // 换成 `TurnMarks.current` 要的**喂序下标**：
+            // `fedIndexOf(oldVisible) = feedPrefix + (visible.size - 1 - oldVisible)`。
+            feedPrefix + (visible.size - 1 - at)
         }
     }
 
@@ -955,6 +976,8 @@ fun ChatScreen(
     // 上一次"从头分批"的会话 id。用普通数组而不是 State：它只给下面的 effect 读一次，
     // 变化不需要触发重组。
     val fillSession = remember { arrayOf("") }
+    // 已经**填完**（而不是"开始填过"）的会话：只有它才允许重入时直接铺满。
+    val fillDone = remember { arrayOf("") }
     val scroll = rememberChatScroll(
         listState = listState,
         autoFollow = settings.autoFollow,
@@ -971,21 +994,23 @@ fun ChatScreen(
     // 等内容真的到了，列表已经贴在底部 —— 这就是「加载更多却跳到最下面」。
     //
     // 现在：点击时记下**当时的内容长度**，只有 `visible.size` 真的变大了才恢复。
-    var pendingAnchor by remember(state.conversationId) { mutableStateOf<Pair<Int, Int>?>(null) }
     var pendingAnchorFrom by remember(state.conversationId) { mutableIntStateOf(-1) }
+    // **「加载更早」不做任何滚动**（用户：「你为什么要改变位置啊？让历史内容出现不就行了」）。
+    //
+    // 这个列表是 `reverseLayout` + 整页转录装在**单个 item** 里（`key = "transcript"`）：
+    // 更早的行只会加在这个 item 的**上边缘**，它的下边缘仍然钉在错误行/实时卡旁边不动
+    // ⇒ LazyColumn 的首可见项与偏移天然不变 ⇒ **阅读位置本来就不会动**。
+    // 之前这里记锚点、等内容长完再 `scrollToItem(anchor)` 把位置"钉回去"，那个动作才是
+    // 位置被改的元凶（钉的时机差一帧，偏移就被"当前最大滚动量"夹断 ⇒ 位置偏）。
+    // 现在只等内容真的变长，然后**放开 restore 闸**（闸的作用：内容还没测完的几帧里，
+    // `ChatScroll` 那个"持续到底就重新贴底"的 collector 不许把列表判定成到底）。
     LaunchedEffect(visible.size) {
-        val anchor = pendingAnchor ?: return@LaunchedEffect
-        // 内容还没变长 ⇒ 不是这次加载的结果，继续等。
+        if (pendingAnchorFrom < 0) return@LaunchedEffect
         if (visible.size <= pendingAnchorFrom) return@LaunchedEffect
-        // **先把新行组合完再恢复锚点**：新加载的行在顶部，而渲染是
-        // `if (visibleIndex >= filledFrom)` —— `filledRows` 还没跟上时新行**根本没组合**，
-        // 此时的 offset 是按旧内容算的 ⇒ 恢复出来的位置是错的（用户：加载更多位置不对）。
-        // 这里把计数补满（组合发生在下一帧），等两帧让它们测量完，再钉回原位置。
+        // 让新行完成一次测量，再开闸。
         withFrameNanos { }
         withFrameNanos { }
-        listState.scrollToItem(anchor.first, anchor.second)
-        withFrameNanos { }
-        pendingAnchor = null
+        pendingAnchorFrom = -1
         scroll.restoring = false
     }
     // **不再有 1.2 秒兜底**（用户：点「加载更早」仍跳到底）。
@@ -1140,15 +1165,17 @@ fun ChatScreen(
     // 画面可能读成「中间那块在滑」而不是「换了一页」。若如此，把 translationY 那行删掉
     // 即可退回纯「淡入 + 缩放」，其余不受影响。
     //
-    // 冷启动判据必须**无条件从 false 起**：这段 `remember` 在 `if (state.loading)` 之外，
-    // 首次组合时 conversationId 可能已经是恢复出来的真实 id（不是 ""），拿
-    // `isNotEmpty()` 当初始值会把那一次误判成「已经见过」以外的东西，判据就不成立了。
-    // BooleanArray 而不是 mutableStateOf：组合期写它不触发快照通知，不会引起重组循环。
-    val alphaHistory = remember { booleanArrayOf(false) }
+    // **入场动画已删**（用户：「点了切换就必须马上切过去，内容出不出来是一回事」）。
+    //
+    // 原来每次切会话都把这份 `Animatable` 从 0 起，转录按 alpha 逐帧淡入 260ms —— 而
+    // `LaunchedEffect` 还要先等 `loading == false`（读盘/补读正文）再等两帧才起动画：
+    // 也就是说**内容到了之后还要先在 alpha=0 上停两帧，再花 260ms 淡进来**。命中 LRU
+    // 缓存时尤其刺眼（内容其实已经在内存里，用户却要等 260ms 才看见）。三次改形态的差评
+    // 都在改数字，没改这一条 ⇒ 现在直接不播：初值就是 1，`switchRunning` 恒 false，
+    // 下面那个 effect 首帧即返回，`graphicsLayer` 走恒等分支（不改变任何像素）。
+    // 冷启动与切会话一视同仁 —— 用户要的是"立刻在那一页"，不是过渡。
     val switchAlpha = remember(state.conversationId) {
-        val coldStart = state.conversationId.isNotEmpty() && !alphaHistory[0]
-        if (state.conversationId.isNotEmpty()) alphaHistory[0] = true
-        androidx.compose.animation.core.Animatable(if (coldStart) 1f else 0f)
+        androidx.compose.animation.core.Animatable(1f)
     }
     // **入场层是常驻的，不按 `switching` 条件挂载**（记录一次已经走过的弯路）：
     // v0.8.276 曾按 issue #27 的建议做成"只在 260ms 动画期间挂"，v0.8.284 实测**出现残影**
@@ -1353,6 +1380,15 @@ fun ChatScreen(
     // 真正的解法是让**动画与内容填充错开**：内容按 `filledRows` 分批进组合（见下），
     // 动画只作用在已经就位的那部分，剩下的行在动画期间逐帧补。
 
+    // **抽屉动画期间不动转录**（用户：「切会话这个抽屉的动画都被吞掉和不流畅」
+    // 「内容出不出来是一回事」）。
+    //
+    // 点抽屉里的一行时，同一帧里同时发生两件事：抽屉收起动画（170ms，每帧一个 offset）
+    // 和这一页的冷组合。而这里的 while 循环会**逐帧**组合一批新行、每行还要 parseMarkdown，
+    // 正好把动画的帧吃掉 —— 表现就是"抽屉啪一下没了/一顿一顿"。
+    // 所以先等抽屉动画落定，再开始分批填充：动画期间这一页只组合第一小批（2~4 行），足够便宜。
+    // 读 `LocalDrawerBusy` 的是**协程**（不是组合体），值变化不会引起任何重组。
+    val drawerBusyState = LocalDrawerBusy.current
     LaunchedEffect(visible, scroll.stickToBottom) {
         val total = visible.size
         if (total == 0) return@LaunchedEffect
@@ -1376,12 +1412,28 @@ fun ChatScreen(
         // **只换会话时从头分批；同一会话内容变化直接铺满**（用户：「加载更多还闪」）。
         // 逐帧补只对"整页冷组合"有意义；同一会话里内容变长（加载更早）或变短，
         // 逐帧补会让新内容**一行行长出来** —— 用户看到的就是那一下闪。
-        if (fillSession[0] == state.conversationId) {
-            filledRows.intValue = total
-        } else {
+        // **effect 重入不许"整页一次铺满"**（这是我上一轮埋的卡，现在才读出来）。
+        // 这个 effect 的 key 有 `visible` 和 `scroll.stickToBottom` —— 切会话时它们**必然多次变化**
+        // （正文晚一帧到、恢复位置把 stickToBottom 翻 false、追底又翻 true）。原来只要
+        // `fillSession[0]` 等于当前会话就无条件 `filledRows = total` ⇒ **剩下没组合的行全挤进
+        // 同一帧**（每行 parseMarkdown + 测量 ≈ 6~8ms，一页 30 行 = 200ms 的一次性主线程），
+        // 分批等于没做 —— 用户说的「切会话也卡」就是这一下。
+        // 现在：只有**确实填完过**才保持铺满；否则从当前进度接着填。
+        if (fillSession[0] != state.conversationId) {
             fillSession[0] = state.conversationId
+            fillDone[0] = ""
             filledRows.intValue = firstChunk.coerceAtMost(total)
+        } else if (fillDone[0] == state.conversationId) {
+            filledRows.intValue = total
         }
+        // **抽屉收起动画期间限流，不是停流**（用户：「切会话这个抽屉的动画都被吞掉和不流畅」）。
+        //
+        // 上一版我是 `await(!busy)`（动画期间一行都不补）——那是错的：转录是 `reverseLayout`
+        // 锚在底部，只填 4 行的话**视口上方整片是空白**，动画 260ms 里用户看到的就是
+        // "切过去一片空、动画完了内容才啪地出现"，读起来正是"卡"。
+        // 现在：动画期间**每帧只补 1 行**（一行冷组合 ≈ 6~8ms，120Hz 一帧 8.3ms，正好不抢帧），
+        // 动画结束再恢复原来的自适应节奏。既不吞动画帧，也不留空窗。
+        // 读它的是协程、不是组合体 ⇒ 值变化不引起任何重组。
         // **按上一帧节奏自适应**：固定每帧补 3 条时，遇到大卡片就是 16~41ms 的超时帧
         // （实测切会话后连续几帧）。上一帧超预算就少补一条、宽裕就多补一条：峰值被压平，
         // 填完的总条数与最终布局完全不变（只是先后节奏）。
@@ -1404,8 +1456,12 @@ fun ChatScreen(
                 }
             }
             prevFrame = frameAt
-            filledRows.intValue = (filledRows.intValue + step).coerceAtMost(total)
+            // **动画期间限到 1 行/帧**（见上面说明）：一行 ≈ 6~8ms，正好留得住 120Hz 的帧预算；
+            // `switchRunning` 那条老限流已经没用了（入场动画删了，它恒 false）。
+            val cap = if (drawerBusyState.value) 1 else CHUNK_MAX_STEP
+            filledRows.intValue = (filledRows.intValue + step.coerceAtMost(cap)).coerceAtMost(total)
         }
+        fillDone[0] = state.conversationId
     }
 
     val streamingKey = "streaming:${state.conversationId}"
@@ -1621,12 +1677,6 @@ fun ChatScreen(
                 savedKey = savedKey as? String,
                 feedPrefix = feedPrefixNow,
             )
-            val approx = visibleNow.indexOfFirst { it.message.id == savedKey }
-            android.util.Log.i(
-                "suixing-pos",
-                "restore chat=${state.conversationId} key=$savedKey approx=$approx rows=${visibleNow.size}",
-            )
-            pinTrace("restore key=$savedKey approx=$approx rows=${visibleNow.size} prefix=$feedPrefixNow")
             if (targetFed != null) {
                 // 单 item 化：item 0 就是整页，`saved.second`（原先的 item 内偏移）
                 // 正好等于「距最新端多少像素」⇒ 按它滚即可，比按 key 查索引更准。
@@ -1730,12 +1780,16 @@ fun ChatScreen(
                     // **新会话页有它自己的底部让位**（用户：「新会话页为什么要和聊天页重复」）：
                     // 聊天页的 `stackFootprint` 里带着 12/16dp 的"转录与输入框之间的空气"，
                     // 那是转录需要的，空状态不需要 —— 照搬它就会在输入框上方多出一段空白。
-                    // 这里只保留输入框的**真实占位**：内容高度 + 它自己的下内边距 + 手势条。
+                    // 这里只保留输入框的**真实占位**：内容高度 + 它自己的下内边距（手势条那一截
+                    // 由下面的修饰符在布局期让出来，见 [keyboardAwareBottomPad]）。
                     val heroBottom = with(LocalDensity.current) {
-                        composerH + COMPOSER_BOTTOM_PAD + navBarPad(heldIme).toDp()
+                        composerH + COMPOSER_BOTTOM_PAD
                     }
                     Box(
                         Modifier
+                            // 键盘抬起/收回时，这里只重新测量（不重组）——空状态也挂着那个
+                            // 60 参数的 Composer，逐帧重组一样会掉帧。
+                            .keyboardAwareBottomPad(navBarPx, imePxState)
                             .fillMaxSize()
                             .padding(
                                 top = with(LocalDensity.current) {
@@ -1762,7 +1816,17 @@ fun ChatScreen(
                         // dispatchRawDelta 逐帧纠正，两处抢同一份列表，才"乱飞/抖/拉回"。
                         reverseLayout = true,
                         modifier = Modifier
+                            // 手势条那一截**在布局期让出来**（键盘盖住它时让位是 0）：
+                            // 放在 `fillMaxSize()` 之外，列表拿到的是「窗口 − 键盘 − 手势条」。
+                            .keyboardAwareBottomPad(navBarPx, imePxState)
                             .fillMaxSize()
+                            // 阅读区的窗口矩形：导航条的探针线要它（顶边 + 28% 高度）。
+                            .onGloballyPositioned { coords ->
+                                val top = coords.positionInWindow().y
+                                if (viewportTopY.value != top) viewportTopY.value = top
+                                val h = coords.size.height
+                                if (viewportH.intValue != h) viewportH.intValue = h
+                            }
                             // 常驻入场层（0.8.284 回退）：条件挂载会导致本列表的布局修饰符链在
                             // `switching` 翻转时重建，展开/收起折叠块时出现残影（用户实测）。
                             //
@@ -2095,8 +2159,14 @@ fun ChatScreen(
                                 Modifier
                                     .then(if (heavyRow) Modifier.graphicsLayer() else Modifier)
                                     .onGloballyPositioned { coords ->
-                                        // 按消息 id 记（见上面 rowHeightsById 的说明）。
-                                        rowHeightsById[row.message.id] = coords.size.height + gapPx
+                                        // 行顶（窗口坐标）—— "正在读哪一行"就是靠它判定的，
+                                        // 见上面 rowTopById 的说明。
+                                        // **只在真的变了才写**：这是快照状态，每帧无条件写会让
+                                        // 导航条在滚动期间每次布局都失效一次。
+                                        val top = coords.positionInWindow().y
+                                        if (rowTopById[row.message.id] != top) {
+                                            rowTopById[row.message.id] = top
+                                        }
                                     },
                             ) {
                                 // 外观 → 显示时间: off means no labels at all, not fewer.
@@ -2193,13 +2263,9 @@ fun ChatScreen(
                                             // 等 420ms 后会把 stickToBottom 翻回 true。restore 闸就是
                                             // 为这种"布局未定型的几帧"准备的（issue #4 链路 4）。
                                             scroll.restoring = true
-                                            // **锚点要等新内容真的到齐再钉**：`loadEarlier()` 只是
-                                            // `viewModelScope.launch { 读盘… }` 的启动，返回值只表示"开始读了"，
-                                            // 内容在几十毫秒后才进 `messages`。原来在这里等两帧就恢复 —— 那时
-                                            // 内容还没来，恢复等于没做，等它来了列表已经回到最底（用户实测）。
-                                            // 现在把锚点存进状态，由 `LaunchedEffect` 在**内容变化后**钉回去。
-                                            pendingAnchor = listState.firstVisibleItemIndex to
-                                                listState.firstVisibleItemScrollOffset
+                                            // 记下**点击时的内容长度**：内容变长 = 读盘回来了，
+                                            // 上面那个 effect 据此开 restore 闸。**不记滚动位置**
+                                            // （上面说明：单个 transcript item 向上长，位置本来就不会动）。
                                             pendingAnchorFrom = visible.size
                                             // **先真的去磁盘读**（#30）：`state.messages` 现在只是
                                             // 尾部窗口，光把 `shownTurns` 加大不会让旧消息从磁盘长出来。
@@ -2208,7 +2274,7 @@ fun ChatScreen(
                                             if (!loaded) {
                                                 // 没有更早内容可读（或读盘失败）：本次到此为止，
                                                 // 闸立刻开，别把列表永久冻住。
-                                                pendingAnchor = null
+                                                pendingAnchorFrom = -1
                                                 scroll.restoring = false
                                             }
                                             if (loaded) {
@@ -2281,14 +2347,19 @@ fun ChatScreen(
             // pill — anchored to the reading area's bottom it hid behind the capsule.
             // One line per turn on the right edge; the old ◀ i/N ▶ row lived in the
             // composer and fought the status line for width.
+            // **窗口第一轮的全局轮号**：`page.earlier` = 上面还有几轮没加载 ⇒ 窗口从
+            // `earlier + 1` 开始（`TurnPage.earlier = turns - drawn`）。
+            // **不要用 `turnIndices.size` 反推**（这里原来就是）：流式期间最新那一轮的行被
+            // `runId != liveRunId` 过滤掉，`turnIndices` 比 `page.drawn` 少一项 ⇒ 反推出来的
+            // 起点偏一轮 ⇒ 标签念错一句、点最新那条还会越界（`getOrNull` 拿到 null，
+            // 于是一下都不动 —— 用户说的「点不中 / 对应不上」）。全局轮号才是真坐标。
+            val firstDrawnTurn = page.earlier + 1
             TurnScrubber(
                 conversationId = state.conversationId,
                 totalTurns = page.turns,
-                // **用真正画出来的轮数**（`turnIndices.size`）而不是 `page.drawn`：
-                // 两者会不一致 —— 流式期间最新那一轮的行被 `runId != liveRunId` 过滤掉，
-                // visible 里的轮数比 page.drawn 少一个。折算全局轮号时口径不一，
-                // 高亮就会落到窗口外 ⇒ 用户看到「导航条不高亮」。
-                drawnTurns = turnIndices.size,
+                // 已加载的轮数用 `page.drawn`（窗口的**定义**）：条数、窗口起点、
+                // 「已加载到第几轮」全按它算，与 `firstDrawnTurn` 同一口径。
+                drawnTurns = page.drawn,
                 current = {
                     TurnMarks.current(
                         firstVisibleFed = firstVisibleFed.value,
@@ -2296,19 +2367,21 @@ fun ChatScreen(
                         visibleSize = visible.size,
                         rowOffset = rowOffset,
                         turnIndices = turnIndices,
-                        drawnTurns = turnIndices.size,
+                        drawnTurns = page.drawn,
                         totalTurns = page.turns,
                     )
                 },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
-                    .padding(end = 4.dp),
+                    // **离屏幕边缘 2dp**：我中途擅自把它从 4dp 挪到 14dp（想避开系统右缘手势带），
+                    // 那是你没要的改动，先撤；再按你的话贴近一点，4dp → 2dp。
+                    // 观感/位置这条以后**只按你说的数字动**，不再自作主张。
+                    .padding(end = 2.dp),
                 labelOf = { turn ->
                     // `turn` 是**全局轮号**（1 基），标签直接用它。
-                    // 找这一轮的开头文字要换算成**窗口内**下标：窗口里装的是最后
-                    // `turnIndices.size` 轮，所以窗口内第 k 轮 = 全局
-                    // (totalTurns - turnIndices.size + k)。
-                    val inWindow = turn - (page.turns - turnIndices.size)
+                    // 找这一轮的开头文字要换算成**窗口内**下标（0 基）：`turnIndices` 里装的是
+                    // 窗口内各轮的开头行，窗口第一轮 = 全局 `firstDrawnTurn`。
+                    val inWindow = turn - firstDrawnTurn
                     val opening = visible.getOrNull(
                         turnIndices.getOrElse(inWindow) { -1 } - rowOffset,
                     )
@@ -2326,14 +2399,23 @@ fun ChatScreen(
                 },
                 onJumpTo = { turn ->
                     // `turn` 是**全局轮号** ⇒ 换成窗口内下标再查 `turnIndices`。
-                    val inWindow = turn - (page.turns - turnIndices.size)
-                    turnIndices.getOrNull(inWindow)?.let { index ->
-                        scope.launch {
-                            // **跳历史必须先关追底**（issue #21）：否则 ChatScroll 的追底逻辑
-                            // 会在同一帧把列表拉回底部，animateScrollToItem 被打断。
-                            scroll.stickToBottom = false
+                    // **最新那一轮在流式期间可能不在 `turnIndices` 里**（`groupRows` 把
+                    // `runId == liveRunId` 的行过滤掉了 ⇒ 它的开头行被滤走，列表尾部少一项）：
+                    // 原来 `getOrNull` 拿到 null 就**整段跳过** —— 点最新那根一下不动
+                    // （用户：「点条的也不对应」）。它没有行可指，但它就是"最新"，
+                    // 底锚下 feed index 0 即底部 ⇒ 明确滚到底，不吞这次点击。
+                    val inWindow = turn - firstDrawnTurn
+                    val index = turnIndices.getOrNull(inWindow)
+                    scope.launch {
+                        // **跳历史必须先关追底**（issue #21）：否则 ChatScroll 的追底逻辑
+                        // 会在同一帧把列表拉回底部，animateScrollToItem 被打断。
+                        scroll.stickToBottom = false
+                        if (index != null) {
                             listState.animateScrollToItem(fedIndexOf(index - rowOffset))
-                        }
+                        } else if (inWindow >= turnIndices.size) {
+                            // 指向的是还没进 `turnIndices` 的最新轮 ⇒ 滚到底（最新端）。
+                            listState.animateScrollToItem(0)
+                        } // 越界向更早（没加载的轮）：不动，条上也不该出现这种格。
                     }
                 },
             )
@@ -2630,3 +2712,40 @@ private fun Modifier.liveRowLagHeight(
         layout(placeable.width, height) { placeable.place(0, 0) }
     }
 
+/**
+ * 把「手势条让位」从组合期搬到**布局期**：键盘盖住手势条时让位是 0，键盘收起时是完整的手势条高度。
+ *
+ * 为什么需要它（用户：「输入框被输入法抬起收回时掉帧」）：这一项原来算在 `stackFootprint` 里，
+ * 而 `stackFootprint` 是 `LazyColumn` 的 `contentPadding` —— 组合期参数。键盘高度在动画的每一帧
+ * 都变，于是整页 ChatScreen（含那个 60 参数的 Composer）每帧重组一次。放到布局期后，
+ * 键盘动画只让这一个节点重新测量/放置，**零重组**，而且间距与输入框逐帧同步（输入框自己也是
+ * 在布局期读同一个值，见 `TurnScrubber.kt` 的 `.layout{}` 与 `Common.kt:595`）。
+ *
+ * 形制照抄 `Common.kt` 的 `imePaddingBottom`：新 `maxHeight` 必须夹在 `[minHeight, maxHeight]`，
+ * 否则 `Constraints` 会抛 "maxHeight(n) must be >= minHeight(m)"（0.8.434 那个闪退的同一类）。
+ */
+private fun Modifier.keyboardAwareBottomPad(
+    navBarPx: Int,
+    ime: androidx.compose.runtime.State<Int>,
+): Modifier = this.layout { measurable, constraints ->
+    val bottom = (navBarPx - ime.value).coerceAtLeast(0)
+    val newMax = if (constraints.maxHeight == Constraints.Infinity) {
+        constraints.maxHeight
+    } else {
+        (constraints.maxHeight - bottom).coerceAtLeast(0)
+    }
+    val newMin = if (constraints.minHeight == Constraints.Infinity) {
+        constraints.minHeight
+    } else {
+        (constraints.minHeight - bottom).coerceAtLeast(0)
+    }
+    val placeable = measurable.measure(
+        Constraints(
+            minWidth = constraints.minWidth,
+            maxWidth = constraints.maxWidth,
+            minHeight = newMin.coerceAtMost(newMax),
+            maxHeight = newMax,
+        ),
+    )
+    layout(placeable.width, placeable.height + bottom) { placeable.place(0, 0) }
+}

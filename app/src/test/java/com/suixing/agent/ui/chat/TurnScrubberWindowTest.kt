@@ -44,13 +44,34 @@ class TurnScrubberWindowTest {
 
     @Test
     fun `reading an older loaded turn slides the window up to it`() {
-        // 已加载 29~40；读到全局第 30 轮 ⇒ 窗口应含 30，且让出最新那几轮。
+        // 已加载 29~40；读到全局第 30 轮（距最新 10 轮，距最早还有 29 轮在盘上）⇒
+        // 条数按**全局**距离解锁到 11 条（老实现传的是 `drawnTurns`，`drawn - current` 恒负
+        // ⇒ 死锁在 5 条，「逐级解锁」对超过一页的会话从未生效），窗口仍不能越过已加载范围。
         val window = scrubberWindow(totalTurns = 40, currentTurn = 30, drawnTurns = 12)
         assertTrue("当前轮必须在窗口里：$window", 30 in window)
-        assertEquals(5, window.count())
-        // 窗口围着当前轮 30：29..33（已加载范围是 29~40，窗口不能越过它）。
+        assertEquals(11, window.count())
+        // 窗口围着当前轮 30 往上长：29..39（已加载范围是 29~40，窗口不能越过它）。
         assertEquals(29, window.first)
-        assertEquals(33, window.last)
+        assertEquals(39, window.last)
+    }
+
+    @Test
+    fun `the strip unlocks while earlier turns are still on disk`() {
+        // **回归守卫**：分页会话（`drawnTurns < totalTurns`）里，越往回读条数越要多，
+        // 不能被"已加载轮数"卡死；同时窗口一格都不能多画没加载的轮次。
+        val near = scrubberWindow(totalTurns = 40, currentTurn = 36, drawnTurns = 12)
+        val back = scrubberWindow(totalTurns = 40, currentTurn = 30, drawnTurns = 12)
+        assertEquals(5, near.count())
+        assertEquals(11, back.count())
+        assertEquals(40 - 12 + 1, back.first)
+        assertTrue("当前轮必须在窗口里：$back", 30 in back)
+        for (current in 29..40) {
+            val window = scrubberWindow(totalTurns = 40, currentTurn = current, drawnTurns = 12)
+            assertTrue(
+                "窗口画到了没加载的轮次：current=$current window=$window",
+                window.first >= 29 && window.last <= 40,
+            )
+        }
     }
 
     @Test

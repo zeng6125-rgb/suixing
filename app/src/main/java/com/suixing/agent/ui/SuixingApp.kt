@@ -3,6 +3,7 @@
 package com.suixing.agent.ui
 
 import androidx.compose.ui.draw.drawBehind
+import com.suixing.agent.ui.components.LocalDrawerBusy
 import com.suixing.agent.ui.components.imePaddingBottom
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -85,6 +86,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.compose.runtime.mutableIntStateOf
@@ -93,6 +95,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -168,6 +171,16 @@ import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.indication
+import kotlinx.coroutines.withTimeoutOrNull
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.drawscope.clipPath
 
 /**
  * 全站唯一的转场规格：旧页**当帧消失**，新页整幅滑入（纯位移、无淡化 —— 淡化必然有
@@ -213,6 +226,33 @@ private const val NAV_FADE_MS = NAV_EXIT_MS
  */
 private const val IME_QUANTUM_PX = 4
 
+/** 抽屉面板宽度（ModalDrawerSheet 与收起残影共用）。 */
+private val DRAWER_SHEET_WIDTH = 300
+
+/**
+ * 抽屉收起：**统一一条规格**，170ms + `FastOutLinearInEasing`（用户指定：260 → 210 → 180 → 170）。
+ *
+ * 之前遮罩那条和助手那条不一样，原因是有两条关闭入口：
+ *  · 我们自己的 `closeDrawer()`（点助手、返回键、会话行）—— 参数由我们传；
+ *  · M3 内部 `Scrim` 的 `onClose = { drawerState.close() }`
+ *    （`NavigationDrawerKt$ModalNavigationDrawer$2$2$1$1`）—— 参数来自
+ *    `DrawerState.anchoredDraggableMotionSpec`，App 模块拿不到（`$material3` 内部可见）。
+ * 所以点遮罩始终是库默认 `TweenSpec(256ms)` + `FastOutSlowInEasing`，和助手那条不同。
+ *
+ * 那条内部规格**改不了**（试过反射：`ModalNavigationDrawer` 每次重组都会把它重写，
+ * 见 `NavigationDrawerKt` 里 `lambda$11$lambda$10` 的三处 set ⇒ 下一帧就失效）。
+ * 所以改成**遮罩由我们这层接管**：`scrimColor = Color.Transparent` 关掉库的视觉，
+ * 另起一层只覆盖面板右侧的自带遮罩（见 ModalNavigationDrawer 之后那段），点击走
+ * `closeDrawer()` ⇒ 与助手 / 返回 / 会话行同一条 [DRAWER_CLOSE_SPEC]。
+ * 打开不受影响：打开是显式传 spec 的（260ms 减速进场）。
+ */
+private const val DRAWER_CLOSE_MS = 170
+
+/** 抽屉收起规格（四条关闭路径共用）。`FiniteAnimationSpec` 不可变，顶层单例即可。 */
+private val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
+    tween(DRAWER_CLOSE_MS, easing = androidx.compose.animation.core.FastOutLinearInEasing)
+
+
 @Composable
 fun SuixingApp() {
     val navController = rememberNavController()
@@ -221,7 +261,9 @@ fun SuixingApp() {
     val route = backStackEntry?.destination?.route?.substringBefore('?') ?: "empty"
     // 覆盖层是否盖着（0＝没有，1＝有）：推进/退回时下面那层跟着让位用。
     // 与 NavHost 的位移同一时长、同一曲线，两层的动作才是**一件事**。
-    val baseShift by animateFloatAsState(
+    // **不在组合期解包**（`by` 会立刻读一次，于是推进/退回的 300ms 里外壳每帧重组一遍，
+    // 抽屉内容、聊天页都跟着重跑）。保留 State 引用，值在下面 `graphicsLayer` 里（绘制期）读。
+    val baseShiftState = animateFloatAsState(
         targetValue = if (route == "empty") 0f else 1f,
         animationSpec = tween(NAV_PUSH_MS, easing = FastOutSlowInEasing),
         label = "baseShift",
@@ -303,6 +345,10 @@ fun SuixingApp() {
     // 下一次无关的导航上——从覆盖层页开抽屉去别页、返回落到 chat 之后，再从聊天页顶栏点设置，
     // route 恰好等于那个陈旧名字，返回动画的判据就会错判。
     var drawerTarget by remember { mutableStateOf<String?>(null) }
+    // 抽屉是否正在播动画：状态对象本身下发（不在这里解包，避免外壳重组），
+    // 读它的是 ChatScreen 的填充协程 —— 见 `LocalDrawerBusy`。
+    val drawerBusyState = remember { mutableStateOf(false) }
+
     val open: (String) -> Unit = { target ->
         // **不关抽屉**（用户：「不用关掉侧边栏」「新页不应该在页面都最上面移动的吗？」）：
         // 覆盖层现在画在 ModalNavigationDrawer 之上（见下面 Scaffold/Box 那段），所以新页是
@@ -327,18 +373,47 @@ fun SuixingApp() {
     // 用户自己收起抽屉（遮罩、返回键、左缘拖动）：这是用户自己的动作，走库的动画。同时清掉
     // 出发页标记——用户手动把抽屉收了，返回时就不该再自己弹出来（"状态"是他刚亲手关掉的这个）。
     val closeDrawer: () -> Unit = {
-        scope.launch { drawerState.close() }
+        // 收起用 [DRAWER_CLOSE_SPEC]（170ms 加速收走）。点遮罩那条也走这里
+        // （自带遮罩层调用本函数），四条路径手感一致。
+        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         drawerTarget = null
     }
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
     // 用户直接落在会话里（ChatGPT 的抽屉在这里同样会关）。这里一并清掉出发页标记。
     val chatFromDrawer: () -> Unit = {
         drawerTarget = null
-        // 0.8.91 原样：与 open() 同一条（snapTo + UNDISPATCHED）。
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            drawerState.snapTo(DrawerValue.Closed)
-        }
+        // **与 `closeDrawer()`（助手 / 遮罩 / 返回键）逐字相同**：只启动同一条
+        // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
+        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         showChat()
+    }
+    /**
+     * 点抽屉里的一行会话：**先把抽屉收起，收完再换会话**。
+     *
+     * 用户原话：「点了侧边栏的切换会话，先有关闭侧边栏（，再）会话」。
+     * 之前把 `openConversation` 和收起动画放在同一帧，换会话要整页换状态（分组、解析、冷组合），
+     * 主线程被占住、动画的帧被吃掉 ⇒ 收起看着和助手/遮罩那几条不一样。
+     * 现在顺序拨正：动画完整播完（170ms），再 `showChat()` + 换会话。
+     */
+    // **连点保护**：只有最后一次点击算数（第一次的协程会被第二次的动画取消，令牌随之失效）。
+    val drawerSwitchToken = remember { intArrayOf(0) }
+    val switchFromDrawer: (Conversation) -> Unit = { conversation ->
+        drawerTarget = null
+        val token = ++drawerSwitchToken[0]
+        drawerBusyState.value = true
+        scope.launch {
+            try {
+                drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+            } finally {
+                // 被后一次点击取消时不要清忙：那一次已经重新置 true 并在跑自己的动画。
+                if (drawerSwitchToken[0] == token) drawerBusyState.value = false
+            }
+            // 同理：过期的点按不再切会话（否则快速点 A 再点 B，A 的协程会在动画结束后抢一次）。
+            if (drawerSwitchToken[0] == token) {
+                showChat()
+                chat.openConversation(conversation)
+            }
+        }
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
     val goBack: () -> Unit = { navController.popBackStack() }
@@ -357,44 +432,70 @@ fun SuixingApp() {
     // opposite-direction change inside the clamp is that rebound and is dropped; real
     // transition frames are 30-80px and pass untouched.
     val rootDensity = LocalDensity.current
-    val imeRawPx = WindowInsets.ime.getBottom(rootDensity)
     // 保留**状态对象本身**（而不是用 `by` 解包）：下发的是引用，读点自己在布局期取 .value，
     // 这样键盘动画的每一帧不会让整棵树重组（见 LocalHeldImePx 的说明）。
     val heldImeState = remember { mutableIntStateOf(0) }
-    val heldImePx = heldImeState.intValue
     var imeDir by remember { mutableIntStateOf(0) }
     // 长按/选择期间冻结 clamp（用户：「抬起时对话框与输入法的高度有时变得很大」）：抬手那一刻
     // 选择手柄/菜单出现，这台 ROM 把它的高度报进 IME inset，clamp 一接受、输入框底垫就暴涨。
     // 守护窗（按下到抬手后 400ms）里不接受任何 inset 变化；窗口外照常。
     var selectionActive by remember { mutableStateOf(false) }
-    LaunchedEffect(imeRawPx, selectionActive) {
-        if (selectionActive) return@LaunchedEffect
-        val delta = imeRawPx - heldImePx
-        if (delta == 0) return@LaunchedEffect
-        val dir = if (delta > 0) 1 else -1
-        val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
-        if (imeDir != 0 && dir != imeDir && rebound) return@LaunchedEffect
-        imeDir = dir
-        // **量化在这里做，只做一次**（用户：「输入框随键盘抬起收回掉帧，边距会抖」）：
-        // 之前下发的是原始 px，而输入框在**布局期**读原始值（逐像素平滑）、转录列表在
-        // **组合期**读着自己又量化了一次的值（4px 台阶）—— 同一份动画被两种精度消费，
-        // 两者之间的间距每帧都在变，于是"边距在抖"。现在唯一来源就是量化后的值，
-        // 所有消费者（输入框、列表让位、滚动条）读到的完全一致，间距在动画全程恒定。
-        // 4px 在 3x 密度下约 1.3dp，视觉上不是台阶；而它把整页重组次数压到约 1/4，
-        // 这是键盘动画期间不整页掉帧的关键。
-        heldImeState.intValue = imeRawPx / IME_QUANTUM_PX * IME_QUANTUM_PX
-    }
-    LaunchedEffect(imeRawPx) {
-        delay(300)
-        imeDir = 0
+    // **原始键盘高度不在组合期读**（这是「输入法一抬一收就掉帧」的最后一块，也是最贵的一块）。
+    //
+    // `WindowInsets.ime.getBottom(...)` 是**快照读**（foundation 里 `AndroidWindowInsets` 的
+    // insets 挂在 `MutableState` 上）。原来它写在组合体里当 `val imeRawPx = …`，于是键盘动画的
+    // 每一帧都让**整个外壳重组一遍**：`ModalNavigationDrawer(drawerContent = …)` 的 lambda
+    // 参数不稳定（`List<Conversation>`、`Set<String>`），抽屉里那 5 行会话 + 5 个按钮 + 头部
+    // 于是**逐帧重新组合** —— 用户报的「点侧栏就卡」，以及「键盘抬起收回掉帧」，同一个根因。
+    // 那次量化（`IME_QUANTUM_PX`）只压住了「写进 heldImeState 的次数」，压不住这一行裸读。
+    //
+    // 改到 `snapshotFlow` 里读：组合期零订阅，值变了才唤醒一次协程。300ms 的方向窗口
+    // （原来的第二个 effect）也并进同一个 collectLatest —— 不再挂一个观察原始值的 effect。
+    // `WindowInsets.ime` 是 @Composable 取值器，只能在组合里取；取到的是**对象**，
+    // 不读它的值（值挂在 `AndroidWindowInsets` 内部的 MutableState 上，读它才订阅）。
+    val imeInsets = WindowInsets.ime
+    LaunchedEffect(rootDensity, imeInsets) {
+        snapshotFlow { imeInsets.getBottom(rootDensity) to selectionActive }
+            .collectLatest { (imeRawPx, selection) ->
+                if (!selection) {
+                    val delta = imeRawPx - heldImeState.intValue
+                    if (delta != 0) {
+                        val dir = if (delta > 0) 1 else -1
+                        val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
+                        if (!(imeDir != 0 && dir != imeDir && rebound)) {
+                            imeDir = dir
+                            // **量化在这里做，只做一次**（用户：「输入框随键盘抬起收回掉帧，
+                            // 边距会抖」）：之前下发的是原始 px，而输入框在**布局期**读原始值
+                            // （逐像素平滑）、转录列表在**组合期**读着自己又量化了一次的值
+                            // （4px 台阶）—— 同一份动画被两种精度消费，两者之间的间距每帧都在变，
+                            // 于是"边距在抖"。现在唯一来源就是量化后的值，所有消费者读到的完全一致，
+                            // 间距在动画全程恒定。4px 在 3x 密度下约 1.3dp，视觉上不是台阶。
+                            heldImeState.intValue = imeRawPx / IME_QUANTUM_PX * IME_QUANTUM_PX
+                        }
+                    }
+                }
+                // 方向窗口：最后一次变化之后 300ms 归零（`heldImeState` 不动，只放下一个方向判断）。
+                delay(300)
+                imeDir = 0
+            }
     }
     CompositionLocalProvider(
+        LocalDrawerBusy provides drawerBusyState,
         // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：演库自己那
         // 一段滑入——用户反对的从来是「返回时把它重放一遍」，不是手动打开时的动画。
         // 只在会话页可用（抽屉只属于会话页，见 ModalNavigationDrawer）：子页没有汉堡入口，
         // 这一层判断是防止以后有人把汉堡画到子页上时它还能把抽屉拉出来。
         LocalOpenSidebar provides {
-            if (route == "empty") scope.launch { drawerState.open() }
+            // **进场**：260ms + LinearOutSlowInEasing（减速进场，末端缓缓贴合）。
+            // 你说过"这个动效感觉很一般，改好一点"——这是针对进场的改进，保留。
+            // **退场不走这里**：关闭统一在下面两处（`closeDrawer` / `chatFromDrawer`），
+            // 用的是 [DRAWER_CLOSE_SPEC]（210ms 加速收走），遮罩那条同源。
+            if (route == "empty") scope.launch {
+                drawerState.animateTo(
+                    DrawerValue.Open,
+                    tween(260, easing = androidx.compose.animation.core.LinearOutSlowInEasing),
+                )
+            }
         },
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
@@ -413,24 +514,34 @@ fun SuixingApp() {
         // 底色只画到键盘上沿，键盘后面（含它的圆角）留白给壁纸 —— 这是其它 App 的做法；
         // 铺满整窗会让渐变的结束色出现在圆角里，和画布顶边对不上。渐变终点钉在画布底边
         // （窗高 − 键盘高），两段渐变才在交界处同色。
-        val gradientEndPx = with(rootDensity) {
-            (LocalConfiguration.current.screenHeightDp.dp.toPx() - heldImePx).coerceAtLeast(1f)
+        // 渐变终点（画布底边 = 窗高 − 键盘高）**在绘制期算**：键盘高度每帧都在变，
+        // 在组合期读它等于让外壳逐帧重组（见上面 `snapshotFlow` 的说明）。
+        // `drawBehind` 的 lambda 是绘制阶段才读快照的：键盘动画期间这里既不重组也不重布局。
+        val canvasTopColor = MaterialTheme.colorScheme.surface
+        val canvasTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
+        val screenHeightPx = with(rootDensity) {
+            LocalConfiguration.current.screenHeightDp.dp.toPx()
         }
+        val darkShell = LocalDarkTheme.current
         Box(
-            Modifier.fillMaxSize().background(
-                if (LocalDarkTheme.current) {
-                    SolidColor(MaterialTheme.colorScheme.surface)
-                } else {
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            MaterialTheme.colorScheme.surface,
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
-                        ),
-                        startY = 0f,
-                        endY = gradientEndPx,
-                    )
-                },
-            ),
+            Modifier
+                .fillMaxSize()
+                .then(
+                    if (darkShell) {
+                        Modifier.background(SolidColor(canvasTopColor))
+                    } else {
+                        Modifier.drawBehind {
+                            val endY = (screenHeightPx - heldImeState.intValue).coerceAtLeast(1f)
+                            drawRect(
+                                Brush.verticalGradient(
+                                    colors = listOf(canvasTopColor, canvasTint),
+                                    startY = 0f,
+                                    endY = endY,
+                                ),
+                            )
+                        }
+                    },
+                ),
         ) {
             // **抽屉在下、覆盖层在上**（用户：「新页不应该在页面都最上面移动的吗？」）：
             // 覆盖层的 NavHost 必须画在 ModalNavigationDrawer 之上，否则从抽屉点进新页时，
@@ -472,7 +583,7 @@ fun SuixingApp() {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .graphicsLayer { translationX = -size.width * 0.10f * baseShift },
+                    .graphicsLayer { translationX = -size.width * 0.10f * baseShiftState.value },
             ) {
             ModalNavigationDrawer(
                 drawerState = drawerState,
@@ -483,6 +594,11 @@ fun SuixingApp() {
                 // 设置页里面还能侧滑出侧边栏？」。只有 chat 那一层（route == "empty"）为 true。
                 gesturesEnabled = route == "empty",
                 // 遮罩浓度照搬自绘那版：M3 默认 scrim 是 32%，这块面板从第一天起是 45% 的黑。
+                // 遮罩的**视觉**仍归库（它画在面板下面：圆角、层次、浓度都对）。
+                // 视觉之外只有一件事要接管：点击后的**关闭动效** —— 库的 `onClose` 用
+                // `DrawerState.closeDrawerMotionSpec`，而那个字段由库每次重组写死，App 侧改不了。
+                // 所以在上面另加一层**透明**的手势层（见下面那段），把点击转成我们自己的
+                // `closeDrawer()`（210ms 加速收走，与助手那条同规格）。
                 scrimColor = Color.Black.copy(alpha = 0.45f),
                 drawerContent = {
                     val drawerConversations by chat.conversations.collectAsState()
@@ -497,15 +613,8 @@ fun SuixingApp() {
                             chatFromDrawer()
                         },
                         onOpenConversation = { conversation ->
-                            // **先切会话、再瞬时收抽屉**（用户：切会话不响应）。
-                            //
-                            // 走过一次弯路记在这里：为了"点不中/要点好几下"，曾改成
-                            // `scope.launch { drawerState.close(); openConversation(...) }` ——
-                            // `close()` 会挂起等完 300ms 关闭动画才轮到切会话，于是点了没反应，
-                            // 连点几下还会把几次切换排成一队（看着像卡死）。
-                            // `chatFromDrawer()` 里本来就是 `snapTo`（瞬时归位），照它来。
-                            chat.openConversation(conversation)
-                            chatFromDrawer()
+                            // 收起动画与助手/遮罩那条完全一致，播完再换会话（见 `switchFromDrawer`）。
+                            switchFromDrawer(conversation)
                         },
                         onDeleteConversation = { chat.deleteConversation(it) },
                         // 改名必须走 ViewModel：它手里有一份标题拷贝，每轮结束会写回盘（见
@@ -573,6 +682,21 @@ fun SuixingApp() {
                     }
                 }
             }
+            }
+            // **透明的点击接管层**（不画任何像素，视觉全部留给库的遮罩）：
+            //  · **只覆盖面板右侧那块**（`padding(start = 面板宽)`）——上一版整屏铺，虽然不绘制，
+            //    但它的手势节点压在面板上，把行点击挡住了（用户：「遮罩覆盖到侧边栏了，点不了」）。
+            //    裁到面板外之后，落在面板上的手指根本不经过这一层。
+            //  · 点到就走 `closeDrawer()`：210ms 加速收走，与助手那条同规格。
+            //  · 挂载条件用 `targetValue`（动画**开始**就翻转）：打开第一帧就能点外面关，
+            //    关闭一开始就让出点击。
+            if (drawerState.targetValue == DrawerValue.Open) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(start = DRAWER_SHEET_WIDTH.dp)
+                        .pointerInput(Unit) { detectTapGestures { closeDrawer() } },
+                )
             }
             NavHost(
                             navController = navController,
@@ -742,7 +866,15 @@ fun SuixingApp() {
                         // **只在会话页**接管 BACK：抽屉现在不随导航关闭（见 open()），覆盖层页
                         // 盖在它上面时抽屉可能还开着 —— 那种情况下 BACK 应该先退页，不是去关一个
                         // 看不见的抽屉。route != "empty" 时这里让位，交给 NavHost 自己的返回。
-                        BackHandler(enabled = drawerState.isOpen && route == "empty") { closeDrawer() }
+                        // **不要把 `isOpen` 读进外壳的组合作用域**（用户实测：抽屉动画
+                        // **播完那一帧**点遮罩要等一会才生效，动画期间反而立刻生效）。
+                        // `isOpen` 只在动画结束时翻转（`settledValue` 由 `anchoredDrag` 收尾写），
+                        // 在外壳函数体里读它 ⇒ 那一帧**整个 SuixingApp 重组**，其中包括
+                        // `ChatScreen(...)`（参数里有每次重组新建的 lambda，跳不过去）⇒
+                        // 聊天页整段重跑（分组、轮号、token 估算、行顶数组重建），主线程被占住，
+                        // 这期间的点击只能排队。挪进 `DrawerBackHandler` 后，重组被限制在
+                        // 那个只含 BackHandler 的小作用域里，外壳与聊天页不再跟着动。
+                        DrawerBackHandler(drawerState, route, closeDrawer)
                     }
                 }
             }
@@ -835,6 +967,25 @@ fun SuixingApp() {
  * 面板本体是 M3 的 [ModalDrawerSheet]（用户点名「不要自绘」）：拖动跟手、遮罩与位移都归库。
  * 圆角、底色、宽度、elevation 全部显式覆盖成自绘那版的值——换库不许换设计。
  */
+/**
+ * 抽屉的返回键处理：**单独成一个组合单元**，只为把 `drawerState.isOpen` 的读取关在小作用域里。
+ *
+ * 若把 `drawerState.isOpen` 直接写进 `SuixingApp` 的函数体（原来是 `BackHandler(enabled =
+ * drawerState.isOpen && …)`），那么抽屉动画**结束那一帧**状态翻转会连带重组整个外壳 ——
+ * 包括常驻的 `ChatScreen`（参数含每次重组新建的 lambda，跳不过去）⇒ 聊天页整段重跑，
+ * 主线程卡住，这一瞬间点到遮罩/按钮的反应就会被推迟。用户实测的现象正是
+ * 「动画期间点遮罩立刻能关、动画刚播完那一下反而要等一会」。
+ * 挪到本函数后，只有这一个只含 BackHandler 的作用域跟着翻转重组。
+ */
+@Composable
+private fun DrawerBackHandler(
+    drawerState: androidx.compose.material3.DrawerState,
+    route: String,
+    onClose: () -> Unit,
+) {
+    BackHandler(enabled = drawerState.isOpen && route == "empty") { onClose() }
+}
+
 @Composable
 private fun Drawer(
     /** 抽屉是否开着（= drawerState.isOpen）：只用来在拉开时收起键盘。 */
@@ -996,7 +1147,9 @@ private fun Drawer(
     ModalDrawerSheet(
         modifier = Modifier
             .fillMaxHeight()
-            .width(300.dp),
+            // **宽度只有一处定义**（`DRAWER_SHEET_WIDTH`）：透明点击层的裁剪边界按它算，
+            // 两处各写一个魔数会在改宽时错位（点击层盖住面板 / 留缝）。
+            .width(DRAWER_SHEET_WIDTH.dp),
         drawerShape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp),
         drawerContainerColor = scheme.surfaceContainerHigh,
         drawerTonalElevation = 0.dp,
@@ -1355,6 +1508,77 @@ private fun exportName(title: String): String {
     return (clean.ifEmpty { "会话" }) + ".json"
 }
 
+
+/**
+ * 抽屉里那一行的点击：**不因节点移动而丢**。
+ *
+ * 为什么不用 `combinedClickable`：它（和 `detectTapGestures`）在抬手时用
+ * `waitForUpOrCancellation` 判定"抬起点是否还在**节点当前**边界内"。抽屉面板在开/合动画里
+ * 每帧都在位移（`ModalDrawerSheet` 的 `offset{}`），而手指是静止的 ⇒ 在**节点本地坐标**里
+ * 手指一直往边界外跑 ⇒ 这一指被判成取消，`onClick` 根本不触发。
+ * 这就是「进入抽屉后元素无法第一时间点击」：不是被谁挡住，是**点击被判定为取消**。
+ *
+ * 这里自己跟指针：只按"位移距离"判点按，不看节点边界；超过 `touchSlop` 就交还给列表/抽屉拖动
+ * （不消费事件），长按到点先出菜单。涟漪复用 `LocalIndication` + 手工发 Press/Release。
+ */
+@Composable
+private fun Modifier.drawerRowTap(
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+): Modifier {
+    // **水波纹照旧**：press/release 的发射不能写在 `AwaitPointerEventScope` 里（那个作用域是
+    // 受限的，调用 `emit` 编译不过 —— 上一版就是因此丢了涟漪）。这里拿一个普通的
+    // `rememberCoroutineScope()`，把手势里的事件通过它转手发出去：视觉与以前一致。
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val indication = androidx.compose.foundation.LocalIndication.current
+    val rippleScope = rememberCoroutineScope()
+    return this
+        .indication(interaction, indication)
+        .pointerInput(enabled, onClick, onLongClick) {
+            if (!enabled) return@pointerInput
+            val slop = viewConfiguration.touchSlop
+            val longMs = viewConfiguration.longPressTimeoutMillis
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val press = androidx.compose.foundation.interaction.PressInteraction.Press(down.position)
+                rippleScope.launch { interaction.emit(press) }
+                var travel = 0f
+                var longFired = false
+                var tapped = false
+                var cancelled = false
+                while (true) {
+                    val event = withTimeoutOrNull(if (longFired) Long.MAX_VALUE else longMs) {
+                        awaitPointerEvent()
+                    }
+                    if (event == null) {
+                        // 按住到点：长按生效，并继续保持跟手（抬手后不再触发点击）。
+                        longFired = true
+                        onLongClick?.invoke()
+                        continue
+                    }
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    travel += (change.position - change.previousPosition).getDistance()
+                    if (!change.pressed) {
+                        tapped = travel <= slop
+                        break
+                    }
+                    if (travel > slop) {
+                        // 拖动：不消费，交给 LazyColumn 滚动 / 抽屉边缘拖动。
+                        cancelled = true
+                        break
+                    }
+                }
+                rippleScope.launch {
+                    interaction.emit(
+                        androidx.compose.foundation.interaction.PressInteraction.Release(press),
+                    )
+                }
+                if (!cancelled && tapped && !longFired) onClick()
+            }
+        }
+}
+
 @Composable
 private fun ConversationRow(
     conversation: Conversation,
@@ -1407,7 +1631,9 @@ private fun ConversationRow(
                 .clip(MaterialTheme.shapes.medium)
                 // 排序模式下这一行没有长按：把手上的拖动和行上的长按是同一只手指上的两个
                 // handler，按住把手超过 500ms 会先被判成长按（用户：「拖把手容易误触菜单」）。
-                .combinedClickable(
+                // 见 `drawerRowTap` 的说明：不能用 `combinedClickable`（抬手时会因节点位移
+                // 把这一指判成取消，抽屉动画期间的第一指就是这么丢的）。
+                .drawerRowTap(
                     onClick = onClick,
                     onLongClick = if (sortMode) null else onLongClick,
                 ),

@@ -793,7 +793,13 @@ internal fun scrubberWindow(
     val size = if (forceRows > 0) {
         forceRows.coerceAtMost(drawnTurns)
     } else {
-        scrubberRowCount(drawnTurns, currentTurn)
+        // **必须是 `totalTurns`**（本版修）：`currentTurn` 是全局轮号，`scrubberRowCount`
+        // 的判据是 `totalTurns - currentTurn`。原来这里传的是 `drawnTurns`（已加载轮数），
+        // 分页会话里 `drawnTurns < currentTurn` 恒成立 ⇒ `distance` 恒 0 ⇒ 条数永远锁在 5 条，
+        // 「常驻 5 → 读到更早逐级解锁到 12」对超过一页的会话根本没生效（用户报的「条数不对」）。
+        // 传 `totalTurns` 不会画出没加载的轮次：下面 `start >= oldestDrawn`、`end <= newest`
+        // 两处夹紧，窗口永远落在已加载范围内（单测 `the turn being read is always on the strip`）。
+        scrubberRowCount(totalTurns, currentTurn)
     }
     if (size <= 0) return IntRange.EMPTY
     // **窗口里能画的最新的那一轮 = 全局第 totalTurns 轮**（已加载的是最后 drawnTurns 轮，
