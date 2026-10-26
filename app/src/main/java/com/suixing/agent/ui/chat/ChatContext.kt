@@ -1,258 +1,98 @@
 package com.suixing.agent.ui.chat
 
-import kotlinx.coroutines.launch
-import com.suixing.agent.ui.components.rememberPopupMotion
-import android.Manifest
-import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.os.SystemClock
-import android.provider.OpenableColumns
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.util.Base64
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.foundation.gestures.animateScrollBy
-import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.exclude
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import kotlinx.coroutines.flow.StateFlow
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.Stable
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.foundation.Image
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import coil3.request.crossfade
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.res.painterResource
-import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.PlatformTextStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
-import com.suixing.agent.agent.estimateTokens
-import com.suixing.agent.core.Core
-import com.suixing.agent.data.AppSettings
-import com.suixing.agent.voice.Dictation
-import com.suixing.agent.voice.DictationRecorder
-import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
-import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
-import com.suixing.agent.data.Tps
 import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TodoItem
-import com.suixing.agent.data.Transcript
-import com.suixing.agent.data.forAssistant
-import com.suixing.agent.data.groupModels
 import com.suixing.agent.data.label
-import com.suixing.agent.data.modelOffers
-import com.suixing.agent.data.choiceFor
-import com.suixing.agent.ui.assistant.AssistantAvatar
-import com.suixing.agent.ui.assistant.AssistantEditor
-import com.suixing.agent.ui.assistant.AssistantSheet
-import com.suixing.agent.ui.components.CircleActionButton
-import com.suixing.agent.ui.components.DrawerButton
-import com.suixing.agent.ui.components.FlatIconButton
-import com.suixing.agent.ui.components.FlatPainterButton
-import com.suixing.agent.ui.components.FullScreenOverlay
-import com.suixing.agent.ui.components.LocalPathClick
-import com.suixing.agent.ui.components.LocalHeldImePx
-import com.suixing.agent.ui.components.LocalSetSelectionActive
-import com.suixing.agent.ui.components.LocalOpenSidebar
-import com.suixing.agent.ui.components.MarkdownText
-import com.suixing.agent.ui.components.PressPill
-import com.suixing.agent.ui.components.REASONING_LEVELS
+import com.suixing.agent.ui.components.MenuCard
 import com.suixing.agent.ui.components.SuixingDialog
-import com.suixing.agent.ui.components.SuixingMark
-import com.suixing.agent.ui.components.markdownBody
-import com.suixing.agent.ui.components.suixingClickable
-import com.suixing.agent.ui.theme.LocalDarkTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.roundToInt
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
+import com.suixing.agent.ui.components.rememberPopupMotion
 import java.util.Locale
-import java.util.concurrent.Executors
-
+import kotlin.math.max
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import com.suixing.agent.R
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 /**
  * The context entry on the title capsule's right end (user: 「原圆环的内容移至标题胶囊右侧，
  * 可以换个 icon」): a bar-chart glyph, and a popup that opens **downward** — the bar sits at the
@@ -880,279 +720,10 @@ internal fun FailureReceiptRow(text: String) {
     }
 }
 
-/** 完整任务清单：输入框上方那一行点开就是它。 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
-    val scheme = MaterialTheme.colorScheme
-    val done = todos.count { it.status == TODO_COMPLETED }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = scheme.surface,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp),
-        ) {
-            Text("任务清单", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = "已完成 $done/${todos.size}",
-                style = MaterialTheme.typography.bodySmall,
-                color = scheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(10.dp))
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                items(todos) { item -> TodoSheetRow(item) }
-            }
-        }
-    }
-}
 
-/**
- * 文件路径菜单（LINK-CLICK-SPEC §3.2 一期）：点消息里的文件路径弹出来。
- *
- * 一期只有两项，且都是「永远可用」的：复制路径、让随行读取。二期才加 FileProvider 的
- * 「文件管理器打开 / 分享」——spec 说得很明白，ACTION_VIEW 对 mime 与已装 app 依赖太大
- * （`.md` 多半没有对应 app），所以把复制与让模型读这两个不会断的放前面。
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun PathActionSheet(
-    path: String,
-    onDismiss: () -> Unit,
-    onCopy: () -> Unit,
-    onAskModel: () -> Unit,
-) {
-    val scheme = MaterialTheme.colorScheme
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = scheme.surface,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp),
-        ) {
-            // 路径本体：等宽、可换行、不截断——用户要核对的就是这串。
-            Text(
-                text = path,
-                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                color = scheme.onSurfaceVariant,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(12.dp))
-            MenuItemRow(
-                icon = ImageVector.vectorResource(R.drawable.ic_copy),
-                label = "复制路径",
-                onClick = onCopy,
-            )
-            MenuItemRow(
-                icon = ImageVector.vectorResource(R.drawable.ic_bot),
-                label = "让随行读取并总结",
-                onClick = onAskModel,
-            )
-        }
-    }
-}
 
-/** 清单里的一行：状态标记 + 事项；完成的划掉一点、进行中的用品牌色。 */
-@Composable
-internal fun TodoSheetRow(item: TodoItem) {
-    val scheme = MaterialTheme.colorScheme
-    val done = item.status == TODO_COMPLETED
-    val active = item.status == TODO_IN_PROGRESS
-    val ink = when {
-        active -> scheme.primary
-        done -> scheme.onSurfaceVariant.copy(alpha = 0.6f)
-        else -> scheme.onSurface
-    }
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Icon(
-            imageVector = ImageVector.vectorResource(
-                when {
-                    done -> R.drawable.ic_circle_check
-                    // 没有专门的「进行中」图标：箭头朝右＝正在往前走，比再画一个圆点更不含糊。
-                    active -> R.drawable.ic_chevron_right
-                    else -> R.drawable.ic_list_checks
-                },
-            ),
-            contentDescription = null,
-            tint = when {
-                active -> scheme.primary
-                done -> scheme.onSurfaceVariant.copy(alpha = 0.6f)
-                else -> scheme.onSurfaceVariant
-            },
-            modifier = Modifier.size(16.dp).padding(top = 2.dp),
-        )
-        Spacer(Modifier.width(10.dp))
-        Text(
-            text = item.subject,
-            style = MaterialTheme.typography.bodyMedium,
-            color = ink,
-            textDecoration = if (done) TextDecoration.LineThrough else null,
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
 
-/**
- * The board rows worth drawing: the items still open, in the order the model wrote them, and —
- * once everything is done — the last few that finished.
- *
- * Finished items leave the row as they finish, which is what "创建、完成、消失" describes: the
- * plan on screen is what is *left*, and the tally is what says how far along the whole board is.
- * Showing the whole list instead would push the one item being worked on off the bottom of a
- * three-row strip as soon as a plan grew past it.
- */
 
-/**
- * One icon action of a queued row.
- *
- * The touch target is the 40dp node the ripple and the click live on, with the glyph drawn
- * inside it: a 16dp icon with a 16dp hit area is a control the user misses half the time.
- * [label] is the accessibility name and the thing to grep for.
- */
-@Composable
-internal fun QueueAction(icon: Int, label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(40.dp)
-            .clip(CircleShape)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = onClick,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = ImageVector.vectorResource(icon),
-            contentDescription = label,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(18.dp),
-        )
-    }
-}
-
-/** The chip above the pill: a thumbnail, the name, and a way out of it. */
-@Composable
-internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
-    val scheme = MaterialTheme.colorScheme
-    // The same inset the queue rows and the board above use: the strip and the rows under it are
-    // one column of things belonging to the field. 多附件后内缩交给外面那一排 Row（每张 chip 自带
-    // 会在一排里叠出参差的间距）。
-    Row {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = scheme.surfaceContainerHigh,
-            border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.6f)),
-        ) {
-            Row(
-                modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val preview = attachment.preview
-                var full by remember { mutableStateOf(false) }
-                // The picture and its name are one tap target; 移除 stays its own button beside
-                // them. Making the whole chip clickable would put "preview" and "delete" on the
-                // same 26dp of glass, which is how a user deletes what they meant to look at.
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = if (preview != null) {
-                        Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = ripple(),
-                                onClick = { full = true },
-                            )
-                    } else {
-                        Modifier
-                    },
-                ) {
-                if (preview != null) {
-                    Image(
-                        bitmap = preview,
-                        contentDescription = "查看图片",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(26.dp)
-                            .clip(RoundedCornerShape(8.dp)),
-                    )
-                } else {
-                    Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_file),
-                        contentDescription = null,
-                        tint = scheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = attachment.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = scheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 190.dp),
-                )
-                }
-                // The attachment's own bitmap, not a scaled-down copy: this is the picture the user
-                // picked, at the size it was stored, so opening it shows what will be sent.
-                if (full && preview != null) {
-                    ImagePreviewDialog(
-                        bitmap = preview,
-                        contentDescription = attachment.label,
-                        // 与对话里那张图片预览同一形态（Dialog + 系统遮罩）：用户要的是
-                        // 「图1 那个效果」，附件与队列两处都跟它对齐。
-                        keepKeyboard = false,
-                    ) { full = false }
-                }
-                IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
-                    Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_x),
-                        contentDescription = "移除",
-                        tint = scheme.onSurfaceVariant,
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * What the ring draws, and whether the number is the endpoint's own or this app's estimate.
- *
- * Four sources, in one order, and the order is the whole point:
- *
- * 1. [liveReported] — the count the endpoint itself sent for the round in flight. The only
- *    honest measure of 「上下文用了多少」 (see `StreamStats.lastPromptTokens`).
- * 2. [newestStored] — the newest round in the transcript that carries a count. This is what the
- *    ring reads on a conversation that was just opened, and between the start of a round and
- *    the endpoint's usage block at its end.
- * 3. [liveEstimate] — the run's own character-based estimate of the wire, used while a round is
- *    going and before its usage block lands.
- * 4. [transcriptEstimate] — the transcript's own size, for a conversation that is *not* running
- *    and whose stored rounds carry no counts at all: a gateway that ignores
- *    `stream_options.include_usage` (see LlmClient's own note), or rows written before the counts
- *    existed. Without it the card was empty in exactly that case — every line zero, 「暂无数据」
- *    on a conversation with plenty of text in it — which is the report this answers.
- *
- * The last two are estimates, so [estimated] is set and the card writes 「约」: a proportion is not
- * a price, but a proportion that says 6% beats a blank.
- */
 
 /**
  * The glyph for an approval mode, from the drawables the app already ships.
@@ -1208,362 +779,131 @@ internal const val KEYBOARD_ANIM_MS = 220
 /** How many queued lines are drawn before the rest collapse into one count. */
 internal const val STEER_ROWS_SHOWN = 3
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/** How far a queued line is inset from the pill on each side, so it reads as narrower. */
+internal val STEER_QUEUE_INSET = 12.dp
+
 /**
- * The draft's `attachmentUri` for a picture taken back out of the queue by 「修改」.
+ * Where the context went.
  *
- * A marker, not a uri: the picture lives in the view model's attachment cache and nowhere else, so
- * this exists only to make the composer re-read that cache (its `remember` is keyed on the draft's
- * uri and name). After a restart the cache is empty and the chip is simply absent, which is the
- * honest outcome — the alternative is a draft pointing at a uri that cannot be read.
- */
-internal const val QUEUED_ATTACHMENT_URI = "queued://steer-image"
-
-/** What the restored picture is called in the composer's chip. */
-internal const val QUEUED_IMAGE_LABEL = "图片"
-
-/** Target width of a queue row's thumbnail, in pixels: the row draws it at 24dp. */
-internal const val THUMB_PX = 96
-
-/**
- * Target width for a picture opened from a queue row, in pixels.
- *
- * Larger than any phone's screen is tall, so nothing is lost on the way in, while still leaving the
- * decoder a bound: a 12-megapixel photo decoded at full size is ~48 MB and an OOM on a cheap device.
- */
-internal const val FULL_PREVIEW_PX = 2160
-
-/**
- * How many board rows are drawn above the queue — the same three as the queue, for the same
- * reason: this stack sits over the field the user is typing into, and a long plan must not
- * push that field off the screen. The tally covers the items that do not fit.
- */
-
-internal const val ATTACHMENT_MAX_WIDTH = 1280
-
-internal fun readAttachment(context: Context, uri: Uri, kind: AttachKind): Attachment? = when (kind) {
-    AttachKind.IMAGE -> decodeImage(context, uri)
-    AttachKind.FILE -> importFile(context, uri)
-}
-
-internal fun decodeImage(context: Context, uri: Uri): Attachment? = runCatching {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
-
-    var scale = 1
-    while (bounds.outWidth / scale > ATTACHMENT_MAX_WIDTH || bounds.outHeight / scale > ATTACHMENT_MAX_WIDTH) {
-        scale *= 2
-    }
-    val options = BitmapFactory.Options().apply { inSampleSize = scale }
-    val bitmap = context.contentResolver.openInputStream(uri)?.use {
-        BitmapFactory.decodeStream(it, null, options)
-    } ?: return@runCatching null
-    bitmapAttachment(bitmap, displayName(context, uri) ?: "图片")
-}.getOrNull()
-
-/** Camera and gallery both land here: one JPEG, small enough to send every turn. */
-internal fun bitmapAttachment(bitmap: Bitmap, label: String = "照片"): Attachment {
-    val scaled = if (bitmap.width > ATTACHMENT_MAX_WIDTH) {
-        val ratio = ATTACHMENT_MAX_WIDTH.toFloat() / bitmap.width
-        Bitmap.createScaledBitmap(
-            bitmap,
-            ATTACHMENT_MAX_WIDTH,
-            (bitmap.height * ratio).toInt().coerceAtLeast(1),
-            true,
-        )
-    } else {
-        bitmap
-    }
-    val bytes = java.io.ByteArrayOutputStream()
-    scaled.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
-    return Attachment(
-        base64 = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP),
-        label = label,
-        preview = scaled.asImageBitmap(),
-    )
-}
-
-/**
- * Decodes stored base64 back into a bitmap, off the main thread.
- *
- * Used by the queue row's 24dp thumbnail and by 「修改」, which puts the picture back into the
- * composer: both hold bytes, not a uri, so neither can go through [readAttachment]. Downsampled to
- * about [target] pixels wide, because the callers draw it small and the full JPEG would cost
- * megabytes per row. Null when the bytes are not an image, which every caller treats as "no
- * picture" rather than as an error worth showing.
- */
-internal suspend fun decodeAttachment(base64: String, target: Int = 512): Bitmap? =
-    withContext(Dispatchers.IO) {
-        runCatching {
-            val bytes = Base64.decode(base64, Base64.DEFAULT)
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            if (bounds.outWidth <= 0) return@runCatching null
-            var sample = 1
-            while (bounds.outWidth / (sample * 2) >= target) sample *= 2
-            BitmapFactory.decodeByteArray(
-                bytes,
-                0,
-                bytes.size,
-                BitmapFactory.Options().apply { inSampleSize = sample },
-            )
-        }.getOrNull()
-    }
-
-/**
- * A picked file is copied into the app's own folder, because the agent reads absolute
- * paths and a `content://` handle means nothing to it. The path goes into the question.
- */
-internal fun importFile(context: Context, uri: Uri): Attachment? = runCatching {
-    val name = displayName(context, uri) ?: "文件"
-    val inbox = File(context.getExternalFilesDir(null) ?: context.filesDir, "inbox").apply { mkdirs() }
-    val target = File(inbox, name)
-    context.contentResolver.openInputStream(uri)?.use { input ->
-        target.outputStream().use { output -> input.copyTo(output) }
-    } ?: return@runCatching null
-    Attachment(base64 = "", label = target.absolutePath, filePath = target.absolutePath)
-}.getOrNull()
-
-internal fun displayName(context: Context, uri: Uri): String? {
-    if (uri.scheme == "file") return uri.lastPathSegment
-    return runCatching {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
-        }
-    }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
-}
-
-/**
- * Rewrites a message. A question can also be re-asked from the edited text, which
- * throws away everything the model said afterwards — those answers were written for
- * a prompt that no longer exists.
+ * The three shares come from the engine's own estimate for the run in flight; a stored
+ * reply has no such numbers, so for it the dialog shows only the header — better a short
+ * dialog than three invented rows.
  */
 @Composable
-internal fun EditDialog(
-    message: StoredMessage,
+internal fun ContextBreakdownDialog(
+    tokens: Int,
+    window: Int,
+    live: StreamStats?,
     onDismiss: () -> Unit,
-    onSave: (String) -> Unit,
-    onResend: ((String) -> Unit)?,
 ) {
-    var draft by remember(message.id) { mutableStateOf(message.text) }
+    val percent = if (window > 0) tokens * 100 / window else 0
     SuixingDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (message.role == Roles.USER) "修改这条消息" else "修改这条回复") },
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("知道了") } },
+        title = { Text(if (window > 0) "上下文已用 $percent%" else "上下文用量") },
         text = {
             Column {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 140.dp, max = 300.dp),
-                    textStyle = MaterialTheme.typography.bodyMedium,
+                Text(
+                    text = if (window > 0) {
+                        "~${tokens / 1000}k / ${window / 1000}k"
+                    } else {
+                        "~${tokens / 1000}k"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (message.role == Roles.USER) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "「重新发送」会丢掉这条之后的所有内容，让模型重新回答。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (window > 0) {
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(
+                        progress = { (percent / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
-            }
-        },
-        confirmButton = { scope ->
-            if (onResend != null) {
-                TextButton(
-                    onClick = { scope.closeThen { onResend(draft) } },
-                    enabled = draft.isNotBlank(),
-                ) { Text("重新发送") }
-            } else {
-                TextButton(onClick = { scope.closeThen { onSave(draft) } }, enabled = draft.isNotBlank()) { Text("保存") }
-            }
-        },
-        dismissButton = { scope ->
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (onResend != null) {
-                    TextButton(onClick = { scope.closeThen { onSave(draft) } }, enabled = draft.isNotBlank()) {
-                        Text("只保存")
+                live?.let { stats ->
+                    val parts = listOf(
+                        Triple("系统提示词", stats.breakSystem, MaterialTheme.colorScheme.primary),
+                        Triple("工具定义", stats.breakTools, MaterialTheme.colorScheme.secondary),
+                        Triple("对话消息", stats.breakHistory, MaterialTheme.colorScheme.tertiary),
+                    )
+                    // Shares are measured against their own sum, not against the endpoint's
+                    // prompt count: the engine's estimate covers messages and tools, and
+                    // forcing it onto that other total would invent a remainder.
+                    val total = parts.sumOf { it.second }
+                    Spacer(Modifier.height(14.dp))
+                    parts.forEach { (label, value, tone) ->
+                        ContextBreakdownRow(label, value, total, tone)
                     }
                 }
-                TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") }
             }
         },
     )
 }
 
-/**
- * The one full-screen picture viewer: a bubble's screenshot, the attachment chip above the field and
- * a queued line's thumbnail all open this.
- *
- * Shared rather than copied because it is not merely a Dialog: the black scrim, the pinch-and-pan
- * transform and tap-anywhere-to-close are the behaviour the user already knows from the transcript,
- * and a second implementation would drift from it. A `Dialog` and not a focusable overlay, so it
- * cannot take the keyboard away from the field — the same rule the composer's own cards follow.
- */
-/**
- * 全屏预览 [bytes]：只在**用户点击**时解码一次（不在滚动路径上）。
- *
- * Coil 负责列表里的缩略显示；全屏要看原图，这里就地解一张交给既有的
- * [ImagePreviewDialog]（黑色遮罩 + 双指缩放 + 点哪关哪，行为不变）。
- */
 @Composable
-internal fun ImagePreviewBytes(
-    bytes: ByteArray?,
-    contentDescription: String,
-    keepKeyboard: Boolean = false,
-    onDismiss: () -> Unit,
-) {
-    var bitmap by remember(bytes) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(bytes) {
-        bitmap = withContext(Dispatchers.Default) {
-            bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
-        }
-    }
-    bitmap?.let { ImagePreviewDialog(it, contentDescription, keepKeyboard, onDismiss) }
-}
-
-@Composable
-internal fun ImagePreviewDialog(
-    bitmap: ImageBitmap,
-    contentDescription: String,
-    /**
-     * Draw it without taking window focus, for the two callers that sit right above the field the
-     * user is typing in — the attachment chip and the queued rows. A focusable window takes the
-     * keyboard away, and the composer would jump under the user's hands for a tap meant to look at a
-     * picture. The transcript's own screenshots keep the ordinary dialog.
-     */
-    keepKeyboard: Boolean = false,
-    onDismiss: () -> Unit,
-) {
-    // Reading a shot needs the whole screen and a pinch.
-    var scale by remember { mutableStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-    val transformable = rememberTransformableState { zoom, pan, _ ->
-        scale = (scale * zoom).coerceIn(1f, 4f)
-        offset = if (scale > 1f) offset + pan else Offset.Zero
-    }
-    val viewer: @Composable () -> Unit = {
-        // 手势返回也要关（用户：「预览图片的时候，手势返回为什么不会关闭图片」）。keepKeyboard 那条
-        BackHandler(onBack = onDismiss)
+internal fun ContextBreakdownRow(label: String, value: Int, total: Int, tone: Color) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Box(
             Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.9f))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDismiss,
-                ),
-            contentAlignment = Alignment.Center,
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(tone),
+        )
+        Spacer(Modifier.width(9.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "~${value / 1000}k",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false,
+        )
+        Spacer(Modifier.width(10.dp))
+        // One bar per row, sized by its share of the three.
+        Box(
+            Modifier
+                .weight(1f)
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
         ) {
-            Image(
-                bitmap = bitmap,
-                contentDescription = contentDescription,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .transformable(transformable)
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = offset.x,
-                        translationY = offset.y,
-                    ),
+            val fraction = if (total > 0) value.toFloat() / total else 0f
+            Box(
+                Modifier
+                    .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                    .fillMaxHeight()
+                    .background(tone),
             )
         }
     }
-    if (keepKeyboard) {
-        // Focus-less, like the composer's own cards: it cannot see BACK, which is why the scrim
-        // above closes on a tap anywhere — the same trade the model sheet makes.
-        Popup(properties = PopupProperties(focusable = false)) { viewer() }
-    } else {
-        Dialog(onDismissRequest = onDismiss) { viewer() }
-    }
 }
-
-
-@Composable
-internal fun ImageBlock(base64: String) {
-    // **图片加载换 Coil 3**（issue #44 第 10 项）：原来这里是手写的 64 行 ——
-    // BitmapFactory 手动降采样 + 容量 4 的 LRU（滚出 4 张就丢，滚回来重新解码一张 1080p）。
-    // Coil 3 覆盖同样的事并且更强：内存 + 磁盘双缓存、按目标尺寸自动采样、生命周期感知、
-    // 解码在它自己的 Dispatcher 上 ⇒ 组合期零阻塞。手写的那套已删除（ImageDecode.kt）。
-    var full by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-    // 图片是内存里的 base64（不是 URL），解码成字节交给 Coil 当 data：
-    // 它按内容做内存缓存键，滚出视口再滚回来直接命中，不必重新解码。
-    val bytes = remember(base64) {
-        runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull()
-    }
-    // **必须包成 ByteBuffer**：Coil 3 的 fetcher 里没有 `ByteArray` 这一种 data 类型
-    // （只有 ByteBuffer / File / Uri / String 等）。直接传 ByteArray 编译不报错、
-    // 运行时静默不出图 —— 这个坑换成 ByteBuffer 才绕过去。
-    // **每次组合新建一个视图**（`wrap` 是 O(1)、不拷贝字节）：ByteBuffer 有读位置，
-    // 复用同一个实例时 Coil 读过一次后位置就到底了，第二次拿到的会是空。
-    val model = bytes?.let { java.nio.ByteBuffer.wrap(it) }
-    Spacer(Modifier.height(6.dp))
-    val shape = RoundedCornerShape(12.dp)
-    // **固定占位高度**（滚动跳变根因之一，与替换前一致）：截图几乎都是竖长图，Fit 后顶满
-    // 240dp 上限。等 Coil 解码期间保持这个高度，行高不变 ⇒ 整列不会被顶一下。
-    AsyncImage(
-        model = ImageRequest.Builder(context)
-            .data(model)
-            // 不做淡入：这里要的是"到位就是到位"，交叉淡入在滚动中反而像闪烁。
-            .crossfade(false)
-            .build(),
-        contentDescription = "工具截图",
-        contentScale = ContentScale.Fit,
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 240.dp, max = 240.dp)
-            .clip(shape)
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = { full = true },
-            ),
-    )
-    if (full) {
-        // 全屏预览仍用手上这份字节，走同一个对话框（Coil 重新解码一次比传 bitmap 更省事，
-        // 而全屏只发生在一次点击里，不在滚动路径上）。
-        ImagePreviewBytes(bytes, contentDescription = "工具截图") { full = false }
-    }
-}
-
-
-/**
- * 行内时间戳：`HH:mm`，超过一天则 `M月d日 HH:mm`。
- *
- * **格式化器按线程复用**（性能优化，输出逐字节不变）：`SimpleDateFormat` 的构造很贵（解析 pattern、
- * 建符号表），而这段代码原来**每次调用都 new 一个**，被消息时间戳与导航条标签反复调用。
- * 用 `ThreadLocal` 而不是共享单例，是因为 `SimpleDateFormat` 本身不是线程安全的。
- */
-private val timeFormatShort = ThreadLocal.withInitial {
-    SimpleDateFormat("HH:mm", Locale.getDefault())
-}
-private val timeFormatWithDate = ThreadLocal.withInitial {
-    SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
-}
-
-internal fun formatTime(timestamp: Long): String {
-    val now = System.currentTimeMillis()
-    val withDate = now - timestamp >= 24 * 60 * 60 * 1000L
-    val fmt = (if (withDate) timeFormatWithDate else timeFormatShort).get()!!
-    return fmt.format(Date(timestamp))
-}
-
-internal fun formatDuration(millis: Long): String =
-    if (millis < 1000) "${millis}ms" else String.format(Locale.getDefault(), "%.1fs", millis / 1000.0)
-
-/** 12 秒 / 1 分 03 秒 — how the run caption counts, never more than two units. */
-internal fun formatRunElapsed(millis: Long): String {
-    val seconds = millis / 1000
-    return if (seconds < 60) {
-        "$seconds 秒"
-    } else {
-        "${seconds / 60} 分 ${(seconds % 60).toString().padStart(2, '0')} 秒"
-    }
-}
-
