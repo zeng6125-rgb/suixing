@@ -1811,6 +1811,11 @@ internal fun TurnScrubber(
     }
     val rows = remember(window) { window.toList() }
     val rowCount = rows.size
+    // 窗口可能为空而会话不止一轮：元信息已知有 N 轮、正文还没读回来（drawnTurns = 0）时
+    // [scrubberWindow] 返回空区间。少了这一行会**崩溃** —— 下面的
+    // `selectionRow.coerceIn(0, rowCount - 1)` 在 rowCount = 0 时是 coerceIn(0, -1)，
+    // Kotlin 直接抛 IllegalArgumentException（Cannot coerce value to an empty range）。
+    if (rowCount == 0) return
     // A gesture outlives the recomposition it started in, so it reads the turns and the
     // jump through these instead of closing over values a new message has replaced.
     val latestRows by rememberUpdatedState(rows)

@@ -952,6 +952,9 @@ fun ChatScreen(
     // LaunchedEffect 重置 —— 换会话本来就要重新填，理应从 0 开始；
     // 同一会话内 `visible` 变长变短都不归零 ⇒ 不会闪。
     val filledRows = remember { mutableIntStateOf(0) }
+    // 上一次"从头分批"的会话 id。用普通数组而不是 State：它只给下面的 effect 读一次，
+    // 变化不需要触发重组。
+    val fillSession = remember { arrayOf("") }
     val scroll = rememberChatScroll(
         listState = listState,
         autoFollow = settings.autoFollow,
@@ -978,7 +981,6 @@ fun ChatScreen(
         // `if (visibleIndex >= filledFrom)` —— `filledRows` 还没跟上时新行**根本没组合**，
         // 此时的 offset 是按旧内容算的 ⇒ 恢复出来的位置是错的（用户：加载更多位置不对）。
         // 这里把计数补满（组合发生在下一帧），等两帧让它们测量完，再钉回原位置。
-        filledRows.intValue = visible.size
         withFrameNanos { }
         withFrameNanos { }
         listState.scrollToItem(anchor.first, anchor.second)
@@ -1371,10 +1373,14 @@ fun ChatScreen(
         // ⇒ 流式每来一条消息，列表就"清空到 2 行"再逐帧长回来 ⇒ 每来一条闪一次。
         // 现在只在**内容变短**（换会话/窗口缩小）时才从 firstChunk 重新开始；
         // 变长时保留已有进度，只补新增的那些。
-        filledRows.intValue = if (total < filledRows.intValue) {
-            firstChunk.coerceAtMost(total)
+        // **只换会话时从头分批；同一会话内容变化直接铺满**（用户：「加载更多还闪」）。
+        // 逐帧补只对"整页冷组合"有意义；同一会话里内容变长（加载更早）或变短，
+        // 逐帧补会让新内容**一行行长出来** —— 用户看到的就是那一下闪。
+        if (fillSession[0] == state.conversationId) {
+            filledRows.intValue = total
         } else {
-            filledRows.intValue.coerceAtMost(total)
+            fillSession[0] = state.conversationId
+            filledRows.intValue = firstChunk.coerceAtMost(total)
         }
         // **按上一帧节奏自适应**：固定每帧补 3 条时，遇到大卡片就是 16~41ms 的超时帧
         // （实测切会话后连续几帧）。上一帧超预算就少补一条、宽裕就多补一条：峰值被压平，
@@ -2277,13 +2283,12 @@ fun ChatScreen(
             // composer and fought the status line for width.
             TurnScrubber(
                 conversationId = state.conversationId,
-                // **全局轮数**：会话一共多少轮（page.turns），以及其中**已经加载出来**的
-                // 多少轮（page.drawn）。窗口之外的还在盘上，没加载不能跳。
                 totalTurns = page.turns,
-                drawnTurns = page.drawn,
-                // 延迟读（issue #26 原因一）：只有导航条用这个值，就在它内部求值。
-                // 换算走纯函数（`TurnMarks`，带单测）：喂序 → 可见要**倒置**、
-                // 比较时要补 `rowOffset` —— 两处都漏过一次（#16 的"偏一两项"）。
+                // **用真正画出来的轮数**（`turnIndices.size`）而不是 `page.drawn`：
+                // 两者会不一致 —— 流式期间最新那一轮的行被 `runId != liveRunId` 过滤掉，
+                // visible 里的轮数比 page.drawn 少一个。折算全局轮号时口径不一，
+                // 高亮就会落到窗口外 ⇒ 用户看到「导航条不高亮」。
+                drawnTurns = turnIndices.size,
                 current = {
                     TurnMarks.current(
                         firstVisibleFed = firstVisibleFed.value,
@@ -2291,7 +2296,7 @@ fun ChatScreen(
                         visibleSize = visible.size,
                         rowOffset = rowOffset,
                         turnIndices = turnIndices,
-                        drawnTurns = page.drawn,
+                        drawnTurns = turnIndices.size,
                         totalTurns = page.turns,
                     )
                 },
@@ -2299,11 +2304,11 @@ fun ChatScreen(
                     .align(Alignment.CenterEnd)
                     .padding(end = 4.dp),
                 labelOf = { turn ->
-                    // `turn` 是**全局轮号**（1 基）⇒ 标签直接用它。
-                    // 找这一轮的开头文字要换算成**窗口内**下标：
-                    // 窗口里装的是最后 drawnTurns 轮，所以窗口内第 k 轮 = 全局
-                    // (totalTurns - drawnTurns + k)。
-                    val inWindow = turn - (page.turns - page.drawn)
+                    // `turn` 是**全局轮号**（1 基），标签直接用它。
+                    // 找这一轮的开头文字要换算成**窗口内**下标：窗口里装的是最后
+                    // `turnIndices.size` 轮，所以窗口内第 k 轮 = 全局
+                    // (totalTurns - turnIndices.size + k)。
+                    val inWindow = turn - (page.turns - turnIndices.size)
                     val opening = visible.getOrNull(
                         turnIndices.getOrElse(inWindow) { -1 } - rowOffset,
                     )
@@ -2320,20 +2325,12 @@ fun ChatScreen(
                     }
                 },
                 onJumpTo = { turn ->
-                    // `turn` 是**全局轮号** ⇒ 换算成窗口内下标再查 `turnIndices`。
-                    val inWindow = turn - (page.turns - page.drawn)
-                    // `getOrNull`, not `turnIndices[turn]`: the row the finger was on is a row of
-                    // the window the gesture started in, and a window can shrink under it — a
-                    // retracted 插话, a branch switch, another conversation opened by a deep link.
-                    // A jump to a turn that is no longer drawn is a no-op, never a crash.
-                    // 底锚：turnIndices 是 visible 坐标（含 rowOffset），换算成喂序索引再跳。
+                    // `turn` 是**全局轮号** ⇒ 换成窗口内下标再查 `turnIndices`。
+                    val inWindow = turn - (page.turns - turnIndices.size)
                     turnIndices.getOrNull(inWindow)?.let { index ->
                         scope.launch {
                             // **跳历史必须先关追底**（issue #21）：否则 ChatScroll 的追底逻辑
-                            // （`if (want.stick && …) scrollToItem(0)`）会在同一帧把列表拉回底部，
-                            // animateScrollToItem 被打断 —— 用户看到的就是「点了没反应」。
-                            // 用户实测「不在追底就不会」，正好印证触发条件就是 stickToBottom。
-                            // 跳完保持 false：跳到历史本来就是为了读旧内容，不该被新内容拉回去。
+                            // 会在同一帧把列表拉回底部，animateScrollToItem 被打断。
                             scroll.stickToBottom = false
                             listState.animateScrollToItem(fedIndexOf(index - rowOffset))
                         }

@@ -231,7 +231,11 @@ fun SuixingApp() {
     // Owned here rather than inside the chat screen: the drawer lists and switches the
     // very conversations the screen is showing.
     val chat: ChatViewModel = viewModel()
-    val conversations by chat.conversations.collectAsState()
+    // **会话列表不在外壳根部订阅**（用户：侧边栏卡）。
+    // 原来这一行订在这里，而它唯一的使用者是抽屉 ⇒ 会话列表每变一次（流式期间每次存盘
+    // 都会刷新 updatedAt/messageCount，列表就换新实例）整个外壳就重组一遍 ——
+    // 包括正在滑动的抽屉那一层，于是抽屉一开就卡。
+    // 现在订阅下沉到 `drawerContent` 作用域里，外壳不再跟着变。
     // The one id alone, not the whole chat state: the shell must not recompose once per
     // streamed token just to keep one row highlighted.
     val activeConversationId by remember(chat) {
@@ -481,10 +485,11 @@ fun SuixingApp() {
                 // 遮罩浓度照搬自绘那版：M3 默认 scrim 是 32%，这块面板从第一天起是 45% 的黑。
                 scrimColor = Color.Black.copy(alpha = 0.45f),
                 drawerContent = {
+                    val drawerConversations by chat.conversations.collectAsState()
                     Drawer(
                         open = drawerState.isOpen,
                         route = route,
-                        conversations = conversations,
+                        conversations = drawerConversations,
                         activeId = activeConversationId,
                         runningId = runningIds,
                         onNew = {
@@ -492,21 +497,15 @@ fun SuixingApp() {
                             chatFromDrawer()
                         },
                         onOpenConversation = { conversation ->
-                            // **先关抽屉，等它关完，再切会话**（用户：切到 b 后想切回 a，
-                            // 要点好几下）。
+                            // **先切会话、再瞬时收抽屉**（用户：切会话不响应）。
                             //
-                            // 原来的顺序是 `openConversation()` 先、`chatFromDrawer()` 后：
-                            // `openConversation` 同步替换整个 `_state.value`，会话列表随之重排
-                            // （那一行的 updatedAt 变了 ⇒ `animateItem` 的位移动画开始），
-                            // 而**抽屉这时还开着** —— 手指下一次按的位置已经不是那一行了。
-                            //
-                            // 现在顺序反过来：先让抽屉关掉（`close()` 有动画，等它走完），
-                            // 抽屉不在屏幕上之后才切会话 —— 列表怎么重排都与点击无关。
-                            scope.launch {
-                                drawerState.close()
-                                chat.openConversation(conversation)
-                                showChat()
-                            }
+                            // 走过一次弯路记在这里：为了"点不中/要点好几下"，曾改成
+                            // `scope.launch { drawerState.close(); openConversation(...) }` ——
+                            // `close()` 会挂起等完 300ms 关闭动画才轮到切会话，于是点了没反应，
+                            // 连点几下还会把几次切换排成一队（看着像卡死）。
+                            // `chatFromDrawer()` 里本来就是 `snapTo`（瞬时归位），照它来。
+                            chat.openConversation(conversation)
+                            chatFromDrawer()
                         },
                         onDeleteConversation = { chat.deleteConversation(it) },
                         // 改名必须走 ViewModel：它手里有一份标题拷贝，每轮结束会写回盘（见
@@ -697,7 +696,9 @@ fun SuixingApp() {
                                         // 「打开」一个会话 = 切到它 + 收掉覆盖层，与抽屉里点会话
                                         // 完全同一条路（chat 常驻，所以这不是一次导航）。
                                         onOpenConversation = { id ->
-                                            conversations.firstOrNull { it.id == id }
+                                            // 回调里读当前值就够（不在组合期订阅）：外壳根部
+                                            // 订阅会让整个外壳跟着会话列表每次变化重组。
+                                            chat.conversations.value.firstOrNull { it.id == id }
                                                 ?.let { chat.openConversation(it) }
                                             showChat()
                                         },
@@ -757,7 +758,11 @@ fun SuixingApp() {
             // The card floats above whichever screen the user is on, so it has to name the
             // conversation it belongs to: with several runs in flight the prompt on screen
             // may well be another chat's, and only this line says whose it is.
-            sourceTitle = conversations.firstOrNull { it.id == chatId }?.title,
+            // 读 `.value` 而不是订阅：`collectAsState` 会让整个外壳跟着会话列表每次变化
+            // 重组一遍（流式期间每次存盘都会变），而这里只是给弹卡取一个标题。
+            sourceTitle = remember(chatId) {
+                chat.conversations.value.firstOrNull { it.id == chatId }?.title
+            },
             otherWaiting = pending.size - 1,
         )
     }
