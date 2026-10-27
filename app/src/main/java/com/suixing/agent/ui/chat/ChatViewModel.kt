@@ -102,7 +102,15 @@ data class PendingTurn(val id: String, val text: String, val imagesBase64: List<
  * 最多缓存几个会话的正文（LRU）。用户定的数：在 5 个会话之间来回切不该反复读盘。
  * 超出就淘汰最久没被打开的那一个 —— 与"列表常驻全文"（RSS 413MB 的根因）是两回事。
  */
-private const val MESSAGE_CACHE_SIZE = 5
+/**
+ * 正文缓存容量（R2：5 → 8）。
+ *
+ * 原值 5 是“在几个会话之间来回切不该反复读盘”的估算，但抽屉里的会话通常不止 5 个：
+ * 超过 5 个就开始**每次切都冷读**（骨架 + 读盘）。8 覆盖“最近一屏抽屉”的常见来回切。
+ * 内存代价：每份是**一页尾部窗口**（OPEN_TURNS 轮），8 份 ≈ 8×一页，与“整份正文常驻”
+ * 不是一个量级；要回退只需把这一个数字改回去。
+ */
+private const val MESSAGE_CACHE_SIZE = 8
 
 data class ChatUiState(
     val conversationId: String = "",
@@ -2876,8 +2884,12 @@ class ChatViewModel : ViewModel() {
         var messageSource: List<StoredMessage>? = null
         var messageRun = ""
         var runMessages: List<StoredMessage> = emptyList()
+        var lastSavedChars = 0
+        // 上一轮测到的正文长度：循环开头没有新数据，用它估“上次落盘之后又长了多少”。
+        var lastMeasuredChars = 0
         while (true) {
-            delay(LIVE_DRAFT_INTERVAL_MS)
+            // 自适应间隔（R4）：用上次真正落盘时的正文长度算增量。
+            delay(liveDraftIntervalMs(pendingChars = maxOf(0, lastMeasuredChars - lastSavedChars)))
             val live = sessions[chatId] ?: continue
             val pendingSize = deltaBuffer.locked { deltaBuffer.sizes(chatId) }
             val prior = previous
@@ -2914,7 +2926,10 @@ class ChatViewModel : ViewModel() {
             if (!built.sameContentAs(written)) {
                 Core.chats.saveLive(built)
                 written = built
+                // 只有真正落过盘才更新基线：否则“内容没变”的分支会把增量算成 0，间隔永远 1s。
+                lastSavedChars = built.text.length + built.reasoning.orEmpty().length
             }
+            lastMeasuredChars = built.text.length + built.reasoning.orEmpty().length
             previous = live
             previousPending = pendingSize
         }
@@ -3461,6 +3476,22 @@ private const val MAX_CHECKPOINTS = 10
  * arrives in thousands of deltas. It is the interval where a kill costs the last tick of the
  * answer rather than all of it.
  */
+/**
+ * 活跃输出的恢复副本多久落一次盘（R4）。
+ *
+ * 原文固定 1s：流式时每秒都要**组装整段正文 + 编码 + 写盘 + rename**，长回答下这笔开销
+ * 与输出速度成正比地重复。这里按“上次落盘之后又长了多少字”分档：
+ *  · 增量小（< 2k 字）：仍 1s —— 被杀最多丢 1s，代价最小；
+ *  · 增量中（2k~8k）：2s —— 多丢 1s，换掉一半的组装/编码；
+ *  · 增量大（≥ 8k）：3s —— 长回答每秒改变几千字，再密的副本也只是重复搬运同样的量。
+ * 纯函数、有单测（LiveDraftIntervalTest）；要改手感只动这三个阈值。
+ */
+internal fun liveDraftIntervalMs(pendingChars: Int): Long = when {
+    pendingChars >= 8_000 -> LIVE_DRAFT_INTERVAL_MS * 3
+    pendingChars >= 2_000 -> LIVE_DRAFT_INTERVAL_MS * 2
+    else -> LIVE_DRAFT_INTERVAL_MS
+}
+
 private const val LIVE_DRAFT_INTERVAL_MS = 1000L
 
 /**

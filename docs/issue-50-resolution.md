@@ -284,3 +284,26 @@
 - 安装后仅读安装元数据：`versionName=0.8.532 / versionCode=553`。没有启动/操作应用界面，也没有读取运行日志或应用数据。
 - 安装成功不是 UI 验收通过；P1–P4、输入法起落、切会话/导航、折叠、TTS、录音条、表格和卡片滚动仍待用户体验确认。
 - 固定源码与交付入口：[v0.8.532 源码](https://github.com/zeng6125-rgb/suixing/tree/v0.8.532)、[Release](https://github.com/zeng6125-rgb/suixing/releases/tag/v0.8.532)。具体未完成项继续按上表跟进，不以版本发布自动关闭 issue #50。
+
+## 中断批次补记与 R2/R3/R4（2026-10-27 晚）
+
+上一轮在“提交 + 更新文档”前中断，改动留在工作区。接手后先验证为绿再提交：
+
+- 提交 `e77734d`：37 改 + 7 新（`PromptMessages`、`InjectedUserContext`、`ProjectedStateFlow`、
+  `SelectionFocus`、`TranscriptMount`、`PreparedMarkdown`、`SettingsStyle`）+ 10 个纯函数测试；
+  当时实测 `:app:testDebugUnitTest` → **891 tests / 0 failures**（本文档 272 行的 858 是中断前那次记录，非本批）。
+- 顺序说明：这份检查点是**先提交、后复核**。未做等价性复核即入库，若复核发现问题需追加修复提交。
+
+接手后新增的三项（测试 891 → **894**）：
+
+| 编号 | 内容 | 实现位置 |
+|---|---|---|
+| R2 | 正文缓存容量 5 → 8，覆盖“抽屉里最近一屏会话来回切”；内存代价为 8×一页窗口 | `ui/chat/ChatViewModel.kt` 的 `MESSAGE_CACHE_SIZE`（含代价说明，回退只改一个数字） |
+| R3 | 冷读也绕过仓库锁：未命中已提交元数据时，先**无锁**读 meta 再打开那一代次日志；任何异常回落加锁路径 | `data/ChatRepository.kt` 的 `readCommittedCold(...)`，接在 `readTailWindow` / `readWindow` 的热快照之后 |
+| R4 | 活跃输出的恢复副本按“未落盘增量”自适应间隔（1s / 2s / 3s），减少长回答下每秒整段组装+编码+写盘 | `ui/chat/ChatViewModel.kt` 的 `liveDraftIntervalMs(...)` + `writeLiveDraft` 计数器；`LiveDraftIntervalTest` |
+
+仍未做（需要真机帧数据或用户验收，不静态断言）：
+
+- CHAT-R-07/11：单个 transcript item 与“一次加入历史”的全量组合/测量成本；
+- COMP-16：超长表格的全量布局仍存在（COMP-12 的冷解析已由 `PreparedMarkdown` 下沉到 Default）；
+- P1–P4：加载更早原位、复制菜单单次消失、注入开关生效、导航条观感，均未真机验证。

@@ -305,11 +305,36 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             val window = snapshot.tail(turns)
             Triple(snapshot.meta.toConversation(window.messages), window.startOffset, snapshot.meta.gen)
         }?.let { return@withContext it }
+        // 冷读：不拿仓库锁，直接读已提交代次（R3）。
+        readCommittedCold(id) { snapshot ->
+            val window = snapshot.tail(turns)
+            Triple(snapshot.meta.toConversation(window.messages), window.startOffset, snapshot.meta.gen)
+        }?.let { return@withContext it }
         lock.withLock {
             val meta = store.readMeta(id) ?: return@withLock null
             val window = store.tail(meta, turns)
             Triple(meta.toConversation(window.messages), window.startOffset, meta.gen)
         }
+    }
+
+    /**
+     * 冷路径同样只读已提交代次（R3）：未命中 `committedMetas` 时先**无锁**读一次 meta
+     * （`ChatStore.readMeta` 只碰自己的同步缓存与一个 meta 文件），再打开那一代次的日志。
+     * 任何异常（正在 rename、文件被删、解析失败）都返回 null，让调用方回落到原来的加锁路径 ——
+     * 冷读不再排在“另一会话整份写盘”后面。
+     */
+    private fun <T : Any> readCommittedCold(
+        id: String,
+        expectGen: Int? = null,
+        read: (ChatStore.ReadSnapshot) -> T,
+    ): T? = try {
+        val meta = store.readMeta(id) ?: return null
+        if (expectGen != null && meta.gen != expectGen) return null
+        store.openRead(meta).use(read)
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        null
     }
 
     /** Writers remain serialized. Read only immutable committed bytes on one pinned generation. */
@@ -400,6 +425,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
     ): ChatStore.MessageWindow? =
         withContext(Dispatchers.IO) {
             readCommitted(id, expectGen) { it.window(endOffset, turns) }?.let { return@withContext it }
+            readCommittedCold(id, expectGen) { it.window(endOffset, turns) }?.let { return@withContext it }
             lock.withLock {
                 val meta = store.readMeta(id) ?: return@withLock null
                 if (expectGen != null && meta.gen != expectGen) return@withLock null
