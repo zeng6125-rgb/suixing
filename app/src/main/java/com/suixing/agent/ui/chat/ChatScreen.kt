@@ -1833,6 +1833,11 @@ fun ChatScreen(
                 },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
+                    // 键盘抬起时导航条跟着上移（用户：「抬起时为什么导航条不动」）。
+                    // 整页不再按 IME 缩高之后，CenterEnd 的居中点是满高的 H/2，而旧结构里
+                    // 居中在 (H − I) 的框内 ⇒ 等价于往上挪 I/2。只在**放置阶段**读 IME，
+                    // 不触发重组、不重测列表。
+                    .offset { androidx.compose.ui.unit.IntOffset(0, -(imePxState.value / 2)) }
                     // **离右边缘 4dp**（用户要求在 4dp 上「稍微收一点」的同时定了这个数）。
                     // 观感/位置只按你说的数字动。
                     .padding(end = 4.dp),
