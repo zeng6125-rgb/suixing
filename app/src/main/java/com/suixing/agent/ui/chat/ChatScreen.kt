@@ -1283,7 +1283,7 @@ fun ChatScreen(
                         Modifier
                             // 键盘抬起/收回时，这里只重新测量（不重组）——空状态也挂着那个
                             // 60 参数的 Composer，逐帧重组一样会掉帧。
-                            .keyboardAwareBottomPad(navBarPx, imePxState)
+                            .keyboardAwareFullPad(navBarPx, imePxState)
                             .fillMaxSize()
                             .graphicsLayer { alpha = viewport.alpha.value }
                             .padding(
@@ -1315,7 +1315,7 @@ fun ChatScreen(
                         modifier = Modifier
                             // 手势条那一截**在布局期让出来**（键盘盖住它时让位是 0）：
                             // 放在 `fillMaxSize()` 之外，列表拿到的是「窗口 − 键盘 − 手势条」。
-                            .keyboardAwareBottomPad(navBarPx, imePxState)
+                            .keyboardAwareFullPad(navBarPx, imePxState)
                             .fillMaxSize()
                             // 阅读区的窗口矩形：导航条的探针线要它（顶边 + 28% 高度）。
                             .onGloballyPositioned { coords ->
@@ -1898,7 +1898,15 @@ fun ChatScreen(
                     }
                 },
             )
-            Box(Modifier.align(Alignment.BottomCenter)) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    // IME 在**放置阶段**读取（offset 的 lambda 属于布局/放置，不属于组合），
+                    // 键盘高度每帧变化只移动输入框的位置：不改约束、不重测 Scaffold、
+                    // 不重组那个 60 参数的 Composer。输入框自己内部还有一段
+                    // `(navbar − ime)` 的让位（ChatComposer.kt:941），两处不重复扣。
+                    .offset { androidx.compose.ui.unit.IntOffset(0, -imePxState.value) },
+            ) {
                 ComposerDraftText(viewModel, state.conversationId) { input ->
                 Composer(
                     input = input,
@@ -2202,3 +2210,15 @@ private fun Modifier.keyboardAwareBottomPad(
     navBarPx: Int,
     ime: androidx.compose.runtime.State<Int>,
 ): Modifier = bottomInsetPadding { (navBarPx - ime.value).coerceAtLeast(0) }
+
+/**
+ * 聊天页整棵不再按 IME 缩高之后，列表要自己把键盘占的那一截让出来。
+ *
+ * 数值与旧结构等价：旧的是「外层缩 IME + 这里让 (navbar − ime)」，从窗口底算起共
+ * `I + max(N − I, 0)`；这里一次给 `max(N − I, 0) + I`，收起键盘时都是 N、键盘弹起时都是 I。
+ * 仍走 `bottomInsetPadding`（布局期），所以键盘动画只让这两个节点重测，不重组整页。
+ */
+private fun Modifier.keyboardAwareFullPad(
+    navBarPx: Int,
+    ime: androidx.compose.runtime.State<Int>,
+): Modifier = bottomInsetPadding { (navBarPx - ime.value).coerceAtLeast(0) + ime.value }

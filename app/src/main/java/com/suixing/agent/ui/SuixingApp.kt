@@ -522,7 +522,12 @@ fun SuixingApp() {
                 // 留在组合里，其余页面改成**盖在它上面的覆盖层**：进设置是往覆盖层 push，
                 // 返回是把覆盖层 pop 掉 ⇒ 揭开的就是原来那份 chat，零重建、零重载。
                 // 键盘让位只作用在聊天内容上（抽屉不再被顶起，见上面 Scaffold 的说明）。
-                Box(Modifier.imePaddingBottom(heldImeState)) {
+                // **不要在这里按 IME 缩高整棵聊天树**（IME 起落优化第 1 步）：
+                // `imePaddingBottom` 每帧改 Box 的高度约束 ⇒ Scaffold、Composer、整份列表
+                // 连同它们的布局修饰符链一起被重新测量（不重组 ≠ 不重测）。
+                // 现在整页保持满高，IME 只在聊天内部被消费一次：
+                // 输入框按 IME 做放置偏移，列表/空状态在**布局期**把键盘那一截让出来。
+                Box(Modifier.fillMaxSize()) {
                     // **首启的引导还没走完时，先别组合 chat**（用户：「第一次出现引导页感觉卡卡的」）。
                     // 冷启动时 chat 要做 turnPage、receipts/transcript 统计、每条消息的 Markdown
                     // 渲染（ChatScreen.kt:465/512/560/621、ChatBlocks.kt:895/1519），
