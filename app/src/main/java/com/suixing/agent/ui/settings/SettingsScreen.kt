@@ -10,6 +10,7 @@ import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,7 +42,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -398,10 +398,16 @@ private class SettingsGroupRow(
 private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
     Column(Modifier.fillMaxWidth()) {
         com.suixing.agent.ui.components.SettingSectionTitle(title)
+        val outline = MaterialTheme.colorScheme.outlineVariant
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            // 用户反馈「设置项的背景太浅，有点看不清」（设置首页的分组卡片）。
+            // 原来是 surfaceContainerLow —— 比页面底色只深一点点，分组卡片几乎浮不起来；
+            // 改成 surfaceContainer（与全站 SuixingCard 同档）再加一圈 outlineVariant 描边，
+            // 卡片边界和层级才看得出来。
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            border = BorderStroke(1.dp, outline),
         ) {
             // 行铺满卡片（横向留白交给 SettingRow 的 contentPadding）：涟漪因此能碰到卡片的左右
             // 边缘与圆角，而不是被容器的 16dp 缩在中间 —— 用户报的「涟漪没填满/没变化」就是它。
@@ -706,16 +712,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                             modifier = Modifier.widthIn(max = 110.dp),
                                         )
                                     },
-                                    // 用户反馈「列表的 tab 项背景太浅，看不清」：M3 FilterChip 默认的
-                                    // 未选中容器几乎与页面同色，一排 chip 挤在一起就分不出边界。
-                                    // 显式给足对比：未选中 surfaceContainerHigh + 主文字色，
-                                    // 选中 secondaryContainer + 其前景色。
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                        labelColor = MaterialTheme.colorScheme.onSurface,
-                                        selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                        selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    ),
                                     // clip 必须在 combinedClickable **之前**：涟漪要跟着 chip 的圆角
                                     // 走，否则它是一块方角盖在圆角 chip 上（全文件唯一一处漏了 clip）。
                                     modifier = Modifier
