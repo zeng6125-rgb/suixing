@@ -70,30 +70,30 @@ fun SettingRow(
                 },
             )
             .padding(contentPadding)
-            .padding(vertical = 12.dp),
+            .padding(vertical = SettingsStyle.RowPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (leading != null) {
             leading()
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(SettingsStyle.ControlGap))
         }
         Column(Modifier.weight(1f)) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.bodyLarge,
+                style = SettingsStyle.rowTitle,
                 maxLines = titleMaxLines,
                 overflow = TextOverflow.Ellipsis,
             )
             if (subtitle != null) {
                 Text(
                     text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
         if (control != null) {
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(SettingsStyle.ControlGap))
             control()
         }
     }

@@ -1,5 +1,9 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.SettingSectionTitle
+import com.suixing.agent.ui.components.settingsPagePadding
+
+import com.suixing.agent.ui.components.SettingsStyle
 import android.view.Choreographer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -108,15 +112,13 @@ internal fun PerfScreen(onBack: () -> Unit) {
         LazyColumn(
             Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp),
+                .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(bottom = navBarContentPadding().calculateBottomPadding()),
+            contentPadding = settingsPagePadding(),
         ) {
             item(key = "summary") {
-                Column(Modifier.padding(vertical = 12.dp)) {
-                    Text("最近 ${summary.count} 轮", style = MaterialTheme.typography.labelLarge)
-                    Spacer(Modifier.height(8.dp))
+                Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
+                    SettingSectionTitle("最近 ${summary.count} 轮")
                     MetricRow("首字延迟（均值）", dashIfZero(summary.avgTtftMs))
                     MetricRow("整轮耗时（均值）", dashIfZero(summary.avgTotalMs))
                     MetricRow("缓存命中（均值）", cacheText(summary.avgCachePercent))
@@ -129,14 +131,13 @@ internal fun PerfScreen(onBack: () -> Unit) {
             }
             item(key = "live") { DeviceMetrics() }
             item(key = "pinlog") {
-                Column(Modifier.padding(vertical = 12.dp)) {
-                    Text("流式上翻痕迹（最近 30 行）", style = MaterialTheme.typography.labelLarge)
-                    Spacer(Modifier.height(8.dp))
+                Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
+                    SettingSectionTitle("流式上翻痕迹（最近 30 行）")
                     Text(
                         text = pinLog.ifBlank {
                             "（还没有痕迹：发一条长消息、流式中往上滑一下就会生成）"
                         },
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (pinLog.isNotBlank()) {
@@ -148,9 +149,8 @@ internal fun PerfScreen(onBack: () -> Unit) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item(key = "health") {
-                Column(Modifier.padding(vertical = 12.dp)) {
-                    Text("会话健康（最近 ${health.runs} 轮）", style = MaterialTheme.typography.labelLarge)
-                    Spacer(Modifier.height(8.dp))
+                Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
+                    SettingSectionTitle("会话健康（最近 ${health.runs} 轮）")
                     MetricRow("首字延迟 p50 / p90", pairText(health.ttftP50, health.ttftP90))
                     MetricRow("整轮耗时 p50 / p90", pairText(health.totalP50, health.totalP90))
                     MetricRow("抖动（p90/p50）", if (health.jitter <= 0.0) "—" else "%.2f×".format(health.jitter))
@@ -168,7 +168,7 @@ internal fun PerfScreen(onBack: () -> Unit) {
                 item(key = "empty") {
                     Text(
                         "还没有记录。跑一轮对话后再回来，这里会出现那一轮的实测数字。",
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = SettingsStyle.body,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(vertical = 24.dp),
                     )
@@ -201,9 +201,8 @@ private fun DeviceMetrics() {
     val frame = rememberFrameStat()
     // 委派属性（by remember）不能智能转换，先落到局部变量；顺带保证这一帧读的是同一份采样。
     val metrics = live
-    Column(Modifier.padding(vertical = 12.dp)) {
-        Text("设备实时", style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(8.dp))
+    Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
+        SettingSectionTitle("设备实时")
         MetricRow("CPU（本进程）", percentText(metrics?.processCpuPercent))
         MetricRow("CPU（整机）", percentText(metrics?.systemCpuPercent))
         MetricRow("GPU", gpuText(metrics))
@@ -256,11 +255,11 @@ private fun MetricRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Text(
             label,
-            style = MaterialTheme.typography.bodyMedium,
+            style = SettingsStyle.body,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.width(150.dp),
         )
-        Text(value, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+        Text(value, style = SettingsStyle.body, fontFamily = FontFamily.Monospace)
     }
 }
 
@@ -316,18 +315,18 @@ private fun RecordRow(record: PerfRecord) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = clock(record.at),
-                style = MaterialTheme.typography.labelMedium,
+                style = SettingsStyle.metadata,
                 fontFamily = FontFamily.Monospace,
             )
             Text(
                 text = if (record.totalMs > 0) "${record.totalMs} ms" else "—",
-                style = MaterialTheme.typography.labelMedium,
+                style = SettingsStyle.metadata,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (record.tokensPerSecond > 0.0) {
                 Text(
                     "%.1f tok/s".format(record.tokensPerSecond),
-                    style = MaterialTheme.typography.labelMedium,
+                    style = SettingsStyle.metadata,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -344,7 +343,7 @@ private fun RecordRow(record: PerfRecord) {
                 }
                 if (record.toolRounds > 0) append(" · 工具 ${record.toolRounds} 轮")
             },
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }

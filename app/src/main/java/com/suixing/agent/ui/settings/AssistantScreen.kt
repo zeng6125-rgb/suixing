@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.SettingsStyle
+
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -73,7 +75,7 @@ fun AssistantScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                    .padding(horizontal = SettingsStyle.PageMargin),
                 // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
                 bottomPadding = navBarContentPadding().calculateBottomPadding(),
             )

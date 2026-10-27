@@ -27,6 +27,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -313,21 +314,24 @@ fun SuixingApp() {
     val rootDensity = LocalDensity.current
     // 保留**状态对象本身**（而不是用 `by` 解包）：下发的是引用，读点自己在布局期取 .value，
     // 这样键盘动画的每一帧不会让整棵树重组（见 LocalHeldImePx 的说明）。
-    val heldImeState = remember { mutableIntStateOf(0) }
     // 长按/选择期间冻结 clamp（用户：「抬起时对话框与输入法的高度有时变得很大」）：抬手那一刻
     // 选择手柄/菜单出现，这台 ROM 把它的高度报进 IME inset，clamp 一接受、输入框底垫就暴涨。
     // 守护窗（按下到抬手后 400ms）里不接受任何 inset 变化；窗口外照常。
     var selectionActive by remember { mutableStateOf(false) }
-    // 在协程读取原始 inset 和系统目标：高度变化只使消费节点重新布局，不订阅外壳组合。
+    // 在消费节点的布局/绘制阶段读取原始 inset 和系统目标，不订阅外壳组合。
     // 长按期间冻结，窗口外按像素单调跟随目标，不量化，也不等定时器解锁。
     val imeInsets = WindowInsets.ime
     val imeTarget = WindowInsets.imeAnimationTarget
     val imeFilter = remember { ImeInsetFilter() }
-    LaunchedEffect(rootDensity, imeInsets, imeTarget) {
-        snapshotFlow {
-            Triple(imeInsets.getBottom(rootDensity), imeTarget.getBottom(rootDensity), selectionActive)
-        }.collect { (raw, target, frozen) ->
-            heldImeState.intValue = imeFilter.update(raw, target, frozen)
+    val heldImeState = remember(rootDensity, imeInsets, imeTarget) {
+        derivedStateOf {
+            // Read the system inset in the consumer's layout pass. Relaying it through a
+            // collector and another state could leave the layout one frame behind IME.
+            imeFilter.update(
+                imeInsets.getBottom(rootDensity),
+                imeTarget.getBottom(rootDensity),
+                selectionActive,
+            )
         }
     }
     CompositionLocalProvider(
@@ -382,7 +386,7 @@ fun SuixingApp() {
                         Modifier.background(SolidColor(canvasTopColor))
                     } else {
                         Modifier.drawBehind {
-                            val endY = (screenHeightPx - heldImeState.intValue).coerceAtLeast(1f)
+                            val endY = (screenHeightPx - heldImeState.value).coerceAtLeast(1f)
                             drawRect(
                                 Brush.verticalGradient(
                                     colors = listOf(canvasTopColor, canvasTint),
@@ -425,7 +429,7 @@ fun SuixingApp() {
                     // **绘制期读键盘高度**：只在 draw 阶段取值 ⇒ 键盘动画期间既不重组也不重布局，
                     // 但绘制范围仍按"画布底边 = 屏高 − IME"裁剪，键盘圆角里那圈色块不会回来。
                     .drawBehind {
-                        val h = (size.height - heldImeState.intValue).coerceAtLeast(0f)
+                        val h = (size.height - heldImeState.value).coerceAtLeast(0f)
                         drawRect(color = surfaceColor, size = androidx.compose.ui.geometry.Size(size.width, h))
                     },
             )

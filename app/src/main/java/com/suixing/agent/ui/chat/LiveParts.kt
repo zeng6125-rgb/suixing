@@ -130,15 +130,21 @@ data class Compress(val checkpoint: ContextCheckpoint) : LivePart
 }
 
 class GrowableText(initial: String = "") {
-private val buf = StringBuilder(initial)
+    private val buf = StringBuilder(initial)
+    private var snapshot: String? = initial
 
-fun append(delta: String) {
+    @Synchronized
+    fun append(delta: String) {
+        if (delta.isEmpty()) return
         buf.append(delta)
-}
+        snapshot = null
+    }
 
-fun length(): Int = buf.length
+    @Synchronized
+    fun length(): Int = buf.length
 
-override fun toString(): String = buf.toString()
+    @Synchronized
+    override fun toString(): String = snapshot ?: buf.toString().also { snapshot = it }
 }
 
 /**

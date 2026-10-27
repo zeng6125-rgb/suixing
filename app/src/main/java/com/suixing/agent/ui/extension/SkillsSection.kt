@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.extension
 
+import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.settingsPagePadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -88,8 +90,8 @@ fun SkillsSection(
     val groups = remember(loaded) { loaded?.let { groupSkills(it) }.orEmpty() }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = settingsPagePadding(),
+        verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
     ) {
         item { SkillIntroCard(rootPath) }
 
@@ -97,7 +99,7 @@ fun SkillsSection(
             failure != null -> item {
                 Text(
                     text = failure,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = SettingsStyle.body,
                     color = MaterialTheme.colorScheme.error,
                 )
             }
@@ -110,7 +112,7 @@ fun SkillsSection(
                 Text(
                     text = "还没有技能。可以在右上角「导入技能」里选一个含 SKILL.md 的文件夹、" +
                         "选一个 .md 文件，或直接填一个 SKILL.md 的链接导入。",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = SettingsStyle.body,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -145,11 +147,11 @@ private fun SkillGroupHeader(title: String, count: Int) {
         modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, style = MaterialTheme.typography.titleSmall)
+        Text(title, style = SettingsStyle.sectionTitle)
         Spacer(Modifier.width(8.dp))
         Text(
             text = "$count",
-            style = MaterialTheme.typography.labelSmall,
+            style = SettingsStyle.badge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -180,13 +182,13 @@ private fun SkillIntroCard(rootPath: String) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
-            Text("什么是技能", style = MaterialTheme.typography.titleMedium)
+            Text("什么是技能", style = SettingsStyle.cardTitle)
         }
         Spacer(Modifier.height(12.dp))
         Text(
             text = "技能是写给模型看的操作手册：一段固定的流程、一套规范、某个 App 的用法。" +
                 "模型平时只看到技能的名字和用途，需要时才用 skill_read 读全文，所以装很多也不占上下文。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
         )
         Spacer(Modifier.height(8.dp))
         Text(
@@ -198,13 +200,13 @@ private fun SkillIntroCard(rootPath: String) {
             text = "自己创建的（在对话里让模型新建的）默认开启，存下来就能用；" +
                 "从链接或文件导入的默认关闭，确认内容没问题再打开开关——" +
                 "下载来的文字是别人写的，模型会当成指令执行。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(6.dp))
         Text(
             text = "关掉的技能留在本机，只是不进模型的技能目录、skill_read 也读不到。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(10.dp))
@@ -228,7 +230,7 @@ private fun SkillIntroCard(rootPath: String) {
         Spacer(Modifier.height(10.dp))
         Text(
             text = rootPath,
-            style = MaterialTheme.typography.labelSmall,
+            style = SettingsStyle.badge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -251,13 +253,13 @@ private fun SkillCard(
             Column(Modifier.weight(1f)) {
                 Text(
                     text = skill.name,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = SettingsStyle.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = skill.description.ifBlank { "id: ${skill.id}" },
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -290,7 +292,7 @@ private fun SkillCard(
             Spacer(Modifier.height(6.dp))
             Text(
                 text = downloaded,
-                style = MaterialTheme.typography.labelSmall,
+                style = SettingsStyle.badge,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -300,7 +302,7 @@ private fun SkillCard(
         Spacer(Modifier.height(10.dp))
         Text(
             text = skill.path,
-            style = MaterialTheme.typography.labelSmall,
+            style = SettingsStyle.badge,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             color = MaterialTheme.colorScheme.outline,
@@ -312,7 +314,7 @@ private fun SkillCard(
             Spacer(Modifier.weight(1f))
             Text(
                 text = "${skill.body.length} 字",
-                style = MaterialTheme.typography.labelSmall,
+                style = SettingsStyle.badge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -329,7 +331,7 @@ fun SkillViewDialog(skill: Skill, onDismiss: () -> Unit) {
                 if (skill.description.isNotBlank()) {
                     Text(
                         text = skill.description,
-                        style = MaterialTheme.typography.labelSmall,
+                        style = SettingsStyle.badge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -347,7 +349,7 @@ fun SkillViewDialog(skill: Skill, onDismiss: () -> Unit) {
                         .heightIn(max = 420.dp)
                         .verticalScroll(rememberScrollState())
                         .padding(12.dp),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = SettingsStyle.body,
                 )
             }
         },

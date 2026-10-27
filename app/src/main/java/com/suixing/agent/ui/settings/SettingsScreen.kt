@@ -2,6 +2,9 @@
 
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.settingsPagePadding
+import com.suixing.agent.ui.components.SettingsStyle
+
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -295,13 +298,8 @@ private fun SettingsRoot(
                 .fillMaxSize()
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 0.dp,
-                bottom = navBarContentPadding().calculateBottomPadding(),
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             item { SettingsStatusCard(capabilities, settings) }
             item {
@@ -359,10 +357,10 @@ private fun SettingsStatusCard(capabilities: CapabilityState, settings: AppSetti
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_shield_user))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("当前能力", style = MaterialTheme.typography.titleMedium)
+                Text("当前能力", style = SettingsStyle.cardTitle)
                 Text(
                     text = checks,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -377,7 +375,7 @@ private fun SettingsStatusCard(capabilities: CapabilityState, settings: AppSetti
         Spacer(Modifier.height(8.dp))
         Text(
             text = model,
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -396,12 +394,7 @@ private class SettingsGroupRow(
 @Composable
 private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
     Column(Modifier.fillMaxWidth()) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
-        )
+        com.suixing.agent.ui.components.SettingSectionTitle(title)
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
@@ -414,7 +407,7 @@ private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
                 rows.forEachIndexed { index, row ->
                     if (index > 0) {
                         HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 16.dp),
+                            modifier = Modifier.padding(horizontal = SettingsStyle.PageMargin),
                             color = MaterialTheme.colorScheme.outlineVariant,
                         )
                     }
@@ -423,7 +416,7 @@ private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
                         subtitle = row.summary,
                         onClick = row.onClick,
                         shape = MaterialTheme.shapes.large,
-                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        contentPadding = PaddingValues(horizontal = SettingsStyle.PageMargin),
                     )
                 }
             }
@@ -599,7 +592,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         // The bar is the bottom-most thing on the page, so it is what
                         // has to clear the navigation bar.
                         .navigationBarsPadding()
-                        .padding(horizontal = 16.dp)
+                        .padding(horizontal = SettingsStyle.PageMargin)
                         .padding(top = 8.dp, bottom = 12.dp),
                 ) {
                     outcome?.let { current ->
@@ -668,13 +661,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 0.dp,
-                bottom = navBarContentPadding().calculateBottomPadding(),
-            ),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
             // 从顶栏搬下来的「有未保存的改动」（顶栏不再有副标题）：dirty 时才出现，放在内容区
             // 第一行 —— 用户改完设置抬头就能看到，不用去找保存键。
@@ -682,7 +670,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 item {
                     Text(
                         text = "有未保存的改动",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = SettingsStyle.badge,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
@@ -846,7 +834,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = "地址填到 /v1 即可，/messages 会自动补上。",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -942,7 +930,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 // 说清楚比不说好 —— 否则用户换了手机发现 Key 没了，以为是 bug。
                 Text(
                     text = "Key 用系统 Keystore 加密后存在这台手机上，不随备份迁移；换机后需要重填一次。",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 )
@@ -1044,14 +1032,14 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     Spacer(Modifier.width(10.dp))
                     Text(
                         text = "已启用 ${selected?.enabled?.size ?: 0} 个",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
                     text = "从接口的 /models 拉一份清单，勾选后按提供方分组出现在顶部的模型切换里。",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -1234,7 +1222,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         hint = "一行一条，格式 Name: Value；随每个请求发送（含模型列表拉取）。留空＝不加。",
                     ) {
                         OutlinedTextField(
-                            textStyle = MaterialTheme.typography.bodyMedium,
+                            textStyle = SettingsStyle.fieldText,
                             value = headersRaw,
                             onValueChange = { input ->
                                 headersRaw = input
@@ -1385,13 +1373,8 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 0.dp,
-                bottom = navBarContentPadding().calculateBottomPadding(),
-            ),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
             item { SectionHeader("输入") }
             item {
@@ -1483,7 +1466,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                         ApprovalMode.ASK -> "每次调用工具前都会问你一次，可以选「总是允许」。"
                         ApprovalMode.DENY -> "禁止一切工具调用，只能聊天。"
                     },
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -1493,14 +1476,14 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("总是允许的工具", style = MaterialTheme.typography.titleSmall)
+                            Text("总是允许的工具", style = SettingsStyle.sectionTitle)
                             Text(
                                 text = if (allowed.isEmpty()) {
                                     "还没有。审批时选「总是允许」，这里会记住它，重启也在。"
                                 } else {
                                     "${allowed.size} 个，重启后依然有效"
                                 },
-                                style = MaterialTheme.typography.bodySmall,
+                                style = SettingsStyle.description,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -1523,7 +1506,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     ) {
                         Text(
                             text = name,
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = SettingsStyle.body,
                             modifier = Modifier.weight(1f),
                         )
                         IconButton(onClick = { Core.gate.forgetAlways(name) }) {
@@ -1541,14 +1524,14 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("总是拒绝的工具", style = MaterialTheme.typography.titleSmall)
+                            Text("总是拒绝的工具", style = SettingsStyle.sectionTitle)
                             Text(
                                 text = if (denied.isEmpty()) {
                                     "还没有。审批时选「总是拒绝」，它不会再问第二次。"
                                 } else {
                                     "${denied.size} 个，重启后依然有效"
                                 },
-                                style = MaterialTheme.typography.bodySmall,
+                                style = SettingsStyle.description,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -1569,7 +1552,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     ) {
                         Text(
                             text = name,
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = SettingsStyle.body,
                             modifier = Modifier.weight(1f),
                         )
                         IconButton(onClick = { Core.gate.forgetDenied(name) }) {
@@ -1627,7 +1610,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                                     COMPRESS_MIN_PERCENT,
                                     COMPRESS_MAX_PERCENT,
                                 )}%",
-                                style = MaterialTheme.typography.bodyLarge,
+                                style = SettingsStyle.rowTitle,
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.widthIn(min = 44.dp),
                             )
@@ -1838,13 +1821,8 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 0.dp,
-                bottom = navBarContentPadding().calculateBottomPadding(),
-            ),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
             item {
                 LabeledBlock(label = "主题") {
@@ -2012,13 +1990,8 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 0.dp,
-                bottom = navBarContentPadding().calculateBottomPadding(),
-            ),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
             item {
                 OutlinedTextField(
@@ -2127,13 +2100,8 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 .fillMaxSize()
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 0.dp,
-                bottom = navBarContentPadding().calculateBottomPadding(),
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             item {
                 SettingsGroup(
@@ -2248,13 +2216,8 @@ internal fun ConversationManagerScreen(
                 .fillMaxSize()
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 0.dp,
-                bottom = navBarContentPadding().calculateBottomPadding(),
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             // 与抽屉共用同一套排序（drawerSections）：置顶在前、置顶区按手动顺序、普通区按
             // updatedAt。这一页原来是纯时间序、也不显示置顶 —— 同一枚置顶两个页面两个样子。
@@ -2313,7 +2276,7 @@ internal fun ConversationManagerScreen(
                     item(key = "archived-header", contentType = "header") {
                         Text(
                             text = "已归档（${archived.size}）",
-                            style = MaterialTheme.typography.titleSmall,
+                            style = SettingsStyle.sectionTitle,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
                         )
@@ -2429,14 +2392,14 @@ private fun ConversationRow(
                     }
                     Text(
                         text = title,
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = SettingsStyle.rowTitle,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Text(
                     text = subtitle,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = SettingsStyle.badge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -2515,16 +2478,16 @@ private fun ChatInfoDialog(info: ChatRepository.ChatFile?, onDismiss: () -> Unit
                 if (info == null) {
                     Text("这个会话在磁盘上没有对应的文件（可能还没落盘）。")
                 } else {
-                    Text("路径：${info.path}", style = MaterialTheme.typography.labelSmall)
+                    Text("路径：${info.path}", style = SettingsStyle.badge)
                     Text(
                         "大小：${humanBytes(info.bytes)} · 修改：${lastUpdated(info.modifiedAt)}",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = SettingsStyle.badge,
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("原始记录（尾部 4000 字）：", style = MaterialTheme.typography.labelSmall)
+                    Text("原始记录（尾部 4000 字）：", style = SettingsStyle.badge)
                     Text(
                         text = info.tail,
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        style = SettingsStyle.badge.copy(fontFamily = FontFamily.Monospace),
                     )
                 }
             }
@@ -2567,7 +2530,7 @@ private fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = "高级参数",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = SettingsStyle.controlLabel,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
                 )
@@ -2626,12 +2589,12 @@ private fun LabeledBlock(
     content: @Composable () -> Unit,
 ) {
     Column(Modifier.padding(top = 10.dp)) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(label, style = SettingsStyle.body)
         if (hint != null) {
             Spacer(Modifier.height(3.dp))
             Text(
                 text = hint,
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -2657,7 +2620,7 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
             Spacer(Modifier.width(10.dp))
             Text(
                 text = outcome.message,
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
@@ -2721,7 +2684,7 @@ private fun ModelPickerDialog(
                     onClick = { adding = true },
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                 ) {
-                    Text("自定义模型", style = MaterialTheme.typography.labelSmall)
+                    Text("自定义模型", style = SettingsStyle.badge)
                 }
                 Spacer(Modifier.height(4.dp))
                 if (models.size > 8) {
@@ -2739,7 +2702,7 @@ private fun ModelPickerDialog(
                 if (groups.isEmpty()) {
                     Text(
                         text = "没有匹配的模型。",
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = SettingsStyle.body,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
@@ -2820,7 +2783,7 @@ private fun GroupHeader(
     ) {
         Text(
             text = group,
-            style = MaterialTheme.typography.labelSmall,
+            style = SettingsStyle.badge,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
             // 组名是 `vendor/model`、`host:port` 这类断不开的 ASCII 串，右边又站着「全选」，
@@ -2835,7 +2798,7 @@ private fun GroupHeader(
         ) {
             Text(
                 text = if (all) "取消全选" else "全选",
-                style = MaterialTheme.typography.labelSmall,
+                style = SettingsStyle.badge,
             )
         }
     }
@@ -2887,7 +2850,7 @@ private fun ModelCheckRow(
             Checkbox(checked = checked, onCheckedChange = { onToggle() })
             Text(
                 text = label,
-                style = MaterialTheme.typography.bodyMedium,
+                style = SettingsStyle.body,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -2919,7 +2882,7 @@ private fun ModelCheckRow(
             ) {
                 Text(
                     text = if (contextWindow > 0) "${contextWindow / 1000}k" else "不限",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = SettingsStyle.badge,
                     color = if (contextWindow > 0) {
                         MaterialTheme.colorScheme.primary
                     } else {
@@ -2943,7 +2906,7 @@ private fun ModelCheckRow(
             ) {
                 Text(
                     text = if (maxTokens > 0) "出${maxTokens / 1000}k" else "出默认",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = SettingsStyle.badge,
                     color = if (maxTokens > 0) {
                         MaterialTheme.colorScheme.secondary
                     } else {
@@ -3034,7 +2997,7 @@ private fun ProtocolPicker(protocol: String, onPick: (String) -> Unit) {
     )
     val label = options.firstOrNull { it.first == protocol }?.second ?: options.first().second
     Column {
-        Text("接口协议", style = MaterialTheme.typography.bodyMedium)
+        Text("接口协议", style = SettingsStyle.body)
         Spacer(Modifier.height(6.dp))
         Box {
             Surface(
@@ -3049,7 +3012,7 @@ private fun ProtocolPicker(protocol: String, onPick: (String) -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Text(label, style = SettingsStyle.body, modifier = Modifier.weight(1f))
                     Icon(
                         imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
                         contentDescription = null,
@@ -3124,21 +3087,9 @@ private fun AddModelDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     )
 }
 
-/**
- * 设置页单行输入框的字号：**标准档 15sp**。
- *
- * **为什么是比例式而不是 `15.sp` 字面量**：全站字号由「外观 → 字号」经 `suixingTypography(scale)`
- * 整体缩放（`FONT_SCALES = 0.88 / 1 / 1.12 / 1.26`，见 `ui/theme/Type.kt`），写死的 sp 不参与缩放
- * ⇒ 用户把字号调大，这些框里的字纹丝不动（规范第 6 条）。比例式在标准档正好 15sp，特大档跟着
- * 变成约 18.9sp。先例：`ui/chat/ChatScreen.kt:1627` 的 `fontSize * (15f / 17f)`。
- *
- * `@Composable` getter 而不是顶层 `val`：`MaterialTheme` 只能在组合里读，顶层取会在类初始化时
- * 读到未提供的主题（要么崩、要么静默拿到默认值）。
- */
+/** Shared 15sp input role; the theme applies the selected font scale. */
 private val settingsFieldText: TextStyle
-    @Composable get() = MaterialTheme.typography.bodyMedium.let { base ->
-        base.copy(fontSize = base.fontSize * (15f / 14f))
-    }
+    @Composable get() = SettingsStyle.fieldText
 
 /** A row that leaves this page: the chevron is what says so before it is tapped. */
 @Composable
@@ -3165,12 +3116,7 @@ private fun SettingsLink(
 /** 一页里的小节标题：四段之间的分界，靠字号与颜色分层，不加卡片。 */
 @Composable
 private fun SectionHeader(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
-    )
+    com.suixing.agent.ui.components.SettingSectionTitle(text)
 }
 
 @Composable
@@ -3183,11 +3129,11 @@ private fun LabeledSlider(
     hint: String? = null,
 ) {
     Column(Modifier.padding(top = 10.dp)) {
-        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Text(label, style = SettingsStyle.rowTitle)
         if (hint != null) {
             Text(
                 text = hint,
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

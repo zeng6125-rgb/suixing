@@ -66,6 +66,7 @@ class ChatRepository(private val context: Context) {
             // 数据本身仍在磁盘上（可以用外部工具读出）。
             warnAboutLegacyFiles()
             val metas = storeMetas()
+            store.retainCommitted(metas.mapTo(HashSet()) { it.id })
             for (meta in metas) {
                 if (byId.containsKey(meta.id)) continue
                 // **列表页只读 meta，不读日志**（#30 的核心收益）：原来这里走
@@ -285,12 +286,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * Returns the conversation with those messages attached, or null when the chat is gone.
      */
     suspend fun readTail(id: String, turns: Int = OPEN_TURNS): Conversation? =
-        withContext(Dispatchers.IO) {
-            lock.withLock {
-                val meta = store.readMeta(id) ?: return@withLock null
-                meta.toConversation(store.tail(meta, turns).messages)
-            }
-        }
+        readTailWindow(id, turns)?.first
 
     /**
      * 打开会话：尾部窗口**连同它的起飞字节位置**一起返回。
@@ -305,11 +301,32 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         id: String,
         turns: Int = OPEN_TURNS,
     ): Triple<Conversation, Long, Int>? = withContext(Dispatchers.IO) {
+        readCommitted(id) { snapshot ->
+            val window = snapshot.tail(turns)
+            Triple(snapshot.meta.toConversation(window.messages), window.startOffset, snapshot.meta.gen)
+        }?.let { return@withContext it }
         lock.withLock {
             val meta = store.readMeta(id) ?: return@withLock null
             val window = store.tail(meta, turns)
             Triple(meta.toConversation(window.messages), window.startOffset, meta.gen)
         }
+    }
+
+    /** Writers remain serialized. Read only immutable committed bytes on one pinned generation. */
+    private fun <T : Any> readCommitted(
+        id: String,
+        expectGen: Int? = null,
+        read: (ChatStore.ReadSnapshot) -> T,
+    ): T? = try {
+        store.committedRead(id)?.use { snapshot ->
+            if (expectGen != null && snapshot.meta.gen != expectGen) null else read(snapshot)
+        }
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        // A rewrite can unlink a generation between lookup and open; damage is rechecked on
+        // the original locked path. Never treat failed snapshot reads as an empty transcript.
+        null
     }
 
     /**
@@ -382,6 +399,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         expectGen: Int? = null,
     ): ChatStore.MessageWindow? =
         withContext(Dispatchers.IO) {
+            readCommitted(id, expectGen) { it.window(endOffset, turns) }?.let { return@withContext it }
             lock.withLock {
                 val meta = store.readMeta(id) ?: return@withLock null
                 if (expectGen != null && meta.gen != expectGen) return@withLock null

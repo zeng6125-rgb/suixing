@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.capability
 
+import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.settingsPagePadding
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -114,17 +116,15 @@ fun CapabilityScreen(onBack: () -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .navigationBarsPadding(),
+            .background(MaterialTheme.colorScheme.background),
     ) {
         // 顶栏不带副标题（用户：「任何页都不要副标题」）；无副标题时标题在行内居中 ⇒
         // 与返回箭头中心天然重合（结构性对齐，不需要任何补偿）。
         PageTopBar(title = "能力", onBack = onBack)
         LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             item(key = "capability-0", contentType = "capability-card") {
                 CapabilityHero(state)
@@ -147,7 +147,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                                 modifier = Modifier.size(18.dp),
                             )
                             Spacer(Modifier.width(10.dp))
-                            Text(text, style = MaterialTheme.typography.bodySmall)
+                            Text(text, style = SettingsStyle.description)
                         }
                         }
             }
@@ -315,7 +315,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     SoftIcon(ImageVector.vectorResource(R.drawable.ic_folder_cog), tint = MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("所有文件访问权限", style = MaterialTheme.typography.titleMedium)
+                        Text("所有文件访问权限", style = SettingsStyle.cardTitle)
                         Text(
                             text = when {
                                 !supportsAllFiles ->
@@ -323,7 +323,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                                 allFiles -> "已授予，文件工具可直接读写 /sdcard"
                                 else -> "未授予，文件工具只能访问应用私有目录"
                             },
-                            style = MaterialTheme.typography.bodySmall,
+                            style = SettingsStyle.description,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -382,7 +382,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 } else {
                     Text(
                         text = "四档权限是叠加的：标准档人人都有，拿到 Shizuku 就自动拥有无障碍的能力，root 又覆盖前两档。",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -449,7 +449,7 @@ private fun CapabilityHero(state: CapabilityState) {
                     Column(Modifier.weight(1f)) {
                         Text(
                             text = "当前权限",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = SettingsStyle.metadata,
                             color = scheme.onPrimary.copy(alpha = 0.75f),
                         )
                         Text(
@@ -461,7 +461,7 @@ private fun CapabilityHero(state: CapabilityState) {
                     }
                     Text(
                         text = "${level + 1} / 4",
-                        style = MaterialTheme.typography.titleMedium,
+                        style = SettingsStyle.cardTitle,
                         color = scheme.onPrimary.copy(alpha = 0.85f),
                     )
                 }
@@ -486,7 +486,7 @@ private fun CapabilityHero(state: CapabilityState) {
                 Spacer(Modifier.height(12.dp))
                 Text(
                     text = detail,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = SettingsStyle.body,
                     color = scheme.onPrimary.copy(alpha = 0.9f),
                 )
             }
@@ -520,11 +520,11 @@ private fun CapabilityTierPicker(
     )
     val missing = options.any { it.key == preferred && !it.ready }
     SuixingCard {
-        Text("执行档次", style = MaterialTheme.typography.titleMedium)
+        Text("执行档次", style = SettingsStyle.cardTitle)
         Text(
             text = "选择随行用哪一档权限执行操作；更高的档位能做的事更多，需要先开启。" +
                 "点已选中的那一档可回到自动。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
@@ -535,7 +535,7 @@ private fun CapabilityTierPicker(
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
         ) {
-            Row(Modifier.padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.padding(4.dp), horizontalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap)) {
                 options.forEach { option ->
                     val active = option.key == preferred
                     Surface(
@@ -552,7 +552,7 @@ private fun CapabilityTierPicker(
                         Text(
                             text = option.label,
                             modifier = Modifier.padding(vertical = 9.dp),
-                            style = MaterialTheme.typography.labelLarge,
+                            style = SettingsStyle.controlLabel,
                             textAlign = TextAlign.Center,
                         )
                     }
@@ -562,7 +562,7 @@ private fun CapabilityTierPicker(
         Spacer(Modifier.height(10.dp))
         Text(
             text = tierSummary(preferred, state),
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             // 选中的那一档还没开出来时用 error 说话：点了有反应这件事得看得见。
             color = if (missing) {
                 MaterialTheme.colorScheme.error
@@ -594,7 +594,7 @@ private fun CapabilityTierPicker(
                 Spacer(Modifier.width(9.dp))
                 Text(
                     text = line,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -675,10 +675,10 @@ private fun shizukuActionLabel(state: CapabilityState): String = when {
 @Composable
 private fun ExplainerRow(title: String, body: String) {
     Column(Modifier.padding(vertical = 6.dp)) {
-        Text(title, style = MaterialTheme.typography.titleSmall)
+        Text(title, style = SettingsStyle.sectionTitle)
         Text(
             text = body,
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -698,7 +698,7 @@ private fun CapabilityCard(
     /** 卡片底部的额外内容：目前只有悬浮窗那张卡片用它放自己的第二个开关。 */
     footer: (@Composable () -> Unit)? = null,
 ) {
-    SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
+    SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(
                 icon = icon,
@@ -710,10 +710,10 @@ private fun CapabilityCard(
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(title, style = SettingsStyle.cardTitle)
                 Text(
                     text = summary,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -735,7 +735,7 @@ private fun CapabilityCard(
                 Spacer(Modifier.width(9.dp))
                 Text(
                     text = line,
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -779,11 +779,11 @@ private fun CapabilityCard(
 private fun ConsoleRunningSwitch(checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("运行时显示", style = MaterialTheme.typography.titleSmall)
+            Text("运行时显示", style = SettingsStyle.sectionTitle)
             Text(
                 text = "不在前台时，只有正在跑任务才显示悬浮球，跑完自动收起。" +
                     "常驻打开时球一直都在，不看这个开关；两个都关，后台完全不显示。前台一律不显示。",
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.settingsPagePadding
+import com.suixing.agent.ui.components.SettingsStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -66,13 +68,8 @@ internal fun McpSection(
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
-            top = 0.dp,
-            bottom = navBarContentPadding().calculateBottomPadding(),
-        ),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = settingsPagePadding(),
+        verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
     ) {
         item { McpIntroCard() }
 
@@ -80,7 +77,7 @@ internal fun McpSection(
             item {
                 Text(
                     text = "还没有配置服务器。点右上角「+」，填一条启动命令（stdio）或一个地址（http）即可。",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = SettingsStyle.body,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -132,14 +129,14 @@ private fun McpIntroCard() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_info), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
-            Text("什么是 MCP", style = MaterialTheme.typography.titleMedium)
+            Text("什么是 MCP", style = SettingsStyle.cardTitle)
         }
         Spacer(Modifier.height(12.dp))
         Text(
             text = "MCP（Model Context Protocol）是给模型外挂工具的标准协议。接上服务器后，" +
                 "它提供的每个工具都会以 mcp__服务器名__工具名 出现在模型可调用的工具列表里，" +
                 "和内置工具一样受审批闸门管控。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
         )
         Spacer(Modifier.height(8.dp))
         Text(
@@ -147,7 +144,7 @@ private fun McpIntroCard() {
                 "手机上的进程默认以应用身份运行，读不到 Termux 私有目录；" +
                 "装了 Magisk/KernelSU 的话可以用 su -c \"...\" 前缀借 root 跑。\n" +
                 "http：填服务器地址（如 http://127.0.0.1:3000/mcp），适合跑在 Termux、电脑或公网的服务。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -178,13 +175,13 @@ private fun ServerCard(
             Column(Modifier.weight(1f)) {
                 Text(
                     text = state.config.name,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = SettingsStyle.cardTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = state.statusLine(),
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -310,7 +307,7 @@ internal fun McpEditorDialog(
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodyMedium,
+                    textStyle = SettingsStyle.fieldText,
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("名称（会进工具名，建议用英文）") },
@@ -322,7 +319,7 @@ internal fun McpEditorDialog(
 
                 if (stdio) {
                     OutlinedTextField(
-                        textStyle = MaterialTheme.typography.bodyMedium,
+                        textStyle = SettingsStyle.fieldText,
                         value = command,
                         onValueChange = { command = it },
                         label = { Text("启动命令") },
@@ -333,7 +330,7 @@ internal fun McpEditorDialog(
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
-                        textStyle = MaterialTheme.typography.bodyMedium,
+                        textStyle = SettingsStyle.fieldText,
                         value = env,
                         onValueChange = { env = it },
                         label = { Text("环境变量（每行 KEY=VALUE，可空）") },
@@ -343,7 +340,7 @@ internal fun McpEditorDialog(
                     )
                 } else {
                     OutlinedTextField(
-                        textStyle = MaterialTheme.typography.bodyMedium,
+                        textStyle = SettingsStyle.fieldText,
                         value = url,
                         onValueChange = { url = it },
                         label = { Text("服务器地址") },
@@ -354,7 +351,7 @@ internal fun McpEditorDialog(
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
-                        textStyle = MaterialTheme.typography.bodyMedium,
+                        textStyle = SettingsStyle.fieldText,
                         value = headers,
                         onValueChange = { headers = it },
                         label = { Text("请求头（每行 Name: value，可空）") },
@@ -368,14 +365,14 @@ internal fun McpEditorDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(checked = enabled, onCheckedChange = { enabled = it })
                     Spacer(Modifier.width(10.dp))
-                    Text("启用（启动时自动连接）", style = MaterialTheme.typography.bodyMedium)
+                    Text("启用（启动时自动连接）", style = SettingsStyle.body)
                 }
 
                 result?.let {
                     Spacer(Modifier.height(10.dp))
                     Text(
                         text = it,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = if (it.startsWith("连接成功")) {
                             MaterialTheme.colorScheme.primary
                         } else {

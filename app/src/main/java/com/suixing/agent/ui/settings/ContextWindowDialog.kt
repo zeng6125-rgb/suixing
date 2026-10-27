@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.SettingsStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -69,11 +70,11 @@ internal fun ContextWindowDialog(
                 Text(
                     text = "这个模型一次能读多少 token。填了它，输入框左边的圆环才会按占用比例" +
                         "显示，并在快满时变红；留空＝不限（圆环不显示比例）。",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodyMedium,
+                    textStyle = SettingsStyle.fieldText,
                     value = text,
                     // 放行字母 k/m（大小写）：单位是这次要支持的输入（用户点名）。其余字符仍滤掉，
                     // 否则一个逗号或全角数字会静默变成「非法」而不是「没打进去」。
@@ -96,7 +97,7 @@ internal fun ContextWindowDialog(
                     // 取整——131072 会先被说成「131k」，再写进去 131000。
                     Text(
                         text = "建议 ${kiloText(suggested)}（按模型名猜的，可改）",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.primary,
                     )
                     TextButton(onClick = { text = kiloText(suggested) }) {
@@ -105,7 +106,7 @@ internal fun ContextWindowDialog(
                 }
                 Text(
                     text = "模型：${model.ifBlank { "未选择" }}",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = SettingsStyle.badge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

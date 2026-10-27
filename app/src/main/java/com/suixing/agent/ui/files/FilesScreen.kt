@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.files
 
+import com.suixing.agent.ui.components.SettingsStyle
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -293,8 +294,8 @@ fun FilesScreen(onBack: () -> Unit) {
                         "这是已安装插件所在的目录（应用私有）。每个插件一个子目录，里面的 manifest.json " +
                             "就是它的说明书；这里只能查看，装卸与开关都在「工具 → 插件」页。"
                 },
-                modifier = Modifier.padding(horizontal = 16.dp),
-                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = SettingsStyle.PageMargin),
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
@@ -310,7 +311,7 @@ fun FilesScreen(onBack: () -> Unit) {
             Text(
                 text = message,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.error,
             )
         }
@@ -319,7 +320,7 @@ fun FilesScreen(onBack: () -> Unit) {
             Text(
                 text = message,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.error,
             )
         }
@@ -329,7 +330,7 @@ fun FilesScreen(onBack: () -> Unit) {
                 text = "这个目录是空的",
                 modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
                 textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodyMedium,
+                style = SettingsStyle.body,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -398,7 +399,7 @@ private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (F
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = SettingsStyle.PageMargin),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         segments.forEachIndexed { index, (label, file) ->
@@ -418,7 +419,7 @@ private fun Breadcrumbs(root: File, current: File, rootLabel: String, onJump: (F
             ) {
                 Text(
                     text = label,
-                    style = MaterialTheme.typography.labelLarge,
+                    style = SettingsStyle.controlLabel,
                     maxLines = 1,
                     color = if (last) {
                         MaterialTheme.colorScheme.primary
@@ -453,7 +454,7 @@ private fun EntryRow(entry: Entry, onClick: () -> Unit) {
         leading = { SoftIcon(icon, size = 36.dp, tint = entry.tint) },
         control = if (entry.isDirectory) ({ RowChevron() }) else null,
         onClick = onClick,
-        modifier = Modifier.padding(horizontal = 16.dp),
+        modifier = Modifier.padding(horizontal = SettingsStyle.PageMargin),
         titleMaxLines = 1,
     )
 }
@@ -473,7 +474,7 @@ private fun PreviewDialog(
                 Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
                     text = size,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = SettingsStyle.badge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

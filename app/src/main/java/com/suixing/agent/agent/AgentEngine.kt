@@ -1106,7 +1106,7 @@ class AgentEngine(
         publish(RunState.Running(stats()))
 
         val produced = mutableListOf<StoredMessage>()
-        val wire = mutableListOf<ChatMessage>()
+        val wire = PromptMessages()
         // Which stored message each stretch of the wire came from. The wire has no ids of its own,
         // and a compression has to be able to name the messages it folded away — a checkpoint that
         // cannot say what it covered could never be resumed from by the next run.
@@ -1350,18 +1350,7 @@ class AgentEngine(
                 // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
                 // **这一遍扫描也放后台**（issue #36 同类）：几十万字符的遍历不该占着主线程，
                 // 而它每轮都跑一次。只搬计算，赋值仍在原地。
-                val (historyChars, promptChars, promptImages) = withContext(Dispatchers.Default) {
-                    var chars = 0
-                    var total = 0
-                    var images = 0
-                    for (message in wire) {
-                        val c = messageChars(message)
-                        total += c
-                        if (message.role != ROLE_SYSTEM) chars += c
-                        if (message.imageCount > 0) images++
-                    }
-                    Triple(chars, total, images)
-                }
+                val (historyChars, promptChars, promptImages) = wire.counts
                 val promptEstimate = estimatePromptTokens(promptChars, promptImages)
                 breakHistory = historyChars / 4
                 // 显示层的「当前请求多大」：wire 在这一刻定型，估算＝端点真实值 + 增量。
@@ -2080,6 +2069,7 @@ class AgentEngine(
      * the pessimistic way.
      */
     private fun estimatePromptTokens(wire: List<ChatMessage>): Int {
+        if (wire is PromptMessages) return wire.counts.let { estimatePromptTokens(it.totalChars, it.imageMessages) }
         // **一趟同时得两个数**（原来是 `wireChars(wire)` + `count{…}` 各扫一遍全历史）：
         // 大会话几十万字符时这是每轮两遍纯重复。数值与原来逐位相同。
         var chars = 0
@@ -2116,7 +2106,7 @@ class AgentEngine(
      * look like a quarter of a million tokens of context.
      */
     private fun messageChars(message: ChatMessage): Int =
-        message.text.length + message.toolCalls.sumOf { it.name.length + it.arguments.length }
+        promptMessageChars(message)
 
     private fun stats(): StreamStats {
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
@@ -2453,32 +2443,9 @@ class AgentEngine(
         // 笔记当成用户的自述。空画像整段不出现，不留一个空标题。
         // **两个开关在「对话配置」里**（[AppSettings.injectProfile] / [AppSettings.injectMemory]）：
         // 关掉＝整段不出现，**连小标题一起**不留 —— 留一个空标题会让模型以为"这里本来该有内容"。
-        val about = if (settings.injectProfile) profile.trim() else ""
-        if (about.isNotBlank()) {
-            append("\n\n## 关于用户（画像）\n")
-            append(about)
-        }
-        val remembered = if (settings.injectMemory) memoryBlock(memory) else ""
-        if (remembered.isNotBlank()) {
-            append("\n\n## 你记得的事\n")
-            append(remembered)
-        }
+        append(injectedUserContext(profile, memory, settings.injectProfile, settings.injectMemory))
     }
 
-    /**
-     * Renders the agent's own notes into the prompt, so they are simply *known*
-     * rather than something the model has to remember to look up.
-     *
-     * Bounded on purpose: memory is unbounded user data, and a note that grows to
-     * megabytes would otherwise eat the whole context window on every request.
-     */
-    private fun memoryBlock(memory: Map<String, MemoryEntry>): String =
-        memory.entries
-            .sortedBy { it.key }
-            .take(MAX_MEMORY_ENTRIES)
-            .joinToString("\n") { (key, entry) ->
-                "- $key: ${entry.value.take(MAX_MEMORY_VALUE)}"
-            }
     }
 
     companion object {
@@ -2486,8 +2453,6 @@ class AgentEngine(
         private const val LIVE_LINE_CHARS = 40
 
         private const val MAX_TOOL_OUTPUT = 8_000
-        private const val MAX_MEMORY_ENTRIES = 40
-        private const val MAX_MEMORY_VALUE = 400
 
         /** 120 ms is faster than the eye and slower than the stream. */
         private const val STATS_TICK_MS = 120L

@@ -407,9 +407,7 @@ class ChatViewModel : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.Eagerly, _state.value)
 
     internal val screenState: StateFlow<ChatUiState> = state
-        .map { it.screenSnapshot() }
-        .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.Eagerly, _state.value.screenSnapshot())
+        .projectState { it.screenSnapshot() }
 
     internal val liveContent: Flow<LiveContent> = _state.map { it.liveContent() }.distinctUntilChanged()
     internal fun currentLiveContent(): LiveContent = _state.value.liveContent()
@@ -429,18 +427,14 @@ class ChatViewModel : ViewModel() {
      * 不收 [liveStats]。
      */
     val requestStats: StateFlow<StreamStats?> = _liveStats
-        .map { it?.copy(tokensOut = 0, thinkingTokens = 0, elapsedMs = 0L, tokPerSec = 0f) }
-        .distinctUntilChanged()
-        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null)
+        .projectState { it?.copy(tokensOut = 0, thinkingTokens = 0, elapsedMs = 0L, tokPerSec = 0f) }
 
     /**
      * 「有没有活内容」的布尔：流式气泡开关与 pin 信号都只认它。活内容增长期间
      * state 因 equals 去重不发射，布尔天然稳定；只在开始/结束翻转时重组屏幕。
      */
     val liveActive: StateFlow<Boolean> = _state
-        .map { it.liveParts.isNotEmpty() || it.reasoning.isNotEmpty() }
-        .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+        .projectState { it.liveParts.isNotEmpty() || it.reasoning.isNotEmpty() }
 
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
 
@@ -2702,9 +2696,15 @@ class ChatViewModel : ViewModel() {
      * 派生只在真的要用时算一次 —— 读它的只有两处：草稿合并、以及"这一轮有没有活内容"的判定。
      */
     private fun RunSession.derivedStreaming(): String {
-        val sb = StringBuilder()
-        for (part in parts) if (part is LivePart.Text) sb.append(part.text)
-        return sb.toString()
+        var first: String? = null
+        var joined: StringBuilder? = null
+        for (part in parts) if (part is LivePart.Text) {
+            val text = part.text
+            if (joined != null) joined.append(text)
+            else if (first == null) first = text
+            else joined = StringBuilder(first.length + text.length).append(first).append(text)
+        }
+        return joined?.toString() ?: first.orEmpty()
     }
 
     /**

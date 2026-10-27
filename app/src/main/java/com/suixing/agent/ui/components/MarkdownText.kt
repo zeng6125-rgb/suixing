@@ -144,7 +144,10 @@ private const val MAX_LIST_START = 9999
  */
 internal fun listStart(digits: String): Int = (digits.toIntOrNull() ?: 1).coerceIn(0, MAX_LIST_START)
 
-fun parseMarkdown(source: String): List<MdBlock> {
+fun parseMarkdown(source: String): List<MdBlock> = parseMarkdown(source, null)
+
+internal fun parseMarkdown(source: String, checkpoint: (() -> Unit)?): List<MdBlock> {
+    checkpoint?.invoke()
     // **没有 CR 就不做两次全串 replace**：绝大多数文本只有 \n，原来无条件复制两遍整串。
     val normalized = if (source.indexOf('\r') < 0) source else source.replace("\r\n", "\n").replace('\r', '\n')
     val lines = normalized.split('\n')
@@ -184,6 +187,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
     }
     var index = 0
     while (index < lines.size) {
+        checkpoint?.invoke()
         val line = lines[index]
         val trimmed = lineInfo[index]?.trimmed ?: line.trim()
         // **空行先返回，四条正则一次都不跑**（原实现把四条 matchEntire 全算完才进 when，
@@ -204,6 +208,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 val body = mutableListOf<String>()
                 index++
                 while (index < lines.size && !MD_FENCE_CLOSE.matches(lines[index].trim())) {
+                    checkpoint?.invoke()
                     body += lines[index]
                     index++
                 }
@@ -230,6 +235,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
             cached.quote -> {
                 val quoted = mutableListOf<String>()
                 while (index < lines.size && lines[index].trimStart().startsWith('>')) {
+                    checkpoint?.invoke()
                     quoted += lines[index].trimStart().removePrefix(">").removePrefix(" ")
                     index++
                 }
@@ -240,6 +246,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 val rows = mutableListOf<List<String>>()
                 index += 2
                 while (index < lines.size) {
+                    checkpoint?.invoke()
                     val row = lines[index].trim()
                     if (row.isEmpty() || !row.contains('|')) break
                     rows += splitTableRow(row)
@@ -251,6 +258,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 val depth = indentDepth(bullet.groupValues[1])
                 val items = mutableListOf<String>()
                 while (index < lines.size) {
+                    checkpoint?.invoke()
                     val item = MD_BULLET.matchEntire(lines[index]) ?: break
                     // A change of level ends the block: one Bullet carries one indent, so
                     // a nested list renders as its own indented block underneath.
@@ -267,6 +275,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 val start = listStart(ordered.groupValues[2])
                 val items = mutableListOf<String>()
                 while (index < lines.size) {
+                    checkpoint?.invoke()
                     val item = MD_ORDERED.matchEntire(lines[index]) ?: break
                     if (indentDepth(item.groupValues[1]) != depth) break
                     items += item.groupValues[3]
@@ -277,6 +286,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
             else -> {
                 val paragraph = mutableListOf<String>()
                 while (index < lines.size && !opensBlockAt(index)) {
+                    checkpoint?.invoke()
                     paragraph += info(index).trimmed
                     index++
                 }
@@ -755,6 +765,7 @@ fun MarkdownText(
  */
 @Composable
 private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): List<MdBlock> {
+    if (settled) LocalPreparedMarkdown.current[text]?.let { return it }
     // A plain holder rather than state: the blocks are returned from this call, so nothing has
     // to recompose when the cache moves on, and writing state during composition is exactly
     // the kind of thing that recomposes forever.

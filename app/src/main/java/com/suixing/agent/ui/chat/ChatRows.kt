@@ -41,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
@@ -1260,8 +1261,15 @@ internal fun SelectableWhenArmed(content: @Composable () -> Unit) {
         content()
         return
     }
+    val tracker = LocalSelectionFocusTracker.current
+    val selectionOwner = remember { Any() }
+    androidx.compose.runtime.DisposableEffect(tracker, selectionOwner) {
+        onDispose { tracker?.remove(selectionOwner) }
+    }
     androidx.compose.runtime.CompositionLocalProvider(LocalInSelectable provides true) {
-        SelectionContainer { content() }
+        SelectionContainer(
+            modifier = Modifier.onFocusChanged { tracker?.update(selectionOwner, it.hasFocus) },
+        ) { content() }
     }
 }
 

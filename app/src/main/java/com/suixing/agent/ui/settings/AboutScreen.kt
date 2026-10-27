@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.settingsPagePadding
+import com.suixing.agent.ui.components.SettingsStyle
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -69,24 +71,18 @@ fun AboutScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(
-                    start = 16.dp,
-                    end = 16.dp,
-                    top = 0.dp,
-                    // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-                    bottom = navBarContentPadding().calculateBottomPadding(),
-                ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(settingsPagePadding()),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             SuixingCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SoftIcon(ImageVector.vectorResource(R.drawable.ic_bot))
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("随行", style = MaterialTheme.typography.titleMedium)
+                        Text("随行", style = SettingsStyle.cardTitle)
                         Text(
                             text = "v$version",
-                            style = MaterialTheme.typography.bodySmall,
+                            style = SettingsStyle.description,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -94,17 +90,17 @@ fun AboutScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 Text(
                     text = "跟着你走的手机智能体：说一句话，它就能读屏、点按、跑命令、翻文件。",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
             SuixingCard {
-                Text("隐私", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                Text("隐私", style = SettingsStyle.cardTitle)
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = "回答由你自己配置的模型服务提供；对话、记忆与密钥都只留在这台手机上。",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -118,19 +114,19 @@ fun AboutScreen(onBack: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = "API Key 只保存在本机应用私有目录，不会上传到任何第三方服务。",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
 
             SuixingCard {
-                Text("开源与致谢", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                Text("开源与致谢", style = SettingsStyle.cardTitle)
                 Spacer(Modifier.height(8.dp))
                 Text(
                     // Lucide 是 ISC 许可：它要求保留版权与许可声明，这一页是 App 唯一的出处说明。
                     text = "图标：Lucide（ISC License）",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(10.dp))
@@ -160,21 +156,20 @@ fun AboutScreen(onBack: () -> Unit) {
             SuixingCard {
                 Text(
                     text = "随包分发的开源组件（GPL）",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    style = SettingsStyle.cardTitle,
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = "为了在手机上有一个完整的 shell，本应用自带两个静态编译的 AArch64 二进制" +
                         "（随 APK 分发，不是下载的）：",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = "· bash 5.3 —— GPL-3.0-or-later（来自 Debian bash-static）\n" +
                         "· BusyBox 1.38.0 —— GPL-2.0-only（来自 Debian busybox-static）",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -183,7 +178,7 @@ fun AboutScreen(onBack: () -> Unit) {
                         "https://salsa.debian.org/debian/busybox（或任一 Debian 镜像的 " +
                         "bash-static / busybox-static 源码包）。如需书面提供源码，按仓库里的 " +
                         "issue 或邮件索取即可。",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(10.dp))

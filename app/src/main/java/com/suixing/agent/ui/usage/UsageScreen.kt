@@ -1,5 +1,8 @@
 package com.suixing.agent.ui.usage
 
+import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.SettingSectionTitle
+import com.suixing.agent.ui.components.settingsPagePadding
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -103,10 +106,9 @@ fun UsageScreen(onBack: () -> Unit) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(padding),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             item {
                 // 三个标题是常量；三个数值各要一次 String.format（`compact`）。都记在 item 的
@@ -124,7 +126,7 @@ fun UsageScreen(onBack: () -> Unit) {
                 Text(
                     text = "tokens 按每次请求全量累加（一轮工具循环 ≈ 十几次请求）；" +
                         "缓存命中的部分网关按约 1/10 计费 —— 这里的数字和账单金额不是一回事。",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = SettingsStyle.badge,
                     color = scheme.onSurfaceVariant,
                 )
             }
@@ -141,7 +143,7 @@ fun UsageScreen(onBack: () -> Unit) {
                         if (loaded && days.isEmpty()) {
                             Text(
                                 text = "还没有用量记录",
-                                style = MaterialTheme.typography.bodySmall,
+                                style = SettingsStyle.description,
                                 color = scheme.onSurfaceVariant,
                             )
                         }
@@ -155,7 +157,7 @@ fun UsageScreen(onBack: () -> Unit) {
                                     // drop 而不是 substring(5)：date 是磁盘缓存 usage.json 的 map key，
                                     // 解码时不校验格式，短于 6 字符的 key 会让 substring 在组合期抛。
                                     text = day.date.drop(5),
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = SettingsStyle.badge,
                                     color = scheme.onSurfaceVariant,
                                     modifier = Modifier.width(44.dp),
                                 )
@@ -175,7 +177,7 @@ fun UsageScreen(onBack: () -> Unit) {
                                 Spacer(Modifier.width(8.dp))
                                 Text(
                                     text = dayLabels[index],
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = SettingsStyle.badge,
                                     color = scheme.onSurfaceVariant,
                                     modifier = Modifier.width(52.dp),
                                 )
@@ -206,7 +208,7 @@ fun UsageScreen(onBack: () -> Unit) {
                     } else {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             if (loaded && models.isEmpty()) {
-                                Text("还没有用量记录", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                                Text("还没有用量记录", style = SettingsStyle.description, color = scheme.onSurfaceVariant)
                             }
                             models.forEachIndexed { index, model -> ModelUsageRow(model, modelTotals[index]) }
                         }
@@ -220,18 +222,14 @@ fun UsageScreen(onBack: () -> Unit) {
 @Composable
 private fun ModelUsageRow(model: ModelUsage, total: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(model.model, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-        Text(total, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(model.model, style = SettingsStyle.body, modifier = Modifier.weight(1f))
+        Text(total, style = SettingsStyle.metadata, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun SectionTitle(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleSmall,
-        modifier = Modifier.padding(top = 6.dp),
-    )
+    SettingSectionTitle(text)
 }
 
 /** 数值字号的下限：再小就不如让用户去别处看完整数字，但三张卡的数值都必须单行放下。 */
@@ -330,7 +328,7 @@ private fun StatCard(
         Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.labelSmall,
+                style = SettingsStyle.badge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 // 标签也必须单行：它一折行，这一张卡就比旁边两张高，三张卡又回到"不齐"。
                 maxLines = 1,

@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.assistant
 
+import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.settingsPagePadding
 import android.graphics.Bitmap
 // Android 的 Color（`ColorDrawable(Color.TRANSPARENT)` 用它），不是 Compose 的
 // androidx.compose.ui.graphics.Color —— 两个同名类，别混。
@@ -215,9 +217,9 @@ fun AssistantEditor(
                         .fillMaxSize()
                         .padding(padding)
                         .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 16.dp)
-                        .padding(top = 12.dp, bottom = 30.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                        .padding(settingsPagePadding())
+                        .padding(top = SettingsStyle.SectionGap),
+                    verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
                 ) {
                     IdentitySection(
                         draft = draft,
@@ -252,7 +254,7 @@ fun AssistantEditor(
                     notice?.let { message ->
                         Text(
                             text = message,
-                            style = MaterialTheme.typography.bodySmall,
+                            style = SettingsStyle.description,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
@@ -268,13 +270,13 @@ fun AssistantEditor(
                         // saying why is the difference between a rule and a missing button.
                         Text(
                             text = "至少要留一个助手，所以这个删不掉：先新建一个，再回来删它。",
-                            style = MaterialTheme.typography.bodySmall,
+                            style = SettingsStyle.description,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     Text(
                         text = "留空的项会跟随「设置」里的当前值，所以只改名字也能用。",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -429,7 +431,7 @@ private fun IdentitySection(
             // 于是 48dp 真的落到 48dp（标签行 + 输入行 + 上下 8dp 正好填满）。
             // 反过来，写死 `height(48.dp)` 是**上限**：用户把「外观→字号」调大时字会被裁掉，工具页
             // 搜索框踩过这个坑（ToolsScreen.kt:521-524）。下限不裁：字大了框跟着长高。
-            textStyle = MaterialTheme.typography.bodyMedium,
+            textStyle = SettingsStyle.fieldText,
             value = draft.name,
             onValueChange = { onDraft(draft.copy(name = it)) },
             // 下限，不是固定高度：内容需要时它自己长高，字号放大也不会裁字。
@@ -440,7 +442,7 @@ private fun IdentitySection(
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(
             // 与「名字」同一个字号、同一个下限：三个框看起来必须是同一种控件。
-            textStyle = MaterialTheme.typography.bodyMedium,
+            textStyle = SettingsStyle.fieldText,
             value = draft.description,
             onValueChange = { onDraft(draft.copy(description = it)) },
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
@@ -466,7 +468,7 @@ private fun PromptSection(draft: Assistant, onDraft: (Assistant) -> Unit) {
         },
     ) {
         OutlinedTextField(
-            textStyle = MaterialTheme.typography.bodyMedium,
+            textStyle = SettingsStyle.fieldText,
             value = draft.systemPrompt,
             onValueChange = { onDraft(draft.copy(systemPrompt = it)) },
             // 150 → 120：提示词框也是"太高"被点名的之一，而这里同样用**下限**——写多长它长多高，
@@ -505,7 +507,7 @@ private fun ModelSection(
             ) {
                 Text(
                     text = label,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = SettingsStyle.body,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -564,7 +566,7 @@ private fun ModelSection(
             )
             Text(
                 text = "温度 ${"%.1f".format(value)}",
-                style = MaterialTheme.typography.labelMedium,
+                style = SettingsStyle.metadata,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -600,8 +602,8 @@ private fun ToolSection(
         CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 40.dp) {
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
+                verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
             ) {
                 toolNames.forEach { name ->
                     val enabled = name !in off
@@ -618,7 +620,7 @@ private fun ToolSection(
                                 ),
                             )
                         },
-                        label = { Text(name, style = MaterialTheme.typography.labelSmall) },
+                        label = { Text(name, style = SettingsStyle.badge) },
                     )
                 }
             }
@@ -626,7 +628,7 @@ private fun ToolSection(
         if (toolNames.isEmpty()) {
             Text(
                 text = "工具还在加载…",
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

@@ -42,7 +42,7 @@ fun SuixingCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainer,
-    contentPadding: PaddingValues = PaddingValues(16.dp),
+    contentPadding: PaddingValues = PaddingValues(SettingsStyle.CardPadding),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val shape = MaterialTheme.shapes.large
@@ -80,7 +80,7 @@ fun SectionCard(
     subtitle: String? = null,
     trailing: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
-    contentPadding: PaddingValues = PaddingValues(16.dp),
+    contentPadding: PaddingValues = PaddingValues(SettingsStyle.CardPadding),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     SuixingCard(modifier = modifier, contentPadding = contentPadding) {
@@ -90,11 +90,11 @@ fun SectionCard(
                 Spacer(Modifier.width(12.dp))
             }
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(title, style = SettingsStyle.cardTitle)
                 if (subtitle != null) {
                     Text(
                         text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

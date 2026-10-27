@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.settingsPagePadding
+import com.suixing.agent.ui.components.SettingsStyle
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -129,12 +131,12 @@ fun PluginsTab(onNotify: (String) -> Unit) {
     // the height constraint is unbounded — a fillMaxHeight there is meaningless at best.
     Column(Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = SettingsStyle.PageMargin),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = if (entries.isEmpty()) "" else "已安装 ${entries.size} 个",
-                style = MaterialTheme.typography.labelMedium,
+                style = SettingsStyle.metadata,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
@@ -271,14 +273,14 @@ private fun PluginRow(entry: PluginEntry, onOpen: () -> Unit, onToggle: (Boolean
             Column(Modifier.weight(1f)) {
                 Text(
                     text = spec?.displayName?.zh ?: entry.id,
-                    style = MaterialTheme.typography.titleSmall,
+                    style = SettingsStyle.sectionTitle,
                 )
                 Text(
                     text = listOfNotNull(
                         spec?.version?.let { "v$it" },
                         spec?.author?.takeIf { it.isNotBlank() },
                     ).joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = SettingsStyle.badge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -293,7 +295,7 @@ private fun PluginRow(entry: PluginEntry, onOpen: () -> Unit, onToggle: (Boolean
         entry.issues.take(2).forEach { issue ->
             Text(
                 text = "${issue.code}: ${issue.message}",
-                style = MaterialTheme.typography.labelSmall,
+                style = SettingsStyle.badge,
                 color = if (issue.severity == Severity.ERROR) {
                     MaterialTheme.colorScheme.error
                 } else {
@@ -358,15 +360,15 @@ private fun PluginDetailDialog(
         text = {
             SelectionContainer {
                 Column(Modifier.horizontalScroll(rememberScrollState())) {
-                    Text(spec.description.zh, style = MaterialTheme.typography.bodySmall)
+                    Text(spec.description.zh, style = SettingsStyle.description)
                     if (dir.isNotBlank()) {
                         Spacer(Modifier.height(10.dp))
-                        Text("目录", style = MaterialTheme.typography.titleSmall)
+                        Text("目录", style = SettingsStyle.sectionTitle)
                         val clipboard = LocalClipboardManager.current
                         val context = LocalContext.current
                         Text(
                             text = dir,
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            style = SettingsStyle.description.copy(fontFamily = FontFamily.Monospace),
                             // Two lines and an ellipsis: an absolute path under /data/data is long,
                             // and letting it wrap freely would push the buttons off the dialog.
                             maxLines = 2,
@@ -381,39 +383,39 @@ private fun PluginDetailDialog(
                     }
                     spec.tools.forEach { tool ->
                         Spacer(Modifier.height(10.dp))
-                        Text("工具 ${tool.name}（${tool.risk ?: "read"}）", style = MaterialTheme.typography.titleSmall)
+                        Text("工具 ${tool.name}（${tool.risk ?: "read"}）", style = SettingsStyle.sectionTitle)
                         if (tool.description.isNotBlank()) {
-                            Text(tool.description, style = MaterialTheme.typography.bodySmall)
+                            Text(tool.description, style = SettingsStyle.description)
                         }
                         // The template itself, variables and all: this is the thing being trusted.
                         val template = tool.exec.command ?: tool.exec.url ?: tool.exec.type
                         Text(
                             text = template,
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            style = SettingsStyle.description.copy(fontFamily = FontFamily.Monospace),
                         )
                     }
                     if (spec.hooks.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
-                        Text("hooks", style = MaterialTheme.typography.titleSmall)
+                        Text("hooks", style = SettingsStyle.sectionTitle)
                         spec.hooks.forEach { hook ->
                             Text(
                                 text = "${hook.on} → ${hook.action}" +
                                     (hook.`when`.tool?.let { "（工具 $it）" } ?: "") +
                                     (hook.message?.let { "：$it" } ?: ""),
-                                style = MaterialTheme.typography.bodySmall,
+                                style = SettingsStyle.description,
                             )
                         }
                     }
                     if (spec.context.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
-                        Text("注入的上下文", style = MaterialTheme.typography.titleSmall)
+                        Text("注入的上下文", style = SettingsStyle.sectionTitle)
                         spec.context.forEach { block ->
-                            Text(block.content, style = MaterialTheme.typography.bodySmall)
+                            Text(block.content, style = SettingsStyle.description)
                         }
                     }
                     if (spec.env.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
-                        Text("env", style = MaterialTheme.typography.titleSmall)
+                        Text("env", style = SettingsStyle.sectionTitle)
                         spec.env.forEach { decl ->
                             val value = env[decl.name]
                             // 展示按「env.json 值 > manifest.defaultValue > （未填）」合并
@@ -427,7 +429,7 @@ private fun PluginDetailDialog(
                             }
                             Text(
                                 text = decl.name + (if (decl.required) "（必填）" else "") + " = " + shown,
-                                style = MaterialTheme.typography.bodySmall,
+                                style = SettingsStyle.description,
                             )
                         }
                     }
@@ -479,7 +481,7 @@ private fun InstallConfirmDialog(
                 Column(Modifier.horizontalScroll(rememberScrollState())) {
                     Text(
                         text = summary?.displayName?.zh ?: "（读不出名字）",
-                        style = MaterialTheme.typography.titleSmall,
+                        style = SettingsStyle.sectionTitle,
                     )
                     Text(
                         text = listOfNotNull(
@@ -488,7 +490,7 @@ private fun InstallConfirmDialog(
                             result.level?.name,
                             summary?.risk,
                         ).joinToString(" · "),
-                        style = MaterialTheme.typography.labelSmall,
+                        style = SettingsStyle.badge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     // 命名规则常驻说明（用户：「插件自行创建的命名规则要求，简洁不允许带点号；
@@ -497,16 +499,16 @@ private fun InstallConfirmDialog(
                     Text(
                         text = "命名规则：id 小写字母开头、只含小写字母/数字/横杠、≤32 字、不含点号；" +
                             "工具名同规则但可含下划线；注册名＝<id>_<tool>（发给模型网关，只收字母数字下划线横杠）",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = SettingsStyle.badge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (result.execTemplates.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
-                        Text("会执行的内容", style = MaterialTheme.typography.titleSmall)
+                        Text("会执行的内容", style = SettingsStyle.sectionTitle)
                         result.execTemplates.forEach { template ->
                             Text(
                                 text = template,
-                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                style = SettingsStyle.description.copy(fontFamily = FontFamily.Monospace),
                             )
                         }
                     }
@@ -515,7 +517,7 @@ private fun InstallConfirmDialog(
                         result.issues.forEach { issue ->
                             Text(
                                 text = "[${issue.severity.name}] ${issue.code}: ${issue.message}",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = SettingsStyle.badge,
                                 color = if (issue.severity == Severity.ERROR) {
                                     MaterialTheme.colorScheme.error
                                 } else {
@@ -584,13 +586,8 @@ internal fun PluginsSection(onNotify: (String) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
-            top = 0.dp,
-            bottom = navBarContentPadding().calculateBottomPadding(),
-        ),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = settingsPagePadding(),
+        verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
     ) {
         item { PluginsIntroCard() }
         // The store draws its own empty state (the same words this tab used to show), so the list and
@@ -605,18 +602,18 @@ private fun PluginsIntroCard() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_cpu), size = 34.dp, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
-            Text("什么是插件", style = MaterialTheme.typography.titleMedium)
+            Text("什么是插件", style = SettingsStyle.cardTitle)
         }
         Spacer(Modifier.height(12.dp))
         Text(
             text = "插件是可以装卸的扩展：随行的每一项能力，将来都以插件的形式提供——" +
                 "装一个就多一份本事，卸掉就干净地消失，不用等应用更新。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
         )
         Spacer(Modifier.height(10.dp))
         Text(
             text = "现在还没有可安装的插件，这一页先放着，等形态定下来再填。",
-            style = MaterialTheme.typography.bodySmall,
+            style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }

@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.ui.components.SuixingDialog
+import com.suixing.agent.ui.components.SettingsStyle
 
 /**
  * 「从链接导入」: one URL in, one skill out.
@@ -43,12 +44,12 @@ internal fun SkillUrlImportDialog(
                 Text(
                     text = "填一个 SKILL.md 的地址（http 或 https）。导入后技能默认关闭，" +
                         "看过内容再打开开关，它才会进入模型的技能目录。",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(SettingsStyle.SectionGap))
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodyMedium,
+                    textStyle = SettingsStyle.fieldText,
                     value = url,
                     onValueChange = { url = it },
                     label = { Text("技能文件地址") },
@@ -61,7 +62,7 @@ internal fun SkillUrlImportDialog(
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = "链接必须以 http:// 或 https:// 开头",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = SettingsStyle.badge,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }

@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.settingsPagePadding
+import com.suixing.agent.ui.components.SettingsStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -93,14 +95,8 @@ fun ProfileScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(
-                    start = 16.dp,
-                    end = 16.dp,
-                    top = 0.dp,
-                    // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-                    bottom = navBarContentPadding().calculateBottomPadding(),
-                ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(settingsPagePadding()),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -112,7 +108,7 @@ fun ProfileScreen(onBack: () -> Unit) {
                     } else {
                         "由模型自动维护 · 尚未总结"
                     },
-                    style = MaterialTheme.typography.labelMedium,
+                    style = SettingsStyle.metadata,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
@@ -156,11 +152,11 @@ fun ProfileScreen(onBack: () -> Unit) {
                 text = "模型会自动维护这段画像；你也可以在这里手动补充或纠正。" +
                     "它随每次请求发给模型，写称呼、偏好、长期习惯这类关于你本人的长期信息，" +
                     "不要写一次性任务。",
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             OutlinedTextField(
-                textStyle = MaterialTheme.typography.bodyMedium,
+                textStyle = SettingsStyle.fieldText,
                 value = text,
                 onValueChange = { draft = it },
                 label = { Text("画像") },
@@ -179,7 +175,7 @@ fun ProfileScreen(onBack: () -> Unit) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         text = "${text.length} / ${UserProfileStore.MAX_LENGTH}",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = SettingsStyle.badge,
                         color = if (over) {
                             MaterialTheme.colorScheme.error
                         } else {
@@ -189,7 +185,7 @@ fun ProfileScreen(onBack: () -> Unit) {
                     if (over) {
                         Text(
                             text = "超出 ${text.length - UserProfileStore.MAX_LENGTH} 字，请精简后再保存",
-                            style = MaterialTheme.typography.labelSmall,
+                            style = SettingsStyle.badge,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
@@ -212,7 +208,7 @@ fun ProfileScreen(onBack: () -> Unit) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Text(
                 text = "自动整理",
-                style = MaterialTheme.typography.titleSmall,
+                style = SettingsStyle.cardTitle,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
             )
@@ -253,7 +249,7 @@ fun ProfileScreen(onBack: () -> Unit) {
                         ) { Text("−", style = MaterialTheme.typography.titleLarge) }
                         Text(
                             text = "${settings.profileTurnThreshold} 轮",
-                            style = MaterialTheme.typography.bodyLarge,
+                            style = SettingsStyle.rowTitle,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.widthIn(min = 44.dp),
                         )

@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.ui.components.settingsPagePadding
+import com.suixing.agent.ui.components.SettingsStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -265,7 +267,7 @@ fun ToolsScreen(onBack: () -> Unit) {
             )
             // 这里不再加 12dp：PageTopBar 自己以 Spacer(12.dp) 收尾（Common.kt:532），
             // 本页把 PageTopBar 放在 Column 里，那一份是生效的，再加就是 24dp。
-            Column(Modifier.padding(horizontal = 16.dp)) {
+            Column(Modifier.padding(horizontal = SettingsStyle.PageMargin)) {
                 SegmentedPill(options = TABS, selectedIndex = tab, onSelect = { tab = it })
             }
             Spacer(Modifier.height(4.dp))
@@ -430,9 +432,9 @@ private fun ToolsTab() {
     }
 
     Column(Modifier.fillMaxSize()) {
-        Column(Modifier.padding(horizontal = 16.dp)) {
+        Column(Modifier.padding(horizontal = SettingsStyle.PageMargin)) {
             OutlinedTextField(
-                textStyle = MaterialTheme.typography.bodyMedium,
+                textStyle = SettingsStyle.fieldText,
                 value = query,
                 onValueChange = { query = it },
                 // 不要给这个框写死高度：OutlinedTextField 的内容（浮动标签 + 文字行盒 + 上下留白）
@@ -450,14 +452,14 @@ private fun ToolsTab() {
                     // 内置工具是全局的、不可修改的，所以「已启用 X / 共 X」这种计数没有意义
                     // （两个数永远相等）：这里只报一共有多少个。
                     text = "共 ${tools.size} 个工具",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = SettingsStyle.metadata,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.weight(1f))
                 if (query.isNotBlank()) {
                     Text(
                         text = "命中 ${filtered.size} 个",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = SettingsStyle.metadata,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -465,7 +467,7 @@ private fun ToolsTab() {
             Text(
                 text = "全局工具默认不可修改：这里只能看名称、用途和它需要的权限。" +
                     "要按助手关掉某些工具，去那个助手的编辑页。",
-                style = MaterialTheme.typography.bodySmall,
+                style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(6.dp))
@@ -476,13 +478,8 @@ private fun ToolsTab() {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
-            top = 0.dp,
-            bottom = navBarContentPadding().calculateBottomPadding(),
-        ),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+        contentPadding = settingsPagePadding(),
+                verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
             ) {
                 grouped.forEach { (group, groupTools) ->
                     item(key = "group-$group") { GroupHeader(group, groupTools.size) }
@@ -525,13 +522,13 @@ private fun requirementOf(tier: String, capabilities: CapabilityState): Pair<Str
 @Composable
 private fun GroupHeader(name: String, count: Int) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+        com.suixing.agent.ui.components.SettingSectionTitle(name, Modifier.weight(1f))
         Text(
             text = "$count 个",
-            style = MaterialTheme.typography.labelMedium,
+            style = SettingsStyle.metadata,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -539,11 +536,11 @@ private fun GroupHeader(name: String, count: Int) {
 
 @Composable
 private fun ToolRow(name: String, description: String, requirement: Pair<String, Boolean>?) {
-    SuixingCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)) {
+    SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = name,
-                style = MaterialTheme.typography.bodyLarge,
+                style = SettingsStyle.rowTitle,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -560,7 +557,7 @@ private fun ToolRow(name: String, description: String, requirement: Pair<String,
             Spacer(Modifier.height(2.dp))
             Text(
                 text = description,
-                style = MaterialTheme.typography.labelSmall,
+                style = SettingsStyle.badge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

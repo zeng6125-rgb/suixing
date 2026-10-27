@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.extension
 
+import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.settingsPagePadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -74,19 +76,19 @@ fun MemorySection(
     Column(Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             item {
                 SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                     Text(
                         text = "模型自己写下的长期备忘，每次对话都会带上。",
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = SettingsStyle.body,
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = "它用 memory_write 记东西，单条最多 4000 字；这里改动会立刻影响它下次回答。",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -95,12 +97,12 @@ fun MemorySection(
             if (rows.isEmpty()) {
                 item {
                     SuixingCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-                        Text("还没有任何备忘", style = MaterialTheme.typography.titleSmall)
+                        Text("还没有任何备忘", style = SettingsStyle.sectionTitle)
                         Spacer(Modifier.height(6.dp))
                         Text(
                             text = "让它「记住我用的是联通宽带」之类的话，这里就会出现一条；" +
                                 "右上角的 + 也可以自己加。",
-                            style = MaterialTheme.typography.bodySmall,
+                            style = SettingsStyle.description,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -116,7 +118,7 @@ fun MemorySection(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = row.key,
-                            style = MaterialTheme.typography.titleSmall,
+                            style = SettingsStyle.sectionTitle,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
@@ -136,7 +138,7 @@ fun MemorySection(
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = row.value.value,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = SettingsStyle.body,
                         maxLines = 8,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -148,7 +150,7 @@ fun MemorySection(
                             text = remember(row.value.updatedAt) {
                                 "更新于 ${formatMemoryTime(row.value.updatedAt)}"
                             },
-                            style = MaterialTheme.typography.labelSmall,
+                            style = SettingsStyle.badge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -223,7 +225,7 @@ private fun MemoryEditorDialog(
         text = {
             Column {
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodyMedium,
+                    textStyle = SettingsStyle.fieldText,
                     value = key,
                     onValueChange = { key = it },
                     label = { Text("名称") },
@@ -233,7 +235,7 @@ private fun MemoryEditorDialog(
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodyMedium,
+                    textStyle = SettingsStyle.fieldText,
                     value = value,
                     onValueChange = { value = it },
                     label = { Text("内容") },
@@ -245,7 +247,7 @@ private fun MemoryEditorDialog(
                     Spacer(Modifier.height(8.dp))
                     Text(
                         text = message,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
