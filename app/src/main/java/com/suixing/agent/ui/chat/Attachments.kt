@@ -21,14 +21,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -38,10 +35,10 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -60,15 +57,24 @@ import androidx.compose.ui.window.PopupProperties
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
-import com.suixing.agent.agent.StreamStats
-import com.suixing.agent.data.label
 import java.io.File
-import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.suixing.agent.R
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+data class Attachment(
+    val base64: String,
+    val label: String,
+    val preview: ImageBitmap? = null,
+    /** 文件附件的落盘路径（图片为 null）。发送时拼进消息正文 —— 见 [withAttachment]。 */
+    val filePath: String? = null,
+)
+
+
+/** What the next question carries along: an image for the model, or a file on disk. */
+internal enum class AttachKind { IMAGE, FILE }
+
 /** The chip above the pill: a thumbnail, the name, and a way out of it. */
 @Composable
 internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
@@ -132,11 +138,14 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                     modifier = Modifier.widthIn(max = 190.dp),
                 )
                 }
-                // The attachment's own bitmap, not a scaled-down copy: this is the picture the user
-                // picked, at the size it was stored, so opening it shows what will be sent.
                 if (full && preview != null) {
-                    ImagePreviewDialog(
-                        bitmap = preview,
+                    val payload by produceState<ByteArray?>(null, attachment.base64) {
+                        value = withContext(Dispatchers.Default) {
+                            runCatching { Base64.decode(attachment.base64, Base64.DEFAULT) }.getOrNull()
+                        }
+                    }
+                    ImagePreviewBytes(
+                        bytes = payload,
                         contentDescription = attachment.label,
                         // 与对话里那张图片预览同一形态（Dialog + 系统遮罩）：用户要的是
                         // 「图1 那个效果」，附件与队列两处都跟它对齐。
@@ -246,10 +255,17 @@ internal fun bitmapAttachment(bitmap: Bitmap, label: String = "照片"): Attachm
     }
     val bytes = java.io.ByteArrayOutputStream()
     scaled.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
+    val thumbnailScale = minOf(1f, 160f / maxOf(scaled.width, scaled.height))
+    val thumbnail = if (thumbnailScale < 1f) Bitmap.createScaledBitmap(
+        scaled,
+        (scaled.width * thumbnailScale).toInt().coerceAtLeast(1),
+        (scaled.height * thumbnailScale).toInt().coerceAtLeast(1),
+        true,
+    ) else scaled
     return Attachment(
         base64 = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP),
         label = label,
-        preview = scaled.asImageBitmap(),
+        preview = thumbnail.asImageBitmap(),
     )
 }
 
@@ -403,25 +419,32 @@ internal fun ImageBlock(base64: String) {
     val context = LocalContext.current
     // 图片是内存里的 base64（不是 URL），解码成字节交给 Coil 当 data：
     // 它按内容做内存缓存键，滚出视口再滚回来直接命中，不必重新解码。
-    val bytes = remember(base64) {
-        runCatching { Base64.decode(base64, Base64.DEFAULT) }.getOrNull()
+    val decoded by produceState<Pair<ByteArray, String>?>(null, base64) {
+        value = withContext(Dispatchers.Default) {
+            runCatching {
+                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                bytes to imageCacheKey(bytes)
+            }.getOrNull()
+        }
     }
+    val bytes = decoded?.first
     // **必须包成 ByteBuffer**：Coil 3 的 fetcher 里没有 `ByteArray` 这一种 data 类型
     // （只有 ByteBuffer / File / Uri / String 等）。直接传 ByteArray 编译不报错、
     // 运行时静默不出图 —— 这个坑换成 ByteBuffer 才绕过去。
-    // **每次组合新建一个视图**（`wrap` 是 O(1)、不拷贝字节）：ByteBuffer 有读位置，
-    // 复用同一个实例时 Coil 读过一次后位置就到底了，第二次拿到的会是空。
-    val model = bytes?.let { java.nio.ByteBuffer.wrap(it) }
+    // Coil 3.6.3's ByteBufferFetcher reads a slice, leaving this model's position unchanged.
+    val request = remember(context, bytes) {
+        ImageRequest.Builder(context)
+            .data(bytes?.let { java.nio.ByteBuffer.wrap(it).asReadOnlyBuffer() })
+            .memoryCacheKey(decoded?.second)
+            .crossfade(false)
+            .build()
+    }
     Spacer(Modifier.height(6.dp))
     val shape = RoundedCornerShape(12.dp)
     // **固定占位高度**（滚动跳变根因之一，与替换前一致）：截图几乎都是竖长图，Fit 后顶满
     // 240dp 上限。等 Coil 解码期间保持这个高度，行高不变 ⇒ 整列不会被顶一下。
     AsyncImage(
-        model = ImageRequest.Builder(context)
-            .data(model)
-            // 不做淡入：这里要的是"到位就是到位"，交叉淡入在滚动中反而像闪烁。
-            .crossfade(false)
-            .build(),
+        model = request,
         contentDescription = "工具截图",
         contentScale = ContentScale.Fit,
         modifier = Modifier

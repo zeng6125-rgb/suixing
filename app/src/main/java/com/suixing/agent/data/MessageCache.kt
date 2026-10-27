@@ -33,7 +33,9 @@ internal class MessageCache(private val capacity: Int = 5) {
         val diskBacked: Boolean,
     )
 
-    private val map = object : LinkedHashMap<String, Entry>(capacity, 0.75f, true) {
+    // Insertion order plus explicit promotion lets metadata lookups stay O(1) without
+    // changing which transcript will be evicted. All access is under this instance's lock.
+    private val map = object : LinkedHashMap<String, Entry>(capacity, 0.75f, false) {
         override fun removeEldestEntry(
             eldest: MutableMap.MutableEntry<String, Entry>?,
         ): Boolean = size > capacity
@@ -43,12 +45,17 @@ internal class MessageCache(private val capacity: Int = 5) {
     @Synchronized
     fun put(chatId: String, messages: List<StoredMessage>, diskBacked: Boolean = false) {
         if (chatId.isEmpty() || messages.isEmpty()) return
+        map.remove(chatId)
         map[chatId] = Entry(messages, diskBacked)
     }
 
     /** 命中的条目会被移到"最近使用"那一端。 */
     @Synchronized
-    fun get(chatId: String): List<StoredMessage>? = map[chatId]?.messages
+    fun get(chatId: String): List<StoredMessage>? {
+        val entry = map.remove(chatId) ?: return null
+        map[chatId] = entry
+        return entry.messages
+    }
 
     /**
      * 这条是否确认已落盘。**不移动访问顺序** —— 读一个标记不该改变淘汰顺序
@@ -56,7 +63,7 @@ internal class MessageCache(private val capacity: Int = 5) {
      */
     @Synchronized
     fun isDiskBacked(chatId: String): Boolean =
-        map.entries.firstOrNull { it.key == chatId }?.value?.diskBacked == true
+        map[chatId]?.diskBacked == true
 
     @Synchronized
     fun remove(chatId: String) {

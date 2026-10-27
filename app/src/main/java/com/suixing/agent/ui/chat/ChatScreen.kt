@@ -2,133 +2,53 @@
 package com.suixing.agent.ui.chat
 
 import android.Manifest
-import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.Build
-import android.os.Bundle
 import android.os.SystemClock
-import android.provider.OpenableColumns
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.util.Base64
-import android.widget.Toast
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.AnimationSpec
-import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.gestures.animateScrollBy
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.gestures.transformable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.exclude
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.DisposableEffect
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withTimeoutOrNull
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.Stable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -142,127 +62,64 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.LayoutCoordinates
+import com.suixing.agent.ui.components.bottomInsetPadding
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalViewConfiguration
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.PlatformTextStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
-import com.suixing.agent.agent.estimateTokens
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
-import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
-import com.suixing.agent.data.TODO_COMPLETED
-import com.suixing.agent.data.TODO_IN_PROGRESS
-import com.suixing.agent.data.TodoItem
-import com.suixing.agent.data.Tps
-import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.choiceFor
-import com.suixing.agent.data.forAssistant
-import com.suixing.agent.data.groupModels
-import com.suixing.agent.data.label
-import com.suixing.agent.data.modelOffers
-import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.assistant.AssistantEditor
 import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.components.CircleActionButton
-import com.suixing.agent.ui.components.DrawerButton
-import com.suixing.agent.ui.components.FlatIconButton
-import com.suixing.agent.ui.components.FlatPainterButton
 import com.suixing.agent.ui.components.FullScreenOverlay
 import com.suixing.agent.ui.components.LocalDrawerBusy
 import com.suixing.agent.ui.components.LocalHeldImePx
-import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.LocalPathClick
 import com.suixing.agent.ui.components.LocalSetSelectionActive
-import com.suixing.agent.ui.components.MarkdownText
-import com.suixing.agent.ui.components.PressPill
-import com.suixing.agent.ui.components.REASONING_LEVELS
-import com.suixing.agent.ui.components.SettledBlocks
-import com.suixing.agent.ui.components.SuixingMark
-import com.suixing.agent.ui.components.markdownBody
-import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.theme.LocalDarkTheme
-import com.suixing.agent.voice.Dictation
-import com.suixing.agent.voice.DictationRecorder
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.concurrent.Executors
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 internal val SUGGESTIONS = listOf(
     "看看现在屏幕上是什么",
@@ -349,8 +206,8 @@ fun ChatScreen(
     /** The generation popup's empty-list escape hatch into the model settings page. */
     onOpenSettings: () -> Unit = {},
 ) {
-    val state by viewModel.state.collectAsState()
-    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+    val state by viewModel.screenState.collectAsStateWithLifecycle()
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -360,7 +217,7 @@ fun ChatScreen(
     // another chat and coming back restores exactly what was left, and nothing leaks
     // across the switch.
     val draft = state.draft
-    val input = draft.text
+    fun currentInput(): String = viewModel.draftFor(state.conversationId).text
     // The conversation is a key as well: the cache is per conversation, and two chats that both
     // hold a 「修改」-restored picture carry the *same* marker uri and label — without this, coming
     // back from one to the other kept the previous chat's decoded bitmap (the chip would show, and
@@ -374,7 +231,7 @@ fun ChatScreen(
         viewModel.attachmentsFor(state.conversationId)
     }
     fun setDraft(
-        text: String = input,
+        text: String = currentInput(),
         uri: String? = draft.attachmentUri,
         name: String? = draft.attachmentName,
         imageNames: List<String> = draft.imageNames,
@@ -400,6 +257,7 @@ fun ChatScreen(
      * the sentence the user typed.
      */
     suspend fun restoreQueuedSteer(steer: PendingSteer) {
+        val input = currentInput()
         val text = if (input.isBlank()) steer.text else "${input.trimEnd()} ${steer.text}"
         // 多附件：排队行的图逐张解回缓存列；一张解不开就跳过它（丢一张图比丢整句话小）。
         var restored = 0
@@ -420,18 +278,7 @@ fun ChatScreen(
     // The keyboard's clamped inset, and the gesture bar's own: the composer's bottom padding is
     // the difference between them (see the stack's own modifier), and it is the one term of the
     // stack's footprint that moves while the keyboard does.
-    // **键盘高度不在组合期读**（用户：「输入框被输入法抬起收回时掉帧」的主因）。
-    //
-    // `heldImePx` 在键盘动画的每一帧都变。原来这里有 `val heldIme by imePxState` 一句裸读，
-    // 它进的是 `stackFootprint` → `LazyColumn(contentPadding = …)` ⇒ **每一帧整页 ChatScreen
-    // 重组一次**（这个组合体有几十个子组合，还包括那个 60 参数的 Composer：
-    // 每帧新建 `Triple`、`List`、十来个 lambda）。量化（`IME_QUANTUM_PX` = 4px）只把
-    // 「每 4px 一次」压了一点，一次 900px 的键盘动画仍然是 200 多次整页重组 ——
-    // 用户看到的「一抬一收就掉帧」就是它，而输入框自己早就在**布局期**读了
-    // （`TurnScrubber.kt` 的 `.layout{}`），真正拖后腿的是这一行传给列表的底边距。
-    //
-    // 现在底边距里与键盘有关的那一项（手势条让位）改由 [keyboardAwareBottomPad] 在**布局期**算：
-    // 键盘动画只让列表重新测量一次，零重组，而且间距与输入框逐帧同步（比再量化一次更准）。
+    // 键盘高度通过 State 引用下传，在底部避让的布局节点读；动画不逐帧订阅整页组合。
     val imePxState = LocalHeldImePx.current
     // 手势条高度在组合期算一次：它是 @Composable 调用（`WindowInsets.navigationBars`），
     // 而且它在键盘动画期间不变。
@@ -480,8 +327,15 @@ fun ChatScreen(
     var todoSheetOpen by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
+    fun keepAttachment(chatId: String, attachment: Attachment) {
+        viewModel.addAttachment(chatId, attachment)
+        val current = viewModel.draftFor(chatId)
+        viewModel.onDraftChange(chatId, current.copy(imageNames = current.imageNames + attachment.label))
+    }
+
     fun attach(uri: Uri?, kind: AttachKind) {
         if (uri == null) return
+        val chatId = state.conversationId
         scope.launch {
             val picked = withContext(Dispatchers.IO) { readAttachment(context, uri, kind) }
             if (picked == null) {
@@ -489,8 +343,7 @@ fun ChatScreen(
             } else {
                 // 多附件：追加而不是覆盖（用户：「图片为什么只能添加一张」）。draft 的 imageNames
                 // 是 remember 的重读触发器，标签列与缓存列同序。
-                viewModel.addAttachment(state.conversationId, picked)
-                setDraft(imageNames = draft.imageNames + picked.label)
+                keepAttachment(chatId, picked)
             }
         }
     }
@@ -504,9 +357,11 @@ fun ChatScreen(
         ActivityResultContracts.TakePicturePreview(),
     ) { bitmap ->
         if (bitmap != null) {
-            val picked = bitmapAttachment(bitmap)
-            viewModel.addAttachment(state.conversationId, picked)
-            setDraft(imageNames = draft.imageNames + picked.label)
+            val chatId = state.conversationId
+            scope.launch {
+                val picked = withContext(Dispatchers.Default) { bitmapAttachment(bitmap) }
+                keepAttachment(chatId, picked)
+            }
         }
     }
 
@@ -525,7 +380,14 @@ fun ChatScreen(
     // transcript, and LazyColumn clamped it to the top. Kept saveable for the same reason as
     // before: the composition can be rebuilt (activity recreation) and the reader's 加载更早
     // taps must survive it.
-    var shownTurnsByConversation by rememberSaveable { mutableStateOf(emptyMap<String, Int>()) }
+    val displayedChat = rememberUpdatedState(state.conversationId)
+    var shownTurnsByConversation by rememberSaveable(
+        stateSaver = androidx.compose.runtime.saveable.mapSaver<Map<String, Int>>(
+            // Other chats retain their in-process window; only the displayed one enters Bundle.
+            save = { windows -> windows.filterKeys { it == displayedChat.value } },
+            restore = { saved -> saved.mapValues { (_, turns) -> turns as Int } },
+        ),
+    ) { mutableStateOf(emptyMap<String, Int>()) }
     val shownTurns = shownTurnsByConversation[state.conversationId] ?: PAGE_TURNS
     // What every derivation below is keyed on: which conversation, how many rows it has, and which
     // row is last.
@@ -587,6 +449,7 @@ fun ChatScreen(
     // 不再有额外的 CPU 争用。
     // 底锚的喂序是反的；反转结果记住，别每次重组都新建包装对象。
     val reversedVisible = remember(visible) { visible.asReversed() }
+    val messagePositions = remember(state.conversationId, state.messagesRevision) { state.messages.firstPositions() }
     // 每行实测高度（visible 正序，已含 12dp 行间距）：单 item 化后
     // `firstVisibleItemIndex` 恒为 0，读数导航改为「像素偏移 → 第几轮」反查。
     // **按消息 id 存实测高度，不要随 `visible` 重建数组**：
@@ -606,7 +469,16 @@ fun ChatScreen(
     // 不成立，"当前轮"就掉回最新那一轮（条数不涨、高亮不动、点条对不上）。而这三处前提
     // 在这个列表里全都不稳：`reverseLayout` + 单个转录 item + `contentPadding` + 流式行/
     // 状态行/错误行这些前缀项。直接量 y 就没有任何换算。
-    val rowTopById = remember(state.conversationId) { androidx.compose.runtime.mutableStateMapOf<String, Float>() }
+    val rowCoordinates = remember(state.conversationId, state.messagesRevision, page) {
+        HashMap<String, LayoutCoordinates>()
+    }
+    val rowHeights = remember(rowCoordinates) { HashMap<String, Int>() }
+    val geometryVersion = remember(rowCoordinates) { mutableIntStateOf(0) }
+    val navigationToken = remember(state.conversationId) { intArrayOf(0) }
+    val navigationJob = remember(state.conversationId) { arrayOfNulls<Job>(1) }
+    DisposableEffect(navigationJob) {
+        onDispose { navigationJob[0]?.cancel() }
+    }
     val viewportTopY = remember { androidx.compose.runtime.mutableStateOf(0f) }
     val viewportH = remember { androidx.compose.runtime.mutableIntStateOf(0) }
     // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
@@ -617,13 +489,15 @@ fun ChatScreen(
     }
     // 没有回执的失败（发送阶段错误等）的实时行，画在最后一轮下面。去重见 [isSameFailure]：
     // 只按完全相等比会漏，同一次失败被两条路径各写一遍时屏幕上是两张提示。
-    val errorLine = state.error?.let { err -> receipts.none { isSameFailure(it.text, err) } } ?: false
+    val errorLine = remember(state.error, receipts) {
+        state.error?.let { err -> receipts.none { isSameFailure(it.text, err) } } ?: false
+    }
     // Whatever the run produces first — a tool call, a thought or a word — opens the live
     // bubble. Waiting for text is what used to leave a tool call stranded on its own until
     // the reply arrived and merged the two into one.
     // 流式气泡开关与 pin 信号都只需要「有没有活内容」这个布尔：
     // 收 VM 的 liveActive（distinct 去抖），思考期的 40ms 批次不再重组整屏。
-    val live by viewModel.liveActive.collectAsState()
+    val live by viewModel.liveActive.collectAsStateWithLifecycle()
     val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
     // The chain a run takes, resolved once for the whole screen. The context readouts
     // below divide by the window of the model that actually sends, which is not the
@@ -697,7 +571,7 @@ fun ChatScreen(
     // 并标「约」。跳变的老根因是两个口径轮流上屏，所以估算值绝不与实测值并列成链。
     val heldPrompt = rememberSaveable(state.conversationId) { mutableIntStateOf(0) }
     // 请求级快照（prompt/breaks 变才发射）——body 不再订阅 120ms 的 elapsedMs。
-    val runStatsNow by viewModel.requestStats.collectAsState()
+    val runStatsNow by viewModel.requestStats.collectAsStateWithLifecycle()
     // **实时统计属于"正在跑的那一次请求"**：它挂在 ViewModel 上全局共享，切会话/新建会话时
     // 不会自己清空。原来直接拿它当圆环读数 ⇒ 新建的空会话会显示上一个会话的 40% / 409.5K
     // （用户实测截图）。所以只在**这个会话自己正在跑**时才认它；其余场合交给下面三档
@@ -709,14 +583,8 @@ fun ChatScreen(
     }
     // 落盘的实测上下文（issue #41 真问题 1）：run 结束瞬间前两级归零，这一档接住圆环。
     // meta 里 O(1) 命中（totalsAt==messageCount 时），每轮落盘自动更新。
-    var persistedContext by remember(state.conversationId) { mutableIntStateOf(0) }
-    LaunchedEffect(state.conversationId, state.messagesRevision) {
-        persistedContext = withContext(Dispatchers.IO) {
-            runCatching {
-                Core.chats.sessionTotals(state.conversationId)?.contextTokens ?: 0
-            }.getOrDefault(0)
-        }
-    }
+    val session = viewModel.sessionStats.collectAsStateWithLifecycle(initialValue = null).value
+    val persistedContext = session?.contextTokens ?: 0
     val reading = ringReading(
         liveReported = if (reported > 0) reported else heldPrompt.intValue,
         newestStored = newestUsage?.prompt ?: 0,
@@ -730,7 +598,6 @@ fun ChatScreen(
     }
     val contextUsed = reading.tokens
     // 圆环读数诊断（用户选的「加日志抓，不再猜」）：任一候选源或 run 状态变化时记一行，含全部
-    val session = viewModel.sessionStats.collectAsState(initial = null).value
     val sessionTokens = session?.tokens ?: 0
     val sessionTurns = session?.turns ?: 0
     // The cumulative row's own floor, for the same conversations as above: every turn re-sent the
@@ -899,23 +766,16 @@ fun ChatScreen(
     // **当前读到哪一轮 = 视口内 28% 位置那一行**（口径取自 Aether 的 `currentTimelineIndex`）。
     // 原来取的是**视口顶部**那一行 ⇒ 导航条高亮与条数全都对不上（用户：对应轮次很奇怪、
     // 条数不增加）。单 item 化后没有 item 边界可读，按像素反查。
-    val firstVisibleFed = remember(visible, feedPrefix) {
+    val firstVisibleFed = remember(visible, feedPrefix, rowCoordinates) {
         derivedStateOf {
-            // 探针线：阅读区靠上 28% 处（Aether 的 `currentTimelineIndex` 口径）。
-            val probeY = viewportTopY.value +
-                viewportH.intValue * TurnMarks.PROBE_FRACTION
-            // 落在这一行：**最后一个顶边不越过探针线的行**（它就是探针线所在的那一行，
-            // 相邻行之间的 12dp 间隙也算给上面那一行）。行是按旧→新排的，所以取最后一个。
-            var at = -1
-            for (i in visible.indices) {
-                val top = rowTopById[visible[i].message.id] ?: continue
-                if (top <= probeY) at = i
+            geometryVersion.intValue
+            val viewport = listState.layoutInfo
+            val probeY = viewportTopY.value + viewport.viewportSize.height * TurnMarks.PROBE_FRACTION
+            val at = probeRowIndex(visible.size, probeY) { index ->
+                rowCoordinates[visible[index].message.id]?.takeIf { it.isAttached }
+                    ?.positionInWindow()?.y ?: Float.NaN
             }
-            // 一行都还没量到（首帧/首帧切换）：按"最新"算，与旧行为一致（不会乱跳）。
-            if (at < 0) return@derivedStateOf feedPrefix
-            // 换成 `TurnMarks.current` 要的**喂序下标**：
-            // `fedIndexOf(oldVisible) = feedPrefix + (visible.size - 1 - oldVisible)`。
-            feedPrefix + (visible.size - 1 - at)
+            if (at < 0) feedPrefix else feedPrefix + (visible.size - 1 - at)
         }
     }
 
@@ -999,15 +859,7 @@ fun ChatScreen(
     // （旧版等两帧再 `scrollToItem` 正是因此偏掉，已删）。
     var pendingAnchorIndex by remember(state.conversationId) { mutableIntStateOf(-1) }
     var pendingAnchorOffset by remember(state.conversationId) { mutableIntStateOf(0) }
-    // **「加载更早」不做任何滚动**（用户：「你为什么要改变位置啊？让历史内容出现不就行了」）。
-    //
-    // 这个列表是 `reverseLayout` + 整页转录装在**单个 item** 里（`key = "transcript"`）：
-    // 更早的行只会加在这个 item 的**上边缘**，它的下边缘仍然钉在错误行/实时卡旁边不动
-    // ⇒ LazyColumn 的首可见项与偏移天然不变 ⇒ **阅读位置本来就不会动**。
-    // 之前这里记锚点、等内容长完再 `scrollToItem(anchor)` 把位置"钉回去"，那个动作才是
-    // 位置被改的元凶（钉的时机差一帧，偏移就被"当前最大滚动量"夹断 ⇒ 位置偏）。
-    // 现在只等内容真的变长，然后**放开 restore 闸**（闸的作用：内容还没测完的几帧里，
-    // `ChatScroll` 那个"持续到底就重新贴底"的 collector 不许把列表判定成到底）。
+    // “加载更早”与下一次测量原子锚定：保持同一 item/offset，不逐帧改写位置。
     LaunchedEffect(visible.size) {
         if (pendingAnchorFrom < 0) return@LaunchedEffect
         if (visible.size <= pendingAnchorFrom) return@LaunchedEffect
@@ -1020,17 +872,7 @@ fun ChatScreen(
         pendingAnchorIndex = -1
         scroll.restoring = false
     }
-    // **不再有 1.2 秒兜底**（用户：点「加载更早」仍跳到底）。
-    //
-    // 原来这里 1.2 秒后无条件 `restoring = false`。而闸的用途正是"内容还没测量完的那几帧
-    // 不许把列表判定成到底" —— 读盘 + 解析 + 测量完全可能超过 1.2 秒，闸一开，
-    // `ChatScroll` 那个 420ms 的"持续到底"collector 就把 `stickToBottom` 翻回 true，
-    // 紧接着追底 effect `scrollToItem(0)` ⇒ 列表跳到最下面（埋点实证：
-    // `stick=true reason=canBack-false restoring=false` → `follow-scrollToBottom`）。
-    //
-    // 现在：**闸只在锚点恢复成功时开**；`loadEarlier()` 明确返回 false（没有更早内容、
-    // 读盘失败）时立刻开。其余情况闸一直开着 —— 列表停在原位，也不会被判成"到底"。
-    // 万一真卡住（内容永远不来），顶栏的「回到最新」按钮仍然可用（它显式设 stickToBottom=true）。
+    // 不按定时器解除 restoring：实际合并触发上面的锚定，异步失败由 onComplete 解锁。
     // 贴底时持续记住当前占位；离开底部（开始读历史）就冻住它 ——
     // 输入框高度在流式期间会变（状态行出现/消失），不冻住就会把整列内容推几 dp。
     LaunchedEffect(stackFootprint, scroll.stickToBottom) {
@@ -1236,6 +1078,27 @@ fun ChatScreen(
     // 消息 id 不撞，`?: return` 挡得住；但 `load-earlier` / `live-status:` 这类**非消息 key** 会撞上，
     // 于是拿 A 的位置去滚 B —— #4 的「串味」就这么回来了。
     val anchors = remember { mutableStateMapOf<String, Pair<Any?, Int>>() }
+    LaunchedEffect(viewModel) {
+        Core.engine.runsFlow.collect { runs ->
+            val currentChat = viewModel.state.value.conversationId
+            runStartedAt.keys.removeAll { key ->
+                val chatId = key.substringBefore(':')
+                chatId != currentChat && chatId !in runs
+            }
+        }
+    }
+    LaunchedEffect(viewModel, scroll) {
+        viewModel.conversations.map { chats -> chats.mapTo(HashSet()) { it.id } }
+            .distinctUntilChanged()
+            .collect { ids ->
+                val retained = ids + viewModel.state.value.conversationId
+                scroll.retainConversations(retained)
+                anchors.keys.retainAll(retained)
+                shownTurnsByConversation = shownTurnsByConversation.filterKeys { it in retained }
+                reasoningExpanded.keys.removeAll { it.substringBefore(':') !in retained }
+                runStartedAt.keys.removeAll { it.substringBefore(':') !in retained }
+            }
+    }
     // **不要在这里读 `anchors`**（性能）：`SnapshotStateMap.get` 是**整表级**失效，而下面那段
     // 「滚动停止时记锚点」会写这张表 —— 一次写入就让整个 ChatScreen 重启组失效（所有可见项
     // 的 content lambda 重跑、live 气泡全量重跑），表现就是「滑到位顿一下」。
@@ -1476,7 +1339,7 @@ fun ChatScreen(
     // 正文只存一份（#38）：`streaming` 是派生值、不再单独保存 ⇒ "有没有活内容"看 liveParts。
     // 这个子表达式下面还要用一次，别写两遍 —— 现在它就是 VM 的 liveActive（布尔 flow，
     // distinct 去重）：思考期的 40ms 批次不再把 body 拖进重组。
-    val liveForPin by viewModel.liveActive.collectAsState()
+    val liveForPin by viewModel.liveActive.collectAsStateWithLifecycle()
     // **`liveForPin` 必须用 rememberUpdatedState 取最新值**（第二轮评审的关键发现）：
     // 它是个普通 `val`，若被 `snapshotFlow` 的 lambda 直接捕获，捕获的是**首次组合**那一帧的值，
     // 而 ChatScreen 常驻、不随会话重建（`SuixingApp.kt:569`）⇒ 首帧没有活内容时它永远是 false
@@ -1568,7 +1431,7 @@ fun ChatScreen(
     // `LocalLiveRowLag` 用来告诉流式行里的 `RevealHeight`「别自己补，外层统一补」——
     // 但外层只有在**钉住生效**时才冻结高度（`pinnedLiveHeight > 0` ⇒ `scroll.pinActive`）。
     // 两者不等价时（读历史了、但钉住没量到高度/没活内容），流式行里的折叠块会**两边都不补** ⇒ 展开时跳。
-    val laggingNow by rememberUpdatedState(scroll.pinActive)
+    val laggingNow by rememberUpdatedState(PIN_LIVE_HEIGHT && scroll.pinActive)
     /** 用户是否在读历史（不在底部、也不在恢复位置）。 */
     val readingHistory = !scroll.stickToBottom && !scroll.restoring
     /**
@@ -1675,35 +1538,19 @@ fun ChatScreen(
             scroll.stickToBottom = false
             scroll.spotKey = savedKey
             scroll.spotOffset = saved.second
-            // ① 粗定位：只是起点，允许差一两项。**用 `*Now` 里的最新值**，不能用 effect 创建时
-            // 捕获的那一份（否则冷路径下 `visible` 是空表、`feedPrefix` 也是旧值）。
-            // 决策走纯函数（`RestoreTarget`，带单测）：换算与"什么时候放弃"都有断言守着 ——
-            // 这条链路出过三次同类事故，症状都是"位置没恢复、退回底部"，且不打日志。
-            val targetFed = RestoreTarget.fedIndex(
-                visibleIds = visibleNow.map { it.message.id },
-                savedKey = savedKey as? String,
-                feedPrefix = feedPrefixNow,
-            )
-            if (targetFed != null) {
-                // 单 item 化：item 0 就是整页，`saved.second`（原先的 item 内偏移）
-                // 正好等于「距最新端多少像素」⇒ 按它滚即可，比按 key 查索引更准。
-                listState.scrollToItem(0, saved.second)
-                withFrameNanos { }
-            }
-            // ② 精确校正：按 **key** 在 layoutInfo 里找全局 index（issue #16 第三步）。
-            //    `target.index` 是 LazyColumn 自己给的，不需要任何 feedPrefix 换算 ——
-            //    存/取时 prefix 不同（流式开始/结束）也不会影响最终位置。
+            snapshotFlow { filledRows.intValue >= visibleNow.size && visibleNow.isNotEmpty() }
+                .first { it }
             withFrameNanos { }
-            val target = listState.layoutInfo.visibleItemsInfo
-                .firstOrNull { it.key == savedKey }
-            if (target != null) {
-                listState.scrollToItem(target.index, saved.second)
-                withFrameNanos { }
-                // 把实际落点写回锚点：这次恢复之后的"当前位置"就是它（下次切走时若没再滚过，
-                // 用的就是这一份）。
+            withFrameNanos { }
+            // The transcript is one LazyColumn item. Its own key is saved by the scroll layer.
+            val items = listState.layoutInfo.visibleItemsInfo
+            val target = items.firstOrNull { it.key == savedKey }
+            val transcriptIndex = feedPrefixNow
+            val targetIndex = target?.index ?: if (savedKey == "transcript") transcriptIndex else null
+            if (targetIndex != null) {
+                listState.scrollToItem(targetIndex, saved.second)
                 anchors[state.conversationId] = savedKey to saved.second
             } else {
-                // key 完全找不到（消息被删 / 分支切换）：只能回底，别停在随机位置。
                 scroll.stickToBottom = true
                 scroll.toBottom()
             }
@@ -1981,6 +1828,7 @@ fun ChatScreen(
                                                     // 钉住期间它与 `armedTop` 的差值就是"用户看到的位移"。
                                                     .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
                                             ) {
+                                            LiveMessageParts(viewModel, state.conversationId, state.liveRunId) { liveParts ->
                                             AssistantRow(
                                             // **不能给这个映射套 remember**（0.8.36x~0.8.405 瞬移的根因，
                                             // 机制见 LivePartsFreezeTest）：liveParts 的元素是「同一对象只追加」
@@ -1988,7 +1836,7 @@ fun ChatScreen(
                                             // ⇒ remember 的 key 永远命中缓存 ⇒ 映射冻结 —— 屏幕只在列表结构
                                             // 变化（新块诞生）时刷新一次，该块积累的全部文本一次性放出。
                                             // parts 只有几个元素，直接映射，代价可以忽略。
-                                            parts = state.liveParts.mapNotNull { part ->
+                                            parts = liveParts.mapNotNull { part ->
                                                     when (part) {
                                                         is LivePart.Thinking ->
                                                             if (settings.showReasoning) {
@@ -2051,6 +1899,7 @@ fun ChatScreen(
                                                 bubbleMaxWidth = bubbleMaxWidth,
                                                 reasoningExpansion = reasoningExpansion,
                                             )
+                                            }
                                             }
                                             // 上 12dp：气泡白底 → 状态行顶。下：让位恒定 12dp（见 stackFootprint）。
                                             if (state.runningHere) {
@@ -2166,14 +2015,10 @@ fun ChatScreen(
                                 Modifier
                                     .then(if (heavyRow) Modifier.graphicsLayer() else Modifier)
                                     .onGloballyPositioned { coords ->
-                                        // 行顶（窗口坐标）—— "正在读哪一行"就是靠它判定的，
-                                        // 见上面 rowTopById 的说明。
-                                        // **只在真的变了才写**：这是快照状态，每帧无条件写会让
-                                        // 导航条在滚动期间每次布局都失效一次。
-                                        val top = coords.positionInWindow().y
-                                        if (rowTopById[row.message.id] != top) {
-                                            rowTopById[row.message.id] = top
-                                        }
+                                        val id = row.message.id
+                                        val firstPlacement = rowCoordinates.put(id, coords) == null
+                                        val heightChanged = rowHeights.put(id, coords.size.height) != coords.size.height
+                                        if (firstPlacement || heightChanged) geometryVersion.intValue++
                                     },
                             ) {
                                 // 外观 → 显示时间: off means no labels at all, not fewer.
@@ -2233,7 +2078,7 @@ fun ChatScreen(
                                 // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
                                 // 键用 revision + checkpoint（两者任一变化才需要重算）。
                                 val originals = remember(checkpoint, state.messagesRevision) {
-                                    checkpointSpan(state.messages, checkpoint)
+                                    checkpointSpan(state.messages, checkpoint, messagePositions)
                                 }
                                 // A checkpoint whose span is not in this transcript (a
                                 // branch switch, a trimmed conversation) is not drawn: half
@@ -2258,6 +2103,7 @@ fun ChatScreen(
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     TextButton(
+                                        enabled = pendingAnchorFrom < 0,
                                         onClick = {
                                             // **点「加载更早」就是读历史：先把追底关掉**。
                                             // 否则 `ChatScroll` 的追底 effect（`stick && 非拖拽 &&
@@ -2279,7 +2125,13 @@ fun ChatScreen(
                                             // **先真的去磁盘读**（#30）：`state.messages` 现在只是
                                             // 尾部窗口，光把 `shownTurns` 加大不会让旧消息从磁盘长出来。
                                             // 读到了才扩窗口；没得读（已到文件开头）就不动，避免按钮骗人。
-                                            val loaded = viewModel.loadEarlier()
+                                            val loaded = viewModel.loadEarlier(onComplete = { added ->
+                                                if (!added && viewModel.state.value.conversationId == state.conversationId) {
+                                                    pendingAnchorFrom = -1
+                                                    pendingAnchorIndex = -1
+                                                    scroll.restoring = false
+                                                }
+                                            })
                                             if (!loaded) {
                                                 // 没有更早内容可读（或读盘失败）：本次到此为止，
                                                 // 闸立刻开，别把列表永久冻住。
@@ -2415,26 +2267,40 @@ fun ChatScreen(
                     // 底锚下 feed index 0 即底部 ⇒ 明确滚到底，不吞这次点击。
                     val inWindow = turn - firstDrawnTurn
                     val index = turnIndices.getOrNull(inWindow)
-                    scope.launch {
-                        // **跳历史必须先关追底**（issue #21）：否则 ChatScroll 的追底逻辑
-                        // 会在同一帧把列表拉回底部，animateScrollToItem 被打断。
+                    val token = ++navigationToken[0]
+                    navigationJob[0]?.cancel()
+                    navigationJob[0] = scope.launch {
                         scroll.stickToBottom = false
-                        if (index != null) {
-                            listState.animateScrollToItem(fedIndexOf(index - rowOffset))
-                        } else if (inWindow >= turnIndices.size) {
-                            // 指向的是还没进 `turnIndices` 的最新轮 ⇒ 滚到底（最新端）。
-                            listState.animateScrollToItem(0)
-                        } // 越界向更早（没加载的轮）：不动，条上也不该出现这种格。
+                        scroll.restoring = true
+                        try {
+                            val row = index?.let { visible.getOrNull(it - rowOffset) }
+                            if (row != null) {
+                                val attached = withTimeoutOrNull(2_000) {
+                                    snapshotFlow { geometryVersion.intValue }.first {
+                                        rowCoordinates[row.message.id]?.isAttached == true
+                                    }
+                                }
+                                if (attached == null) return@launch
+                                if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
+                                val coordinates = rowCoordinates[row.message.id] ?: return@launch
+                                val probeY = viewportTopY.value + viewportH.intValue * TurnMarks.PROBE_FRACTION
+                                listState.animateScrollBy(probeJumpDelta(coordinates.positionInWindow().y, probeY))
+                            } else if (inWindow >= turnIndices.size) {
+                                listState.animateScrollToItem(0)
+                            }
+                        } finally {
+                            if (token == navigationToken[0] && scroll.conversationId == state.conversationId) scroll.restoring = false
+                        }
                     }
                 },
             )
             Box(Modifier.align(Alignment.BottomCenter)) {
+                ComposerDraftText(viewModel, state.conversationId) { input ->
                 Composer(
                     input = input,
                     onInput = { setDraft(text = it) },
                     onRestoreSteer = { steer -> scope.launch { restoreQueuedSteer(steer) } },
                     running = state.runningHere,
-                    statsFlow = viewModel.liveStats,
                     settings = settings,
                     assistantId = state.assistantId,
                     contextWindow = contextWindow,
@@ -2445,13 +2311,6 @@ fun ChatScreen(
                         Triple(it.breakSystem, it.breakTools, it.breakHistory)
                     } ?: state.contextBreakdown,
                     onContextPanelOpen = { viewModel.refreshContextBreakdown() },
-                    sessionTokens = sessionTokens,
-                    sessionEstimate = sessionEstimate,
-                    sessionSplit = sessionSplit,
-                    sessionTurns = sessionTurns,
-                    sessionPerSecond = session?.perSecond ?: 0.0,
-                    sessionCachePercent = session?.cachePercent ?: 0.0,
-                    sessionElapsedMs = sessionElapsedMs,
                     conversationProviderId = state.providerId,
                     conversationModel = state.model,
                     conversationReasoningEffort = state.reasoningEffort,
@@ -2530,7 +2389,6 @@ fun ChatScreen(
                     showJump = false,
                     onHeightChanged = { composerH = it },
                     // 底锚：键盘起落改的是列表底 padding，index0 就在底边上 ⇒ 一个滚动都不需要。
-                    onPlaced = {},
                 )
                 // 「回到最新」浮钮：**画在 composer 之外**（兄弟节点），高度不参与 composer 的
                 // 测量 ⇒ 它出现/消失不会改底部让位、不会把转录顶上去（用户报的「往上滑一点点就
@@ -2549,6 +2407,7 @@ fun ChatScreen(
                             .padding(end = 24.dp),
                     )
                 }
+                }
             }
         }
         if (voiceOpen) {
@@ -2559,7 +2418,10 @@ fun ChatScreen(
                 // user can still read what they are dictating into.
                 bottomInset = composerH + 8.dp,
                 onOpenSettings = onOpenSettings,
-                onResult = { text -> setDraft(text = if (input.isBlank()) text else "$input $text") },
+                onResult = { text ->
+                    val input = currentInput()
+                    setDraft(text = if (input.isBlank()) text else "$input $text")
+                },
                 onDismiss = { voiceOpen = false },
             )
         }
@@ -2617,7 +2479,7 @@ fun ChatScreen(
     FullScreenOverlay(visible = editorAssistantId != null) {
         val id = editorAssistantId ?: lastEditorId
         if (id != null) {
-            val servers by Core.mcp.servers.collectAsState()
+            val servers by Core.mcp.servers.collectAsStateWithLifecycle()
             val toolNames = remember(servers) { Core.tools.names() }
             val target = settings.assistants.firstOrNull { it.id == id }
                 ?: Assistant(id = id, avatar = "🧭")
@@ -2736,25 +2598,4 @@ private fun Modifier.liveRowLagHeight(
 private fun Modifier.keyboardAwareBottomPad(
     navBarPx: Int,
     ime: androidx.compose.runtime.State<Int>,
-): Modifier = this.layout { measurable, constraints ->
-    val bottom = (navBarPx - ime.value).coerceAtLeast(0)
-    val newMax = if (constraints.maxHeight == Constraints.Infinity) {
-        constraints.maxHeight
-    } else {
-        (constraints.maxHeight - bottom).coerceAtLeast(0)
-    }
-    val newMin = if (constraints.minHeight == Constraints.Infinity) {
-        constraints.minHeight
-    } else {
-        (constraints.minHeight - bottom).coerceAtLeast(0)
-    }
-    val placeable = measurable.measure(
-        Constraints(
-            minWidth = constraints.minWidth,
-            maxWidth = constraints.maxWidth,
-            minHeight = newMin.coerceAtMost(newMax),
-            maxHeight = newMax,
-        ),
-    )
-    layout(placeable.width, placeable.height + bottom) { placeable.place(0, 0) }
-}
+): Modifier = bottomInsetPadding { (navBarPx - ime.value).coerceAtLeast(0) }

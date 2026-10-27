@@ -615,10 +615,11 @@ internal fun oneLine(raw: String, limit: Int = Int.MAX_VALUE): String {
         for (ch in raw) {
             append(if (ch.isISOControl() || ch in ZERO_WIDTH) ' ' else ch)
         }
-    }.replace(Regex("\\s+"), " ").trim()
+    }.replace(CATALOG_WHITESPACE, " ").trim()
     return if (flat.length <= limit) flat else flat.take(limit).trimEnd() + "…"
 }
 
+private val CATALOG_WHITESPACE = Regex("\\s+")
 private val ZERO_WIDTH = setOf('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff')
 
 /** One heading of the skills page: the skills that arrived the same way. */

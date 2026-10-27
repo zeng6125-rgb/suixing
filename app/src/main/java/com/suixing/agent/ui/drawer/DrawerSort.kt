@@ -1,12 +1,8 @@
 package com.suixing.agent.ui.drawer
 
-import androidx.compose.foundation.layout.size
 import com.suixing.agent.data.Conversation
-import com.suixing.agent.ui.DrawerOrder
-import com.suixing.agent.ui.DrawerSections
-import kotlinx.coroutines.flow.map
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
+import com.suixing.agent.ui.drawer.DrawerOrder
+import com.suixing.agent.ui.drawer.DrawerSections
 /**
  * 把 [dragging] 挪到 [target] 的槽位上，只在**同一区块内**生效。
  *

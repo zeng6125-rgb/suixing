@@ -3,12 +3,11 @@ package com.suixing.agent.ui.settings
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,7 +47,7 @@ fun AssistantScreen(
     // 编辑器是主窗口里的全屏覆盖层（结构路，0.8.105）：整页宿主就地画在 Scaffold 之上，
     // BACK 先关编辑、再退页面（编辑器自己的 BackHandler 优先）。
     var editingId by remember { mutableStateOf<String?>(null) }
-    val servers by Core.mcp.servers.collectAsState()
+    val servers by Core.mcp.servers.collectAsStateWithLifecycle()
     val toolNames = remember(servers) { Core.tools.names() }
     val editing = editingId?.let { id ->
         assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")

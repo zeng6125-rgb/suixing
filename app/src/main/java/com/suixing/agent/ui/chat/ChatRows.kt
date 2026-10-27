@@ -1,8 +1,5 @@
 package com.suixing.agent.ui.chat
 
-import android.content.Context
-import android.widget.Toast
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -18,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -45,12 +41,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material3.ripple
@@ -62,9 +54,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.components.MenuCard
@@ -76,13 +66,10 @@ import com.suixing.agent.data.Tps
 import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
-import com.suixing.agent.data.label
 import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.components.MarkdownText
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.components.markdownBody
-import kotlinx.coroutines.launch
-import kotlin.math.max
 import java.util.Locale
 
 // 模型层：气泡分组、分页、圆环读数、待办行、跳转轨窗口、附件。纯函数，单测覆盖。
@@ -676,14 +663,6 @@ internal const val SCRUBBER_VISIBLE_MIN = 5
 /** 读到很靠前的轮次时条数的上限（第 12 轮起不再增加）。 */
 internal const val SCRUBBER_VISIBLE_MAX = 12
 
-data class Attachment(
-    val base64: String,
-    val label: String,
-    val preview: ImageBitmap? = null,
-    /** 文件附件的落盘路径（图片为 null）。发送时拼进消息正文 —— 见 [withAttachment]。 */
-    val filePath: String? = null,
-)
-
 /** 看板上画几行。 */
 internal const val TODO_ROWS_SHOWN = 3
 
@@ -1082,10 +1061,6 @@ internal fun TurnMetrics(
     // What the card last showed: the popup stays composed through its exit animation, and an
     // empty card sliding away is worse than the one the user just closed.
     var shown by remember { mutableStateOf(MetricCard.TIME) }
-    // `open` read once, not asserted: the check and the use are two reads of a state that a
-    // recomposition can move between, and `!!` on the second is the shape that turns that into a
-    // crash. Same fix as the one in Common.kt.
-    open?.let { shown = it }
     val elapsed = remember(elapsedMs) {
         String.format(Locale.getDefault(), "%.1f秒", elapsedMs / 1000.0)
     }
@@ -1099,7 +1074,7 @@ internal fun TurnMetrics(
                     icon = ImageVector.vectorResource(R.drawable.ic_clock),
                     text = elapsed,
                     label = "用时详情",
-                    onClick = { open = MetricCard.TIME },
+                    onClick = { shown = MetricCard.TIME; open = MetricCard.TIME },
                 )
             }
             if (total > 0) {
@@ -1107,35 +1082,12 @@ internal fun TurnMetrics(
                     icon = ImageVector.vectorResource(R.drawable.ic_database),
                     text = remember(total) { "用量 ${shortTokens(total)} tok" },
                     label = "用量详情",
-                    onClick = { open = MetricCard.USAGE },
+                    onClick = { shown = MetricCard.USAGE; open = MetricCard.USAGE },
                 )
             }
         }
         Box(Modifier.align(Alignment.TopStart)) {
-            // Focus-less, like the composer's own cards and for the same reason (see [MenuCard]'s
-            // `focusable`): a focusable popup window takes the keyboard away from the field, and a
-            // reader looking up what a turn cost has not left the conversation. This card sits in
-            // the transcript, so it was the one place still doing it — the composer's two cards
-            // were already focus-less. A focus-less window can see neither a tap outside itself
-            // nor BACK, so both are handled here: the scrim is a window of its own and is composed
-            // before the card, because windows stack in composition order.
-            //
-            // 纯遮罩：它只负责接住卡片的退场时间（卡片自己的 140ms 动画在 [MenuCard] 里），所以
-            // 这里不加动画修饰符 —— 它本来就什么都不画。`keeping` 只做一件事：退场那 110ms 让这层
-            // 仍在组合里，别让「点卡片外面」在卡片还看得见的时候漏到下面的对话流上。
-            if (open != null) {
-                Popup(properties = PopupProperties(focusable = false)) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                            ) { open = null },
-                    )
-                }
-                BackHandler { open = null }
-            }
+            // MenuCard owns the outside-tap layer and BACK handler.
             val density = LocalDensity.current
             val topBarCardProvider = remember(density) {
                 val gap = with(density) { 8.dp.roundToPx() }
@@ -1422,9 +1374,8 @@ internal fun AssistantRow(
                 // this spacer, so a bubble without a card does not stack two of them.
                 Spacer(Modifier.height(6.dp))
             }
-            // R5：只随 parts 变。live 行每拍都会重建 parts（映射本身故意不 remember，
-            // 见 LivePartsFreezeTest），但 `it is Part.Text` 只看元素**类型**、不看内容 ——
-            // 元素实例相等时结果必然相等，所以这条 remember 不会冻住任何仍在增长的文字。
+            // The last text slot follows the current snapshot; versioned live parts must
+            // never be memoized across actual text changes.
             val lastText = remember(parts) { parts.indexOfLast { it is Part.Text } }
             // key(index): without it every part's remembered state was allocated by
             // position, so a new round appearing at the front moved one block's switch onto
@@ -1486,28 +1437,15 @@ internal fun AssistantRow(
                             // card's expanded list, not flat beside the answer.
                             // Consecutive tool rounds merge into one block: one card per
                             // run of calls, not a card inside a card per round.
-                            // **记住合并结果**（性能）：`tools: List<ToolLine>` 是 unstable 参数。
-                            // 开了 strong skipping 时按 **equals（结构）** 比较：复用同一实例能让
-                            // `AbstractList.equals` 首行 `o === this` 短路，省掉逐条 `ToolLine` 的深比较
-                            // （每条带 toolArgs / toolOutput 字符串，工具输出可能几十 KB）。
-                            // **合并结果与"块尾下标"同一趟算完并 remember**（优化清单 chat-P2）：
-                            // 原来 `tools` 在 remember 里扫一遍、紧接着又在组合体里线性扫到块尾
-                            // 找 cursor ⇒ 多块 Tool 时是 O(n²)，且 cursor 每次重组都重算。
-                            val bundle = remember(parts, index) {
-                                val calls = buildList {
-                                    var c = index
-                                    while (c < parts.size && parts[c] is Part.Tools) {
-                                        addAll((parts[c] as Part.Tools).calls)
-                                        c++
-                                    }
-                                }
-                                // cursor = 这一串 Tools 之后的第一块。
-                                var cursor = index
-                                while (cursor < parts.size && parts[cursor] is Part.Tools) cursor++
-                                calls to cursor
+                            // Key only the contiguous tool run: later text deltas cannot
+                            // invalidate an unchanged bundle or copy all its tool output again.
+                            var cursor = index + 1
+                            while (cursor < parts.size && parts[cursor] is Part.Tools) cursor++
+                            val toolRun = parts.subList(index, cursor)
+                            val tools = remember(toolRun) {
+                                if (toolRun.size == 1) part.calls
+                                else toolRun.flatMap { (it as Part.Tools).calls }
                             }
-                            val tools = bundle.first
-                            val cursor = bundle.second
                             ToolBundle(
                                 tools = tools,
                                 // Only the newest block can be the one waiting on a tool.

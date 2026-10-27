@@ -108,6 +108,7 @@ class SuixingAccessibilityService : AccessibilityService() {
      * flight is rejected by the system, and now it simply cannot happen.
      */
     private suspend fun gesture(path: Path, durationMs: Long): Boolean =
+        kotlinx.coroutines.withTimeoutOrNull(durationMs.coerceAtLeast(30L) + 2_000L) {
         suspendCancellableCoroutine { continuation ->
             val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(30L))
             val description = GestureDescription.Builder().addStroke(stroke).build()
@@ -123,6 +124,7 @@ class SuixingAccessibilityService : AccessibilityService() {
             val dispatched = runCatching { dispatchGesture(description, callback, null) }.getOrDefault(false)
             if (!dispatched && continuation.isActive) continuation.resume(false)
         }
+        } ?: false
 
     fun global(action: Int): Boolean = runCatching { performGlobalAction(action) }.getOrDefault(false)
 
@@ -139,44 +141,54 @@ class SuixingAccessibilityService : AccessibilityService() {
     /** Types into the focused editable field. Works for CJK because it does not use key events. */
     fun setText(text: String): Boolean = runCatching {
         val node = focusedEditable() ?: return false
-        val arguments = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-        }
-        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        try { setTextOn(node, text) } finally { node.recycleIfLegacy() }
     }.getOrDefault(false)
 
     fun appendText(text: String): Boolean = runCatching {
         val node = focusedEditable() ?: return false
-        val existing = node.text?.toString().orEmpty()
-        val arguments = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, existing + text)
-        }
-        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        try { setTextOn(node, node.text?.toString().orEmpty() + text) }
+        finally { node.recycleIfLegacy() }
     }.getOrDefault(false)
 
     fun clickFocused(): Boolean = runCatching {
         var node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        while (node != null) {
-            if (node.isClickable) return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            node = node.parent
-        }
-        false
+        try {
+            while (node != null) {
+                if (node.isClickable) return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                val parent = node.parent
+                node.recycleIfLegacy()
+                node = parent
+            }
+            false
+        } finally { node?.recycleIfLegacy() }
     }.getOrDefault(false)
 
     private fun focusedEditable(): AccessibilityNodeInfo? {
         val root = rootInActiveWindow ?: return null
-        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        if (focused != null && focused.isEditable) return focused
-        return firstEditable(root, 0)
+        var result: AccessibilityNodeInfo? = null
+        try {
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focused != null && focused.isEditable) {
+                result = focused
+                return result
+            }
+            if (focused !== root) focused?.recycleIfLegacy()
+            result = firstEditable(root, 0)
+            return result
+        } finally { if (result !== root) root.recycleIfLegacy() }
     }
 
+    /** The caller owns node; ownership of only the returned child is transferred. */
     private fun firstEditable(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
         if (depth > 30) return null
         if (node.isEditable) return node
         for (index in 0 until node.childCount) {
             val child = node.getChild(index) ?: continue
-            val found = firstEditable(child, depth + 1)
-            if (found != null) return found
+            var found: AccessibilityNodeInfo? = null
+            try {
+                found = firstEditable(child, depth + 1)
+                if (found != null) return found
+            } finally { if (found !== child) child.recycleIfLegacy() }
         }
         return null
     }
@@ -201,7 +213,10 @@ class SuixingAccessibilityService : AccessibilityService() {
             val label = node.text?.toString()?.trim().orEmpty()
             val description = node.contentDescription?.toString()?.trim().orEmpty()
             // 命中就交出去：**不能回收**，调用方还要拿它去点击。
-            if (labelMatches(label, needle, exact) || labelMatches(description, needle, exact)) return node
+            if (labelMatches(label, needle, exact) || labelMatches(description, needle, exact)) {
+                while (queue.isNotEmpty()) queue.removeFirst().recycleIfLegacy()
+                return node
+            }
             for (index in 0 until node.childCount) {
                 node.getChild(index)?.let { queue.addLast(it) }
             }
@@ -233,39 +248,43 @@ class SuixingAccessibilityService : AccessibilityService() {
     suspend fun clickNode(node: AccessibilityNodeInfo): Boolean {
         val bounds = Rect().also { node.getBoundsInScreen(it) }
         var current: AccessibilityNodeInfo? = node
-        while (current != null) {
-            if (current.isClickable) {
-                if (runCatching { current.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)) {
-                    // An accessibility click never goes through dispatchGesture, but the user
-                    // still asked to see what the agent is touching, so the ring is drawn
-                    // from the node's own box instead.
-                    if (bounds.width() > 0 && bounds.height() > 0) {
-                        TouchFx.tap(this, bounds.centerX().toFloat(), bounds.centerY().toFloat())
+        try {
+            while (current != null) {
+                if (current.isClickable) {
+                    val candidate = current
+                    if (runCatching { candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)) {
+                        if (bounds.width() > 0 && bounds.height() > 0) {
+                            TouchFx.tap(this, bounds.centerX().toFloat(), bounds.centerY().toFloat())
+                        }
+                        return true
                     }
-                    return true
+                    break
                 }
-                break
+                val parent = current.parent
+                if (current !== node) current.recycleIfLegacy()
+                current = parent
             }
-            current = current.parent
-        }
+        } finally { if (current !== node) current?.recycleIfLegacy() }
         if (bounds.width() <= 0 || bounds.height() <= 0) return false
         return tap(bounds.centerX().toFloat(), bounds.centerY().toFloat())
     }
 
     suspend fun clickByText(text: String, exact: Boolean = false): Boolean {
         val node = findNodeByText(text, exact) ?: return false
-        return clickNode(node)
+        return try { clickNode(node) } finally { node.recycleIfLegacy() }
     }
 
-    /** Focuses the field that carries [label], waits for the keyboard, then writes [text]. */
     suspend fun typeIntoField(label: String, text: String): Boolean {
         val node = findNodeByText(label, exact = false) ?: return false
-        clickNode(node)
-        delay(350L)
-        if (setText(text)) return true
-        val editable = if (node.isEditable) node else firstEditable(node, 0)
-        if (editable == null) return false
-        return setTextOn(editable, text)
+        try {
+            clickNode(node)
+            delay(350L)
+            if (setText(text)) return true
+            val editable = if (node.isEditable) node else firstEditable(node, 0)
+            if (editable == null) return false
+            return try { setTextOn(editable, text) }
+            finally { if (editable !== node) editable.recycleIfLegacy() }
+        } finally { node.recycleIfLegacy() }
     }
 
     private fun setTextOn(node: AccessibilityNodeInfo, text: String): Boolean = runCatching {
@@ -277,7 +296,11 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     // ------------------------------------------------------------------ reading
 
-    fun currentPackage(): String? = runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
+    fun currentPackage(): String? = runCatching {
+        rootInActiveWindow?.let { node ->
+            try { node.packageName?.toString() } finally { node.recycleIfLegacy() }
+        }
+    }.getOrNull()
 
     fun screenSize(): Pair<Int, Int> {
         val metrics = resources.displayMetrics
@@ -300,7 +323,8 @@ class SuixingAccessibilityService : AccessibilityService() {
         builder.append("屏幕: ").append(width).append('x').append(height).append('\n')
         builder.append("包名: ").append(root.packageName?.toString() ?: "未知").append('\n')
         val counter = intArrayOf(0)
-        walk(root, 0, maxDepth, maxNodes, builder, counter)
+        try { walk(root, 0, maxDepth, maxNodes, builder, counter) }
+        finally { root.recycleIfLegacy() }
         if (counter[0] == 0) builder.append("(界面上没有可交互元素)")
         if (counter[0] >= maxNodes) builder.append("\n…（节点过多，已截断）")
         return builder.toString()
@@ -323,7 +347,8 @@ class SuixingAccessibilityService : AccessibilityService() {
         for (index in 0 until node.childCount) {
             if (counter[0] >= maxNodes) return
             val child = node.getChild(index) ?: continue
-            walk(child, depth + 1, maxDepth, maxNodes, builder, counter)
+            try { walk(child, depth + 1, maxDepth, maxNodes, builder, counter) }
+            finally { child.recycleIfLegacy() }
         }
     }
 

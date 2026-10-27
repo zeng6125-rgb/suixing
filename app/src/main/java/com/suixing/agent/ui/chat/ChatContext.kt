@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,7 +19,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,7 +27,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -36,25 +36,20 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -71,8 +66,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.data.ApprovalMode
@@ -82,12 +75,9 @@ import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TodoItem
-import com.suixing.agent.data.label
 import com.suixing.agent.ui.components.MenuCard
 import com.suixing.agent.ui.components.SuixingDialog
-import com.suixing.agent.ui.components.rememberPopupMotion
 import java.util.Locale
-import kotlin.math.max
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import com.suixing.agent.R
@@ -115,11 +105,8 @@ internal fun TopBarContextEntry(
     /** 当前模型名，用于在面板里说明"窗口是多少、属于谁"（issue #49）。 */
     model: String = "",
 ) {
-    val live by statsFlow.collectAsState()
     var open by remember { mutableStateOf(false) }
     BackHandler(enabled = open) { open = false }
-    var anchorCentreX by remember { mutableStateOf(0f) }
-    var cardWidth by remember { mutableStateOf(0) }
     val density = LocalDensity.current
     val screenPx = with(density) {
         LocalConfiguration.current.screenWidthDp.dp.toPx()
@@ -128,7 +115,6 @@ internal fun TopBarContextEntry(
     Box(
         modifier = Modifier
             .size(28.dp)
-            .onGloballyPositioned { anchorCentreX = it.boundsInWindow().center.x }
             .clip(CircleShape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -143,10 +129,6 @@ internal fun TopBarContextEntry(
             modifier = Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        // 小浮层进出场（用户：「用量统计这些弹窗出现得太生硬」）。
-        // `keeping` 让退场动画期间浮层仍留在组合里，否则窗口先被销毁、动画根本看不到。
-        val popupMotion = rememberPopupMotion()
-        LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
         // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
         // 同一套 110ms 进出场。这里需要显式定位，所以传 popupPositionProvider。
         // **provider 必须 remember**（优化清单 chat-P1）：原来每次重组都在组合体里 new 一个
@@ -180,7 +162,8 @@ internal fun TopBarContextEntry(
             popupPositionProvider = ringProvider,
             focusable = false,
         ) {
-            Box(Modifier.onSizeChanged { cardWidth = it.width }) {
+            val live by statsFlow.collectAsStateWithLifecycle()
+            Box {
                 ContextRingCard(
                     used = used,
                     estimated = estimated,
@@ -299,9 +282,10 @@ internal fun sessionSplitOf(messages: List<StoredMessage>): SessionSplit {
 internal fun checkpointSpan(
     messages: List<StoredMessage>,
     checkpoint: ContextCheckpoint,
+    positions: Map<String, Int>? = null,
 ): List<StoredMessage>? {
-    val from = messages.indexOfFirst { it.id == checkpoint.fromMessageId }
-    val to = messages.indexOfFirst { it.id == checkpoint.toMessageId }
+    val from = if (positions == null) messages.indexOfFirst { it.id == checkpoint.fromMessageId } else positions[checkpoint.fromMessageId] ?: -1
+    val to = if (positions == null) messages.indexOfFirst { it.id == checkpoint.toMessageId } else positions[checkpoint.toMessageId] ?: -1
     if (from < 0 || to < from) return null
     return messages.subList(from, to + 1)
 }
@@ -358,21 +342,22 @@ internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Store
             )
         }
         if (showOriginal) {
-            Column(
+            LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 240.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .heightIn(max = 240.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = "被压缩的原文（${originals.size} 条）",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = FontWeight.SemiBold,
-                    ),
-                    color = scheme.onSurfaceVariant,
-                )
-                originals.forEach { original ->
+                item(key = "original-header", contentType = "header") {
+                    Text(
+                        text = "被压缩的原文（${originals.size} 条）",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                        color = scheme.onSurfaceVariant,
+                    )
+                }
+                items(originals, key = { it.id }, contentType = { "original-message" }) { original ->
                     Column {
                         Text(
                             text = "${if (original.role == Roles.USER) "我" else "随行"} · " +

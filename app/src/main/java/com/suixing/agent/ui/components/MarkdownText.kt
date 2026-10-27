@@ -1,8 +1,5 @@
 package com.suixing.agent.ui.components
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -42,6 +40,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.vectorResource
@@ -57,11 +57,9 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.suixing.agent.R
 import kotlinx.coroutines.delay
 import androidx.compose.ui.unit.LayoutDirection
@@ -154,18 +152,29 @@ fun parseMarkdown(source: String): List<MdBlock> {
     // **每行的"块首判定"只算一次**（优化清单 ui-P0）：原来一行正文要在 opensBlock 里重跑
     // 6 条正则，其中 4 条在派发阶段已对同一行跑过，边界行还要再跑一遍。
     val lineInfo = arrayOfNulls<LineInfo>(lines.size)
-    fun info(i: Int): LineInfo = lineInfo[i] ?: run {
+    fun info(i: Int, knownTrimmed: String? = null): LineInfo = lineInfo[i] ?: run {
         val rawLine = lines[i]
-        val rawTrimmed = rawLine.trim()
+        val rawTrimmed = knownTrimmed ?: rawLine.trim()
+        // Match only as far as dispatch needs, in exactly the same priority order.
+        val empty = rawTrimmed.isEmpty()
+        val fence = if (!empty) MD_FENCE.matchEntire(rawTrimmed) else null
+        val heading = if (!empty && fence == null) MD_HEADING.matchEntire(rawTrimmed) else null
+        val rule = !empty && fence == null && heading == null && MD_RULE.matches(rawTrimmed)
+        val quote = !empty && fence == null && heading == null && !rule && rawTrimmed.startsWith('>')
+        val table = !empty && fence == null && heading == null && !rule && !quote && isTableStart(lines, i)
+        val listCandidate = !empty && fence == null && heading == null && !rule && !quote && !table
+        val bullet = if (listCandidate) MD_BULLET.matchEntire(rawLine) else null
+        val ordered = if (listCandidate && bullet == null) MD_ORDERED.matchEntire(rawLine) else null
         LineInfo(
-            empty = rawTrimmed.isEmpty(),
-            fence = MD_FENCE.matchEntire(rawTrimmed),
-            heading = MD_HEADING.matchEntire(rawTrimmed),
-            rule = MD_RULE.matches(rawTrimmed),
-            quote = rawTrimmed.startsWith('>'),
-            table = isTableStart(lines, i),
-            bullet = MD_BULLET.matchEntire(rawLine),
-            ordered = MD_ORDERED.matchEntire(rawLine),
+            trimmed = rawTrimmed,
+            empty = empty,
+            fence = fence,
+            heading = heading,
+            rule = rule,
+            quote = quote,
+            table = table,
+            bullet = bullet,
+            ordered = ordered,
         ).also { lineInfo[i] = it }
     }
     fun opensBlockAt(i: Int): Boolean {
@@ -176,7 +185,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
     var index = 0
     while (index < lines.size) {
         val line = lines[index]
-        val trimmed = line.trim()
+        val trimmed = lineInfo[index]?.trimmed ?: line.trim()
         // **空行先返回，四条正则一次都不跑**（原实现把四条 matchEntire 全算完才进 when，
         // 而 when 的第一支就是 `trimmed.isEmpty()` —— 空行白跑 4 次匹配，流式期间每 40ms
         // 一次全量解析时这就是纯浪费）。顺序与原来完全一致，只是把空行提前。
@@ -184,7 +193,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
             index++
             continue
         }
-        val cached = info(index)
+        val cached = info(index, trimmed)
         val fence = cached.fence
         val heading = cached.heading
         val bullet = cached.bullet
@@ -205,8 +214,9 @@ fun parseMarkdown(source: String): List<MdBlock> {
                 // A fence written on the same line as its content never reaches this
                 // branch at all — the opening test is matchEntire-strict — so it stays
                 // prose and nothing leaks into a code block.
-                if (body.joinToString("\n").isNotBlank()) {
-                    blocks += MdBlock.Code(fence.groupValues[1], body.joinToString("\n"))
+                val code = body.joinToString("\n")
+                if (code.isNotBlank()) {
+                    blocks += MdBlock.Code(fence.groupValues[1], code)
                 }
             }
             heading != null -> {
@@ -267,7 +277,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
             else -> {
                 val paragraph = mutableListOf<String>()
                 while (index < lines.size && !opensBlockAt(index)) {
-                    paragraph += lines[index].trim()
+                    paragraph += info(index).trimmed
                     index++
                 }
                 blocks += MdBlock.Paragraph(paragraph.joinToString("\n"))
@@ -279,6 +289,7 @@ fun parseMarkdown(source: String): List<MdBlock> {
 
 /** 一行在"是不是块首"上的全部判定结果（解析期按行缓存，见 [parseMarkdown]）。 */
 private class LineInfo(
+    val trimmed: String,
     val empty: Boolean,
     val fence: MatchResult?,
     val heading: MatchResult?,
@@ -610,9 +621,13 @@ private class InlineScanner(
 
     private fun urlEnd(from: Int, to: Int): Int {
         var end = from
+        var opens = 0
+        var closes = 0
         while (end < to) {
             val c = text[end]
             if (c.isWhitespace() || URL_STOP.indexOf(c) >= 0) break
+            if (c == '(') opens++
+            if (c == ')') closes++
             end++
         }
         while (end > from) {
@@ -622,21 +637,14 @@ private class InlineScanner(
                 continue
             }
             // A trailing ")" only belongs to the url when it is balanced.
-            if (c == ')' && countChar(from, end, '(') < countChar(from, end, ')')) {
+            if (c == ')' && opens < closes) {
+                closes--
                 end--
                 continue
             }
             break
         }
         return end
-    }
-
-    private fun countChar(from: Int, to: Int, c: Char): Int {
-        var count = 0
-        for (i in from until to) {
-            if (text[i] == c) count++
-        }
-        return count
     }
 
     private fun parseLink(start: Int, to: Int): LinkTarget? {
@@ -797,29 +805,20 @@ internal class LiveBlocks {
 
     fun blocksFor(next: String): List<MdBlock> {
         if (next == text) return result
-        if (!next.startsWith(stablePrefix) && stablePrefix.isNotEmpty()) {
-            // 换块/重放：整段重建，前缀从新文本里重新找。
-            text = next
-            stablePrefix = ""
-            prefixBlocks = emptyList()
-            result = parseWithPrefix(next)
-            return result
-        }
         text = next
         result = parseWithPrefix(next)
         return result
     }
 
     private fun parseWithPrefix(next: String): List<MdBlock> {
-        // 稳定前缀 = 最后一个空行（含）之前的部分。它里面的块不会再变。
-        val blankLine = NL + NL
-        val cut = next.lastIndexOf(blankLine)
-        val prefix = if (cut >= 0) next.substring(0, cut + 2) else ""
-        if (prefix.isNotEmpty() && prefix != stablePrefix) {
-            stablePrefix = prefix
-            prefixBlocks = parseMarkdown(prefix)
+        // Use the same fence-safe boundary as the settled parser, after newline normalization.
+        val normalized = if ('\r' in next) next.replace("\r\n", "\n").replace('\r', '\n') else next
+        val prefixEnd = settledMarkdownPrefixEnd(normalized)
+        if (prefixEnd != stablePrefix.length || !normalized.startsWith(stablePrefix)) {
+            stablePrefix = normalized.substring(0, prefixEnd)
+            prefixBlocks = parseMarkdown(stablePrefix)
         }
-        val tail = if (prefix.isEmpty()) next else next.substring(prefix.length)
+        val tail = normalized.substring(prefixEnd)
         if (tail.isEmpty()) return prefixBlocks
         return prefixBlocks + parseMarkdown(tail)
     }
@@ -834,8 +833,7 @@ internal class LiveBlocks {
  *
  * 只缓存定稿文本：流式中的文本每 80ms 变一次，缓存它没有意义（也会把内存撑爆）。
  *
- * 上限按**条目数**而不是字节数：一条消息的解析结果与它的文本同量级，16 条已经能覆盖
- * 「来回翻看最近几屏」这个场景，且总内存有界（最坏 16 × 单条长度）。
+ * 同时限制条目数和原文字符总量，避免少量超长消息让缓存常驻数十 MB。
  */
 internal object SettledBlocks {
     // **64**（原 16，真机实测卡顿的根因）：一张重卡（思考链逐行 + 正文 + 工具参数，
@@ -843,10 +841,9 @@ internal object SettledBlocks {
     // 「助手→用户→助手」区即冲爆逐出，每遍回来都重解析（每行 2~10ms）= 每一遍都卡。
     private const val MAX_ENTRIES = 64
 
-    private val map = object : LinkedHashMap<String, List<MdBlock>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MdBlock>>?): Boolean =
-            size > MAX_ENTRIES
-    }
+    private val map = LinkedHashMap<String, List<MdBlock>>(16, 0.75f, true)
+    internal const val MAX_CHARS = 512 * 1024
+    private var cachedChars = 0
 
     /** 只对**足够长**的文本生效：短文本本身解析就很快，缓存它只是多占内存。 */
     internal const val MIN_CHARS = 400
@@ -854,7 +851,7 @@ internal object SettledBlocks {
 
     internal fun get(text: String): List<MdBlock>? {
         // 与 `put` 对称：短文本从不入缓存，所以查找纯属白做（思考链每行都短）。
-        if (text.length < MIN_CHARS) return null
+        if (text.length < MIN_CHARS || text.length > MAX_CHARS) return null
         return synchronized(map) { map[text] }
     }
 
@@ -874,8 +871,16 @@ internal object SettledBlocks {
     }
 
     internal fun put(text: String, blocks: List<MdBlock>) {
-        if (text.length < MIN_CHARS) return
-        synchronized(map) { map[text] = blocks }
+        if (text.length < MIN_CHARS || text.length > MAX_CHARS) return
+        synchronized(map) {
+            if (!map.containsKey(text)) cachedChars += text.length
+            map[text] = blocks
+            while (map.size > MAX_ENTRIES || cachedChars > MAX_CHARS) {
+                val oldest = map.entries.iterator()
+                cachedChars -= oldest.next().key.length
+                oldest.remove()
+            }
+        }
     }
 
     /**
@@ -890,7 +895,7 @@ internal object SettledBlocks {
      */
     internal fun prewarm(texts: List<String>) {
         for (t in texts) {
-            if (t.length < MIN_CHARS) continue
+            if (t.length < MIN_CHARS || t.length > MAX_CHARS) continue
             if (get(t) != null) continue
             put(t, parseMarkdown(t))
         }
@@ -913,17 +918,17 @@ internal class MarkdownCache {
 
     fun blocksFor(next: String): List<MdBlock> {
         if (next == text) return blocks
-        val settled = settledPrefix(next)
-        if (settled.isNotEmpty() && settled == prefix) {
-            blocks = prefixBlocks + parseMarkdown(next.removePrefix(settled))
+        val prefixEnd = settledMarkdownPrefixEnd(next)
+        if (prefixEnd == 0) {
+            prefix = ""
+            prefixBlocks = emptyList()
+            blocks = parseMarkdown(next)
         } else {
-            prefixBlocks = if (settled.isEmpty()) emptyList() else parseMarkdown(settled)
-            blocks = if (settled.isEmpty()) {
-                parseMarkdown(next)
-            } else {
-                prefixBlocks + parseMarkdown(next.removePrefix(settled))
+            if (prefixEnd != prefix.length || !next.startsWith(prefix)) {
+                prefix = next.substring(0, prefixEnd)
+                prefixBlocks = parseMarkdown(prefix)
             }
-            prefix = settled
+            blocks = prefixBlocks + parseMarkdown(next.substring(prefixEnd))
         }
         text = next
         return blocks
@@ -938,19 +943,21 @@ internal class MarkdownCache {
      * before it is the one taken, and a text whose only blank lines are inside fences simply has
      * no settled part (it is re-parsed whole, which is what it did before any of this).
      */
-    private fun settledPrefix(text: String): String {
-        var searchFrom = text.length
-        while (true) {
-            val at = text.lastIndexOf("\n\n", searchFrom - 1)
-            // at == 0 is a blank line at the very top of the answer, and "\n\n" is a settled
-            // prefix like any other (its parse is empty). Treating it as "nothing settled"
-            // re-parsed the whole answer on every publish for as long as it was there.
-            if (at < 0) return ""
-            val candidate = text.substring(0, at + 2)
-            if (candidate.count { it == '`' } % 2 == 0) return candidate
-            searchFrom = at
+}
+
+/** Same backtick-parity boundary as MarkdownCache, found without rescanning each candidate. */
+internal fun settledMarkdownPrefix(text: String): String = text.substring(0, settledMarkdownPrefixEnd(text))
+
+private fun settledMarkdownPrefixEnd(text: String): Int {
+    var odd = false
+    for (c in text) if (c == '`') odd = !odd
+    for (index in text.lastIndex downTo 1) {
+        if (text[index] == '`') odd = !odd
+        if (!odd && text[index] == '\n' && text[index - 1] == '\n') {
+            return index + 1
         }
     }
+    return 0
 }
 
 /**
@@ -967,7 +974,7 @@ fun MarkdownBlocks(
     style: TextStyle = markdownBody(),
     color: Color = Color.Unspecified,
     onUrlClick: ((String) -> Unit)? = null,
-    /** 见 [MarkdownText] 的 `cursor`：只有最后一个段落会带上它。 */
+    /** The cursor belongs to the final block, including a code block or list. */
     cursor: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -988,11 +995,7 @@ fun MarkdownBlocks(
             codeFontSize = codeFontSize,
         )
     }
-    // 光标挂在**最后一个 block 是段落**时；否则不画（列表/代码块尾部挂光标排版会怪）。
-    // **光标下标要缓存**（优化清单 ui-P1）：思考链可达数千块，`indexOfLast` 每次重组都要扫一遍。
-    val cursorAt = remember(blocks, cursor) {
-        if (cursor) blocks.indexOfLast { it is MdBlock.Paragraph } else -1
-    }
+    val cursorAt = if (cursor) blocks.lastIndex else -1
     // **空文本也要有光标**（用户：思考流式光标"还是有滞后性"）：思考文本经常以换行结尾，
     // 此时最新那一行是空串 ⇒ 这里解析出 0 个块 ⇒ `cursorAt = -1` ⇒ 光标根本不画，
     // 换行后的一段时间里看起来"光标落后了"。补一个空段落承载光标。
@@ -1009,19 +1012,20 @@ fun MarkdownBlocks(
         }
         return
     }
+    val keys = remember(blocks) { markdownBlockKeys(blocks) }
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
-            if (index > 0) {
-                Spacer(Modifier.height(gapBetween(blocks[index - 1], block)))
+            key(keys[index]) {
+                if (index > 0) Spacer(Modifier.height(gapBetween(blocks[index - 1], block)))
+                MarkdownBlock(
+                    block = block,
+                    style = style,
+                    color = color,
+                    palette = palette,
+                    onUrlClick = onUrlClick,
+                    cursor = index == cursorAt,
+                )
             }
-            MarkdownBlock(
-                block = block,
-                style = style,
-                color = color,
-                palette = palette,
-                onUrlClick = onUrlClick,
-                cursor = index == cursorAt && cursorAt == blocks.lastIndex,
-            )
         }
     }
 }
@@ -1041,7 +1045,7 @@ fun MarkdownBlock(
     val codeFontSize = MaterialTheme.typography.bodySmall.fontSize
     val palette = remember(scheme, codeFontSize) {
         MarkdownPalette(
-            codeBackground = scheme.surfaceContainerHigh,
+            codeBackground = scheme.surfaceContainerHigh.copy(alpha = 0.6f),
             codeColor = scheme.onSurfaceVariant,
             linkColor = scheme.primary,
             codeFontSize = codeFontSize,
@@ -1070,18 +1074,18 @@ private fun MarkdownBlock(
     cursor: Boolean = false,
 ) {
     when (block) {
-        is MdBlock.Heading -> HeadingBlock(block, color, palette, onUrlClick)
+        is MdBlock.Heading -> HeadingBlock(block, color, palette, onUrlClick, cursor)
         is MdBlock.Paragraph -> InlineText(block.text, style, color, palette, onUrlClick, cursor = cursor)
-        is MdBlock.Bullet -> BulletBlock(block, style, color, palette, onUrlClick)
-        is MdBlock.Code -> CodeBlock(block)
-        is MdBlock.Quote -> QuoteBlock(block, style, color, palette, onUrlClick)
+        is MdBlock.Bullet -> BulletBlock(block, style, color, palette, onUrlClick, cursor)
+        is MdBlock.Code -> CodeBlock(block, palette, cursor)
+        is MdBlock.Quote -> QuoteBlock(block, style, color, palette, onUrlClick, cursor)
         // No padding of its own: the 12dp above and below comes from gapBetween, so a
         // caller spacing blocks by markdownGap() gets the same rhythm.
         MdBlock.Rule -> HorizontalDivider(
             thickness = 1.dp,
             color = MaterialTheme.colorScheme.outlineVariant,
         )
-        is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick)
+        is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick, cursor)
     }
 }
 
@@ -1127,6 +1131,18 @@ private fun InlineText(
             codeFontSize = palette.codeFontSize,
         ).scan()
     }
+    CaretText(annotated, style, color, palette.linkColor, modifier, cursor)
+}
+
+@Composable
+private fun CaretText(
+    annotated: AnnotatedString,
+    style: TextStyle,
+    color: Color,
+    caretColor: Color,
+    modifier: Modifier = Modifier,
+    cursor: Boolean = false,
+) {
     // 光标：**不再拼进 AnnotatedString**（性能）。
     //
     // 原来是 `remember(annotated, alpha) { buildAnnotatedString { … } }`，而 `alpha` 在**组合期**
@@ -1177,7 +1193,7 @@ private fun InlineText(
                 // 零宽 ⇒ 包围盒左右缘相同；RTL 时竖条画在左边。
                 val x = if (rtl) box.left - CURSOR_WIDTH_PX else box.left
                 drawRect(
-                    color = palette.linkColor.copy(alpha = caretAlpha.value),
+                    color = caretColor.copy(alpha = caretAlpha.value),
                     topLeft = Offset(x, top),
                     size = Size(CURSOR_WIDTH_PX, h),
                 )
@@ -1226,6 +1242,7 @@ private fun HeadingBlock(
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
+    cursor: Boolean = false,
 ) {
     // One ramp, scaled off titleLarge: 20 / 18 / 16, with 16 medium for anything deeper.
     // Leading scales with the size, so a heading keeps the 22/29 ratio it was drawn with
@@ -1243,6 +1260,7 @@ private fun HeadingBlock(
         color = color,
         palette = palette,
         onUrlClick = onUrlClick,
+        cursor = cursor,
     )
 }
 
@@ -1264,6 +1282,7 @@ private fun BulletBlock(
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
+    cursor: Boolean = false,
 ) {
     // The marker sits on the first line's centre, not on the row's top: a 4dp dot level
     // with the top edge reads as floating above the text it belongs to.
@@ -1312,6 +1331,7 @@ private fun BulletBlock(
                     color = color,
                     palette = palette,
                     onUrlClick = onUrlClick,
+                    cursor = cursor && index == block.items.lastIndex,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -1320,7 +1340,7 @@ private fun BulletBlock(
 }
 
 @Composable
-private fun CodeBlock(block: MdBlock.Code) {
+private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boolean = false) {
     val clipboard = LocalClipboardManager.current
     var copied by remember(block.code) { mutableStateOf(false) }
     Surface(
@@ -1374,8 +1394,10 @@ private fun CodeBlock(block: MdBlock.Code) {
                 }
             }
             Spacer(Modifier.height(6.dp))
-            Text(
-                text = block.code,
+            CaretText(
+                annotated = remember(block.code) { AnnotatedString(block.code) },
+                caretColor = palette.linkColor,
+                cursor = cursor,
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 // bodySmall is already 13sp monospace-sized; only the leading differs,
                 // and it is scaled off the font size so 字号 still applies.
@@ -1396,6 +1418,7 @@ private fun QuoteBlock(
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
+    cursor: Boolean = false,
 ) {
     Row(
         modifier = Modifier
@@ -1416,6 +1439,7 @@ private fun QuoteBlock(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             palette = palette,
             onUrlClick = onUrlClick,
+            cursor = cursor,
             modifier = Modifier
                 .weight(1f)
                 .padding(start = 12.dp),
@@ -1430,6 +1454,7 @@ private fun TableBlock(
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
+    cursor: Boolean = false,
 ) {
     val cellStyle = MaterialTheme.typography.bodySmall
     // 12sp semibold, scaled off bodySmall so the header still follows the 字号 setting.
@@ -1451,6 +1476,7 @@ private fun TableBlock(
             palette = palette,
             onUrlClick = onUrlClick,
             header = true,
+            cursor = cursor && block.rows.isEmpty(),
         )
         block.rows.forEachIndexed { index, row ->
             HorizontalDivider(
@@ -1464,6 +1490,7 @@ private fun TableBlock(
                 palette = palette,
                 onUrlClick = onUrlClick,
                 header = false,
+                cursor = cursor && index == block.rows.lastIndex,
             )
         }
     }
@@ -1477,28 +1504,35 @@ private fun TableRow(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
     header: Boolean,
+    cursor: Boolean = false,
 ) {
+    val separators = remember(cells.size) { FloatArray((cells.size - 1).coerceAtLeast(0)) { Float.NaN } }
+    val dividerColor = MaterialTheme.colorScheme.outlineVariant
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            // The row, not the separator, asks for the intrinsic height: an empty Box has
-            // none of its own, so a separator that measured itself would collapse to 0dp.
-            .height(IntrinsicSize.Min)
             .background(
                 if (header) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
-            ),
+            )
+            .drawBehind {
+                // Row measures each cell once. Divider positions come from its own placement,
+                // so weight rounding and RTL remain identical without an intrinsic text pass.
+                for (x in separators) if (!x.isNaN()) {
+                    drawRect(dividerColor, Offset(x, 0f), Size(1.dp.roundToPx().toFloat(), size.height))
+                }
+            },
     ) {
         cells.forEachIndexed { index, cell ->
             if (index > 0) {
-                Box(
+                Spacer(
                     Modifier
                         .width(1.dp)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.outlineVariant),
+                        .onPlaced { separators[index - 1] = it.positionInParent().x },
                 )
             }
             InlineText(
                 text = cell,
+                cursor = cursor && index == cells.lastIndex,
                 style = style,
                 color = color,
                 palette = palette,

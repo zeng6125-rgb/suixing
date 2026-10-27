@@ -1,129 +1,51 @@
 
 package com.suixing.agent.ui.chat
 
-import android.Manifest
-import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.os.SystemClock
-import android.provider.OpenableColumns
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.util.Base64
-import android.widget.Toast
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.animateScrollBy
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.exclude
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -131,120 +53,32 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.layout.positionInWindow
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.LocalViewConfiguration
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.LineHeightStyle
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
-import com.suixing.agent.agent.estimateTokens
-import com.suixing.agent.core.Core
-import com.suixing.agent.data.AppSettings
-import com.suixing.agent.data.ApprovalMode
-import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.ContextCheckpoint
-import com.suixing.agent.data.ProviderConfig
-import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
-import com.suixing.agent.data.TODO_COMPLETED
-import com.suixing.agent.data.TODO_IN_PROGRESS
-import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Tps
-import com.suixing.agent.data.Transcript
-import com.suixing.agent.data.choiceFor
-import com.suixing.agent.data.forAssistant
-import com.suixing.agent.data.groupModels
-import com.suixing.agent.data.label
-import com.suixing.agent.data.modelOffers
-import com.suixing.agent.ui.assistant.AssistantAvatar
-import com.suixing.agent.ui.assistant.AssistantEditor
-import com.suixing.agent.ui.assistant.AssistantSheet
-import com.suixing.agent.ui.components.CircleActionButton
-import com.suixing.agent.ui.components.DrawerButton
-import com.suixing.agent.ui.components.FlatIconButton
-import com.suixing.agent.ui.components.FlatPainterButton
-import com.suixing.agent.ui.components.FullScreenOverlay
-import com.suixing.agent.ui.components.LocalHeldImePx
-import com.suixing.agent.ui.components.LocalOpenSidebar
-import com.suixing.agent.ui.components.LocalPathClick
-import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.components.MarkdownText
-import com.suixing.agent.ui.components.PressPill
-import com.suixing.agent.ui.components.REASONING_LEVELS
-import com.suixing.agent.ui.components.SuixingMark
-import com.suixing.agent.ui.components.markdownBody
-import com.suixing.agent.ui.components.suixingClickable
-import com.suixing.agent.ui.theme.LocalDarkTheme
-import com.suixing.agent.voice.Dictation
-import com.suixing.agent.voice.DictationRecorder
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.concurrent.Executors
 import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.roundToInt
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 internal fun BranchArrow(
@@ -474,7 +308,10 @@ private fun RevealHeight(
     // 每张卡里的思考块都是折叠态 ⇒ 每次进视口都白付内层 LazyColumn+snapshotFlow 的组合成本
     // ⇒ 帧时 13ms > 8.3ms（120Hz 预算）⇒ 掉半帧率的「顿」。展开/收起动画期间（progress>0）
     // 照常组合，动画不受影响。
-    if (visible || progress > 0f) Layout(
+    // Composition observes only mounting/unmounting. Fractional height stays a measure read,
+    // so each animation frame can reuse the unchanged content's composition and constraints.
+    val contentMounted by remember(visible) { derivedStateOf { visible || progress > 0f } }
+    if (contentMounted) Layout(
         content = content,
         modifier = Modifier
             .fillMaxWidth()
@@ -939,6 +776,7 @@ internal fun ReasoningBlock(
                     // 都换成上一行**。用位置键时可见的十几行全部重组 + 重新测量文本；
                     // 用绝对行号后已有行的身份不变，只有新行和光标行重组。
                     key = { index -> lines.lastIndex - index },
+                    contentType = { "reasoning-line" },
                 ) { index ->
                     // 底锚：index 0 是**最新一行**（视觉最底），越往上 index 越大。
                     val line = lines[lines.lastIndex - index]
@@ -1351,7 +1189,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
                 }
             }
             // 逐行进虚拟列表：行数再多也只排版可见的那些。
-            items(rows.size, key = { index -> "out-$index" }) { index ->
+            items(rows.size, key = { index -> "out-$index" }, contentType = { "tool-output" }) { index ->
                 Text(
                     text = rows[index],
                     style = monoStyle,

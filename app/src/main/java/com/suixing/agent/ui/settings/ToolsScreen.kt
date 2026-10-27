@@ -30,7 +30,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +56,7 @@ import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
 import com.suixing.agent.tools.TIER_SHELL
 import com.suixing.agent.tools.virtualTool
+import com.suixing.agent.ui.extension.SkillUrlImportDialog
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SegmentedPill
@@ -66,7 +67,6 @@ import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.extension.SkillViewDialog
 import com.suixing.agent.ui.extension.SkillsSection
 import com.suixing.agent.ui.theme.Tone
-import com.suixing.agent.ui.theme.color
 import kotlinx.coroutines.launch
 /** The tab strip's three faces, in the order the pills are drawn. */
 /**
@@ -293,7 +293,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                     onNotify = ::notify,
                 )
 
-                else -> PluginsTab(onNotify = ::notify)
+                else -> PluginsSection(onNotify = ::notify)
             }
         }
 
@@ -404,8 +404,8 @@ fun ToolsScreen(onBack: () -> Unit) {
 private fun ToolsTab() {
     // MCP tools appear and disappear with their server, so the snapshot is re-taken whenever
     // the MCP state changes; the builtin half never changes after Core.init.
-    val servers by Core.mcp.servers.collectAsState()
-    val capabilities by Core.capabilities.state.collectAsState()
+    val servers by Core.mcp.servers.collectAsStateWithLifecycle()
+    val capabilities by Core.capabilities.state.collectAsStateWithLifecycle()
     val tools = remember(servers) {
         // 引擎的虚拟工具不在注册表里（compress_context 在分发前被拦截，见 AgentEngine），
         // 但模型看得到它，所以页面上也要有这一行 —— 否则用户会觉得工具列表不全。

@@ -13,15 +13,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -59,7 +55,6 @@ import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.theme.Tone
-import com.suixing.agent.ui.theme.color
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -79,7 +74,7 @@ import kotlinx.coroutines.withContext
  * a package it merely warns about is shown with its warnings before the user agrees.
  */
 @Composable
-fun PluginsSection(onNotify: (String) -> Unit) {
+fun PluginsTab(onNotify: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var entries by remember { mutableStateOf<List<PluginEntry>>(emptyList()) }
@@ -576,72 +571,16 @@ private fun EnvDialog(
 }
 
 /**
- * 「从链接导入」: one URL in, one skill out.
- *
- * The dialog checks only the scheme, which is the same check the import itself makes, so a
- * mistyped address is answered here instead of after a download. Everything else — the
- * ceilings, the folder name, the switched-off default — belongs to `SkillStore.importUrl`.
- */
-@Composable
-internal fun SkillUrlImportDialog(
-    onDismiss: () -> Unit,
-    onImport: (String) -> Unit,
-) {
-    var url by remember { mutableStateOf("") }
-    val usable = url.trim().startsWith("http://") || url.trim().startsWith("https://")
-
-    SuixingDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("从链接导入技能") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    text = "填一个 SKILL.md 的地址（http 或 https）。导入后技能默认关闭，" +
-                        "看过内容再打开开关，它才会进入模型的技能目录。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    textStyle = MaterialTheme.typography.bodyMedium,
-                    value = url,
-                    onValueChange = { url = it },
-                    label = { Text("技能文件地址") },
-                    placeholder = { Text("https://example.com/SKILL.md") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                )
-                if (url.isNotBlank() && !usable) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "链接必须以 http:// 或 https:// 开头",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-        },
-        confirmButton = { scope ->
-            TextButton(onClick = { scope.closeThen { onImport(url.trim()) } }, enabled = usable) { Text("导入") }
-        },
-        dismissButton = { scope ->
-            TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") }
-        },
-    )
-}
-
-/**
  * 「插件」 tab: the idea, and now the packages themselves.
  *
  * The user's framing is DSH's: everything the app can do is something you can put in and take out.
- * The intro card explains that; [PluginsSection] below it is the actual store — installed packages,
+ * The intro card explains that; [PluginsTab] below it is the actual store — installed packages,
  * their level and risk, and a white-box view of what each would do. M1 installs and inspects only:
  * nothing here reaches the tool table or the prompt yet, which is why the detail view shows raw
  * templates rather than a friendly summary.
  */
 @Composable
-internal fun PluginsTab(onNotify: (String) -> Unit) {
+internal fun PluginsSection(onNotify: (String) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
@@ -656,7 +595,7 @@ internal fun PluginsTab(onNotify: (String) -> Unit) {
         item { PluginsIntroCard() }
         // The store draws its own empty state (the same words this tab used to show), so the list and
         // the "nothing here yet" case stay in one place instead of being decided twice.
-        item { PluginsSection(onNotify = onNotify) }
+        item { PluginsTab(onNotify = onNotify) }
     }
 }
 

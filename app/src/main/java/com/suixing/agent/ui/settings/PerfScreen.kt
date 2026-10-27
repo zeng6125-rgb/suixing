@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,7 +29,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.LiveMetrics
 import com.suixing.agent.data.LiveSampler
@@ -76,24 +76,6 @@ internal fun PerfScreen(onBack: () -> Unit) {
     }
     val health = remember(records) { PerfHealth.of(records) }
 
-    // 设备实时：采样器自己记着上一帧的读数，所以第一秒的 CPU 是「—」（没有可比的前一次）。
-    // **采样在 IO 线程**：一秒里要读 /proc/stat、/proc/self/status、PSS 与几个 sysfs 节点，全是
-    // 阻塞 IO，放主线程就是每秒卡一下。
-    // **页面不在前台就停**（[ProcessLifecycleOwner]）：协程随组合销毁只覆盖"离开这一页"，
-    // 覆盖不到"按了 home 键"—— 那之后还每秒读一遍 /proc 就纯属浪费电。
-    val sampler = remember { LiveSampler() }
-    var live by remember { mutableStateOf<LiveMetrics?>(null) }
-    LaunchedEffect(sampler) {
-        val owner = ProcessLifecycleOwner.get()
-        while (true) {
-            if (owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                val next = withContext(Dispatchers.IO) { sampler.sample() }
-                live = next
-            }
-            delay(1000)
-        }
-    }
-    val frame = rememberFrameStat()
 
     // #17 定位用：把 `pin.log` 的尾部搬进界面。
     //
@@ -111,7 +93,7 @@ internal fun PerfScreen(onBack: () -> Unit) {
                     ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
                 }.getOrNull().orEmpty()
                 val file = java.io.File(ctx.filesDir, "pin.log")
-                val body = if (!file.isFile) "" else file.readLines().takeLast(30).joinToString(NL_PERF)
+                val body = if (!file.isFile) "" else com.suixing.agent.data.readJobLog(file, tail = 30, since = 0)
                 if (body.isEmpty()) "" else "version=$version" + NL_PERF + body
             }.getOrDefault("")
         }
@@ -145,29 +127,7 @@ internal fun PerfScreen(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
-            item(key = "live") {
-                // 委派属性（by remember）不能智能转换，先落到局部变量；顺带保证这一帧读的是同一份采样。
-                val metrics = live
-                Column(Modifier.padding(vertical = 12.dp)) {
-                    Text("设备实时", style = MaterialTheme.typography.labelLarge)
-                    Spacer(Modifier.height(8.dp))
-                    MetricRow("CPU（本进程）", percentText(metrics?.processCpuPercent))
-                    MetricRow("CPU（整机）", percentText(metrics?.systemCpuPercent))
-                    MetricRow("GPU", gpuText(metrics))
-                    MetricRow("帧率", frame?.let { "${it.fps} fps · p90 ${it.p90Ms} ms" } ?: "采样中…")
-                    // PSS 的间隔读常量（见 LiveSampler.PSS_INTERVAL_SECONDS）：标签写死"5 秒"，
-                    // 而间隔以后一改就变成一句假话。
-                    MetricRow(
-                        "内存（PSS · ${LiveSampler.PSS_INTERVAL_SECONDS} 秒一采）",
-                        metrics?.pssMb?.let { "$it MB" } ?: "—",
-                    )
-                    val heap = metrics?.javaHeapMb
-                    val heapMax = metrics?.javaHeapMaxMb
-                    MetricRow("Java 堆", if (heap != null && heapMax != null) "$heap / $heapMax MB" else "—")
-                    MetricRow("线程", metrics?.threads?.toString() ?: "—")
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
+            item(key = "live") { DeviceMetrics() }
             item(key = "pinlog") {
                 Column(Modifier.padding(vertical = 12.dp)) {
                     Text("流式上翻痕迹（最近 30 行）", style = MaterialTheme.typography.labelLarge)
@@ -214,13 +174,52 @@ internal fun PerfScreen(onBack: () -> Unit) {
                     )
                 }
             } else {
-                items(records, key = { it.at.toString() + it.conversationId }) { record ->
+                items(records, contentType = { "perf-record" }) { record ->
                     RecordRow(record)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
             }
         }
     }
+}
+
+/** Sampling invalidates only this visible item; scrolling record rows does not sample the device. */
+@Composable
+private fun DeviceMetrics() {
+    val scheme = MaterialTheme.colorScheme
+    val sampler = remember { LiveSampler() }
+    val owner = LocalLifecycleOwner.current
+    var live by remember { mutableStateOf<LiveMetrics?>(null) }
+    LaunchedEffect(sampler, owner) {
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                live = withContext(Dispatchers.IO) { sampler.sample() }
+                delay(1000)
+            }
+        }
+    }
+    val frame = rememberFrameStat()
+    // 委派属性（by remember）不能智能转换，先落到局部变量；顺带保证这一帧读的是同一份采样。
+    val metrics = live
+    Column(Modifier.padding(vertical = 12.dp)) {
+        Text("设备实时", style = MaterialTheme.typography.labelLarge)
+        Spacer(Modifier.height(8.dp))
+        MetricRow("CPU（本进程）", percentText(metrics?.processCpuPercent))
+        MetricRow("CPU（整机）", percentText(metrics?.systemCpuPercent))
+        MetricRow("GPU", gpuText(metrics))
+        MetricRow("帧率", frame?.let { "${it.fps} fps · p90 ${it.p90Ms} ms" } ?: "采样中…")
+        // PSS 的间隔读常量（见 LiveSampler.PSS_INTERVAL_SECONDS）：标签写死"5 秒"，
+        // 而间隔以后一改就变成一句假话。
+        MetricRow(
+            "内存（PSS · ${LiveSampler.PSS_INTERVAL_SECONDS} 秒一采）",
+            metrics?.pssMb?.let { "$it MB" } ?: "—",
+        )
+        val heap = metrics?.javaHeapMb
+        val heapMax = metrics?.javaHeapMaxMb
+        MetricRow("Java 堆", if (heap != null && heapMax != null) "$heap / $heapMax MB" else "—")
+        MetricRow("线程", metrics?.threads?.toString() ?: "—")
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
 /** 0 在这里的含义是「没有采集到」，不是「测得为零」。 */
@@ -275,21 +274,20 @@ private data class FrameStat(val fps: Int, val p90Ms: Int)
 @Composable
 private fun rememberFrameStat(): FrameStat? {
     var stat by remember { mutableStateOf<FrameStat?>(null) }
-    LaunchedEffect(Unit) {
-        val choreographer = Choreographer.getInstance()
-        val intervals = ArrayDeque<Long>()
-        val owner = ProcessLifecycleOwner.get()
-        while (true) {
-            // **采一秒、停一秒**：逐帧 postFrameCallback 会让 Choreographer 一直出帧，页面开着就
-            // 等于自己把机器焐热、也把上面那两行 CPU 读数抬上去 —— 这页要量的正是这两样。
-            // 一秒窗口足够算 fps 与 p90；页面不在前台时整轮跳过。
-            if (owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+    val owner = LocalLifecycleOwner.current
+    LaunchedEffect(owner) {
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val choreographer = Choreographer.getInstance()
+            val intervals = ArrayDeque<Long>()
+            while (true) {
                 intervals.clear()
                 val until = System.nanoTime() + 1_000_000_000L
                 var last = 0L
                 while (System.nanoTime() < until) {
                     val now = suspendCancellableCoroutine<Long> { cont ->
-                        choreographer.postFrameCallback { cont.resume(it) }
+                        val callback = Choreographer.FrameCallback { if (cont.isActive) cont.resume(it) }
+                        cont.invokeOnCancellation { choreographer.removeFrameCallback(callback) }
+                        choreographer.postFrameCallback(callback)
                     }
                     if (last > 0L) {
                         intervals.addLast((now - last).coerceAtLeast(0L))
@@ -305,8 +303,8 @@ private fun rememberFrameStat(): FrameStat? {
                         p90Ms = (sorted[(sorted.size * 9) / 10] / 1_000_000L).toInt(),
                     )
                 }
+                delay(1000)
             }
-            delay(1000)
         }
     }
     return stat

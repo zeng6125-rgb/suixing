@@ -3,6 +3,8 @@ package com.suixing.agent.data
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -109,24 +111,28 @@ data class UsageSnapshot(
     companion object {
         const val SCHEMA_VERSION = 2
     }
-    val days: Map<String, TokenTally>
-        get() = merge { it.days }
-
-    val models: Map<String, TokenTally>
-        get() = merge { it.models }
-
-    val totals: TokenTally
-        get() = days.values.fold(TokenTally()) { acc, tally -> acc + tally }
-
-    /** Sums one map out of every chat, so the charts stay derived from the per-chat detail. */
-    private fun merge(pick: (ChatUsage) -> Map<String, TokenTally>): Map<String, TokenTally> {
-        val out = mutableMapOf<String, TokenTally>()
+    @kotlinx.serialization.Transient
+    private val aggregate: Lazy<UsageAggregate> = lazy {
+        val days = mutableMapOf<String, TokenTally>()
+        val models = mutableMapOf<String, TokenTally>()
         chats.values.forEach { usage ->
-            pick(usage).forEach { (key, tally) -> out[key] = (out[key] ?: TokenTally()) + tally }
+            usage.days.forEach { (key, tally) -> days[key] = (days[key] ?: TokenTally()) + tally }
+            usage.models.forEach { (key, tally) -> models[key] = (models[key] ?: TokenTally()) + tally }
         }
-        return out
+        UsageAggregate(days, models, days.values.fold(TokenTally()) { acc, tally -> acc + tally })
     }
+
+    val days: Map<String, TokenTally> get() = aggregate.value.days
+    val models: Map<String, TokenTally> get() = aggregate.value.models
+    val totals: TokenTally get() = aggregate.value.totals
+
 }
+
+private data class UsageAggregate(
+    val days: Map<String, TokenTally>,
+    val models: Map<String, TokenTally>,
+    val totals: TokenTally,
+)
 
 /**
  * Read-only roll-up of every chat's token usage, by day and by model. It never
@@ -134,6 +140,7 @@ data class UsageSnapshot(
  * conversation store stays the single source of truth.
  */
 class UsageStore(private val context: Context) {
+    private val refreshLock = Mutex()
     private val chatsDir: File get() = File(context.filesDir, "chats")
     private val cacheFile: File get() = File(context.filesDir, CACHE_FILE)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = true }
@@ -149,22 +156,24 @@ class UsageStore(private val context: Context) {
      * rewrites the cache. Safe to call on a timer or on screen open.
      */
     suspend fun refresh(): UsageSnapshot = withContext(Dispatchers.IO) {
-        val cache = readCache()
-        // **目录只扫一次**：原来 loadSlices 与这里各 listFiles 一遍同一个目录。
-        // 盘上仍有的会话（meta 在即算）：retainAll 的「确认删除」依据（issue #41 真问题 3）
-        val metaFiles = File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
-            ?: emptyArray()
-        val onDisk = metaFiles.mapTo(mutableSetOf()) { it.name.removeSuffix(META_SUFFIX) }
-        val slices = loadSlices(cache, metaFiles)
-        // 显式打上当前版本：cache 若刚被版本校验丢弃，这里就是"重建一次"的落点。
-        val next = accumulateSlices(cache, slices, onDiskIds = onDisk)
-            .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION)
-        snapshot = next
-        // **没有变化就不重写缓存**（优化清单 data-P2）：`writeCache` 会把整份快照
-        // prettyPrint 成 JSON 再落盘；定时刷新时绝大多数次扫描都没有新消息。
-        // 比较的是值相等（data class），结果与"总是写"完全一致 —— 只是少一次写盘。
-        if (next != cache) writeCache(next)
-        next
+        refreshLock.withLock {
+            val cache = readCache()
+            // **目录只扫一次**：原来 loadSlices 与这里各 listFiles 一遍同一个目录。
+            // 盘上仍有的会话（meta 在即算）：retainAll 的「确认删除」依据（issue #41 真问题 3）
+            val metaFiles = File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
+                ?: emptyArray()
+            val onDisk = metaFiles.mapTo(mutableSetOf()) { it.name.removeSuffix(META_SUFFIX) }
+            val slices = loadSlices(cache, metaFiles)
+            // 显式打上当前版本：cache 若刚被版本校验丢弃，这里就是"重建一次"的落点。
+            val next = accumulateSlices(cache, slices, onDiskIds = onDisk)
+                .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION)
+            // **没有变化就不重写缓存**（优化清单 data-P2）：`writeCache` 会把整份快照
+            // prettyPrint 成 JSON 再落盘；定时刷新时绝大多数次扫描都没有新消息。
+            // 比较的是值相等（data class），结果与"总是写"完全一致 —— 只是少一次写盘。
+            if (next != cache) writeCache(next)
+            snapshot = next
+            next
+        }
     }
 
     /** The most recent [limit] days with any usage, oldest first — chart order. */
@@ -224,11 +233,11 @@ class UsageStore(private val context: Context) {
         // longer parses. (It would only cost a full rescan of the transcripts, but there is no
         // reason to allow the window at all.)
         val temp = File(cacheFile.parentFile, "${cacheFile.name}.tmp")
-        temp.writeText(text)
-        if (!temp.renameTo(cacheFile)) {
-            runCatching { temp.delete() }
-            cacheFile.writeText(text)
+        java.io.FileOutputStream(temp).use {
+            it.write(text.toByteArray(Charsets.UTF_8))
+            it.fd.sync()
         }
+        java.nio.file.Files.move(temp.toPath(), cacheFile.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
     }
 
     private companion object {

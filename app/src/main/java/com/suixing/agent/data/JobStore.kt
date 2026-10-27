@@ -2,8 +2,6 @@ package com.suixing.agent.data
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.RandomAccessFile
@@ -46,7 +44,7 @@ data class JobStatus(
  */
 class JobStore(private val dir: File, private val scope: CoroutineScope) {
 
-    private class Job(val info: JobInfo, val process: Process) {
+    private class Job(val info: JobInfo, @Volatile var process: Process?) {
         @Volatile
         var exitCode: Int? = null
     }
@@ -76,12 +74,27 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
         )
         val job = Job(info, process)
         synchronized(lock) { jobs[id] = job }
-        // One watcher per job, on a scope of its own hanging off the app's: it exists to
-        // record the exit code, and it must outlive the run that started the job.
-        val jobScope = CoroutineScope(
-            scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]) + Dispatchers.IO,
-        )
-        jobScope.launch { job.exitCode = process.waitFor() }
+        // One IO watcher on the app scope outlives the run that started the process.
+        scope.launch(Dispatchers.IO) {
+            try {
+                job.exitCode = process.waitFor()
+            } finally {
+                runCatching { process.inputStream.close() }
+                runCatching { process.errorStream.close() }
+                runCatching { process.outputStream.close() }
+                job.process = null
+                synchronized(lock) {
+                    var completed = jobs.values.count { it.exitCode != null }
+                    val iterator = jobs.entries.iterator()
+                    while (completed > KEEP_LOGS && iterator.hasNext()) {
+                        if (iterator.next().value.exitCode != null) {
+                            iterator.remove()
+                            completed--
+                        }
+                    }
+                }
+            }
+        }
         return info
     }
 
@@ -133,9 +146,10 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
      */
     fun kill(id: String): Boolean {
         val job = synchronized(lock) { jobs[id] } ?: return false
-        if (!job.process.isAlive) return false
-        job.process.destroy()
-        if (!job.process.waitFor(2, TimeUnit.SECONDS)) job.process.destroyForcibly()
+        val process = job.process ?: return false
+        if (!process.isAlive) return false
+        process.destroy()
+        if (!process.waitFor(2, TimeUnit.SECONDS)) process.destroyForcibly()
         return true
     }
 

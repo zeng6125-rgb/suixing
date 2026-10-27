@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -23,10 +24,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -38,7 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,8 +77,8 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun CapabilityScreen(onBack: () -> Unit) {
-    val state by Core.capabilities.state.collectAsState()
-    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+    val state by Core.capabilities.state.collectAsStateWithLifecycle()
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val scope = rememberCoroutineScope()
     var probing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -121,40 +120,44 @@ fun CapabilityScreen(onBack: () -> Unit) {
         // 顶栏不带副标题（用户：「任何页都不要副标题」）；无副标题时标题在行内居中 ⇒
         // 与返回箭头中心天然重合（结构性对齐，不需要任何补偿）。
         PageTopBar(title = "能力", onBack = onBack)
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            CapabilityHero(state)
+            item(key = "capability-0", contentType = "capability-card") {
+                CapabilityHero(state)
+            }
 
-            notice?.let { text ->
-                Surface(
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+            if (notice != null) item(key = "capability-1", contentType = "capability-card") {
+                notice?.let { text ->
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
                     ) {
-                        Icon(
-                            ImageVector.vectorResource(R.drawable.ic_circle_alert),
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(text, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                ImageVector.vectorResource(R.drawable.ic_circle_alert),
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(text, style = MaterialTheme.typography.bodySmall)
+                        }
+                        }
+            }
             }
 
             // 自选档位：Hero 说的是「机器现在给到了哪一档」，这一块说的是「用户想要哪一档」。
             // 想要的档还没开出来时照样记下来，等它可用就生效。放在提示条之后，是为了让
             // 下面那些卡片触发的提示条留在原来的位置上。
-            CapabilityTierPicker(
+            item(key = "capability-2", contentType = "capability-card") {
+                CapabilityTierPicker(
                 preferred = settings.preferredCapability,
                 state = state,
                 settings = settings,
@@ -162,9 +165,11 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     scope.launch { Core.settings.update { it.copy(preferredCapability = key) } }
                 },
             )
+            }
 
             // 第一档不是「还没开的权限」，而是这个应用本身：装上就有，其余三档都是它的叠加。
-            CapabilityCard(
+            item(key = "capability-3", contentType = "capability-card") {
+                CapabilityCard(
                 title = "标准档（默认）",
                 icon = ImageVector.vectorResource(R.drawable.ic_bot),
                 summary = "装上就有，不需要任何授权",
@@ -174,8 +179,10 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 actionEnabled = false,
                 onAction = {},
             )
+            }
 
-            CapabilityCard(
+            item(key = "capability-4", contentType = "capability-card") {
+                CapabilityCard(
                 title = "无障碍",
                 icon = ImageVector.vectorResource(R.drawable.ic_pointer),
                 summary = "读屏、点击、滑动、输入文字、截图",
@@ -184,8 +191,10 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 actionLabel = if (state.accessibility) "打开设置" else "去开启",
                 onAction = { Core.capabilities.openAccessibilitySettings() },
             )
+            }
 
-            CapabilityCard(
+            item(key = "capability-5", contentType = "capability-card") {
+                CapabilityCard(
                 title = "Shizuku（ADB 级）",
                 icon = ImageVector.vectorResource(R.drawable.ic_terminal),
                 summary = "am / pm / input / dumpsys，读写 /sdcard 与 Android/data",
@@ -214,8 +223,10 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     }
                 },
             )
+            }
 
-            CapabilityCard(
+            item(key = "capability-6", contentType = "capability-card") {
+                CapabilityCard(
                 title = "Root",
                 icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
                 summary = "最高权限，可直接读写系统文件",
@@ -232,8 +243,10 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     }
                 },
             )
+            }
 
-            CapabilityCard(
+            item(key = "capability-7", contentType = "capability-card") {
+                CapabilityCard(
                 title = "悬浮窗控制台",
                 icon = ImageVector.vectorResource(R.drawable.ic_picture_in_picture_2),
                 summary = "agent 跑起来时，屏幕上有个能停止、能插话的悬浮球",
@@ -266,8 +279,10 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     )
                 },
             )
+            }
 
-            CapabilityCard(
+            item(key = "capability-8", contentType = "capability-card") {
+                CapabilityCard(
                 title = "后台运行",
                 icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
                 summary = "息屏或切到别的应用时，长任务与流式回答继续跑",
@@ -292,8 +307,10 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     }
                 },
             )
+            }
 
-            SuixingCard {
+            item(key = "capability-9", contentType = "capability-card") {
+                SuixingCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SoftIcon(ImageVector.vectorResource(R.drawable.ic_folder_cog), tint = MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.width(12.dp))
@@ -341,8 +358,10 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     }
                 }
             }
+            }
 
-            SectionCard(
+            item(key = "capability-10", contentType = "capability-card") {
+                SectionCard(
                 title = "这四档权限分别能做什么",
                 icon = ImageVector.vectorResource(R.drawable.ic_circle_question_mark),
                 subtitle = if (explainerOpen) "点右侧按钮收起" else "点右侧按钮展开",
@@ -368,8 +387,11 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     )
                 }
             }
+            }
 
-            Spacer(Modifier.height(10.dp))
+            item(key = "capability-11", contentType = "capability-card") {
+                Spacer(Modifier.height(10.dp))
+            }
         }
     }
 }

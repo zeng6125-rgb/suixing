@@ -535,7 +535,7 @@ private fun readPreview(file: File): String {
     if (file.length() > MAX_PREVIEW_BYTES) return "（文件超过 ${humanSize(MAX_PREVIEW_BYTES)}，不在预览范围内）"
     return runCatching {
         val bytes = file.readBytes()
-        if (bytes.take(4096).contains(0)) "（二进制文件）" else String(bytes, Charsets.UTF_8)
+        if ((0 until minOf(bytes.size, 4096)).any { bytes[it] == 0.toByte() }) "（二进制文件）" else String(bytes, Charsets.UTF_8)
     }.getOrElse { "（读取失败：${it.message ?: it::class.java.simpleName}）" }
 }
 

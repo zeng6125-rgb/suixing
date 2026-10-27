@@ -76,6 +76,7 @@ class SchedulerService : Service() {
 
     private suspend fun fire(id: String) {
         val schedule = Core.schedules.find(id) ?: return
+        getSystemService(NotificationManager::class.java)?.notify(REMINDER_ID, buildNotification(id))
         val question = StoredMessage(
             id = UUID.randomUUID().toString(),
             role = Roles.USER,
@@ -153,7 +154,7 @@ class SchedulerService : Service() {
     }
 
     private fun buildNotification(id: String): Notification {
-        val schedule: Schedule? = Core.schedules.find(id)
+        val schedule: Schedule? = Core.schedules.peek(id)
         val open = PendingIntent.getActivity(
             this,
             0,

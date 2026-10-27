@@ -115,8 +115,13 @@ class ScheduleStore(private val file: File) {
      * `read`/`write` non-suspending for their existing callers.
      */
     private val lock = Any()
+    @Volatile private var snapshot: List<Schedule>? = null
+
+    /** Notification construction must never cold-read JSON on the main thread. */
+    fun peek(id: String): Schedule? = snapshot?.firstOrNull { it.id == id }
 
     fun read(): List<Schedule> = synchronized(lock) {
+        snapshot?.let { return@synchronized it }
         if (!file.exists()) {
             emptyList()
         } else {
@@ -126,7 +131,7 @@ class ScheduleStore(private val file: File) {
                 file.renameTo(File(file.parentFile, "schedules.corrupt.json"))
                 emptyList()
             }
-        }
+        }.also { snapshot = it }
     }
 
     fun write(items: List<Schedule>): List<Schedule> = synchronized(lock) {
@@ -143,7 +148,7 @@ class ScheduleStore(private val file: File) {
                 temp.delete()
             }
         }
-        items
+        items.toList().also { snapshot = it }
     }
 
     fun find(id: String): Schedule? = read().firstOrNull { it.id == id }

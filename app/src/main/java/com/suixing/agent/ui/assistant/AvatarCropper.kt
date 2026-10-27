@@ -12,11 +12,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -25,7 +23,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,8 +44,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.suixing.agent.R
 import com.suixing.agent.data.AvatarCropRect
 import com.suixing.agent.data.avatarCropRect
@@ -103,7 +98,6 @@ fun AvatarCropper(
                 Box(Modifier.fillMaxSize()) {
                 // 1) 整张图，居中、可平移缩放。requiredSize 而不是 size：它故意比框大，size 会被
                 //    父约束夹住、缩放就失效了。
-                val displayScale = baseScale * zoom
                 Image(
                     bitmap = source.asImageBitmap(),
                     contentDescription = null,
@@ -111,10 +105,12 @@ fun AvatarCropper(
                     modifier = Modifier
                         .align(Alignment.Center)
                         .requiredSize(
-                            with(density) { (source.width * displayScale).toDp() },
-                            with(density) { (source.height * displayScale).toDp() },
+                            with(density) { (source.width * baseScale).toDp() },
+                            with(density) { (source.height * baseScale).toDp() },
                         )
                         .graphicsLayer {
+                            scaleX = zoom
+                            scaleY = zoom
                             translationX = offset.x
                             translationY = offset.y
                         },

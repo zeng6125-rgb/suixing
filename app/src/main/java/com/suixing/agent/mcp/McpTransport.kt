@@ -133,6 +133,9 @@ class StdioTransport(
                 running.destroy()
                 if (!running.waitFor(PROCESS_GRACE_MS, TimeUnit.MILLISECONDS)) running.destroyForcibly()
             }
+            runCatching { running.inputStream.close() }
+            runCatching { running.errorStream.close() }
+            runCatching { running.outputStream.close() }
         }
     }
 
@@ -153,17 +156,23 @@ class StdioTransport(
 
     private fun readLoop(started: Process) {
         try {
-            val reader = BufferedReader(InputStreamReader(started.inputStream, Charsets.UTF_8))
+            BufferedReader(InputStreamReader(started.inputStream, Charsets.UTF_8)).use { reader ->
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isBlank()) continue
                 val message = try {
                     McpProtocol.json.parseToJsonElement(line).jsonObject
                 } catch (_: Exception) {
+                    // Preserve the existing tolerance for ordinary stdout startup messages.
+                    // A line shaped as a JSON object is a broken protocol response.
+                    if (line.trimStart().startsWith('{')) {
+                        failAll("MCP 服务器返回了无效 JSON：$label")
+                    }
                     continue
                 }
                 val id = (message["id"] as? JsonPrimitive)?.content?.toLongOrNull() ?: continue
                 pending.remove(id)?.complete(message)
+            }
             }
         } catch (_: Exception) {
             // The stream ends when the process dies; the finally below reports it.
@@ -174,7 +183,7 @@ class StdioTransport(
 
     private fun errorLoop(started: Process) {
         try {
-            val reader = BufferedReader(InputStreamReader(started.errorStream, Charsets.UTF_8))
+            BufferedReader(InputStreamReader(started.errorStream, Charsets.UTF_8)).use { reader ->
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isBlank()) continue
@@ -182,6 +191,7 @@ class StdioTransport(
                     stderrTail.addLast(line)
                     while (stderrTail.size > STDERR_KEEP) stderrTail.removeFirst()
                 }
+            }
             }
         } catch (_: Exception) {
             // Diagnostics only.
@@ -238,6 +248,7 @@ class HttpTransport(
     }
 
     override fun close() {
+        client.dispatcher.cancelAll()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
     }

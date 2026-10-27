@@ -54,6 +54,10 @@ internal class DeltaBuffer {
     fun peek(chatId: String): Pair<String, String> =
         (texts[chatId]?.toString().orEmpty()) to (reasonings[chatId]?.toString().orEmpty())
 
+    /** Change detection without copying a potentially long unpublished tail. Caller holds [locked]. */
+    fun sizes(chatId: String): Pair<Int, Int> =
+        (texts[chatId]?.length ?: 0) to (reasonings[chatId]?.length ?: 0)
+
     /** 取走并清空这一份。**调用方必须已在 [locked] 内。** */
     fun take(chatId: String): Pair<String, String> {
         val text = texts.remove(chatId)?.toString().orEmpty()

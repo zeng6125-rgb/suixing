@@ -410,8 +410,9 @@ class FileTools(private val context: Context) : ToolGroup() {
             val query = args.str("query").orEmpty()
             if (query.isEmpty()) return@withContext ToolResult.failure("缺少参数 query")
             if (!root.isDirectory) return@withContext ToolResult.failure("起始目录无效：" + root.absolutePath)
+            val caseSensitive = args.bool("case_sensitive", false)
             val regex = if (args.bool("regex", false)) {
-                runCatching { Regex(query) }.getOrElse {
+                runCatching { searchPattern(query, caseSensitive) }.getOrElse {
                     return@withContext ToolResult.failure("正则表达式无效：" + (it.message ?: ""))
                 }
             } else {
@@ -423,7 +424,6 @@ class FileTools(private val context: Context) : ToolGroup() {
             // 以前要再调一次 read_file —— 那是一次完整的 LLM 往返（几秒）。
             // 输出格式与 `grep -C` 一致（':' 匹配行，'-' 上下文），模型训练过这种格式。
             val context = args.int("context", 0).coerceIn(0, 5)
-            val caseSensitive = args.bool("case_sensitive", false)
             val maxFiles = args.int("max_files", 400).coerceIn(1, 5000)
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
@@ -436,12 +436,11 @@ class FileTools(private val context: Context) : ToolGroup() {
                 if (file.length() > MAX_SEARCH_BYTES) return@walk
                 scanned++
                 val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@walk
-                if (bytes.take(2048).any { it == 0.toByte() }) return@walk
+                if ((0 until minOf(2048, bytes.size)).any { bytes[it] == 0.toByte() }) return@walk
                 val lines = bytes.toString(Charsets.UTF_8).lines()
                 var lastEmitted = -1
                 for ((index, line) in lines.withIndex()) {
-                    val matched = if (regex != null) regex.containsMatchIn(line)
-                    else line.contains(query, ignoreCase = caseSensitive)
+                    val matched = searchLineMatches(line, query, caseSensitive, regex)
                     if (!matched) continue
                     if (filesOnly) {
                         hitFiles.add(file.absolutePath)

@@ -36,6 +36,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,10 +52,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.withContext
-import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.roundToInt
 
 /**
  * What the user has typed but not sent, per conversation. A single global field is
@@ -386,8 +385,7 @@ class ChatViewModel : ViewModel() {
     private val _state = MutableStateFlow(ChatUiState())
 
     /** The message list the revision below was stamped for; touched only by the collector. */
-    private var lastPublishedMessages: List<StoredMessage>? = null
-    private var messagesRevision = 0L
+    private val revisionStamp = MessageRevisionStamp()
 
     /**
      * What the screen collects.
@@ -405,15 +403,16 @@ class ChatViewModel : ViewModel() {
      * other time.
      */
     val state: StateFlow<ChatUiState> = _state
-        .map { snapshot ->
-            if (snapshot.messages === lastPublishedMessages) {
-                snapshot
-            } else {
-                lastPublishedMessages = snapshot.messages
-                snapshot.copy(messagesRevision = ++messagesRevision)
-            }
-        }
+        .map(revisionStamp::stamp)
         .stateIn(viewModelScope, SharingStarted.Eagerly, _state.value)
+
+    internal val screenState: StateFlow<ChatUiState> = state
+        .map { it.screenSnapshot() }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, _state.value.screenSnapshot())
+
+    internal val liveContent: Flow<LiveContent> = _state.map { it.liveContent() }.distinctUntilChanged()
+    internal fun currentLiveContent(): LiveContent = _state.value.liveContent()
 
     /**
      * 流式统计，**独立于 [state]**（审计 3§1 Top1）：引擎的 stats ticker 每 120ms 发一次
@@ -430,7 +429,7 @@ class ChatViewModel : ViewModel() {
      * 不收 [liveStats]。
      */
     val requestStats: StateFlow<StreamStats?> = _liveStats
-        .map { it?.copy(elapsedMs = 0L) }
+        .map { it?.copy(tokensOut = 0, thinkingTokens = 0, elapsedMs = 0L, tokPerSec = 0f) }
         .distinctUntilChanged()
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null)
 
@@ -445,48 +444,9 @@ class ChatViewModel : ViewModel() {
 
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
 
-    /**
-     * What the memo below is keyed on: everything that can move the tally.
-     *
-     * The last row is named by its id and its three counts rather than by the object itself: a
-     * message can carry a screenshot as base64, and comparing two of those on every publish
-     * would cost more than the walk this memo exists to avoid. The counts are in the key so a
-     * row whose usage was written after it first appeared is still caught.
-     */
-    private data class StatsKey(
-        /**
-         * Which conversation the tally belongs to.
-         *
-         * In the key because two conversations can otherwise agree on a shape — two empty ones
-         * always do, and a switch between them would then answer the new chat with the old one's
-         * numbers (or with the empty tally a moment before its own rows load).
-         */
-        val chat: String,
-        val rows: Int,
-        val lastId: String?,
-        val lastPrompt: Int,
-        val lastCompletion: Int,
-        val lastCached: Int,
-        val window: Int,
-    )
-
-    /** The tally and the key it was built under; see [sessionStats]. */
-    private var statsKey: StatsKey? = null
-    private var statsValue: SessionStats? = null
-
-    /**
-     * The on-screen conversation's tally for the drawer. distinctUntilChanged matters: the
-     * state itself changes on every token, while these numbers change once a reply lands.
-     *
-     * Memoised, because that is the whole cost of this flow. `SessionStats.of` walks the whole
-     * conversation six times (four sums and two counts), and the state it is built from
-     * republishes twelve times a second while an answer streams — for a long chat that walk ran
-     * on the main thread on every one of those publishes, for numbers that only move when a row
-     * lands. A row's counts are written before it is emitted (`withUsage` in the engine) and
-     * nothing rewrites them afterwards, so the last row plus the row count is enough to know the
-     * tally is unchanged.
-     */
-    val sessionStats: Flow<SessionStats?> = combine(state, Core.settings.flow) { snapshot, settings ->
+    /** Shared per-chat totals; token deltas never enter this subscription. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val sessionStats: Flow<SessionStats?> = combine(screenState, Core.settings.flow, conversations) { snapshot, settings, chats ->
         // The window of the model this conversation would send with, not the app-wide
         // default's: a chat that picked a smaller-window endpoint must not read its own
         // usage against the wrong denominator.
@@ -495,7 +455,7 @@ class ChatViewModel : ViewModel() {
         val window = settings.contextWindowFor(model)
         // **缓存键用盘上的条数/更新时间，不用窗口的条数**：窗口会随「加载更早」变，
         // 而整个会话的总账不变。
-        val meta = Core.chats.conversations.value.firstOrNull { it.id == snapshot.conversationId }
+        val meta = chats.firstOrNull { it.id == snapshot.conversationId }
         StatsRequest(
             chat = snapshot.conversationId,
             key = "${meta?.messageCount ?: 0}:${meta?.updatedAt ?: 0}",
@@ -511,6 +471,7 @@ class ChatViewModel : ViewModel() {
             } ?: return@mapLatest null
             SessionStats.of(totals, request.window)
         }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** The per-conversation run-state watcher; replaced whenever the display switches. */
     private var stateWatcher: Job? = null
@@ -815,30 +776,32 @@ class ChatViewModel : ViewModel() {
     private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private val _drafts = MutableStateFlow<Map<String, Draft>>(emptyMap())
+    internal val drafts: StateFlow<Map<String, Draft>> = _drafts.asStateFlow()
+    internal fun draftFor(chatId: String): Draft = _drafts.value[chatId] ?: Draft()
 
     /**
      * The decoded attachment per conversation. The draft keeps only its uri and name
      * (what a restore can mean); the decoded bitmap lives here for the session, so a
      * chip keeps its thumbnail across a drawer switch without re-decoding.
      */
-    private val attachmentCache = mutableMapOf<String, MutableList<Attachment>>()
+    private val attachmentCache = ConcurrentHashMap<String, List<Attachment>>()
 
     /** 追加一张图/一个文件到这条会话的附件列（多附件：不再覆盖上一张）。 */
     fun addAttachment(chatId: String, attachment: Attachment) {
-        attachmentCache.getOrPut(chatId) { mutableListOf() } += attachment
+        attachmentCache.compute(chatId) { _, current -> current.orEmpty() + attachment }
     }
 
     /** 删掉附件列里第 [index] 个；删空即移除整条缓存。 */
     fun removeAttachmentAt(chatId: String, index: Int) {
-        val list = attachmentCache[chatId] ?: return
-        if (index !in list.indices) return
-        list.removeAt(index)
-        if (list.isEmpty()) attachmentCache.remove(chatId)
+        attachmentCache.computeIfPresent(chatId) { _, current ->
+            if (index !in current.indices) current
+            else current.filterIndexed { at, _ -> at != index }.takeIf { it.isNotEmpty() }
+        }
     }
 
     fun cacheAttachment(chatId: String, attachment: Attachment?) {
         if (attachment == null) attachmentCache.remove(chatId)
-        else attachmentCache[chatId] = mutableListOf(attachment)
+        else attachmentCache[chatId] = listOf(attachment)
     }
 
     fun attachmentFor(chatId: String): Attachment? = attachmentCache[chatId]?.firstOrNull()
@@ -848,7 +811,7 @@ class ChatViewModel : ViewModel() {
 
     /** Writes [draft] as the conversation's unsent text; the display follows at once. */
     fun onDraftChange(chatId: String, draft: Draft) {
-        _drafts.value = _drafts.value + (chatId to draft)
+        _drafts.update { it + (chatId to draft) }
     }
 
     /**
@@ -860,13 +823,14 @@ class ChatViewModel : ViewModel() {
      * `removeAt(index)` 撞 `IndexOutOfBoundsException`（主线程崩）。
      */
     private fun backfillDraftText(chatId: String, text: String) {
-        val current = _drafts.value[chatId] ?: Draft()
-        _drafts.value = _drafts.value + (chatId to current.copy(text = text))
+        _drafts.update { drafts ->
+            drafts + (chatId to (drafts[chatId] ?: Draft()).copy(text = text))
+        }
     }
 
     /** Sending empties the conversation's draft; nothing else touches it. */
     fun clearDraft(chatId: String) {
-        _drafts.value = _drafts.value + (chatId to Draft())
+        _drafts.update { it - chatId }
         attachmentCache.remove(chatId)
         // And straight onto the screen when that chat is the one being shown. The collector above
         // would do it a hop later, and a field that keeps its text for even one frame after the user
@@ -877,21 +841,6 @@ class ChatViewModel : ViewModel() {
     }
 
     init {
-        // Adopted before the first frame when this process already knows which conversation
-        // the user was in — that is the case where nothing needs reading, so nothing may
-        // flash. With no memory of it the coroutine below decides, and until then the screen
-        // shows the skeleton rather than a conversation the user is not in. The persona is
-        // left blank on purpose: an empty id means "follow the app-wide default", which is
-        // exactly what a fresh state wants, and resolving it needs a suspend call this
-        // constructor cannot make.
-        // **不再用 cached 直接当正文**（#30）：`load()` 现在只读 meta，`cached.messages` 是空的。
-        // 这里只把"在哪个会话"定下来（conversationId/title），正文交给下面那个 IO 协程的
-        // `readTail()` —— 它会读出最近 N 轮。`loading = true` 保留，否则首帧会闪一个空会话。
-        lastOpenedId?.let { id ->
-            Core.chats.conversations.value.firstOrNull { it.id == id }?.let { cached ->
-                _state.value = cached.toUiState("").copy(loading = true)
-            }
-        }
         // The engine keys its runs by conversation, so this screen subscribes to the
         // state of whichever conversation is on display: a run elsewhere neither
         // locks this screen nor narrates itself into its status line.
@@ -1012,7 +961,10 @@ class ChatViewModel : ViewModel() {
         // The draft follows the displayed conversation: switching restores that
         // conversation's own unsent text without any action at the switch site.
         viewModelScope.launch {
-            combine(state.map { it.conversationId }, _drafts) { id, all -> id to (all[id] ?: Draft()) }
+            combine(state.map { it.conversationId }, _drafts) { id, all ->
+                // Text has its own composer subscription; attachment changes still update the screen.
+                id to (all[id] ?: Draft()).copy(text = "")
+            }
                 .distinctUntilChanged()
                 .collect { (id, draft) ->
                     if (_state.value.conversationId == id && _state.value.draft != draft) {
@@ -1022,17 +974,8 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Reads one more page of older turns from disk and prepends it to the messages on screen.
-     *
-     * #30 made opening a chat read only the tail, so "加载更早" can no longer just raise a number in
-     * memory — the older messages are not in the list at all. This walks the log backwards from the
-     * current window and returns true when something was actually added (the screen then re-anchors
-     * on the item it was reading, which it already does on every list change).
-     *
-     * Returns false when there is nothing older, or the chat has no store copy yet.
-     */
-    fun loadEarlier(turns: Int = Core.chats.openTurns()): Boolean {
+    /** Returns whether a page request was accepted; [onComplete] reports the actual merge. */
+    fun loadEarlier(turns: Int = Core.chats.openTurns(), onComplete: (Boolean) -> Unit = {}): Boolean {
         val chatId = _state.value.conversationId
         if (chatId.isEmpty()) return false
         val shown = _state.value.messages
@@ -1040,50 +983,62 @@ class ChatViewModel : ViewModel() {
         // 已经读到文件开头就别再读了。
         if (_state.value.messageCount in 1..shown.size) return false
         viewModelScope.launch {
-            // **优先用字节偏移**（O(窗口)），只有偏移未知/代次不匹配时才退回按 id 扫全文件。
-            val start = windowStarts[chatId]
-            val window = if (start != null) {
-                Core.chats.readEarlier(chatId, start.second, turns, expectGen = start.first)
-            } else {
-                null
-            }
-            // 回退路径也把窗口位置记下来：编辑重答会换 gen（旧偏移失效），
-            // 不补种的话之后每次翻页都要重扫整个日志（评审 S1）。
-            val fallback = if (window == null) {
-                Core.chats.readEarlierBefore(chatId, shown.first().id, turns)
-            } else {
-                null
-            }
-            val older = window?.messages ?: fallback?.messages ?: return@launch
-            if (window != null && start != null) {
-                windowStarts[chatId] = start.first to window.startOffset
-            } else if (fallback != null) {
-                windowStarts[chatId] = fallback.gen to fallback.startOffset
-            }
-            if (older.isEmpty()) return@launch
-            if (_state.value.conversationId != chatId) return@launch
-            // **合并后的列表未必都在盘上**（评审 13 的 H1）：`older` 来自盘，但 `current.messages`
-            // 可能含"只在内存"的消息（保存失败 / 刚合并进来的恢复消息）。无条件标"已落盘"
-            // 会给后面删草稿开一条新路 —— 而草稿恰恰可能是那份内容的唯一副本。
-            // 只有当**当前这份列表本身就是那份"确认已落盘"的缓存对象**时，合并结果才全部可证在盘上。
-            // **`===` 是这条判据的一部分**：只有"当前列表就是缓存里那个对象"时，
-            // 缓存条目的 `diskBacked` 才在描述这份内容。若将来有人在这里插 `.toList()`/`filter`，
-            // 身份会静默失配 ⇒ 退化成"不敢清草稿"（方向安全，但没人会知道）。
-            val baseWasDiskBacked = cacheIsDiskBacked(chatId) &&
-                cachedMessages(chatId) === _state.value.messages
-            var mergedOut: List<StoredMessage>? = null
-            _state.update { current ->
-                // 双保险：只接在**同一个**头部之前，避免期间列表被替换过。
-                if (current.messages.firstOrNull()?.id != shown.first().id) {
-                    current
+            var added = false
+            try {
+                // **优先用字节偏移**（O(窗口)），只有偏移未知/代次不匹配时才退回按 id 扫全文件。
+                val start = windowStarts[chatId]
+                val window = if (start != null) {
+                    Core.chats.readEarlier(chatId, start.second, turns, expectGen = start.first)
                 } else {
-                    val merged = older + current.messages
-                    mergedOut = merged
-                    current.copy(messages = merged)
+                    null
                 }
+                // 回退路径也把窗口位置记下来：编辑重答会换 gen（旧偏移失效），
+                // 不补种的话之后每次翻页都要重扫整个日志（评审 S1）。
+                val fallback = if (window == null) {
+                    Core.chats.readEarlierBefore(chatId, shown.first().id, turns)
+                } else {
+                    null
+                }
+                val older = window?.messages ?: fallback?.messages ?: return@launch
+                if (window != null && start != null) {
+                    windowStarts[chatId] = start.first to window.startOffset
+                } else if (fallback != null) {
+                    windowStarts[chatId] = fallback.gen to fallback.startOffset
+                }
+                if (older.isEmpty()) return@launch
+                if (_state.value.conversationId != chatId) return@launch
+                // **合并后的列表未必都在盘上**（评审 13 的 H1）：`older` 来自盘，但 `current.messages`
+                // 可能含"只在内存"的消息（保存失败 / 刚合并进来的恢复消息）。无条件标"已落盘"
+                // 会给后面删草稿开一条新路 —— 而草稿恰恰可能是那份内容的唯一副本。
+                // 只有当**当前这份列表本身就是那份"确认已落盘"的缓存对象**时，合并结果才全部可证在盘上。
+                // **`===` 是这条判据的一部分**：只有"当前列表就是缓存里那个对象"时，
+                // 缓存条目的 `diskBacked` 才在描述这份内容。若将来有人在这里插 `.toList()`/`filter`，
+                // 身份会静默失配 ⇒ 退化成"不敢清草稿"（方向安全，但没人会知道）。
+                val baseWasDiskBacked = cacheIsDiskBacked(chatId) &&
+                    cachedMessages(chatId) === _state.value.messages
+                var mergedOut: List<StoredMessage>? = null
+                _state.update { current ->
+                    // 双保险：只接在**同一个**头部之前，避免期间列表被替换过。
+                    if (current.conversationId != chatId || current.messages.firstOrNull()?.id != shown.first().id) {
+                        current
+                    } else {
+                        val merged = older + current.messages
+                        mergedOut = merged
+                        current.copy(messages = merged)
+                    }
+                }
+                // 副作用放到 update 之外：`MutableStateFlow.update` 是 CAS 重试循环，lambda 可能被重跑。
+                mergedOut?.let {
+                    cacheMessages(chatId, it, diskBacked = baseWasDiskBacked)
+                    added = true
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Log.w(TAG, "earlier page unavailable for $chatId", failure)
+            } finally {
+                onComplete(added)
             }
-            // 副作用放到 update 之外：`MutableStateFlow.update` 是 CAS 重试循环，lambda 可能被重跑。
-            mergedOut?.let { cacheMessages(chatId, it, diskBacked = baseWasDiskBacked) }
         }
         return true
     }
@@ -1104,12 +1059,15 @@ class ChatViewModel : ViewModel() {
         val snapshot = _state.value
         val inMemory = if (snapshot.conversationId == chatId) snapshot.messages.size else 0
         val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }?.messageCount ?: return
-        val hasDraft = Core.chats.hasLiveDraft(chatId)
+        val hasDraft = Core.chats.hasLiveDraft(chatId) ||
+            !_drafts.value[chatId]?.text.isNullOrBlank() || attachmentsFor(chatId).isNotEmpty()
         if (!shouldDiscardEmptyChat(stored, inMemory, snapshot.runningHere, hasDraft)) return
-        runCatching { Core.chats.delete(chatId) }
+        runCatching { Core.chats.delete(chatId) }.onSuccess { forgetConversation(chatId) }
     }
 
     fun newConversation() {
+        openingJob?.cancel()
+        openingJob = null
         // 上一轮的实时统计挂在这个 ViewModel 上、全局共享：不清掉的话，新建的空会话在第一次
         // stats tick 之前仍会显示**上一个会话**的圆环读数（用户实测：新会话显示 40% / 409.5K）。
         _liveStats.value = null
@@ -1159,13 +1117,19 @@ class ChatViewModel : ViewModel() {
     /** 排队中的「记住上次打开」写盘（debounce 用）。 */
     private var lastOpenedJob: Job? = null
 
+    /** Only the latest cold-open read can occupy the repository queue. */
+    private var openingJob: Job? = null
+
     fun openConversation(conversation: Conversation) {
+        openingJob?.cancel()
+        openingJob = null
         // 与 newConversation 同理：切过去的会话在它自己第一条 stats 到达前，不能顶着上一个
         // 会话的读数（圆环 / 三块占比都读这份）。
         _liveStats.value = null
         // 切走时把"什么都没发过的空会话"回收掉：判据在 shouldDiscardEmptyChat（无消息 /
         // 无草稿 / 无 run 才删），有草稿的会保留 —— 用户打了字没发那是有内容的。
-        viewModelScope.launch { discardIfUntouched(_state.value.conversationId) }
+        val leavingId = _state.value.conversationId
+        viewModelScope.launch { discardIfUntouched(leavingId) }
         // Anything the conversation on screen was still holding is published before the
         // display moves: a buffered tail would otherwise land in the conversation being
         // opened, or be lost with the one being left.
@@ -1250,7 +1214,7 @@ class ChatViewModel : ViewModel() {
         //
         // 条件都是"这个会话还在屏幕上"：用户可能已经切走，那就别再写回状态去覆盖新会话。
         // 只有**没命中缓存**才读盘（#35：命中时上面已经带正文建好状态了）。
-        if (cached == null) viewModelScope.launch {
+        if (cached == null && live == null) openingJob = viewModelScope.launch {
             val opened = Core.chats.readTailWindow(conversation.id)?.let { (conversationTail, startOffset, gen) ->
                 windowStarts[conversation.id] = gen to startOffset
                 conversationTail
@@ -1271,6 +1235,8 @@ class ChatViewModel : ViewModel() {
             } else if (_state.value.conversationId == conversation.id) {
                 _state.update { it.copy(loading = false) }
             }
+            // Recovery can write data, so only the read phase is superseded by another tap.
+            openingJob = null
             // **尾部读完再合并草稿**（评审 10 的 S4）：这两件事原来各起一个协程，
             // 而草稿是小文件、往往先读完 ⇒ `mergeLiveDraft` 手里 `messages` 还是空
             // ⇒ 两个判重分支都看不到那条消息 ⇒ 又补一条（重复）。串起来之后才真正生效。
@@ -1435,6 +1401,8 @@ class ChatViewModel : ViewModel() {
      * 会话数量只增不减 ⇒ 这些残留会一直堆着。
      */
     private fun forgetConversation(chatId: String) {
+        clearSteers(chatId)
+        _drafts.update { it - chatId }
         pendingTurns.remove(chatId)
         todoBoards.remove(chatId)
         lastErrors.remove(chatId)
@@ -1567,11 +1535,12 @@ class ChatViewModel : ViewModel() {
     fun send(text: String, imagesBase64: List<String> = emptyList()): Boolean {
         val body = text.trim()
         if (body.isEmpty() && imagesBase64.isEmpty()) return false
-        if (_state.value.conversationId.isEmpty()) return false
+        val chatId = _state.value.conversationId
+        if (chatId.isEmpty()) return false
         // No global lock: the engine refuses a second run in the same conversation
         // (two runs would interleave into one transcript), and every other
         // conversation is free to start its own run right now.
-        if (Core.engine.isRunning(_state.value.conversationId)) return false
+        if (Core.engine.isRunning(chatId)) return false
 
         val user = StoredMessage(
             id = UUID.randomUUID().toString(),
@@ -1600,7 +1569,6 @@ class ChatViewModel : ViewModel() {
         if (_state.value.messageCount <= shownMessages.size) {
             start(fresh, shownMessages)
         } else {
-            val chatId = _state.value.conversationId
             viewModelScope.launch {
                 // 读盘失败不能让发送带崩（`viewModelScope` 里未捕获的异常会打到主线程）。
                 //
@@ -1629,7 +1597,7 @@ class ChatViewModel : ViewModel() {
                 start(fresh, history)
             }
         }
-        clearDraft(_state.value.conversationId)
+        clearDraft(chatId)
         return true
     }
 
@@ -1650,7 +1618,20 @@ class ChatViewModel : ViewModel() {
                 error = null,
             )
         }
-        start(fresh, prompt)
+        if (snapshot.messageCount <= snapshot.messages.size) {
+            start(fresh, prompt)
+        } else {
+            viewModelScope.launch {
+                val wire = runCatching { Core.chats.readWire(snapshot.conversationId) }.getOrNull()
+                if (_state.value.conversationId != snapshot.conversationId ||
+                    Core.engine.isRunning(snapshot.conversationId)
+                ) return@launch
+                val fullPrompt = wire?.takeIf { it.isNotEmpty() }?.let {
+                    Transcript.withoutLastAnswer(Transcript.active(it, snapshot.activeRuns))
+                } ?: prompt
+                start(fresh, fullPrompt)
+            }
+        }
     }
 
     /** Draws another candidate answer for [turnId]; the transcript itself is untouched. */
@@ -1673,7 +1654,8 @@ class ChatViewModel : ViewModel() {
         val body = text.trim()
         if (body.isEmpty()) return
         editDisplayed { snapshot ->
-            val index = snapshot.messages.indexOfFirst { it.id == id }
+            val positions = snapshot.messages.firstPositions()
+            val index = positions[id] ?: -1
             snapshot.copy(
                 messages = snapshot.messages.map { message ->
                     if (message.id == id) message.copy(text = body, edited = true) else message
@@ -1686,7 +1668,7 @@ class ChatViewModel : ViewModel() {
                     snapshot.checkpoints
                 } else {
                     snapshot.checkpoints.filterNot { checkpoint ->
-                        snapshot.messages.indexOfFirst { it.id == checkpoint.toMessageId } >= index
+                        (positions[checkpoint.toMessageId] ?: -1) >= index
                     }
                 },
             )
@@ -1730,10 +1712,11 @@ class ChatViewModel : ViewModel() {
             // **被改的那条若落在某个压缩区间里，那个摘要就已经在说谎**（评审 M-4）：
             // `readWire` 只从最后一个 checkpoint 之后开始发，模型会拿到旧摘要而不是改后的句子。
             // 所以丢掉"覆盖它"的那个 checkpoint 以及**之后的所有** checkpoint（历史改从更早处回放）。
+            val positions = full.firstPositions()
             val safeCheckpoints = snapshot.checkpoints
                 .takeWhile { cp ->
-                    val from = full.indexOfFirst { it.id == cp.fromMessageId }.takeIf { it >= 0 } ?: Int.MAX_VALUE
-                    val to = full.indexOfFirst { it.id == cp.toMessageId }.takeIf { it >= 0 } ?: Int.MAX_VALUE
+                    val from = positions[cp.fromMessageId] ?: Int.MAX_VALUE
+                    val to = positions[cp.toMessageId] ?: Int.MAX_VALUE
                     at !in from..to
                 }
             // 先落盘：`fullHistory = true` 是诚实声明（手里确实是整份），护栏据此放行。
@@ -1781,12 +1764,13 @@ class ChatViewModel : ViewModel() {
                 }
                 return@launch
             }
+            val keptIds = kept.mapTo(HashSet()) { it.id }
             // 写成了：更新屏幕，然后**用全文版**起这一轮（模型才看得到改后的句子）。
             _state.update {
                 if (it.conversationId != snapshot.conversationId) it
                 else it.copy(
                     messages = kept,
-                    activeRuns = it.activeRuns.filterKeys { key -> kept.any { row -> row.id == key } } + (id to fresh),
+                    activeRuns = it.activeRuns.filterKeys { key -> key in keptIds } + (id to fresh),
                     streaming = "",
                     reasoning = "",
                     status = "正在重新回答…",
@@ -2022,7 +2006,10 @@ class ChatViewModel : ViewModel() {
         if (!tryBeginDrain(chatId)) return
         try {
             val next = takeHeadPendingTurn(chatId) ?: return
-            if (_state.value.conversationId != chatId) return
+            if (_state.value.conversationId != chatId) {
+                restoreHeadPendingTurn(chatId, next)
+                return
+            }
             publishPendingTurns(chatId)
             if (send(next.text, next.imagesBase64)) return
             // Refused: back to the head, where the next trigger will try again. Nothing is lost and
@@ -2222,7 +2209,7 @@ class ChatViewModel : ViewModel() {
         // 当成用户中断而不再报出来）。
         userStopped -= chatId
         _state.update { it.copy(todos = emptyList(), error = null) }
-        jobs[chatId] = viewModelScope.launch {
+        val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             AgentForegroundService.start(Core.appContext, "随行正在执行任务")
             // The draft writer rides inside the run's own coroutine, so it stops the moment
             // the run does — no separate job to cancel, and no writes after the answer has
@@ -2379,7 +2366,7 @@ class ChatViewModel : ViewModel() {
                 withContext(NonCancellable) {
                     // First of all: the writer must not run again, or a tick landing after
                     // the clear below would resurrect a draft for an answer already saved.
-                    writer.cancel()
+                    writer.cancelAndJoin()
                     // 传输层抛异常的失败（400/超时/断连）不走 AgentEvent.Failed，而回执只埋在
                     // Failed 分支 ⇒ 横幅倒计时一过就什么都不剩（用户：「红色回执依旧会消失」）。
                     // 这里补同一张回执，并且**必须走 putSession**：直接给 sessions[chatId] 赋值只会
@@ -2456,6 +2443,9 @@ class ChatViewModel : ViewModel() {
                 }
             }
         }
+        jobs[chatId] = job
+        job.invokeOnCompletion { jobs.remove(chatId, job) }
+        job.start()
     }
 
     private fun handleEvent(chatId: String, event: AgentEvent) {
@@ -2629,7 +2619,7 @@ class ChatViewModel : ViewModel() {
                 // 这一轮成功了：屏幕上不该再挂着任何错误。重试成功的轮次走的是过程留痕
                 // （StoredMessage.traceNote），从不设 error；这里清一次是给所有成功路径的保证
                 // （用户：「整轮对话是成功的话 就不要有 错误提示卡片存在」）。
-                live.copy(error = null)
+                base.copy(error = null)
             }
 
             // 这一轮作废重来（收到内容之后流断了、而且还能重试）：把本段已经流出去的内容撤掉，
@@ -2818,6 +2808,7 @@ class ChatViewModel : ViewModel() {
         // 用户看到的就是「回答少了一截」，且没有任何报错。
         flushDeltas(chatId)
         val live = sessions.remove(chatId)
+        deltaBuffer.drop(chatId)
         // 一轮结束：`sessions` 里那份没了，切回来只能靠 LRU 缓存 ⇒ 在这里刷一次
         // （#35：原来是在 `putSession` 里每 80ms 刷，太频繁）。
         // **内存版**：可能含保存失败、只在内存的消息 ⇒ 水位显式降级，别拿去清草稿。
@@ -2880,9 +2871,20 @@ class ChatViewModel : ViewModel() {
      */
     private suspend fun writeLiveDraft(chatId: String) {
         var written: LiveDraft? = null
+        var previous: RunSession? = null
+        var previousPending = 0 to 0
+        var messageSource: List<StoredMessage>? = null
+        var messageRun = ""
+        var runMessages: List<StoredMessage> = emptyList()
         while (true) {
             delay(LIVE_DRAFT_INTERVAL_MS)
             val live = sessions[chatId] ?: continue
+            val pendingSize = deltaBuffer.locked { deltaBuffer.sizes(chatId) }
+            val prior = previous
+            if (prior != null && prior.runId == live.runId &&
+                prior.messages === live.messages && prior.parts === live.parts &&
+                prior.reasoning === live.reasoning && previousPending == pendingSize
+            ) continue
             // The answer, the thinking beside it, and the rounds this run has already
             // produced. The reasoning and those rounds are not "extra": the session is the
             // only place they exist until the run ends, so a run that never ends would
@@ -2895,17 +2897,26 @@ class ChatViewModel : ViewModel() {
             // 而原来这一段跑在 `viewModelScope`（Main）上 —— 长回答时每秒在主线程上
             // 重建一次整段正文。`saveLive` 自身已经在 IO 里，这里把整段一起放过去。
             val built = withContext(Dispatchers.IO) {
+                if (messageSource !== live.messages || messageRun != live.runId) {
+                    runMessages = live.messages.filter { it.runId == live.runId }
+                    messageSource = live.messages
+                    messageRun = live.runId
+                }
                 liveDraftFor(
                     chatId = chatId,
                     runId = live.runId,
                     text = live.derivedStreaming() + pendingText,
                     reasoning = live.reasoning + pendingReasoning,
                     messages = live.messages,
+                    preparedMessages = runMessages,
                 )
             } ?: continue
-            if (built.sameContentAs(written)) continue
-            written = built
-            Core.chats.saveLive(built)
+            if (!built.sameContentAs(written)) {
+                Core.chats.saveLive(built)
+                written = built
+            }
+            previous = live
+            previousPending = pendingSize
         }
     }
 
@@ -2957,7 +2968,7 @@ class ChatViewModel : ViewModel() {
         if (live != null) return
         val shown = _state.value.takeIf { it.conversationId == chatId }
         val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }
-        val messages = live?.messages ?: shown?.messages ?: stored?.messages.orEmpty()
+        val messages = shown?.messages ?: stored?.messages.orEmpty()
         // The rounds and tool results this run had already produced, put back before the
         // paragraph that was still being written. Until the run ends they exist nowhere else,
         // and leaving them out is what brought the card back as a bare sentence with no chain
@@ -3006,7 +3017,6 @@ class ChatViewModel : ViewModel() {
         if (shown != null) {
             _state.update { it.copy(messages = next, messageCount = maxOf(it.messageCount, next.size)) }
         }
-        live?.let { putSession(it.copy(messages = next)) }
         // `save` 返回 null = **没有写下去**（被护栏拒绝或抛异常）⇒ 草稿是唯一副本，不能清。
         val written = save(
             chatId = chatId,
@@ -3285,8 +3295,9 @@ internal fun liveDraftFor(
     text: String,
     reasoning: String,
     messages: List<StoredMessage>,
+    preparedMessages: List<StoredMessage>? = null,
 ): LiveDraft? {
-    val mine = messages.filter { it.runId == runId }
+    val mine = preparedMessages ?: messages.filter { it.runId == runId }
     if (text.isBlank() && reasoning.isBlank() && mine.isEmpty()) return null
     return LiveDraft(
         chatId = chatId,
@@ -3385,7 +3396,8 @@ internal fun liveDraftRecovery(
     /** 中断原因，写进半截回答的尾部（用户：「由 xxx 原因，对话中断」）。 */
     cancelReason: String = "任务被停止",
 ): List<StoredMessage> {
-    val restored = draft.messages.filterNot { written -> messages.any { it.id == written.id } }
+    val existingIds = messages.mapTo(HashSet()) { it.id }
+    val restored = draft.messages.filterNot { it.id in existingIds }
     val probe = draft.text.trim().take(LIVE_DRAFT_PROBE_CHARS)
     // **正文为空、只有思考内容**时也要判重（评审 9 建议项）。
     // `emitPartial` 在"还没吐正文"时会把 text="" + reasoning 全文发出来并落盘；

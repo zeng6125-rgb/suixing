@@ -84,12 +84,14 @@ class ScheduleTools(
         ),
     )
 
-    override suspend fun execute(name: String, args: JsonObject): ToolResult = when (name) {
+    override suspend fun execute(name: String, args: JsonObject): ToolResult = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        when (name) {
         "schedule_create" -> create(args)
         "schedule_list" -> list()
         "schedule_update" -> update(args)
         "schedule_delete" -> delete(args)
         else -> ToolResult.failure("未知工具：$name")
+        }
     }
 
     private suspend fun create(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {

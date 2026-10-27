@@ -29,11 +29,8 @@ import com.suixing.agent.core.Core
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.PI
@@ -1024,22 +1021,26 @@ object TouchFx {
     /**
      * Appends one line to `filesDir/fx-trace.log`.
      *
-     * The caller is read off the stack rather than passed in: a diagnostic that every call site has
-     * to remember to identify itself in is one that rots the first time a call site is added. The
-     * write happens on [traceWorker] and every failure is swallowed — a trace must never be the
-     * reason an effect does not happen.
+     * Source names the explicit event, not an expensive caller stack. Event fields are captured
+     * on the calling thread; formatting and file work happen on [traceWorker].
      */
     private fun trace(context: Context, line: String, episode: String? = null) {
         val app = context.applicationContext
         val overlay = view?.let { "up" } ?: lastOverlayNote ?: "none"
         // episode 只在转折点上给（start/extend/end）；其它行写的是此刻的 latch 状态。
         val edge = episode ?: if (view?.lit == true) "live" else "off"
-        val entry = "${stamp()} $line source=${caller()} overlay=$overlay " +
-            "episode=$edge fg=${if (lastForeground) "self" else "other"} " +
-            "alpha=${String.format(Locale.US, "%.2f", view?.edgeAlpha ?: 0f)} " +
-            "runs=${Core.engine.runsFlow.value.size}"
+        val at = System.currentTimeMillis()
+        val zone = java.time.ZoneId.systemDefault()
+        val foreground = lastForeground
+        val alpha = view?.edgeAlpha ?: 0f
+        val runCount = Core.engine.runsFlow.value.size
+        // Event/tool fields are retained. Explicit event provenance replaces a full stack capture.
+        val source = line.substringBefore(' ')
         traceWorker.execute {
             runCatching {
+                val entry = "${traceStamp(at, zone)} $line source=event:$source overlay=$overlay " +
+                    "episode=$edge fg=${if (foreground) "self" else "other"} " +
+                    "alpha=${String.format(Locale.US, "%.2f", alpha)} runs=$runCount"
                 val file = traceFile ?: File(app.filesDir, FX_TRACE_FILE).also { traceFile = it }
                 if (file.length() > FX_TRACE_MAX_BYTES) {
                     // Bytes, not characters, and the first (partial) line of the tail is dropped:
@@ -1054,19 +1055,6 @@ object TouchFx {
                 file.appendText("$entry\n")
             }
         }
-    }
-
-    private fun stamp(): String = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
-
-    /** The first frame outside this file: which tool asked for the effect, and where. */
-    private fun caller(): String {
-        val frame = Thread.currentThread().stackTrace.firstOrNull {
-            !it.className.startsWith("com.suixing.agent.service.TouchFx") &&
-                !it.className.startsWith("java.lang.Thread") &&
-                !it.className.startsWith("java.util.concurrent")
-        } ?: return "?"
-        val file = frame.fileName ?: "?"
-        return "${frame.className.substringAfterLast('.')}.${frame.methodName}($file:${frame.lineNumber})"
     }
 
     /** Logs a change of overlay state, and only a change: a tick failing every second writes once. */

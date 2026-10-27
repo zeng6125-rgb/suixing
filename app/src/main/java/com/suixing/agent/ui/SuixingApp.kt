@@ -1,10 +1,9 @@
-@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.suixing.agent.ui
 
 import android.app.Activity
 import android.graphics.drawable.ColorDrawable
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.ExitTransition
@@ -18,11 +17,10 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imeAnimationTarget
+import com.suixing.agent.ui.components.ImeInsetFilter
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
@@ -32,7 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,12 +74,10 @@ import com.suixing.agent.ui.components.NAV_ENTER_MS
 import com.suixing.agent.ui.components.NAV_EXIT_MS
 import com.suixing.agent.ui.components.NAV_SHIFT_DIVISOR
 import com.suixing.agent.ui.components.imePaddingBottom
-import com.suixing.agent.ui.drawer.ApprovalDialog
 import com.suixing.agent.ui.drawer.DRAWER_CLOSE_SPEC
 import com.suixing.agent.ui.drawer.DRAWER_SHEET_WIDTH
 import com.suixing.agent.ui.drawer.Drawer
 import com.suixing.agent.ui.drawer.DrawerBackHandler
-import com.suixing.agent.ui.drawer.IME_QUANTUM_PX
 import com.suixing.agent.ui.extension.ExtensionScreen
 import com.suixing.agent.ui.files.FilesScreen
 import com.suixing.agent.ui.onboarding.OnboardingHost
@@ -94,9 +90,6 @@ import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
 import com.suixing.agent.ui.theme.LocalDarkTheme
-import kotlin.math.abs
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -154,7 +147,6 @@ fun SuixingApp() {
         animationSpec = tween(NAV_PUSH_MS, easing = FastOutSlowInEasing),
         label = "baseShift",
     )
-    val pending by Core.gate.pending.collectAsState()
 
     // Owned here rather than inside the chat screen: the drawer lists and switches the
     // very conversations the screen is showing.
@@ -168,16 +160,16 @@ fun SuixingApp() {
     // streamed token just to keep one row highlighted.
     val activeConversationId by remember(chat) {
         chat.state.map { it.conversationId }.distinctUntilChanged()
-    }.collectAsState(initial = "")
+    }.collectAsStateWithLifecycle(initialValue = "")
     // Which conversations have a run in flight, straight off the engine's own map: the
     // drawer's dots follow it without the view model narrating anyone else's run.
     val runningIds by remember {
         Core.engine.runsFlow.map { it.keys }.distinctUntilChanged()
-    }.collectAsState(initial = emptySet<String>())
+    }.collectAsStateWithLifecycle(initialValue = emptySet<String>())
     // Same reason as the ids above: the picker needs one field, not the whole transcript.
     val assistantId by remember(chat) {
         chat.state.map { it.assistantId }.distinctUntilChanged()
-    }.collectAsState(initial = "")
+    }.collectAsStateWithLifecycle(initialValue = "")
 
     // 抽屉本体交给 M3 的 ModalNavigationDrawer：手势（边缘拖动跟手）、遮罩、面板位移全归库。
     // 自绘那版只能整段出现/消失——边缘拖不动，用户点名的就是这条。
@@ -202,7 +194,7 @@ fun SuixingApp() {
             showOnboarding = true
         }
     }
-    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Returning from the system's overlay page is the only moment the grant can have
@@ -230,26 +222,27 @@ fun SuixingApp() {
     // 抽屉里点走的那一页：标记只在「还停在这一页」的期间有效。没有它，一个陈旧的名字会留到
     // 下一次无关的导航上——从覆盖层页开抽屉去别页、返回落到 chat 之后，再从聊天页顶栏点设置，
     // route 恰好等于那个陈旧名字，返回动画的判据就会错判。
-    var drawerTarget by remember { mutableStateOf<String?>(null) }
+    val drawerOrigin = remember { arrayOfNulls<String>(1) }
     // 抽屉是否正在播动画：状态对象本身下发（不在这里解包，避免外壳重组），
     // 读它的是 ChatScreen 的填充协程 —— 见 `LocalDrawerBusy`。
     val drawerBusyState = remember { mutableStateOf(false) }
 
-    val open: (String) -> Unit = { target ->
+    val routeNow by androidx.compose.runtime.rememberUpdatedState(route)
+    val open: (String) -> Unit = remember(navController) { { target ->
         // **不关抽屉**（用户：「不用关掉侧边栏」「新页不应该在页面都最上面移动的吗？」）：
         // 覆盖层现在画在 ModalNavigationDrawer 之上（见下面 Scaffold/Box 那段），所以新页是
         // 压着抽屉滑进来的，抽屉保持打开、原样留在下面 —— 返回时揭开的就是它，状态天然保留。
-        if (target != route) {
-            // drawerTarget 只用来决定"返回时要不要播动画"（见 popExitTransition）：从抽屉点进的
+        if (target != routeNow) {
+            // drawerOrigin[0] 只用来决定"返回时要不要播动画"（见 popExitTransition）：从抽屉点进的
             // 那一页，返回要瞬时揭开出发页。
-            drawerTarget = target
+            drawerOrigin[0] = target
             navController.navigate(target) {
                 popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
                 restoreState = true
             }
         }
-    }
+    } }
     // A row inside the settings page pushes, so back returns to the list it came from.
     val push: (String) -> Unit = { target -> navController.navigate(target) }
     // chat 常驻（见下面 NavHost 那段），所以"回聊天"不是导航到某个目的地，而是**把覆盖层收掉**：
@@ -262,12 +255,12 @@ fun SuixingApp() {
         // 收起用 [DRAWER_CLOSE_SPEC]（160ms 加速收走）。点遮罩那条也走这里
         // （自带遮罩层调用本函数），四条路径手感一致。
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
-        drawerTarget = null
+        drawerOrigin[0] = null
     }
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
     // 用户直接落在会话里（ChatGPT 的抽屉在这里同样会关）。这里一并清掉出发页标记。
     val chatFromDrawer: () -> Unit = {
-        drawerTarget = null
+        drawerOrigin[0] = null
         // **与 `closeDrawer()`（助手 / 遮罩 / 返回键）逐字相同**：只启动同一条
         // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
@@ -284,7 +277,7 @@ fun SuixingApp() {
     // **连点保护**：只有最后一次点击算数（第一次的协程会被第二次的动画取消，令牌随之失效）。
     val drawerSwitchToken = remember { intArrayOf(0) }
     val switchFromDrawer: (Conversation) -> Unit = { conversation ->
-        drawerTarget = null
+        drawerOrigin[0] = null
         val token = ++drawerSwitchToken[0]
         drawerBusyState.value = true
         scope.launch {
@@ -306,8 +299,8 @@ fun SuixingApp() {
 
     // 结算：离开抽屉点走的那一页时清标记。抽屉不再需要"摆回开着"——它从头到尾没关过
     // （见 open()），返回时揭开的就是原来那份。
-    if (drawerTarget != null && route != drawerTarget) {
-        SideEffect { drawerTarget = null }
+    if (drawerOrigin[0] != null && route != drawerOrigin[0]) {
+        SideEffect { drawerOrigin[0] = null }
     }
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
@@ -321,49 +314,21 @@ fun SuixingApp() {
     // 保留**状态对象本身**（而不是用 `by` 解包）：下发的是引用，读点自己在布局期取 .value，
     // 这样键盘动画的每一帧不会让整棵树重组（见 LocalHeldImePx 的说明）。
     val heldImeState = remember { mutableIntStateOf(0) }
-    var imeDir by remember { mutableIntStateOf(0) }
     // 长按/选择期间冻结 clamp（用户：「抬起时对话框与输入法的高度有时变得很大」）：抬手那一刻
     // 选择手柄/菜单出现，这台 ROM 把它的高度报进 IME inset，clamp 一接受、输入框底垫就暴涨。
     // 守护窗（按下到抬手后 400ms）里不接受任何 inset 变化；窗口外照常。
     var selectionActive by remember { mutableStateOf(false) }
-    // **原始键盘高度不在组合期读**（这是「输入法一抬一收就掉帧」的最后一块，也是最贵的一块）。
-    //
-    // `WindowInsets.ime.getBottom(...)` 是**快照读**（foundation 里 `AndroidWindowInsets` 的
-    // insets 挂在 `MutableState` 上）。原来它写在组合体里当 `val imeRawPx = …`，于是键盘动画的
-    // 每一帧都让**整个外壳重组一遍**：`ModalNavigationDrawer(drawerContent = …)` 的 lambda
-    // 参数不稳定（`List<Conversation>`、`Set<String>`），抽屉里那 5 行会话 + 5 个按钮 + 头部
-    // 于是**逐帧重新组合** —— 用户报的「点侧栏就卡」，以及「键盘抬起收回掉帧」，同一个根因。
-    // 那次量化（`IME_QUANTUM_PX`）只压住了「写进 heldImeState 的次数」，压不住这一行裸读。
-    //
-    // 改到 `snapshotFlow` 里读：组合期零订阅，值变了才唤醒一次协程。300ms 的方向窗口
-    // （原来的第二个 effect）也并进同一个 collectLatest —— 不再挂一个观察原始值的 effect。
-    // `WindowInsets.ime` 是 @Composable 取值器，只能在组合里取；取到的是**对象**，
-    // 不读它的值（值挂在 `AndroidWindowInsets` 内部的 MutableState 上，读它才订阅）。
+    // 在协程读取原始 inset 和系统目标：高度变化只使消费节点重新布局，不订阅外壳组合。
+    // 长按期间冻结，窗口外按像素单调跟随目标，不量化，也不等定时器解锁。
     val imeInsets = WindowInsets.ime
-    LaunchedEffect(rootDensity, imeInsets) {
-        snapshotFlow { imeInsets.getBottom(rootDensity) to selectionActive }
-            .collectLatest { (imeRawPx, selection) ->
-                if (!selection) {
-                    val delta = imeRawPx - heldImeState.intValue
-                    if (delta != 0) {
-                        val dir = if (delta > 0) 1 else -1
-                        val rebound = with(rootDensity) { abs(delta).toDp() <= 24.dp }
-                        if (!(imeDir != 0 && dir != imeDir && rebound)) {
-                            imeDir = dir
-                            // **量化在这里做，只做一次**（用户：「输入框随键盘抬起收回掉帧，
-                            // 边距会抖」）：之前下发的是原始 px，而输入框在**布局期**读原始值
-                            // （逐像素平滑）、转录列表在**组合期**读着自己又量化了一次的值
-                            // （4px 台阶）—— 同一份动画被两种精度消费，两者之间的间距每帧都在变，
-                            // 于是"边距在抖"。现在唯一来源就是量化后的值，所有消费者读到的完全一致，
-                            // 间距在动画全程恒定。4px 在 3x 密度下约 1.3dp，视觉上不是台阶。
-                            heldImeState.intValue = imeRawPx / IME_QUANTUM_PX * IME_QUANTUM_PX
-                        }
-                    }
-                }
-                // 方向窗口：最后一次变化之后 300ms 归零（`heldImeState` 不动，只放下一个方向判断）。
-                delay(300)
-                imeDir = 0
-            }
+    val imeTarget = WindowInsets.imeAnimationTarget
+    val imeFilter = remember { ImeInsetFilter() }
+    LaunchedEffect(rootDensity, imeInsets, imeTarget) {
+        snapshotFlow {
+            Triple(imeInsets.getBottom(rootDensity), imeTarget.getBottom(rootDensity), selectionActive)
+        }.collect { (raw, target, frozen) ->
+            heldImeState.intValue = imeFilter.update(raw, target, frozen)
+        }
     }
     CompositionLocalProvider(
         LocalDrawerBusy provides drawerBusyState,
@@ -375,7 +340,7 @@ fun SuixingApp() {
             // **进场**：260ms + LinearOutSlowInEasing（减速进场，末端缓缓贴合）。
             // 你说过"这个动效感觉很一般，改好一点"——这是针对进场的改进，保留。
             // **退场不走这里**：关闭统一在下面两处（`closeDrawer` / `chatFromDrawer`），
-            // 用的是 [DRAWER_CLOSE_SPEC]（210ms 加速收走），遮罩那条同源。
+            // 用的是 [DRAWER_CLOSE_SPEC]（160ms 加速收走），遮罩那条同源。
             if (route == "empty") scope.launch {
                 drawerState.animateTo(
                     DrawerValue.Open,
@@ -487,7 +452,7 @@ fun SuixingApp() {
                 // `closeDrawer()`（210ms 加速收走，与助手那条同规格）。
                 scrimColor = Color.Black.copy(alpha = 0.45f),
                 drawerContent = {
-                    val drawerConversations by chat.conversations.collectAsState()
+                    val drawerConversations by chat.conversations.collectAsStateWithLifecycle()
                     Drawer(
                         open = drawerState.isOpen,
                         route = route,
@@ -564,7 +529,7 @@ fun SuixingApp() {
                     // **只在首启时这样**：设置里「重新看一遍引导」时 chat 已经在组合里，
                     // 盖一层引导不能把常驻的 chat 拆了。
                     if (!(showOnboarding && onboardingIsFirstRun)) {
-                        ChatScreen(viewModel = chat, onOpenSettings = { open("settings") })
+                        ChatScreen(viewModel = chat, onOpenSettings = remember(open) { { open("settings") } })
                     }
                 }
             }
@@ -576,14 +541,7 @@ fun SuixingApp() {
             //  · 点到就走 `closeDrawer()`：210ms 加速收走，与助手那条同规格。
             //  · 挂载条件用 `targetValue`（动画**开始**就翻转）：打开第一帧就能点外面关，
             //    关闭一开始就让出点击。
-            if (drawerState.targetValue == DrawerValue.Open) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .padding(start = DRAWER_SHEET_WIDTH.dp)
-                        .pointerInput(Unit) { detectTapGestures { closeDrawer() } },
-                )
-            }
+            DrawerDismissLayer(drawerState, closeDrawer)
             NavHost(
                             navController = navController,
                             // 覆盖层的栈底：什么都不画（透明），所以"当前是 empty"就等于"chat 露着"。
@@ -649,12 +607,12 @@ fun SuixingApp() {
                             popExitTransition = {
                                 // 用户再三强调的规则（0.8.98 立过、0.8.106 统一动画时被我一并盖掉，
                                 // 这轮恢复）：**从侧边栏点进的那一页，返回不要动画**（瞬时揭开出发页）；
-                                // 设置里的子页（push 进的）返回走推入的反向。判据用 drawerTarget：
+                                // 设置里的子页（push 进的）返回走推入的反向。判据用 drawerOrigin[0]：
                                 // open() 置位、结算块在 route 离开它时清掉，所以 pop 那一刻它仍指向被退的页。
                                 // 这条 lambda 是接收者形式（AnimatedContentTransitionScope），被退的
                                 // 目的地在 initialState 上，不是 lambda 参数。
-                                if (drawerTarget != null &&
-                                    initialState.destination.route == drawerTarget
+                                if (drawerOrigin[0] != null &&
+                                    initialState.destination.route == drawerOrigin[0]
                                 ) {
                                     ExitTransition.None
                                 } else {
@@ -768,22 +726,7 @@ fun SuixingApp() {
 
     // Rendered outside the navigation host so a prompt cannot be missed while the
     // user is on another screen — the agent is blocked until it is answered.
-    pending.entries.firstOrNull()?.let { (chatId, request) ->
-        ApprovalDialog(
-            chatId = chatId,
-            toolName = request.toolName,
-            args = request.args,
-            // The card floats above whichever screen the user is on, so it has to name the
-            // conversation it belongs to: with several runs in flight the prompt on screen
-            // may well be another chat's, and only this line says whose it is.
-            // 读 `.value` 而不是订阅：`collectAsState` 会让整个外壳跟着会话列表每次变化
-            // 重组一遍（流式期间每次存盘都会变），而这里只是给弹卡取一个标题。
-            sourceTitle = remember(chatId) {
-                chat.conversations.value.firstOrNull { it.id == chatId }?.title
-            },
-            otherWaiting = pending.size - 1,
-        )
-    }
+    PendingApprovals(chat.conversations)
 
     // 首次启动引导：与助手编辑器同一个位置——盖在导航宿主与抽屉之上的一切。
     // AnimatedVisibility 只在 visible 为真（或退场那 200ms）时组合内容，所以引导页
@@ -820,7 +763,7 @@ fun SuixingApp() {
     FullScreenOverlay(visible = editorAssistantId != null) {
         val id = editorAssistantId ?: lastEditorId
         if (id != null) {
-            val servers by Core.mcp.servers.collectAsState()
+            val servers by Core.mcp.servers.collectAsStateWithLifecycle()
             val toolNames = remember(servers) { Core.tools.names() }
             val target = settings.assistants.firstOrNull { it.id == id }
                 ?: Assistant(id = id, avatar = "🧭")
@@ -844,5 +787,18 @@ fun SuixingApp() {
                 onDismiss = { editorAssistantId = null },
             )
         }
+    }
+}
+
+
+/** Target changes invalidate only this transparent hit layer, outside the drawer panel. */
+@Composable
+private fun DrawerDismissLayer(state: androidx.compose.material3.DrawerState, onClose: () -> Unit) {
+    val closeNow by androidx.compose.runtime.rememberUpdatedState(onClose)
+    if (state.targetValue == DrawerValue.Open) {
+        Box(
+            Modifier.fillMaxSize().padding(start = DRAWER_SHEET_WIDTH.dp)
+                .pointerInput(state) { detectTapGestures { closeNow() } },
+        )
     }
 }

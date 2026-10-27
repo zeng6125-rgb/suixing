@@ -100,12 +100,13 @@ class PerfMonitor(private val file: File) {
 
     /** 最近的记录，最新在最前。 */
     fun recent(limit: Int = 50): List<PerfRecord> = synchronized(lock) {
-        records.toList().asReversed().take(limit.coerceAtLeast(0))
+        List(limit.coerceIn(0, records.size)) { index -> records[records.lastIndex - index] }
     }
 
     /** 顶部几个数字。没有任何记录时全 0，而不是编一个数。 */
     fun summary(limit: Int = 50): PerfSummary = synchronized(lock) {
-        val window = records.toList().takeLast(limit.coerceAtLeast(1))
+        val count = limit.coerceAtLeast(1).coerceAtMost(records.size)
+        val window = List(count) { index -> records[records.size - count + index] }
         if (window.isEmpty()) return PerfSummary()
         // **一个循环算四组平均**（优化清单 data-P2）：原来 4 条 `filter{}.map{}.average()`
         // 会建 8 个中间 List。分组条件与分母完全不变（各算各的样本数）。
@@ -145,9 +146,12 @@ class PerfMonitor(private val file: File) {
         runCatching {
             val tmp = File(file.absolutePath + ".tmp")
             tmp.parentFile?.mkdirs()
-            tmp.writeText(json.encodeToString(PerfRecord.serializer().let { kotlinx.serialization.builtins.ListSerializer(it) }, records.toList()))
-            if (file.exists() && !file.delete()) return@runCatching
-            tmp.renameTo(file)
+            val text = json.encodeToString(PerfRecord.serializer().let { kotlinx.serialization.builtins.ListSerializer(it) }, records.toList())
+            java.io.FileOutputStream(tmp).use {
+                it.write(text.toByteArray(Charsets.UTF_8))
+                it.fd.sync()
+            }
+            java.nio.file.Files.move(tmp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         }
     }
 }

@@ -364,6 +364,11 @@ private val RE_LI = Regex("(?i)<li[^>]*>")
 private val RE_BLOCK_END = Regex("(?i)<(br|/p|/div|/li|/tr|/h[1-6]|/table|/section|/article|/header|/footer)[^>]*>")
 private val RE_TAG = Regex("(?s)<[^>]+>")
 
+private val RE_TEXT_SPACES = Regex("[ \\t\\u00A0\\u3000]+")
+private val RE_LINE_SPACES = Regex(" *\\n *")
+private val RE_BLANK_LINES = Regex("\\n{3,}")
+private val RE_ENTITY = Regex("&(#x?[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);")
+
 /** Turns a page into something worth spending context on. */
 internal fun htmlToText(html: String): String {
     var text = html
@@ -376,9 +381,9 @@ internal fun htmlToText(html: String): String {
     text = text.replace(RE_BLOCK_END, "\n")
     text = text.replace(RE_TAG, " ")
     text = decodeEntities(text)
-    text = text.replace(Regex("[ \\t\\u00A0\\u3000]+"), " ")
-    text = text.replace(Regex(" *\\n *"), "\n")
-    text = text.replace(Regex("\\n{3,}"), "\n\n")
+    text = text.replace(RE_TEXT_SPACES, " ")
+    text = text.replace(RE_LINE_SPACES, "\n")
+    text = text.replace(RE_BLANK_LINES, "\n\n")
     return text.trim()
 }
 
@@ -393,7 +398,7 @@ private val NAMED_ENTITIES = mapOf(
 
 internal fun decodeEntities(text: String): String {
     if (!text.contains('&')) return text
-    return Regex("&(#x?[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);").replace(text) { match ->
+    return RE_ENTITY.replace(text) { match ->
         val body = match.groupValues[1]
         when {
             body.startsWith("#x", ignoreCase = true) ->

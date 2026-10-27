@@ -1,12 +1,10 @@
 package com.suixing.agent.ui.drawer
 
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -15,7 +13,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -27,7 +24,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -43,9 +39,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -80,14 +74,12 @@ import androidx.compose.ui.unit.sp
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Conversation
-import com.suixing.agent.ui.DrawerOrder
-import com.suixing.agent.ui.DrawerOrderStore
+import com.suixing.agent.ui.drawer.DrawerOrder
+import com.suixing.agent.ui.drawer.DrawerOrderStore
 import com.suixing.agent.ui.assistant.AssistantAvatar
-import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
-import com.suixing.agent.ui.drawerSections
+import com.suixing.agent.ui.drawer.drawerSections
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
@@ -95,23 +87,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
-/**
- * 键盘高度的量化步长（px）。
- *
- * 为什么需要：键盘动画的每一帧都会改变 IME inset，直接下发原始 px 会让整棵树的消费者
- * 逐帧读到一个一直在变的数（转录列表的底边距在组合期读它 ⇒ 每帧整页重组）。
- * 量化到 4px（3x 密度约 1.3dp）后，整页重组次数降到约 1/4，而视觉上看不出台阶。
- *
- * **必须只有这一处量化**：输入框在布局期读、列表在组合期读，两处各用不同精度正是
- * 「随键盘抬起收回时边距在抖」的根因（用户 2026-10-26 报）。
- */
-internal const val IME_QUANTUM_PX = 4
-
 /** 抽屉面板宽度（ModalDrawerSheet 与收起残影共用）。 */
 internal val DRAWER_SHEET_WIDTH = 300
 
 /**
- * 抽屉收起：**统一一条规格**，170ms + `FastOutLinearInEasing`（用户指定：260 → 210 → 180 → 170 → 160）。
+ * 抽屉收起：**统一一条规格**，160ms + `FastOutLinearInEasing`（用户指定：260 → 210 → 180 → 170 → 160）。
  *
  * 之前遮罩那条和助手那条不一样，原因是有两条关闭入口：
  *  · 我们自己的 `closeDrawer()`（点助手、返回键、会话行）—— 参数由我们传；
@@ -261,15 +241,17 @@ internal fun Drawer(
     // 会话列表一变就做两件事：剔除已删除的 id（残留 id 会在列表里占位，看着像排序没生效），
     // 以及把「updatedAt 变大」的那几行从普通表里摘掉。
     LaunchedEffect(conversations) {
-        if (conversations.isEmpty()) return@LaunchedEffect
         val known = conversations.map { it.id }.toHashSet()
+        lastSeen.keys.retainAll(known)
+        if (conversations.isEmpty()) return@LaunchedEffect
         val current = orderState.value
         var next = current.prunedTo(known)
         val bumped = conversations
             .filter { chat -> lastSeen[chat.id]?.let { chat.updatedAt > it } == true }
             .map { it.id }
         conversations.forEach { lastSeen[it.id] = it.updatedAt }
-        val dropped = bumped.filter { it in next.normal }
+        val normalIds = next.normal.toHashSet()
+        val dropped = bumped.filterTo(HashSet()) { it in normalIds }
         if (dropped.isNotEmpty()) next = next.copy(normal = next.normal.filterNot { it in dropped })
         if (next != current) orderState.value = next
         if (dropped.isNotEmpty()) orderDirty = true
@@ -373,9 +355,6 @@ internal fun Drawer(
             // 置顶区只在置顶表里挪；普通区「新会话/新消息在前 + 手动基线」；跨区拖动在
             // reorderWithinSection 里被直接拒掉，所以怎么拖都越不过置顶那条线。
             // 排序要 filter + associateBy + 两次 sortedBy：不该每次重组都重算。
-            val sections = remember(conversations, orderState.value) {
-                drawerSections(conversations, orderState.value)
-            }
             // 埋点：抽屉每重组一次记一行（看打开抽屉时重组了多少次）。
 
             // 两个区块共用同一行（只差顺序，不差样子）：抽成局部 lambda，免得把二十来行
@@ -500,7 +479,7 @@ internal fun Drawer(
                             modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
                         )
                     }
-                    items(sections.pinned, key = { it.id }) { // 只保留位移动画：默认外观动画会让**滚进视口的每一行**都跑一段淡入，滚动时每行都带一个动画（子代理审计 B2）。
+                    items(sections.pinned, key = { it.id }, contentType = { "conversation" }) { // 只保留位移动画。
 drawerRow(
                         it,
                         Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null),
@@ -514,7 +493,7 @@ drawerRow(
                         }
                     }
                 }
-                items(sections.normal, key = { it.id }) { // 只保留位移动画：默认外观动画会让**滚进视口的每一行**都跑一段淡入，滚动时每行都带一个动画（子代理审计 B2）。
+                items(sections.normal, key = { it.id }, contentType = { "conversation" }) { // 只保留位移动画。
 drawerRow(
                         it,
                         Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null),
@@ -844,7 +823,7 @@ internal fun DrawerGripIcon(tint: Color, modifier: Modifier = Modifier.size(16.d
         val stroke = 1.5.dp.toPx()
         val start = size.width * 0.16f
         val end = size.width * 0.84f
-        listOf(0.3f, 0.5f, 0.7f).forEach { fraction ->
+        DrawerGripFractions.forEach { fraction ->
             val y = size.height * fraction
             drawLine(
                 color = tint,
@@ -856,3 +835,5 @@ internal fun DrawerGripIcon(tint: Color, modifier: Modifier = Modifier.size(16.d
         }
     }
 }
+
+private val DrawerGripFractions = floatArrayOf(0.3f, 0.5f, 0.7f)

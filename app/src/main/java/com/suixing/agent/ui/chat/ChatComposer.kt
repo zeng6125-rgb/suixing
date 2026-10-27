@@ -17,12 +17,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,16 +40,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.suixing.agent.ui.components.bottomInsetPadding
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
@@ -89,7 +87,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
-import com.suixing.agent.ui.components.GenerationSheet
+import com.suixing.agent.ui.chat.GenerationSheet
 import com.suixing.agent.ui.components.MenuCard
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.data.AppSettings
@@ -99,20 +97,15 @@ import com.suixing.agent.data.Tps
 import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TodoItem
-import com.suixing.agent.data.forAssistant
 import com.suixing.agent.data.label
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.LocalHeldImePx
-import com.suixing.agent.ui.components.REASONING_LEVELS
-import com.suixing.agent.ui.components.rememberPopupMotion
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.delay
-import kotlin.math.max
 import kotlin.math.roundToInt
 import java.util.Locale
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.runtime.mutableFloatStateOf
 
 /** The composer's status line: plain 13sp text with no container of its own. */
@@ -200,7 +193,6 @@ internal fun withAttachment(attachments: List<Attachment>, text: String): Pair<S
     return body to attachments.mapNotNull { it.base64.takeIf { b -> b.isNotEmpty() } }
 }
 
-internal enum class AttachKind { IMAGE, FILE }
 
 /**
  * The context window as a ring, left of the mic.
@@ -226,18 +218,6 @@ internal fun ContextRing(
     /** True when [used] is this app's own estimate; the card says 「约」 when it is. */
     estimated: Boolean = false,
     window: Int,
-    /** Everything this conversation has ever spent, prompt + completion. */
-    sessionTokens: Int,
-    /** The text-based floor for the cumulative row, when nothing in the session was priced. */
-    sessionEstimate: Int = 0,
-    /** That spend in the endpoint's own three parts. */
-    sessionSplit: SessionSplit,
-    /** How many questions that tally was built from, so 「累计」 cannot read as 「本轮」. */
-    sessionTurns: Int,
-    sessionPerSecond: Double,
-    sessionCachePercent: Double,
-    sessionElapsedMs: Long,
-    live: StreamStats?,
     /**
      * 面板三行（系统提示词 / 工具定义 / 对话消息）的**当前窗口**读数，不依赖 run：run 中优先用
      * [live] 的实测三块，空闲用这个（打开面板时由 [onPanelOpen] 触发上层按当前上下文算）。
@@ -251,8 +231,6 @@ internal fun ContextRing(
     val fraction = if (known) (used.toFloat() / window).coerceIn(0f, 1f) else 0f
     val tone = if (fraction >= 0.8f) scheme.error else scheme.primary
     val track = scheme.surfaceVariant
-    // 布局取证要用（见 layoutDiag）。
-    val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
     // A focus-less popup does not receive BACK either: without this the press falls through to the
     // activity and finishes it. Same pair the composer's own cards use.
@@ -338,8 +316,6 @@ internal fun ContextRing(
             // 小浮层进出场（用户：「用量统计这些弹窗出现得太生硬」）。`keeping` 让退场动画期间窗口
             // 仍留在组合里：遮罩和卡片都挂在它上面，否则退场的第一帧窗口就被销毁、动画看不到。
             // 遮罩层保持原样（用户明确：不需要改小浮层的阴影/遮罩）。只有卡片本身有动效。
-            val popupMotion = rememberPopupMotion()
-            LaunchedEffect(open) { if (open) popupMotion.enter() else popupMotion.exit() }
             // **直接复用 MenuCard**（与模型选择同一个组件）；需要显式定位，故传 popupPositionProvider。
             val belowGlyphPx = with(density) { 8.dp.roundToPx() }
             // 卡片离屏幕边至少 12dp（用户：单轮统计卡不要碰屏幕边缘）。
@@ -373,9 +349,7 @@ internal fun ContextRing(
                 ContextPanelCard(
                     used = used,
                     window = window,
-                    split = live?.let {
-                        Triple(it.breakSystem, it.breakTools, it.breakHistory)
-                    } ?: breakSplit,
+                    split = breakSplit,
                 )
             }
         }
@@ -590,6 +564,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
         // 所以打开面板就有；进度条基准是**上下文窗口**（三行占比之和 = 顶部那条的比例）。
         parts?.let {
             Spacer(Modifier.height(4.dp))
+            val denominator = if (window > 0) window else parts.sumOf { it.second }
             parts.forEach { (label, value, tone) ->
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -622,29 +597,19 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
                         modifier = Modifier.width(56.dp),
                     )
                     Spacer(Modifier.width(10.dp))
+                    val fraction = if (denominator > 0) {
+                        (value.toFloat() / denominator).coerceIn(0f, 1f)
+                    } else 0f
                     Box(
                         Modifier
                             .weight(1f)
                             .height(6.dp)
                             .clip(RoundedCornerShape(3.dp))
-                            .background(scheme.surfaceContainerHighest),
-                    ) {
-                        // 基准 = 上下文窗口（用户：「进度条是以上下文窗口为准啊」）：每段条长 = 该段
-                        // ÷ 窗口，于是三行加起来就是顶部那条的总占比。窗口未设置（0）时退回三块之和，
-                        // 至少还能看构成。
-                        val denominator = if (window > 0) window else parts.sumOf { it.second }
-                        val fraction = if (denominator > 0) {
-                            value.toFloat() / denominator
-                        } else {
-                            0f
-                        }
-                        Box(
-                            Modifier
-                                .fillMaxWidth(fraction.coerceIn(0f, 1f))
-                                .fillMaxHeight()
-                                .background(tone),
-                        )
-                    }
+                            .background(scheme.surfaceContainerHighest)
+                            .drawBehind {
+                                drawRect(tone, size = Size((size.width * fraction).roundToInt().toFloat(), size.height))
+                            },
+                    )
                 }
             }
         }
@@ -802,10 +767,6 @@ internal fun Composer(
      */
     onRestoreSteer: (PendingSteer) -> Unit,
     running: Boolean,
-    /** The live run's stats; the context ring reads its note.
-     *  传 **flow** 而不是值：本叶子每 120ms 重组一次没问题（就一个环），
-     *  但不能拖着整个 ChatScreen 陪跑（审计 3§1）。 */
-    statsFlow: StateFlow<StreamStats?>,
     settings: AppSettings,
     /** The persona this conversation runs with, not the app-wide active one. */
     assistantId: String,
@@ -822,18 +783,6 @@ internal fun Composer(
     contextBreak: Triple<Int, Int, Int>? = null,
     /** 面板打开时回调：上层按当前上下文算一次三行。 */
     onContextPanelOpen: () -> Unit = {},
-    /** Everything this conversation has ever spent, for the ring's detail card. */
-    sessionTokens: Int,
-    /** The text-based floor for the ring's cumulative row, when nothing was ever priced. */
-    sessionEstimate: Int = 0,
-    /** That spend in the endpoint's own three parts, for the same card. */
-    sessionSplit: SessionSplit,
-    /** How many questions that tally was built from. */
-    sessionTurns: Int,
-    /** The session's own output speed, cache hit rate and wall clock, for the ring's card. */
-    sessionPerSecond: Double,
-    sessionCachePercent: Double,
-    sessionElapsedMs: Long,
     /** This conversation's own model pick, or null while it follows persona/defaults. */
     conversationProviderId: String?,
     conversationModel: String?,
@@ -903,10 +852,8 @@ internal fun Composer(
      */
     onHeightChanged: (Dp) -> Unit,
     /** Called once the stack has been placed for this frame: the caller's follow pin rides it. */
-    onPlaced: () -> Unit,
 ) {
     // 每 120ms 重组的只有这一个环（含时间读数），不拖别人。
-    val stats by statsFlow.collectAsState()
     val scheme = MaterialTheme.colorScheme
     // 发送后键盘退避（用户：「抬起输入法发送时，对话框也会挡住」）：不收键盘的话 composer 悬在
     // 键盘上方、把列表尾的状态行盖在后面。发送＝这句话说完了，收键盘让整条栈落回去；「停止」
@@ -991,32 +938,12 @@ internal fun Composer(
             // platform's end-of-animation rebound cannot flicker the band back for a frame).
             // **读数在布局期完成**（键盘动画期间不重组）：这一处原来在组合期减键盘高度，
             // 键盘抬起/收起时输入框每帧重组一次 —— 用户报的「输入法一抬一收就掉帧」。
-            .layout { measurable, constraints ->
-                val bottom = (navBarBottomPx - imePxState.value).coerceAtLeast(0)
-                // 同 Common.kt 的 imePaddingBottom：新 maxHeight 必须夹在 [minHeight, maxHeight]，
-                // 否则 `Constraints.copy` 抛 "maxHeight must be >= minHeight"（父约束为精确高度时必现）。
-                val newMax = if (constraints.maxHeight == androidx.compose.ui.unit.Constraints.Infinity) {
-                    constraints.maxHeight
-                } else {
-                    (constraints.maxHeight - bottom).coerceIn(constraints.minHeight, constraints.maxHeight)
-                }
-                val placeable = measurable.measure(
-                    androidx.compose.ui.unit.Constraints(
-                        minWidth = constraints.minWidth,
-                        maxWidth = constraints.maxWidth,
-                        minHeight = constraints.minHeight,
-                        maxHeight = newMax,
-                    ),
-                )
-                layout(placeable.width, placeable.height + bottom) { placeable.place(0, 0) }
-            }
+            .bottomInsetPadding { (navBarBottomPx - imePxState.value).coerceAtLeast(0) }
             .padding(horizontal = 16.dp)
             // The air under the pill, named: the list's own padding is this plus the strip
             // above, and it is measured here, inside the padding (see COMPOSER_BOTTOM_PAD).
             .padding(top = 6.dp, bottom = COMPOSER_BOTTOM_PAD)
-            .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) }
-            // Placed for this frame: the caller's follow pin is dispatched from here.
-            .onGloballyPositioned { onPlaced() },
+            .onSizeChanged { size -> onHeightChanged(with(density) { size.height.toDp() }) },
     ) {
         Column {
             // 「回到最新」按钮**不在这里**（用户报的「往上滑一点点就跳」）：它原来在本列里占
@@ -1520,14 +1447,6 @@ internal fun Composer(
                         used = contextUsed,
                         estimated = contextEstimated,
                         window = contextWindow,
-                        sessionTokens = sessionTokens,
-                        sessionEstimate = sessionEstimate,
-                        sessionSplit = sessionSplit,
-                        sessionTurns = sessionTurns,
-                        sessionPerSecond = sessionPerSecond,
-                        sessionCachePercent = sessionCachePercent,
-                        sessionElapsedMs = sessionElapsedMs,
-                        live = stats,
                         breakSplit = contextBreak,
                         onPanelOpen = onContextPanelOpen,
                     )

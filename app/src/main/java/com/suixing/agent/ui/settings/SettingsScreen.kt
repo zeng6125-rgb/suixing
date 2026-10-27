@@ -5,8 +5,6 @@ package com.suixing.agent.ui.settings
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -32,7 +30,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.ripple
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -58,7 +55,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -105,9 +102,9 @@ import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.describeError
-import com.suixing.agent.ui.DrawerOrder
-import com.suixing.agent.ui.DrawerOrderStore
-import com.suixing.agent.ui.drawerSections
+import com.suixing.agent.ui.drawer.DrawerOrder
+import com.suixing.agent.ui.drawer.DrawerOrderStore
+import com.suixing.agent.ui.drawer.drawerSections
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.components.PageTopBar
@@ -129,7 +126,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
@@ -226,8 +222,65 @@ private fun SettingsRoot(
     onOpenPage: (SettingsPage) -> Unit,
     onOpenOnboarding: () -> Unit,
 ) {
-    val capabilities by Core.capabilities.state.collectAsState()
-    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+    val capabilities by Core.capabilities.state.collectAsStateWithLifecycle()
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+
+    val openNow = androidx.compose.runtime.rememberUpdatedState(onOpen)
+    val onboardingNow = androidx.compose.runtime.rememberUpdatedState(onOpenOnboarding)
+    val modelRows = remember {
+        listOf(
+            // 走 `openNow.value(...route)`（真路由）而不是 `onOpenPage(...)`（同一个目的地里换内容）：
+            // 内部切换不经过 NavHost ⇒ 没有任何转场。路由本来就存在（`SettingsPageRoute` 按
+            // `SettingsPage.route` 分发），所以这里只是改走它；用 `SettingsPage.X.route` 而不是
+            // 手写字符串，避免两处各写一份路由名。
+            SettingsGroupRow("模型与生成", "接口、模型与采样") {
+                openNow.value(SettingsPage.MODEL.route)
+            },
+            SettingsGroupRow("对话配置", "输入、运行、失败重试与显示") {
+                openNow.value(SettingsPage.CONVERSATION.route)
+            },
+            SettingsGroupRow("外观", "主题、配色与排版") {
+                openNow.value(SettingsPage.APPEARANCE.route)
+            },
+        )
+    }
+    val connectionRows = remember {
+        listOf(
+            // 权限不是这一页的子页：能力清单是一份用户管理的清单，不是一组开关。
+            SettingsGroupRow("权限", "无障碍、Shizuku、root 与悬浮窗") {
+                openNow.value("capability")
+            },
+            SettingsGroupRow("工具", "工具、Skill 与 MCP 的管理") {
+                openNow.value("tools")
+            },
+            SettingsGroupRow("网络与语音", "搜索走哪里、回复读不读出来") {
+                openNow.value(SettingsPage.NETWORK.route)
+            },
+        )
+    }
+    val dataRows = remember {
+        listOf(
+            SettingsGroupRow("数据", "记忆、助手与会话文件") {
+                openNow.value(SettingsPage.DATA.route)
+            },
+            SettingsGroupRow("用量", "tokens · 30 日柱状 · 按模型") {
+                openNow.value(SettingsPage.USAGE.route)
+            },
+            // 性能页回答的是「这一轮到底慢在哪」：耗时、tokens、缓存命中都来自端点
+            // 自己的回报，不是估算；没采集到的项显示「—」，不用 0 冒充测量。
+            SettingsGroupRow("性能", "首字延迟 · 整轮耗时 · 缓存命中 · 输出速度") {
+                openNow.value(SettingsPage.PERF.route)
+            },
+            // 再看一遍首启那五页。走的是外壳上的覆盖层（不是一条路由），
+            // 所以它不进返回栈——从这儿进去，走完还是这一页。
+            SettingsGroupRow("新手引导", "再走一遍：供应商 · 模型 · 权限") {
+                onboardingNow.value()
+            },
+            SettingsGroupRow("关于", "版本、隐私与开源许可") {
+                openNow.value("about")
+            },
+        )
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -254,64 +307,19 @@ private fun SettingsRoot(
             item {
                 SettingsGroup(
                     title = "模型与对话",
-                    rows = listOf(
-                        // 走 `onOpen(...route)`（真路由）而不是 `onOpenPage(...)`（同一个目的地里换内容）：
-                        // 内部切换不经过 NavHost ⇒ 没有任何转场。路由本来就存在（`SettingsPageRoute` 按
-                        // `SettingsPage.route` 分发），所以这里只是改走它；用 `SettingsPage.X.route` 而不是
-                        // 手写字符串，避免两处各写一份路由名。
-                        SettingsGroupRow("模型与生成", "接口、模型与采样") {
-                            onOpen(SettingsPage.MODEL.route)
-                        },
-                        SettingsGroupRow("对话配置", "输入、运行、失败重试与显示") {
-                            onOpen(SettingsPage.CONVERSATION.route)
-                        },
-                        SettingsGroupRow("外观", "主题、配色与排版") {
-                            onOpen(SettingsPage.APPEARANCE.route)
-                        },
-                    ),
+                    rows = modelRows,
                 )
             }
             item {
                 SettingsGroup(
                     title = "能力与连接",
-                    rows = listOf(
-                        // 权限不是这一页的子页：能力清单是一份用户管理的清单，不是一组开关。
-                        SettingsGroupRow("权限", "无障碍、Shizuku、root 与悬浮窗") {
-                            onOpen("capability")
-                        },
-                        SettingsGroupRow("工具", "工具、Skill 与 MCP 的管理") {
-                            onOpen("tools")
-                        },
-                        SettingsGroupRow("网络与语音", "搜索走哪里、回复读不读出来") {
-                            onOpen(SettingsPage.NETWORK.route)
-                        },
-                    ),
+                    rows = connectionRows,
                 )
             }
             item {
                 SettingsGroup(
                     title = "数据与关于",
-                    rows = listOf(
-                        SettingsGroupRow("数据", "记忆、助手与会话文件") {
-                            onOpen(SettingsPage.DATA.route)
-                        },
-                        SettingsGroupRow("用量", "tokens · 30 日柱状 · 按模型") {
-                            onOpen(SettingsPage.USAGE.route)
-                        },
-                        // 性能页回答的是「这一轮到底慢在哪」：耗时、tokens、缓存命中都来自端点
-                        // 自己的回报，不是估算；没采集到的项显示「—」，不用 0 冒充测量。
-                        SettingsGroupRow("性能", "首字延迟 · 整轮耗时 · 缓存命中 · 输出速度") {
-                            onOpen(SettingsPage.PERF.route)
-                        },
-                        // 再看一遍首启那五页。走的是外壳上的覆盖层（不是一条路由），
-                        // 所以它不进返回栈——从这儿进去，走完还是这一页。
-                        SettingsGroupRow("新手引导", "再走一遍：供应商 · 模型 · 权限") {
-                            onOpenOnboarding()
-                        },
-                        SettingsGroupRow("关于", "版本、隐私与开源许可") {
-                            onOpen("about")
-                        },
-                    ),
+                    rows = dataRows,
                 )
             }
         }
@@ -455,7 +463,7 @@ private fun CoroutineScope.persistProvider(id: String?, block: (ProviderConfig) 
  */
 @Composable
 private fun ModelSettingsPage(onBack: () -> Unit) {
-    val raw by Core.settings.flow.collectAsState(initial = AppSettings())
+    val raw by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     // 仓库里存的是**密文**（Keystore 加密），页面里一律用**明文**：Key 框要显示它，
     // 「有未保存的改动」的比对也要拿明文跟明文比（拿密文比会永远判定成改过）。
     //
@@ -1355,11 +1363,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
  */
 @Composable
 private fun ConversationSettingsPage(onBack: () -> Unit) {
-    val stored by Core.settings.flow.collectAsState(initial = AppSettings())
+    val stored by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    val allowed by Core.gate.alwaysAllowedTools.collectAsState()
-    val denied by Core.gate.alwaysDeniedTools.collectAsState()
+    val allowed by Core.gate.alwaysAllowedTools.collectAsStateWithLifecycle()
+    val denied by Core.gate.alwaysDeniedTools.collectAsStateWithLifecycle()
     // 排序只依赖这两个集合：别每次重组都在 items() 里重排一遍。
     val allowSorted = remember(allowed) { allowed.sorted() }
     val denySorted = remember(denied) { denied.sorted() }
@@ -1817,7 +1825,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
 /** 外观: theme, palette, type scale and what the transcript shows by default. */
 @Composable
 private fun AppearanceSettingsPage(onBack: () -> Unit) {
-    val stored by Core.settings.flow.collectAsState(initial = AppSettings())
+    val stored by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val scope = rememberCoroutineScope()
 
     Scaffold(
@@ -1991,7 +1999,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
 /** 网络与语音: where search goes, and whether replies are read out loud. */
 @Composable
 private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
-    val stored by Core.settings.flow.collectAsState(initial = AppSettings())
+    val stored by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val scope = rememberCoroutineScope()
 
     Scaffold(
@@ -2041,9 +2049,11 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
+                val engineLabel by Core.speaker.engineLabel.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) { Core.speaker.prepare() }
                 SettingRow(
                     title = "朗读回复",
-                    subtitle = "用系统语音引擎读出来。引擎状态：${Core.speaker.languageLabel()}。" +
+                    subtitle = "用系统语音引擎读出来。引擎状态：${engineLabel}。" +
                         "输入框左边的麦克风按钮负责语音输入。",
                     control = {
                         Switch(
@@ -2181,7 +2191,7 @@ internal fun ConversationManagerScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val conversations by Core.chats.conversations.collectAsState()
+    val conversations by Core.chats.conversations.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
     var pendingExport by remember { mutableStateOf<Conversation?>(null) }

@@ -111,6 +111,18 @@ class MarkdownTest {
     }
 
     @Test
+    fun `returning from a nested list retains following parent items`() {
+        assertEquals(
+            listOf<MdBlock>(
+                MdBlock.Bullet(listOf("parent"), ordered = false, depth = 0),
+                MdBlock.Bullet(listOf("child"), ordered = false, depth = 1),
+                MdBlock.Bullet(listOf("next", "last"), ordered = false, depth = 0),
+            ),
+            parseMarkdown("- parent\n  - child\n- next\n- last"),
+        )
+    }
+
+    @Test
     fun `a tab indents one level like two spaces`() {
         assertEquals(
             listOf<MdBlock>(

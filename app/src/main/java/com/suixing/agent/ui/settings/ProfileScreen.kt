@@ -27,7 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,10 +66,10 @@ import java.util.Locale
 fun ProfileScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    val stored by Core.profile.text.collectAsState()
-    val summary by Core.profile.summary.collectAsState()
+    val stored by Core.profile.text.collectAsStateWithLifecycle()
+    val summary by Core.profile.summary.collectAsStateWithLifecycle()
     // 这两行「自动整理」的开关原来在「插话与运行」页，现在跟着画像本身走（字段与存储没动）。
-    val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     // null = 输入框还没被碰过，显示 store 里的值；一旦开始输入就以草稿为准，免得后台的
     // 一次 load 把用户正在写的东西冲掉。
     var draft by remember { mutableStateOf<String?>(null) }

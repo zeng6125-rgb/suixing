@@ -151,14 +151,14 @@ override fun toString(): String = buf.toString()
      */
 internal fun List<LivePart>.appendText(delta: String, segmentStart: Int): List<LivePart> {
         val from = segmentStart.coerceIn(0, size)
-        val tailIdx = subList(from, size).indexOfLast { it is LivePart.Text }
-        if (tailIdx < 0) return this + LivePart.Text(delta)
-        val idx = from + tailIdx
+        var idx = lastIndex
+        while (idx >= from && this[idx] !is LivePart.Text) idx--
+        if (idx < from) return this + LivePart.Text(delta)
         val part = this[idx] as LivePart.Text
         // **只追加增量**（不是整串复制）：缓冲原地增长，列表只复制"前段 + 这一项"。
         // 放回的是**新实例**（version +1）—— 否则列表判等为 true、state 不发射、屏幕冻结。
         part.buffer.append(delta)
-        return take(idx) + part.appended() + subList(idx + 1, size)
+        return toMutableList().also { it[idx] = part.appended() }
 }
 
 /**
@@ -174,12 +174,12 @@ internal fun List<LivePart>.traceRetry(note: String): List<LivePart> =
 /** 同 [appendText]：同一段里思考只持一个块，交错流不再劈开。 */
 internal fun List<LivePart>.appendThinking(delta: String, segmentStart: Int): List<LivePart> {
         val from = segmentStart.coerceIn(0, size)
-        val tailIdx = subList(from, size).indexOfLast { it is LivePart.Thinking }
-        if (tailIdx < 0) return this + LivePart.Thinking(delta)
-        val idx = from + tailIdx
+        var idx = lastIndex
+        while (idx >= from && this[idx] !is LivePart.Thinking) idx--
+        if (idx < from) return this + LivePart.Thinking(delta)
         val part = this[idx] as LivePart.Thinking
         part.buffer.append(delta)
-        return take(idx) + part.appended() + subList(idx + 1, size)
+        return toMutableList().also { it[idx] = part.appended() }
 }
 
 /** 当前段里是否已有思考块（决定这一段的思考钟是续走还是重置）。 */
@@ -198,7 +198,7 @@ internal fun List<LivePart>.sealThinking(startedAt: Long): List<LivePart> {
         val elapsed = if (startedAt > 0) System.currentTimeMillis() - startedAt else 0L
         // `Thinking` 现在不是 data class（它持有一个可变缓冲），所以这里**新建**一个，
         // 但**沿用同一个 buffer** —— 文本不能被复制/重建（那正是我们要避免的整串复制）。
-        val tokens = last.text.length / 4
+        val tokens = last.buffer.length() / 4
         return dropLast(1) + LivePart.Thinking(last.buffer, tokens, elapsed)
 }
 

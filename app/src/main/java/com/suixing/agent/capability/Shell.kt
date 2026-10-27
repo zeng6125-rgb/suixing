@@ -268,66 +268,57 @@ object Shell {
         }
 
     private suspend fun collect(process: Process): ShellResult {
-        val stdout = StringBuilder()
-        val stderr = StringBuilder()
-        var outChars = 0
-        var errChars = 0
-        val outThread = Thread { outChars = readInto(process.inputStream.bufferedReader(), stdout) }
-            .apply { isDaemon = true }
-        val errThread = Thread { errChars = readInto(process.errorStream.bufferedReader(), stderr) }
-            .apply { isDaemon = true }
+        val stdout = OutputCapture()
+        val stderr = OutputCapture()
+        val outThread = Thread { readInto(process.inputStream.bufferedReader(), stdout) }.apply { isDaemon = true }
+        val errThread = Thread { readInto(process.errorStream.bufferedReader(), stderr) }.apply { isDaemon = true }
         outThread.start()
         errThread.start()
-        // Polled instead of waited out in one go: a command that is still running when the user
-        // taps stop has to die there and then. `waitFor(45s)` would keep it — and its side
-        // effects — alive for the rest of the window, which is exactly what a stop is not.
-        val deadline = System.currentTimeMillis() + DEFAULT_TIMEOUT_MS
-        var finished = false
-        while (true) {
-            if (process.waitFor(POLL_MS, TimeUnit.MILLISECONDS)) {
-                finished = true
-                break
+        try {
+            val deadline = System.currentTimeMillis() + DEFAULT_TIMEOUT_MS
+            var finished = false
+            while (true) {
+                if (process.waitFor(POLL_MS, TimeUnit.MILLISECONDS)) {
+                    finished = true
+                    break
+                }
+                if (!currentCoroutineContext().isActive) {
+                    process.killAndReap()
+                    throw CancellationException("已停止")
+                }
+                if (System.currentTimeMillis() >= deadline) break
             }
-            if (!currentCoroutineContext().isActive) {
-                // Plain destroy, like the timeout below: SIGTERM is enough for the commands
-                // this runs. It reaches the process we started, not its children, so a
-                // pipeline's other end can outlive it — SIGKILL would have the same limit.
-                process.killAndReap()
-                throw CancellationException("已停止")
-            }
-            if (System.currentTimeMillis() >= deadline) break
-        }
-        if (!finished) {
-            process.killAndReap()
-            outThread.join(500)
-            errThread.join(500)
+            if (!finished) process.killAndReap()
+            outThread.join(if (finished) 1500L else 500L)
+            errThread.join(if (finished) 1500L else 500L)
             return ShellResult(
-                false,
-                capped(stdout, outChars),
-                "命令超时（${DEFAULT_TIMEOUT_MS / 1000}s）已终止",
-                -1,
+                finished && process.exitValue() == 0,
+                stdout.snapshot(),
+                if (finished) stderr.snapshot() else "命令超时（${DEFAULT_TIMEOUT_MS / 1000}s）已终止",
+                if (finished) process.exitValue() else -1,
             )
+        } finally {
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
+            runCatching { process.outputStream.close() }
         }
-        outThread.join(1500)
-        errThread.join(1500)
-        return ShellResult(
-            process.exitValue() == 0,
-            capped(stdout, outChars),
-            capped(stderr, errChars),
-            process.exitValue(),
-        )
     }
 
-    /**
-     * Says how much was dropped, so a truncated answer is never read as the whole one.
-     * [total] counts every character the command produced, not just the kept ones.
-     */
-    private fun capped(target: StringBuilder, total: Int): String =
-        if (total <= target.length) {
-            target.toString()
-        } else {
-            target.toString() + "\n…（输出过长已截断：只保留前 $MAX_OUTPUT_CHARS 字符，完整输出共约 $total 字节）"
+    /** Reader threads and timeout snapshots share one lock, including the truncation counter. */
+    private class OutputCapture {
+        private val text = StringBuilder()
+        private var total = 0L
+
+        @Synchronized fun append(buffer: CharArray, count: Int) {
+            total += count
+            if (text.length < MAX_OUTPUT_CHARS) {
+                text.append(buffer, 0, minOf(count, MAX_OUTPUT_CHARS - text.length))
+            }
         }
+
+        @Synchronized fun snapshot(): String = if (total <= text.length) text.toString() else
+            text.toString() + "\n…（输出过长已截断：只保留前 $MAX_OUTPUT_CHARS 字符，完整输出共约 $total 字节）"
+    }
 
     /**
      * 杀掉并**回收**一个子进程（issue #9）。
@@ -352,21 +343,17 @@ object Shell {
      * The stream is still read to the end after the cap: abandoning it would leave the process
      * blocked on a full pipe, which would turn a chatty command into a hanging one.
      */
-    private fun readInto(reader: BufferedReader, target: StringBuilder): Int {
-        var total = 0
+    private fun readInto(reader: BufferedReader, target: OutputCapture) {
         runCatching {
             reader.use { source ->
                 val buffer = CharArray(4096)
                 while (true) {
                     val read = source.read(buffer)
-                    if (read <= 0) break
-                    total += read
-                    if (target.length < MAX_OUTPUT_CHARS) {
-                        target.append(buffer, 0, minOf(read, MAX_OUTPUT_CHARS - target.length))
-                    }
+                    if (read < 0) break
+                    if (read == 0) continue
+                    target.append(buffer, read)
                 }
             }
         }
-        return total
     }
 }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -41,9 +42,7 @@ import androidx.compose.ui.unit.sp
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.DayUsage
 import com.suixing.agent.data.ModelUsage
-import com.suixing.agent.data.Roles
 import com.suixing.agent.data.TokenTally
-import com.suixing.agent.data.Transcript
 import com.suixing.agent.ui.components.PageTopBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -191,36 +190,38 @@ fun UsageScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.large,
                     color = scheme.surfaceContainer,
-                    // 与 SuixingCard / 任务行 / 定时页同一张卡：shapes.large + 1dp outlineVariant。
                     border = BorderStroke(1.dp, scheme.outlineVariant),
                 ) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (loaded && models.isEmpty()) {
-                            Text(
-                                text = "还没有用量记录",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = scheme.onSurfaceVariant,
-                            )
-                        }
-                        val modelTotals = remember(models) { models.map { compact(it.tokens.total) } }
-                        models.forEachIndexed { index, row ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = row.model,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Text(
-                                    text = modelTotals[index],
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = scheme.onSurfaceVariant,
-                                )
+                    val modelTotals = remember(models) { models.map { compact(it.tokens.total) } }
+                    if (models.size > 12) {
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 480.dp),
+                            contentPadding = PaddingValues(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            itemsIndexed(models, key = { _, model -> model.model }, contentType = { _, _ -> "model-usage" }) { index, model ->
+                                ModelUsageRow(model, modelTotals[index])
                             }
+                        }
+                    } else {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (loaded && models.isEmpty()) {
+                                Text("还没有用量记录", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                            }
+                            models.forEachIndexed { index, model -> ModelUsageRow(model, modelTotals[index]) }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ModelUsageRow(model: ModelUsage, total: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(model.model, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Text(total, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

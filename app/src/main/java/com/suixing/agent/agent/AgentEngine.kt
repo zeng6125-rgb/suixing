@@ -406,19 +406,27 @@ class AgentEngine(
      * freezes on `Done`, and a flow that vanished along with the run would take the numbers
      * with it.
      */
-    private val states = mutableMapOf<String, MutableStateFlow<RunState>>()
+    private val states = mutableMapOf<String, java.lang.ref.WeakReference<MutableStateFlow<RunState>>>()
+    private val recentStates = object : LinkedHashMap<String, MutableStateFlow<RunState>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutableStateFlow<RunState>>?): Boolean = size > 16
+    }
 
     /**
      * The state of one conversation, whether or not it is running right now.
      *
-     * The same flow is returned for the same id for the life of the process, so a screen can
-     * collect it once and keep it across runs.
+     * A flow held by any caller keeps its identity across runs. Recent terminal states are
+     * retained strongly; older unobserved flows may be reclaimed without breaking a collector.
      */
     fun stateOf(chatId: String): StateFlow<RunState> = stateFlowOf(chatId)
 
     /** The writable side of [stateOf], for the runs that publish into it. */
     private fun stateFlowOf(chatId: String): MutableStateFlow<RunState> = synchronized(states) {
-        states.getOrPut(chatId) { MutableStateFlow(RunState.Idle) }
+        states.entries.removeAll { it.value.get() == null }
+        val flow = states[chatId]?.get() ?: MutableStateFlow(runs.value[chatId]?.state?.value ?: RunState.Idle).also {
+            states[chatId] = java.lang.ref.WeakReference(it)
+        }
+        recentStates[chatId] = flow
+        flow
     }
 
     fun isRunning(chatId: String): Boolean = runs.value.containsKey(chatId)
@@ -1281,7 +1289,7 @@ class AgentEngine(
                 // Steering lands here, on the boundary between two model turns: the
                 // model has finished the previous turn and has not been asked for the
                 // next one, which is the only moment the wire can be edited safely.
-                drainSteering(wire, onEvent, settings)
+                drainSteering(wire, spans, onEvent, settings)
                 // A manual 「压缩」 is spent here, on the boundary: the user asked for the oldest
                 // context to be folded away, not for the answer in flight to be cut short.
                 val asked = compressNow
@@ -1342,7 +1350,7 @@ class AgentEngine(
                 // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
                 // **这一遍扫描也放后台**（issue #36 同类）：几十万字符的遍历不该占着主线程，
                 // 而它每轮都跑一次。只搬计算，赋值仍在原地。
-                val (historyChars, promptEstimate) = withContext(Dispatchers.Default) {
+                val (historyChars, promptChars, promptImages) = withContext(Dispatchers.Default) {
                     var chars = 0
                     var total = 0
                     var images = 0
@@ -1352,8 +1360,9 @@ class AgentEngine(
                         if (message.role != ROLE_SYSTEM) chars += c
                         if (message.imageCount > 0) images++
                     }
-                    chars to estimatePromptTokens(total, images)
+                    Triple(chars, total, images)
                 }
+                val promptEstimate = estimatePromptTokens(promptChars, promptImages)
                 breakHistory = historyChars / 4
                 // 显示层的「当前请求多大」：wire 在这一刻定型，估算＝端点真实值 + 增量。
                 currentPromptEstimate = promptEstimate
@@ -1472,15 +1481,9 @@ class AgentEngine(
                 // only the endpoint knows how big the prompt really was.
                 usage?.promptTokens?.takeIf { it > 0 }?.let { reported ->
                     lastPromptTokens = reported
-                    // 一趟同时取字符数与图片数（原来是两次全历史扫描）。
-                    var chars = 0
-                    var images = 0
-                    for (message in wire) {
-                        chars += messageChars(message)
-                        if (message.imageCount > 0) images++
-                    }
-                    lastPromptChars = chars
-                    lastPromptImages = images
+                    // No wire mutation occurs during complete(); reuse this request's scan.
+                    lastPromptChars = promptChars
+                    lastPromptImages = promptImages
                 }
                 val thinking = turn.reasoning.takeIf { it.isNotBlank() }
                 // A truncated turn can end mid-tool-call, so say so instead of silently
@@ -1539,7 +1542,7 @@ class AgentEngine(
                     // the last one, so the run takes one more pass to read it. Finishing here
                     // instead would leave a steer bubble on screen that the model never saw, with
                     // nothing telling the user it went nowhere.
-                    if (drainSteering(wire, onEvent, settings) > 0) continue
+                    if (drainSteering(wire, spans, onEvent, settings) > 0) continue
                     onEvent(AgentEvent.Finished(turn.text))
                     publish(RunState.Done(stats()))
                     return produced
@@ -1805,6 +1808,7 @@ class AgentEngine(
      */
     private fun drainSteering(
         wire: MutableList<ChatMessage>,
+        spans: MutableList<WireSpan>,
         onEvent: (AgentEvent) -> Unit,
         // The run's own snapshot, passed in rather than read off the class: the constructor
         // parameter is not a property, and `execute`'s own `settings` is the one the round is
@@ -1832,7 +1836,9 @@ class AgentEngine(
             } else {
                 ""
             }
+            val from = wire.size
             wire += ChatMessage.user("（用户在任务进行中说：${line.text}）$note", images)
+            spans += WireSpan(line.id, from, wire.size)
             // Announced after the wire, never before: a caller told about a line and then shown a
             // prompt without it would have written a bubble the model never saw.
             onEvent(AgentEvent.Steered(line.id, line.text, line.imagesBase64))

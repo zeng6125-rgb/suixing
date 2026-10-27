@@ -2,15 +2,11 @@ package com.suixing.agent.ui.drawer
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,13 +15,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
@@ -35,29 +28,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.vectorResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
-import com.suixing.agent.core.Core
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.SuixingDialog
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 /**
@@ -103,9 +89,11 @@ private fun Modifier.drawerRowTap(
     val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val indication = androidx.compose.foundation.LocalIndication.current
     val rippleScope = rememberCoroutineScope()
+    val latestClick by androidx.compose.runtime.rememberUpdatedState(onClick)
+    val latestLongClick by androidx.compose.runtime.rememberUpdatedState(onLongClick)
     return this
         .indication(interaction, indication)
-        .pointerInput(enabled, onClick, onLongClick) {
+        .pointerInput(enabled) {
             if (!enabled) return@pointerInput
             val slop = viewConfiguration.touchSlop
             val longMs = viewConfiguration.longPressTimeoutMillis
@@ -124,7 +112,7 @@ private fun Modifier.drawerRowTap(
                     if (event == null) {
                         // 按住到点：长按生效，并继续保持跟手（抬手后不再触发点击）。
                         longFired = true
-                        onLongClick?.invoke()
+                        latestLongClick?.invoke()
                         continue
                     }
                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -144,7 +132,7 @@ private fun Modifier.drawerRowTap(
                         androidx.compose.foundation.interaction.PressInteraction.Release(press),
                     )
                 }
-                if (!cancelled && tapped && !longFired) onClick()
+                if (!cancelled && tapped && !longFired) latestClick()
             }
         }
 }
@@ -189,10 +177,10 @@ internal fun ConversationRow(
     // （删除仍旧进 pendingDelete 那个二次确认）。Surface(onClick) 不支持长按，所以点击交给
     // combinedClickable，Surface 只负责形状与底色；clip 是为了让水波纹跟着圆角走。
     Box(
-        modifier = modifier.onGloballyPositioned { coordinates ->
+        modifier = if (menuOpen) modifier.onGloballyPositioned { coordinates ->
             rowBottomPx = coordinates.boundsInWindow().bottom
             rowHeightPx = coordinates.size.height.toFloat()
-        },
+        } else modifier,
     ) {
         Surface(
             modifier = Modifier
@@ -349,75 +337,3 @@ private val DrawerMenuWidth = 200.dp
  * 只用来判断「下面还放得下吗」，放不下就朝上翻；项数改了这里要跟着改。
  */
 private val DrawerMenuHeight = 40.dp * 6 + 28.dp
-
-@Composable
-internal fun ApprovalDialog(
-    chatId: String,
-    toolName: String,
-    args: String,
-    /** Title of the conversation whose run is asking; null once it is gone from the list. */
-    sourceTitle: String?,
-    /** How many other conversations are blocked on their own prompt right now. */
-    otherWaiting: Int,
-) {
-    // A deleted or untitled conversation still has to be named: a blank line would leave
-    // the user unable to tell the card apart from the chat they are looking at.
-    val from = sourceTitle?.takeIf { it.isNotBlank() } ?: "另一个会话"
-    SuixingDialog(
-        onDismissRequest = { Core.gate.resolve(chatId, false) },
-        icon = { Icon(ImageVector.vectorResource(R.drawable.ic_shield_alert), contentDescription = null) },
-        title = {
-            Column {
-                Text("需要你确认")
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = "来自会话：$from",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                // Only worth a line when it is true: one blocked chat is the normal case.
-                if (otherWaiting > 0) {
-                    Text(
-                        text = "还有 $otherWaiting 个会话在等待",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        },
-        text = {
-            Column {
-                Text("随行想调用工具：$toolName")
-                Spacer(Modifier.height(10.dp))
-                Surface(
-                    shape = MaterialTheme.shapes.small,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                ) {
-                    Text(
-                        text = args,
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 12,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = "拒绝后模型会收到失败结果，可以换个方式继续。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        confirmButton = { scope -> TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, true) } }) { Text("允许一次") } },
-        dismissButton = { scope ->
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, true, always = true) } }) { Text("总是允许") }
-                TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, false) } }) { Text("拒绝") }
-            }
-        },
-    )
-}

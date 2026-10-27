@@ -8,7 +8,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.delay
@@ -44,7 +43,7 @@ class ChatScroll internal constructor(internal val listState: LazyListState) {
     var stickToBottom: Boolean
         get() = stickByConversation[conversationId] ?: true
         set(value) {
-            stickByConversation[conversationId] = value
+            if (stickToBottom != value) stickByConversation[conversationId] = value
         }
 
     /** 每个会话的阅读位置：首可见项 key + 它离滚动起点的 px。切走存、切回恢复。 */
@@ -124,6 +123,13 @@ class ChatScroll internal constructor(internal val listState: LazyListState) {
         spots.remove(conversationId)
         lastSeenByConversation.remove(conversationId)
         spotByConversation.remove(conversationId)
+    }
+
+    internal fun retainConversations(ids: Set<String>) {
+        stickByConversation.keys.retainAll(ids)
+        spots.keys.retainAll(ids)
+        spotByConversation.keys.retainAll(ids)
+        lastSeenByConversation.keys.retainAll(ids)
     }
 
     internal fun saveSpot(conversationId: String) {
@@ -275,7 +281,6 @@ fun rememberChatScroll(
     // 阅读位置：手指停下那一刻记首可见项。底锚下"首可见"是视觉最底那条（滚动起点）。
     // 位置取 firstVisibleItemScrollOffset —— 它正是 scrollToItem(index, offset) 的第二个参数；
     // layoutInfo 里那条项的 offset 是含负偏移的视口坐标，直接回填会把位置修正掉。
-    var wasScrolling by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
         snapshotFlow {
             val index = listState.firstVisibleItemIndex
@@ -295,7 +300,6 @@ fun rememberChatScroll(
                     scroll.spots[scroll.conversationId] = key to offset
                 }
             }
-            wasScrolling = scrolling
         }
     }
     return scroll

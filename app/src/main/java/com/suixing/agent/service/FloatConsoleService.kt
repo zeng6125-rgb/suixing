@@ -54,13 +54,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -221,6 +219,9 @@ class FloatConsoleService : Service() {
 
     private var attached = false
     private var dotPulse: ValueAnimator? = null
+    private var dotRunning: Boolean? = null
+    private var stopAreaKey: List<Triple<String, Long, String>>? = null
+    private var conversationRenderRevision = 0L
 
     private var touchStartX = 0f
     private var touchStartY = 0f
@@ -356,6 +357,8 @@ class FloatConsoleService : Service() {
      * accessibility service connects or goes away ([watchAccessibility]).
      */
     private fun buildConsole() {
+        dotRunning = null
+        stopAreaKey = null
         root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         panel = buildPanel()
         root.addView(buildBall())
@@ -483,13 +486,16 @@ class FloatConsoleService : Service() {
      * from a phone.
      */
     private fun trace(line: String) {
-        val entry = "${stamp()} $line canDrawOverlays=${Settings.canDrawOverlays(this)} " +
-            "accessibility=${SuixingAccessibilityService.instance() != null} " +
-            "resident=${consoleSettings.resident} " +
-            "runs=${Core.engine.runsFlow.value.size}\n"
-        // 文件 IO 全在这条线程上：日志永远不该卡住一次绘制或一次手势。
+        val at = System.currentTimeMillis()
+        val zone = java.time.ZoneId.systemDefault()
+        val accessibility = SuixingAccessibilityService.instance() != null
+        val resident = consoleSettings.resident
+        val runCount = Core.engine.runsFlow.value.size
         traceWorker.execute {
             runCatching {
+                // Permission is checked on the worker; other fields describe the queued event.
+                val entry = "${traceStamp(at, zone)} $line canDrawOverlays=${Settings.canDrawOverlays(this)} " +
+                    "accessibility=$accessibility resident=$resident runs=$runCount\n"
                 val file = File(filesDir, CONSOLE_TRACE_FILE)
                 if (file.length() > CONSOLE_TRACE_MAX_BYTES) {
                     // 头尾都留：尾部是刚发生的事，而头部那条 `service=start` 是判读的起点 ——
@@ -504,7 +510,6 @@ class FloatConsoleService : Service() {
         }
     }
 
-    private fun stamp(): String = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
 
     /**
      * The panel's width: whatever the user last dragged it to, or 268dp, and never wider than the
@@ -1022,7 +1027,8 @@ class FloatConsoleService : Service() {
                     // start/stop, so a newer run takes the panel over and an ended one hands it
                     // back to the previous run or hides the panel when none is left. The stop
                     // area, unlike the panel, shows every run in flight.
-                    val handle = runs.values.maxByOrNull { it.startedAt }
+                    val orderedRuns = runs.values.sortedByDescending { it.startedAt }
+                    val handle = orderedRuns.firstOrNull()
                     val state = handle?.state?.value ?: RunState.Idle
                     stateText.text = consoleStatus(state, handle)
                     showStats(state.detail())
@@ -1039,7 +1045,7 @@ class FloatConsoleService : Service() {
                     // reads the same way, so the two never disagree about what a tap will do.
                     sendButton.text = if (state is RunState.Running) "插话" else "发送"
                     setStatusDot(state is RunState.Running)
-                    renderStopArea(runs.values.sortedByDescending { it.startedAt })
+                    renderStopArea(orderedRuns)
                     renderConversation()
                     // Re-decided here as well, because a run can also start with the app already
                     // in the background (a reminder): this is the only place that sees one
@@ -1114,6 +1120,7 @@ class FloatConsoleService : Service() {
      * 读的是**尾部**而不是全文 —— 悬浮窗只回显最近几条，没必要把 30MB 拉进内存。
      */
     private suspend fun renderConversation() {
+        val revision = ++conversationRenderRevision
         val conversations = Core.chats.conversations.value
         val running = Core.engine.newestRun()?.chatId
         val conversation: Conversation? =
@@ -1132,6 +1139,8 @@ class FloatConsoleService : Service() {
         val recentMessages = conversation.messages.ifEmpty {
             runCatching { Core.chats.readTail(conversation.id)?.messages }.getOrNull().orEmpty()
         }
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        if (revision != conversationRenderRevision) return
         val recent = recentMessages
             .filter { it.text.isNotBlank() }
             .takeLast(RECENT_MESSAGE_COUNT)
@@ -1146,6 +1155,8 @@ class FloatConsoleService : Service() {
     }
 
     private fun setStatusDot(running: Boolean) {
+        if (dotRunning == running) return
+        dotRunning = running
         dotPulse?.cancel()
         dotPulse = null
         statusDot.alpha = 1f
@@ -1174,6 +1185,9 @@ class FloatConsoleService : Service() {
      * looking at.
      */
     private fun renderStopArea(handles: List<AgentEngine.RunHandle>) {
+        val key = handles.map { Triple(it.chatId, it.startedAt, titleOf(it)) }
+        if (key == stopAreaKey) return
+        stopAreaKey = key
         stopArea.removeAllViews()
         if (handles.size <= 1) {
             // 单 run（或没有）：停止键就落在底部动作行「回到对话」的右侧（[stopButton]），
@@ -1459,4 +1473,3 @@ private fun RunState.detail(): String = when (this) {
     is RunState.Cancelled -> "已中断"
     is RunState.Failed -> message
 }
-

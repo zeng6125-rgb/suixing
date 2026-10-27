@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -78,9 +80,7 @@ class ChatRepository(private val context: Context) {
                 byId[meta.id] = meta.toConversation()
             }
             _conversations.value = byId.values.sortedByDescending { it.updatedAt }
-            // Same pass, same thread: quarantined files are never read again, so without this
-            // they would sit in filesDir for ever.
-            pruneQuarantine()
+            // Quarantined originals stay recoverable; they are excluded by storeMetas().
             pruneStaleGens(metas)
         }
     }
@@ -390,10 +390,12 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         }
 
     suspend fun create(title: String = "新会话"): Conversation = withContext(Dispatchers.IO) {
-        val conversation = Conversation(id = UUID.randomUUID().toString(), title = title)
-        val stored = write(conversation)
-        _conversations.value = listOf(stored) + _conversations.value
-        stored
+        lock.withLock {
+            val conversation = Conversation(id = UUID.randomUUID().toString(), title = title)
+            val stored = write(conversation)
+            _conversations.value = listOf(stored) + _conversations.value
+            stored
+        }
     }
 
     /**
@@ -646,8 +648,12 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * run ends: a draft kept there would be lost exactly when it is needed.
      */
     suspend fun saveLive(draft: LiveDraft) = withContext(Dispatchers.IO) {
+        // Encoding is pure snapshot work; it must not block another chat's tail read.
+        // The run awaits its writer's cancellation before clearing this file.
+        val text = json.encodeToString(LiveDraft.serializer(), draft)
+        currentCoroutineContext().ensureActive()
         lock.withLock {
-            writeAtomically(liveFile(draft.chatId), json.encodeToString(LiveDraft.serializer(), draft))
+            writeAtomically(liveFile(draft.chatId), text)
         }
     }
 
@@ -949,30 +955,9 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         runCatching { file.renameTo(File(dir, "${file.name}$CORRUPT_SUFFIX")) }
     }
 
-    /**
-     * Quarantined transcripts older than [CORRUPT_KEEP_MS] go for good: they are kept so a broken
-     * file can still be rescued by hand, and a month is long past the point where anyone would.
-     *
-     * Best effort on purpose — a sweep that fails (a locked file, a directory that vanished) must
-     * never be a reason for a load to fail.
-     */
-    /**
-     * 隔离区（解析失败的原始文件）**不再自动删除**。
-     *
-     * 这些文件解析不了，但它们是**原始数据** —— 格式改过、编码变了、手工改坏了，
-     * 都有可能靠它们捞回来。自动清理等于"过了 N 天就放弃用户的数据"。
-     * 用户没发话不许删。
-     */
-    private fun pruneQuarantine() {
-        // 故意留空：隔离区里是用户的原始数据，不自动清理。
-    }
-
     private companion object {
         /** 打开会话与「加载更早」每次取的轮数。 */
         const val OPEN_TURNS = 12
-        /** How long a quarantined transcript is kept for hand recovery. */
-        const val CORRUPT_KEEP_MS = 30L * 24 * 60 * 60 * 1000
-
         const val CORRUPT_SUFFIX = ".corrupt"
 
         /** Tag for the storage lines: rewriting a whole transcript, and every migration step. */

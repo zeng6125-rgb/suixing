@@ -25,7 +25,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import java.io.File
 
 /**
@@ -40,8 +39,8 @@ object Core {
      * 主题模式的同步快照：1＝浅、2＝深、其它＝跟系统（与 `MainActivity` 里那份 when 同一套语义）。
      *
      * `settings.current()` 是挂起的，而 `MainActivity.onCreate` 必须在 `setContentView` **之前**
-     * 决定用哪套启动主题 —— 那一刻没有协程可以等。所以这里备一份同步可读的副本：[init] 里先同步
-     * 读一次（settings.json 只有几百字节），之后由收集器跟着用户的改动走。读不到时保持 0＝跟系统，
+     * 决定用哪套启动主题 —— 那一刻没有协程可以等。所以这里只同步读独立的主题快照，
+     * DataStore 由 IO 收集器异步读取并更新快照。读不到时保持 0＝跟系统，
      * 也就是资源系统本来的默认行为（不会崩，只是那一帧仍按系统 uiMode 画）。
      */
     @Volatile
@@ -151,11 +150,16 @@ object Core {
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)
             engine = AgentEngine(scope = appScope)
-            // 启动窗口的底色必须在 MainActivity 之前定下来，所以这一份是**同步**读的：
-            // settings.json 只有几百字节，读盘几毫秒；读不到就等于「跟系统」（0），不会崩。
-            themeMode = runCatching { runBlocking { settings.current().themeMode } }.getOrDefault(0)
-            // 用户在设置里改了主题：下一次冷启动就该按新的那一套画启动窗口。
-            appScope.launch { settings.flow.collect { themeMode = it.themeMode } }
+            val appearance = appContext.getSharedPreferences("startup_appearance", Context.MODE_PRIVATE)
+            themeMode = appearance.getInt("theme_mode", 0)
+            appScope.launch {
+                settings.flow.collect {
+                    themeMode = it.themeMode
+                    if (appearance.getInt("theme_mode", -1) != it.themeMode) {
+                        appearance.edit().putInt("theme_mode", it.themeMode).apply()
+                    }
+                }
+            }
             appScope.launch {
                 memory.load()
                 profile.load()
@@ -175,7 +179,7 @@ object Core {
             }
             // Alarms are dropped when the app is updated or force-stopped, so aiming the next
             // one on every launch is what keeps a reminder set weeks ago from going quiet.
-            SchedulerService.arm(appContext)
+            appScope.launch(Dispatchers.IO) { SchedulerService.arm(appContext) }
             // 插件链路 clinit 探针（FEEDBACK v0.8.112 P0#1 / 真机 ExceptionInInitializerError）：
             // 启动时主动碰一次两个门面类，clinit 炸就把 cause 链写进 plugin-trace.log —— 这台真机
             // logcat 读不出来，不主动记就永远拿不到真凶。探针只读不写业务状态，失败也只落日志。
