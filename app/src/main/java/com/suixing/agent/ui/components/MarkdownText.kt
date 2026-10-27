@@ -786,11 +786,14 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
     // to recompose when the cache moves on, and writing state during composition is exactly
     // the kind of thing that recomposes forever.
     val cache = remember { MarkdownCache() }
-    // **流式文本直接按当前文本解析**（用户：正文流式一直是"整段整段地出"）。
-    // 原来这里返回 `cache.blocksFor(text)` —— 那条增量缓存只在**空行**处合入尾部，
-    // 同一段落内部继续追加字符时它并不刷新，于是屏幕上要等下一个换行才看到新字，
-    // 表现就是一段一段蹦。这里改为每次按当前文本重新解析，保证"到多少显示多少"。
-    // 解析纯函数、文本长度通常几 KB，一次几毫秒；正确性优先，后续如需优化再做块级复用。
+    // **流式走 [LiveBlocks] 的块级复用**（不是整段重解析，也不是旧的 [MarkdownCache]）。
+    // 旧的 `MarkdownCache` 只在**空行**处合入尾部，同一段落里继续追加字符时不刷新，
+    // 屏幕上要等下一个换行才看到新字（用户："整段整段地出"）；它因此被停用。
+    // 现在：每次发布按当前文本重新解析**最后一个未闭合块**，空行以上的块是终值直接复用
+    // ⇒ 既保证"到多少显示多少"，又把每次发布的解析量从"整段"降到"尾段"
+    // （打字机 25~60Hz 下保住帧预算的关键，issue #44）。
+    // 仍留在主线程的剩余成本是**最后一个未闭合块的文字测量**（排版而非解析），
+    // 长未闭合代码块尤其明显；没有帧数据前不动它。
     if (!settled) {
         // **块级复用**（issue #44）：流式文本只有末尾在长，空行以上的块是终值。
         // 只重解析最后一个未闭合的块，前面的直接复用上次结果 —— 长答案下每次发布的
