@@ -9,6 +9,7 @@ import com.suixing.agent.agent.RunState
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.plugins.PluginRuntime
+import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.ContextCheckpoint
@@ -27,6 +28,7 @@ import com.suixing.agent.data.forAssistant
 import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.ConversationLogShrunkException
 import com.suixing.agent.data.MessageCache
+import com.suixing.agent.llm.LocalNetworkAccess
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.describeError
@@ -287,6 +289,8 @@ private data class RunSession(
     val checkpoints: List<ContextCheckpoint> = emptyList(),
     val runId: String,
     val messages: List<StoredMessage>,
+    /** Pages loaded during this run; copied independently of in-flight stream snapshots. */
+    val loadedPrefix: List<StoredMessage> = emptyList(),
     val activeRuns: Map<String, String>,
     val streaming: String = "",
     val reasoning: String = "",
@@ -389,6 +393,14 @@ class ChatViewModel : ViewModel() {
     private val llm = LlmClient()
     /** Endpoints already asked in this process, so opening the sheet twice costs one call. */
     private val windowsAsked = mutableSetOf<String>()
+
+    /**
+     * 设置的最近快照：`send()` 不是挂起函数，而 `Core.settings.current()` 是挂起的。
+     * 初值**用 null 而不是 `AppSettings()`**：默认值的 baseUrl 是空串，拿它判「是不是内网」
+     * 会在 DataStore 首次发射前给出错误结论；null 表示「还不知道」，此时不拦。
+     */
+    private val settingsSnapshot: StateFlow<AppSettings?> = Core.settings.flow
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _state = MutableStateFlow(ChatUiState())
 
@@ -1029,11 +1041,6 @@ class ChatViewModel : ViewModel() {
                     null
                 }
                 val older = window?.messages ?: fallback?.messages ?: return@launch
-                if (window != null && start != null) {
-                    windowStarts[chatId] = start.first to window.startOffset
-                } else if (fallback != null) {
-                    windowStarts[chatId] = fallback.gen to fallback.startOffset
-                }
                 if (older.isEmpty()) return@launch
                 if (_state.value.conversationId != chatId) return@launch
                 // **合并后的列表未必都在盘上**（评审 13 的 H1）：`older` 来自盘，但 `current.messages`
@@ -1045,13 +1052,28 @@ class ChatViewModel : ViewModel() {
                 // 身份会静默失配 ⇒ 退化成"不敢清草稿"（方向安全，但没人会知道）。
                 val baseWasDiskBacked = cacheIsDiskBacked(chatId) &&
                     cachedMessages(chatId) === _state.value.messages
+                // Install the page in the run first. A stream event may already hold a
+                // pre-page snapshot; putSession carries these pages over that snapshot.
+                var pagedRun: RunSession? = null
+                sessions.computeIfPresent(chatId) { _, live ->
+                    val merged = prependEarlierPage(live.messages, shown.first(), older)
+                    if (merged != null) {
+                        live.copy(messages = merged, loadedPrefix = older + live.loadedPrefix)
+                            .also { pagedRun = it }
+                    } else {
+                        live
+                    }
+                }
                 var mergedOut: List<StoredMessage>? = null
                 _state.update { current ->
-                    // 双保险：只接在**同一个**头部之前，避免期间列表被替换过。
-                    if (current.conversationId != chatId || current.messages.firstOrNull()?.id != shown.first().id) {
+                    // CAS may retry after a stream publication has already shown this page.
+                    mergedOut = null
+                    val merged = if (current.conversationId == chatId) {
+                        prependEarlierPage(current.messages, shown.first(), older)
+                    } else null
+                    if (merged == null) {
                         current
                     } else {
-                        val merged = older + current.messages
                         mergedOut = merged
                         current.copy(messages = merged)
                     }
@@ -1060,6 +1082,16 @@ class ChatViewModel : ViewModel() {
                 mergedOut?.let {
                     cacheMessages(chatId, it, diskBacked = baseWasDiskBacked)
                     added = true
+                }
+                // A stream publication can have displayed the installed page before
+                // our CAS. That is still a successful page, even though the head changed.
+                if (pagedRun != null) added = true
+                if (added) {
+                    if (window != null && start != null) {
+                        windowStarts[chatId] = start.first to window.startOffset
+                    } else if (fallback != null) {
+                        windowStarts[chatId] = fallback.gen to fallback.startOffset
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1573,6 +1605,21 @@ class ChatViewModel : ViewModel() {
         // (two runs would interleave into one transcript), and every other
         // conversation is free to start its own run right now.
         if (Core.engine.isRunning(chatId)) return false
+
+        // Android 17（API 37）起，发往内网的请求必须先有 ACCESS_LOCAL_NETWORK，否则只会超时，
+        // 还会被重试 5 次后才报「连接超时」——把权限问题伪装成网络问题。这里先拦下来，
+        // 直接告诉用户去哪儿授权，不发出那 5 次注定失败的请求。
+        val appContext = runCatching { Core.appContext }.getOrNull()
+        val settingsNow = settingsSnapshot.value
+        if (appContext != null && settingsNow != null &&
+            LocalNetworkAccess.blockedByMissingPermission(appContext, settingsNow.baseUrl)
+        ) {
+            _state.update {
+                it.copy(error = "Android 17 起访问局域网模型需要「局域网访问」权限：到「设置 → 模型」点一次" +
+                    "「测试连接」会弹出系统授权，允许后再发送。")
+            }
+            return false
+        }
 
         val user = StoredMessage(
             id = UUID.randomUUID().toString(),
@@ -2818,26 +2865,38 @@ class ChatViewModel : ViewModel() {
      * the display only ever reads its own entry.
      */
     private fun putSession(next: RunSession) {
-        sessions[next.chatId] = next
+        val installed = sessions.compute(next.chatId) { _, current ->
+            if (current != null && current.runId == next.runId && current.loadedPrefix.size > next.loadedPrefix.size) {
+                next.copy(
+                    messages = carryEarlierPages(next.messages, next.loadedPrefix.size, current.loadedPrefix),
+                    loadedPrefix = current.loadedPrefix,
+                )
+            } else {
+                next
+            }
+        } ?: return
         // **不在这里刷 LRU 缓存**（#35）：流式期间每 ~80ms 一次 `putSession`，每次都要动缓存
         // （`MessageCache` 内部是一把监视器锁），而切会话时的 `readTail` 读盘也要用同一把 ——
         // 撞在一起就是可感知的抖动。缓存只在「一轮结束」时刷（见 [endSession]）就够：
         // 一轮中途切回来走的是 `sessions`（live 分支），根本不看缓存。
         _state.update { snapshot ->
-            if (snapshot.conversationId != next.chatId) {
+            // Re-read inside the CAS: pagination can install/publish a newer copy
+            // after this call's compute, and a CAS retry must keep that copy.
+            val latest = sessions[next.chatId] ?: installed
+            if (snapshot.conversationId != latest.chatId) {
                 snapshot
             } else {
                 snapshot.copy(
-                    title = next.title,
-                    messages = next.messages,
-                    activeRuns = next.activeRuns,
-                    streaming = next.streaming,
-                    reasoning = next.reasoning,
-                    status = next.status,
-                    runningTool = next.runningTool,
-                    liveParts = next.parts,
-                    liveRunId = next.runId,
-                    error = next.error ?: snapshot.error,
+                    title = latest.title,
+                    messages = latest.messages,
+                    activeRuns = latest.activeRuns,
+                    streaming = latest.streaming,
+                    reasoning = latest.reasoning,
+                    status = latest.status,
+                    runningTool = latest.runningTool,
+                    liveParts = latest.parts,
+                    liveRunId = latest.runId,
+                    error = latest.error ?: snapshot.error,
                 )
             }
         }

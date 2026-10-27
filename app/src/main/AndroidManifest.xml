@@ -3,6 +3,13 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      Android 17（API 37）起，targetSdk ≥ 37 的应用默认不能访问局域网：只有 INTERNET 不够，
+      还必须声明并在运行时获得 ACCESS_LOCAL_NETWORK，否则发往内网地址的连接会直接超时
+      （表现和「地址/端口写错」无法区分）。旧系统没有这条权限，声明了也不会弹授权。
+      https://developer.android.com/privacy-and-security/local-network-permission
+    -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <!-- 息屏后 CPU 不休眠：前台服务只保证进程不被杀，不阻止 doze；没有它流式会被冻结。 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 「允许后台运行」：请求忽略电池优化，避免 MIUI 在后台掐掉长任务。 -->

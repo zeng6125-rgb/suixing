@@ -106,6 +106,7 @@ import com.suixing.agent.data.PROTOCOL_RESPONSES
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
+import com.suixing.agent.llm.LocalNetworkAccess
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.ui.drawer.DrawerOrder
 import com.suixing.agent.ui.drawer.DrawerOrderStore
@@ -302,7 +303,6 @@ private fun SettingsRoot(
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
             contentPadding = settingsPagePadding(),
-            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             item { SettingsStatusCard(capabilities, settings) }
             item {
@@ -489,6 +489,25 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     var loadingModels by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
     var outcome by remember { mutableStateOf<TestOutcome?>(null) }
+    val context = LocalContext.current
+    // Android 17 起访问局域网要先拿到 ACCESS_LOCAL_NETWORK。这里只在**目标像内网**时请求，
+    // 公网接口的用户永远不会看到这个系统对话框；授权结果回来后提示「再点一次」，
+    // 不自动重放请求（重放会在用户还没点允许时就发出注定超时的请求）。
+    val localNetworkLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        outcome = if (granted) {
+            TestOutcome(true, "已获得局域网访问权限，再点一次即可。")
+        } else {
+            TestOutcome(false, "没有局域网访问权限：Android 17 起访问内网模型必须允许这项权限。")
+        }
+    }
+    fun ensureLocalNetwork(): Boolean {
+        if (!LocalNetworkAccess.blockedByMissingPermission(context, form.baseUrl)) return true
+        localNetworkLauncher.launch(android.Manifest.permission.ACCESS_LOCAL_NETWORK)
+        outcome = TestOutcome(false, "已请求「局域网访问」权限，允许后再点一次。")
+        return false
+    }
     // The chip being edited. Keyed on the provider ids, never on `stored` itself: the name
     // field writes through on every keystroke, and a selection re-derived from `stored` on
     // each of those writes would snap back to the active provider mid-word — the rest of the
@@ -621,6 +640,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             enabled = !testing,
                             onClick = {
                                 scope.launch {
+                                    if (!ensureLocalNetwork()) return@launch
                                     testing = true
                                     outcome = null
                                     // 同保存：空地址不写进全局 active（新建后停在空 provider 上
@@ -678,6 +698,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     )
                 }
             }
+            item { SectionHeader("服务商与接口", first = true) }
             item {
                 // The provider row: one chip per endpoint, the active one filled, plus
                 // 新建. Renaming and deleting ride each chip's own long-press menu, so
@@ -937,6 +958,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 )
             }
+            item { SectionHeader("模型与能力") }
             item {
                 // The raw id, not the alias: what is typed here is what goes on the wire, so
                 // a display name typed or pasted in would be sent as the model and 404. The
@@ -963,6 +985,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         enabled = !loadingModels,
                         onClick = {
                             scope.launch {
+                                // 内网地址且还没授权时，先弹系统授权；不发出注定超时的请求。
+                                if (!ensureLocalNetwork()) return@launch
                                 loadingModels = true
                                 outcome = null
                                 runCatching { client.listModelDetails(form) }.fold(
@@ -1057,6 +1081,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     },
                 )
             }
+            item { SectionHeader("生成参数") }
             item(key = "max-tokens") {
                 // 最大输出**按模型**（用户：「取消全局性的，改用各模型默认＋可自定义，跟上下文
                 // 窗口一样」）：存 [AppSettings.modelMaxTokens]，键是裸模型 id（与 modelContexts
@@ -1377,7 +1402,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
             contentPadding = settingsPagePadding(),
             verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
-            item { SectionHeader("输入") }
+            item { SectionHeader("输入与插话", first = true) }
             item {
                 SettingRow(
                     title = "回车键发送",
@@ -1406,7 +1431,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     )
                 }
             }
-            item { SectionHeader("运行") }
+            item { SectionHeader("工具执行") }
             item {
                 // 0 是「不限制」，但把 0 直接摆在标签上读起来像个没配好的空值——用户原话
                 // 「把 0 字样改成无限」。存储值不变（仍是 0），引擎那侧 `roundLimit <= 0`
@@ -1448,6 +1473,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
             // 「自动整理用户画像」与「画像整理间隔」搬到了用户画像页（ProfileScreen）：它们管的是
             // 那份画像本身怎么维护，与这一页的对话行为不是一回事，而「数据」页是纯入口列表、
             // 放开关会破坏它的形态。字段与存储没动。
+            item { SectionHeader("审批与授权") }
             item {
                 LabeledBlock(label = "工具审批", hint = "模型每次动手前要不要问你。") {
                     SegmentedPill(
@@ -1563,6 +1589,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     }
                 }
             }
+            item { SectionHeader("上下文管理") }
             item {
                 SettingRow(
                     title = "自动压缩上下文",
@@ -1625,7 +1652,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     },
                 )
             }
-            item { SectionHeader("注入系统提示词") }
+            item { SectionHeader("记忆与画像") }
             item {
                 SettingRow(
                     title = "注入记忆提示词",
@@ -1652,7 +1679,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     },
                 )
             }
-            item { SectionHeader("失败处理") }
+            item { SectionHeader("失败重试") }
             item {
                 SettingRow(
                     title = "失败自动重试",
@@ -1692,7 +1719,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     onValueChange = { s -> scope.persist { it.copy(retryDelaySeconds = s.toInt()) } },
                 )
             }
-            item { SectionHeader("显示") }
+            item { SectionHeader("思考过程") }
             item {
                 SettingRow(
                     title = "显示思考过程",
@@ -1749,6 +1776,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     },
                 )
             }
+            item { SectionHeader("消息显示") }
             item {
                 SettingRow(
                     title = "自动跟随新消息",
@@ -1808,6 +1836,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
             contentPadding = settingsPagePadding(),
             verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
+            item { SectionHeader("主题与配色", first = true) }
             item {
                 LabeledBlock(label = "主题") {
                     SegmentedPill(
@@ -1829,6 +1858,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                     )
                 }
             }
+            item { SectionHeader("文字与布局") }
             item {
                 LabeledBlock(label = "字号", hint = "正文字号，立即生效。") {
                     SegmentedPill(
@@ -1856,6 +1886,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                     )
                 }
             }
+            item { SectionHeader("动效与提示") }
             item {
                 LabeledBlock(
                     label = "打字机效果",
@@ -1971,6 +2002,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             contentPadding = settingsPagePadding(),
             verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
+            item { SectionHeader("联网搜索", first = true) }
             item {
                 OutlinedTextField(
                     textStyle = settingsFieldText,
@@ -1998,6 +2030,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                     visualTransformation = PasswordVisualTransformation(),
                 )
             }
+            item { SectionHeader("语音朗读") }
             item {
                 val engineLabel by Core.speaker.engineLabel.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) { Core.speaker.prepare() }
@@ -2023,6 +2056,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                     }
                 }
             }
+            item { SectionHeader("语音转写") }
             item {
                 SettingRow(
                     title = "语音输入",
@@ -2077,7 +2111,6 @@ private fun DataSettingsPage(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 .padding(padding),
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
             contentPadding = settingsPagePadding(),
-            verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
             item {
                 SettingsGroup(
@@ -3100,10 +3133,17 @@ private fun SettingsLink(
     )
 }
 
-/** 一页里的小节标题：四段之间的分界，靠字号与颜色分层，不加卡片。 */
+/** Controls already own their top inset; avoid adding a second gap below the heading. */
 @Composable
-private fun SectionHeader(text: String) {
-    com.suixing.agent.ui.components.SettingSectionTitle(text)
+private fun SectionHeader(text: String, first: Boolean = false) {
+    com.suixing.agent.ui.components.SettingSectionTitle(
+        text,
+        contentPadding = PaddingValues(
+            start = SettingsStyle.SectionIndent,
+            top = if (first) 0.dp else SettingsStyle.SectionTop,
+            bottom = 0.dp,
+        ),
+    )
 }
 
 @Composable
