@@ -18,13 +18,14 @@ object SettingsStyle {
     val RowPadding = 12.dp
     val ControlGap = 12.dp
     val FieldGap = 8.dp
-    val SectionTop = 12.dp
+    val SectionTop = 8.dp
     val SectionBottom = 8.dp
+    val SectionIndent = 6.dp
 
     val rowTitle: TextStyle @Composable get() = MaterialTheme.typography.bodyLarge
     val description: TextStyle @Composable get() = MaterialTheme.typography.bodySmall
     val metadata: TextStyle @Composable get() = MaterialTheme.typography.labelMedium
-    val sectionTitle: TextStyle @Composable get() = MaterialTheme.typography.titleSmall
+    val sectionTitle: TextStyle @Composable get() = MaterialTheme.typography.labelLarge
     val cardTitle: TextStyle @Composable get() = MaterialTheme.typography.titleMedium
     val fieldText: TextStyle @Composable get() = MaterialTheme.typography.bodyMedium
     val body: TextStyle @Composable get() = MaterialTheme.typography.bodyMedium
@@ -42,11 +43,19 @@ fun settingsPagePadding(): PaddingValues = PaddingValues(
 )
 
 @Composable
-fun SettingSectionTitle(text: String, modifier: Modifier = Modifier) {
+fun SettingSectionTitle(
+    text: String,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(
+        start = SettingsStyle.SectionIndent,
+        top = SettingsStyle.SectionTop,
+        bottom = SettingsStyle.SectionBottom,
+    ),
+) {
     Text(
         text = text,
         style = SettingsStyle.sectionTitle,
         color = MaterialTheme.colorScheme.primary,
-        modifier = modifier.padding(top = SettingsStyle.SectionTop, bottom = SettingsStyle.SectionBottom),
+        modifier = modifier.padding(contentPadding),
     )
 }

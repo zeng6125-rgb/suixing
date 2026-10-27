@@ -163,8 +163,7 @@ class ShellTools(
         val mode = args.str("mode")?.trim()?.lowercase() ?: "auto"
         val shell = args.str("shell")?.trim()?.lowercase() ?: "auto"
         drawInputFx(command, tool = "run_shell")
-        val state = capabilities.state.value
-        if (mode == "root" && !state.rootProbed) capabilities.probeRoot()
+        if (mode == "root") capabilities.ensureRootProbed()
         val chosen = shellChannel(mode, capabilities.shellTier())
         // shell 只在 local 档有意义：root/shizuku 用的是系统里的 sh（那两个身份本来就能跑任何
         // 系统命令）；local 档默认优先用随包分发的静态 bash（见 Shell.local）。

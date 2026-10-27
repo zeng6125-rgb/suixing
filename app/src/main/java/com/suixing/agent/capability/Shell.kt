@@ -268,6 +268,9 @@ object Shell {
         }
 
     private suspend fun collect(process: Process): ShellResult {
+        // Commands arrive through -c; this API has no stdin writer. Send EOF now so
+        // commands (or login profiles) reading stdin cannot wait until the timeout.
+        runCatching { process.outputStream.close() }
         val stdout = OutputCapture()
         val stderr = OutputCapture()
         val outThread = Thread { readInto(process.inputStream.bufferedReader(), stdout) }.apply { isDaemon = true }

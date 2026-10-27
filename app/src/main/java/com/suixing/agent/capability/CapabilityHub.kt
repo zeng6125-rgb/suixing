@@ -7,13 +7,16 @@ import android.provider.Settings
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.service.SuixingAccessibilityService
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /** The three privilege tiers the agent can act through. */
 enum class Tier {
@@ -36,6 +39,28 @@ enum class ShellTier {
     LOCAL,
     SHIZUKU,
     ROOT,
+}
+
+/** Shares only an in-flight check; a deliberate recheck after completion remains fresh. */
+internal class RootProbe(
+    private val scope: CoroutineScope,
+    private val known: () -> Boolean?,
+    private val check: suspend () -> Boolean,
+) {
+    private val lock = Any()
+    private var pending: Deferred<Boolean>? = null
+
+    suspend fun await(force: Boolean): Boolean {
+        val probe = synchronized(lock) {
+            pending?.takeUnless { it.isCompleted } ?: run {
+                if (!force) known()?.let { return it }
+                scope.async(start = CoroutineStart.LAZY) { check() }.also { pending = it }
+            }
+        }
+        // The application owns the check; cancelling a waiter does not cancel the shared su.
+        probe.start()
+        return probe.await()
+    }
 }
 
 /**
@@ -136,6 +161,17 @@ class CapabilityHub(
     /** Outlives any screen: probing must not be tied to a composable's lifetime. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    private val rootProbe = RootProbe(scope, known = {
+        _state.value.let { if (it.rootProbed) it.root else null }
+    }, check = {
+        val available = Shell.rootAvailable()
+        _state.update { it.copy(root = available, rootProbed = true) }
+        runCatching {
+            settings.update { it.copy(rootAvailable = available, rootCheckedAt = System.currentTimeMillis()) }
+        }
+        available
+    })
+
     init {
         ShizukuManager.addBinderAliveListener { refresh() }
         ShizukuManager.addBinderDeadListener { refresh() }
@@ -166,33 +202,41 @@ class CapabilityHub(
     private suspend fun restoreRoot() {
         val saved = runCatching { settings.current() }.getOrNull() ?: return
         if (saved.rootCheckedAt > 0L) {
-            _state.value = _state.value.copy(root = saved.rootAvailable, rootProbed = true)
+            // A tool/manual probe can finish while the saved answer is being read.
+            _state.update { current ->
+                if (current.rootProbed) current
+                else current.copy(root = saved.rootAvailable, rootProbed = true)
+            }
             return
         }
-        probeRoot()
+        ensureRootProbed()
     }
 
     fun refresh() {
-        _state.value = _state.value.copy(
-            accessibility = SuixingAccessibilityService.isConnected(),
-            shizukuInstalled = ShizukuManager.isInstalled(context),
-            shizukuAlive = ShizukuManager.isBinderAlive(),
-            shizukuGranted = ShizukuManager.isGranted(),
-        )
+        // External queries run once, outside the retryable StateFlow update.
+        val accessibility = SuixingAccessibilityService.isConnected()
+        val installed = ShizukuManager.isInstalled(context)
+        val alive = ShizukuManager.isBinderAlive()
+        val granted = ShizukuManager.isGranted()
+        _state.update {
+            it.copy(
+                accessibility = accessibility,
+                shizukuInstalled = installed,
+                shizukuAlive = alive,
+                shizukuGranted = granted,
+            )
+        }
     }
 
     fun onAccessibilityChanged(connected: Boolean) {
-        _state.value = _state.value.copy(accessibility = connected)
+        _state.update { it.copy(accessibility = connected) }
     }
 
-    suspend fun probeRoot(): Boolean = withContext(Dispatchers.IO) {
-        val available = Shell.rootAvailable()
-        _state.value = _state.value.copy(root = available, rootProbed = true)
-        runCatching {
-            settings.update { it.copy(rootAvailable = available, rootCheckedAt = System.currentTimeMillis()) }
-        }
-        available
-    }
+    /** Manual rechecks start a new probe once the previous one has completed. */
+    suspend fun probeRoot(): Boolean = rootProbe.await(force = true)
+
+    /** Automatic callers reuse the known answer, or join the probe already checking it. */
+    suspend fun ensureRootProbed(): Boolean = rootProbe.await(force = false)
 
     /** Returns false when Shizuku is not running, so the UI can explain the no-op. */
     fun requestShizuku(): Boolean {

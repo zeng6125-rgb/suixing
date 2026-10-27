@@ -1,42 +1,69 @@
 package com.suixing.agent.ui.components
 
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import com.suixing.agent.R
+import kotlin.math.roundToInt
 /**
  * 全站唯一的「列表行」：左边标题（可带前置图标、可带副标题），右边控件。
  * 设置页、关于页、文件页的行都从这里出——曾经每页各写一遍，行高、内边距、
@@ -119,7 +146,14 @@ fun RowChevron() {
     )
 }
 
-/** Shared low-contrast track and selected surface for exclusive settings and tabs. */
+/** Logical segment position under a pointer; centered on each equal-width option. */
+internal fun segmentPositionAt(x: Float, width: Float, count: Int, rtl: Boolean): Float? {
+    if (count <= 0 || width <= 0f || !width.isFinite() || !x.isFinite()) return null
+    val physical = (x / width * count - 0.5f).coerceIn(0f, (count - 1).toFloat())
+    return if (rtl) count - 1f - physical else physical
+}
+
+/** Library selection/ripple primitives, with group-level drag-to-select. */
 @Composable
 fun SegmentedPill(
     options: List<String>,
@@ -128,35 +162,80 @@ fun SegmentedPill(
     modifier: Modifier = Modifier,
     role: Role = Role.RadioButton,
 ) {
-    Surface(
-        modifier = modifier.fillMaxWidth().selectableGroup(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+    val colors = MaterialTheme.colorScheme
+    val shape = MaterialTheme.shapes.small
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val selectNow by rememberUpdatedState(onSelect)
+    var dragPosition by remember(options, selectedIndex, rtl) { mutableStateOf<Float?>(null) }
+    val position = animateFloatAsState(
+        targetValue = dragPosition ?: selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat(),
+        animationSpec = if (dragPosition != null) snap() else tween(180, easing = FastOutSlowInEasing),
+        label = "segment selection",
+    )
+    val visibleIndex = dragPosition?.roundToInt() ?: selectedIndex
+    Box(
+        modifier.fillMaxWidth().selectableGroup()
+            .pointerInput(options, selectedIndex, rtl) {
+                try {
+                    detectHorizontalDragGestures(
+                        onDragStart = { offset ->
+                            dragPosition = segmentPositionAt(offset.x, size.width.toFloat(), options.size, rtl)
+                        },
+                        onDragCancel = { dragPosition = null },
+                        onDragEnd = {
+                            val index = dragPosition?.roundToInt()
+                            dragPosition = null
+                            if (index != null && index != selectedIndex) selectNow(index)
+                        },
+                    ) { change, _ ->
+                        change.consume()
+                        dragPosition = segmentPositionAt(change.position.x, size.width.toFloat(), options.size, rtl)
+                    }
+                } finally {
+                    dragPosition = null
+                }
+            },
     ) {
-        // At most four labels: match segment heights when large text wraps to two lines.
-        Row(Modifier.padding(4.dp).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        // A 40dp visible track and 48dp touch targets; labels can grow with font size.
+        Box(
+            Modifier.matchParentSize().padding(vertical = 4.dp)
+                .clip(shape).background(lerp(colors.surface, colors.onSurface, 0.06f)),
+        ) {
+            if (options.isNotEmpty()) Box(
+                Modifier.align(Alignment.CenterStart).fillMaxHeight().fillMaxWidth(1f / options.size)
+                    .graphicsLayer {
+                        translationX = position.value * size.width * if (rtl) -1f else 1f
+                    }
+                    .padding(3.dp)
+                    .shadow(1.dp, shape)
+                    .background(colors.surface, shape)
+                    .border(1.dp, colors.outlineVariant.copy(alpha = 0.5f), shape),
+            )
+        }
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             options.forEachIndexed { index, label ->
-                val active = index == selectedIndex
-                Surface(
-                    modifier = Modifier.weight(1f).fillMaxHeight()
-                        .clip(MaterialTheme.shapes.small)
-                        .selectable(selected = active, role = role, onClick = { if (!active) onSelect(index) }),
-                    shape = MaterialTheme.shapes.small,
-                    color = if (active) MaterialTheme.colorScheme.surface else Color.Transparent,
-                    border = if (active) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
-                    contentColor = if (active) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                val interaction = remember { MutableInteractionSource() }
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxHeight().heightIn(min = 48.dp)
+                        // Foundation expands this 40dp visual node's touch target to
+                        // 48dp. Press coordinates and the ripple now share one origin.
+                        .padding(vertical = 4.dp).clip(shape)
+                        .selectable(
+                            selected = index == selectedIndex,
+                            interactionSource = interaction,
+                            indication = ripple(color = colors.primary),
+                            role = role,
+                            onClick = { if (index != selectedIndex) onSelect(index) },
+                        ),
                 ) {
                     Box(
-                        Modifier.heightIn(min = 48.dp).padding(horizontal = 8.dp, vertical = 10.dp),
+                        Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 7.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             text = label,
                             style = SettingsStyle.controlLabel,
+                            color = if (index == visibleIndex) colors.onSurface else colors.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
@@ -177,22 +256,70 @@ fun SettingsSwitch(
     enabled: Boolean = true,
 ) {
     val colors = MaterialTheme.colorScheme
-    Switch(
-        checked = checked,
-        onCheckedChange = onCheckedChange,
-        enabled = enabled,
-        // 用户反馈「开关太大了」：M3 的 Switch 视觉上是 52×32dp，在一行 14sp 的文字旁边显得抢眼。
-        // 缩到 0.88 后视觉约 46×28dp，**布局尺寸不变**，48dp 的触控目标仍然成立。
-        modifier = modifier.heightIn(min = 48.dp).scale(0.88f),
-        // 用户反馈「颜色太简陋」：原来选中是浅色 track + 主色 thumb，对比度低、看着发灰。
-        // 改成实心主色 track + onPrimary thumb（选中一眼可见），未选中用中性灰轨道 + 描边。
-        colors = SwitchDefaults.colors(
-            checkedThumbColor = colors.onPrimary,
-            checkedTrackColor = colors.primary,
-            checkedBorderColor = colors.primary,
-            uncheckedThumbColor = colors.outline,
-            uncheckedTrackColor = colors.surfaceContainerHigh,
-            uncheckedBorderColor = colors.outline,
-        ),
-    )
+    val track = lerp(colors.primary, colors.surface, 0.12f)
+    val source = remember { MutableInteractionSource() }
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val interactive = onCheckedChange != null
+    val changeNow by rememberUpdatedState(onCheckedChange)
+    var dragChecked by remember(checked, enabled, interactive, rtl) { mutableStateOf<Boolean?>(null) }
+    // Keep the touch/semantics owner unscaled while the standard animated switch shrinks.
+    val interaction = if (onCheckedChange != null) {
+        Modifier.toggleable(
+            value = checked,
+            interactionSource = source,
+            // Switch draws its own thumb-centered ripple from this shared source.
+            indication = null,
+            enabled = enabled,
+            role = Role.Switch,
+            onValueChange = onCheckedChange,
+        )
+    } else {
+        Modifier.semantics {
+            role = Role.Switch
+            toggleableState = ToggleableState(checked)
+            if (!enabled) disabled()
+        }
+    }
+    val drag = if (enabled && interactive) {
+        Modifier.pointerInput(checked, enabled, interactive, rtl) {
+            try {
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        dragChecked = segmentPositionAt(offset.x, size.width.toFloat(), 2, rtl)?.let { it >= 0.5f }
+                    },
+                    onDragCancel = { dragChecked = null },
+                    onDragEnd = {
+                        val next = dragChecked
+                        dragChecked = null
+                        if (next != null && next != checked) changeNow?.invoke(next)
+                    },
+                ) { change, _ ->
+                    change.consume()
+                    dragChecked = segmentPositionAt(change.position.x, size.width.toFloat(), 2, rtl)?.let { it >= 0.5f }
+                }
+            } finally {
+                dragChecked = null
+            }
+        }
+    } else Modifier
+    Box(
+        modifier = modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).then(drag).then(interaction),
+        contentAlignment = Alignment.Center,
+    ) {
+        Switch(
+            checked = dragChecked ?: checked,
+            onCheckedChange = null,
+            enabled = enabled,
+            modifier = Modifier.scale(0.88f).clearAndSetSemantics { },
+            interactionSource = source,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = colors.onPrimary,
+                checkedTrackColor = track,
+                checkedBorderColor = Color.Transparent,
+                uncheckedThumbColor = colors.onSurfaceVariant,
+                uncheckedTrackColor = colors.surfaceContainerHigh,
+                uncheckedBorderColor = colors.outlineVariant,
+            ),
+        )
+    }
 }

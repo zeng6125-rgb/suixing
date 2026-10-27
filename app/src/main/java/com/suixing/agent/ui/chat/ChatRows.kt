@@ -1490,75 +1490,7 @@ internal fun AssistantRow(
                         }
 
                         is Part.Text -> {
-                            // Only the last stretch of prose is drawn once the run is over:
-                            // the model's "let me check" before a tool is not part of its
-                            // answer. While it streams every stretch shows, because that is
-                            // what it is doing right now.
-                            // Selectable once it has settled, and only then: text that grows a
-                            // line at a time is not selectable in practice, and wrapping a
-                            // container that re-measures its content on every frame is what
-                            // made the live bubble flash the previous layout.
-                            // Selectable from the frame AFTER the bubble lands, never in the
-                            // frame it lands in. The hand-over from the live row to the
-                            // stored one builds this subtree from scratch, and wrapping the
-                            // whole answer in a SelectionContainer in that same frame makes
-                            // it re-measure text that was laid out a frame ago without one —
-                            // the frame that then still paints the old layout is the ghost
-                            // at the end of every stream. One frame later the same wrap costs
-                            // its measure and nothing is drawn stale.
-                            // **初值按进入组合时的状态定**（滚动跳变的根因，用户实测
-                            // 「助手→用户→助手」区滚动不连续）：原来是恒 false、下一帧翻 true，
-                            // 滚动时每条已定型的行进入视口都会经历「无选区→有选区」的重新测量，
-                            // 一行跳一帧。已定型的行从第一帧就是选区版 ⇒ 不再跳；
-                            // 流式行保持原节奏（首帧无选区、下一帧加上，护住流结束那一帧的
-                            // 「文本+选区同帧变化」重影）。
-                            var selectable by remember { mutableStateOf(!streaming) }
-                            if (!selectable) {
-                                LaunchedEffect(Unit) {
-                                    withFrameNanos { }
-                                    selectable = true
-                                }
-                            }
-                            // 流式时逐字放（外观 → 打字机效果）；settled 直接全文，选区也用全文。
-                            // **与思考块完全同一套**（用户：正文的打字机一直不正常，「直接用思考
-                            // 流式那一套」）：不再依赖 `part.bornAtMs` —— 那个值一旦大于 500ms
-                            // 就会被判成"很久以前"，于是整段直接给全、一个字都不打。改用
-                            // [rememberTypedTextFromBirth]：块首次组合时记下时刻，live 块必然
-                            // 年龄≈0 ⇒ 永远从 0 开始打。
-                            // **恢复打字机引入之前的渲染方式**（`git log -S rememberTypedText`
-                            // 找到的那一版）：`MarkdownText(text = part.text)` + 默认
-                            // `settled = true`（走块缓存）。那一版流式是正常的 —— 后来为了逐字
-                            // 传入 `settled = !streaming` 把它切到了"每帧重解析"的路径，
-                            // 整段文本每 16ms 重排一次，Compose 合并后就成了"一下子蹦出一大段"。
-                            // 光标仍然内联（`cursor = streaming`），位置 = 真实文本末行末尾。
-                            // **按 v0.8.100 那版恢复**（用户：「之前就是可以的」）：
-                            // 直接渲染 `part.text`，不做打字机；`settled = false` 走
-                            // `rememberGrowingMarkdown` 的**增量解析**路径（只重解析尾部），
-                            // 而不是后来新增的 settled 分支。
-                            // **逐字显影**（用户要"流式必须做好"）：流式通道修通之后
-                            // （LiveParts 的版本号修复），打字机终于能真正工作 —— 之前它
-                            // "不生效"是因为屏幕压根没在重组。
-                            // live 块（bornAtMs > 0）从 0 开始逐字放；已定型/历史内容直接全文，
-                            // 不重播。速度随积压自适应（Typewriter.typeStep），chunk 再大也连续。
-                            val liveText = part.bornAtMs > 0L
-                            val shown = rememberTypedText(
-                                text = part.text,
-                                enabled = streaming || liveText,
-                                startAtZero = liveText,
-                            )
-                            if (streaming || !selectable || shown.length < part.text.length) {
-                                MarkdownText(
-                                    text = shown,
-                                    settled = !streaming,
-                                    // **正文不画光标**（用户：「正文要不就不要那个光标效果」）：
-                                    // 正文是逐字显影的，光标跟着打字进度走本来就容易显得滞后；
-                                    // 思考块保留光标（那里更新是逐行、观感更稳）。
-                                    cursor = false,
-                                )
-                            } else {
-                                SelectableWhenArmed { MarkdownText(text = part.text) }
-                            }
-
+                            AssistantProse(part, streaming)
                             if (!last) Spacer(Modifier.height(6.dp))
                         }
 
@@ -1622,6 +1554,37 @@ internal fun AssistantRow(
                 }
             }
         }
+    }
+}
+
+/** Keep typewriter state reads inside the prose rather than the whole reply content. */
+@Composable
+private fun AssistantProse(part: Part.Text, streaming: Boolean) {
+    // History is selectable immediately. A newly mounted live block waits one frame,
+    // and selection still waits for streaming and the remaining typed text to finish.
+    var selectable by remember { mutableStateOf(!streaming) }
+    if (!selectable) {
+        LaunchedEffect(Unit) {
+            withFrameNanos { }
+            selectable = true
+        }
+    }
+    val liveText = part.bornAtMs > 0L
+    val shown = rememberTypedText(
+        text = part.text,
+        enabled = streaming || liveText,
+        startAtZero = liveText,
+    )
+    if (streaming || !selectable || shown.length < part.text.length) {
+        MarkdownText(
+            text = shown,
+            // Generation can stop before the typewriter drains. Keep these changing
+            // prefixes on the incremental parser and out of the settled document cache.
+            settled = !streaming && shown.length == part.text.length,
+            cursor = false,
+        )
+    } else {
+        SelectableWhenArmed { MarkdownText(text = part.text) }
     }
 }
 

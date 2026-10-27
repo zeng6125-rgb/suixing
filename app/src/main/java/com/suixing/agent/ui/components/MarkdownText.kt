@@ -146,11 +146,22 @@ internal fun listStart(digits: String): Int = (digits.toIntOrNull() ?: 1).coerce
 
 fun parseMarkdown(source: String): List<MdBlock> = parseMarkdown(source, null)
 
-internal fun parseMarkdown(source: String, checkpoint: (() -> Unit)?): List<MdBlock> {
+internal fun parseMarkdown(source: String, checkpoint: (() -> Unit)?): List<MdBlock> =
+    parseMarkdownBlocks(source, checkpoint)
+
+private fun parseMarkdownBlocks(
+    source: String,
+    checkpoint: (() -> Unit)?,
+    onStableBoundary: ((offset: Int, blockCount: Int) -> Unit)? = null,
+): List<MdBlock> {
     checkpoint?.invoke()
     // **没有 CR 就不做两次全串 replace**：绝大多数文本只有 \n，原来无条件复制两遍整串。
     val normalized = if (source.indexOf('\r') < 0) source else source.replace("\r\n", "\n").replace('\r', '\n')
     val lines = normalized.split('\n')
+    val lineStarts = if (onStableBoundary != null) {
+        var offset = 0
+        IntArray(lines.size) { index -> offset.also { offset += lines[index].length + 1 } }
+    } else null
     val blocks = mutableListOf<MdBlock>()
     // **每行的"块首判定"只算一次**（优化清单 ui-P0）：原来一行正文要在 opensBlock 里重跑
     // 6 条正则，其中 4 条在派发阶段已对同一行跑过，边界行还要再跑一遍。
@@ -194,6 +205,11 @@ internal fun parseMarkdown(source: String, checkpoint: (() -> Unit)?): List<MdBl
         // 而 when 的第一支就是 `trimmed.isEmpty()` —— 空行白跑 4 次匹配，流式期间每 40ms
         // 一次全量解析时这就是纯浪费）。顺序与原来完全一致，只是把空行提前。
         if (trimmed.isEmpty()) {
+            // Only the parser's outer loop knows this blank line is outside a code
+            // block/table/list. Never infer these boundaries from backtick counts.
+            if (line.isEmpty() && lineStarts != null && index > 0 && lineStarts[index] < normalized.length) {
+                onStableBoundary?.invoke(lineStarts[index] + 1, blocks.size)
+            }
             index++
             continue
         }
@@ -802,7 +818,7 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
  * 策略：
  *  · 记住上一次的文本、它的"稳定前缀"（最后一个空行之前的部分）以及该前缀的解析结果；
  *  · 新文本以旧稳定前缀开头 ⇒ 前缀块直接复用，只 `parseMarkdown(尾段)`；
- *  · 新出现了空行 ⇒ 前缀变长，重算前缀（每次答案只发生几次，不是每秒几十次）；
+ *  · 新出现了空行 ⇒ 只解析新完成的部分，复用此前前缀的块；
  *  · 不是前缀（换块、重放、变短）⇒ 整体重建。
  *
  * 与 `text.split` 式的"按行增量"不同，这里只关心**块**，实现更简单且与
@@ -822,16 +838,28 @@ internal class LiveBlocks {
     }
 
     private fun parseWithPrefix(next: String): List<MdBlock> {
-        // Use the same fence-safe boundary as the settled parser, after newline normalization.
+        // Normalize before finding complete lines, matching parseMarkdown's input.
         val normalized = if ('\r' in next) next.replace("\r\n", "\n").replace('\r', '\n') else next
-        val prefixEnd = settledMarkdownPrefixEnd(normalized)
-        if (prefixEnd != stablePrefix.length || !normalized.startsWith(stablePrefix)) {
-            stablePrefix = normalized.substring(0, prefixEnd)
-            prefixBlocks = parseMarkdown(stablePrefix)
+        if (!normalized.startsWith(stablePrefix)) {
+            stablePrefix = ""
+            prefixBlocks = emptyList()
         }
-        val tail = normalized.substring(prefixEnd)
-        if (tail.isEmpty()) return prefixBlocks
-        return prefixBlocks + parseMarkdown(tail)
+        // The parser itself reports completed blocks, so fence-looking table rows
+        // and blank lines inside code cannot incorrectly freeze a partial result.
+        val suffix = normalized.substring(stablePrefix.length)
+        if (suffix.isEmpty()) return prefixBlocks
+        var completed = 0
+        var completedBlocks = 0
+        val parsed = parseMarkdownBlocks(suffix, null) { offset, count ->
+            completed = offset
+            completedBlocks = count
+        }
+        val result = if (prefixBlocks.isEmpty()) parsed else prefixBlocks + parsed
+        if (completed > 0) {
+            if (completedBlocks > 0) prefixBlocks = prefixBlocks + parsed.take(completedBlocks)
+            stablePrefix = normalized.substring(0, stablePrefix.length + completed)
+        }
+        return result
     }
 }
 

@@ -1486,55 +1486,11 @@ fun ChatScreen(
                                                     // 钉住期间它与 `armedTop` 的差值就是"用户看到的位移"。
                                                     .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
                                             ) {
-                                            LiveMessageParts(viewModel, state.conversationId, state.liveRunId) { liveParts ->
+                                            LiveMessageParts(viewModel, state.conversationId, state.liveRunId,
+                                                settings.showReasoning) { liveParts ->
                                             AssistantRow(
-                                            // **不能给这个映射套 remember**（0.8.36x~0.8.405 瞬移的根因，
-                                            // 机制见 LivePartsFreezeTest）：liveParts 的元素是「同一对象只追加」
-                                            // （GrowableText），新旧列表逐元素 === 相等 ⇒ 列表 equals 恒 true
-                                            // ⇒ remember 的 key 永远命中缓存 ⇒ 映射冻结 —— 屏幕只在列表结构
-                                            // 变化（新块诞生）时刷新一次，该块积累的全部文本一次性放出。
-                                            // parts 只有几个元素，直接映射，代价可以忽略。
-                                            parts = liveParts.mapNotNull { part ->
-                                                    when (part) {
-                                                        is LivePart.Thinking ->
-                                                            if (settings.showReasoning) {
-                                                                Part.Thinking(
-                                                                    text = part.text,
-                                                                    tokens = part.tokens,
-                                                                    elapsedMs = part.elapsedMs,
-                                                                    // The run this block belongs to:
-                                                                    // the saved message carries the
-                                                                    // same id, so the block keeps its
-                                                                    // identity when the live row is
-                                                                    // replaced by the stored one.
-                                                                    runId = state.liveRunId,
-                                                                )
-                                                            } else {
-                                                                null
-                                                            }
-
-                                                        is LivePart.Tools ->
-                                                            Part.Tools(part.calls.map(ToolLine::of))
-
-                                                        is LivePart.Text -> Part.Text(part.text, part.bornAtMs)
-
-                                                        // The stored copy of this line is hidden for as
-                                                        // long as the run streams, so the live part is
-                                                        // what puts it on screen the moment it is handed
-                                                        // over. Same widget either way, which is why the
-                                                        // bubble does not move when the run settles.
-                                                        is LivePart.Steer -> Part.Steer(part.message)
-
-                                                        // 重试留痕：这一轮的落盘消息在流式期间是藏起来的，
-                                                        // 只有这里画了，用户才不用等整轮结束才知道刚才重试过。
-                                                        is LivePart.Trace -> Part.Trace(part.note)
-
-                                                        // 压缩块：运行中就画在它发生的位置，不再用气泡下面
-                                                        // 那一行提示（用户：「在哪个部分进行的就在哪个部分
-                                                        // 渲染」——思考 → 工具 → 压缩 → 继续）。
-                                                        is LivePart.Compress -> Part.Compress(part.checkpoint)
-                                                    }
-                                                },
+                                            // Versioned text is refreshed; unchanged tool lists keep their identity.
+                                            parts = liveParts,
                                                 streaming = true,
                                                 // The live bubble is the persona's reply too:
                                                 // without these two it fell back to the brand name
