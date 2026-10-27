@@ -41,6 +41,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -705,6 +706,16 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                             modifier = Modifier.widthIn(max = 110.dp),
                                         )
                                     },
+                                    // 用户反馈「列表的 tab 项背景太浅，看不清」：M3 FilterChip 默认的
+                                    // 未选中容器几乎与页面同色，一排 chip 挤在一起就分不出边界。
+                                    // 显式给足对比：未选中 surfaceContainerHigh + 主文字色，
+                                    // 选中 secondaryContainer + 其前景色。
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                        labelColor = MaterialTheme.colorScheme.onSurface,
+                                        selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    ),
                                     // clip 必须在 combinedClickable **之前**：涟漪要跟着 chip 的圆角
                                     // 走，否则它是一块方角盖在圆角 chip 上（全文件唯一一处漏了 clip）。
                                     modifier = Modifier

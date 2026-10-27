@@ -19,6 +19,7 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -180,14 +181,18 @@ fun SettingsSwitch(
         checked = checked,
         onCheckedChange = onCheckedChange,
         enabled = enabled,
-        modifier = modifier.heightIn(min = 48.dp),
+        // 用户反馈「开关太大了」：M3 的 Switch 视觉上是 52×32dp，在一行 14sp 的文字旁边显得抢眼。
+        // 缩到 0.88 后视觉约 46×28dp，**布局尺寸不变**，48dp 的触控目标仍然成立。
+        modifier = modifier.heightIn(min = 48.dp).scale(0.88f),
+        // 用户反馈「颜色太简陋」：原来选中是浅色 track + 主色 thumb，对比度低、看着发灰。
+        // 改成实心主色 track + onPrimary thumb（选中一眼可见），未选中用中性灰轨道 + 描边。
         colors = SwitchDefaults.colors(
-            checkedThumbColor = colors.primary,
-            checkedTrackColor = colors.primaryContainer,
-            checkedBorderColor = colors.primary.copy(alpha = 0.2f),
-            uncheckedThumbColor = colors.onSurfaceVariant,
-            uncheckedTrackColor = colors.surfaceContainerHighest,
-            uncheckedBorderColor = colors.outlineVariant,
+            checkedThumbColor = colors.onPrimary,
+            checkedTrackColor = colors.primary,
+            checkedBorderColor = colors.primary,
+            uncheckedThumbColor = colors.outline,
+            uncheckedTrackColor = colors.surfaceContainerHigh,
+            uncheckedBorderColor = colors.outline,
         ),
     )
 }
