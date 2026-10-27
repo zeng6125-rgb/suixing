@@ -22,7 +22,8 @@ object SettingsStyle {
     // 各加 2dp（10/10）；行内与卡片内边距一概不动。
     val SectionTop = 10.dp
     val SectionBottom = 10.dp
-    val SectionIndent = 6.dp
+    // 0dp：分组标题与卡片左缘对齐（用户：「恢复之前间距，对齐卡片左侧」）。
+    val SectionIndent = 0.dp
 
     val rowTitle: TextStyle @Composable get() = MaterialTheme.typography.bodyLarge
     val description: TextStyle @Composable get() = MaterialTheme.typography.bodySmall

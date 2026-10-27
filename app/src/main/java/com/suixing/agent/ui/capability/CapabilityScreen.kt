@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.capability
 
+import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.settingsPagePadding
@@ -527,37 +528,15 @@ private fun CapabilityTierPicker(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
-        // 和 SegmentedPill 同一个形状与配色，只是这里每一格要能单独置灰：共用组件做不到，
-        // 而「不可用但仍可点」是这一块的要求。
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            Row(Modifier.padding(4.dp), horizontalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap)) {
-                options.forEach { option ->
-                    val active = option.key == preferred
-                    Surface(
-                        onClick = { onPick(if (active) "" else option.key) },
-                        modifier = Modifier.weight(1f),
-                        shape = CircleShape,
-                        color = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
-                        contentColor = when {
-                            active -> MaterialTheme.colorScheme.onPrimary
-                            option.ready -> MaterialTheme.colorScheme.onSurfaceVariant
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                        },
-                    ) {
-                        Text(
-                            text = option.label,
-                            modifier = Modifier.padding(vertical = 9.dp),
-                            style = SettingsStyle.controlLabel,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                }
-            }
-        }
+        // 统一用共享的 SegmentedPill（与设置页同一形状/配色/拖动反馈）：
+        // 通过 optionEnabled 置灰未开启的档位，onReselect 让「点已选中的一档」回到自动。
+        SegmentedPill(
+            options = options.map { it.label },
+            selectedIndex = options.indexOfFirst { it.key == preferred },
+            onSelect = { index -> onPick(options[index].key) },
+            optionEnabled = { index -> options[index].ready },
+            onReselect = { onPick("") },
+        )
         Spacer(Modifier.height(10.dp))
         Text(
             text = tierSummary(preferred, state),

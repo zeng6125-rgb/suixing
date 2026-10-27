@@ -19,6 +19,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,6 +30,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
@@ -234,13 +240,26 @@ fun PageTopBar(
                 //
                 // 历史（别再退回补丁）：这里曾用 `.offset(y = if (subtitle != null) 9.dp else 0.dp)`
                 // 上下挪整列 —— 那是补偿数字，还写反过一次符号（−9 让标题比不改更歪 18dp）。
+                var opticalShift by remember(title, subtitle) { mutableFloatStateOf(0f) }
                 Box(Modifier.weight(1f)) {
                     Text(
                         text = title,
-                        style = MaterialTheme.typography.titleMedium,
+                        // 关掉字体自带的上下留白：默认 includeFontPadding 让文字盒比字形盒高，
+                        // 文字看起来比返回图标低半像素到一像素（用户：「标题和 icon 没有严格垂直居中」）。
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                                includeFontPadding = false,
+                            ),
+                        ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.align(Alignment.CenterStart),
+                        onTextLayout = { layout -> opticalShift = opticalCenterShift(layout) },
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            // 字形视觉中心 vs 行盒中心：字体上伸/下伸不对称，居中盒子并不等于居中字。
+                            // 用文字自己报上来的 baseline 算差多少，再补回同样的距离 —— 换字号/字体
+                            // 自动跟随，不是写死的 ±Ndp。
+                            .offset { IntOffset(0, opticalShift.roundToInt()) },
                     )
                     if (subtitle != null) {
                         // 行高**先取成局部 val**：`MaterialTheme.typography` 是 @Composable 读取，而
@@ -279,4 +298,21 @@ fun PageTopBar(
             Spacer(Modifier.height(12.dp))
         }
     }
+}
+
+/**
+ * 让文字在行盒里**视觉**居中需要的位移（px，向下为正）。
+ *
+ * `Text` 的盒高是上伸 + 下伸，而不是字形的实际高度；中文/拉丁混排时字形压在 baseline 之上，
+ * 盒子里下伸那一段是空的 ⇒ 盒子居中后字看起来偏高。这里按 baseline 与字高估出字形中心，
+ * 与盒中心求差；字号、字体、行高变了都自动跟随，不需要写死补偿值。
+ */
+private fun opticalCenterShift(layout: TextLayoutResult): Float {
+    if (layout.lineCount <= 0) return 0f
+    val baseline = layout.getLineBaseline(0)
+    // 字形中心 ≈ baseline 往上半个字高。cap height 取 0.7 em（中英文常见值）。
+    val em = layout.layoutInput.style.fontSize
+    val emPx = if (em.isSp) with(layout.layoutInput.density) { em.toPx() } else em.value
+    val glyphCenter = baseline - emPx * 0.35f
+    return layout.size.height / 2f - glyphCenter
 }

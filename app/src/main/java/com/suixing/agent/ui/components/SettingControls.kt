@@ -5,6 +5,12 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.draw.alpha
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -48,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.util.lerp as fLerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -157,16 +164,25 @@ internal fun segmentPositionAt(x: Float, width: Float, count: Int, rtl: Boolean)
 @Composable
 fun SegmentedPill(
     options: List<String>,
+    /** −1 表示「一项都没选中」（如「自动」档）：此时不画高亮块。 */
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
     role: Role = Role.RadioButton,
+    /** 这一格是否可用；不可用的只置灰，仍可点（能力页的「未开启档位」就是这种）。 */
+    optionEnabled: (Int) -> Boolean = { true },
+    /** 点了**已经选中**的那一格（能力页用它回到「自动」）。不传则保持原行为：不响应。 */
+    onReselect: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val shape = MaterialTheme.shapes.small
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val selectNow by rememberUpdatedState(onSelect)
     var dragPosition by remember(options, selectedIndex, rtl) { mutableStateOf<Float?>(null) }
+    // 每一格自己的交互源与「当前按下」事件：拖动开始时要把按下取消掉，
+    // 否则只有横向拖动、手指没离开的这一格，照样会画一圈点击涟漪（用户报的现象）。
+    val interactions = remember(options.size) { List(options.size) { MutableInteractionSource() } }
+    val presses = remember(options.size) { arrayOfNulls<androidx.compose.foundation.interaction.PressInteraction.Press>(options.size) }
     val position = animateFloatAsState(
         targetValue = dragPosition ?: selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat(),
         animationSpec = if (dragPosition != null) snap() else tween(180, easing = FastOutSlowInEasing),
@@ -179,6 +195,16 @@ fun SegmentedPill(
                 try {
                     detectHorizontalDragGestures(
                         onDragStart = { offset ->
+                            // 拖动先取消所有格的按住态：涟漪随 Cancel 立即消失，
+                            // 之后由拖动高亮接替反馈。
+                            presses.forEachIndexed { index, press ->
+                                if (press != null) {
+                                    interactions[index].tryEmit(
+                                        androidx.compose.foundation.interaction.PressInteraction.Cancel(press),
+                                    )
+                                    presses[index] = null
+                                }
+                            }
                             dragPosition = segmentPositionAt(offset.x, size.width.toFloat(), options.size, rtl)
                         },
                         onDragCancel = { dragPosition = null },
@@ -199,9 +225,12 @@ fun SegmentedPill(
         // A 40dp visible track and 48dp touch targets; labels can grow with font size.
         Box(
             Modifier.matchParentSize().padding(vertical = 4.dp)
-                .clip(shape).background(lerp(colors.surface, colors.onSurface, 0.06f)),
+                // 0.06 → 0.08（用户先要更明显，再看整体觉得 0.12 偏深，定为 0.08）：
+                // 只把槽提亮一档，不改变选中块的对比；边线另外收到 0.5dp。
+                .clip(shape).background(lerp(colors.surface, colors.onSurface, 0.08f))
+                .border(0.5.dp, colors.outlineVariant.copy(alpha = 0.5f), shape),
         ) {
-            if (options.isNotEmpty()) Box(
+            if (options.isNotEmpty() && (dragPosition != null || selectedIndex >= 0)) Box(
                 Modifier.align(Alignment.CenterStart).fillMaxHeight().fillMaxWidth(1f / options.size)
                     .graphicsLayer {
                         translationX = position.value * size.width * if (rtl) -1f else 1f
@@ -214,7 +243,19 @@ fun SegmentedPill(
         }
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             options.forEachIndexed { index, label ->
-                val interaction = remember { MutableInteractionSource() }
+                val interaction = interactions[index]
+                androidx.compose.runtime.LaunchedEffect(interaction) {
+                    interaction.interactions.collect { event ->
+                        when (event) {
+                            is androidx.compose.foundation.interaction.PressInteraction.Press ->
+                                presses[index] = event
+                            is androidx.compose.foundation.interaction.PressInteraction.Release,
+                            is androidx.compose.foundation.interaction.PressInteraction.Cancel,
+                            -> presses[index] = null
+                            else -> Unit
+                        }
+                    }
+                }
                 Box(
                     modifier = Modifier.weight(1f).fillMaxHeight().heightIn(min = 48.dp)
                         // Foundation expands this 40dp visual node's touch target to
@@ -223,9 +264,16 @@ fun SegmentedPill(
                         .selectable(
                             selected = index == selectedIndex,
                             interactionSource = interaction,
-                            indication = ripple(color = colors.primary),
+                            // **分段控件不画点击涟漪**（用户两次反馈：「只是拖动，却出现点击的
+                            // 涟漪」）。根因：涟漪在**按下**那一刻就起，而横向拖动要越过触摸阈值
+                            // 才被识别 —— 阈值之前那一段只按不拖；靠 Cancel 收尾仍会先闪一下
+                            // （工具页顶栏标签就是这么被看到的）。反馈交给高亮：按下即响应、
+                            // 拖动连续跟手。
+                            indication = null,
                             role = role,
-                            onClick = { if (index != selectedIndex) onSelect(index) },
+                            onClick = {
+                                if (index != selectedIndex) onSelect(index) else onReselect?.invoke()
+                            },
                         ),
                 ) {
                     Box(
@@ -235,7 +283,11 @@ fun SegmentedPill(
                         Text(
                             text = label,
                             style = SettingsStyle.controlLabel,
-                            color = if (index == visibleIndex) colors.onSurface else colors.onSurfaceVariant,
+                            color = when {
+                                index == visibleIndex -> colors.onSurface
+                                !optionEnabled(index) -> colors.onSurfaceVariant.copy(alpha = 0.45f)
+                                else -> colors.onSurfaceVariant
+                            },
                             textAlign = TextAlign.Center,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
@@ -247,7 +299,17 @@ fun SegmentedPill(
     }
 }
 
-/** Every settings destination uses the same switch size, track and disabled treatment. */
+/**
+ * 全站唯一的开关：自绘，进度直接跟手。
+ *
+ * 为什么不用 M3 的 `Switch`：它的圆钮位置由内部 `animateFloatAsState` 决定，拖动中只要
+ * `checked` 变化就会被弹簧动画接管 —— 快速左右拖时圆钮来回跳、轨道颜色乱闪（用户实测）。
+ * 而「只在松手时才改状态」又会被读成「不能实时拖动」（用户第二次反馈）。两难来自**把连续拖动
+ * 压进一个二值动画**，所以这里把进度（0..1）直接画出来：
+ * · 拖动中：进度 = 按下时的进度 + 手指位移 / 行程（RTL 反向），跟手、无二次动画；
+ * · 松手：超过一半就提交，交给调用方改状态，之后由 tween 补齐；
+ * · 点击：仍走 `toggleable`，无障碍语义（Role.Switch / ToggleableState）与禁用态不变。
+ */
 @Composable
 fun SettingsSwitch(
     checked: Boolean,
@@ -256,18 +318,26 @@ fun SettingsSwitch(
     enabled: Boolean = true,
 ) {
     val colors = MaterialTheme.colorScheme
-    val track = lerp(colors.primary, colors.surface, 0.12f)
-    val source = remember { MutableInteractionSource() }
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    val interactive = onCheckedChange != null
+    val interactive = onCheckedChange != null && enabled
     val changeNow by rememberUpdatedState(onCheckedChange)
-    var dragChecked by remember(checked, enabled, interactive, rtl) { mutableStateOf<Boolean?>(null) }
-    // Keep the touch/semantics owner unscaled while the standard animated switch shrinks.
+    val source = remember { MutableInteractionSource() }
+
+    // 拖动进度；null = 没在拖（跟随 checked 的补间）
+    var dragProgress by remember { mutableStateOf<Float?>(null) }
+    var dragStartX by remember { mutableFloatStateOf(0f) }
+    var dragStartProgress by remember { mutableFloatStateOf(0f) }
+    val settle by animateFloatAsState(
+        targetValue = if (checked) 1f else 0f,
+        animationSpec = tween(durationMillis = 160),
+        label = "switch progress",
+    )
+    val progress = (dragProgress ?: settle).coerceIn(0f, 1f)
+
     val interaction = if (onCheckedChange != null) {
         Modifier.toggleable(
             value = checked,
             interactionSource = source,
-            // Switch draws its own thumb-centered ripple from this shared source.
             indication = null,
             enabled = enabled,
             role = Role.Switch,
@@ -280,46 +350,67 @@ fun SettingsSwitch(
             if (!enabled) disabled()
         }
     }
-    val drag = if (enabled && interactive) {
-        Modifier.pointerInput(checked, enabled, interactive, rtl) {
-            try {
-                detectHorizontalDragGestures(
-                    onDragStart = { offset ->
-                        dragChecked = segmentPositionAt(offset.x, size.width.toFloat(), 2, rtl)?.let { it >= 0.5f }
-                    },
-                    onDragCancel = { dragChecked = null },
-                    onDragEnd = {
-                        val next = dragChecked
-                        dragChecked = null
-                        if (next != null && next != checked) changeNow?.invoke(next)
-                    },
-                ) { change, _ ->
-                    change.consume()
-                    dragChecked = segmentPositionAt(change.position.x, size.width.toFloat(), 2, rtl)?.let { it >= 0.5f }
-                }
-            } finally {
-                dragChecked = null
+    val drag = if (interactive) {
+        Modifier.pointerInput(checked, enabled, rtl) {
+            detectHorizontalDragGestures(
+                onDragStart = {
+                    dragStartX = it.x
+                    dragStartProgress = if (checked) 1f else 0f
+                    dragProgress = dragStartProgress
+                },
+                onDragCancel = { dragProgress = null },
+                onDragEnd = {
+                    val next = (dragProgress ?: dragStartProgress) >= 0.5f
+                    dragProgress = null
+                    if (next != checked) changeNow?.invoke(next)
+                },
+            ) { change, _ ->
+                change.consume()
+                val travel = (size.width - 56.dp.toPx()).coerceAtLeast(1f)
+                val delta = (change.position.x - dragStartX) / travel * (if (rtl) -1f else 1f)
+                dragProgress = (dragStartProgress + delta).coerceIn(0f, 1f)
             }
         }
     } else Modifier
+
     Box(
-        modifier = modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).then(drag).then(interaction),
+        modifier = modifier
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .then(drag)
+            .then(interaction),
         contentAlignment = Alignment.Center,
     ) {
-        Switch(
-            checked = dragChecked ?: checked,
-            onCheckedChange = null,
-            enabled = enabled,
-            modifier = Modifier.scale(0.88f).clearAndSetSemantics { },
-            interactionSource = source,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = colors.onPrimary,
-                checkedTrackColor = track,
-                checkedBorderColor = Color.Transparent,
-                uncheckedThumbColor = colors.onSurfaceVariant,
-                uncheckedTrackColor = colors.surfaceContainerHigh,
-                uncheckedBorderColor = colors.outlineVariant,
-            ),
-        )
+        val trackOn = colors.primary
+        // 关态别太灰（用户：「开关太灰了」）：12% 的灰，圆点用页面色，对比够但不脏。
+        val trackOff = lerp(colors.surface, colors.onSurface, 0.12f)
+        val trackColor = lerp(trackOff, trackOn, progress)
+        val alpha = if (enabled && onCheckedChange != null) 1f else 0.38f
+        Canvas(
+            Modifier
+                .size(width = 46.dp, height = 28.dp)
+                .alpha(alpha),
+        ) {
+            val h = size.height
+            val w = size.width
+            val radius = h / 2f
+            drawRoundRect(
+                color = trackColor,
+                cornerRadius = CornerRadius(radius, radius),
+            )
+            // 关态给一圈极细的边，浅色页面上才看得出轨道的边界（不是之前那圈 1dp 粗边）。
+            if (progress < 1f) {
+                drawRoundRect(
+                    color = colors.outline.copy(alpha = 0.35f * (1f - progress)),
+                    cornerRadius = CornerRadius(radius, radius),
+                    style = Stroke(width = 0.5.dp.toPx()),
+                )
+            }
+            val inset = 4.dp.toPx()
+            val thumbR = radius - inset
+            val startX = thumbR + inset
+            val endX = w - thumbR - inset
+            val cx = if (rtl) fLerp(endX, startX, progress) else fLerp(startX, endX, progress)
+            drawCircle(color = colors.surface, radius = thumbR, center = Offset(cx, h / 2f))
+        }
     }
 }
