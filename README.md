@@ -4,15 +4,16 @@
 
 > 0.7.0 起项目从「灵枢 / Lingshu」更名为「随行 / Suixing」，包名同步从 `com.lingshu.agent` 改为 `com.suixing.agent`。**包名变了意味着这是一次全新安装**：旧版本请先卸载，会话记录与设置不会迁移。
 
-> ⚠️ **0.8.317 起会话存储格式变了，旧版本读不了新数据。** 会话从「一个 `<id>.json` 单文件、每次保存全量重写」改成「`chats/store/<id>.meta` + `<id>.<gen>.jsonl` 追加日志」。收益是 30 MB 的会话每轮保存从「重写 30 MB」降到「追加几十字节」。代价是**装回 0.8.316 及更早版本看不到这些会话**。本项目是单人自用的 beta，不做向后兼容；旧数据会在首次启动时由 `migratePending()` 逐个迁移（校验通过才退休旧文件，失败则原样保留、下次再试）。
+> **会话存储**：`chats/store/<id>.meta`（元数据 + 累计统计）+ `<id>.<gen>.jsonl`（每行一条消息的追加日志）。保存一轮只追加尾部，不再全量重写——32 MB 的会话每轮保存从「序列化 + 写 32 MB + rename」降到「追加几十字节到几 KB」。重排类操作（编辑重答、分支切换）会换代重写，旧代留一代作回退。**装回 0.8.316 及更早版本看不到这些会话**；更早的 `<id>.json` 单文件格式已不再支持读取（迁移代码随兼容层一起删了），磁盘上残留的这类文件不会出现在列表里。
 
-- 纯 Kotlin + Jetpack Compose（Material 3），没有 NDK 源码；随包只带两个预编译的静态 shell 二进制（bash / BusyBox，见[第三方声明](#开源许可与第三方声明)）
-- 目标平台：Android 8.0 (API 26) 及以上；`compileSdk` / `targetSdk` = 35
+- 纯 Kotlin + Jetpack Compose（Material 3，Compose BOM 2026.09.00 / Kotlin 2.4.21 / AGP 9.4.1 / Gradle 9.8.2），没有 NDK 源码；随包只带两个预编译的静态 shell 二进制（bash / BusyBox，见[第三方声明](#开源许可与第三方声明)）
+- 目标平台：Android 8.0 (API 26) 及以上；`compileSdk` / `targetSdk` = 37
+- 图片走 Coil 3（内存 + 磁盘双缓存、自动降采样），不再手写 `BitmapFactory` 与 LRU
 - 不做云同步、不做遥测，API Key 只存在本机应用私有目录
 - 支持 MCP：任何 MCP 服务器提供的工具都会并进模型可调用的工具表
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
-- 当前源码版本：**0.8.432**（`versionCode` 455）
+- 当前源码版本：**0.8.534**（`versionCode` 555）
 
 ## 界面与设计
 
@@ -21,7 +22,7 @@
 - **不跟随 Material 动态取色**。默认用一套手调的「随行配色」，想要跟壁纸就在「设置 → 外观 → 配色」里切到「跟随壁纸」（Android 12 以上，会改用系统动态取色）。
 - **不用阴影**。层级靠表面阶梯（`surfaceContainerLow` / `surfaceContainer` / `surfaceContainerHigh`，另有两级 Lowest / Highest）加 1dp 发丝描边区分。
 - **卡片 20dp 圆角、左侧抽屉导航**。没有底部导航条，会话页的纵向空间全部留给消息；顶栏左上角的按钮拉出抽屉（会话列表 + 助手 / 定时任务 / 文件 / 悬浮窗控制台 / 设置）。
-- **edge-to-edge**。状态栏与导航栏透明，内容自己处理 insets；顶栏自带 `statusBarsPadding()`，页面与输入框自带 `navigationBarsPadding()`。
+- **edge-to-edge**。状态栏与导航栏透明，内容自己处理 insets；顶栏自带 `statusBarsPadding()`。列表页的底部让位走 **`contentPadding`**——内容画到手势条下面、滚到底时末行才避让，而不是给列表挂 `navigationBarsPadding()`（后者会让内容停在手势条上方，底下留一条空背景带）。`navigationBarsPadding()` 只留给 `SnackbarHost` 这类不该穿底的浮层。
 - 会话页空状态是一个品牌标记加四条建议提示词（「看看现在屏幕上是什么」等），点一下直接填进输入框。
 - 输入框那一行常驻一枚**模型胶囊**（当前模型名 + 思考强度徽标），点开是一张两页的卡：第一页是当前模型与思考强度滑杆，第二页是按端点、再按上游厂商分组的模型列表。
 - **折叠块展开/收起时钉住块顶边**。思考过程、工具条展开时，用同一套逐帧补偿把块顶边按在原位，内容往下长而不是把上面的东西顶走。
@@ -45,7 +46,7 @@
   - 详情里有入参（等宽字体、不截断）、一条分割线、「输出」标签与复制按钮、输出逐行进虚拟列表，以及工具返回的截图。
   - 工具条本身是普通 `Column`（不做虚拟列表、不设高度上限，所以不会被截断），只有单个工具的详情保留 180dp 上限。
 - **每条回复下方有 token 统计**：入 / 出 / 思考 / 缓存命中 / 耗时 / 输出速度（tok/s），接口没返回 usage 时这一行不显示；「用时详情」「用量详情」可展开成卡片。
-- **上下文圆环**：输入框那一行的圆环显示当前对话占上下文窗口的比例，填了上下文窗口才显示比例，快满时变红。
+- **上下文圆环**：输入框那一行显示当前对话占上下文窗口的比例，快满时变红。分子只认**实测**口径（网关回报的 `prompt_tokens`，含按会话保持的最近一次；其次读落盘的 `meta.totals.contextTokens`），只有整个会话从没被报过用量时才用字符数 ÷4 估算兜底并标「约」。分母按**模型**取（`/models` 报过的自动填，没报过的落到 256k 默认）——换模型会换分母，所以同一个会话在不同模型下的百分比不同是正常的。
 - **发送图片**（多模态模型可直接看图；用纯文本模型时请保持设置里「模型支持图片输入」关闭，否则带图请求会被接口拒绝）；附件也可以是文件。
 - **语音输入**：默认关闭。打开后输入框旁出现麦克风，走随行自己的录音链路（AudioRecord → WAV → 你配置的 OpenAI 兼容 `/audio/transcriptions`），**不弹系统识别面板**；失败时可手动降级到系统识别。
 - **语音输出**：「朗读回复」打开后，每条回复结束用系统 TTS 读出；模型也能自己调 `speak` 工具主动说话。
@@ -74,7 +75,7 @@
 
 ### 工具
 
-内置 **50 个工具**，分 12 个工具包；分组由工具包自己声明，加一个工具、删一个工具，分组和人数自动跟着变。
+内置 **52 个工具**，分 12 个工具包；分组由工具包自己声明，加一个工具、删一个工具，分组和人数自动跟着变。
 
 | 分组 | 数量 | 工具 |
 | --- | --- | --- |
@@ -87,7 +88,7 @@
 | 网络 | 3 | `web_fetch` `web_download` `web_search` |
 | 任务清单 | 2 | `todo_write` `todo_read` |
 | 语音 | 2 | `speak` `stop_speaking` |
-| Shell | 2 | `run_shell` `app_action`（start / force_stop / clear_data / uninstall / disable / enable / info / permissions / install） |
+| Shell | 4 | `run_shell` `app_action`（start / force_stop / clear_data / uninstall / disable / enable / info / permissions / install）`settings_get` `settings_put` |
 | 其它（未声明分组） | 1 | `create_assistant` |
 | 会话 | 1 | `get_session_status` |
 
@@ -97,6 +98,10 @@
 - 工具输出太长会被「溢写」到 `filesDir/toolout/`（保留头部，附一条让模型改用 `read_file` 去读的提示），不撑爆上下文。
 - **工具审批**三档：自动运行 / 每次询问（默认）/ 禁止。被记住的「总是允许」与「总是拒绝」都可在一键清除。
 - **并行工具数**可调（默认串行）；只有「自动运行」档才并行，「每次询问」档一次只问一个。
+- **哪些工具能并行由工具名决定，不看运行时能力**（`agent/ToolBatching.kt`）：`ui_*` 手势与 `run_shell` / `app_action` 各自独占一组、前后都是屏障；纯读类（`read_file`、`grep_files`、`ui_dump`、`ui_screenshot`…）照旧并行。两个手势并发 = 一个按在另一个刚滑走的位置上，同一个 shell 会话里并发提交两条命令 = stdout 互相插队。
+- **工具目录在一个 run 内冻结**：能力中途丢失时工具仍留在表里，执行前复核并返回明确错误；新启用的能力追加到末尾。这是保住 prompt 前缀缓存的关键——目录每轮重拼会让缓存命中率崩掉。
+- **写类操作读回核验**：`settings_put` 写入后立刻 `settings get` 读回，回报 `before` / `after` / `verified`。`settings put` 退出 0 不等于生效（SELinux 拒绝、namespace 写错、写到了别的 user 都会静默失败），所以命令成功与「真的改了」是两件事。
+- **敏感数据不进会话记录**（`data/TranscriptRedaction.kt`）：`clipboard_read` 的结果、`ui_type` / `ui_type_into` / `clipboard_write` 的参数，**这一轮发给模型的仍是原文，落盘时替换成占位说明**。`run_shell` 与 `read_file` 刻意不屏蔽——它们能读到的东西无限广，一刀切会把会话记录掏空。
 - 界面操作类工具走无障碍通道，Shell 类工具走 shell 通道，权限档次见下。
 
 **联网**：`web_fetch` 抓网页（HTML 自动转纯文本，带编码嗅探，1MB 上限）、`web_download` 存文件到本机、`web_search` 搜网页。搜索默认走内置的 DuckDuckGo 抓取，零配置但容易被限流；想要稳定就在「设置 → 网络与语音」里填一个 Tavily 兼容接口（地址 + Key），`web_search` 会自动改走它。
@@ -121,10 +126,10 @@
 | --- | --- |
 | 显示思考过程 | 只控制画不画。关掉不代表不让模型思考，思考强度照旧生效 |
 | 思考强度 | 对应接口的 `reasoning_effort`，七档：默认 / minimal / 低 / 中 / 高 / xhigh / max。不支持的模型会忽略这一项 |
-| 上下文窗口（tokens） | 这个模型一次能读多少 token，可写 `128k` / `1m`；留空＝不限。填了，输入框那行的圆环才按比例显示 |
+| 上下文窗口（tokens） | 这个模型一次能读多少 token，可写 `128k` / `1m`。**按模型逐条配置**，上游 `/models` 报过窗口的会自动填上；没报过的落到全局默认 256k（保守上界，不是「不限」——0 会让压缩阈值失效）。它也决定输入框那行圆环的分母 |
 | 上下文条数 | 每次请求只带最近多少条消息，默认不限。历史很长时调小可以明显提速、省钱 |
 | Top P | 核采样，1.00 表示不过滤，一般不用动 |
-| 最大输出 tokens | 留空 = 模型默认。有些接口不给上限会中途截断，填上更稳 |
+| 最大输出 tokens | **按模型配置**（全局与提供方级的旧字段已退役，老文件里的值会自动搬进按模型的表）。0 或缺席＝不说，由模型/端点默认决定 |
 
 温度在「模型与生成」卡片里；每个助手还可以单独覆盖温度与提示词。模型切换器里的思考强度滑杆是**按会话**记的，不会把别的会话也改了。
 
@@ -216,24 +221,26 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 
 ## 构建与出包
 
-需要 **JDK 17** 与 Android SDK（`platforms;android-35`，以及与它配套的 build-tools 35.x）。SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。
+需要 **JDK 17** 与 Android SDK（`platforms;android-37`，以及与它配套的 build-tools 37.x）。SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。
 
-**仓库刻意不带 `gradlew` / `gradlew.bat` / `gradle-wrapper.jar`**（从未被 git 跟踪），所以本地要用一个已解包的 Gradle 发行版，版本与 CI 对齐（**8.11+**）。CI 用 `gradle/actions/setup-gradle` 指定 8.11.1。
+**仓库现在带 `gradlew` / `gradle/wrapper/`**（0.8.4xx 起补上的），wrapper 固定 **Gradle 9.8.2**——AGP 9.4.1 要求 Gradle 9.x。本地直接 `./gradlew` 即可，不再需要一个已解包的 Gradle 发行版。
 
 ```bash
 # 只查语法，不出包
-gradle :app:compileDebugKotlin
+./gradlew :app:compileDebugKotlin
 
-# 单元测试（协议层往返、HTML 转纯文本、Markdown 解析、接口报错翻译、
+# 单元测试（909 个用例 / 136 个文件：协议层往返、HTML 转纯文本、Markdown 解析与增量复用、
+# 工具批次的并行判定、敏感数据屏蔽、会话日志的追加/换代/自愈、接口报错翻译、
 # 提供方与模型分组、消息分叉的选取逻辑等，无需设备）
-gradle :app:testDebugUnitTest
+./gradlew :app:testDebugUnitTest
 
 # 出包（只出 release）
-gradle :app:assembleRelease
+./gradlew :app:assembleRelease
 # 产物 app/build/outputs/apk/release/app-release.apk
 ```
 
-- 本机（Windows）没有 `gradle` 也不在 PATH 时，用一个**转发脚本**把 `gradlew.bat` 指到已解包的 Gradle 8.11.1（脚本只做一件事：设好 `JAVA_HOME` / `GRADLE_USER_HOME` 后 `call` 真实的 `gradle.bat %*`），任何 gradle 任务都能透传。转发脚本放在仓库之外，不入库。
+- 本机（Windows）没有 `gradle` 也不在 PATH 时，用一个**转发脚本**把 `gradlew.bat` 指到已解包的 Gradle（脚本只做一件事：设好 `JAVA_HOME` / `GRADLE_USER_HOME` 后 `call` 真实的 `gradle.bat %*`），任何 gradle 任务都能透传。转发脚本放在仓库之外，不入库。
+- **CI 的 Gradle 版本尚未跟上**：`.github/workflows/android.yml` 里 `gradle-version` 仍是 `'8.11.1'`，而 wrapper 与 AGP 已经到 9.x，CI 上大概率会失败。改 wrapper 时应当一并改成 9.8.2（或直接用 `./gradlew`，不再让 setup-gradle 指定版本）。
 - **出包纪律**：只出 release，不构建 debug——debug 的 `applicationId` 带 `.debug` 后缀，装上去会变成另一个应用。打包要等放行。
 - 装机前必须 `aapt dump badging` 核对 APK 的 `versionName` / `versionCode`（历史上出过一次「构建没跑、把旧包当新包装机」的事故；几个版本的 APK 字节数完全相同，光看大小分不出来）。发错了用 `gh release upload --clobber` 覆盖附件。
 - 推送到 GitHub 后 `.github/workflows/android.yml` 会自动跑：`gradle :app:testDebugUnitTest` → 上传测试报告 → `gradle :app:assembleDebug :app:assembleRelease` → 上传 `suixing-debug` / `suixing-release` 两个 APK artifact。
@@ -246,8 +253,16 @@ app/src/main/java/com/suixing/agent/
 ├── MainActivity.kt              入口：edge-to-edge、主题、导航
 ├── SuixingApplication.kt        初始化 Core
 ├── core/Core.kt                 全局单例（settings / chats / capabilities / skills / speaker / tools / mcp / plugins / perf）
-├── data/                        设置（DataStore）、会话存储（JSON 文件）、助手、画像、记忆、待办、
-│                                定时、任务日志、用量、性能、MCP 配置、权限记忆
+├── data/                        设置（DataStore）、会话存储（meta + JSONL 追加日志）、助手、画像、记忆、
+│                                待办、定时、任务日志、用量、性能、MCP 配置、权限记忆
+│   ├── ChatStore.kt             日志读写：追加 / 换代 / 切窗 / 自愈
+│   ├── ChatRepository.kt        会话门面：列表只持 meta，正文按需读
+│   ├── MessageCache.kt          最近打开的会话正文 LRU
+│   ├── OffsetCache.kt           消息 id → 日志字节偏移（免全文件扫描）
+│   ├── SecretBox.kt             API Key 的 Keystore 加解密
+│   ├── LiveMetrics.kt           运行中的实时指标快照
+│   ├── ConversationReads.kt     阅读位置
+│   └── TranscriptRedaction.kt   落盘时的敏感数据屏蔽
 ├── capability/                  能力探测：无障碍状态、Shizuku 绑定、root 探测、Shell 执行
 ├── service/                     无障碍服务、前台保活服务、悬浮窗控制台、定时任务服务、开机广播
 ├── tools/                       工具层：Tool 契约 + ToolRegistry + 12 组工具
@@ -259,11 +274,19 @@ app/src/main/java/com/suixing/agent/
 │                                （SSE + tool_calls 组装、思考流、模型列表、报错翻译、重试）
 ├── agent/                       AgentEngine 主循环：模型 → 工具 → 模型，含审批闸门、
 │                                上下文压缩、工具输出溢写、插话与中断；另有画像摘要与请求图片预算
+│   ├── ToolBatching.kt          哪些工具能并行（GUI/Shell 串行，纯读并行）
+│   ├── CompactionPlan.kt        压缩切点规划
+│   ├── HistoryTrim.kt           按 token 预算裁历史
+│   ├── InjectedUserContext.kt   插话的包装文本
+│   ├── PromptMessages.kt        系统提示与消息装配
+│   └── ProfileSummarizer.kt     画像摘要
 └── ui/
     ├── SuixingApp.kt            抽屉导航与路由表
     ├── theme/                   配色（手调 M3 角色）、排版、圆角、文件类型色
     ├── components/              通用组件、品牌标记、Markdown 渲染器
-    ├── chat/                    会话页：转录、折叠块、工具条、输入区、滚动与轮次导航条
+    ├── chat/                    会话页：转录、折叠块、工具条、输入区、滚动、轮次导航条，以及
+    │                            DeltaBuffer（流式增量缓冲）、LiveParts（流式增量规则）、
+    │                            LivePinState（读历史时的钉住状态）、ConversationViewport（阅读窗口）
     ├── assistant/               助手面板（半屏）与助手编辑页
     ├── settings/                设置各子页、能力页、工具页、关于页、插件页、性能页、画像页
     ├── extension/               记忆页与技能页
@@ -303,6 +326,17 @@ GLM、OpenAI 兼容（自填地址）、本机 Ollama、Kimi、千问、硅基�
 ## 路线图
 
 - **v0.9**：虚拟屏（Shower 式虚拟显示，独立 native 组件）——真屏注入已在 v0.8 覆盖日常自动化，虚拟屏留到下一轮
+
+## 性能与稳定性（v0.8.4xx 起）
+
+这一轮把「感觉慢、数字乱跳、偶发闪退」当作主线做了一轮收口，几处值得写下来：
+
+- **流式渲染三层节流**：模型 delta → `DeltaBuffer`（合并后按拍发布）→ 打字机（恒定揭示速度，不按积压量加速）。生成速度 100~200 字/秒，任何「追得上」的加速都会让积压多时一次吐出成整块。块的真伪只按「诞生 500ms 内第一次组合」判定：刚出现的块从 0 打，早就存在的块直接给全文。
+- **会话列表只读 meta**：抽屉只画标题，不物化正文。10 个会话 54 MB 全部物化曾让 RSS 到 413 MB。正文按需读：打开会话取最近 12 轮、喂模型从最后一个 checkpoint 往后、导出取全文。
+- **工具目录在一个 run 内冻结**，不每轮重拼——这是保住 prompt 前缀缓存的关键（日常缓存命中率约 95%）。
+- **统计只认实测**：上下文圆环的分子优先用网关回报的 `prompt_tokens`，只有整个会话从没被报过用量才用 `/4` 估算兜底并标「约」。落盘的 `meta.totals.contextTokens` 是会话级权威值，不受「最后一条消息有没有 usage」影响。
+- **写类操作读回核验**，未生效时回报 `verified=false` 并明确告诉模型「请勿假设已修改」。
+- **敏感数据不进转录**：剪贴板读取的结果、文本输入类的参数，当轮给模型原文，落盘换成占位说明。
 
 ## 开源许可与第三方声明
 
