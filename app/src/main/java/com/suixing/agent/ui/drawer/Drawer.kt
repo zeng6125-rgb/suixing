@@ -41,7 +41,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -71,13 +70,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.drawer.DrawerOrder
 import com.suixing.agent.ui.drawer.DrawerOrderStore
 import com.suixing.agent.ui.assistant.AssistantAvatar
+import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.drawer.drawerSections
@@ -544,7 +543,9 @@ drawerRow(
                 // the tap, so the two never fire together.
                 onClick = onToggleConsole,
                 trailing = {
-                    Switch(checked = consoleOn, onCheckedChange = { onToggleConsole() })
+                    // 与设置页同一个开关（尺寸 0.88、实心主色轨道）：悬浮控制台和设置里的
+                    // 「常驻控制台」是同一件事，两处长得不一样会让人以为是两个开关。
+                    SettingsSwitch(checked = consoleOn, onCheckedChange = { onToggleConsole() })
                 },
             )
             DrawerAction(
@@ -772,7 +773,11 @@ private fun DrawerAction(
             Spacer(Modifier.width(12.dp))
             Text(
                 text = label,
-                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 14.sp),
+                // 与会话列表标题**同一个样式**（用户：「五个按钮的标题字号改和会话列表一样大」）。
+                // 原来用 `bodyLarge.copy(fontSize = 14.sp)`：字号数值相同，但 bodyLarge 的行高
+                // 是 24sp（bodyMedium 是 20sp），同一行里文字看着更大、行也更松 —— 直接取同一个
+                // 样式对象，主题里若改 bodyMedium 两者也会一起变。
+                style = MaterialTheme.typography.bodyMedium,
                 color = if (selected) scheme.primary else scheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

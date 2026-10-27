@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.capability
 
+import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.settingsPagePadding
 import android.content.Context
@@ -33,7 +34,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -787,7 +787,7 @@ private fun ConsoleRunningSwitch(checked: Boolean, onChange: (Boolean) -> Unit) 
             )
         }
         Spacer(Modifier.width(12.dp))
-        Switch(checked = checked, onCheckedChange = onChange)
+        SettingsSwitch(checked = checked, onCheckedChange = onChange)
     }
 }
 

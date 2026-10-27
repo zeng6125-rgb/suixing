@@ -24,7 +24,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -49,6 +48,7 @@ import com.suixing.agent.data.Schedule
 import com.suixing.agent.service.SchedulerService
 import com.suixing.agent.tools.describeSchedule
 import com.suixing.agent.tools.formatScheduleMoment
+import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SuixingDialog
@@ -200,7 +200,7 @@ private fun ScheduleRow(
             // 已过期的不给开关：这类行是 one-shot 错过了触发时间，下一次 arm 一定会把它重新
             // 关掉——用户打开又被关掉，看起来就是开关失灵。要恢复只能重新建一条。
             if (schedule.missedAt <= 0L) {
-                Switch(checked = schedule.enabled, onCheckedChange = onToggle)
+                SettingsSwitch(checked = schedule.enabled, onCheckedChange = onToggle)
             }
             RowAction(icon = R.drawable.ic_trash, label = "删除", onClick = onDelete)
         }
