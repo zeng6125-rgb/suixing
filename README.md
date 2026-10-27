@@ -270,8 +270,6 @@ app/src/main/java/com/suixing/agent/
     ├── files/ tasks/ schedules/ usage/   文件、任务清单、定时任务、用量
 ```
 
-- `docs/` 是跨版本的设计与契约文档，索引在 [`docs/README.md`](docs/README.md)。
-- [`TODO_NEXT.md`](TODO_NEXT.md) 是当前待办的唯一真相；[`WORK_MEMORY_suixing-agent.md`](WORK_MEMORY_suixing-agent.md) 是工作记忆。
 - `dist/` 放本机的打包产物与发布记录，已在 `.gitignore` 里，不入库。
 
 ## 首次使用

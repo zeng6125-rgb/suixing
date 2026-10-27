@@ -46,3 +46,16 @@ verify-out/
 # 只属于本机协作的工作产物：交接板、设计/实施计划、记忆文件
 HANDOFF.md
 docs/superpowers/
+
+# 排期 / 排查记录 / 契约草稿：只在本机，不进仓库
+TODO_NEXT.md
+PERFORMANCE_OPTIMIZATION_PLAN.md
+docs/README.md
+docs/issue-50-resolution.md
+docs/optimization-backlog.md
+docs/scroll-redesign.md
+docs/settings-style.md
+docs/v0.8-contract.md
+docs/R3-markdown-prefix-incremental.patch
+docs/housekeeping.md
+docs/onboarding.md
