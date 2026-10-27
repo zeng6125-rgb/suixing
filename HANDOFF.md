@@ -6,28 +6,29 @@
 
 ## 1. 状态
 
-- HEAD：`5ea5ed2`（B 方案重构 + R4 修复，已提交未 push）· 工作树：见 `git status`
-- 已装 APK：`0.8.534` / vc555 · sha256 `1193dd0d…` · 装机 2026-10-27 19:51
-  - ⚠️ 该包**不含**本文件同批的设置配色改动，装新包前别拿旧包验收设置
-- 最近测试：`:app:testReleaseUnitTest` → **909 tests / 0 failures**（2026-10-27 20:09:53）
+- HEAD：`b3b8219`（B 方案重构 + R4 修复 + 设置卡片对比度）· 工作树：`git status` 自查
+- 已装 APK：`0.8.534` / vc555 · sha256 `5ef77732…7fe1bc6` · 装机 2026-10-27 **20:30:44**
+  - 该包**已含**设置首页卡片加深 + 开关缩放/配色；不含 FilterChip 配色（那条已撤回）
+- 最近测试：`:app:testReleaseUnitTest` → **909 tests / 0 failures**（2026-10-27 20:28:56）
+- 已知既有警告（非本轮引入）：`SettingsScreen.kt` 里 `form.mapProvider(selected?.id)` 的
+  «Unnecessary safe call on a non-null receiver of type 'ProviderConfig'»
 
 ## 2. 用户验收结果（唯一权威，不能用源码推断替代）
 
-- ✅ P1「加载更早」原位（2026-10-27 晚）
+- ✅ P1「加载更早」原位
 - ✅ P2 复制菜单：只出一个、带「复制」
 - ✅ 切会话（不再长时间阻塞，入场动画已恢复）
 - ✅ 绿点 / 输入法 / 折叠与抽屉 / P3 注入开关
-- ❌ **设置样式**：开关太大、配色简陋；列表 tab 项背景太浅看不清
-  → DSH 已改（开关缩放 0.88 + 实心主色；供应商 chip 提高对比），**待装新包复验**
+- ⏳ **设置样式**：开关已缩小改色、分组卡片已加深加描边 —— **等用户装 20:30 的包复验**
 
 ## 3. 正在进行（防撞车；没有占用就写「空闲」）
 
 - 空闲：`ui/components/SettingControls.kt`、`ui/settings/SettingsScreen.kt`
-- 空闲：`ui/chat/ChatScreen.kt`、`ui/chat/ChatViewModel.kt`
+- 空闲：`ui/chat/ChatScreen.kt`、`ui/chat/ChatViewModel.kt`、`ui/components/PreparedMarkdown.kt`
 
 ## 4. 下一步 / 未决
 
-- 装新包复验设置三点（开关大小、配色、tab 对比度）
+- 设置观感复验；若仍太浅就 `surfaceContainer` → `surfaceContainerHigh`（反过来则回退一档）
 - **R4 真机未验**：长回答流式时强杀 App，看恢复量（预期最多丢约 3s）
 - P4 导航条外观/交互：等用户指示，别自行设计
 - 未 push、未打 tag、未发布
