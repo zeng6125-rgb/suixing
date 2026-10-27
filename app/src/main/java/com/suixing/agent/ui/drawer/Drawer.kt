@@ -47,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
@@ -138,6 +139,7 @@ internal fun Drawer(
     onNavigate: (String) -> Unit,
     onAssistants: () -> Unit,
 ) {
+    val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
     // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「随行」标。
     //
     // **只订阅"当前助手"这一个值**（原来订阅整份 settings 流）：抽屉里只有左上角那枚标识
@@ -407,6 +409,7 @@ internal fun Drawer(
                     conversation = conversation,
                     selected = conversation.id == activeId,
                     running = conversation.id in runningId,
+                    completedUnread = conversation.id in unreadCompleted,
                     menuOpen = menuFor == conversation.id,
                     sortMode = sortMode,
                     dragging = draggingState.value == conversation.id,

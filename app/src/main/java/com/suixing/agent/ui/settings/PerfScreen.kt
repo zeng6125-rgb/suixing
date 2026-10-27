@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -42,7 +41,6 @@ import com.suixing.agent.data.PerfHealth
 import com.suixing.agent.data.PerfRecord
 import com.suixing.agent.data.PerfSummary
 import com.suixing.agent.ui.components.PageTopBar
-import com.suixing.agent.ui.components.navBarContentPadding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -127,7 +125,6 @@ internal fun PerfScreen(onBack: () -> Unit) {
                         if (summary.avgTokensPerSecond <= 0.0) "—" else "%.1f tok/s".format(summary.avgTokensPerSecond),
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item(key = "live") { DeviceMetrics() }
             item(key = "pinlog") {
@@ -146,7 +143,6 @@ internal fun PerfScreen(onBack: () -> Unit) {
                         }
                     }
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item(key = "health") {
                 Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
@@ -162,7 +158,6 @@ internal fun PerfScreen(onBack: () -> Unit) {
                     MetricRow("无 usage 回报", "${health.noUsageRuns} 轮")
                     MetricRow("慢轮（>${PerfHealth.SLOW_MS / 1000}s）", "${health.slowRuns} 轮")
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             if (records.isEmpty()) {
                 item(key = "empty") {
@@ -218,7 +213,6 @@ private fun DeviceMetrics() {
         MetricRow("Java 堆", if (heap != null && heapMax != null) "$heap / $heapMax MB" else "—")
         MetricRow("线程", metrics?.threads?.toString() ?: "—")
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
 /** 0 在这里的含义是「没有采集到」，不是「测得为零」。 */

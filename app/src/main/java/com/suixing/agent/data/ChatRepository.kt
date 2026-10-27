@@ -36,7 +36,10 @@ internal const val LIVE_SUFFIX = ".live.json"
  * existing chats are 54 MB of them — and [migratePending] moves each one over, renaming it to
  * 只有读回校验通过才认为写入成功（见 [save]）。
  */
-class ChatRepository(private val context: Context) {
+class ChatRepository(
+    private val context: Context,
+    private val onDeleted: (String) -> Unit = {},
+) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val dir: File get() = File(context.filesDir, "chats").apply { if (!exists()) mkdirs() }
     private val lock = Mutex()
@@ -683,6 +686,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             if (readLastOpenedMarker() == id) lastOpenedFile.delete()
         }
         _conversations.value = _conversations.value.filterNot { it.id == id }
+        onDeleted(id)
     }
 
     /**

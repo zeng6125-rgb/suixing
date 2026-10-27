@@ -5,8 +5,6 @@ import com.suixing.agent.ui.components.settingsPagePadding
 import android.graphics.Bitmap
 // Android 的 Color（`ColorDrawable(Color.TRANSPARENT)` 用它），不是 Compose 的
 // androidx.compose.ui.graphics.Color —— 两个同名类，别混。
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -45,12 +43,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
+import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,15 +57,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.core.view.WindowCompat
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
 import com.suixing.agent.data.ASSISTANT_AVATARS
@@ -549,7 +541,7 @@ private fun ModelSection(
             title = "单独设置温度",
             subtitle = "关闭则跟随全局温度",
             control = {
-                Switch(
+                SettingsSwitch(
                     checked = draft.temperature != null,
                     onCheckedChange = { on ->
                         onDraft(draft.copy(temperature = if (on) 0.6 else null))

@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -33,7 +32,6 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.ui.components.PageTopBar
-import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
@@ -135,13 +133,11 @@ fun AboutScreen(onBack: () -> Unit) {
                     subtitle = "配色与排版的参考",
                     url = "https://github.com/Zhou-Shilin/Aether",
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 AboutLink(
                     title = "Operit",
                     subtitle = "能力清单与交互约定的参考",
                     url = "https://github.com/AAswordman/Operit",
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 AboutLink(
                     title = "Model Context Protocol",
                     subtitle = "MCP 协议规范",

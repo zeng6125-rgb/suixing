@@ -6,6 +6,8 @@ import com.suixing.agent.agent.ApprovalGate
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.data.ChatRepository
+import com.suixing.agent.data.ConversationReads
+import com.suixing.agent.data.ConversationViewports
 import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.McpStore
 import com.suixing.agent.data.MemoryStore
@@ -56,6 +58,10 @@ object Core {
     lateinit var settings: SettingsRepository
         private set
     lateinit var chats: ChatRepository
+        private set
+    internal lateinit var conversationReads: ConversationReads
+        private set
+    internal lateinit var conversationViewports: ConversationViewports
         private set
 
     /** The agent's long-term notes: `filesDir/memory.json`, shared with the UI. */
@@ -131,7 +137,12 @@ object Core {
             // 自带 bash/busybox 的目录（见 Shell.initBinaries 的注释）：只读一次，工具里同步取用。
             Shell.initBinaries(appContext.applicationInfo.nativeLibraryDir)
             settings = SettingsRepository(appContext)
-            chats = ChatRepository(appContext)
+            conversationReads = ConversationReads.create(appContext, appScope)
+            conversationViewports = ConversationViewports.create(appContext, appScope)
+            chats = ChatRepository(appContext, onDeleted = { id ->
+                conversationReads.forget(id)
+                conversationViewports.forget(id)
+            })
             memory = MemoryStore(appContext)
             profile = UserProfileStore(appContext)
             capabilities = CapabilityHub(appContext, settings)
@@ -149,7 +160,7 @@ object Core {
             )
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)
-            engine = AgentEngine(scope = appScope)
+            engine = AgentEngine(scope = appScope, onCompleted = conversationReads::completed)
             val appearance = appContext.getSharedPreferences("startup_appearance", Context.MODE_PRIVATE)
             themeMode = appearance.getInt("theme_mode", 0)
             appScope.launch {

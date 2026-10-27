@@ -2,6 +2,8 @@
 
 来源：[issue #50](https://github.com/zeng6125-rgb/suixing/issues/50)，审计基线 `23a028e`。本轮从 `9029f8d` 接续，源码版本 `0.8.532 / vc553`。issue 尚有未完成项，保持开启；安装与发布口径见文末。
 
+> 上方版本以及原始逐项表是 **0.8.532 交付时的记录**，保留历史口径。0.8.533 及其后续工作树的修复、保留理由和未完成项见文末“Codex 续接复核”；不能把旧表直接当作当前实现。
+
 原文有 **145 个不同的原始编号**，另有未附原始编号的“长会话重新回答缺全文兜底”。不能把标题的 147 当成全部已修复数量。这里逐个覆盖原文实际编号；`CHAT-R-02`、`CHAT-VM-03` 原文未出现，不补造编号。
 
 “修复”表示已经修改源码并经编译，相关纯函数有回归测试；不代表真机 UI 通过。“已具备”表示现有实现已满足或报告前提不成立。“保留”写明具体理由，仍可存在成本，不能算修复。“待验证”是未解决的体验风险，不伪装完成。
@@ -305,14 +307,110 @@
 | R3 | 冷读也绕过仓库锁：未命中已提交元数据时，先**无锁**读 meta 再打开那一代次日志；任何异常回落加锁路径 | `data/ChatRepository.kt` 的 `readCommittedCold(...)`，接在 `readTailWindow` / `readWindow` 的热快照之后 |
 | R4 | 活跃输出的恢复副本按“未落盘增量”自适应间隔（1s / 2s / 3s），减少长回答下每秒整段组装+编码+写盘 | `ui/chat/ChatViewModel.kt` 的 `liveDraftIntervalMs(...)` + `writeLiveDraft` 计数器；`LiveDraftIntervalTest` |
 
-> **2026-10-27 静态更正（R4）**：上表记录的是**设计意图，当前并未生效**。`ChatViewModel.kt:2892` 按
-> `lastMeasuredChars - lastSavedChars` 选档，而 `:2930`/`:2932` 在保存成功后把两个计数赋成**同一个**值，
-> 内容未变或提前 `continue` 也不产生差值 ⇒ 下一轮差值恒为 0 ⇒ 运行时**只会走 1s**，2s/3s 分支不可达
-> （`LiveDraftIntervalTest` 只测纯函数，照不到这个闭环）。本轮**不改代码**（改保存节奏会改变崩溃时最多丢失的正文量），
-> 仅记录口径。详见 `WORK_MEMORY_suixing-agent.md` §8.132.4。
+> **2026-10-27 R4 缺陷与修复**：此前 `writeLiveDraft` 用 `lastMeasuredChars - lastSavedChars` 选档，而
+> `lastMeasuredChars` 在同一拍保存后被写成与 `lastSavedChars` **相同**的值 ⇒ 差值恒为 0 ⇒ 运行时
+> **只会走 1s**，2s/3s 分支不可达（`LiveDraftIntervalTest` 只测纯函数，照不到这个闭环）。
+> **已修**（工作树，未提交）：改为在 `delay` **之前**用新加的 `RunSession.draftChars(...)` 量
+> “此刻正文+思考长度 − 上次真正落盘长度”选档；量长只取缓冲/字符串长度，不调用 `derivedStreaming()`，
+> 因此不把 O(n) 字符串重建搬回每拍。代价是长回答被杀时最多丢约 3s 而非 1s（既定取舍）。
+> 仅 `:app:compileReleaseKotlin` 通过；本项目无 Release 单测任务、Debug 任务被用户禁止，
+> 该修复**没有可执行测试**，真机行为未验收。详见 `WORK_MEMORY_suixing-agent.md` §8.138。
 
 仍未做（需要真机帧数据或用户验收，不静态断言）：
 
 - CHAT-R-07/11：单个 transcript item 与“一次加入历史”的全量组合/测量成本；
 - COMP-16：超长表格的全量布局仍存在（COMP-12 的冷解析已由 `PreparedMarkdown` 下沉到 Default）；
 - P1–P4：加载更早原位、复制菜单单次消失、注入开关生效、导航条观感，均未真机验证。
+
+## Codex 续接复核（2026-10-27，基线 004c0a5）
+
+接续时工作树干净，本地比 origin/main 多 5 个提交；版本为 **0.8.533 / vc554**。用户先前的真机反馈是 P1 仍移位、P2 仍有第二菜单、P4 没有对应高亮、输入法动画仍不顺；折叠动画“暂时正常”。这些反馈不能被安装成功或单测通过覆盖。
+
+用户在接续 agent 中暂缓了 R4 保存节奏、单 transcript 结构调整和超长表格折叠。本次保留这些决定，正文缓存维持已确认的 **8**，不退回 5，也不继续加大。
+
+### 已有中断批次的实质进展
+
+| 项目 | 当前实现与证据 | 仍有的成本 |
+|---|---|---|
+| ENG-09 | PromptMessages 在 add/remove/set/iterator/subList/clear 时同步维护字符和含图片消息数；请求合计读取 O(1)。随机 2,000 次编辑与全量参考结果比对。 | 单条新消息仍需计算其工具调用长度；token 数仍是原估算口径。 |
+| CHAT-VM-21 | screenState、requestStats、liveActive 使用 projectState，取消三个常驻 Eagerly 投影协程；无人收集时不执行转换，直接读 value 仍取得最新值。 | 内部消息修订盖章继续常驻；Activity 仍 STARTED 且聊天仍被收集时，不会冻结真实输出。 |
+| ENG-11 / R3 | 已索引快照与未 load 的冷读均可绕过仓库写锁；只打开一个日志代次并以 meta.logBytes 为提交边界，异常回落原加锁路径。热/冷路径均有“写锁已占用仍读到完整已提交窗口”的回归。 | 异常回落与其它仓库操作仍串行；未测出读盘、组合、绘制各占真机卡顿的比例。 |
+| COMP-12 | 长定稿正文仅为即将挂载的批次在 Default 解析，结果直接交给这些行；取消切会话时检查解析取消。没有整页并行预热或提前挤占全局 LRU。 | 短正文、思考/工具内层、行内格式和未准备的新编辑内容仍可能在主线程处理；解析就绪也不消除布局成本。仍为部分修复。 |
+| CHAT-VM-15 / ENG-16 | GrowableText 的不可变快照在追加前复用，UI 与保存线程同步读取，避免重复复制和半个 UTF-16 字符；单段正文不再多建拼接副本。 | 活跃输出仍按实际 1s 周期组装、编码、写完整当前轮副本；R4 的 2s/3s 当前不可达，按用户决定暂不改。 |
+| P3 | 生产提示词调用 injectedUserContext，6 项回归覆盖两个开关的四种组合、空内容、顺序与长度上限。关闭的段不贡献标题或正文。 | 单测证明纯函数与生产接线，未读取手机请求做真机验证。 |
+
+按当前源码口径，ENG-09 从部分修复转为修复，COMP-12 从未完成转为部分修复：**118 修复 / 7 部分修复 / 6 保留 / 12 已具备 / 1 待验证 / 1 未完成，共 145 项**。这只是源码工作分类，P1/P2/P4 体验验收仍未通过。
+
+### 本次继续修复
+
+- **P1 等待与取消**：等成功发布更大的 shownTurns 窗口及该会话准备完成，不再依赖 groupRows 后行数一定增加；准备等待最多 15s，放置等待最多 2s。失败、超时、切会话、拖动均释放恢复状态。请求令牌使已取消或过期的读盘回调不能展开历史、不能干扰下一次请求。首次分批内容未准备完时禁用加载按钮，避免捕获尚未挂载的阅读行。
+- **P1 位置策略保持诚实**：按消息 ID 保留行身份和实测坐标，放置后最多校正一次测得的漂移；没有 requestScrollToItem 原子锚定，也没有逐帧纠正。新增历史仍一次挂载，实际像素原位需真机复验。
+- **P2 切会话的陈旧捕获**：pointerInput 原为 Unit，长驻协程可能保留旧 SelectionFocusTracker 和旧会话的加载状态；改以 conversationId 为键，并在取消时释放 pressed、选择/输入法守护。保留单个外层 SelectionContainer 及 Final pass 清焦点，避免短点输入框之外时误清输入焦点。
+- **P4 与输入法**：0.8.533 已包含滚动 index/offset 的显式观测，使位置快速放置时仍能更新当前轮高亮；四条路径的 160ms 抽屉收起保持。输入法高度直接由布局/绘制消费者读取，移除了协程中转多一帧的路径。两项尚无新真机验收。
+- **设置风格**：共享 SettingsStyle、页边距/底部避让和分组标题已覆盖模型、会话、外观、网络语音、数据、会话管理、用量、性能、画像、关于、助手、工具/技能/MCP/插件、记忆、能力、文件。实际差异与保留项见 [设置子页样式规范](settings-style.md)。
+
+### 保留与明确未完成
+
+6 项保留理由延续原 39 项逐条复核：CHAT-VM-26 保存用户未送达内容；COMP-02 保持完整嵌套列表及既有段间距；COMP-18 保留流式局部增量状态（全局缓存仍有界）；ENG-17 保留可恢复的隔离原文；SVC-18 保留孤立悬浮窗口的恢复检查；APP-15 保留真实跨行的实时拖拽排序。它们均有具体成本，不计作性能修复。
+
+未完成工作继续列为待办：CHAT-R-07 的单 transcript 全量布局；CHAT-R-11 的单次历史挂载峰值及 P1 实际位置；COMP-12 的余下冷解析路径；COMP-16 的超长表格布局；CHAT-VM-15/ENG-16 的完整副本写入；CHAT-VM-21 的仍被收集场景；ENG-11 的异常回落串行成本；CHAT-R-12 的动画测量成本。用户暂缓的结构或恢复协议变更没有被改写成“没必要做”。
+
+本轮最终命令为 `:app:compileDebugKotlin :app:compileReleaseKotlin :app:testDebugUnitTest --offline --console=plain`，**BUILD SUCCESSFUL，35s**；测试任务实际执行，XML 汇总 **896 tests / 0 failures / 0 errors / 0 skipped，131 个测试类**。日志为 `verify-out/resume-final-guard-verification.log`。`git diff --check` 通过。
+
+语义检查覆盖中断批次的 35 个目标源文件：32 个解析无错误，从其中 19 个文件删除 36 条未使用 import；ChatRepository、ChatStore、ChatViewModel 有前端/生成代码兼容诊断，未据此清理。审计记录 `verify-out/import-removals-resume.json`；19 个文件去掉 import 后与本轮 HEAD 的正文逐字相同，记录 `verify-out/resume-source-equivalence.json`。ChatScreen、ChatRows、SuixingApp 需要的 getValue/setValue 委托操作符保留；最终 K2 编译与单测通过。
+
+本轮仅修改和本地编译/单测，不操作手机、不新建安装包、不提交或推送。手机现有的 0.8.533 不含本次工作树的 P1/P2 追加修复。上述结果不代替 UI、请求或帧率的真机验收。
+
+## 用户新增：会话完成未读绿点（2026-10-27）
+
+这是原 145 项之外的新功能，不增加 #50 的“修复数”。
+
+- 运行中保持原转圈提示；切到其它会话后，原会话**正常完成且未读**时显示小绿点。失败、手动停止不标为完成；完成时正在看的会话不产生未读标记。
+- 抽屉及会话管理页（含归档行）共用 CompletionDot，复用主题的成功绿色；圆点直径 7dp，14dp 状态槽与运行中图标一致，描述为“已完成，未读”。
+- 回到聊天页、Activity RESUMED、会话正文已加载时清除该会话的标记。停在其它导航页、应用退后台、仍加载或读取失败的空内容不清除。这里的“已读”是打开该会话，不要求滚到回答末尾。
+- AgentEngine 在每个 RunHandle 的 Done 时最多发一次完成回调；不从运行列表消失或旧终态推断完成，避免把失败/停止及升级前旧回答标绿。
+- ConversationReads 串行处理完成、查看、删除事件，后台 DataStore 独立保存未读 ID；启动加载与事件顺序一致，重启保留已保存标记，删除会话同时清理。聊天正文、meta、恢复协议与 R4 保存节奏不变。
+
+验证命令 `:app:compileDebugKotlin :app:compileReleaseKotlin :app:testDebugUnitTest --offline --console=plain`：**BUILD SUCCESSFUL in 1m 16s**；最新 XML **909 tests / 0 failures / 0 errors / 0 skipped，135 类**。新增 13 项覆盖完成/停止/失败、每 run 去重、并行会话、启动事件顺序、实际落盘及关闭重开、删除清理、加载中/失败空窗不确认已读。日志 `verify-out/completion-full-verification.log`。
+
+本次仍未打包、安装、提交或推送；手机上的 533 不含新增绿点及本地 P1/P2 追加修复。新绿点的主题、位置和交互未真机验收。#50 的原未完成项、暂缓的 R4/单 transcript/超长表格方案继续按上一节记录，未因此关闭或改成“不必做”。
+
+## Release 0.8.534 构建及安装（2026-10-27）
+
+用户明确纠正“不要 Debug 编译和打包”，并授权安装。本次升到 **0.8.534 / vc555**，只执行 `:app:assembleRelease --offline --console=plain`，**BUILD SUCCESSFUL in 59s**；没有 Debug 变体编译、单测或打包任务。`stripReleaseDebugSymbols` 和 `mergeReleaseNativeDebugMetadata` 是 Release 原生符号处理，不能据名称中的 Debug 误报为 Debug 构建。
+
+- APK：`dist/suixing-0.8.534-release.apk`，**17,837,759 bytes**；包内 `com.suixing.agent / versionName=0.8.534 / versionCode=555`，v2 签名验证通过，交付文件与 Gradle 原 APK 的 SHA-256 相同。
+- SHA-256：`0117fcb6d0312dc31d8fea2e8a3477f10090a719b462eac590adf51f0d26736f`。
+- 无线调试重新发现为 `192.168.0.102:34295`，`adb install -r` 返回 **Success**；安装元数据确认 `0.8.534 / 555`，更新时间 `2026-10-27 17:37:51`。
+- 本版包含本地 P1/P2 追加修复与完成未读绿点。用户自行打开验收；没有操作应用界面、读取应用日志或聊天数据。
+- 日志 `verify-out/0.8.534-release-build.log`；产物与安装校验分别为 `dist/suixing-0.8.534-release-verification.json`、`dist/suixing-0.8.534-install-verification.json`。909 项单测是上一轮结果，本次未重跑 Debug 测试。
+- 本地仍未提交/推送；安装成功不代替 P1/P2/P4/IME、绿点和设置样式的真机验收，issue #50 保持开启。
+
+## 0.8.534 用户验收反馈与后续设计（2026-10-27）
+
+用户确认完成未读绿点可以、输入法当前可以、折叠/抽屉和 P3 没问题。代理本轮没有另做手机测试或取请求数据。
+
+继续未完成的项目：
+
+| 项目 | 反馈及结论 |
+|---|---|
+| P1 | 部分位置仍改变，未通过；放置后一次补偿不是首帧原子定位 |
+| P2 | 仍出现第二个只有“全选”的菜单，未通过；不能继续把重复容器当唯一已证实原因 |
+| 切会话 | 不再卡几秒，但切换后掉帧、入场动画缺失、恢复位置迟到，未完成 |
+| 设置风格 | 状态切换控件不统一、分隔线太多且位置不合理，未完成 |
+| P4 | 用户将另给重构指示，本轮不擅自改外观与交互 |
+
+核查确认：正文共用 LazyListState；多个内存位置 Map 被注释误称“落盘”；消息 ID 锚点采集与实际 transcript item key 不匹配；挂载正文后才等待布局恢复；入场 Animatable 初值为 1，实际明确禁用了动画。P2 使用的实际 foundation 1.12.1 已有显式 SelectionState.clear，而当前应用仅清焦点；这是可用修复入口，不等于已确认第二菜单的实际发起者。
+
+新增[重构设计草案](superpowers/specs/2026-10-27-chat-viewport-design.md)，比较保留单 transcript 收敛状态、消息卡片虚拟化和整页常驻三种方案。推荐方案需防止 #43 的旧卡进视口卡顿回归；此前单 transcript 结构仍有用户“先不做”的决定，本轮先完成可审阅设计，再确认变更范围。P4 必要内部定位适配和外观/交互重构分开说明。
+
+实施状态（2026-10-27，工作树未提交）：用户批准 B 方案后，正文已改为逐消息 Lazy item（稳定 key/contentType，`LazyLayoutCacheWindow` 有界预取），阅读位置收敛为每会话一份 `ViewportBookmark`；切换恢复改为「首屏就位后再淡入 180ms」，显示后 `scrollBy` 纠偏与整页分批挂载已删除；选区改为登记真实选区并在短点/换会话时 `SelectionState.clear()`，旧 `TextToolbar` 路径同样按有效选区过滤；设置页统一开关/分段选择器并移除 36 处重复分隔线。`TurnMarks.topFedIndex` 因此失去生产调用点（未删）。仅 `:app:compileReleaseKotlin` 通过；本项目无 Release 单测任务、且用户禁止 Debug 任务，新逻辑当前无可执行测试。真机行为全部未验收。R4 恢复副本间隔的死分支已修（见上方 R4 注记）。
+2026-10-27 补充：AGP 默认只给 Debug 建单元测试任务，而用户禁止 Debug 任务 ⇒ 曾出现「改了代码却无可执行测试」。
+已在 `app/build.gradle.kts` 用 `androidComponents { beforeVariants(...) { (it as? HasUnitTestBuilder)?.enableUnitTest = true } }`
+为 Release 变体开启单测（不影响 `assembleRelease` 产物）。开启后立即暴露一处真回归：
+`PreparedMarkdown.kt` 的 `prepareMarkdownTexts` 被改成把结果写入全局 `SettledBlocks` 缓存，
+违反该文件自身 KDoc（"owned by the rows, rather than an extra process cache"）与
+`PreparedMarkdownTest` 的断言（预解析不得填充全局缓存）；已还原为只读不写。
+`:app:testReleaseUnitTest --rerun` 现为 **909 tests / 0 failures / 0 errors / 0 skipped**（135 类）。
+
+本轮只更新设计与验收记录，没有改应用代码、版本或产物，没有编译/打包/安装、操作手机、取日志/聊天数据、提交/push。原 145 项分类不因写出草案增加“已修复”数量，#50 保持开启。

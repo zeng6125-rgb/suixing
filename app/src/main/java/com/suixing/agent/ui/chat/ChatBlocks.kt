@@ -557,7 +557,7 @@ internal fun TraceBlock(note: String, modifier: Modifier = Modifier) {
  */
 @Composable
 internal fun CompressionBlock(checkpoint: ContextCheckpoint) {
-    var expanded by remember { mutableStateOf(false) }
+    var expanded by rememberSaveable { mutableStateOf(false) }
     ProcessCard(
         icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
         title = "已压缩上下文",
@@ -999,13 +999,13 @@ internal fun ToolBundle(
     runningTool: String? = null,
     startExpanded: Boolean = false,
 ) {
-    var expanded by remember { mutableStateOf(startExpanded) }
+    var expanded by rememberSaveable { mutableStateOf(startExpanded) }
     // **每个工具独立展开**（issue #20）：原来是单个 `String?`，展开 B 会覆盖 A ——
     // 想同时对照「第 1 个的输入」和「第 3 个的输出」就得来回点。用 Set 记住所有打开的，
     // 展开新的不影响已开的。
     // 代价（issue #20 自己提的）：多个 `RevealHeight` 会同时跑动画，位置补偿的负载上升，
     // 与 #13 是同一处风险 —— 若实测位置跳动更明显，再考虑限制「最多同时开 N 个」。
-    var openTools by remember { mutableStateOf(emptySet<String>()) }
+    var openTools by rememberSaveable { mutableStateOf(emptySet<String>()) }
     // **摘要只依赖 tools 本身**：count/标题/预览 remember 住，折叠条常驻，
     // 原来每帧都重算一遍（审计 2§A14）。
     // R4：这个 count 也是同一类 —— 它只随 tools 变，而这一行在每次重组都会被求值一遍。

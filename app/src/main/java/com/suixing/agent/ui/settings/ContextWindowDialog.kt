@@ -4,7 +4,6 @@ import com.suixing.agent.ui.components.SettingsStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.KeyboardOptions
 import com.suixing.agent.ui.components.SuixingDialog

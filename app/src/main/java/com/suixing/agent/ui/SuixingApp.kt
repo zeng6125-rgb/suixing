@@ -32,11 +32,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
@@ -66,6 +64,7 @@ import com.suixing.agent.ui.assistant.AssistantSheet
 import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
+import com.suixing.agent.ui.chat.ObserveConversationRead
 import com.suixing.agent.ui.components.FullScreenOverlay
 import com.suixing.agent.ui.components.LocalDrawerBusy
 import com.suixing.agent.ui.components.LocalHeldImePx
@@ -533,6 +532,7 @@ fun SuixingApp() {
                     // **只在首启时这样**：设置里「重新看一遍引导」时 chat 已经在组合里，
                     // 盖一层引导不能把常驻的 chat 拆了。
                     if (!(showOnboarding && onboardingIsFirstRun)) {
+                        ObserveConversationRead(chat, visible = route == "empty")
                         ChatScreen(viewModel = chat, onOpenSettings = remember(open) { { open("settings") } })
                     }
                 }

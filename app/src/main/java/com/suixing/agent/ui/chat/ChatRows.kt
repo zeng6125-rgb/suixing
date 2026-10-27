@@ -23,6 +23,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.rememberSelectionState
+import androidx.compose.foundation.text.contextmenu.modifier.filterTextContextMenuComponents
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -1255,6 +1258,7 @@ internal fun MetricButton(icon: ImageVector, text: String, label: String, onClic
 internal val LocalInSelectable = androidx.compose.runtime.compositionLocalOf { false }
 
 @Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 internal fun SelectableWhenArmed(content: @Composable () -> Unit) {
     if (LocalInSelectable.current) {
         // 已经在一个容器里：只透传内容，不再嵌套第二个。
@@ -1263,12 +1267,34 @@ internal fun SelectableWhenArmed(content: @Composable () -> Unit) {
     }
     val tracker = LocalSelectionFocusTracker.current
     val selectionOwner = remember { Any() }
-    androidx.compose.runtime.DisposableEffect(tracker, selectionOwner) {
-        onDispose { tracker?.remove(selectionOwner) }
+    val selection = rememberSelectionState()
+    val parentToolbar = LocalTextToolbar.current
+    val toolbar = remember(selection, parentToolbar) {
+        SelectionTextToolbar(parentToolbar) { selection.selectedTexts.any { it.isNotEmpty() } }
     }
-    androidx.compose.runtime.CompositionLocalProvider(LocalInSelectable provides true) {
+    androidx.compose.runtime.DisposableEffect(tracker, selectionOwner) {
+        tracker?.register(selectionOwner,
+            selected = { selection.selectedTexts.any { it.isNotEmpty() } },
+            clear = selection::clear,
+        )
+        onDispose {
+            selection.clear()
+            tracker?.remove(selectionOwner)
+        }
+    }
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalInSelectable provides true,
+        LocalTextToolbar provides toolbar,
+    ) {
         SelectionContainer(
-            modifier = Modifier.onFocusChanged { tracker?.update(selectionOwner, it.hasFocus) },
+            state = selection,
+            modifier = Modifier
+                .onFocusChanged { tracker?.update(selectionOwner, it.hasFocus) }
+                .filterTextContextMenuComponents {
+                    // A released text owner must not reopen a select-all-only toolbar.
+                    // New long-press selection repopulates selectedTexts before showing it.
+                    selection.selectedTexts.any { it.isNotEmpty() }
+                },
         ) { content() }
     }
 }

@@ -1,25 +1,34 @@
 package com.suixing.agent.ui.components
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.res.painterResource
@@ -27,7 +36,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
-import com.suixing.agent.ui.theme.color
 /**
  * 全站唯一的「列表行」：左边标题（可带前置图标、可带副标题），右边控件。
  * 设置页、关于页、文件页的行都从这里出——曾经每页各写一遍，行高、内边距、
@@ -110,41 +118,76 @@ fun RowChevron() {
     )
 }
 
-/** Segmented pill control: one rounded track, the active segment filled. */
+/** Shared low-contrast track and selected surface for exclusive settings and tabs. */
 @Composable
 fun SegmentedPill(
     options: List<String>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    role: Role = Role.RadioButton,
 ) {
     Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier.fillMaxWidth().selectableGroup(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
-        Row(Modifier.padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        // At most four labels: match segment heights when large text wraps to two lines.
+        Row(Modifier.padding(4.dp).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             options.forEachIndexed { index, label ->
                 val active = index == selectedIndex
                 Surface(
-                    onClick = { onSelect(index) },
-                    modifier = Modifier.weight(1f),
-                    shape = CircleShape,
-                    color = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
+                    modifier = Modifier.weight(1f).fillMaxHeight()
+                        .clip(MaterialTheme.shapes.small)
+                        .selectable(selected = active, role = role, onClick = { if (!active) onSelect(index) }),
+                    shape = MaterialTheme.shapes.small,
+                    color = if (active) MaterialTheme.colorScheme.surface else Color.Transparent,
+                    border = if (active) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
                     contentColor = if (active) {
-                        MaterialTheme.colorScheme.onPrimary
+                        MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
                 ) {
-                    Text(
-                        text = label,
-                        modifier = Modifier.padding(vertical = 9.dp),
-                        style = MaterialTheme.typography.labelLarge,
-                        textAlign = TextAlign.Center,
-                    )
+                    Box(
+                        Modifier.heightIn(min = 48.dp).padding(horizontal = 8.dp, vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            style = SettingsStyle.controlLabel,
+                            textAlign = TextAlign.Center,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
     }
+}
+
+/** Every settings destination uses the same switch size, track and disabled treatment. */
+@Composable
+fun SettingsSwitch(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val colors = MaterialTheme.colorScheme
+    Switch(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        enabled = enabled,
+        modifier = modifier.heightIn(min = 48.dp),
+        colors = SwitchDefaults.colors(
+            checkedThumbColor = colors.primary,
+            checkedTrackColor = colors.primaryContainer,
+            checkedBorderColor = colors.primary.copy(alpha = 0.2f),
+            uncheckedThumbColor = colors.onSurfaceVariant,
+            uncheckedTrackColor = colors.surfaceContainerHighest,
+            uncheckedBorderColor = colors.outlineVariant,
+        ),
+    )
 }

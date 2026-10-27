@@ -9,7 +9,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,7 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
+import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -55,7 +54,6 @@ import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SuixingDialog
-import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.theme.Tone
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -288,7 +286,7 @@ private fun PluginRow(entry: PluginEntry, onOpen: () -> Unit, onToggle: (Boolean
             Spacer(Modifier.width(6.dp))
             RiskBadge(spec)
             Spacer(Modifier.width(10.dp))
-            Switch(checked = entry.state.enabled, onCheckedChange = onToggle)
+            SettingsSwitch(checked = entry.state.enabled, onCheckedChange = onToggle)
         }
         // A plugin the validator could not read still has to say so where it is listed, or a broken
         // package looks like an installed one with a blank name.

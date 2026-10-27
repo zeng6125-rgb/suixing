@@ -8,7 +8,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -65,7 +64,6 @@ import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SuixingDialog
-import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.extension.SkillViewDialog
 import com.suixing.agent.ui.extension.SkillsSection
 import com.suixing.agent.ui.theme.Tone
@@ -268,7 +266,7 @@ fun ToolsScreen(onBack: () -> Unit) {
             // 这里不再加 12dp：PageTopBar 自己以 Spacer(12.dp) 收尾（Common.kt:532），
             // 本页把 PageTopBar 放在 Column 里，那一份是生效的，再加就是 24dp。
             Column(Modifier.padding(horizontal = SettingsStyle.PageMargin)) {
-                SegmentedPill(options = TABS, selectedIndex = tab, onSelect = { tab = it })
+                SegmentedPill(options = TABS, selectedIndex = tab, onSelect = { tab = it }, role = androidx.compose.ui.semantics.Role.Tab)
             }
             Spacer(Modifier.height(4.dp))
             when (tab) {

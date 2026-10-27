@@ -4,6 +4,7 @@ package com.suixing.agent.ui.settings
 
 import com.suixing.agent.ui.components.settingsPagePadding
 import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.CompletionDot
 
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -51,7 +52,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
+import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -109,7 +110,6 @@ import com.suixing.agent.ui.drawer.DrawerOrder
 import com.suixing.agent.ui.drawer.DrawerOrderStore
 import com.suixing.agent.ui.drawer.drawerSections
 import com.suixing.agent.ui.components.EmptyState
-import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.RowChevron
@@ -129,6 +129,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
@@ -404,13 +406,7 @@ private fun SettingsGroup(title: String, rows: List<SettingsGroupRow>) {
             // 边缘与圆角，而不是被容器的 16dp 缩在中间 —— 用户报的「涟漪没填满/没变化」就是它。
             // 分割线仍缩进 16dp，与文字左缘对齐。
             Column {
-                rows.forEachIndexed { index, row ->
-                    if (index > 0) {
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = SettingsStyle.PageMargin),
-                            color = MaterialTheme.colorScheme.outlineVariant,
-                        )
-                    }
+                rows.forEach { row ->
                     SettingsLink(
                         title = row.title,
                         subtitle = row.summary,
@@ -901,13 +897,12 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     subtitle = "接口是 https 且证书自签时打开。局域网上的反代（例如 " +
                         "https://192.168.0.50:8914/v1）基本都要开，开了就不再校验证书与域名。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = form.allowInsecureTls,
                             onCheckedChange = { form = form.copy(allowInsecureTls = it) },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 OutlinedTextField(
@@ -1048,13 +1043,12 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     title = "支持图片输入",
                     subtitle = "截图会随消息发给模型，需要视觉模型；纯文字模型开着会直接报错。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = form.imageInput,
                             onCheckedChange = { form = form.copy(imageInput = it) },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item(key = "max-tokens") {
                 // 最大输出**按模型**（用户：「取消全局性的，改用各模型默认＋可自定义，跟上下文
@@ -1143,7 +1137,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         title = "独立采样参数",
                         subtitle = "开启后温度 / Top P / 思考强度只作用于当前提供方。",
                         control = {
-                            Switch(
+                            SettingsSwitch(
                                 checked = selected?.ownSampling == true,
                                 onCheckedChange = { on ->
                                     form = form.mapProvider(selected?.id) { it.copy(ownSampling = on) }
@@ -1383,13 +1377,12 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     subtitle = "开：按回车直接发送（运行中则当作插话送进去）；关：回车换行，" +
                         "用发送键提交。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.enterKeySends,
                             onCheckedChange = { on -> scope.persist { it.copy(enterKeySends = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 // 0 排队 / 1 立即，见 AppSettings.steerMode：打断在途的回复是有损的，
@@ -1406,7 +1399,6 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     )
                 }
             }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             item { SectionHeader("运行") }
             item {
                 // 0 是「不限制」，但把 0 直接摆在标签上读起来像个没配好的空值——用户原话
@@ -1472,7 +1464,6 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
             }
             if (stored.approvalMode == ApprovalMode.ASK) {
                 item {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -1520,7 +1511,6 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     }
                 }
                 item {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -1566,20 +1556,18 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     }
                 }
             }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             item {
                 SettingRow(
                     title = "自动压缩上下文",
                     subtitle = "上下文接近窗口上限时把旧消息压成摘要。超窗是接口直接报错，" +
                         "压缩最坏只是丢些细节；只在「模型与生成」里设了上下文条数时才可能触发。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.autoCompress,
                             onCheckedChange = { on -> scope.persist { it.copy(autoCompress = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 SettingRow(
@@ -1630,7 +1618,6 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     },
                 )
             }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             item { SectionHeader("注入系统提示词") }
             item {
                 SettingRow(
@@ -1638,13 +1625,12 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     subtitle = "开：每次请求都把「你记得的事」（记忆条目）拼进系统提示词；" +
                         "关：这一段完全不出现，模型不知道你记过什么，但省下这部分上下文。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.injectMemory,
                             onCheckedChange = { on -> scope.persist { it.copy(injectMemory = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 SettingRow(
@@ -1652,13 +1638,12 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     subtitle = "开：把「关于用户（画像）」拼进系统提示词，模型先知道「这是谁」；" +
                         "关：整段不出现（画像本身不会被删，只是这次不发给模型）。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.injectProfile,
                             onCheckedChange = { on -> scope.persist { it.copy(injectProfile = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item { SectionHeader("失败处理") }
             item {
@@ -1667,13 +1652,12 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     subtitle = "只对网络中断、超时、5xx 与 429 重试；已经开始回答则不重试——那会把" +
                         "半截回答重来一遍，比重试更糟。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.retryOnFailure,
                             onCheckedChange = { on -> scope.persist { it.copy(retryOnFailure = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 LabeledSlider(
@@ -1701,33 +1685,30 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                     onValueChange = { s -> scope.persist { it.copy(retryDelaySeconds = s.toInt()) } },
                 )
             }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             item { SectionHeader("显示") }
             item {
                 SettingRow(
                     title = "显示思考过程",
                     subtitle = "把模型的思考流式画在回复上方。关掉只是不显示，思考强度照旧生效。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.showReasoning,
                             onCheckedChange = { on -> scope.persist { it.copy(showReasoning = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 SettingRow(
                     title = "历史思考块展开",
                     subtitle = "正在思考的那一块总是展开。开＝历史思考块也展开；关＝历史块收起成一行标题，点它仍可逐块展开。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.expandReasoning,
                             onCheckedChange = { on -> scope.persist { it.copy(expandReasoning = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 LabeledBlock(label = "思考块高度", hint = "展开的思考过程最多长这么高，超出部分在块内滚动。") {
@@ -1748,53 +1729,49 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                         },
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 SettingRow(
                     title = "思考块跟随最新",
                     subtitle = "思考过程流式输出时自动滚到底部；关掉后停在当前位置",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.followReasoning,
                             onCheckedChange = { on -> scope.persist { it.copy(followReasoning = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 SettingRow(
                     title = "自动跟随新消息",
                     subtitle = "在底部时新回复自动滚到底；上滑看历史就暂停跟随。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.autoFollow,
                             onCheckedChange = { on -> scope.persist { it.copy(autoFollow = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 SettingRow(
                     title = "显示时间",
                     subtitle = "在每条消息下面显示发送时间。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.showTimestamps,
                             onCheckedChange = { on -> scope.persist { it.copy(showTimestamps = on) } },
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 SettingRow(
                     title = "工具调用默认展开",
                     subtitle = "关掉时工具卡片折叠成一行，点开才看参数与结果。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.expandTools,
                             onCheckedChange = { on -> scope.persist { it.copy(expandTools = on) } },
                         )
@@ -1844,7 +1821,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                         onSelect = { index -> scope.persist { it.copy(paletteMode = index) } },
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 LabeledBlock(label = "字号", hint = "正文字号，立即生效。") {
@@ -1872,7 +1848,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                         onSelect = { index -> scope.persist { it.copy(bubbleWidth = index) } },
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 LabeledBlock(
@@ -1885,7 +1860,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                         onSelect = { index -> scope.persist { it.copy(typewriter = index == 0) } },
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 LabeledBlock(
@@ -1899,7 +1873,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                         onSelect = { index -> scope.persist { it.copy(edgeLight = index == 0) } },
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 // **不独立**（用户 2026-10-23）：只有边缘光总开关开着时这一项才起作用。
@@ -1924,7 +1897,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                         modifier = if (stored.edgeLight) Modifier else Modifier.alpha(0.38f),
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             // 思考块与「看到什么」的六项搬到了「对话配置」页：它们是对话内容的显示方式，不是
             // 主题/排版。字段与存储没动。
@@ -1947,7 +1919,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                         },
                     )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 TextButton(
@@ -2019,7 +1990,6 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                     shape = MaterialTheme.shapes.small,
                     visualTransformation = PasswordVisualTransformation(),
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
             item {
                 val engineLabel by Core.speaker.engineLabel.collectAsStateWithLifecycle()
@@ -2029,7 +1999,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                     subtitle = "用系统语音引擎读出来。引擎状态：${engineLabel}。" +
                         "输入框左边的麦克风按钮负责语音输入。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.speakReplies,
                             onCheckedChange = { on -> scope.persist { it.copy(speakReplies = on) } },
                         )
@@ -2047,13 +2017,12 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                 }
             }
             item {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 SettingRow(
                     title = "语音输入",
                     subtitle = "开＝输入框右侧显示麦克风，用随行自己的录音发给你配置的转写接口（不会再弹系统识别面板）；" +
                         "关＝完全不显示麦克风。",
                     control = {
-                        Switch(
+                        SettingsSwitch(
                             checked = stored.voiceInput,
                             onCheckedChange = { on -> scope.persist { it.copy(voiceInput = on) } },
                         )
@@ -2160,6 +2129,10 @@ internal fun ConversationManagerScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val conversations by Core.chats.conversations.collectAsStateWithLifecycle()
+    val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
+    val runningIds by remember {
+        Core.engine.runsFlow.map { it.keys }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(emptySet())
     val snackbar = remember { SnackbarHostState() }
     var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
     var pendingExport by remember { mutableStateOf<Conversation?>(null) }
@@ -2259,6 +2232,7 @@ internal fun ConversationManagerScreen(
                     ConversationRow(
                         title = conversation.title,
                         pinned = conversation.pinned,
+                        completedUnread = conversation.id in unreadCompleted && conversation.id !in runningIds,
                         subtitle = subtitle,
                         onOpen = { onOpenConversation(conversation.id) },
                         onInfo = { pendingInfo = conversation },
@@ -2297,6 +2271,7 @@ internal fun ConversationManagerScreen(
                         }
                         ConversationRow(
                             title = conversation.title,
+                            completedUnread = conversation.id in unreadCompleted && conversation.id !in runningIds,
                             // **用 meta 的 messageCount**：`messages` 是空列表
                             // （`load()` 只读 meta），拿它算会显示成「0 条消息」。
                             subtitle = subtitle,
@@ -2357,6 +2332,7 @@ private fun ConversationRow(
     subtitle: String,
     /** 置顶标记：抽屉那份顺序会把它排到最前，这一页至少得看得出「它是置顶的」。 */
     pinned: Boolean = false,
+    completedUnread: Boolean = false,
     onOpen: () -> Unit,
     onInfo: () -> Unit,
     onExport: () -> Unit,
@@ -2381,6 +2357,10 @@ private fun ConversationRow(
                     .padding(start = 14.dp, top = 12.dp, bottom = 12.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (completedUnread) {
+                        CompletionDot()
+                        Spacer(Modifier.width(2.dp))
+                    }
                     if (pinned) {
                         Icon(
                             imageVector = ImageVector.vectorResource(R.drawable.ic_star),
@@ -2588,17 +2568,17 @@ private fun LabeledBlock(
     hint: String? = null,
     content: @Composable () -> Unit,
 ) {
-    Column(Modifier.padding(top = 10.dp)) {
-        Text(label, style = SettingsStyle.body)
+    Column(Modifier.padding(top = SettingsStyle.RowPadding)) {
+        Text(label, style = SettingsStyle.rowTitle)
         if (hint != null) {
-            Spacer(Modifier.height(3.dp))
+            Spacer(Modifier.height(SettingsStyle.RowGap))
             Text(
                 text = hint,
                 style = SettingsStyle.description,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.height(9.dp))
+        Spacer(Modifier.height(SettingsStyle.FieldGap))
         content()
     }
 }
@@ -3128,7 +3108,7 @@ private fun LabeledSlider(
     onValueChange: (Float) -> Unit,
     hint: String? = null,
 ) {
-    Column(Modifier.padding(top = 10.dp)) {
+    Column(Modifier.padding(top = SettingsStyle.RowPadding)) {
         Text(label, style = SettingsStyle.rowTitle)
         if (hint != null) {
             Text(

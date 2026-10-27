@@ -42,6 +42,7 @@ import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.CompletionDot
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
@@ -142,6 +143,7 @@ internal fun ConversationRow(
     conversation: Conversation,
     selected: Boolean,
     running: Boolean,
+    completedUnread: Boolean,
     menuOpen: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -213,6 +215,9 @@ internal fun ConversationRow(
                     // 「它正在动」，而这一行要回答的正是「现在有没有人在跑」。
                     // 14dp 的环比原来的 7dp 点宽，间距收窄到 2dp，标题的左缘不动。
                     RunningSpinner(Modifier.size(14.dp))
+                    Spacer(Modifier.width(2.dp))
+                } else if (completedUnread) {
+                    CompletionDot()
                     Spacer(Modifier.width(2.dp))
                 }
                 // 置顶标记：仓库里**没有** ic_pin，按约定复用既有的 ic_star（不新造 drawable）。

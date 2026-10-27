@@ -12,8 +12,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 37
-        versionCode = 554
-        versionName = "0.8.533"
+        versionCode = 555
+        versionName = "0.8.534"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -201,3 +201,16 @@ dependencies {
 
 
 
+
+/**
+ * Release 变体也跑单测。
+ *
+ * 为什么要有这一块：用户明确禁止 Debug 任务（见 WORK_MEMORY §8.135），而 AGP 默认只为 Debug
+ * 建单元测试任务，于是「改了代码却没有任何可执行的测试」——R4 这类回归恰好就是这么漏掉的。
+ * 这里只**新增测试任务**，不参与打包：`assembleRelease` 的产物与输入都因此不变。
+ */
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variant ->
+        (variant as? com.android.build.api.variant.HasUnitTestBuilder)?.enableUnitTest = true
+    }
+}

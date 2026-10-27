@@ -4,7 +4,6 @@ import com.suixing.agent.ui.components.settingsPagePadding
 import com.suixing.agent.ui.components.SettingsStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,7 +22,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
+import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,7 +49,6 @@ import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SuixingDialog
-import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.MonoStyle
 import com.suixing.agent.ui.theme.Tone
@@ -188,7 +186,7 @@ private fun ServerCard(
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Switch(checked = state.config.enabled, onCheckedChange = onToggleEnabled)
+            SettingsSwitch(checked = state.config.enabled, onCheckedChange = onToggleEnabled)
         }
 
         val target = if (state.config.isStdio) state.config.command else state.config.url
@@ -363,7 +361,7 @@ internal fun McpEditorDialog(
 
                 Spacer(Modifier.height(14.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = enabled, onCheckedChange = { enabled = it })
+                    SettingsSwitch(checked = enabled, onCheckedChange = { enabled = it })
                     Spacer(Modifier.width(10.dp))
                     Text("启用（启动时自动连接）", style = SettingsStyle.body)
                 }

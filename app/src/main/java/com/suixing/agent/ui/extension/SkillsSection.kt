@@ -4,7 +4,6 @@ import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.settingsPagePadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,7 +21,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
+import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -268,7 +267,7 @@ private fun SkillCard(
             Spacer(Modifier.width(4.dp))
             // Off means the skill stays on disk but leaves the prompt catalogue and
             // becomes unreadable to the model — the cheap way to park a skill.
-            Switch(checked = skill.enabled, onCheckedChange = onToggle)
+            SettingsSwitch(checked = skill.enabled, onCheckedChange = onToggle)
             IconButton(onClick = onDelete) {
                 Icon(
                     ImageVector.vectorResource(R.drawable.ic_trash),

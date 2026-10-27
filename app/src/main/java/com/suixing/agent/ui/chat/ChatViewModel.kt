@@ -446,6 +446,33 @@ class ChatViewModel : ViewModel() {
 
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
 
+    private var viewportOwner = ""
+    private var viewportCapture: (() -> Unit)? = null
+    private val _presentedConversation = MutableStateFlow<String?>(null)
+    internal val presentedConversation = _presentedConversation.asStateFlow()
+
+    internal fun bindViewport(chatId: String, capture: () -> Unit) {
+        viewportOwner = chatId
+        viewportCapture = capture
+    }
+
+    internal fun unbindViewport(capture: () -> Unit) {
+        if (viewportCapture === capture) {
+            viewportCapture = null
+            viewportOwner = ""
+            _presentedConversation.value = null
+        }
+    }
+
+    internal fun presentViewport(chatId: String) {
+        if (chatId == _state.value.conversationId) _presentedConversation.value = chatId
+    }
+
+    private fun leaveViewport() {
+        if (viewportOwner == _state.value.conversationId) viewportCapture?.invoke()
+        _presentedConversation.value = null
+    }
+
     /** Shared per-chat totals; token deltas never enter this subscription. */
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val sessionStats: Flow<SessionStats?> = combine(screenState, Core.settings.flow, conversations) { snapshot, settings, chats ->
@@ -1079,6 +1106,7 @@ class ChatViewModel : ViewModel() {
             discardIfUntouched(_state.value.conversationId)
             val settings = Core.settings.current()
             val created = Core.chats.create()
+            leaveViewport()
             _state.value = ChatUiState(
                 conversationId = created.id,
                 title = created.title,
@@ -1123,6 +1151,8 @@ class ChatViewModel : ViewModel() {
     private var openingJob: Job? = null
 
     fun openConversation(conversation: Conversation) {
+        if (_state.value.conversationId == conversation.id) return
+        leaveViewport()
         openingJob?.cancel()
         openingJob = null
         // 与 newConversation 同理：切过去的会话在它自己第一条 stats 到达前，不能顶着上一个
@@ -2716,6 +2746,17 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
+     * 这一拍「正文 + 思考」共有多少字符（UTF-16），用于选恢复副本的落盘间隔（R4）。
+     *
+     * **不能走 [derivedStreaming]**：那条路每拍都重建整段字符串（O(n) 分配），
+     * 而这里只想知道“有多长”，所以全部取长度、不取内容 —— `LivePart.Text` 读缓冲长度、
+     * `reasoning` 读字符串长度、还没发布的那段用 `DeltaBuffer.sizes()`（同样只给长度）。
+     */
+    private fun RunSession.draftChars(pending: Pair<Int, Int>): Int =
+        parts.sumOf { part -> if (part is LivePart.Text) part.buffer.length() else 0 } +
+            reasoning.length + pending.first + pending.second
+
+    /**
      * 把这一拍攒下来的正文/思考并进 [live]。
      *
      * **只做一次 `copy`**：原来每有一种增量就 copy 一次（每次都重建整份 Session）。
@@ -2869,10 +2910,12 @@ class ChatViewModel : ViewModel() {
     /**
      * Keeps the conversation's draft file in step with the answer being streamed.
      *
-     * Once a second, and only when the answer, the thinking or the round count actually
-     * changed: one write is an encode plus a file write plus a rename, and tokens can arrive
-     * every few milliseconds. A second is the interval where a kill costs the user the last
-     * tick instead of the whole answer, while a stalled stream costs nothing at all.
+     * Every 1–3s (adaptive — see [liveDraftIntervalMs]), and only when the answer, the thinking
+     * or the round count actually changed: one write is an encode plus a file write plus a
+     * rename, and tokens can arrive every few milliseconds. A second is the interval where a
+     * kill costs the user the last tick instead of the whole answer, while a stalled stream
+     * costs nothing at all; a long answer that grows by thousands of characters per second is
+     * written less often, because copying the same amount again buys nothing.
      *
      * Because nothing runs after the process is killed, this is the only place the thinking
      * and the finished rounds can be saved at all — see [liveDraftFor].
@@ -2885,11 +2928,17 @@ class ChatViewModel : ViewModel() {
         var messageRun = ""
         var runMessages: List<StoredMessage> = emptyList()
         var lastSavedChars = 0
-        // 上一轮测到的正文长度：循环开头没有新数据，用它估“上次落盘之后又长了多少”。
-        var lastMeasuredChars = 0
         while (true) {
-            // 自适应间隔（R4）：用上次真正落盘时的正文长度算增量。
-            delay(liveDraftIntervalMs(pendingChars = maxOf(0, lastMeasuredChars - lastSavedChars)))
+            // 自适应间隔（R4）：**先量当前还没落盘的增量，再决定睡多久**。
+            //
+            // 原来这里是 `lastMeasuredChars - lastSavedChars`，而 `lastMeasuredChars` 在同一拍
+            // 保存之后被写成与 `lastSavedChars` 相同的值 ⇒ 差值恒为 0 ⇒ 永远 1s，2s/3s 不可达。
+            // 增量的正确来源只能是“此刻内容有多长 − 上次真正落盘时多长”，所以量测必须在
+            // `delay` **之前**、用不重建字符串的方式（见 [draftChars]）。
+            val liveNow = sessions[chatId]
+            val pendingNow = if (liveNow == null) 0
+            else liveNow.draftChars(deltaBuffer.locked { deltaBuffer.sizes(chatId) }) - lastSavedChars
+            delay(liveDraftIntervalMs(pendingChars = pendingNow.coerceAtLeast(0)))
             val live = sessions[chatId] ?: continue
             val pendingSize = deltaBuffer.locked { deltaBuffer.sizes(chatId) }
             val prior = previous
@@ -2926,10 +2975,9 @@ class ChatViewModel : ViewModel() {
             if (!built.sameContentAs(written)) {
                 Core.chats.saveLive(built)
                 written = built
-                // 只有真正落过盘才更新基线：否则“内容没变”的分支会把增量算成 0，间隔永远 1s。
+                // 基线只在**真正落盘**后推进；那一刻没有“未落盘增量”了。
                 lastSavedChars = built.text.length + built.reasoning.orEmpty().length
             }
-            lastMeasuredChars = built.text.length + built.reasoning.orEmpty().length
             previous = live
             previousPending = pendingSize
         }

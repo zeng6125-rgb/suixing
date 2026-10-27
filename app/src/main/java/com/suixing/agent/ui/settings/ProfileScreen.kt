@@ -1,5 +1,8 @@
 package com.suixing.agent.ui.settings
 
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+
 import com.suixing.agent.ui.components.settingsPagePadding
 import com.suixing.agent.ui.components.SettingsStyle
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +27,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
+import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,7 +51,6 @@ import com.suixing.agent.data.PROFILE_MIN_TURNS
 import com.suixing.agent.data.PROFILE_STEP_TURNS
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.ui.components.PageTopBar
-import com.suixing.agent.ui.components.navBarContentPadding
 import com.suixing.agent.ui.components.SettingRow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -205,7 +207,7 @@ fun ProfileScreen(onBack: () -> Unit) {
             // 「自动整理」原来在设置→插话与运行页。它管的是这一篇画像怎么维护（每几轮重跑一次
             // 总结），放在画像页比放在「数据」页合适：那一页是纯入口列表，一行一个跳转，
             // 塞开关会破坏它的形态。
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(Modifier.height(SettingsStyle.SectionGap))
             Text(
                 text = "自动整理",
                 style = SettingsStyle.cardTitle,
@@ -218,13 +220,12 @@ fun ProfileScreen(onBack: () -> Unit) {
                     "写进画像。与记忆不同：记忆是模型在任务里主动记下的键值，画像是它定期从对话里" +
                     "读出来的滚动摘要。总结失败不打扰你，也不改动已有画像。",
                 control = {
-                    Switch(
+                    SettingsSwitch(
                         checked = settings.autoProfile,
                         onCheckedChange = { on -> scope.persist { it.copy(autoProfile = on) } },
                     )
                 },
             )
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             SettingRow(
                 title = "画像整理间隔",
                 subtitle = "每这么多轮整理一次；一轮 = 一次跑完的运行，跨会话累计。" +

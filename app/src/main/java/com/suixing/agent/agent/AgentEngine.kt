@@ -51,8 +51,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -389,6 +387,7 @@ sealed interface RunState {
 class AgentEngine(
     private val llm: LlmClient = LlmClient(),
     private val scope: CoroutineScope? = null,
+    private val onCompleted: (String) -> Unit = {},
 ) {
 
     private val runs = MutableStateFlow<Map<String, RunHandle>>(emptyMap())
@@ -716,6 +715,7 @@ class AgentEngine(
         settings: AppSettings,
     ) {
         private val _state = MutableStateFlow<RunState>(RunState.Idle)
+        private val completionReported = AtomicBoolean(false)
 
         /** This conversation's state, from the moment it starts to long after it ends. */
         val state: StateFlow<RunState> = _state.asStateFlow()
@@ -1007,6 +1007,9 @@ class AgentEngine(
         // stateOf(chatId) would sit at Idle forever and every per-chat branch in the UI
         // would be dead code.
         stateFlowOf(chatId).value = state
+        if (state is RunState.Done && completionReported.compareAndSet(false, true)) {
+            onCompleted(chatId)
+        }
     }
 
     /** Repaints the speed readout while this run streams. */
