@@ -536,6 +536,8 @@ private fun CapabilityTierPicker(
             onSelect = { index -> onPick(options[index].key) },
             optionEnabled = { index -> options[index].ready },
             onReselect = { onPick("") },
+            // 只在这一页加深一档（用户定 0.10）：四格常带置灰，默认 0.08 的边界偏弱。
+            trackTint = 0.10f,
         )
         Spacer(Modifier.height(10.dp))
         Text(

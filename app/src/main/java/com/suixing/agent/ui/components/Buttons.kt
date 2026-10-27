@@ -324,6 +324,8 @@ fun CircleActionButton(
      * see the press rule in the painter overload below.
      */
     shadowElevation: Dp = 2.dp,
+    /** 阴影色：浮层卡片同一套（Black 18% 同色 ambient/spot）。 */
+    shadowColor: Color = Color.Black.copy(alpha = 0.12f),
 ) = CircleActionButton(
     painter = rememberVectorPainter(icon),
     contentDescription = contentDescription,
@@ -335,6 +337,7 @@ fun CircleActionButton(
     enabled = enabled,
     iconSize = iconSize,
     shadowElevation = shadowElevation,
+    shadowColor = shadowColor,
 )
 
 /**
@@ -354,6 +357,8 @@ internal fun CircleActionButton(
     enabled: Boolean = true,
     iconSize: Dp = 20.dp,
     shadowElevation: Dp = 2.dp,
+    /** 阴影颜色：浮层卡片用 Black 18% 同色 ambient/spot（无方向性），见 PopupStyle.kt。 */
+    shadowColor: Color = Color.Black.copy(alpha = 0.12f),
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -394,6 +399,8 @@ internal fun CircleActionButton(
                     // growing a smudge; every filled button keeps the lift.
                     elevation = if (pressed && shadowElevation > 0.dp) shadowElevation + 2.dp else shadowElevation,
                     shape = CircleShape,
+                    ambientColor = shadowColor,
+                    spotColor = shadowColor,
                 )
                 .clip(CircleShape)
                 .background(containerColor),

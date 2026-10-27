@@ -141,5 +141,12 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     private fun transparentNavigationBar() {
         window.navigationBarColor = Color.TRANSPARENT
+        // **手势条那一层的系统遮罩**：Android 10 起，系统默认给导航栏加一层
+        // "对比度保护"半透明底（isNavigationBarContrastEnforced 默认 true）。即使
+        // navigationBarColor 设成透明，手势条底下仍会看到一条灰带 —— 就是用户说的
+        // 「没有 edge to edge，手势条背景不是透明的」。关掉它才是真透明。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
     }
 }

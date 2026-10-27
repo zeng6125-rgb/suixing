@@ -545,7 +545,12 @@ drawerRow(
                 trailing = {
                     // 与设置页同一个开关（尺寸 0.88、实心主色轨道）：悬浮控制台和设置里的
                     // 「常驻控制台」是同一件事，两处长得不一样会让人以为是两个开关。
-                    SettingsSwitch(checked = consoleOn, onCheckedChange = { onToggleConsole() })
+                    SettingsSwitch(
+                        checked = consoleOn,
+                        onCheckedChange = { onToggleConsole() },
+                        // 抽屉底色比设置页深一档，同样的 0.08 关态在这里几乎看不见（用户定 0.14）。
+                        offTrackTint = 0.14f,
+                    )
                 },
             )
             DrawerAction(

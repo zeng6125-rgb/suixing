@@ -303,7 +303,13 @@ fun ChatScreen(
         composerH + COMPOSER_BOTTOM_PAD +
             // **恒定 12dp**（用户定案：所有垂直间距统一 12dp —— 静态项间距、状态行上下、
             // 底部让位全一致；顺带保持「run 结束时几何完全不变」）。
-            12.dp
+            12.dp +
+            // **手势条那一截改由 contentPadding 让**（用户：「手势条有背景颜色会挡到内容」）。
+            // 原来它写在列表的布局修饰符里（[keyboardAwareFullPad]），那是**裁剪视口**：
+            // 内容到条子上沿就被切掉，条子下面只剩一底色 —— 正是「不沉浸」。
+            // 设置页一直是 contentPadding 写法（只让最后一行避开条子，滚动中内容从条下穿过），
+            // 这里对齐它；键盘那一截仍在布局期让（见 keyboardAwareImePad），不引入逐帧重组。
+            with(LocalDensity.current) { navBarPx.toDp() }
     }
 
     var voiceOpen by remember { mutableStateOf(false) }
@@ -1283,7 +1289,7 @@ fun ChatScreen(
                         Modifier
                             // 键盘抬起/收回时，这里只重新测量（不重组）——空状态也挂着那个
                             // 60 参数的 Composer，逐帧重组一样会掉帧。
-                            .keyboardAwareFullPad(navBarPx, imePxState)
+                            .keyboardAwareImePad(navBarPx, imePxState)
                             .fillMaxSize()
                             .graphicsLayer { alpha = viewport.alpha.value }
                             .padding(
@@ -1315,7 +1321,7 @@ fun ChatScreen(
                         modifier = Modifier
                             // 手势条那一截**在布局期让出来**（键盘盖住它时让位是 0）：
                             // 放在 `fillMaxSize()` 之外，列表拿到的是「窗口 − 键盘 − 手势条」。
-                            .keyboardAwareFullPad(navBarPx, imePxState)
+                            .keyboardAwareImePad(navBarPx, imePxState)
                             .fillMaxSize()
                             // 阅读区的窗口矩形：导航条的探针线要它（顶边 + 28% 高度）。
                             .onGloballyPositioned { coords ->
@@ -2016,6 +2022,11 @@ fun ChatScreen(
                         onClick = { jumpToLatest() },
                         size = 48.dp,
                         containerColor = MaterialTheme.colorScheme.surface,
+                        // 与浮层卡片同一套阴影（用户：「参考浮层卡片的阴影效果」）：
+                        // PopupStyle.kt 的规格是 elevation 10dp + ambient/spot 同为 18% 黑，
+                        // 扩散大、浓度低、没有方向性 —— 比默认 elevation 阴影（偏灰、发脏）高级。
+                        shadowElevation = 10.dp,
+                        shadowColor = Color.Black.copy(alpha = 0.18f),
                         iconSize = 22.dp,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
@@ -2219,11 +2230,13 @@ private fun Modifier.keyboardAwareBottomPad(
 /**
  * 聊天页整棵不再按 IME 缩高之后，列表要自己把键盘占的那一截让出来。
  *
- * 数值与旧结构等价：旧的是「外层缩 IME + 这里让 (navbar − ime)」，从窗口底算起共
- * `I + max(N − I, 0)`；这里一次给 `max(N − I, 0) + I`，收起键盘时都是 N、键盘弹起时都是 I。
- * 仍走 `bottomInsetPadding`（布局期），所以键盘动画只让这两个节点重测，不重组整页。
+ * **只让键盘超出导航条的那一截**，导航条本身已挪进 `stackFootprint`（contentPadding）：
+ * 视口在键盘收起时铺到屏幕底（内容从手势条下穿过），键盘弹起时只再缩 `max(IME − N, 0)`。
+ * 底部净空 = contentPadding 的 N + 这里的 max(IME − N, 0) = **max(IME, N)** ——
+ * 与改前的 `max(N − IME, 0) + IME` 完全相等，不会重复让位，也不会多空一截。
+ * 仍走 `bottomInsetPadding`（布局期），键盘动画只让这两个节点重测，不重组整页。
  */
-private fun Modifier.keyboardAwareFullPad(
+private fun Modifier.keyboardAwareImePad(
     navBarPx: Int,
     ime: androidx.compose.runtime.State<Int>,
-): Modifier = bottomInsetPadding { (navBarPx - ime.value).coerceAtLeast(0) + ime.value }
+): Modifier = bottomInsetPadding { (ime.value - navBarPx).coerceAtLeast(0) }
