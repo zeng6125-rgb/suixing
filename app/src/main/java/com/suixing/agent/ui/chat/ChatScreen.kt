@@ -393,6 +393,10 @@ fun ChatScreen(
             restore = { saved -> saved.mapValues { (_, turns) -> turns as Int } },
         ),
     ) { mutableStateOf(emptyMap<String, Int>()) }
+    // 同一组合里只建一张 id→index 表，三处共用（issue #54 B-7）。
+    val messagePositions = remember(state.conversationId, state.messagesRevision) {
+        state.messages.firstPositions()
+    }
     val bookmarkWindow = openingBookmark?.let { bookmark ->
         val added = if (bookmark.followLatest) 0L else (state.turnCount.toLong() - bookmark.totalTurns).coerceAtLeast(0)
         (bookmark.shownTurns.toLong() + added).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
@@ -401,7 +405,7 @@ fun ChatScreen(
         if (openingBookmark == null || openingBookmark.followLatest) PAGE_TURNS else {
             // issue #53 B-2：用一次建表替换「每落一条消息扫一遍全表」的线性查找。
             // 语义保持 indexOfFirst：各自最早命中取最小 ⇒ 与「第一个满足任一条件的下标」等价。
-            val positions = state.messages.firstPositions()
+            val positions = messagePositions
             val candidates = buildList {
                 positions[openingBookmark.messageId]?.let(::add)
                 openingBookmark.nearbyMessageIds.forEach { positions[it]?.let(::add) }
@@ -472,7 +476,7 @@ fun ChatScreen(
         ConversationViewport(state.conversationId, openingBookmark)
     }
     val listState = viewport.listState
-    val messagePositions = remember(state.conversationId, state.messagesRevision) { state.messages.firstPositions() }
+
     // 每行实测高度（visible 正序，已含 12dp 行间距）：单 item 化后
     // `firstVisibleItemIndex` 恒为 0，读数导航改为「像素偏移 → 第几轮」反查。
     // **按消息 id 存实测高度，不要随 `visible` 重建数组**：
@@ -579,7 +583,7 @@ fun ChatScreen(
     val transcriptEstimate = remember(state.messagesRevision, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
         // issue #53 B-2：同一次建表里查 id（firstPositions 保留首个重复 id 的语义）。
-        val positions = state.messages.firstPositions()
+        val positions = messagePositions
         val start = last?.let { cp ->
             val i = positions[cp.toMessageId] ?: -1
             if (i >= 0) i + 1 else 0

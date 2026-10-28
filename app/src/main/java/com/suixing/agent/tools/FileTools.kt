@@ -262,7 +262,9 @@ class FileTools(private val context: Context) : ToolGroup() {
                 )
             }
             if (hits.size > 1 && !replaceAll) {
-                val lines = hits.map { lineOf(text, it) }.joinToString("、")
+                // 一次扫描算出全部命中行号，避免每个命中各做一次 substring + count（issue #54 B-1）。
+                val lineMap = lineNumbers(text, hits)
+                val lines = hits.joinToString("、") { lineMap[it].toString() }
                 return@withContext ToolResult.failure(
                     "old_string 在文件里出现 ${hits.size} 次（第 $lines 行），拒绝盲改：" +
                         "把 old_string 写长一点（带上前后行）让它唯一，或传 replace_all=true 全部替换。",
@@ -303,6 +305,21 @@ class FileTools(private val context: Context) : ToolGroup() {
     /** 1-based 行号：该偏移之前有多少个换行。 */
     private fun lineOf(text: String, index: Int): Int = text.substring(0, index).count { it == '\n' } + 1
 
+
+    /** 多个偏移共用一次扫描：O(n + k log k)，替代每个命中一次 `lineOf` 的 O(n·k)。 */
+    private fun lineNumbers(text: String, offsets: List<Int>): Map<Int, Int> {
+        val out = HashMap<Int, Int>(offsets.size)
+        var line = 1
+        var cursor = 0
+        for (target in offsets.sorted()) {
+            while (cursor < target && cursor < text.length) {
+                if (text[cursor].code == 10) line++
+                cursor++
+            }
+            out[target] = line
+        }
+        return out
+    }
 
     private fun deleteRecursive(file: File): Int {
         var count = 0
