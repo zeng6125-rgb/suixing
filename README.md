@@ -13,7 +13,7 @@
 - 支持 MCP：任何 MCP 服务器提供的工具都会并进模型可调用的工具表
 - 支持技能（Skill）：把写好的操作手册放进手机，模型需要时自己读
 - 支持插件（Plugin）：安装一个 zip 就能带来新工具、新的上下文注入与新的执行闸门
-- 当前源码版本：**0.8.534**（`versionCode` 555）
+- 当前源码版本：**0.8.538**（`versionCode` 559）
 
 ## 界面与设计
 
@@ -26,7 +26,7 @@
 - 会话页空状态是一个品牌标记加四条建议提示词（「看看现在屏幕上是什么」等），点一下直接填进输入框。
 - 输入框那一行常驻一枚**模型胶囊**（当前模型名 + 思考强度徽标），点开是一张两页的卡：第一页是当前模型与思考强度滑杆，第二页是按端点、再按上游厂商分组的模型列表。
 - **折叠块展开/收起时钉住块顶边**。思考过程、工具条展开时，用同一套逐帧补偿把块顶边按在原位，内容往下长而不是把上面的东西顶走。
-- 切会话时转录有一次 **260ms** 的入场：淡入 + 从下方 24dp 升起 + 缩放落定。
+- 切会话时转录有一次 **240ms** 的入场：淡入 + 从下方 12dp 升起（不缩放）。这一层是常驻的——条件挂载会让列表的修饰符链在切换时重建，展开/收起折叠块就会出现残影；恒等态下它不改变任何像素，合成器直接跳过。
 - 外观页可调主题（跟随系统 / 浅色 / 深色）、配色、字号、圆角、气泡宽度、打字机效果、边缘光、提示条停留时间。
 
 ## 功能
@@ -55,7 +55,7 @@
 - **停止 / 插话**：运行中发送键变「停止」，点停即停（不等当前工具跑完）；输入框里有内容时它变成「插话发送」，在下一个模型边界把这句话插进同一轮。插话可以排队（插话方式：排队 / 立即）。
 - **任务清单**：模型调 `todo_write` 时，输入框上方出现一条待办行（`已完成/总数`），点它可以展开完整清单；完成的条目从行上消失，跑完或停止整条收起。
 - **自动跟随**：在底部时新回复自动滚到底，上滑看历史就暂停跟随，出现「回到最新」按钮。
-- **右侧轮次导航条**：一键在最近 6 轮之间跳转，往上拉可以解锁更早的轮次。
+- **右侧轮次导航条**：常驻 5 格，越往回读逐级解锁到最多 12 格；长按画出全部已加载轮次。点一格跳到那一轮，往上拉可以解锁更早的轮次。
 
 **助手（人设）**
 
@@ -229,7 +229,8 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 # 只查语法，不出包
 ./gradlew :app:compileDebugKotlin
 
-# 单元测试（909 个用例 / 136 个文件：协议层往返、HTML 转纯文本、Markdown 解析与增量复用、
+# 单元测试（1012 个 @Test / 149 个文件 —— 这是静态注解计数，不是某次运行的通过数：
+# 协议层往返、HTML 转纯文本、Markdown 解析与增量复用、
 # 工具批次的并行判定、敏感数据屏蔽、会话日志的追加/换代/自愈、接口报错翻译、
 # 提供方与模型分组、消息分叉的选取逻辑等，无需设备）
 ./gradlew :app:testDebugUnitTest
@@ -240,10 +241,10 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 ```
 
 - 本机（Windows）没有 `gradle` 也不在 PATH 时，用一个**转发脚本**把 `gradlew.bat` 指到已解包的 Gradle（脚本只做一件事：设好 `JAVA_HOME` / `GRADLE_USER_HOME` 后 `call` 真实的 `gradle.bat %*`），任何 gradle 任务都能透传。转发脚本放在仓库之外，不入库。
-- **CI 的 Gradle 版本尚未跟上**：`.github/workflows/android.yml` 里 `gradle-version` 仍是 `'8.11.1'`，而 wrapper 与 AGP 已经到 9.x，CI 上大概率会失败。改 wrapper 时应当一并改成 9.8.2（或直接用 `./gradlew`，不再让 setup-gradle 指定版本）。
+- **CI 跟仓库 wrapper 走**：`.github/workflows/android.yml` 用 `gradle/actions/setup-gradle@v6` + `./gradlew`，不再由 `gradle-version` 钉死版本，Gradle 版本只由 `gradle/wrapper/` 决定（曾经出现过的 `Minimum supported Gradle version is 9.6.0` 已修）。
 - **出包纪律**：只出 release，不构建 debug——debug 的 `applicationId` 带 `.debug` 后缀，装上去会变成另一个应用。打包要等放行。
 - 装机前必须 `aapt dump badging` 核对 APK 的 `versionName` / `versionCode`（历史上出过一次「构建没跑、把旧包当新包装机」的事故；几个版本的 APK 字节数完全相同，光看大小分不出来）。发错了用 `gh release upload --clobber` 覆盖附件。
-- 推送到 GitHub 后 `.github/workflows/android.yml` 会自动跑：`gradle :app:testDebugUnitTest` → 上传测试报告 → `gradle :app:assembleDebug :app:assembleRelease` → 上传 `suixing-debug` / `suixing-release` 两个 APK artifact。
+- 推送到 GitHub 后 `.github/workflows/android.yml` 会自动跑：`./gradlew :app:testReleaseUnitTest` → 上传测试报告 → `./gradlew :app:assembleDebug :app:assembleRelease` → 上传 `suixing-debug` / `suixing-release` 两个 APK artifact。单测跑的是 **Release 变体**（与出包同一份编译配置，Release-only 的问题才拦得住）。
 - release 用仓库内的 `app/sideload.keystore` 自签（alias / 密码都是更名前的 `lingshu`。**不要改**：keystore 就是用这个名字生成的，改了等于换签名，已装的版本将无法覆盖安装）——这是自用侧载包，不是上架包；该 keystore 必须入库，否则覆盖安装会失败。release 目前不开 minify（`isMinifyEnabled = false`），`proguard-rules.pro` 里的规则是为将来开混淆准备的。
 
 ## 目录结构
@@ -262,6 +263,7 @@ app/src/main/java/com/suixing/agent/
 │   ├── SecretBox.kt             API Key 的 Keystore 加解密
 │   ├── LiveMetrics.kt           运行中的实时指标快照
 │   ├── ConversationReads.kt     阅读位置
+│   ├── ConversationViewports.kt 每会话的滚动位置 / 书签持久化（删会话时清理）
 │   └── TranscriptRedaction.kt   落盘时的敏感数据屏蔽
 ├── capability/                  能力探测：无障碍状态、Shizuku 绑定、root 探测、Shell 执行
 ├── service/                     无障碍服务、前台保活服务、悬浮窗控制台、定时任务服务、开机广播
@@ -281,15 +283,18 @@ app/src/main/java/com/suixing/agent/
 │   ├── PromptMessages.kt        系统提示与消息装配
 │   └── ProfileSummarizer.kt     画像摘要
 └── ui/
-    ├── SuixingApp.kt            抽屉导航与路由表
+    ├── SuixingApp.kt            外壳：路由表、抽屉状态与全局 CompositionLocal
     ├── theme/                   配色（手调 M3 角色）、排版、圆角、文件类型色
-    ├── components/              通用组件、品牌标记、Markdown 渲染器
-    ├── chat/                    会话页：转录、折叠块、工具条、输入区、滚动、轮次导航条，以及
+    ├── components/              通用组件、品牌标记、Markdown 渲染器、预解析注入（PreparedMarkdown）
+    ├── drawer/                  抽屉：会话列表、行手势与长按菜单、拖动排序（DrawerOrderStore 落盘）
+    ├── chat/                    会话页（39 个文件）：转录虚拟列表、折叠块、工具条、输入区、滚动、
+    │                            轮次导航条，以及
     │                            DeltaBuffer（流式增量缓冲）、LiveParts（流式增量规则）、
     │                            LivePinState（读历史时的钉住状态）、ConversationViewport（阅读窗口）
     ├── assistant/               助手面板（半屏）与助手编辑页
     ├── settings/                设置各子页、能力页、工具页、关于页、插件页、性能页、画像页
     ├── extension/               记忆页与技能页
+    ├── onboarding/              首次引导（五页）与供应商预设
     ├── files/ tasks/ schedules/ usage/   文件、任务清单、定时任务、用量
 ```
 
@@ -337,6 +342,16 @@ GLM、OpenAI 兼容（自填地址）、本机 Ollama、Kimi、千问、硅基�
 - **统计只认实测**：上下文圆环的分子优先用网关回报的 `prompt_tokens`，只有整个会话从没被报过用量才用 `/4` 估算兜底并标「约」。落盘的 `meta.totals.contextTokens` 是会话级权威值，不受「最后一条消息有没有 usage」影响。
 - **写类操作读回核验**，未生效时回报 `verified=false` 并明确告诉模型「请勿假设已修改」。
 - **敏感数据不进转录**：剪贴板读取的结果、文本输入类的参数，当轮给模型原文，落盘换成占位说明。
+
+### 0.8.5xx：审计后的第二轮
+
+对全仓 5.8 万行做了一次只读审计（147 项），逐项复核后 115 项已修，其后又收口了 19 项残留。用户能感觉到的几处：
+
+- **转录回到虚拟列表**：按消息 id 取 `key`、按角色取 `contentType`，配 `LazyLayoutCacheWindow`。上一版为了消掉滚动时的首次组合开销，把整页装进单个 `item`——代价是行数随「加载更早」线性累积、最终退化成全量组合。现在滚出视口的行不再常驻。
+- **打字不触发整屏重组**：草稿文本从顶层 `ChatUiState` 剥离，改由输入框自己订阅。按一次键只重组合输入框那一行，不再带动整个会话页。
+- **抽屉滚动**：`onGloballyPositioned` 只在长按菜单打开时挂载，不再每帧给每个可见行写一次测量状态；拖动排序期间只更新预览顺序，松手才落盘。
+- **冷启动不读盘**：`Application.onCreate` 不再 `runBlocking` 读 DataStore，主题模式改从一个几百字节的 `SharedPreferences` 同步读；DataStore 的收集器继续负责后续更新。
+- **审批弹卡**：待审批请求带单调序号，显式取最早的一条，不再依赖 `Map` 的迭代顺序。
 
 ## 开源许可与第三方声明
 
