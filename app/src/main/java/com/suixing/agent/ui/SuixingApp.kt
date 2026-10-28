@@ -333,29 +333,27 @@ fun SuixingApp() {
             )
         }
     }
+    val openSidebar: () -> Unit = remember(scope, drawerState) { {
+        if (routeNow == "empty") scope.launch {
+            drawerState.animateTo(
+                DrawerValue.Open,
+                tween(260, easing = androidx.compose.animation.core.LinearOutSlowInEasing),
+            )
+        }
+    } }
+    val setSelectionActive: (Boolean) -> Unit = remember { { selectionActive = it } }
     CompositionLocalProvider(
         LocalDrawerBusy provides drawerBusyState,
         // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：演库自己那
         // 一段滑入——用户反对的从来是「返回时把它重放一遍」，不是手动打开时的动画。
         // 只在会话页可用（抽屉只属于会话页，见 ModalNavigationDrawer）：子页没有汉堡入口，
         // 这一层判断是防止以后有人把汉堡画到子页上时它还能把抽屉拉出来。
-        LocalOpenSidebar provides {
-            // **进场**：260ms + LinearOutSlowInEasing（减速进场，末端缓缓贴合）。
-            // 你说过"这个动效感觉很一般，改好一点"——这是针对进场的改进，保留。
-            // **退场不走这里**：关闭统一在下面两处（`closeDrawer` / `chatFromDrawer`），
-            // 用的是 [DRAWER_CLOSE_SPEC]（160ms 加速收走），遮罩那条同源。
-            if (route == "empty") scope.launch {
-                drawerState.animateTo(
-                    DrawerValue.Open,
-                    tween(260, easing = androidx.compose.animation.core.LinearOutSlowInEasing),
-                )
-            }
-        },
+        LocalOpenSidebar provides openSidebar,
         // The clamped keyboard height, for children that have to subtract it from an inset of
         // their own (the composer's navigation-bar padding: while the keyboard covers the
         // gesture bar that padding is dead space, which is the band the user photographed).
         LocalHeldImePx provides heldImeState,
-        LocalSetSelectionActive provides { active -> selectionActive = active },
+        LocalSetSelectionActive provides setSelectionActive,
     ) {
         // 用户明确要求保留这一段（2026-10-11：先被自审删掉，用户看到键盘后面那块颜色变了，要求回退）。
         // 把窗口底色刷成主题 surface：键盘圆角/键盘后面那条缝露的就是这个颜色；删掉之后窗口是透明的，

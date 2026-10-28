@@ -39,4 +39,12 @@ class PreparedMarkdownTest {
             if (++checks == 10) throw CancellationException("replaced chat")
         }
     }
+
+    @Test(expected = CancellationException::class)
+    fun `nested list parsing checks cancellation within child items`() {
+        var checks = 0
+        parseMarkdown("- parent\n" + "  - child\n".repeat(1_000)) {
+            if (++checks == 10) throw CancellationException("replaced chat")
+        }
+    }
 }

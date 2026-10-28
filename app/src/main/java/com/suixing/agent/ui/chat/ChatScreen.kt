@@ -456,8 +456,7 @@ fun ChatScreen(
     }
     // Long settled bodies are parsed only for the next mount batch. Those rows consume the
     // returned blocks directly; there is no competing full-page parse or global cache prewarm.
-    // 底锚的喂序是反的；反转结果记住，别每次重组都新建包装对象。
-    val reversedVisible = remember(visible) { visible.asReversed() }
+    // The physical feed uses the same old-to-new order as this projection.
     val rowKeys = remember(state.conversationId, visible) { presentationKeys(state.conversationId, visible) }
     val rowKeyIndices = remember(rowKeys) { rowKeys.withIndex().associate { it.value to it.index } }
     val viewport = remember(state.conversationId, positionStorageReady) {
@@ -592,6 +591,8 @@ fun ChatScreen(
     // 当前会话上下文/上下文窗口的数字」）。分子只认实测口径：网关回报的本轮 prompt_tokens
     // （含按会话保持的最近一次）→ 落盘回报；只有整个会话从没被网关报过用量时才用 /4 估算兜底
     // 并标「约」。跳变的老根因是两个口径轮流上屏，所以估算值绝不与实测值并列成链。
+    // tokens 是上次请求的绝对用量，没有绑定窗口。切 provider 仍保留这个会话的最近实测，
+    // 分母单独按当前模型计算；下次请求上报后再更新，避免切模型即丢失唯一实测。
     val heldPrompt = rememberSaveable(state.conversationId) { mutableIntStateOf(0) }
     // 请求级快照（prompt/breaks 变才发射）——body 不再订阅 120ms 的 elapsedMs。
     val runStatsNow by viewModel.requestStats.collectAsStateWithLifecycle()
@@ -601,12 +602,14 @@ fun ChatScreen(
     // （本会话的实测快照 heldPrompt / 落盘实测 persistedContext / 估算兜底）。
     val liveStatsHere = runStatsNow.takeIf { state.runningHere }
     val reported = liveStatsHere?.lastPromptTokens ?: 0
-    LaunchedEffect(reported) {
+    LaunchedEffect(state.conversationId, reported) {
         if (reported > 0) heldPrompt.intValue = reported
     }
     // 落盘的实测上下文（issue #41 真问题 1）：run 结束瞬间前两级归零，这一档接住圆环。
     // meta 里 O(1) 命中（totalsAt==messageCount 时），每轮落盘自动更新。
+    // 统计在 IO 线程重读，StateFlow 的旧值不一定属于本页；不能让别的会话抢占圆环读数。
     val session = viewModel.sessionStats.collectAsStateWithLifecycle(initialValue = null).value
+        ?.forConversation(state.conversationId)
     val persistedContext = session?.contextTokens ?: 0
     val reading = ringReading(
         liveReported = if (reported > 0) reported else heldPrompt.intValue,
@@ -723,6 +726,21 @@ fun ChatScreen(
     val reasoningExpansion = remember(state.conversationId) {
         ReasoningExpansion(state.conversationId, reasoningExpanded)
     }
+    val retainReadingNow = rememberUpdatedState {
+        val current = viewModel.currentLiveContent()
+        if (current.chatId == state.conversationId && current.runId.isNotBlank()) {
+            // Capture on the gesture, before a completion can replace the live
+            // composition and skip its last SideEffect in the same frame.
+            val parts = LivePartProjection(current.runId).project(current.parts, settings.showReasoning)
+            reasoningExpansion.retainForReading(parts, current.runId, settings.expandTools)
+        }
+    }
+    SideEffect {
+        if (state.liveRunId.isNotBlank() && reasoningExpansion.stored("time:${state.liveRunId}") == null) {
+            // Do not insert a newly-created timestamp above an already-read live reply.
+            reasoningExpansion.set("time:${state.liveRunId}", false)
+        }
+    }
 
     // The 「加载更早」 line sits above the transcript as an item of its own, so every row
     // below it is one item further down than its place in [visible].
@@ -770,10 +788,10 @@ fun ChatScreen(
         // 点条也全错位（三种反馈同因）。宁可退化成一"行"一轮，也不能让整条导航条失效。
         if (starts.isEmpty()) visible.indices.map { it + rowOffset } else starts
     }
-    // 喂序（底锚倒序，视觉从下往上）：live? → compress-status? → error? → visible 倒序 → load-earlier?。
-    // 所以 visible 第 i 行的喂序索引 = 前缀项数 + (visible.size - 1 - i)。
+    // Keep the scrubber's legacy reverse coordinate, while physical rows are chronological.
+    // Temporary rows are now at the end; only load-earlier precedes stored messages.
     val feedPrefix = slots.feedPrefix
-    fun fedIndexOf(oldVisible: Int) = feedPrefix + (visible.size - 1 - oldVisible)
+    fun fedIndexOf(oldVisible: Int) = rowOffset + oldVisible
 
     // **不在 ChatScreen 组合体里读 `.value`**（issue #26 原因一）：`firstVisibleItemIndex` 滚动时
     // 每跨一个 item 就变一次，一旦在这里读，整个 ChatScreen（1600 行、几十个 Composable 调用）
@@ -802,13 +820,13 @@ fun ChatScreen(
             }
             val at = measured.filter { it.second <= probeY }.maxByOrNull { it.second }?.first
                 ?: measured.minByOrNull { it.second }?.first
-            if (at == null) feedPrefix else fedIndexOf(at)
+            // Keep the scrubber's synthetic reverse coordinate independent of physical order.
+            if (at == null) feedPrefix else feedPrefix + visible.lastIndex - at
         }
     }
 
-    // ===== 滚动与阅读位置：底锚列表，逻辑全在 ChatScroll.kt =====
-    // 底锚（index 0 = 视觉最底）下长高向上、底边不动；追底＝回到 index 0；取消＝手指轻扫 4dp。
-    // 这一层没有任何"纠正"代码。
+    // Reading is natively top-anchored; explicit follow-to-end lives in ChatScroll.kt.
+    // A swipe disables following, so neither streaming nor settlement seeks the list.
     var pressed by remember { mutableStateOf(false) }
     var pressUpAt by remember { mutableLongStateOf(0L) }
     // 用 `mutableStateOf` 持有而不是 `by remember`：守护标记还要被下面的 bring-into-view 规格读到
@@ -861,13 +879,24 @@ fun ChatScreen(
     var loadingEarlier by remember(state.conversationId) { mutableStateOf(false) }
     val earlierRequestToken = remember(state.conversationId) { intArrayOf(0) }
     suspend fun prepareRows(rows: List<ChatRow>) {
+        fun sourceIsCurrent(): Boolean {
+            val current = viewModel.screenState.value
+            return current.conversationId == state.conversationId &&
+                current.messagesRevision == state.messagesRevision && current.activeRuns == state.activeRuns &&
+                current.liveRunId == state.liveRunId && current.runningHere == state.runningHere
+        }
         for (row in rows) {
             val texts = row.parts.filterIsInstance<Part.Text>().map { it.text }
             val current = rowDocuments[row.message.id]
             if (current == null || texts.any { it.length >= com.suixing.agent.ui.components.SettledBlocks.MIN_CHARS && it !in current }) {
-                rowDocuments[row.message.id] = prepareMarkdownTexts(texts)
+                val prepared = prepareMarkdownTexts(texts)
+                // A parser may finish after a branch/page/chat changed during suspension.
+                // Its old document must not publish into, or evict, the current row cache.
+                if (!sourceIsCurrent()) return
+                rowDocuments[row.message.id] = prepared
             }
         }
+        if (!sourceIsCurrent()) return
         val retained = rows.mapTo(HashSet()) { it.message.id }
         listState.layoutInfo.visibleItemsInfo.forEach { item ->
             rowKeyIndices[item.key]?.let { retained.add(visible[it].message.id) }
@@ -876,7 +905,7 @@ fun ChatScreen(
     }
     key(state.conversationId) {
         BindConversationViewport(
-            viewport, viewModel, scroll, visible, rowKeys, feedPrefix, shownTurns, state.turnCount,
+            viewport, viewModel, scroll, visible, rowKeys, rowKeyIndices, rowOffset, itemCount, shownTurns, state.turnCount,
             MaterialTheme.typography.bodyMedium.fontSize.value * LocalDensity.current.fontScale,
             positionStorageReady, state.messagesRevision, ::prepareRows,
         )
@@ -989,7 +1018,7 @@ fun ChatScreen(
         }
     }
     // Only the target list is animated, after its first valid viewport is ready.
-    val switchAlpha = viewport.alpha
+    val switchEntrance = viewport.entrance
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     LaunchedEffect(viewModel) {
         Core.engine.runsFlow.collect { runs ->
@@ -1291,7 +1320,11 @@ fun ChatScreen(
                             // 60 参数的 Composer，逐帧重组一样会掉帧。
                             .keyboardAwareImePad(navBarPx, imePxState)
                             .fillMaxSize()
-                            .graphicsLayer { alpha = viewport.alpha.value }
+                            .graphicsLayer {
+                                val progress = switchEntrance.value
+                                alpha = ConversationEntrance.alpha(progress)
+                                translationY = ConversationEntrance.remainingTravel(progress) * 12.dp.toPx()
+                            }
                             .padding(
                                 top = with(LocalDensity.current) {
                                     WindowInsets.statusBars.getTop(this).toDp()
@@ -1314,10 +1347,9 @@ fun ChatScreen(
                     LazyColumn(
                         state = listState,
                         userScrollEnabled = viewport.presented,
-                        // **底锚**（reverseLayout + 数据倒序喂）：index 0 就是视觉最底，最后一张卡片
-                        // 长高向上、底边不动 ⇒ 不再需要任何逐帧同步滚动。旧底锚失败在它还在用
-                        // dispatchRawDelta 逐帧纠正，两处抢同一份列表，才"乱飞/抖/拉回"。
-                        reverseLayout = true,
+                        // Top-relative native anchoring keeps text already read inside a growing
+                        // message in place. Follow-to-end is explicit and pauses on user scrolling.
+                        reverseLayout = false,
                         modifier = Modifier
                             // 手势条那一截**在布局期让出来**（键盘盖住它时让位是 0）：
                             // 放在 `fillMaxSize()` 之外，列表拿到的是「窗口 − 键盘 − 手势条」。
@@ -1337,7 +1369,6 @@ fun ChatScreen(
                             // `graphicsLayer` 的 lambda 是**绘制阶段**才读快照的，动画结束
                             // （p == 1f）后把 alpha 等写回默认值即可 —— 层还在（不会重建修饰符链、
                             // 不会有残影），但不再改变任何像素，合成器可以直接跳过它。
-                            // 动画那 260ms 内行为完全不变。
                             // **常驻，不按 switchRunning 条件挂载**（0.8.284 的定案；此前注释写
                             // "常驻"、代码却挂在 `if (switchRunning)` 里，两者矛盾 —— 以注释为准）。
                             // 条件挂载会让整条修饰符链在开关翻转时**重建** ⇒ 重新测量 + 重新挂
@@ -1345,9 +1376,9 @@ fun ChatScreen(
                             // 常驻的代价是一个 RenderNode 参与合成；省掉它的做法是让层在恒等
                             // 状态不改变任何像素（下面 p >= 1f 直接返回），而不是摘掉它。
                              .graphicsLayer {
-                                 val p = switchAlpha.value
-                                 alpha = p
-                                 translationY = (1f - p) * 6.dp.toPx()
+                                 val progress = switchEntrance.value
+                                 alpha = ConversationEntrance.alpha(progress)
+                                 translationY = ConversationEntrance.remainingTravel(progress) * 12.dp.toPx()
                              }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(state.conversationId) {
@@ -1391,6 +1422,7 @@ fun ChatScreen(
                                                     (dy > CANCEL_FOLLOW_PX || dy < -CANCEL_FOLLOW_PX)
                                                 ) {
                                                     scroll.stickToBottom = false
+                                                    retainReadingNow.value()
                                                     moved = true
                                                     pressMoved = true
                                                     // 滚动不是选字：解除 reveal 拦截
@@ -1431,33 +1463,208 @@ fun ChatScreen(
                             top = with(LocalDensity.current) {
                                 WindowInsets.statusBars.getTop(this).toDp()
                             } + 76.dp,
-                            // *composer 的让位走 contentPadding，不走列表项**（真机日志实锤：
-                            // reverseLayout 下 top/bottom 的**视觉**归属不变（Compose 只是把
-                            // before/after 的内部名对调：before=bottom padding），所以让位仍在
-                            // 输入框这一侧。
-                            // 读历史期间用冻结值（见 heldFootprint）。
+                            // Composer space belongs below the chronological transcript.
+                            // Keep it stable throughout reading, including run completion.
                             // 没种过就退回当前值（**不要退回 0.dp**，那会让恢复位置被推移一次）。
-                            bottom = if (scroll.stickToBottom || !state.runningHere) {
-                                // **没有 run 时永远用实时值**（真机反馈：生成结束后滑到底，
-                                // 按住期间最底卡片与输入框的间距不是 16dp，松手才恢复 ——
-                                // 因为按压保护强制 stickToBottom=false，吃到了「运行中」
-                                // 冻结的旧 heldFootprint。冻结只为流式期间输入框高度变化
-                                // 不推内容；没有 run 时高度根本不会变，冻结只剩这个 bug）。
+                            bottom = if (scroll.stickToBottom) {
                                 stackFootprint
                             } else {
+                                // Finishing a run must not shorten the scroll range under
+                                // a reader near its end. Release this reservation when the
+                                // reader intentionally returns to latest, not on completion.
                                 heldFootprint ?: stackFootprint
                             },
                         ),
-                        // **内容不满一屏时贴顶**（issue #19，用户：「新会话气泡就应该在上面，然后再流式
-                        // 长下来，旧内容不就往上推了」）。底锚（reverseLayout）已经负责"满了之后"：
-                        // index 0 钉在底部、新内容向上长、旧内容被推上去；arrangement 只在内容不满一屏时
-                        // 参与，所以这里改一个词就够，不需要混合判断。
-                        //
-                        // 风险（issue 自己提的）：当年从 Top 改回 Bottom，注释写的是「短对话被顶到上面、
-                        // 最后一张卡片长高就还是往下长」—— 那正是用户现在要的行为，所以大概率是当年
-                        // 判断反了。若满屏那一刻有跳变，退回 `Alignment.Bottom` + offset 方案。
+                        // Short chats begin at the top. Growing text extends below existing
+                        // text; only the explicit latest-follow policy scrolls toward the end.
                         verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Top),
                     ) {
+                        // Chronological items anchor the already-rendered text at its top.
+                        if (page.hasEarlier) {
+                            item(key = "load-earlier") {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    TextButton(
+                                        enabled = !loadingEarlier && viewport.presented,
+                                        onClick = {
+                                            scroll.stickToBottom = false
+                                            val chatId = state.conversationId
+                                            val token = ++earlierRequestToken[0]
+                                            loadingEarlier = true
+                                            fun finish(added: Boolean) {
+                                                if (viewModel.state.value.conversationId != chatId || earlierRequestToken[0] != token) return
+                                                if (added) {
+                                                    shownTurnsByConversation = shownTurnsByConversation + (chatId to shownTurns + PAGE_TURNS)
+                                                }
+                                                loadingEarlier = false
+                                            }
+                                            // Stable lazy keys preserve the current message and offset in
+                                            // the same layout as the page insertion; no visible correction.
+                                            if (page.from > 0) finish(true)
+                                            else if (!viewModel.loadEarlier(onComplete = ::finish)) finish(false)
+                                        },
+                                    ) {
+                                        Text(
+                                            text = if (loadingEarlier) "正在加载更早的内容…"
+                                                else "加载更早的 $PAGE_TURNS 轮 · 上面还有 ${page.earlier} 轮",
+                                            style = MaterialTheme.typography.labelLarge,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        items(
+                            count = visible.size,
+                            key = { fed -> rowKeys[fed] },
+                            contentType = { fed -> visible[fed].message.role },
+                        ) { fed ->
+                            val row = visible[fed]
+                            val presentationKey = rowKeys[fed]
+                            DisposableEffect(presentationKey, rowCoordinates) {
+                                onDispose {
+                                    rowCoordinates.remove(presentationKey)
+                                    rowHeights.remove(presentationKey)
+                                }
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            // One placeable per item: the list's own 16dp spacing applies
+                            // between the placeables of a single item as well, which is what
+                            // held the timestamp a full 16dp above the bubble it belongs to.
+                            // Inside this Column the two sit 3dp apart, and the 16dp goes back
+                            // to meaning what it says — the air between messages.
+                            // **重行独立成一个 RenderNode**（issue #47 方向 2）：LazyColumn 把
+                            // 所有可见项画进**同一棵**绘制树 —— 任何一处内容变化、以及每一次
+                            // 滚动/动画，RenderThread 都要把这棵树整个重录（实测是主线程的
+                            // 3.4 倍）。给「含思考块/工具卡」的重行挂一层，内容没变时它自己的
+                            // 绘制列表可以被直接复用，整棵重录退化成「只有脏行重录」。
+                            //
+                            // 只在重行上挂：轻行（用户气泡、纯正文）的绘制列表本来就短，多一层
+                            // 反而增加合成开销和内存。层上不带任何视觉属性 ⇒ 渲染结果逐像素相同。
+                            // **重卡判定要覆盖全部重内容**（issue #47 方向 2）：
+                            // 原来只看 `Thinking` / `Tools`，漏掉两类最重的：
+                            //  · `Compress`（上下文压缩卡，内部可含长清单）；
+                            //  · **含图片的消息行** —— 图片不在 `Part` 里，而是消息级的
+                            //    `message.allImages`（`ChatTopBar.kt:645` 逐个 ImageBlock），
+                            //    解码位图是整页绘制列表里最重的一类。
+                            // 轻行（用户气泡、纯正文）不挂层：它们的绘制列表本来就短，多一层
+                            // 只增加合成开销与内存。层上没有任何视觉属性 ⇒ 渲染结果逐像素相同。
+                            // 键用 `imageCount`（Int）而不是 `allImages`：后者是每次访问都重建
+                            // List 的 getter（`ChatModels.kt:81` 的 ifEmpty/listOfNotNull），
+                            // 拿它当 remember 键等于每次重组都换一个新对象、缓存必然失效。
+                            val imageCount = row.message.imageCount
+                            val heavyRow = remember(row.parts, imageCount) {
+                                imageCount > 0 ||
+                                    row.parts.any {
+                                        it is Part.Thinking || it is Part.Tools || it is Part.Compress
+                                    }
+                            }
+                            Column(
+                                Modifier
+                                    .then(if (heavyRow) Modifier.graphicsLayer() else Modifier)
+                                    .onGloballyPositioned { coords ->
+                                        val id = presentationKey
+                                        val firstPlacement = rowCoordinates.put(id, coords) == null
+                                        val heightChanged = rowHeights.put(id, coords.size.height) != coords.size.height
+                                        if (firstPlacement || heightChanged) geometryVersion.intValue++
+                                    },
+                            ) {
+                                // 外观 → 显示时间: off means no labels at all, not fewer.
+                                if (settings.showTimestamps && row.showTimeLabel &&
+                                    reasoningExpansion.stored("time:${row.message.runId}") != false) {
+                                    TimeLabel(row.message.timestamp)
+                                    // 3dp 太挤，时间像是贴在气泡上（用户：「间距再大一点」）。6dp 让它
+                                    // 读作一行独立的抬头，又不会散开成两个东西。
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                                // 稳定引用（issue #5）：每次重组新建 lambda ⇒ `MessageRow` 的 equals
+                                // 恒为 false ⇒ Compose 的跳过优化失效，每个可见项每帧都重组。
+                                val onBranch = remember(viewModel) {
+                                    { turnId: String, runId: String -> viewModel.switchBranch(turnId, runId) }
+                                }
+                                val onRegenerate = remember(viewModel) {
+                                    { viewModel.regenerate() }
+                                }
+                                val onEdit = remember {
+                                    { message: StoredMessage -> editing = message }
+                                }
+                                // 「提供方 / 模型」也按模型缓存：原来每帧每个可见项都新建一个 String。
+                                val engineLabel = remember(row.message.model, providerOfModel) {
+                                    providerOfModel[row.message.model]
+                                        ?.let { "${it.label} / ${it.displayModel(row.message.model)}" }
+                                        ?: row.message.model
+                                }
+                                CompositionLocalProvider(LocalPreparedMarkdown provides rowDocuments[row.message.id].orEmpty()) {
+                                MessageRow(
+                                    row = row,
+                                    assistantName = assistant?.label ?: "随行",
+                                    assistantFace = assistant?.face ?: "",
+                                    assistantAvatarPath = assistant?.avatarPath ?: "",
+                                    showReasoning = settings.showReasoning,
+                                    expandTools = settings.expandTools,
+                                    expandReasoning = settings.expandReasoning,
+                                    reasoningMaxHeight = settings.reasoningHeight.dp,
+                                    followReasoning = settings.followReasoning,
+                                    bubbleMaxWidth = bubbleMaxWidth,
+                                    contextWindow = contextWindow,
+                                    runElapsedMs = runElapsed[row.message.runId] ?: 0L,
+                                    // The endpoint and the model that answered this round, as
+                                    // one line: a message keeps the id it ran on, and the
+                                    // owner is looked up from it. Just the id when no endpoint
+                                    // claims it — a stale pick is not worth a wrong name.
+                                    engineLabel = engineLabel,
+                                    reasoningExpansion = reasoningExpansion,
+                                    preserveExpanded = !scroll.stickToBottom && !scroll.restoring,
+                                    onBranch = onBranch,
+                                    onRegenerate = onRegenerate,
+                                    onEdit = onEdit,
+                                )
+                                }
+                                // 中断/截断/失败的原因不再挂在这里：错误提醒统一画在列表最底
+                                // （回执行 + 无回执时的实时红字），同一次失败只通知一次。
+                            }
+                            // The compression record sits under the last message it folded
+                            // away: that is the point in the transcript where the model
+                            // stopped seeing the conversation verbatim.
+                            checkpointsByRow[row.message.id].orEmpty().forEach { checkpoint ->
+                                // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
+                                // 键用 revision + checkpoint（两者任一变化才需要重算）。
+                                val originals = remember(checkpoint, state.messagesRevision) {
+                                    checkpointSpan(state.messages, checkpoint, messagePositions)
+                                }
+                                // A checkpoint whose span is not in this transcript (a
+                                // branch switch, a trimmed conversation) is not drawn: half
+                                // a record would read as data loss.
+                                if (originals != null) {
+                                    CheckpointCard(
+                                        checkpoint = checkpoint,
+                                        originals = originals,
+                                    )
+                                }
+                            }
+                            }
+                        }
+
+                        // 没有回执的实时失败（发送阶段错误等）画在最后一轮下面；有回执的失败由
+                        // 回执自己跟在那一轮后面（内联），同文案不重复画。
+                        if (errorLine) {
+                            item(key = "error:${state.conversationId}") {
+                                RunReasonLine(state.error.orEmpty())
+                            }
+                        }
+                        // 没有 run 时手动压缩：状态行说「正在压缩上下文 · 用时 xx」。
+                        // 没有这一行，点了压缩屏幕上什么都没有（用户：「啥响应也没有」）。
+                        if (!state.runningHere && state.compressingSince > 0L) {
+                            item(key = "compress-status:${state.conversationId}") {
+                                RunStatusLine(
+                                    text = "正在压缩上下文",
+                                    startedAt = state.compressingSince,
+                                    timed = true,
+                                    modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 12.dp),
+                                )
+                            }
+                        }
                         if (live) {
                             // Keyed by conversation: the live row keeps its slot for as long
                             // as it is on screen, and a switch used to hand the next chat
@@ -1518,6 +1725,8 @@ fun ChatScreen(
                                                 followReasoning = settings.followReasoning,
                                                 bubbleMaxWidth = bubbleMaxWidth,
                                                 reasoningExpansion = reasoningExpansion,
+                                                runId = state.liveRunId,
+                                                preserveExpanded = !scroll.stickToBottom && !scroll.restoring,
                                             )
                                             }
                                             }
@@ -1561,204 +1770,7 @@ fun ChatScreen(
                                 )
                             }
                         }
-                        // 没有 run 时手动压缩：状态行说「正在压缩上下文 · 用时 xx」。
-                        // 没有这一行，点了压缩屏幕上什么都没有（用户：「啥响应也没有」）。
-                        if (!state.runningHere && state.compressingSince > 0L) {
-                            item(key = "compress-status:${state.conversationId}") {
-                                RunStatusLine(
-                                    text = "正在压缩上下文",
-                                    startedAt = state.compressingSince,
-                                    timed = true,
-                                    modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 12.dp),
-                                )
-                            }
-                        }
-                        // 没有回执的实时失败（发送阶段错误等）画在最后一轮下面；有回执的失败由
-                        // 回执自己跟在那一轮后面（内联），同文案不重复画。
-                        if (errorLine) {
-                            item(key = "error:${state.conversationId}") {
-                                RunReasonLine(state.error.orEmpty())
-                            }
-                        }
-                        // `asReversed()` 每次调用都返回一个**新包装对象**；`visible` 本身按
-                        // revision 记忆，所以这里记住反转结果就够了。
-                        // **contentType 不能省**（滚动卡顿，用户实测「助手→用户→助手」区每遍都卡）：
-                        // 列表混着助手卡/用户气泡/系统回执/工具卡，没有 contentType 时 Compose
-                        // 在不同形状的行之间复用组合槽 = 类型一换就整槽拆了重建。
-                        // key 管身份，contentType 管复用 —— 两个都要。
-                        // **每条消息一个 item**（方案 B）：卡片只在被滚到视口附近时才第一次
-                        // 组合+排版，预取范围由 `ConversationViewport` 的
-                        // `LazyLayoutCacheWindow(aheadFraction = 2f, behindFraction = 1f)` 限定，
-                        // 不再把整页历史塞进同一个 item 一起组合/测量。
-                        // 流式内容仍在**独立** item（`streaming:`）里，每 token 的重组范围不变。
-                        // `visible` 是正序（旧→新），reverseLayout 下喂序 0 是最底 ⇒ 用
-                        // `visible.lastIndex - fed` 换算，最后一行（最新）落在底部。
-                        // 行间距放进每个 item 内部的 Column：时间戳与所属气泡只隔 3dp。
-                        items(
-                            count = visible.size,
-                            key = { fed -> rowKeys[visible.lastIndex - fed] },
-                            contentType = { fed -> visible[visible.lastIndex - fed].message.role },
-                        ) { fed ->
-                            val row = visible[visible.lastIndex - fed]
-                            val presentationKey = rowKeys[visible.lastIndex - fed]
-                            DisposableEffect(presentationKey, rowCoordinates) {
-                                onDispose {
-                                    rowCoordinates.remove(presentationKey)
-                                    rowHeights.remove(presentationKey)
-                                }
-                            }
-                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            // One placeable per item: the list's own 16dp spacing applies
-                            // between the placeables of a single item as well, which is what
-                            // held the timestamp a full 16dp above the bubble it belongs to.
-                            // Inside this Column the two sit 3dp apart, and the 16dp goes back
-                            // to meaning what it says — the air between messages.
-                            // **重行独立成一个 RenderNode**（issue #47 方向 2）：LazyColumn 把
-                            // 所有可见项画进**同一棵**绘制树 —— 任何一处内容变化、以及每一次
-                            // 滚动/动画，RenderThread 都要把这棵树整个重录（实测是主线程的
-                            // 3.4 倍）。给「含思考块/工具卡」的重行挂一层，内容没变时它自己的
-                            // 绘制列表可以被直接复用，整棵重录退化成「只有脏行重录」。
-                            //
-                            // 只在重行上挂：轻行（用户气泡、纯正文）的绘制列表本来就短，多一层
-                            // 反而增加合成开销和内存。层上不带任何视觉属性 ⇒ 渲染结果逐像素相同。
-                            // **重卡判定要覆盖全部重内容**（issue #47 方向 2）：
-                            // 原来只看 `Thinking` / `Tools`，漏掉两类最重的：
-                            //  · `Compress`（上下文压缩卡，内部可含长清单）；
-                            //  · **含图片的消息行** —— 图片不在 `Part` 里，而是消息级的
-                            //    `message.allImages`（`ChatTopBar.kt:645` 逐个 ImageBlock），
-                            //    解码位图是整页绘制列表里最重的一类。
-                            // 轻行（用户气泡、纯正文）不挂层：它们的绘制列表本来就短，多一层
-                            // 只增加合成开销与内存。层上没有任何视觉属性 ⇒ 渲染结果逐像素相同。
-                            // 键用 `imageCount`（Int）而不是 `allImages`：后者是每次访问都重建
-                            // List 的 getter（`ChatModels.kt:81` 的 ifEmpty/listOfNotNull），
-                            // 拿它当 remember 键等于每次重组都换一个新对象、缓存必然失效。
-                            val imageCount = row.message.imageCount
-                            val heavyRow = remember(row.parts, imageCount) {
-                                imageCount > 0 ||
-                                    row.parts.any {
-                                        it is Part.Thinking || it is Part.Tools || it is Part.Compress
-                                    }
-                            }
-                            Column(
-                                Modifier
-                                    .then(if (heavyRow) Modifier.graphicsLayer() else Modifier)
-                                    .onGloballyPositioned { coords ->
-                                        val id = presentationKey
-                                        val firstPlacement = rowCoordinates.put(id, coords) == null
-                                        val heightChanged = rowHeights.put(id, coords.size.height) != coords.size.height
-                                        if (firstPlacement || heightChanged) geometryVersion.intValue++
-                                    },
-                            ) {
-                                // 外观 → 显示时间: off means no labels at all, not fewer.
-                                if (settings.showTimestamps && row.showTimeLabel) {
-                                    TimeLabel(row.message.timestamp)
-                                    // 3dp 太挤，时间像是贴在气泡上（用户：「间距再大一点」）。6dp 让它
-                                    // 读作一行独立的抬头，又不会散开成两个东西。
-                                    Spacer(Modifier.height(6.dp))
-                                }
-                                // 稳定引用（issue #5）：每次重组新建 lambda ⇒ `MessageRow` 的 equals
-                                // 恒为 false ⇒ Compose 的跳过优化失效，每个可见项每帧都重组。
-                                val onBranch = remember(viewModel) {
-                                    { turnId: String, runId: String -> viewModel.switchBranch(turnId, runId) }
-                                }
-                                val onRegenerate = remember(viewModel) {
-                                    { viewModel.regenerate() }
-                                }
-                                val onEdit = remember {
-                                    { message: StoredMessage -> editing = message }
-                                }
-                                // 「提供方 / 模型」也按模型缓存：原来每帧每个可见项都新建一个 String。
-                                val engineLabel = remember(row.message.model, providerOfModel) {
-                                    providerOfModel[row.message.model]
-                                        ?.let { "${it.label} / ${it.displayModel(row.message.model)}" }
-                                        ?: row.message.model
-                                }
-                                CompositionLocalProvider(LocalPreparedMarkdown provides rowDocuments[row.message.id].orEmpty()) {
-                                MessageRow(
-                                    row = row,
-                                    assistantName = assistant?.label ?: "随行",
-                                    assistantFace = assistant?.face ?: "",
-                                    assistantAvatarPath = assistant?.avatarPath ?: "",
-                                    showReasoning = settings.showReasoning,
-                                    expandTools = settings.expandTools,
-                                    expandReasoning = settings.expandReasoning,
-                                    reasoningMaxHeight = settings.reasoningHeight.dp,
-                                    followReasoning = settings.followReasoning,
-                                    bubbleMaxWidth = bubbleMaxWidth,
-                                    contextWindow = contextWindow,
-                                    runElapsedMs = runElapsed[row.message.runId] ?: 0L,
-                                    // The endpoint and the model that answered this round, as
-                                    // one line: a message keeps the id it ran on, and the
-                                    // owner is looked up from it. Just the id when no endpoint
-                                    // claims it — a stale pick is not worth a wrong name.
-                                    engineLabel = engineLabel,
-                                    reasoningExpansion = reasoningExpansion,
-                                    onBranch = onBranch,
-                                    onRegenerate = onRegenerate,
-                                    onEdit = onEdit,
-                                )
-                                }
-                                // 中断/截断/失败的原因不再挂在这里：错误提醒统一画在列表最底
-                                // （回执行 + 无回执时的实时红字），同一次失败只通知一次。
-                            }
-                            // The compression record sits under the last message it folded
-                            // away: that is the point in the transcript where the model
-                            // stopped seeing the conversation verbatim.
-                            checkpointsByRow[row.message.id].orEmpty().forEach { checkpoint ->
-                                // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
-                                // 键用 revision + checkpoint（两者任一变化才需要重算）。
-                                val originals = remember(checkpoint, state.messagesRevision) {
-                                    checkpointSpan(state.messages, checkpoint, messagePositions)
-                                }
-                                // A checkpoint whose span is not in this transcript (a
-                                // branch switch, a trimmed conversation) is not drawn: half
-                                // a record would read as data loss.
-                                if (originals != null) {
-                                    CheckpointCard(
-                                        checkpoint = checkpoint,
-                                        originals = originals,
-                                    )
-                                }
-                            }
-                            }
-                        }
-                        // 底锚：「加载更早」在**大索引端**（视觉顶部）。更老的轮次追加在喂序末尾，
-                        // 现有 item 的索引不动，LazyColumn 按 key 钉住首可见项 ⇒ 阅读位不动。
-                        if (page.hasEarlier) {
-                            item(key = "load-earlier") {
-                                Box(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    TextButton(
-                                        enabled = !loadingEarlier && viewport.presented,
-                                        onClick = {
-                                            scroll.stickToBottom = false
-                                            val chatId = state.conversationId
-                                            val token = ++earlierRequestToken[0]
-                                            loadingEarlier = true
-                                            fun finish(added: Boolean) {
-                                                if (viewModel.state.value.conversationId != chatId || earlierRequestToken[0] != token) return
-                                                if (added) {
-                                                    shownTurnsByConversation = shownTurnsByConversation + (chatId to shownTurns + PAGE_TURNS)
-                                                }
-                                                loadingEarlier = false
-                                            }
-                                            // Stable lazy keys preserve the current message and offset in
-                                            // the same layout as the page insertion; no visible correction.
-                                            if (page.from > 0) finish(true)
-                                            else if (!viewModel.loadEarlier(onComplete = ::finish)) finish(false)
-                                        },
-                                    ) {
-                                        Text(
-                                            text = if (loadingEarlier) "正在加载更早的内容…"
-                                                else "加载更早的 $PAGE_TURNS 轮 · 上面还有 ${page.earlier} 轮",
-                                            style = MaterialTheme.typography.labelLarge,
-                                        )
-                                    }
-                                }
-                            }
-                        }
+
                     }
                     }
                 }
@@ -1899,9 +1911,9 @@ fun ChatScreen(
                                 if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
                                 val coordinates = rowCoordinates[targetKey] ?: return@launch
                                 val probeY = viewportTopY.value + viewportH.intValue * TurnMarks.PROBE_FRACTION
-                                listState.animateScrollBy(probeJumpDelta(coordinates.positionInWindow().y, probeY))
+                                listState.animateScrollBy(-probeJumpDelta(coordinates.positionInWindow().y, probeY))
                             } else if (inWindow >= turnIndices.size) {
-                                listState.animateScrollToItem(0)
+                                listState.animateScrollToItem((itemCount - 1).coerceAtLeast(0), TRANSCRIPT_END_OFFSET)
                             }
                         } finally {
                             if (token == navigationToken[0] && scroll.conversationId == state.conversationId) scroll.restoring = false

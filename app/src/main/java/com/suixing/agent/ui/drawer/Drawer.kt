@@ -165,6 +165,7 @@ internal fun Drawer(
     // 长按行仍然是菜单，两个手势各占一处，不互相抢。
     var sortMode by remember { mutableStateOf(false) }
     val draggingState = remember { mutableStateOf<String?>(null) }
+    val dragPreview = remember { mutableStateOf<DrawerSections?>(null) }
     val dragTracker = remember { DrawerDragTracker() }
     val listState = rememberLazyListState()
     // 每行上次看到的 updatedAt：数值变大 = 那条会话来了新消息 ⇒ 把它从普通表里摘掉，
@@ -178,10 +179,17 @@ internal fun Drawer(
     // `rememberUpdatedState` 的参数位 —— 那只包住了「转发最新值」，没包住计算，
     // 于是外壳每次重组都白算一遍 filter + associateBy + 2×sortedBy（O(n log n)）。
     // 同文件 :1001 已是正确写法。
-    val sections = remember(conversations, orderState.value) {
+    val baseSections = remember(conversations, orderState.value) {
         drawerSections(conversations, orderState.value)
     }
+    val sections = dragPreview.value ?: baseSections
     val sectionsNow = rememberUpdatedState(sections)
+    LaunchedEffect(conversations, orderState.value) {
+        // Real updates take precedence over a gesture's frozen preview: a deleted or
+        // completed conversation must not stay drawable or overwrite its new baseline.
+        dragPreview.value = null
+        draggingState.value = null
+    }
     // 导出与「设置 → 会话」页同一套：系统选择器（SAF），不碰 FileProvider、不改 manifest。
     var pendingExport by remember { mutableStateOf<Conversation?>(null) }
     val exporter = rememberLauncherForActivityResult(
@@ -223,6 +231,7 @@ internal fun Drawer(
             // （用户：「进行了长按等其它操作（例如关闭侧边栏），自动退出拖动模式」）。
             sortMode = false
             draggingState.value = null
+            dragPreview.value = null
             // 抽屉一关，长按菜单也不该留在屏幕上（它是 focusable = false 的弹窗，不会自己消失）。
             menuFor = null
         }
@@ -272,6 +281,7 @@ internal fun Drawer(
     val exitSortMode: () -> Unit = {
         sortMode = false
         draggingState.value = null
+        dragPreview.value = null
     }
 
     // 面板：库负责拖动/回弹/遮罩/位移，视觉参数逐条覆盖回自绘那版——
@@ -365,12 +375,14 @@ internal fun Drawer(
                 // 这次拖动取消，于是「拖到一半断了」。
                 val dragHandle = remember(conversation.id) {
                     Modifier.pointerInput(conversation.id) {
-                        detectDragGestures(
+                        try {
+                            detectDragGestures(
                             onDragStart = {
                                 val row = listState.layoutInfo.visibleItemsInfo
                                     .firstOrNull { it.key == conversation.id }
                                 if (row != null) {
                                     draggingState.value = conversation.id
+                                    dragPreview.value = sectionsNow.value
                                     dragTracker.pointerY = row.offset + row.size / 2f
                                 }
                             },
@@ -386,22 +398,37 @@ internal fun Drawer(
                                         }
                                         ?.key as? String
                                     if (hit != null) {
-                                        val reordered = reorderWithinSection(
-                                            order = orderState.value,
-                                            sections = sectionsNow.value,
+                                        val reordered = previewDrawerReorder(
+                                            sections = dragPreview.value ?: sectionsNow.value,
                                             dragging = dragging,
                                             target = hit,
                                         )
-                                        if (reordered != null) orderState.value = reordered
+                                        if (reordered != null) dragPreview.value = reordered
                                     }
                                 }
                             },
                             onDragEnd = {
-                                if (draggingState.value != null) persistOrder()
+                                if (draggingState.value != null) dragPreview.value?.let { preview ->
+                                    orderState.value = DrawerOrder(
+                                        pinned = preview.pinned.map { it.id },
+                                        normal = preview.normal.map { it.id },
+                                    ).prunedTo(conversationsNow.value.map { it.id }.toSet())
+                                    persistOrder()
+                                }
+                                dragPreview.value = null
                                 draggingState.value = null
                             },
-                            onDragCancel = { draggingState.value = null },
-                        )
+                            onDragCancel = {
+                                dragPreview.value = null
+                                draggingState.value = null
+                            },
+                            )
+                        } finally {
+                            if (draggingState.value == conversation.id) {
+                                draggingState.value = null
+                                dragPreview.value = null
+                            }
+                        }
                     }
                 }
                 ConversationRow(

@@ -502,7 +502,7 @@ private data class TierOption(val key: String, val label: String, val ready: Boo
  *
  * 四档的可用性用的是和下面四张卡片同一套判据（[CapabilityState]），置灰只说明「现在
  * 还用不了」，不是禁用：点下去仍然记下这个选择，并说清该去下面哪张卡片点哪个按钮——
- * 手指落在这一档上必须有回音。再点一次已选中的那一档就回到自动，否则选出去就退不回来。
+ * 手指落在这一档上必须有回音。旧版未固定档次的设置显示当前可用档，点击后固定。
  */
 @Composable
 private fun CapabilityTierPicker(
@@ -518,30 +518,38 @@ private fun CapabilityTierPicker(
         TierOption(TIER_SHELL, "Shizuku", state.shellReady),
         TierOption(TIER_ROOT, "Root", state.rootReady),
     )
+    // Preserve legacy unfixed routing without a fifth slot or an unsolicited settings write.
+    val shown = options.firstOrNull { it.key == preferred }?.key ?: when {
+        state.rootReady -> TIER_ROOT
+        state.shellReady -> TIER_SHELL
+        state.accessibility -> TIER_ACCESSIBILITY
+        else -> TIER_NONE
+    }
+    val fixed = options.any { it.key == preferred }
     val missing = options.any { it.key == preferred && !it.ready }
     SuixingCard {
         Text("执行档次", style = SettingsStyle.cardTitle)
         Text(
-            text = "选择随行用哪一档权限执行操作；更高的档位能做的事更多，需要先开启。" +
-                "点已选中的那一档可回到自动。",
+            text = "选择随行执行操作的权限档次。更高的档位能做的事更多，需要先开启。",
             style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
         // 统一用共享的 SegmentedPill（与设置页同一形状/配色/拖动反馈）：
-        // 通过 optionEnabled 置灰未开启的档位，onReselect 让「点已选中的一档」回到自动。
+        // 未开启档位仍可选；点击当前显示档也会固定旧版未指定的设置。
         SegmentedPill(
             options = options.map { it.label },
-            selectedIndex = options.indexOfFirst { it.key == preferred },
+            selectedIndex = options.indexOfFirst { it.key == shown },
             onSelect = { index -> onPick(options[index].key) },
             optionEnabled = { index -> options[index].ready },
-            onReselect = { onPick("") },
+            onReselect = { onPick(shown) },
             // 只在这一页加深一档（用户定 0.10）：四格常带置灰，默认 0.08 的边界偏弱。
             trackTint = 0.10f,
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            text = tierSummary(preferred, state),
+            text = if (fixed) tierSummary(preferred, state)
+            else "当前使用${options.first { it.key == shown }.label}，点击任意一档可固定执行档次。",
             style = SettingsStyle.description,
             // 选中的那一档还没开出来时用 error 说话：点了有反应这件事得看得见。
             color = if (missing) {
@@ -551,17 +559,7 @@ private fun CapabilityTierPicker(
             },
         )
         // 「选一档看这一档解锁了什么」：条目和下面四张卡片读同一份 tierLines，不另写一套文案。
-        // 没固定档（自动）时按「当前已经开出来的最高档」画，和上面那句摘要说的是同一档。
-        val shown = if (preferred.isNotBlank()) {
-            preferred
-        } else {
-            when {
-                state.rootReady -> TIER_ROOT
-                state.shellReady -> TIER_SHELL
-                state.accessibility -> TIER_ACCESSIBILITY
-                else -> TIER_NONE
-            }
-        }
+        // 条目、选中态与摘要使用同一档。
         Spacer(Modifier.height(6.dp))
         tierLines(shown, state, settings).forEach { line ->
             Row(Modifier.padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {

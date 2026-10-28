@@ -3,8 +3,10 @@ package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -210,7 +214,7 @@ private fun reconcileRevealTop(
     before: Float,
     after: Float,
 ) {
-    if (outer == null || !outer.canScrollBackward) return
+    if (outer == null || !outer.layoutInfo.reverseLayout || !outer.canScrollBackward) return
     if (before.isNaN() || after.isNaN()) return
     val drift = after - before
     if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
@@ -290,7 +294,8 @@ private fun RevealHeight(
             val growth = px * progress - oldH
             val comp = growth
             // 外层流式行在补时这里绝不能补（否则同一份增量补两次 ⇒ 抖动）。
-            if (!suppressOuterCompensation && comp != 0f && outer != null && outer.canScrollBackward) {
+            if (!suppressOuterCompensation && comp != 0f && outer != null &&
+                outer.layoutInfo.reverseLayout && outer.canScrollBackward) {
                 outer.dispatchRawDelta(comp)
             }
             if (t >= 1f) break
@@ -356,6 +361,8 @@ internal fun ProcessCard(
     preview: String? = null,
     /** Drawn right after [preview]: the streaming cursor for a folded think. */
     previewTail: (@Composable () -> Unit)? = null,
+    /** The turn summary owns its seam with the flat tail; other cards keep their usual air. */
+    contentBottomPadding: Dp = 6.dp,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -461,7 +468,7 @@ internal fun ProcessCard(
                         // **上方 0dp**（用户：「折叠条分割线下方还有一处空白，不能去掉吗」）：
                         // 那 8dp 就是分割线下面那道空白，所有折叠块共用这一处，所以在这里一次去掉。
                         // 下方仍留 8dp：展开内容与卡片下沿之间需要一点收尾空气。
-                        Modifier.padding(start = 0.dp, top = 0.dp, end = 0.dp, bottom = 6.dp),
+                        Modifier.padding(start = 0.dp, top = 0.dp, end = 0.dp, bottom = contentBottomPadding),
                         content = content,
                     )
                 }
@@ -556,20 +563,24 @@ internal fun TraceBlock(note: String, modifier: Modifier = Modifier) {
  * 不再往气泡下面塞一行提示（用户：「不需要这种在卡片下的提示」）。
  */
 @Composable
-internal fun CompressionBlock(checkpoint: ContextCheckpoint) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
+internal fun CompressionBlock(
+    checkpoint: ContextCheckpoint,
+    expansion: ReasoningExpansion,
+    blockId: String,
+) {
+    val expanded = expansion.stored(blockId) ?: false
     ProcessCard(
         icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
         title = "已压缩上下文",
         expanded = expanded,
-        onToggle = { expanded = !expanded },
+        onToggle = { expansion.set(blockId, !expanded) },
         preview = "${checkpoint.messages} 条消息 → 摘要 · 压缩前约 ${shortTokens(checkpoint.promptTokens)}",
     ) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .heightIn(max = 200.dp)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(remember(expansion, blockId) { expansion.viewport(blockId).scrollState }),
         ) {
             Text(
                 text = checkpoint.summary,
@@ -593,12 +604,98 @@ internal class ReasoningExpansion(
     private val conversationId: String,
     private val entries: MutableMap<String, Boolean>,
 ) {
+    // Live and stored bubbles are different composition groups. Protect this run's
+    // viewports through hand-over, plus 16 recent historical viewports. An arbitrary
+    // cap on the active run would lose the first positions when 17+ blocks remount.
+    // Entries contain state only, never a job, composable, or Activity.
+    private val viewports = LinkedHashMap<String, ReasoningViewport>(16, 0.75f, true)
+    private var protectedPrefix: String? = null
+    private var historicalViewports = 0
+
+    fun protectRun(runId: String) {
+        val prefix = "$runId:"
+        if (protectedPrefix == prefix) return
+        protectedPrefix = prefix
+        historicalViewports = viewports.keys.count { !isProtected(it) }
+        trimHistoricalViewports()
+    }
+
+    fun viewport(blockId: String): ReasoningViewport {
+        viewports[blockId]?.let { return it }
+        val state = ReasoningViewport()
+        viewports[blockId] = state
+        if (!isProtected(blockId)) historicalViewports++
+        trimHistoricalViewports()
+        return state
+    }
+
+    private fun isProtected(blockId: String): Boolean = protectedPrefix?.let { blockId.startsWith(it) } == true
+
+    private fun trimHistoricalViewports() {
+        if (historicalViewports <= 16) return
+        val oldest = viewports.entries.iterator()
+        while (historicalViewports > 16 && oldest.hasNext()) {
+            if (!isProtected(oldest.next().key)) {
+                oldest.remove()
+                historicalViewports--
+            }
+        }
+    }
+
     /** Null while this block has no opinion of its own. */
     fun stored(blockId: String): Boolean? = entries["$conversationId:$blockId"]
 
     fun set(blockId: String, expanded: Boolean) {
         entries["$conversationId:$blockId"] = expanded
     }
+
+    fun hasOpenFold(parts: List<Part>, runId: String): Boolean = parts.indices.any { index ->
+        val slot = processFoldSlot(parts, index, runId) ?: return@any false
+        if (stored(slot) == true) return@any true
+        val tool = parts[index] as? Part.Tools ?: return@any false
+        stored(slot) != false && tool.calls.indices.any { stored("$slot:call:$it") == true }
+    }
+
+    fun summaryExpanded(parts: List<Part>, runId: String, streaming: Boolean): Boolean =
+        stored(summarySlot(runId)) ?: (streaming || stored("$runId:reading") == true || hasOpenFold(parts, runId))
+
+    /** Reading is a user action too: don't auto-close what was open under that reader. */
+    fun retainForReading(parts: List<Part>, runId: String, expandTools: Boolean) {
+        protectRun(runId)
+        if (stored("$runId:reading") != true) set("$runId:reading", true)
+        parts.forEachIndexed { index, part ->
+            val slot = processFoldSlot(parts, index, runId) ?: return@forEachIndexed
+            if (stored(slot) == null && when (part) {
+                is Part.Thinking -> true
+                is Part.Tools -> expandTools
+                else -> false
+            }) set(slot, true)
+        }
+    }
+}
+
+@Stable
+internal class ReasoningViewport {
+    val listState = LazyListState()
+    val scrollState by lazy { ScrollState(0) }
+    var follow by mutableStateOf(true)
+}
+
+internal fun summarySlot(runId: String): String = "$runId:summary"
+
+/** Last prose and anything that arrived after it stay in source order outside the process card. */
+internal fun processTailStart(parts: List<Part>): Int =
+    parts.indexOfLast { it is Part.Text }.takeIf { it >= 0 } ?: parts.size
+
+internal fun processFoldSlot(parts: List<Part>, index: Int, runId: String): String? = when (val part = parts[index]) {
+    is Part.Thinking -> thinkSlot(parts, index, runId)
+    is Part.Tools -> {
+        var before = 0
+        for (i in 0 until index) before += (parts[i] as? Part.Tools)?.calls?.size ?: 0
+        "$runId:tools:$before"
+    }
+    is Part.Compress -> "$runId:compression:${part.checkpoint.id}"
+    else -> null
 }
 
 /**
@@ -635,6 +732,8 @@ internal fun thinkSlot(parts: List<Part>, index: Int, fallback: String): String 
 internal fun ReasoningBlock(
     text: String,
     streaming: Boolean,
+    /** The run can still be live after this individual think stopped growing. */
+    runStreaming: Boolean = streaming,
     /** This block's slot in the screen's table: see [thinkSlot]. */
     blockId: String,
     expansion: ReasoningExpansion,
@@ -676,7 +775,7 @@ internal fun ReasoningBlock(
     // a think that is still arriving is open (watching it arrive is why the model was asked to
     // think), and one that has settled follows 历史思考块默认展开. Off, a finished think folds to
     // its header — the reader's tap is the way in, and the table remembers it per conversation.
-    val expanded = expansion.stored(blockId) ?: (streaming || expandReasoning)
+    val expanded = expansion.stored(blockId) ?: (runStreaming || expandReasoning)
     // **增量切行**（见 [IncrementalLines]）：文本是逐字变长的，`text.split('\n')` 每一拍都在
     // 全文上重做一次切分 + 分配一个新列表。切分器记住上一次的文本与结果，只切新增那一段。
     val splitter = remember { IncrementalLines() }
@@ -688,30 +787,9 @@ internal fun ReasoningBlock(
             if (elapsedMs > 0) add(formatDuration(elapsedMs))
         }
     }
-    // The folded header says what the think starts with, so a closed block is still
-    // readable; a streaming block adds the cursor right after that line.
-    // 光标挂在最新的一条**非空**行上：末行是空行时顺延，避免光标消失一帧。
-    // **在 items 外算一次**（原来每个可见项都重算一遍 Sequence+Iterator）。
-    //
-    // **必须是「视觉行号」**（0 = 最新行，因为底锚 reverseLayout 下 `items` 的 index 就是视觉号）。
-    // 绝对行号（`indexOfLast`）与它差一个 `lastIndex - i` 的换算，混用会让光标挂到最旧那一行 ——
-    // 长的思考链里甚至直接移出视口（真机症状：「光标没有跟在思考链后面」）。
-    // 全空行时 `indexOfLast` 为 -1 ⇒ cursorAt = lastIndex + 1，永远不会等于任何 index（正确）。
-    // **光标永远挂在「已显示文本的最后一行」**（用户：「思考流式过程中光标不能稳定出现在末尾」）。
-    //
-    // 原来的算法是「最后一个非空行」：`lines.lastIndex - lines.indexOfLast { it.isNotBlank() }`。
-    // 问题出在**刚换行、下一个字还没打出来**的那一段：
-    //   · 打字机每拍只放 2 个字（TYPE_STEP=2 / TYPE_TICK_MS=16），换行符被放出来的那一拍，
-    //     末行是空串；
-    //   · 空串让 `indexOfLast { it.isNotBlank() }` 退回**上一行**，于是 cursorAt 指向上一行，
-    //     内联光标画在上一行末尾 —— 屏幕上的光标比真正的文本末尾高一行；
-    //   · 而空行那条 item 走的是 `Spacer`（不画字也不画光标），所以末尾那一行什么都没有。
-    //   · 模型常在段落/列表项之间停顿（换行之后停几百毫秒很常见），这段时间光标一直停在
-    //     上一行 ⇒ 就是「不稳定出现在末尾」。
-    //
-    // 现在：流式时**恒定挂最新行（视觉行号 0）**；最新行有字时内联在字后面，最新行是空行时
-    // 由下面的空白分支画一个同样的光标。行号 0 = 底锚倒序里的最新行，与 `items` 的 index 同义。
-    val cursorAt = if (streaming) 0 else -1
+    // Source order is also visual order. A trailing blank line owns the cursor
+    // immediately after a newline, rather than moving it back onto the preceding line.
+    val cursorAt = if (streaming) lines.lastIndex else -1
     val firstLine = remember(lines) { lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty() }
     // The chain itself, shared by both shapes: a think with no text at all (the
     // endpoint reported time but no chain) must not render as an empty slab, and a
@@ -725,39 +803,44 @@ internal fun ReasoningBlock(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            // *底锚倒序**（与主转录同一套画法）：index 0 是视觉最底，贴尾＝scrollToItem(0)。
-            val inner = rememberLazyListState()
-            // 追尾开关：手指往上拖就停跟，真滚到底再跟回来。底锚下判据是 canScrollBackward ——
-            // 顶锚时内容一长高 canScrollForward 就变真，追一次就再也不追（用户：「思维链的追底呢」）。
-            var innerFollow by remember { mutableStateOf(true) }
+            // Top-anchored lines keep an already-read wrapped line still while its tail grows.
+            val viewport = remember(expansion, blockId) { expansion.viewport(blockId) }
+            val inner = viewport.listState
+            val lineCount by rememberUpdatedState(lines.size)
+            // A completed user scroll away from the bottom stops following; reaching
+            // the bottom resumes it. Content growth alone must not disable following.
             var innerWasScrolling by remember { mutableStateOf(false) }
             LaunchedEffect(inner) {
-                snapshotFlow { inner.isScrollInProgress to inner.canScrollBackward }
-                    .collect { (scrolling, canBack) ->
-                        if (!canBack) {
-                            innerFollow = true
-                        } else if (innerWasScrolling && !scrolling) {
+                inner.interactionSource.interactions.collect { interaction ->
+                    if (interaction is DragInteraction.Start) viewport.follow = false
+                }
+            }
+            LaunchedEffect(inner) {
+                snapshotFlow { Triple(inner.isScrollInProgress, inner.canScrollForward, inner.layoutInfo.totalItemsCount > 0) }
+                    .collect { (scrolling, canForward, measured) ->
+                        if (!measured) return@collect
+                        if (!canForward && !scrolling) {
+                            viewport.follow = true
+                        } else if (innerWasScrolling && !scrolling && canForward) {
                             // 一次滚动结束在非底部 ⇒ 用户拖上去的（程序化贴底只会停在底部）。
-                            innerFollow = false
+                            viewport.follow = false
                         }
                         innerWasScrolling = scrolling
                     }
             }
-            // 追尾：底锚下最新一行长高向上、底边不动，不逐帧滚；只有新行插在最前把锚点
-            // 顶离 (0, 0) 时才补一次。
+            // Follow only while opted in. The ordinary top anchor itself keeps a
+            // reader still when a wrapped line or later lines grow below them.
             LaunchedEffect(inner, expanded, followReasoning) {
                 if (!expanded || !followReasoning) return@LaunchedEffect
                 snapshotFlow {
-                    val offBottom =
-                        inner.firstVisibleItemIndex != 0 || inner.firstVisibleItemScrollOffset != 0
-                    offBottom to innerFollow
+                    inner.canScrollForward to viewport.follow
                 }.collect { (offBottom, follow) ->
-                    if (follow && offBottom) inner.scrollToItem(0)
+                    if (follow && offBottom && !inner.isScrollInProgress) inner.scrollToItem(lineCount)
                 }
             }
             LazyColumn(
                 state = inner,
-                reverseLayout = true,
+                reverseLayout = false,
                 modifier = Modifier
                     .fillMaxWidth()
                     // Configurable in 外观: a chain of thought is context, and the
@@ -771,15 +854,11 @@ internal fun ReasoningBlock(
             ) {
                 items(
                     count = lines.size,
-                    // **绝对行号当 key**（性能）：思考链是打字机 25 Hz 逐字放出来的，每冒出一个
-                    // 换行 `lines` 就多一行；底锚下 index 0 是最新行 ⇒ **所有位置的"视觉第 i 行"
-                    // 都换成上一行**。用位置键时可见的十几行全部重组 + 重新测量文本；
-                    // 用绝对行号后已有行的身份不变，只有新行和光标行重组。
-                    key = { index -> lines.lastIndex - index },
+                    // Appending a logical line never changes an existing line's identity.
+                    key = { index -> index },
                     contentType = { "reasoning-line" },
                 ) { index ->
-                    // 底锚：index 0 是**最新一行**（视觉最底），越往上 index 越大。
-                    val line = lines[lines.lastIndex - index]
+                    val line = lines[index]
                     if (line.isBlank()) {
                         // **最新行是空行时，光标就画在这里**：它才是「已显示文本的末尾」
                         // （刚换行、下一个字还没被打字机放出来）。原来是 `Spacer`，光标于是
@@ -792,9 +871,8 @@ internal fun ReasoningBlock(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 cursor = true,
                             )
-                        } else if (index < lines.lastIndex) {
-                            // 视觉首行（倒序里的最后一条）是空行时不占位：那 4dp 就是「分割线
-                            // 下面还有一点空白」的来源。
+                        } else if (index > 0) {
+                            // A leading blank line takes no extra space below the header.
                             Spacer(Modifier.height(4.dp))
                         }
                     } else {
@@ -815,13 +893,16 @@ internal fun ReasoningBlock(
                             // 的后面」）：以前是一个独立的 `BlinkingCursor()` 跟在 item 后面，
                             // 它自成一行、位置和文字对不上。现在作为 AnnotatedString 的尾段，
                             // 换行和对齐都跟着正文走。
-                            // 挂在**最新一行**（index 0），空行时顺延到第一条非空行。
+                            // The current final logical line owns the streaming cursor.
                             cursor = streaming && index == cursorAt,
                         )
                         }
                     }
                     // 光标已内联进上一段 MarkdownText（见 cursor 参数），这里不再另起一行。
                 }
+                // A zero-height terminal item provides exact bottom following even when
+                // the final logical line wraps taller than this capped viewport.
+                item(key = "reasoning-end", contentType = "reasoning-end") { Spacer(Modifier.height(0.dp)) }
             }
         }
     }
@@ -996,16 +1077,17 @@ internal fun thinkingStyle(): TextStyle {
 @Composable
 internal fun ToolBundle(
     tools: List<ToolLine>,
+    expansion: ReasoningExpansion,
+    blockId: String,
     runningTool: String? = null,
     startExpanded: Boolean = false,
 ) {
-    var expanded by rememberSaveable { mutableStateOf(startExpanded) }
+    val expanded = expansion.stored(blockId) ?: startExpanded
     // **每个工具独立展开**（issue #20）：原来是单个 `String?`，展开 B 会覆盖 A ——
     // 想同时对照「第 1 个的输入」和「第 3 个的输出」就得来回点。用 Set 记住所有打开的，
     // 展开新的不影响已开的。
     // 代价（issue #20 自己提的）：多个 `RevealHeight` 会同时跑动画，位置补偿的负载上升，
     // 与 #13 是同一处风险 —— 若实测位置跳动更明显，再考虑限制「最多同时开 N 个」。
-    var openTools by rememberSaveable { mutableStateOf(emptySet<String>()) }
     // **摘要只依赖 tools 本身**：count/标题/预览 remember 住，折叠条常驻，
     // 原来每帧都重算一遍（审计 2§A14）。
     // R4：这个 count 也是同一类 —— 它只随 tools 变，而这一行在每次重组都会被求值一遍。
@@ -1032,7 +1114,7 @@ internal fun ToolBundle(
         icon = ImageVector.vectorResource(R.drawable.ic_wrench),
         title = title,
         expanded = expanded,
-        onToggle = { expanded = !expanded },
+        onToggle = { expansion.set(blockId, !expanded) },
         preview = preview,
         trailing = {
             when {
@@ -1057,7 +1139,10 @@ internal fun ToolBundle(
         // detail straight away — an inner row repeating the header's own name is
         // what drew one call as two.
         if (tools.size == 1) {
-            ToolDetail(line = tools.first())
+            ToolDetail(
+                line = tools.first(),
+                listState = remember(expansion, blockId) { expansion.viewport("$blockId:call:0:output").listState },
+            )
         } else {
             // **这里不用虚拟列表，也不用高度上限**（用户：3 个工具条里不该有虚拟列表，
             // 具体工具里面设虚拟列表即可，和单个工具一样）。
@@ -1075,15 +1160,16 @@ internal fun ToolBundle(
                     // 每个工具**各自**点开（用户：「不是点击多个工具马上平铺各个工具」），
                     // 但彼此**不互斥**：展开第二个不会收起第一个（issue #20）。
                     // 展开后的内容与单个工具同一套（ToolRow 内部不再加缩进）。
-                    val key = tool.message?.id ?: "live-$index"
+                    val key = "$blockId:call:$index"
                     key(key) {
                         ToolRow(
                             line = tool,
+                            listState = remember(expansion, key) { expansion.viewport("$key:output").listState },
                             // 只有这一轮还在跑才转圈；历史 done=false 是中断遗留。
                             running = runningTool != null,
-                            expanded = key in openTools,
+                            expanded = expansion.stored(key) ?: false,
                             onToggle = {
-                                openTools = if (key in openTools) openTools - key else openTools + key
+                                expansion.set(key, !(expansion.stored(key) ?: false))
                             },
                         )
                     }
@@ -1099,7 +1185,7 @@ internal fun ToolBundle(
  * a live call and a settled one show the same thing.
  */
 @Composable
-internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
+internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyListState? = null) {
     val scheme = MaterialTheme.colorScheme
     val args = line.args.takeIf { it.isNotBlank() && it != "{}" }
     val output = line.message?.toolOutput?.takeIf { it.isNotBlank() }
@@ -1119,7 +1205,7 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp) {
     // 先取出 typography，再 remember 派生值；下面逐行复用它。
     val bodySmall = MaterialTheme.typography.bodySmall
     val monoStyle = remember(bodySmall) { bodySmall.copy(fontSize = 12.sp) }
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
+    LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight), state = listState ?: rememberLazyListState()) {
         if (args != null) {
             item(key = "args") {
                 Text(
@@ -1213,6 +1299,7 @@ internal fun ToolRow(
     onToggle: () -> Unit,
     /** 这一轮是否还在跑：历史里被中断落盘的 `done=false` 行不是在跑，不能永久转圈。 */
     running: Boolean = false,
+    listState: LazyListState? = null,
 ) {
     val tone = when {
         !line.done -> MaterialTheme.colorScheme.primary
@@ -1320,7 +1407,7 @@ internal fun ToolRow(
             // 与「单个工具」同一套边距：这里**不加** 44dp 缩进 —— 那是多工具独有的、用户
             // 明确指出的多余边距（「要像单个工具一样没有边距」）。
             Column(Modifier.fillMaxWidth()) {
-                ToolDetail(line = line)
+                ToolDetail(line = line, listState = listState)
             }
         }
     }
@@ -1356,9 +1443,25 @@ internal fun TurnSummary(
     /** The message these blocks belong to; part of every block's key in the table. */
     messageId: String = "",
     reasoningExpansion: ReasoningExpansion,
+    runId: String = messageId,
+    streaming: Boolean = false,
+    runningTool: String? = null,
+    preserveExpanded: Boolean = false,
     onEdit: (StoredMessage) -> Unit = {},
 ) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
+    // Metadata only: establish protection before the child viewport lookups compose.
+    // Keep it through completion; the next live run releases it into bounded history.
+    if (streaming) reasoningExpansion.protectRun(runId)
+    val expanded = reasoningExpansion.summaryExpanded(parts, runId, streaming)
+    SideEffect {
+        if (streaming && preserveExpanded) {
+            reasoningExpansion.retainForReading(parts, runId, expandTools)
+        } else if (!streaming && reasoningExpansion.stored(summarySlot(runId)) == null) {
+            // Latch the hand-over once. Closing an inner block later must not close
+            // the whole process card around the reader as a side effect.
+            reasoningExpansion.set(summarySlot(runId), expanded)
+        }
+    }
     // **remember**（性能）：这两行在**参数变化时**才需要重算；记住后同一实例能让
     // `AbstractList.equals` 首行 `o === this` 短路，省掉逐条 Part 深比较。
     val thoughts = remember(parts) { parts.filterIsInstance<Part.Thinking>() }
@@ -1392,9 +1495,9 @@ internal fun TurnSummary(
     // The numbers ride inside the title rather than in their own slot, so they shorten
     // with it and the chip after them is never the thing that gets squeezed.
     // 标题串只在输入变化时重算（每次重组 3 个 buildList + joinToString 是纯浪费）。
-    val header = remember(headline, tail, note) {
+    val header = remember(headline, tail, note, streaming) {
         buildList {
-        add(if (headline.isEmpty()) "本轮用量" else "本轮：${headline.joinToString(" · ")}")
+        add(if (headline.isEmpty()) if (streaming) "正在回复" else "本轮用量" else "本轮：${headline.joinToString(" · ")}")
         addAll(tail)
         // After the numbers, before nothing else: the compression line is a fact about this
         // turn, so it rides in the same title and folds away with the card.
@@ -1405,7 +1508,8 @@ internal fun TurnSummary(
         icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
         title = header,
         expanded = expanded,
-        onToggle = { expanded = !expanded },
+        contentBottomPadding = 0.dp,
+        onToggle = { reasoningExpansion.set(summarySlot(runId), !expanded) },
         trailing = {
             if (live != null) {
                 Spacer(Modifier.width(8.dp))
@@ -1422,8 +1526,14 @@ internal fun TurnSummary(
         // Expanding means the run as it happened: every piece in arrival order —
         // thinking blocks (foldable, full text), tool rows, every stretch of prose
         // including the mid-run transitions, steer bubbles — the same sequence the
-        // live bubble drew. The usage detail closes the list.
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // live bubble draws. Usage details stay below the final prose.
+        val tailStart = remember(parts) { processTailStart(parts) }
+        // The prefix and flat tail form one visual sequence. Whether a new prose
+        // part moves the former tail here must not add padding above that content.
+        Column(
+            modifier = Modifier.padding(top = 6.dp, bottom = if (tailStart > 0) 6.dp else 0.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             // The answer itself is already drawn by the bubble below this card (the settled
             // path keeps the last stretch of prose). Leaving a second copy in here is what
             // made one reply read as a stack of the same text; the mid-run transitions — the
@@ -1431,20 +1541,20 @@ internal fun TurnSummary(
             // those and the card is their only record.
             // R5：`indexOfLast` 只随 parts 变（列表元素是数据类，新块诞生/追加即 key 变），
             // 折叠卡展开时却每帧都在整条 parts 上重扫一遍。
-            val lastText = remember(parts) { parts.indexOfLast { it is Part.Text } }
             parts.forEachIndexed { index, part ->
                 // Guarded before key(index), never inside it: a non-local return out of a key
                 // group leaves the group unclosed and Compose aborts with "Start/end
                 // imbalance" — the crash this file has already paid for once.
-                if (part is Part.Text && index == lastText) return@forEachIndexed
+                if (index >= tailStart) return@forEachIndexed
                 key(index) {
                     when (part) {
                         is Part.Thinking -> ReasoningBlock(
                             text = part.text,
-                            streaming = false,
+                            streaming = streaming && index == parts.lastIndex,
+                            runStreaming = streaming,
                             // One message can hold several thinks (think → tool → think);
                             // the slot is the run plus the think's place inside it.
-                            blockId = thinkSlot(parts, index, messageId.ifEmpty { "summary" }),
+                            blockId = thinkSlot(parts, index, runId),
                             expansion = reasoningExpansion,
                             reasoningTokens = part.tokens,
                             elapsedMs = part.elapsedMs,
@@ -1463,6 +1573,9 @@ internal fun TurnSummary(
                             // 这里原来每个调用单独一行，运行时是合并成「调用 N 个工具」的 ToolBundle。
                             ToolBundle(
                                 tools = part.calls,
+                                expansion = reasoningExpansion,
+                                blockId = processFoldSlot(parts, index, runId)!!,
+                                runningTool = runningTool.takeIf { streaming && index == parts.lastIndex },
                                 startExpanded = expandTools,
                             )
                         }
@@ -1470,60 +1583,60 @@ internal fun TurnSummary(
                         // Prose keeps the card's own left edge: it is read as the answer's
                         // body, not as a row of the grid, and 2dp of vertical air plus the
                         // column's 8dp keeps it off its neighbours.
-                        is Part.Text -> Column(Modifier.padding(vertical = 2.dp)) {
-                            SelectableWhenArmed { MarkdownText(text = part.text) }
-                        }
+                        // This prose already appeared in the flat tail. Reparenting
+                        // it here must never replay its typewriter from an empty string.
+                        is Part.Text -> AssistantProse(part, streaming, typewriter = false)
 
-                        // **插话不在这里画**：那是用户自己说的话，任何时候都要在正文流里看得见
-                        // （扁平循环负责），卡片只回放模型的思考/工具/正文。原先两处都画，展开
-                        // 这张卡时同一句插话会出现两份。
-                        // 留一个显式空分支：`when` 是表达式，省掉它编译不过（且比 `else` 更能说明
-                        // 「这一类是故意不画的」）。
-                        is Part.Steer -> Unit
+                        // Earlier steering remains at its actual position in the process.
+                        is Part.Steer -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            UserBubble(message = part.message, onEdit = onEdit)
+                        }
 
                         // 重试留痕：与思考块/工具块同一套栅格（见 TraceBlock），留白不再自己加。
                         is Part.Trace -> TraceBlock(part.note)
 
                         // 压缩块：位置就是它发生的地方（思考 → 工具 → 压缩 → 继续）。
-                        is Part.Compress -> CompressionBlock(part.checkpoint)
+                        is Part.Compress -> CompressionBlock(part.checkpoint, reasoningExpansion,
+                            processFoldSlot(parts, index, runId)!!)
                     }
                 }
             }
-            // 每次重组都 buildList + joinToString（兄弟串 :1510 已经 remember 了，这里漏了）。
-            val detailText = remember(settled, live) {
-                buildList {
-                if (settled != null) {
-                    if (settled.prompt > 0) add("输入 ${settled.prompt}")
-                    if (settled.completion > 0) add("输出 ${settled.completion}")
-                    if (settled.reasoning > 0) add("思考 ${settled.reasoning}")
-                    if (settled.cached > 0) add("缓存 ${settled.cached}")
-                } else if (live != null) {
-                    add("输出 ${live.tokensOut}")
-                    if (live.thinkingTokens > 0) add("思考 ${live.thinkingTokens}")
-                }
-                }.joinToString(" · ")
+        }
+    }
+}
+
+/** Final usage arrives below the prose, never inserts height above the reading point. */
+@Composable
+internal fun SummaryUsageDetails(usage: Usage?, live: StreamStats?, contextWindow: Int) {
+    val settled = usage?.takeIf { it.known }
+    val context = live?.lastPromptTokens?.takeIf { it > 0 } ?: usage?.prompt ?: 0
+    val detailText = remember(settled, live) {
+        buildList {
+            if (settled != null) {
+                if (settled.prompt > 0) add("输入 ${settled.prompt}")
+                if (settled.completion > 0) add("输出 ${settled.completion}")
+                if (settled.reasoning > 0) add("思考 ${settled.reasoning}")
+                if (settled.cached > 0) add("缓存 ${settled.cached}")
+            } else if (live != null) {
+                add("输出 ${live.tokensOut}")
+                if (live.thinkingTokens > 0) add("思考 ${live.thinkingTokens}")
             }
-            if (detailText.isNotEmpty() || context > 0) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (detailText.isNotEmpty()) {
-                        Text(
-                            text = detailText,
-                            style = metaStyle(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            // fill = false, so this text takes only what it needs and gives
-                            // way to the chip: an unconstrained Text in a Row eats the whole
-                            // width, wraps, and leaves the chip zero width — which then stacks
-                            // its own characters one per line and stretches the row.
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                    }
-                    if (context > 0) {
-                        if (detailText.isNotEmpty()) Spacer(Modifier.width(6.dp))
-                        ContextChip(tokens = context, window = contextWindow, live = live)
-                    }
-                }
+        }.joinToString(" · ")
+    }
+    if (detailText.isNotEmpty() || context > 0) {
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (detailText.isNotEmpty()) Text(
+                text = detailText,
+                style = metaStyle(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (context > 0) {
+                if (detailText.isNotEmpty()) Spacer(Modifier.width(6.dp))
+                ContextChip(tokens = context, window = contextWindow, live = live)
             }
         }
     }

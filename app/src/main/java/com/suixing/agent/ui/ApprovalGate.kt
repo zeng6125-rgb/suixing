@@ -30,7 +30,7 @@ import com.suixing.agent.ui.components.SuixingDialog
 @Composable
 internal fun PendingApprovals(conversations: StateFlow<List<Conversation>>) {
     val pending by Core.gate.pending.collectAsStateWithLifecycle()
-    val first = pending.entries.firstOrNull() ?: return
+    val first = Core.gate.oldestPending(pending) ?: return
     val chats by conversations.collectAsStateWithLifecycle()
     ApprovalDialog(
         chatId = first.key,

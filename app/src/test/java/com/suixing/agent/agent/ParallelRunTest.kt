@@ -73,6 +73,9 @@ class ParallelRunTest {
             gate.request("b", "run_shell", "rm", ApprovalMode.ASK)
         }
         assertEquals("both prompts on screen", setOf("a", "b"), gate.pending.value.keys)
+        // UI must choose the oldest request even if a different map reverses iteration.
+        val reversed = gate.pending.value.entries.reversed().associate { it.toPair() }
+        assertEquals("a", gate.oldestPending(reversed)?.key)
 
         gate.resolve("a", approved = true)
         gate.resolve("b", approved = false)
@@ -94,6 +97,7 @@ class ParallelRunTest {
         gate.cancelPending("a")
         assertFalse("A's prompt dies as refused with its run", a.await())
         assertEquals("B's prompt survives", setOf("b"), gate.pending.value.keys)
+        assertEquals("b", gate.oldestPending(gate.pending.value)?.key)
         assertFalse("B is still waiting on the user", b.isCompleted)
 
         gate.resolve("b", approved = true)

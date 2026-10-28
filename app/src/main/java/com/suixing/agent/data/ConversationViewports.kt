@@ -33,6 +33,8 @@ internal data class ViewportBookmark(
     val totalTurns: Int = 0,
     val width: Int = 0,
     val fontScale: Float = 1f,
+    /** Older versions stored offsets from a reversed item's bottom edge. */
+    val topAnchored: Boolean = false,
 )
 
 internal class ConversationViewports(

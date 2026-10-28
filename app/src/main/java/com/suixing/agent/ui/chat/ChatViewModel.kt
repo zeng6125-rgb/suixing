@@ -329,7 +329,12 @@ data class SessionStats(
     val split: SessionSplit = SessionSplit(0, 0, 0),
     /** 整个会话的墙钟合计。 */
     val elapsedMs: Long = 0,
+    /** 此快照所属会话；异步重读统计时，StateFlow 可能仍保留上个会话的值。 */
+    val conversationId: String = "",
 ) {
+    internal fun forConversation(chatId: String): SessionStats? =
+        takeIf { conversationId == chatId }
+
     companion object {
         /**
          * 由**整个会话**的统计量构建（[ChatRepository.sessionTotals] 从 meta 读，O(1)）。
@@ -349,7 +354,11 @@ data class SessionStats(
                 contextWindow,
             )
 
-        internal fun of(totals: ChatTotals, contextWindow: Int): SessionStats? {
+        internal fun of(
+            totals: ChatTotals,
+            contextWindow: Int,
+            conversationId: String = "",
+        ): SessionStats? {
             val prompt = totals.promptTokens
             val completion = totals.completionTokens
             val cached = totals.cachedTokens
@@ -374,6 +383,7 @@ data class SessionStats(
                     output = completion.toLong(),
                 ),
                 elapsedMs = totals.elapsedMs,
+                conversationId = conversationId,
             )
         }
     }
@@ -510,7 +520,7 @@ class ChatViewModel : ViewModel() {
             val totals = withContext(Dispatchers.IO) {
                 runCatching { Core.chats.sessionTotals(request.chat) }.getOrNull()
             } ?: return@mapLatest null
-            SessionStats.of(totals, request.window)
+            SessionStats.of(totals, request.window, request.chat)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -614,12 +624,12 @@ class ChatViewModel : ViewModel() {
      *
      * A plain monitor rather than a `Mutex`: the accessors are not suspending functions
      * (the engine's event callback is a plain call), and a `Mutex` can only be taken from
-     * inside a coroutine. The same shape as [steersLock].
+     * inside a coroutine. The same shape as [PendingMessageQueues]' internal monitor.
      *
      * Held for one event and nothing else: no suspending call, no callback into this class
      * except the [removeSteer]/[publishSteers] pair of the 插话 event, which takes
-     * [steersLock] — always in that order, and [steersLock] is never held while this one
-     * is wanted, so there is no lock order to get wrong.
+     * the steering queue's monitor — always in that order. Queue methods never call back
+     * while holding their monitor, so there is no reverse lock order.
      */
 
     /**
@@ -659,43 +669,26 @@ class ChatViewModel : ViewModel() {
      * Concurrent on purpose, like [sessions]: the composer's callbacks and the run's event
      * callback are not the same thread, and a plain map written from two of them does not
      * only lose an update — it can lose entries of its own. Every access goes through the
-     * helpers below, which hold [steersLock] around the whole read-modify-write.
+     * helpers below; the queue owns the whole read-modify-write under one monitor.
      */
-    private val steers = ConcurrentHashMap<String, List<PendingSteer>>()
+    private val steers = PendingMessageQueues<PendingSteer> { it.id }
 
-    /**
-     * Guards the read-modify-write of [steers].
-     *
-     * A plain monitor rather than a `Mutex`: the accessors are not suspending functions
-     * (the composer's callbacks and the engine's event callback are both plain calls), and
-     * a `Mutex` can only be taken from inside a coroutine. The same shape as the steering
-     * queues in the engine, which the UI thread writes while the run's coroutine drains.
-     *
-     * Held for one map operation and nothing else: no suspending call, no callback into
-     * this class. [todoBoardsLock] is never held at the same time, so there is no lock
-     * order to get wrong.
-     */
-    private val steersLock = Any()
-
-    /** The queue of one conversation, read under [steersLock]. */
-    private fun steersOf(chatId: String): List<PendingSteer> =
-        synchronized(steersLock) { steers[chatId].orEmpty() }
+    /** The queue of one conversation, read under its own monitor. */
+    private fun steersOf(chatId: String): List<PendingSteer> = steers.list(chatId)
 
     /** Appends a line to a queue — the read and the write are one step. */
     private fun enqueueSteer(chatId: String, line: PendingSteer) {
-        synchronized(steersLock) { steers[chatId] = steers[chatId].orEmpty() + line }
+        steers.add(chatId, line)
     }
 
     /** Takes a line off a queue by id — the read and the write are one step. */
     private fun removeSteer(chatId: String, id: String) {
-        synchronized(steersLock) {
-            steers[chatId] = steers[chatId].orEmpty().filterNot { it.id == id }
-        }
+        steers.take(chatId, id)
     }
 
     /** Forgets a conversation's queue entirely. */
     private fun clearSteers(chatId: String) {
-        synchronized(steersLock) { steers.remove(chatId) }
+        steers.forget(chatId)
     }
 
     /**
@@ -706,17 +699,7 @@ class ChatViewModel : ViewModel() {
      * in one chat cannot be sent into another, and drained when that chat's run reports itself
      * finished.
      */
-    private val pendingTurns = ConcurrentHashMap<String, List<PendingTurn>>()
-
-    /**
-     * Conversations with a queued turn currently being handed to [send].
-     *
-     * The two drain hooks (the run-state watcher and the run's own `finally`) can fire for the same
-     * run end, and the first of them starts a run whose end can fire the second. Re-entrancy is what
-     * this closes: a turn is taken off the queue *before* it is sent, so a second entry finds the
-     * queue shorter and cannot deliver the same line twice.
-     */
-    private val draining = mutableSetOf<String>()
+    private val pendingTurns = PendingMessageQueues<PendingTurn> { it.id }
 
     /**
      * How many attempts the run in flight has spent on retries; 0 when none.
@@ -786,8 +769,8 @@ class ChatViewModel : ViewModel() {
     /**
      * Guards the read-modify-write of [todoBoards].
      *
-     * Never held at the same time as [steersLock], and never held across a suspending call
-     * or a callback into this class — see [steersLock] for why it is a plain monitor.
+     * Never held at the same time as a pending-message queue's monitor, nor across a
+     * suspending call or a callback into this class.
      */
     private val todoBoardsLock = Any()
 
@@ -1207,7 +1190,7 @@ class ChatViewModel : ViewModel() {
         // Read-and-clear: a failure that landed while another conversation was on screen
         // is reported the moment its own chat comes back.
         val failure = lastErrors.remove(conversation.id)
-        _state.value = if (live != null) {
+        val openedState = if (live != null) {
             // Coming back to the conversation a run owns: pick up what it has streamed
             // since, rather than the older snapshot on disk.
             ChatUiState(
@@ -1273,6 +1256,9 @@ class ChatViewModel : ViewModel() {
                 }
             }
         }
+        // 排队输入属于会话。后台运行结束时只保留队列，重新打开必须把它放回屏幕；
+        // 不能因为没有新 Running→terminal 事件就把用户输入永久留在不可见的表里。
+        _state.value = openedState.copy(pendingTurns = pendingTurnsOf(conversation.id))
         // **补读正文**（#30 + LRU 缓存）：上面只按 meta 建了状态，这里把最近 N 轮读进来。
         // 先查缓存：「切走再切回」在几个会话之间来回看是极常见的操作，不该每次都读盘。
         //
@@ -1315,6 +1301,7 @@ class ChatViewModel : ViewModel() {
             ) {
                 mergeLiveDraft(conversation.id, baseFromDisk = true)
             }
+            if (opened != null) resumePendingTurns(conversation.id)
         }
         // A run that was killed left its half-written answer in a draft file: it belongs to
         // this conversation, so it is picked up the moment the conversation is.
@@ -1322,7 +1309,12 @@ class ChatViewModel : ViewModel() {
         // 所以先 stat 一下再决定要不要起协程（#35）。
         if (cached != null && Core.chats.hasLiveDraft(conversation.id)) {
             // 命中 LRU 缓存时正文已经在手里（不需要读盘），可以直接合并。
-            viewModelScope.launch { mergeLiveDraft(conversation.id) }
+            viewModelScope.launch {
+                mergeLiveDraft(conversation.id)
+                resumePendingTurns(conversation.id)
+            }
+        } else if (cached != null) {
+            resumePendingTurns(conversation.id)
         }
         // Where the user is, for the next launch.
         rememberOpened(conversation.id)
@@ -1467,7 +1459,7 @@ class ChatViewModel : ViewModel() {
     private fun forgetConversation(chatId: String) {
         clearSteers(chatId)
         _drafts.update { it - chatId }
-        pendingTurns.remove(chatId)
+        pendingTurns.forget(chatId)
         todoBoards.remove(chatId)
         lastErrors.remove(chatId)
         windowStarts.remove(chatId)
@@ -1997,7 +1989,7 @@ class ChatViewModel : ViewModel() {
         // a compare-and-set loop, so a lost race re-reads the queue and publishes the newer
         // one. Reading it once before the update would let a later publish overwrite a newer
         // one with an older list.
-        _state.update { it.copy(pendingSteers = synchronized(steersLock) { steers[chatId].orEmpty() }) }
+        _state.update { it.copy(pendingSteers = steersOf(chatId)) }
     }
 
     /**
@@ -2005,59 +1997,23 @@ class ChatViewModel : ViewModel() {
      * [retractTurn]/[promoteTurn]），IO 线程读改写（`handleEvent` 里的 [drainPendingTurns]），
      * 原来的普通 map 会**静默丢更新**（用户排的 turn 凭空消失）。同一把锁把「读-改-写」收成一步。
      *
-     * [draining] 也在这把锁里动：它防的是两个 drain 同时发同一条（发两次比丢一条更糟）。
+     * 队列内部同时保护 drain 防重入标记，避免两个入口重复发送。
      */
-    private val pendingTurnsLock = Any()
-
     /** 队列里的 排队 turn（读，锁内）。 */
-    private fun pendingTurnsOf(chatId: String): List<PendingTurn> =
-        synchronized(pendingTurnsLock) { pendingTurns[chatId].orEmpty() }
+    private fun pendingTurnsOf(chatId: String): List<PendingTurn> = pendingTurns.list(chatId)
 
     /** 入队（锁内；读-改-写合成一步）。 */
     private fun enqueuePendingTurn(chatId: String, turn: PendingTurn) {
-        synchronized(pendingTurnsLock) { pendingTurns[chatId] = pendingTurns[chatId].orEmpty() + turn }
+        pendingTurns.add(chatId, turn)
     }
 
     /** 按 id 摘掉一条（锁内）。 */
     private fun removePendingTurn(chatId: String, id: String) {
-        synchronized(pendingTurnsLock) {
-            pendingTurns[chatId] = pendingTurns[chatId].orEmpty().filterNot { it.id == id }
-        }
+        pendingTurns.take(chatId, id)
     }
 
     /** 按 id 取出一条并同时把它摘掉（锁内，合成一步 ⇒ 不会取到别人已经摘走的那条）。 */
-    private fun takePendingTurn(chatId: String, id: String): PendingTurn? =
-        synchronized(pendingTurnsLock) {
-            val list = pendingTurns[chatId].orEmpty()
-            val hit = list.firstOrNull { it.id == id } ?: return@synchronized null
-            pendingTurns[chatId] = list.filterNot { it.id == id }
-            hit
-        }
-
-    /** 取队首并把它摘掉（锁内；发送被拒绝时要放回队首，见 [drainPendingTurns]）。 */
-    private fun takeHeadPendingTurn(chatId: String): PendingTurn? =
-        synchronized(pendingTurnsLock) {
-            val list = pendingTurns[chatId].orEmpty()
-            val head = list.firstOrNull() ?: return@synchronized null
-            pendingTurns[chatId] = list.drop(1)
-            head
-        }
-
-    /** 放回队首（发送被拒绝时，锁内）。 */
-    private fun restoreHeadPendingTurn(chatId: String, turn: PendingTurn) {
-        synchronized(pendingTurnsLock) {
-            pendingTurns[chatId] = listOf(turn) + pendingTurns[chatId].orEmpty()
-        }
-    }
-
-    /** 这个会话正在排空吗（防重入；锁内）。 */
-    private fun tryBeginDrain(chatId: String): Boolean =
-        synchronized(pendingTurnsLock) { draining.add(chatId) }
-
-    /** 排空结束（锁内）。 */
-    private fun endDrain(chatId: String) {
-        synchronized(pendingTurnsLock) { draining.remove(chatId) }
-    }
+    private fun takePendingTurn(chatId: String, id: String): PendingTurn? = pendingTurns.take(chatId, id)
 
     /** The same, for the 排队 turns waiting to become the next run. */
     private fun publishPendingTurns(chatId: String) {
@@ -2078,38 +2034,32 @@ class ChatViewModel : ViewModel() {
      * talking to itself.
      *
      * So: take it, try to send, and put it back **only** if the send was refused (a run still
-     * registered, or no conversation on screen to send into). [draining] keeps two hooks from
+     * registered, or no conversation on screen to send into). The queue's drain guard keeps hooks from
      * getting in each other's way; a refused turn is restored at the head, in order.
      */
     private fun drainPendingTurns(chatId: String) {
-        if (!tryBeginDrain(chatId)) return
-        try {
-            val next = takeHeadPendingTurn(chatId) ?: return
-            if (_state.value.conversationId != chatId) {
-                restoreHeadPendingTurn(chatId, next)
-                return
-            }
+        val result = pendingTurns.drain(chatId, isDisplayed = {
+            val shown = _state.value
+            shown.conversationId == chatId && !shown.loading
+        }) { next ->
             publishPendingTurns(chatId)
-            if (send(next.text, next.imagesBase64)) return
-            // Refused: back to the head, where the next trigger will try again. Nothing is lost and
-            // nothing was sent.
-            restoreHeadPendingTurn(chatId, next)
-            publishPendingTurns(chatId)
-            // Refused while **nothing is running** is the case that needs help: the engine publishes
-            // a run's terminal state before it lets go of the run, so a drain fired by that state can
-            // arrive in the gap and be refused — and no further emission comes, because the state
-            // flow has already settled. That is 「暂停后再发，助手没有响应」: the turn sat in the queue
-            // with nothing left to trigger it. One short retry closes the gap. A refusal while a run
-            // *is* going needs none: that run's end drains again.
-            if (!Core.engine.isRunning(chatId)) {
-                viewModelScope.launch {
-                    delay(RETRY_TURN_MS)
-                    drainPendingTurns(chatId)
-                }
-            }
-        } finally {
-            endDrain(chatId)
+            send(next.text, next.imagesBase64)
         }
+        if (result != PendingMessageQueues.DrainResult.REFUSED) return
+        publishPendingTurns(chatId)
+        // The terminal state can arrive before the engine unregisters. A refused turn stays
+        // at the head and gets one retry when nothing is running; a live run drains at its end.
+        if (!Core.engine.isRunning(chatId)) {
+            viewModelScope.launch {
+                delay(RETRY_TURN_MS)
+                drainPendingTurns(chatId)
+            }
+        }
+    }
+
+    /** Reopening a completed background chat has no future terminal event to drain its queue. */
+    private fun resumePendingTurns(chatId: String) {
+        if (!sessions.containsKey(chatId) && !Core.engine.isRunning(chatId)) drainPendingTurns(chatId)
     }
 
     /**
@@ -3436,14 +3386,19 @@ internal fun liveDraftFor(
  *
  * [LiveDraft.at] is deliberately not compared: it changes on every tick, and comparing it
  * would turn the interval into a write every second for a stream that has gone quiet. The
- * rounds are compared whole rather than by id — a card whose result just arrived replaces the
- * same id, and an id-only check would leave that write to the next tick, or to never.
+ * Check scalar lengths before walking strings/lists. A growing answer then rejects the old
+ * draft in O(1); unchanged immutable lists use their identity fast path. Same-length edits
+ * still receive exact comparisons: hashes/ids alone could lose the only recovery copy.
  */
 internal fun LiveDraft.sameContentAs(other: LiveDraft?): Boolean = other != null &&
+    other.chatId == chatId &&
     other.runId == runId &&
-    other.text == text &&
+    other.text.length == text.length &&
+    other.reasoning?.length == reasoning?.length &&
+    other.messages.size == messages.size &&
     other.reasoning == reasoning &&
-    other.messages == messages
+    other.messages == messages &&
+    other.text == text
 
 /**
  * 合并草稿时，**base 为空**要不要放弃这一次（先不动磁盘，把草稿留到下次）。
@@ -3518,8 +3473,6 @@ internal fun liveDraftRecovery(
     /** 中断原因，写进半截回答的尾部（用户：「由 xxx 原因，对话中断」）。 */
     cancelReason: String = "任务被停止",
 ): List<StoredMessage> {
-    val existingIds = messages.mapTo(HashSet()) { it.id }
-    val restored = draft.messages.filterNot { it.id in existingIds }
     val probe = draft.text.trim().take(LIVE_DRAFT_PROBE_CHARS)
     // **正文为空、只有思考内容**时也要判重（评审 9 建议项）。
     // `emitPartial` 在"还没吐正文"时会把 text="" + reasoning 全文发出来并落盘；
@@ -3531,17 +3484,23 @@ internal fun liveDraftRecovery(
     // （这恰恰是最常见的场景），相等永远不成立 ⇒ 还是会补一张重复的思考卡。
     // 方向与正文分支一致（那边一直用 `startsWith`），注释里也早写明"用相等会把每次正常结束
     // 都判成未落盘"。不做 trim：两边都没有规范化，逐字前缀关系是可靠的。
-    val reasoningDelivered = probe.isEmpty() && !draft.reasoning.isNullOrBlank() &&
-        messages.any { message ->
-            message.runId == draft.runId &&
-                message.role == Roles.ASSISTANT &&
-                message.reasoning?.startsWith(draft.reasoning) == true
+    val existingIds = HashSet<String>(messages.size)
+    val reasoningProbe = draft.reasoning?.takeIf { probe.isEmpty() && it.isNotBlank() }
+    var delivered = false
+    // One transcript traversal supplies both id de-duplication and the run-local prefix check.
+    // Recovery runs once on opening/stopping, not at the periodic writer's frequency.
+    for (message in messages) {
+        existingIds += message.id
+        if (delivered || message.runId != draft.runId || message.role != Roles.ASSISTANT) continue
+        delivered = if (reasoningProbe != null) {
+            message.reasoning?.startsWith(reasoningProbe) == true
+        } else if (probe.isNotEmpty()) {
+            message.text.trimmedStartsWith(probe)
+        } else {
+            false
         }
-    val delivered = reasoningDelivered || (probe.isNotEmpty() && messages.any { message ->
-        message.runId == draft.runId &&
-            message.role == Roles.ASSISTANT &&
-            message.text.trim().startsWith(probe)
-    })
+    }
+    val restored = draft.messages.filterNot { it.id in existingIds }
     // Nothing left to say only when the answer already landed, or when the draft is empty in
     // every sense. A run stopped while it was still thinking has no answer text at all, and
     // that is not the same as having produced nothing: the thinking — and any tool round
@@ -3571,6 +3530,15 @@ internal fun liveDraftRecovery(
         )
     }
     return restored + line
+}
+
+/** Equivalent to trim().startsWith(prefix), without copying the remaining long answer. */
+private fun String.trimmedStartsWith(prefix: String): Boolean {
+    var start = 0
+    var end = length
+    while (start < end && this[start].isWhitespace()) start++
+    while (end > start && this[end - 1].isWhitespace()) end--
+    return end - start >= prefix.length && startsWith(prefix, startIndex = start)
 }
 
 /** How many compressions of one conversation are kept; older ones are dropped. */

@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.chat
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -397,7 +398,9 @@ internal fun groupRows(
                 val arrived = buildList {
                     // 重试留痕在最前：它发生在这一轮产出任何字之前，排在思考/正文前面才是它真正的位置。
                     message.traceNote?.takeIf { it.isNotBlank() }?.let { add(Part.Trace(it)) }
-                    message.reasoning?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                    // Preserve the same lines as the live block at hand-over. Trimming
+                    // here removed leading/trailing rows under an active reader.
+                    message.reasoning?.takeIf { it.isNotBlank() }?.let {
                         add(Part.Thinking(it, message.reasoningTokens, message.elapsedMs, run))
                     }
                     if (message.text.isNotBlank()) add(Part.Text(message.text))
@@ -706,8 +709,9 @@ internal fun ringReading(
     // 实测口径优先：网关回报（含按会话保持的最近一次）→ **会话级权威值** → UI 现找。
     liveReported > 0 -> RingReading(liveReported, estimated = false)
     // **`persistedContext` 必须排在 `newestStored` 前面**（issue #49）：
-    // 后者是从**可见消息里现找**最后一条带 usage 的，一旦某几轮失败（网络错误、切了 provider
-    // 却没成功跑起来）就没有 usage，它会一路退到很早的轮次 ⇒ 圆环从 73% 掉到 4%。
+    // 后者只查可见气泡，纯工具调用的无正文 assistant 轮不会进入气泡的 rounds；若这轮
+    // 已上报 usage、后续却失败，就可能只找到更早的可见回答。普通无 usage 的失败本身
+    // 不会让两者不同：两条链都会保留最近一次实测，不能把缺少新 usage 当作充分原因。
     // `meta.contextTokens` 由 `ChatStore.appendTail` 维护、语义是「最近一次报了用量的 prompt」，
     // 失败轮**不会把它变小**，而且跨会话切走再回来是 O(1) 读 meta。
     persistedContext > 0 -> RingReading(persistedContext, estimated = false)
@@ -864,6 +868,7 @@ internal fun MessageRow(
     engineLabel: String = "",
     /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
     reasoningExpansion: ReasoningExpansion,
+    preserveExpanded: Boolean = false,
     onBranch: (String, String) -> Unit,
     onRegenerate: () -> Unit,
     onEdit: (StoredMessage) -> Unit,
@@ -908,6 +913,7 @@ internal fun MessageRow(
                 followReasoning = followReasoning,
                 bubbleMaxWidth = bubbleMaxWidth,
                 reasoningExpansion = reasoningExpansion,
+                preserveExpanded = preserveExpanded,
                 onBranch = onBranch,
                 onRegenerate = onRegenerate,
                 onEdit = onEdit,
@@ -926,10 +932,12 @@ internal fun MessageRow(
             AssistantRow(
                 parts = row.parts,
                 streaming = false,
+                message = row.message,
                 face = assistantFace,
                 avatarPath = assistantAvatarPath,
                 bubbleMaxWidth = bubbleMaxWidth,
                 reasoningExpansion = reasoningExpansion,
+                preserveExpanded = preserveExpanded,
             )
         }
     }
@@ -1062,6 +1070,7 @@ internal fun TurnMetrics(
     if (elapsedMs <= 0 && total <= 0) return
     val scheme = MaterialTheme.colorScheme
     var open by remember { mutableStateOf<MetricCard?>(null) }
+    BackHandler(enabled = open != null) { open = null }
     // What the card last showed: the popup stays composed through its exit animation, and an
     // empty card sliding away is worse than the one the user just closed.
     var shown by remember { mutableStateOf(MetricCard.TIME) }
@@ -1091,7 +1100,7 @@ internal fun TurnMetrics(
             }
         }
         Box(Modifier.align(Alignment.TopStart)) {
-            // MenuCard owns the outside-tap layer and BACK handler.
+            // MenuCard owns the outside-tap layer; this caller handles BACK above.
             val density = LocalDensity.current
             val topBarCardProvider = remember(density) {
                 val gap = with(density) { 8.dp.roundToPx() }
@@ -1323,6 +1332,8 @@ internal fun AssistantRow(
     /** 「提供方 / 模型」 for the usage card; blank leaves that line out. */
     engineLabel: String = "",
     message: StoredMessage? = null,
+    runId: String = message?.runId.orEmpty(),
+    preserveExpanded: Boolean = false,
     expandTools: Boolean = false,
     /** 外观 → 历史思考块默认展开; see [ReasoningBlock.expandReasoning]. */
     expandReasoning: Boolean = true,
@@ -1337,6 +1348,7 @@ internal fun AssistantRow(
     onRegenerate: () -> Unit = {},
     onEdit: (StoredMessage) -> Unit = {},
 ) {
+    val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
     Surface(
         // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
         // constraint, or the inner fill would win and the card could never narrow.
@@ -1375,17 +1387,19 @@ internal fun AssistantRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // The summary opens the bubble and waits for the run to settle: while it
-            // streams the numbers are still moving, and a card that changes shape under the
-            // reader's eyes is worse than no card at all.
-            // 头像行→10→首块（无汇总卡的流式态也走这一条）。
+            // The same fixed-height process header exists on both sides of hand-over.
+            // Completion updates numbers without inserting a new row above the prose.
             Spacer(Modifier.height(6.dp))
             val settled = usage?.takeIf { it.known }
-            if (!streaming && (settled != null || parts.isNotEmpty())) {
+            if (streaming || settled != null || parts.isNotEmpty()) {
                 TurnSummary(
                     parts = parts,
                     usage = usage,
                     live = null,
+                    streaming = streaming,
+                    runningTool = runningTool,
+                    runId = processRun,
+                    preserveExpanded = preserveExpanded,
                     contextWindow = contextWindow,
                     // The run's note, when there was one: it lives on the stats for as long as
                     // the run does, which is exactly the window in which this card is drawn
@@ -1394,23 +1408,23 @@ internal fun AssistantRow(
                     note = liveStats?.note.orEmpty(),
                     reasoningMaxHeight = reasoningMaxHeight,
                     followReasoning = followReasoning,
-                    // The card's thinks are settled ones: this is what decides whether they open.
+                    // Untouched settled thinks follow the appearance default.
                     expandReasoning = expandReasoning,
                     // 工具块与运行时同一套默认展开设置（用户：「展开时原样展开」）。
                     expandTools = expandTools,
-                    // The stored blocks answer to their message, so the table keeps their
-                    // state apart from the live run's and from every other message's.
+                    // The run identity, not this message id, owns each block's state.
                     messageId = message?.id.orEmpty(),
                     reasoningExpansion = reasoningExpansion,
                     onEdit = onEdit,
                 )
-                // 头像行→10→首块、末块→10→正文/气泡底: the card's own air below is
-                // this spacer, so a bubble without a card does not stack two of them.
-                Spacer(Modifier.height(6.dp))
+                // Expanded content already owns the single 6dp seam with the flat
+                // tail, including when its prefix is empty. A collapsed header
+                // needs that same seam outside its unmounted content instead.
+                Spacer(Modifier.height(if (reasoningExpansion.summaryExpanded(parts, processRun, streaming)) 0.dp else 6.dp))
             }
             // The last text slot follows the current snapshot; versioned live parts must
             // never be memoized across actual text changes.
-            val lastText = remember(parts) { parts.indexOfLast { it is Part.Text } }
+            val tailStart = remember(parts) { processTailStart(parts) }
             // key(index): without it every part's remembered state was allocated by
             // position, so a new round appearing at the front moved one block's switch onto
             // its neighbour.
@@ -1418,27 +1432,14 @@ internal fun AssistantRow(
                 // Guarded before key(index), not inside it: a non-local return out of the
                 // key group leaves that group unclosed, and Compose aborts the composition
                 // with "Start/end imbalance". Same conditions, evaluated outside the group.
-                if (part is Part.Thinking && !streaming) return@forEachIndexed
-                if (part is Part.Tools && !streaming) return@forEachIndexed
-                if (part is Part.Text && !streaming && index != lastText) return@forEachIndexed
-                // **留痕与压缩块在存盘行只由「过程」卡画**（展开才会组合）：这里再画一次就是
-                // 同一份内容出现两份（用户实测「展开后重试留痕重复」）。插话（Steer）不在此列 ——
-                // 那是用户自己说的话，任何时候都要在正文流里看得见，所以它反而从展开体里删掉了。
-                if (part is Part.Trace && !streaming) return@forEachIndexed
-                if (part is Part.Compress && !streaming) return@forEachIndexed
+                if (index < tailStart) return@forEachIndexed
+                // Each part belongs to exactly one side of the process/tail boundary.
                 key(index) {
                     val last = index == parts.lastIndex
                     when (part) {
                         is Part.Thinking -> {
-                            // A settled reply keeps its thinking inside the summary card
-                            // alone: a second copy beside the answer is what made one
-                            // answer read as a stack of blocks. Live it still streams here.
-                            // 正在长的那一块才走打字机；已经结束的思考块一次给全（关掉开关时
-                            // rememberTypedText 直接原样返回，这条分支等于不存在）。
-                            // **打字机条件绝不能带 `&& last`**：思考块一旦不再是最后一个
-                            // （正文/工具开始流），它当场退出打字机 ⇒ 没打完的字一次性全出 ——
-                            // 这就是「先逐字、后瞬移」（用户连续反馈三轮）。
-                            // `streaming` 本身够了：块还在屏幕上就继续把剩下的字打完。
+                            // Only the growing block owns the cursor. Earlier thoughts
+                            // remain open by default until their whole run settles.
                             val thinkingLive = streaming && last
                             ReasoningBlock(
                                 // **直接渲染，不做打字机**（与正文、与 DSH 的流式一致）：
@@ -1448,9 +1449,10 @@ internal fun AssistantRow(
                                 // A live block is the one still growing; a settled round's
                                 // thinking is complete even while the run continues.
                                 streaming = thinkingLive,
+                                runStreaming = streaming,
                                 // A live block keeps its slot for the whole run, and the
                                 // stored copy of the same run answers to the same key.
-                                blockId = thinkSlot(parts, index, "live"),
+                                blockId = thinkSlot(parts, index, processRun),
                                 expansion = reasoningExpansion,
                                 reasoningTokens = part.tokens,
                                 elapsedMs = part.elapsedMs,
@@ -1467,23 +1469,14 @@ internal fun AssistantRow(
                         }
 
                         is Part.Tools -> {
-                            // Same rule as thinking: settled tool rows live in the summary
-                            // card's expanded list, not flat beside the answer.
-                            // Consecutive tool rounds merge into one block: one card per
-                            // run of calls, not a card inside a card per round.
-                            // Key only the contiguous tool run: later text deltas cannot
-                            // invalidate an unchanged bundle or copy all its tool output again.
-                            var cursor = index + 1
-                            while (cursor < parts.size && parts[cursor] is Part.Tools) cursor++
-                            val toolRun = parts.subList(index, cursor)
-                            val tools = remember(toolRun) {
-                                if (toolRun.size == 1) part.calls
-                                else toolRun.flatMap { (it as Part.Tools).calls }
-                            }
+                            // LivePart and groupRows already group adjacent calls. Drawing
+                            // each part once also preserves the source order at hand-over.
                             ToolBundle(
-                                tools = tools,
+                                tools = part.calls,
+                                expansion = reasoningExpansion,
+                                blockId = processFoldSlot(parts, index, processRun)!!,
                                 // Only the newest block can be the one waiting on a tool.
-                                runningTool = runningTool.takeIf { cursor > parts.lastIndex },
+                                runningTool = runningTool.takeIf { streaming && last },
                                 startExpanded = expandTools,
                             )
                             if (!last) Spacer(Modifier.height(6.dp))
@@ -1516,13 +1509,15 @@ internal fun AssistantRow(
 
                         // 压缩块：位置就是它发生的地方。
                         is Part.Compress -> {
-                            CompressionBlock(part.checkpoint)
+                            CompressionBlock(part.checkpoint, reasoningExpansion,
+                                processFoldSlot(parts, index, processRun)!!)
                             if (!last) Spacer(Modifier.height(6.dp))
                         }
                     }
                 }
             }
             if (parts.isEmpty() && streaming) TypingDots()
+            SummaryUsageDetails(usage, liveStats, contextWindow)
             if (message != null && !streaming) {
                 // The last block carries no trailing spacer of its own, so the air
                 // above this row is its own 10dp.
@@ -1559,7 +1554,7 @@ internal fun AssistantRow(
 
 /** Keep typewriter state reads inside the prose rather than the whole reply content. */
 @Composable
-private fun AssistantProse(part: Part.Text, streaming: Boolean) {
+internal fun AssistantProse(part: Part.Text, streaming: Boolean, typewriter: Boolean = true) {
     // History is selectable immediately. A newly mounted live block waits one frame,
     // and selection still waits for streaming and the remaining typed text to finish.
     var selectable by remember { mutableStateOf(!streaming) }
@@ -1572,8 +1567,8 @@ private fun AssistantProse(part: Part.Text, streaming: Boolean) {
     val liveText = part.bornAtMs > 0L
     val shown = rememberTypedText(
         text = part.text,
-        enabled = streaming || liveText,
-        startAtZero = liveText,
+        enabled = typewriter && (streaming || liveText),
+        startAtZero = typewriter && liveText,
     )
     if (streaming || !selectable || shown.length < part.text.length) {
         MarkdownText(

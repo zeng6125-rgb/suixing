@@ -26,7 +26,7 @@ import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,7 +61,7 @@ internal fun McpSection(
     onNotify: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val servers by Core.mcp.servers.collectAsState()
+    val servers by Core.mcp.servers.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),

@@ -1,7 +1,8 @@
 package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyListState
@@ -25,7 +26,8 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.ViewportBookmark
 import kotlin.math.abs
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -77,10 +79,37 @@ internal fun bookmarkRow(bookmark: ViewportBookmark?, keys: List<String>, rows: 
 internal class ConversationViewport(val conversationId: String, val bookmark: ViewportBookmark?) {
     // Two screens ahead, one behind: bounded reuse instead of retaining whole transcripts.
     val listState = LazyListState(cacheWindow = LazyLayoutCacheWindow(aheadFraction = 2f, behindFraction = 1f))
-    val alpha = Animatable(0f)
+    // One target transcript, with opacity finishing before its small spatial settle. Reads
+    // stay in graphicsLayer; changing this clock never recomposes or remeasures the rows.
+    val entrance = Animatable(0f)
     var prepared by mutableStateOf(false)
     var presented by mutableStateOf(false)
     var followOverride by mutableStateOf(false)
+}
+
+internal object ConversationEntrance {
+    const val DURATION_MS = 240
+    private val fade = CubicBezierEasing(0f, 0f, 0.2f, 1f)
+    private val settle = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
+    fun alpha(progress: Float): Float = fade.transform((progress * 2f).coerceIn(0f, 1f))
+    fun remainingTravel(progress: Float): Float = 1f - settle.transform(progress.coerceIn(0f, 1f))
+}
+
+/** A new row projection matters even when a streamed/edited row keeps its list index. */
+private class NearbyPreparation(
+    val rows: List<ChatRow>,
+    val revision: Long,
+    val prefix: Int,
+    val first: Int,
+    val last: Int,
+) {
+    override fun equals(other: Any?): Boolean = other is NearbyPreparation &&
+        rows === other.rows && revision == other.revision && prefix == other.prefix &&
+        first == other.first && last == other.last
+
+    override fun hashCode(): Int = 31 * (31 * (31 * (31 * System.identityHashCode(rows) +
+        revision.hashCode()) + prefix) + first) + last
 }
 
 /** Bound under key(conversationId): disposal cannot read the next chat's providers. */
@@ -91,7 +120,9 @@ internal fun BindConversationViewport(
     scroll: ChatScroll,
     rows: List<ChatRow>,
     keys: List<String>,
+    keyIndices: Map<String, Int>,
     feedPrefix: Int,
+    itemCount: Int,
     shownTurns: Int,
     totalTurns: Int,
     fontScale: Float,
@@ -101,7 +132,9 @@ internal fun BindConversationViewport(
 ) {
     val rowsNow = rememberUpdatedState(rows)
     val keysNow = rememberUpdatedState(keys)
+    val keyIndicesNow = rememberUpdatedState(keyIndices)
     val prefixNow = rememberUpdatedState(feedPrefix)
+    val countNow = rememberUpdatedState(itemCount)
     val turnsNow = rememberUpdatedState(shownTurns)
     val totalNow = rememberUpdatedState(totalTurns)
     val fontNow = rememberUpdatedState(fontScale)
@@ -114,11 +147,14 @@ internal fun BindConversationViewport(
         {
             if (viewport.presented && !scroll.restoring && viewport.conversationId.isNotBlank()) {
                 val list = viewport.listState
-                val first = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == list.firstVisibleItemIndex }
+                val first = list.layoutInfo.visibleItemsInfo.firstOrNull {
+                    it.key in keyIndicesNow.value ||
+                        (it.key as? String)?.startsWith("run:${viewport.conversationId}:") == true
+                }
                 if (first != null) {
                     val key = first.key as? String
-                    val row = keysNow.value.indexOf(key).takeIf { it >= 0 }?.let { rowsNow.value.getOrNull(it) }
-                    val rowIndex = keysNow.value.indexOf(key)
+                    val rowIndex = keyIndicesNow.value[key] ?: -1
+                    val row = rowsNow.value.getOrNull(rowIndex)
                     val nearby = if (rowIndex >= 0) listOfNotNull(rowsNow.value.getOrNull(rowIndex - 1)?.message?.id,
                         rowsNow.value.getOrNull(rowIndex + 1)?.message?.id)
                         else rowsNow.value.takeLast(2).map { it.message.id }
@@ -130,12 +166,14 @@ internal fun BindConversationViewport(
                         messageId = row?.message?.id,
                         runId = row?.message?.runId?.takeIf { it.isNotBlank() } ?: liveRun,
                         nearbyMessageIds = nearby,
-                        offset = list.firstVisibleItemScrollOffset,
+                        offset = if (first.index == list.firstVisibleItemIndex)
+                            list.firstVisibleItemScrollOffset else -first.offset,
                         followLatest = scroll.stickToBottom,
                         shownTurns = turnsNow.value,
                         totalTurns = totalNow.value,
                         width = list.layoutInfo.viewportSize.width,
                         fontScale = fontNow.value,
+                        topAnchored = true,
                     ))
                 }
             }
@@ -184,23 +222,26 @@ internal fun BindConversationViewport(
         snapshotFlow { revisionNow.value }.first { it == viewModel.screenState.value.messagesRevision }
         var target = bookmarkRow(bookmark, keysNow.value, rowsNow.value)
         val center = if (target >= 0) target else rowsNow.value.lastIndex
-        prepareNow.value(rowsNow.value.filterIndexed { at, _ -> abs(at - center) <= 3 })
+        prepareNow.value(openingViewportRows(rowsNow.value, center))
         // Parsing suspends: structural rows or a live/status prefix may have changed meanwhile.
         snapshotFlow { revisionNow.value }.first { it == viewModel.screenState.value.messagesRevision }
         target = bookmarkRow(bookmark, keysNow.value, rowsNow.value)
         val liveKey = bookmark?.rowKey?.takeIf { it == liveRowKey(viewport.conversationId, viewModel.state.value.liveRunId) }
+        val following = viewport.followOverride || bookmark == null || bookmark.followLatest ||
+            target < 0 && liveKey == null
         val index = when {
-            bookmark == null || bookmark.followLatest -> 0
-            liveKey != null -> 0
-            target >= 0 -> prefixNow.value + rowsNow.value.lastIndex - target
-            else -> 0
+            following || liveKey != null -> (countNow.value - 1).coerceAtLeast(0)
+            target >= 0 -> prefixNow.value + target
+            else -> prefixNow.value
         }
         val compatible = bookmark == null || (bookmark.width == 0 || abs(bookmark.width - expectedWidth) <= 2) &&
             abs(bookmark.fontScale - fontNow.value) < 0.01f
-        val offset = if (compatible && (target >= 0 || liveKey != null)) bookmark?.offset ?: 0 else 0
-        scroll.stickToBottom = viewport.followOverride || bookmark?.followLatest != false || target < 0 && liveKey == null
+        val offset = if (following) TRANSCRIPT_END_OFFSET
+            else if (compatible && bookmark?.topAnchored == true && (target >= 0 || liveKey != null)) bookmark.offset
+            else 0
+        scroll.stickToBottom = following
         val beforeLayout = viewport.listState.layoutInfo
-        viewport.listState.requestScrollToItem(if (viewport.followOverride) 0 else index, if (viewport.followOverride) 0 else offset)
+        viewport.listState.requestScrollToItem(index, offset)
         viewport.prepared = true
         if (rowsNow.value.isNotEmpty() || viewModel.state.value.runningHere) {
             snapshotFlow { viewport.listState.layoutInfo }.first {
@@ -211,18 +252,34 @@ internal fun BindConversationViewport(
                 // Edited/shortened rows may invalidate a pixel offset. Retry the same stable
                 // row at its boundary while still hidden; never repair a visible transcript.
                 val at = keysNow.value.indexOf(targetKey)
-                val retry = if (at >= 0) prefixNow.value + rowsNow.value.lastIndex - at else 0
+                val retry = if (at >= 0) prefixNow.value + at else (countNow.value - 1).coerceAtLeast(0)
                 val previous = viewport.listState.layoutInfo
                 viewport.listState.requestScrollToItem(retry)
                 withTimeoutOrNull(2_000) {
                     snapshotFlow { viewport.listState.layoutInfo }.first { it !== previous && it.visibleItemsInfo.isNotEmpty() }
                 }
             }
+            // Old bookmarks measured an item's bottom against the bottom reading edge.
+            // Convert only after its height is known and while the list is still hidden.
+            if (!following && compatible && bookmark?.topAnchored == false && targetKey != null) {
+                val layout = viewport.listState.layoutInfo
+                val item = layout.visibleItemsInfo.firstOrNull { it.key == targetKey }
+                if (item != null) {
+                    val readingHeight = (layout.viewportSize.height - layout.beforeContentPadding - layout.afterContentPadding)
+                        .coerceAtLeast(0)
+                    val converted = if (viewport.listState.canScrollBackward || viewport.listState.canScrollForward)
+                        legacyReadingOffset(bookmark.offset, item.size, readingHeight) else 0
+                    viewport.listState.requestScrollToItem(item.index, converted)
+                    withTimeoutOrNull(2_000) {
+                        snapshotFlow { viewport.listState.layoutInfo }.first { it !== layout && it.visibleItemsInfo.isNotEmpty() }
+                    }
+                }
+            }
         }
         scroll.restoring = false
         viewport.presented = true
         var acknowledged = false
-        viewport.alpha.animateTo(1f, tween(180, easing = LinearOutSlowInEasing)) {
+        viewport.entrance.animateTo(1f, tween(ConversationEntrance.DURATION_MS, easing = LinearEasing)) {
             if (!acknowledged && value > 0f) {
                 viewModel.presentViewport(viewport.conversationId)
                 acknowledged = true
@@ -231,19 +288,29 @@ internal fun BindConversationViewport(
     }
 
     LaunchedEffect(viewport, scroll) {
-        snapshotFlow { Triple(viewport.listState.firstVisibleItemIndex, viewport.listState.firstVisibleItemScrollOffset,
-            viewport.listState.isScrollInProgress) }.collectLatest { (_, _, moving) ->
-            if (!moving) capture()
+        snapshotFlow {
+            // While a gesture/fling owns the list, a bookmark cannot be final. Avoid
+            // allocating/emitting a tuple and starting a collector on every scroll pixel.
+            if (viewport.listState.isScrollInProgress) null else
+                viewport.listState.firstVisibleItemIndex to viewport.listState.firstVisibleItemScrollOffset
+        }.collect { idlePosition ->
+            if (idlePosition != null) capture()
         }
     }
     LaunchedEffect(viewport) {
-        snapshotFlow { viewport.listState.layoutInfo.visibleItemsInfo.map { it.index } }
-            .collectLatest { indices ->
-                if (!viewport.prepared || indices.isEmpty()) return@collectLatest
-                val low = (indices.min() - prefixNow.value - 4).coerceAtLeast(0)
-                val high = indices.max() - prefixNow.value + 4
-                val last = rowsNow.value.lastIndex
-                prepareNow.value(rowsNow.value.filterIndexed { index, _ -> last - index in low..high })
+        snapshotFlow {
+            val items = viewport.listState.layoutInfo.visibleItemsInfo
+            if (!viewport.presented || items.isEmpty()) null else NearbyPreparation(
+                rowsNow.value, revisionNow.value, prefixNow.value, items.first().index, items.last().index,
+            )
+        }.filterNotNull().conflate().collect { request ->
+                // Finish at most one bounded parse, retaining only the newest pending
+                // window. collectLatest used to restart work at every item boundary.
+                // Disposal of this viewport still cancels the entire operation.
+                if (request.rows !== rowsNow.value || request.revision != revisionNow.value ||
+                    request.prefix != prefixNow.value) return@collect
+                prepareNow.value(nearbyViewportRows(request.rows, request.prefix, request.first, request.last,
+                    reverseLayout = false))
             }
     }
 }

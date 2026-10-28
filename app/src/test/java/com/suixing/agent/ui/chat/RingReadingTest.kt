@@ -1,5 +1,9 @@
 package com.suixing.agent.ui.chat
 
+import com.suixing.agent.data.Roles
+import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.StoredToolCall
+import com.suixing.agent.data.foldTotals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -88,19 +92,64 @@ class RingReadingTest {
     /**
      * **issue #49**：切 provider 后圆环 73% → 4% → 73%。
      *
-     * 复现条件：几轮失败（网络错误）没有 usage ⇒ `newestStored` 会退到很久以前的小值。
-     * 会话级权威值 `persistedContext` 不受失败轮影响，必须排在它前面。
+     * 可见气泡不是完整存储：纯工具调用的无正文 assistant 轮可以有 usage，却不进气泡。
+     * 会话级值必须排在可见气泡的旧值前面；失败本身没有新 usage 时不会制造这类差异。
      */
     @Test
-    fun `a failed round cannot drag the ring back through newestStored`() {
+    fun `a full-session report outranks an older visible report`() {
         val reading = ringReading(
             liveReported = 0,
-            newestStored = 40_000,      // 失败轮跳过后，退到很早的轮次
+            newestStored = 40_000,      // 可见气泡的旧实测
             liveEstimate = 0,
             persistedContext = 730_000, // 会话级权威值：最近一次真正上报的 prompt
         )
         assertEquals("失败轮不该把读数拉到旧轮次", 730_000, reading.tokens)
         assertFalse(reading.estimated)
+    }
+
+    @Test
+    fun `a textless tool round remains authoritative after a later failure`() {
+        val messages = listOf(
+            StoredMessage(id = "u1", role = Roles.USER, text = "第一问"),
+            StoredMessage(
+                id = "a1", role = Roles.ASSISTANT, text = "上一轮回答",
+                runId = "r1", promptTokens = 40_000,
+            ),
+            StoredMessage(id = "u2", role = Roles.USER, text = "执行工具"),
+            StoredMessage(
+                id = "a2", role = Roles.ASSISTANT, text = "",
+                runId = "r2", promptTokens = 730_000,
+                toolCalls = listOf(StoredToolCall("call-2", "run-shell", "{}")),
+            ),
+            StoredMessage(
+                id = "t2", role = Roles.TOOL, text = "工具结果",
+                runId = "r2", toolName = "run-shell", toolCallId = "call-2",
+            ),
+            StoredMessage(id = "error", role = Roles.SYSTEM, text = "这一轮最终失败：网络错误", runId = "r2"),
+        )
+        val visible = groupRows(messages, emptyMap(), running = false)
+        val visiblePrompt = visible.lastOrNull { it.usage != null }?.usage?.prompt ?: 0
+        val persistedPrompt = foldTotals(messages).contextTokens
+        assertEquals("the textless tool-call round has no visible usage chip", 40_000, visiblePrompt)
+        assertEquals(730_000, persistedPrompt)
+        val reading = ringReading(0, visiblePrompt, 0, persistedContext = persistedPrompt)
+        assertEquals(730_000, reading.tokens)
+        assertFalse(reading.estimated)
+    }
+
+    @Test
+    fun `a plain failure without usage preserves the same latest report in both sources`() {
+        val messages = listOf(
+            StoredMessage(
+                id = "a1", role = Roles.ASSISTANT, text = "回答", promptTokens = 40_000,
+            ),
+            StoredMessage(id = "error", role = Roles.SYSTEM, text = "这一轮最终失败：网络错误"),
+        )
+        val visible = groupRows(messages, emptyMap(), running = false)
+        assertEquals(
+            foldTotals(messages).contextTokens,
+            visible.lastOrNull { it.usage != null }?.usage?.prompt,
+        )
     }
 
     @Test

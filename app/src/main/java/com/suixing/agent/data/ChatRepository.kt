@@ -813,10 +813,12 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
                     "meta unreadable for ${conversation.id}: refusing to fall back to a full write",
                 )
             }
-        val next = store.appendNew(onDisk, newMessages)
         // The meta's own fields (title / pinned / archived / model …) still come from the
-        // conversation, not from the old meta.
-        val updated = next.copy(
+        // conversation, not from the old meta. Supply them BEFORE append commits: committing
+        // the old fields and writing them again cost a second meta fsync for every save.
+        // The log is still synced before its single metadata commit; no durability boundary
+        // or watermark validation is removed.
+        val updated = onDisk.copy(
             title = conversation.title,
             updatedAt = conversation.updatedAt,
             pinned = conversation.pinned,
@@ -828,8 +830,13 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             reasoningEffort = conversation.reasoningEffort,
             checkpoints = conversation.checkpoints,
         )
-        store.writeMeta(updated)
-        return updated.toConversation()
+        val committed = if (newMessages.isEmpty()) {
+            store.writeMeta(updated)
+            updated
+        } else {
+            store.appendNew(updated, newMessages)
+        }
+        return committed.toConversation()
     }
 
     /** 这个会话在 store 里是否**已经有日志文件**（不管 meta 读不读得出来）。 */

@@ -63,6 +63,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.cancellation.CancellationException
 
 /** Everything the UI needs to render while the agent is working. */
@@ -189,7 +190,13 @@ class ApprovalGate(
     private val settings: SettingsRepository? = null,
     private val scope: CoroutineScope? = null,
 ) {
-    data class Request(val id: String, val toolName: String, val args: String)
+    data class Request(val id: String, val toolName: String, val args: String, val sequence: Long = 0)
+
+    private val requestSequence = AtomicLong()
+
+    /** Oldest requested approval wins, independently of the map implementation. */
+    fun oldestPending(requests: Map<String, Request>): Map.Entry<String, Request>? =
+        requests.entries.minByOrNull { it.value.sequence }
 
     private data class Decision(val approved: Boolean, val always: Boolean)
 
@@ -238,7 +245,8 @@ class ApprovalGate(
         val id = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Decision>()
         waiters[chatId] = deferred
-        _pending.update { it + (chatId to Request(id, toolName, args)) }
+        val request = Request(id, toolName, args, requestSequence.incrementAndGet())
+        _pending.update { it + (chatId to request) }
         val decision = deferred.await()
         waiters.remove(chatId)
         _pending.update { it - chatId }
@@ -832,8 +840,6 @@ class AgentEngine(
         @Volatile
         private var breakTools = 0
 
-        /** [breakTools] 是按哪一组工具算出来的：工具集变了就重算（插件热插拔会改它）。 */
-        private var breakToolsSig: String? = null
 
         @Volatile
         private var breakHistory = 0
@@ -1278,7 +1284,13 @@ class AgentEngine(
                 val pluginSpecs = PluginRuntime.enabledPlugins()
                 val toolSpecs = builtinSpecs +
                     PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
-                ToolTable(pluginSpecs, toolSpecs)
+                ToolTable(
+                    pluginSpecs,
+                    toolSpecs,
+                    toolSpecs.sumOf {
+                        it.name.length + it.description.length + it.parameters.toString().length
+                    } / 4,
+                )
             }
             while (roundLimit <= 0 || round < roundLimit) {
                 round++
@@ -1320,12 +1332,6 @@ class AgentEngine(
                 // Measured here, where the wire for this round is final: steering has landed
                 // and compression has already run, so the numbers match what is about to be
                 // sent rather than what the round started with.
-                // 接线点 A（HOST-DEV §5）：内置工具之后**追加启用插件的工具**（`<id>.<tool>`）。
-                // 重名的插件工具在 PluginRuntime.toolSpecs 里被跳过并记日志 —— 内置优先，绝不覆盖。
-                // 实时读盘：用户刚启用的插件，下一个请求就该出现在工具表里。
-                // **拼装下放 Default**（#36 A）：enabledPlugins() 在 TTL 过期时扫目录 + 逐插件
-                // readText + JSON 解析；breakTools 的 parameters.toString() 是全量序列化。每轮
-                // 一遍，原来全在 Main。字段赋值（breakToolsSig/breakTools）仍留在调用线程。
                 // **run 期间工具目录冻结**（issue #44 第三项）：原来这里是每轮重新拼装，
                 // 于是无障碍/Shizuku/Root 能力一变化（或插件目录一变化）工具表就换掉 ⇒
                 // prompt 的工具清单前缀全失效，整个上下文缓存作废，下一轮重新计费 + 变慢。
@@ -1338,17 +1344,9 @@ class AgentEngine(
                 // 调用都过一遍 [PluginRuntime.preExecute] —— 每轮读一次目录是刻意的（热插拔），
                 // 每条调用查一次 hook 是纯函数、不碰磁盘。
                 val hooks = PluginRuntime.hooksFor(pluginSpecs)
-                // **工具集没变就不重算**：这一行会把每个工具的 parameters（JsonObject）
-                // 完整序列化成字符串、只为取长度 —— 二十来个工具、每轮一次，纯浪费。
-                // 但工具集**是会变的**（插件热插拔），所以用「工具名序列」当缓存键：
-                // 名字集合相同 ⇒ 表没变 ⇒ 沿用上次的计数；变了就重算。
-                val toolSig = toolSpecs.joinToString(",") { it.name }
-                if (breakToolsSig != toolSig) {
-                    breakToolsSig = toolSig
-                    breakTools = toolSpecs.sumOf {
-                        it.name.length + it.description.length + it.parameters.toString().length
-                    } / 4
-                }
+                // The frozen table's estimate is computed once on Default, including
+                // JSON serialization. No signature allocation or schema work per round.
+                breakTools = frozenTable.estimatedTokens
                 // 三个数字都来自同一份 wire：一次遍历算完，别为每个数字各扫一遍
                 // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
                 // **这一遍扫描也放后台**（issue #36 同类）：几十万字符的遍历不该占着主线程，
@@ -2681,4 +2679,5 @@ private fun StoredMessage.withUsage(
 private class ToolTable(
     val plugins: List<PluginSpec>,
     val specs: List<ToolSpec>,
+    val estimatedTokens: Int,
 )

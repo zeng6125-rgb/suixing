@@ -100,11 +100,13 @@ class MarkdownTest {
     }
 
     @Test
-    fun `a nested list becomes its own indented block`() {
+    fun `a nested list belongs to its parent item`() {
         assertEquals(
             listOf<MdBlock>(
-                MdBlock.Bullet(listOf("a"), ordered = false, depth = 0),
-                MdBlock.Bullet(listOf("b"), ordered = false, depth = 1),
+                MdBlock.Bullet(
+                    listOf("a"), ordered = false,
+                    children = mapOf(0 to listOf(MdBlock.Bullet(listOf("b"), ordered = false, depth = 1))),
+                ),
             ),
             parseMarkdown("- a\n  - b"),
         )
@@ -114,9 +116,10 @@ class MarkdownTest {
     fun `returning from a nested list retains following parent items`() {
         assertEquals(
             listOf<MdBlock>(
-                MdBlock.Bullet(listOf("parent"), ordered = false, depth = 0),
-                MdBlock.Bullet(listOf("child"), ordered = false, depth = 1),
-                MdBlock.Bullet(listOf("next", "last"), ordered = false, depth = 0),
+                MdBlock.Bullet(
+                    listOf("parent", "next", "last"), ordered = false,
+                    children = mapOf(0 to listOf(MdBlock.Bullet(listOf("child"), ordered = false, depth = 1))),
+                ),
             ),
             parseMarkdown("- parent\n  - child\n- next\n- last"),
         )
@@ -126,8 +129,10 @@ class MarkdownTest {
     fun `a tab indents one level like two spaces`() {
         assertEquals(
             listOf<MdBlock>(
-                MdBlock.Bullet(listOf("a"), ordered = false, depth = 0),
-                MdBlock.Bullet(listOf("b"), ordered = false, depth = 1),
+                MdBlock.Bullet(
+                    listOf("a"), ordered = false,
+                    children = mapOf(0 to listOf(MdBlock.Bullet(listOf("b"), ordered = false, depth = 1))),
+                ),
             ),
             parseMarkdown("- a\n\t- b"),
         )
@@ -137,8 +142,10 @@ class MarkdownTest {
     fun `indentation deeper than four levels is capped`() {
         assertEquals(
             listOf<MdBlock>(
-                MdBlock.Bullet(listOf("a"), ordered = false, depth = 0),
-                MdBlock.Bullet(listOf("b"), ordered = false, depth = 4),
+                MdBlock.Bullet(
+                    listOf("a"), ordered = false,
+                    children = mapOf(0 to listOf(MdBlock.Bullet(listOf("b"), ordered = false, depth = 4))),
+                ),
             ),
             parseMarkdown("- a\n" + " ".repeat(20) + "- b"),
         )
@@ -433,14 +440,45 @@ class MarkdownTest {
     @Test
     fun `a nested ordered list keeps its own start`() {
         val blocks = parseMarkdown("1. a\n   3. b\n   4. c")
-        assertEquals(2, blocks.size)
-        val outer = blocks[0] as MdBlock.Bullet
-        val inner = blocks[1] as MdBlock.Bullet
+        val outer = blocks.single() as MdBlock.Bullet
+        val inner = outer.children.getValue(0).single()
         assertEquals(0, outer.depth)
         assertEquals(1, inner.depth)
         assertEquals(3, inner.start)
         assertEquals("1.", markers(listOf(outer)))
         assertEquals("3. 4.", markers(listOf(inner)))
+    }
+
+    @Test
+    fun `outer numbering continues across nested ordered and unordered lists`() {
+        val outer = parseMarkdown("3. a\n  7. b\n  8. c\n  - note\n4. d\n5. e").single() as MdBlock.Bullet
+        assertEquals(listOf("a", "d", "e"), outer.items)
+        assertEquals("3. 4. 5.", markers(listOf(outer)))
+        val nested = outer.children.getValue(0)
+        assertEquals(2, nested.size)
+        assertEquals("7. 8.", markers(listOf(nested.first())))
+        assertEquals(listOf("note"), nested.last().items)
+        assertEquals(false, nested.last().ordered)
+    }
+
+    @Test
+    fun `children at several levels stay with the item before them`() {
+        val outer = parseMarkdown("- a\n  - a1\n    - a11\n  - a2\n- b\n  - b1\n- c").single() as MdBlock.Bullet
+        assertEquals(listOf("a", "b", "c"), outer.items)
+        assertEquals(setOf(0, 1), outer.children.keys)
+        val aChildren = outer.children.getValue(0).single()
+        assertEquals(listOf("a1", "a2"), aChildren.items)
+        assertEquals(listOf("a11"), aChildren.children.getValue(0).single().items)
+        assertEquals(2, aChildren.children.getValue(0).single().depth)
+        assertEquals(listOf("b1"), outer.children.getValue(1).single().items)
+    }
+
+    @Test
+    fun `different list kinds at the same level remain separate lists`() {
+        val blocks = parseMarkdown("- bullet\n  - child\n7. ordered\n8. next")
+        assertEquals(2, blocks.size)
+        assertEquals(false, (blocks.first() as MdBlock.Bullet).ordered)
+        assertEquals("7. 8.", markers(listOf(blocks.last())))
     }
 
     @Test

@@ -47,6 +47,7 @@ import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -74,6 +75,8 @@ import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SettingRow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 
 /**
  * 对话框窗口里「系统栏到底占多高」。
@@ -299,19 +302,29 @@ fun AssistantEditor(
     // 裁剪是选图与保存之间的一步，自己一个全屏对话框：它要占满屏幕才拖得动，而编辑页还开着，
     // 取消回来时用户看到的正是他离开时的那个编辑页。
     cropping?.let { source ->
+        val saveJob = remember(source) { arrayOfNulls<Job>(1) }
+        DisposableEffect(source) {
+            onDispose {
+                // A closing editor may still have an IO crop using this bitmap.
+                // Job completion waits for that child before releasing its pixels.
+                val release = { if (!source.isRecycled) source.recycle() }
+                val saving = saveJob[0]
+                if (saving == null) release()
+                else saving.invokeOnCompletion { release() }
+            }
+        }
         AvatarCropper(
             source = source,
             onCancel = {
                 // 取消：什么都没写，头像仍是原来那张。把解码出来的位图还给系统。
                 cropping = null
-                source.recycle()
             },
             onConfirm = { rect ->
+                if (saveJob[0]?.isActive == true) return@AvatarCropper
                 val previous = draft.avatarPath
-                scope.launch {
+                saveJob[0] = scope.launch(start = CoroutineStart.LAZY) {
                     val path = AssistantAvatarStore.saveCropped(context, draft.id, source, rect, previous)
                     cropping = null
-                    source.recycle()
                     if (path != null) {
                         notice = null
                         draft = draft.copy(avatarPath = path)
@@ -320,7 +333,7 @@ fun AssistantEditor(
                         // 与「打开失败」分开——用户下一步该做的事不一样。
                         notice = "这张图没能保存下来，头像保持原样。可以换一张，或直接用下面的表情。"
                     }
-                }
+                }.also { it.start() }
             },
         )
     }

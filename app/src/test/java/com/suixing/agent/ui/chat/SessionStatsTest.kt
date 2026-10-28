@@ -2,8 +2,10 @@ package com.suixing.agent.ui.chat
 
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.ChatTotals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 /**
@@ -118,5 +120,27 @@ class SessionStatsTest {
     fun `the window is carried through as given`() {
         val stats = SessionStats.of(listOf(answer("a1", 10, 10)), contextWindow = 64_000)!!
         assertEquals(64_000, stats.contextWindow)
+    }
+
+    @Test
+    fun `a replayed tally belongs only to the conversation that produced it`() {
+        val stats = SessionStats.of(
+            ChatTotals(promptTokens = 730_000, contextTokens = 730_000),
+            contextWindow = 1_000_000,
+            conversationId = "chat-a",
+        )!!
+        assertSame(stats, stats.forConversation("chat-a"))
+        assertNull("new chat must not inherit the previous StateFlow value", stats.forConversation("chat-b"))
+        assertNull(stats.forConversation(""))
+    }
+
+    @Test
+    fun `changing the model window preserves the last measured token count`() {
+        val totals = ChatTotals(promptTokens = 730_000, contextTokens = 730_000)
+        val largeWindow = SessionStats.of(totals, 1_000_000, "chat-a")!!
+        val smallerWindow = SessionStats.of(totals, 256_000, "chat-a")!!
+        assertEquals(largeWindow.contextTokens, smallerWindow.contextTokens)
+        assertEquals(256_000, smallerWindow.contextWindow)
+        assertEquals("chat-a", smallerWindow.conversationId)
     }
 }

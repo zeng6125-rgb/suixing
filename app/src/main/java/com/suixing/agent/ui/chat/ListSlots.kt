@@ -24,7 +24,7 @@ package com.suixing.agent.ui.chat
  * @param hasLoadEarlier 顶部有「加载更早」一行
  */
 internal data class ListSlots(
-    /** 插在喂序最前面（视觉最底）的临时行数量：`live? + compress-status? + error?` */
+    /** 临时行数量。主列表放在尾部；导航条沿用倒序逻辑坐标中的前缀数。 */
     val feedPrefix: Int,
     /** 整个列表的项数（含所有临时行与「加载更早」）。 */
     val total: Int,

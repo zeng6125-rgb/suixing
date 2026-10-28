@@ -51,6 +51,19 @@ class LiveBlocksTest {
         feed(complete)
     }
 
+    @Test fun `nested lists grow into one parent block at every streaming prefix`() {
+        feed("intro\n\n3. parent\n  - child\n    7. grandchild\n  - child2\n4. next\n\nend")
+    }
+
+    @Test fun `nested lists retain completed prefix blocks when the next paragraph grows`() {
+        val live = LiveBlocks()
+        val first = live.blocksFor("3. a\n  - child\n4. b\n\nnext")
+        val next = live.blocksFor("3. a\n  - child\n4. b\n\nnext paragraph")
+        assertEquals(2, first.size)
+        assertSame(first.first(), next.first())
+        assertEquals(parseMarkdown("3. a\n  - child\n4. b\n\nnext paragraph"), next)
+    }
+
     /** 逐字符喂入，每一步都必须与整段解析一致 —— 这是"任何流式前缀都安全"的证明。 */
     private fun feed(charByChar: String): LiveBlocks {
         val live = LiveBlocks()

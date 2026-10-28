@@ -45,7 +45,10 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.DayUsage
 import com.suixing.agent.data.ModelUsage
 import com.suixing.agent.data.TokenTally
+import com.suixing.agent.data.byDayOf
+import com.suixing.agent.data.byModelOf
 import com.suixing.agent.ui.components.PageTopBar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -69,13 +72,19 @@ fun UsageScreen(onBack: () -> Unit) {
     LaunchedEffect(Unit) {
         // **失败不能静默**（issue #41）：原来没有 catch，refresh() 一抛异常就永远
         // `loaded = false`，页面停在"还没有用量记录"且没有任何线索。
-        val snapshot = withContext(Dispatchers.IO) {
-            runCatching { store.refresh() }
-                .onFailure { android.util.Log.w("suixing-usage", "refresh failed", it) }
+        val (snapshot, byDay, byModel) = withContext(Dispatchers.IO) {
+            val refreshed = runCatching { store.refresh() }
+                .onFailure {
+                    if (it is CancellationException) throw it
+                    android.util.Log.w("suixing-usage", "refresh failed", it)
+                }
                 .getOrDefault(com.suixing.agent.data.UsageSnapshot())
+            // 日期/模型投影都要排序完整累计表，随后才截取最近30天。与刷新一起在后台
+            // 计算，并固定到同一份返回快照，避免转场中主线程排序和跨快照读数混用。
+            Triple(refreshed, byDayOf(refreshed, 30), byModelOf(refreshed))
         }
-        days = store.byDay(30)
-        models = store.byModel()
+        days = byDay
+        models = byModel
         totals = snapshot.totals
         val chats = Core.chats.conversations.value
         conversations = chats.size

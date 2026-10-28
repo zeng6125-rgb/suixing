@@ -77,7 +77,7 @@ sealed interface MdBlock {
     data class Bullet(
         val items: List<String>,
         val ordered: Boolean,
-        /** Nesting level, 0 = top level. One block holds one level's items. */
+        /** Absolute nesting level, 0 = top level. */
         val depth: Int = 0,
         /**
          * The number the source's *first* item carried, for an ordered list; 1 for bullets.
@@ -88,6 +88,8 @@ sealed interface MdBlock {
          * such a block from 1 is what made every item of a 51-item chain of thought read "1.".
          */
         val start: Int = 1,
+        /** Nested lists belonging to each item, in source order. */
+        val children: Map<Int, List<Bullet>> = emptyMap(),
     ) : MdBlock
     data class Code(val language: String, val code: String) : MdBlock
     data class Quote(val text: String) : MdBlock
@@ -197,6 +199,28 @@ private fun parseMarkdownBlocks(
             c.table || c.bullet != null || c.ordered != null
     }
     var index = 0
+    fun listAtCurrentLine(depth: Int, isOrdered: Boolean): MdBlock.Bullet {
+        val first = info(index)
+        val start = if (isOrdered) listStart(first.ordered!!.groupValues[2]) else 1
+        val items = mutableListOf<String>()
+        val children = mutableMapOf<Int, MutableList<MdBlock.Bullet>>()
+        while (index < lines.size) {
+            checkpoint?.invoke()
+            val item = info(index)
+            val match = item.bullet ?: item.ordered ?: break
+            val itemDepth = indentDepth(match.groupValues[1])
+            if (itemDepth < depth) break
+            if (itemDepth > depth && items.isNotEmpty()) {
+                children.getOrPut(items.lastIndex) { mutableListOf() } +=
+                    listAtCurrentLine(itemDepth, item.ordered != null)
+                continue
+            }
+            if (itemDepth != depth || (item.ordered != null) != isOrdered) break
+            items += match.groupValues[if (isOrdered) 3 else 2]
+            index++
+        }
+        return MdBlock.Bullet(items, isOrdered, depth, start, children)
+    }
     while (index < lines.size) {
         checkpoint?.invoke()
         val line = lines[index]
@@ -271,33 +295,10 @@ private fun parseMarkdownBlocks(
                 blocks += MdBlock.Table(header, rows)
             }
             bullet != null -> {
-                val depth = indentDepth(bullet.groupValues[1])
-                val items = mutableListOf<String>()
-                while (index < lines.size) {
-                    checkpoint?.invoke()
-                    val item = MD_BULLET.matchEntire(lines[index]) ?: break
-                    // A change of level ends the block: one Bullet carries one indent, so
-                    // a nested list renders as its own indented block underneath.
-                    if (indentDepth(item.groupValues[1]) != depth) break
-                    items += item.groupValues[2]
-                    index++
-                }
-                blocks += MdBlock.Bullet(items, ordered = false, depth = depth)
+                blocks += listAtCurrentLine(indentDepth(bullet.groupValues[1]), isOrdered = false)
             }
             ordered != null -> {
-                val depth = indentDepth(ordered.groupValues[1])
-                // Read off the first line of the run, before the loop consumes it: the rest of
-                // the run's numbers are the source's business, and CommonMark ignores them too.
-                val start = listStart(ordered.groupValues[2])
-                val items = mutableListOf<String>()
-                while (index < lines.size) {
-                    checkpoint?.invoke()
-                    val item = MD_ORDERED.matchEntire(lines[index]) ?: break
-                    if (indentDepth(item.groupValues[1]) != depth) break
-                    items += item.groupValues[3]
-                    index++
-                }
-                blocks += MdBlock.Bullet(items, ordered = true, depth = depth, start = start)
+                blocks += listAtCurrentLine(indentDepth(ordered.groupValues[1]), isOrdered = true)
             }
             else -> {
                 val paragraph = mutableListOf<String>()
@@ -406,6 +407,52 @@ fun inlineMarkdown(
 
 private data class LinkTarget(val labelStart: Int, val labelEnd: Int, val url: String, val end: Int)
 
+/**
+ * Searches made by one inline scan. An unmatched opener must not rescan the whole remaining
+ * paragraph for every later opener: repeated unsupported double-backtick runs otherwise turn
+ * a single parse quadratic, including every new streaming prefix of that paragraph.
+ *
+ * A failed search proves that the same marker/width has no closer later in that exact range.
+ * Keep one such range for each of the six supported marker/width pairs, not text-sized indexes.
+ * Callers start immediately after an opener, so a later search cannot begin inside a backslash
+ * escape skipped by the previous search. Nested spans may have a different end; those rescan.
+ */
+internal class InlineDelimiterSearch(private val text: String) {
+    private val failedRanges = IntArray(12) { -1 }
+
+    fun findClosing(marker: Char, len: Int, from: Int, to: Int): Int {
+        val slot = when (marker) {
+            '`' -> 0
+            '*' -> if (len == 1) 2 else 4
+            '_' -> if (len == 1) 6 else 8
+            '~' -> 10
+            else -> error("Unsupported inline delimiter")
+        }
+        if (failedRanges[slot + 1] == to && from >= failedRanges[slot]) return -1
+        var i = from
+        while (i < to) {
+            val c = text[i]
+            if (c == '\\' && i + 1 < to) {
+                i += 2
+                continue
+            }
+            if (c == marker) {
+                var runEnd = i + 1
+                while (runEnd < to && text[runEnd] == marker) runEnd++
+                val runStartsHere = i == 0 || text[i - 1] != marker
+                val available = runEnd - i
+                if (runStartsHere && (if (len == 1) available == 1 else available >= len)) return i
+                i = runEnd
+                continue
+            }
+            i++
+        }
+        failedRanges[slot] = from
+        failedRanges[slot + 1] = to
+        return -1
+    }
+}
+
 private class InlineScanner(
     private val text: String,
     private val codeBackground: Color,
@@ -424,6 +471,7 @@ private class InlineScanner(
     // rather than one of them silently winning.
 ) {
     private val out = AnnotatedString.Builder()
+    private val delimiters = InlineDelimiterSearch(text)
     private val linkStyle = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
     // 文件路径：主色但**无下划线**（LINK-CLICK-SPEC §2.1）——与 URL 区分，符合「链接才带下划线」的直觉。
     private val pathStyle = SpanStyle(color = linkColor)
@@ -457,7 +505,7 @@ private class InlineScanner(
                     i += 2
                 }
                 c == '`' -> {
-                    val close = findClosing('`', 1, i + 1, to)
+                    val close = delimiters.findClosing('`', 1, i + 1, to)
                     if (close < 0) {
                         buffer.append(c)
                         i++
@@ -472,8 +520,10 @@ private class InlineScanner(
                     }
                 }
                 c == '*' || c == '_' -> {
-                    val len = if (runLength(i, to) >= 2) 2 else 1
-                    val close = findClosing(c, len, i + len, to)
+                    // Only single versus double matters; repeatedly counting the
+                    // remainder of one unmatched run would itself be quadratic.
+                    val len = if (i + 1 < to && text[i + 1] == c) 2 else 1
+                    val close = delimiters.findClosing(c, len, i + len, to)
                     if (close < 0) {
                         repeat(len) { buffer.append(c) }
                         i += len
@@ -485,7 +535,7 @@ private class InlineScanner(
                     }
                 }
                 c == '~' && i + 1 < to && text[i + 1] == '~' -> {
-                    val close = findClosing('~', 2, i + 2, to)
+                    val close = delimiters.findClosing('~', 2, i + 2, to)
                     if (close < 0) {
                         buffer.append("~~")
                         i += 2
@@ -583,36 +633,6 @@ private class InlineScanner(
                 end,
             )
         }
-    }
-
-    private fun runLength(index: Int, to: Int): Int {
-        val c = text[index]
-        var end = index
-        while (end < to && text[end] == c) end++
-        return end - index
-    }
-
-    // Position of the delimiter that closes a marker opened with [len] characters,
-    // or -1 when the marker never closes. Escaped delimiters do not close.
-    private fun findClosing(marker: Char, len: Int, from: Int, to: Int): Int {
-        var i = from
-        while (i < to) {
-            val c = text[i]
-            if (c == '\\' && i + 1 < to) {
-                i += 2
-                continue
-            }
-            if (c == marker) {
-                val runEnd = i + runLength(i, to)
-                val runStartsHere = i == 0 || text[i - 1] != marker
-                val available = runEnd - i
-                if (runStartsHere && (if (len == 1) available == 1 else available >= len)) return i
-                i = runEnd
-                continue
-            }
-            i++
-        }
-        return -1
     }
 
     private fun startsUrl(index: Int, to: Int): Boolean {
@@ -744,11 +764,8 @@ fun MarkdownText(
     /**
      * 在**最后一个字符之后**画一个闪烁光标（流式输出用）。
      *
-     * 光标必须内联进文本：以前它是一个独立的 `Text("▍")`，于是会自成一行或挤到块外
-     * （用户截图里那根竖条悬在正文下方）。这里把它作为 `AnnotatedString` 的最后一段追加，
-     * 换行、对齐都跟着正文走。
-     *
-     * 只在 `Paragraph` 上追加：标题/列表/代码追加光标会让排版变怪，而流式正文几乎总是段落。
+     * 文本块由末尾占位符定位，分隔线由下一行的空文本承载；嵌套列表转交最后一个叶子。
+     * 闪烁只在绘制阶段读取，不随闪烁重新解析、重排文本。
      */
     cursor: Boolean = false,
     /**
@@ -782,10 +799,6 @@ fun MarkdownText(
 @Composable
 private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): List<MdBlock> {
     if (settled) LocalPreparedMarkdown.current[text]?.let { return it }
-    // A plain holder rather than state: the blocks are returned from this call, so nothing has
-    // to recompose when the cache moves on, and writing state during composition is exactly
-    // the kind of thing that recomposes forever.
-    val cache = remember { MarkdownCache() }
     // **流式走 [LiveBlocks] 的块级复用**（不是整段重解析，也不是旧的 [MarkdownCache]）。
     // 旧的 `MarkdownCache` 只在**空行**处合入尾部，同一段落里继续追加字符时不刷新，
     // 屏幕上要等下一个换行才看到新字（用户："整段整段地出"）；它因此被停用。
@@ -801,6 +814,9 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
         val live = remember { LiveBlocks() }
         return remember(text) { live.blocksFor(text) }
     }
+    // The live holder belongs only to the branch above. Settling forgets its source and
+    // prefix bookkeeping; a final row needs only its last document and parsed result.
+    val cache = remember { MarkdownCache() }
     // 定稿文本：先查进程级缓存 —— 滚出去再滚回来就不必重新解析（快速滑动的卡顿来源）。
     SettledBlocks.get(text)?.let { return it }
     val blocks = cache.blocksFor(text)
@@ -828,28 +844,29 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
  * `parseMarkdown` 的语义完全一致（前缀 + 尾段解析 == 整段解析，因为块边界就是空行）。
  */
 internal class LiveBlocks {
+    // One normalized source reference; the stable prefix is a range into it, never a copy.
     private var text = ""
-    private var stablePrefix = ""
+    private var stableEnd = 0
     private var prefixBlocks: List<MdBlock> = emptyList()
     private var result: List<MdBlock> = emptyList()
 
     fun blocksFor(next: String): List<MdBlock> {
-        if (next == text) return result
-        text = next
-        result = parseWithPrefix(next)
+        val normalized = if ('\r' in next) next.replace("\r\n", "\n").replace('\r', '\n') else next
+        if (normalized == text) return result
+        result = parseWithPrefix(normalized)
+        text = normalized
         return result
     }
 
-    private fun parseWithPrefix(next: String): List<MdBlock> {
-        // Normalize before finding complete lines, matching parseMarkdown's input.
-        val normalized = if ('\r' in next) next.replace("\r\n", "\n").replace('\r', '\n') else next
-        if (!normalized.startsWith(stablePrefix)) {
-            stablePrefix = ""
+    private fun parseWithPrefix(normalized: String): List<MdBlock> {
+        // Verify the actual prefix, not only length/hash: both can collide after edits.
+        if (normalized.length < stableEnd || !normalized.regionMatches(0, text, 0, stableEnd)) {
+            stableEnd = 0
             prefixBlocks = emptyList()
         }
         // The parser itself reports completed blocks, so fence-looking table rows
         // and blank lines inside code cannot incorrectly freeze a partial result.
-        val suffix = normalized.substring(stablePrefix.length)
+        val suffix = normalized.substring(stableEnd)
         if (suffix.isEmpty()) return prefixBlocks
         var completed = 0
         var completedBlocks = 0
@@ -860,7 +877,7 @@ internal class LiveBlocks {
         val result = if (prefixBlocks.isEmpty()) parsed else prefixBlocks + parsed
         if (completed > 0) {
             if (completedBlocks > 0) prefixBlocks = prefixBlocks + parsed.take(completedBlocks)
-            stablePrefix = normalized.substring(0, stablePrefix.length + completed)
+            stableEnd += completed
         }
         return result
     }
@@ -947,28 +964,28 @@ internal object SettledBlocks {
 /**
  * The last parse, kept so the next one can start where this one stopped.
  *
- * [prefix] is the settled part of the text (everything before its last blank line) and
+ * [prefixEnd] marks the settled range in [text] (everything before its last blank line) and
  * [prefixBlocks] is that part's parse: the two together are what makes appending a freshly
  * parsed tail correct — reusing the *whole* previous block list would append the tail to a list
  * that already contained the old one.
  */
 internal class MarkdownCache {
     private var text = ""
-    private var prefix = ""
+    private var prefixEnd = 0
     private var prefixBlocks: List<MdBlock> = emptyList()
     private var blocks: List<MdBlock> = emptyList()
 
     fun blocksFor(next: String): List<MdBlock> {
         if (next == text) return blocks
-        val prefixEnd = settledMarkdownPrefixEnd(next)
-        if (prefixEnd == 0) {
-            prefix = ""
+        val nextPrefixEnd = settledMarkdownPrefixEnd(next)
+        if (nextPrefixEnd == 0) {
+            prefixEnd = 0
             prefixBlocks = emptyList()
             blocks = parseMarkdown(next)
         } else {
-            if (prefixEnd != prefix.length || !next.startsWith(prefix)) {
-                prefix = next.substring(0, prefixEnd)
-                prefixBlocks = parseMarkdown(prefix)
+            if (nextPrefixEnd != prefixEnd || !next.regionMatches(0, text, 0, prefixEnd)) {
+                prefixEnd = nextPrefixEnd
+                prefixBlocks = parseMarkdown(next.substring(0, prefixEnd))
             }
             blocks = prefixBlocks + parseMarkdown(next.substring(prefixEnd))
         }
@@ -1123,10 +1140,15 @@ private fun MarkdownBlock(
         is MdBlock.Quote -> QuoteBlock(block, style, color, palette, onUrlClick, cursor)
         // No padding of its own: the 12dp above and below comes from gapBetween, so a
         // caller spacing blocks by markdownGap() gets the same rhythm.
-        MdBlock.Rule -> HorizontalDivider(
-            thickness = 1.dp,
-            color = MaterialTheme.colorScheme.outlineVariant,
-        )
+        MdBlock.Rule -> {
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant,
+            )
+            if (cursor) {
+                InlineText("", style, color, palette, onUrlClick, cursor = true)
+            }
+        }
         is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick, cursor)
     }
 }
@@ -1325,6 +1347,7 @@ private fun BulletBlock(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
+    parentDepth: Int = 0,
 ) {
     // The marker sits on the first line's centre, not on the row's top: a 4dp dot level
     // with the top edge reads as floating above the text it belongs to.
@@ -1336,9 +1359,11 @@ private fun BulletBlock(
             .fillMaxWidth()
             // One indent per level, marker included: the dot has to move with its text or
             // a nested list reads as a second top-level one.
-            .padding(start = ListIndent * block.depth),
+            .padding(start = ListIndent * (block.depth - parentDepth).coerceAtLeast(0)),
     ) {
         block.items.forEachIndexed { index, item ->
+            val children = block.children[index].orEmpty()
+            val itemCursor = cursor && index == block.items.lastIndex
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1373,8 +1398,19 @@ private fun BulletBlock(
                     color = color,
                     palette = palette,
                     onUrlClick = onUrlClick,
-                    cursor = cursor && index == block.items.lastIndex,
+                    cursor = itemCursor && children.isEmpty(),
                     modifier = Modifier.weight(1f),
+                )
+            }
+            children.forEachIndexed { childIndex, child ->
+                BulletBlock(
+                    block = child,
+                    style = style,
+                    color = color,
+                    palette = palette,
+                    onUrlClick = onUrlClick,
+                    cursor = itemCursor && childIndex == children.lastIndex,
+                    parentDepth = block.depth,
                 )
             }
         }

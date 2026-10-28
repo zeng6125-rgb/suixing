@@ -424,11 +424,26 @@ internal fun ContextRingCard(
                     "${if (estimated) "约 " else ""}${shortTokens(used)} · 窗口未设置 · 到设置里填"
                 },
             )
-            // **窗口与模型名**（issue #49 修法 2）：切 provider 后分母变了，这一行让用户
-            // 立刻看出"是窗口变了，不是上下文变了"。
-            if (known && model.isNotBlank()) {
-                RingDetail("模型窗口", "${fullTokens(window.toLong())} tok · $model")
+            // 窗口和模型分开显示：长模型名与完整窗口数挤在单行时会被省略，无法解释分母变化。
+            if (known) {
+                RingDetail("模型窗口", "${fullTokens(window.toLong())} tok")
             }
+            if (model.isNotBlank()) {
+                Text(
+                    text = "当前模型：$model",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = if (estimated) {
+                    "用量为本地估算，百分比按当前模型窗口计算。"
+                } else {
+                    "用量沿用本会话最近实测，百分比按当前模型窗口计算；切换模型后的实际用量以下次上报为准。"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+            )
             // The conversation's own hit rate, not the newest round's: the user asked for
             // 「总缓存命中率」 and a label of exactly 「缓存命中」. SessionStats.cachePercent is
             // the whole session's cached tokens over its whole prompt, so it is the total this
@@ -876,16 +891,6 @@ internal fun Composer(
     var approvalOpen by remember { mutableStateOf(false) }
     var approvalAnchorLeft by remember { mutableStateOf(0f) }
     var approvalWidth by remember { mutableStateOf(0) }
-    // The model capsule's right edge in window pixels: the sheet is aligned to it so the card
-    // hangs off the button that opened it rather than off the free space around it. Measured
-    // here because the capsule is this row's child, and read by [GenerationSheet].
-    var capsuleRight by remember { mutableStateOf(0f) }
-    // 胶囊上沿（窗口坐标）：模型卡要贴在它上方 8dp。
-    var capsuleTop by remember { mutableStateOf(0f) }
-    // Where the model button's centre sits, in window pixels: the 生成设置 sheet is centred
-    // on it rather than on the composer or the screen, which is what "right above the model
-    // button" means. Read from the layout, because the row's paddings and the label's own
-    // width decide it.
     val ctx = LocalContext.current
     // The two cards this row opens are focus-less (see [MenuCard]'s focusable): a focusable
     // popup window takes the keyboard away from the field, the shell then lays the composer
@@ -1396,17 +1401,7 @@ internal fun Composer(
                                 // capsule. Hung on the capsule box itself, BottomStart put the
                                 // popup's bottom on the capsule's bottom — covering the button
                                 // that opened it, which is what the user photographed.
-                                // The capsule's own right edge, measured: the sheet hangs off
-                                // the button that opened it, and the free space around the
-                                // button is wider than the button whenever the model name is
-                                // short — right-aligning to the free space left the card that
-                                // far to the right of the control it belongs to.
-                                Box(
-                                    Modifier.onGloballyPositioned {
-                                        capsuleRight = it.boundsInWindow().right
-                                        capsuleTop = it.boundsInWindow().top
-                                    },
-                                ) {
+                                Box {
                                 // **卡片挂在按钮自己的 Box 里**（与添加菜单、审批菜单同构）：Popup 的
                                 // 锚点就是这个 28dp 高的按钮框，于是卡片底边落在按钮上沿 −8dp、
                                 // 右缘对齐按钮右缘。原来它挂在一个整行宽的零高探针上，锚点是屏幕

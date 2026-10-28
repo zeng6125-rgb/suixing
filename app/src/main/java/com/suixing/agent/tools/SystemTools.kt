@@ -19,7 +19,6 @@ import kotlinx.serialization.json.JsonObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.coroutines.resume
 
 /**
  * Things every phone agent needs and that need no extra privilege: what device
@@ -27,6 +26,27 @@ import kotlin.coroutines.resume
  */
 /** 主线程 Handler：进程内复用，避免每次调用都 new（见 [SystemTools.onMainThread]）。 */
 private val mainHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
+
+/** Pending tool operations belong to the caller, including their queued closures. */
+internal suspend fun <T> awaitToolCallback(
+    post: (Runnable) -> Boolean,
+    remove: (Runnable) -> Unit,
+    block: () -> T,
+): T = suspendCancellableCoroutine { continuation ->
+    val action = Runnable {
+        // Removal can lose a race with dequeueing; a canceled tool must still skip the action.
+        if (!continuation.isActive) return@Runnable
+        val result = runCatching { block() }
+        if (continuation.isActive) continuation.resumeWith(result)
+    }
+    val accepted = post(action)
+    // Register after posting: if cancellation happened during post(), registration invokes
+    // removal immediately, instead of removing an action that has not been queued yet.
+    continuation.invokeOnCancellation { remove(action) }
+    if (!accepted && continuation.isActive) {
+        continuation.resumeWith(Result.failure(IllegalStateException("工具操作未执行：主线程消息队列已关闭")))
+    }
+}
 
 class SystemTools(
     private val context: Context,
@@ -344,16 +364,9 @@ class SystemTools(
         return ToolResult.success(text.ifBlank { "（用户画像还是空的）" })
     }
 
-    private suspend fun <T> onMainThread(block: () -> T): T = suspendCancellableCoroutine { continuation ->
-        // 主线程 Handler 复用（优化清单 tools-P2）：原来每次调用都 new 一个 Handler。
-        mainHandler.post {
-            val result = runCatching { block() }
-            if (continuation.isActive) {
-                result.fold(
-                    onSuccess = { continuation.resume(it) },
-                    onFailure = { continuation.resumeWith(Result.failure(it)) },
-                )
-            }
-        }
-    }
+    private suspend fun <T> onMainThread(block: () -> T): T = awaitToolCallback(
+        post = { mainHandler.post(it) },
+        remove = { mainHandler.removeCallbacks(it) },
+        block = block,
+    )
 }

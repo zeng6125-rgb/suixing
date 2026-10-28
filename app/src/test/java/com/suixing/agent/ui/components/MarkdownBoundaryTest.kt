@@ -56,4 +56,25 @@ class MarkdownBoundaryTest {
             assertEquals(parseMarkdown(text), settled.blocksFor(text))
         }
     }
+
+    @Test fun `same length hash collisions never reuse the previous document or prefix`() {
+        val live = LiveBlocks()
+        val settled = MarkdownCache()
+        val old = "Aa\n\ntail"
+        val replacement = "BB\n\ntail"
+        assertEquals(old.length, replacement.length)
+        assertEquals(old.hashCode(), replacement.hashCode())
+        for (text in listOf(old, replacement, replacement + " grows", old + " grows")) {
+            assertEquals(parseMarkdown(text), live.blocksFor(text))
+            assertEquals(parseMarkdown(text), settled.blocksFor(text))
+        }
+    }
+
+    @Test fun `shrinking exactly to the completed boundary retains only that prefix`() {
+        val live = LiveBlocks()
+        live.blocksFor("first\n\nlast")
+        assertEquals(parseMarkdown("first\n\n"), live.blocksFor("first\n\n"))
+        assertEquals(parseMarkdown("first\n\nnew"), live.blocksFor("first\n\nnew"))
+        assertEquals(emptyList<MdBlock>(), live.blocksFor(""))
+    }
 }

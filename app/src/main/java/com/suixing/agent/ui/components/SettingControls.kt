@@ -17,15 +17,12 @@ import androidx.compose.animation.core.spring
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
-import androidx.compose.foundation.Indication
-import androidx.compose.foundation.IndicationInstance
 import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.IndicationNodeFactory
+import androidx.compose.foundation.indication
 import androidx.compose.ui.node.DelegatableNode
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
+import androidx.compose.ui.node.DelegatingNode
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -167,52 +164,41 @@ fun RowChevron() {
 }
 
 
-/**
- * 按下后**等一小会儿**才起涟漪的指示器。
- *
- * 分段控件与开关都是"按下即可能开始拖动"的控件：原来的涟漪在手指落下的那一帧就开始画，
- * 而横向拖动要越过触摸阈值才被识别 —— 阈值之前那一段，用户看到的就是"我只是想拖一下，
- * 却闪了一圈点击反馈"。一刀切去掉（`indication = null`）又会让真正的点击没有反馈。
- * 折中：按下后延迟 [delayMs] 再转发给系统涟漪；真点击（按住超过这个时间）照常看到涟漪，
- * 一拖就走的场景在起涟漪之前就被取消（调用方在 onDragStart 发 Cancel）。
- */
-/**
- * 按下后**等一小会儿**才起涟漪的指示器（分段控件与开关共用）。
- *
- * 为什么需要：这两个控件"按下即可能开始拖动"。系统涟漪在手指落下那一帧就开始画，而横向
- * 拖动要越过触摸阈值才被识别 ⇒ 阈值前那一段看着就是"只想拖一下却闪了一圈点击反馈"。
- * 一刀切去掉（`indication = null`）又让真正的点击没有反馈 —— 用户否掉了这种做法。
- *
- * 实现要点：**必须走 [IndicationNodeFactory]**。Material3 的 `ripple()` 是
- * `IndicationNodeFactory` 实现，旧的 `Indication.rememberUpdatedInstance` 路径对它返回的是
- * 空实例 —— 上一版就是这么写的，结果两种控件都完全看不到涟漪。
- * 这里把按下事件延迟转发到一条内部 source，再把这条 source 交给真正的 ripple 节点。
- */
-@Suppress("DEPRECATION")
-private data class DelayedRipple(
-    private val delegate: Indication,
-    private val delayMs: Long = 48L,
-) : IndicationNodeFactory {
-    override fun create(interactionSource: InteractionSource): DelegatableNode {
-        val forward = MutableInteractionSource()
-        // M3 的 ripple() 是 IndicationNodeFactory 实现（见类文档）；这里按契约转换。
-        val factory = delegate as IndicationNodeFactory
-        val scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
-        scope.launch {
-            interactionSource.interactions.collect { event ->
+/** Confirm the tap before starting Material's ripple; a drag never starts one. */
+private data class TapRipple(private val delegate: IndicationNodeFactory) : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode =
+        TapRippleNode(interactionSource, delegate)
+}
+
+private class TapRippleNode(
+    private val source: InteractionSource,
+    factory: IndicationNodeFactory,
+) : DelegatingNode() {
+    private val taps = MutableInteractionSource()
+    private val presses = PressFeedback<PressInteraction.Press>()
+
+    init { delegate(factory.create(taps)) }
+
+    override fun onAttach() {
+        coroutineScope.launch {
+            source.interactions.collect { event ->
                 when (event) {
-                    is androidx.compose.foundation.interaction.PressInteraction.Press -> {
-                        scope.launch { delay(delayMs); forward.emit(event) }
+                    is PressInteraction.Press -> presses.press(event)
+                    is PressInteraction.Release -> if (presses.release(event.press)) {
+                        // Material owns expansion and fade-out even for Press + Release
+                        // in the same frame. Never clear its drawing on pointer-up.
+                        taps.emit(event.press)
+                        taps.emit(event)
                     }
-                    is androidx.compose.foundation.interaction.PressInteraction.Release,
-                    is androidx.compose.foundation.interaction.PressInteraction.Cancel,
-                    -> forward.emit(event)
-                    else -> Unit
+                    is PressInteraction.Cancel -> presses.cancel(event.press)
+                    else -> taps.emit(event)
                 }
             }
         }
-        return factory.create(forward)
     }
+
+    override fun onReset() { presses.clear() }
+    override fun onDetach() { presses.clear() }
 }
 /** Logical segment position under a pointer; centered on each equal-width option. */
 internal fun segmentPositionAt(x: Float, width: Float, count: Int, rtl: Boolean): Float? {
@@ -225,14 +211,14 @@ internal fun segmentPositionAt(x: Float, width: Float, count: Int, rtl: Boolean)
 @Composable
 fun SegmentedPill(
     options: List<String>,
-    /** −1 表示「一项都没选中」（如「自动」档）：此时不画高亮块。 */
+    /** −1 表示「一项都没选中」。权限档次始终传入当前显示档的下标。 */
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
     role: Role = Role.RadioButton,
     /** 这一格是否可用；不可用的只置灰，仍可点（能力页的「未开启档位」就是这种）。 */
     optionEnabled: (Int) -> Boolean = { true },
-    /** 点了**已经选中**的那一格（能力页用它回到「自动」）。不传则保持原行为：不响应。 */
+    /** 点了已经选中的那一格。不传则保持当前选择。 */
     onReselect: (() -> Unit)? = null,
     /**
      * 槽的深浅（0..1，按 onSurface 与页面底色混合）。
@@ -245,9 +231,7 @@ fun SegmentedPill(
     val shape = MaterialTheme.shapes.small
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val selectNow by rememberUpdatedState(onSelect)
-    // **必须 remember**：指示器每次重组新建实例会让节点重建，按下时发出的 Press 与松开时的
-    // Release 落到两个不同节点上 ⇒ 涟漪停不下来（用户：「涟漪会一直存在」）。
-    val rippleIndication = remember(colors.primary) { DelayedRipple(ripple(color = colors.primary)) }
+    val rippleIndication = remember(colors.onSurface) { TapRipple(ripple(color = colors.onSurface)) }
     var dragPosition by remember(options, selectedIndex, rtl) { mutableStateOf<Float?>(null) }
     // 每一格自己的交互源与「当前按下」事件：拖动开始时要把按下取消掉，
     // 否则只有横向拖动、手指没离开的这一格，照样会画一圈点击涟漪（用户报的现象）。
@@ -337,9 +321,7 @@ fun SegmentedPill(
                         .selectable(
                             selected = index == selectedIndex,
                             interactionSource = interaction,
-                            // 点击要有涟漪、拖动不要（用户第三次强调「不能一刀切」）：
-                            // 用延迟指示器，按住超过 90ms 才起涟漪；一拖就走则在 OnDragStart
-                            // 的 Cancel 里取消，根本画不出来。
+                            // Only a confirmed click starts Material's complete ripple.
                             indication = rippleIndication,
                             role = role,
                             onClick = {
@@ -397,8 +379,6 @@ fun SettingsSwitch(
     val changeNow by rememberUpdatedState(onCheckedChange)
     val scope = rememberCoroutineScope()
     val source = remember { MutableInteractionSource() }
-    // 同分段：remember 一份，避免每次重组换实例导致 Release 落空、涟漪不消失。
-    val rippleIndication = remember(colors.primary) { DelayedRipple(ripple(color = colors.primary)) }
     val settleSpec = spring<Float>(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow)
 
     val anim = remember { Animatable(if (checked) 1f else 0f) }
@@ -409,7 +389,12 @@ fun SettingsSwitch(
     LaunchedEffect(checked) {
         if (!dragging) anim.animateTo(if (checked) 1f else 0f, settleSpec)
     }
-    val progress = (if (dragging) dragProgress else anim.value).coerceIn(0f, 1f)
+    // Track drawing and the thumb feedback layer read animation progress locally.
+    val progressNow = remember(anim) { { (if (dragging) dragProgress else anim.value).coerceIn(0f, 1f) } }
+    val rippleIndication = remember(colors.onSurface) {
+        // Material's state layer is wider than its thumb: keep a 40dp circular halo.
+        TapRipple(ripple(bounded = false, radius = 20.dp, color = colors.onSurface))
+    }
 
     // 拖动开始时取消按住态：点击仍有涟漪，拖动不留。
     val press = remember { arrayOfNulls<androidx.compose.foundation.interaction.PressInteraction.Press>(1) }
@@ -429,9 +414,8 @@ fun SettingsSwitch(
         Modifier.toggleable(
             value = checked,
             interactionSource = source,
-            // 点击仍要有涟漪（用户：「对于点击还是应该需要的」），但延迟到确认是点击再画：
-            // 拖动开始时会 Cancel，所以横向拖走不会闪一圈。
-            indication = rippleIndication,
+            // The indication lives on the moving thumb, sharing this interaction source.
+            indication = null,
             enabled = enabled,
             role = Role.Switch,
             onValueChange = onCheckedChange,
@@ -486,21 +470,19 @@ fun SettingsSwitch(
     Box(
         modifier = modifier
             .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
-            // 裁成圆：开关是圆的，方形涟漪很违和（用户）。clip 必须在 toggleable 之前，
-            // 涟漪才会被同一层裁剪。
-            .clip(CircleShape)
             .then(drag)
             .then(interaction),
         contentAlignment = Alignment.Center,
     ) {
         val trackOff = lerp(colors.surface, colors.onSurface, offTrackTint)
-        val trackColor = lerp(trackOff, colors.primary, progress)
         val alpha = if (enabled && onCheckedChange != null) 1f else 0.38f
         Canvas(
             Modifier
                 .size(width = 46.dp, height = 28.dp)
                 .alpha(alpha),
         ) {
+            val progress = progressNow()
+            val trackColor = lerp(trackOff, colors.primary, progress)
             val h = size.height
             val w = size.width
             val radius = h / 2f
@@ -518,5 +500,12 @@ fun SettingsSwitch(
                 style = Stroke(width = 0.5.dp.toPx()),
             )
         }
+        if (interactive) Box(
+            Modifier.size(20.dp)
+                .graphicsLayer {
+                    translationX = (progressNow() - 0.5f) * 18.dp.toPx() * if (rtl) -1f else 1f
+                }
+                .indication(source, rippleIndication),
+        )
     }
 }

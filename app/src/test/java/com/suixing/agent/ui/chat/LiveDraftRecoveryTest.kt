@@ -64,4 +64,27 @@ class LiveDraftRecoveryTest {
         )
         assertEquals("内容不同 ⇒ 必须恢复", 1, liveDraftRecovery(draft, listOf(other)).size)
     }
+
+    @Test fun `one recovery scan ignores another run and still de-duplicates stored tool ids`() {
+        val tool = StoredMessage("tool", Roles.TOOL, runId = "r1", toolOutput = "result")
+        val draft = LiveDraft("c1", "r1", 1L, "unfinished", messages = listOf(tool))
+        val unrelated = StoredMessage("answer", Roles.ASSISTANT, "unfinished complete", runId = "r2")
+        val recovered = liveDraftRecovery(draft, listOf(tool, unrelated))
+        assertEquals(1, recovered.size)
+        assertEquals(Roles.ASSISTANT, recovered.single().role)
+        assertTrue(recovered.single().text.startsWith("unfinished"))
+    }
+
+    @Test fun `prefix comparison keeps trim semantics for unicode whitespace`() {
+        val draft = LiveDraft("c1", "r1", 1L, "answer")
+        val stored = StoredMessage("m", Roles.ASSISTANT, "\u2003\nanswer complete\t\u2003", runId = "r1")
+        assertTrue(liveDraftRecovery(draft, listOf(stored)).isEmpty())
+    }
+
+    @Test fun `trailing whitespace removed by trim cannot satisfy a longer probe`() {
+        val prefix = "x".repeat(63) + " "
+        val draft = LiveDraft("c1", "r1", 1L, prefix + "more")
+        val shorter = StoredMessage("m", Roles.ASSISTANT, prefix, runId = "r1")
+        assertEquals(1, liveDraftRecovery(draft, listOf(shorter)).size)
+    }
 }

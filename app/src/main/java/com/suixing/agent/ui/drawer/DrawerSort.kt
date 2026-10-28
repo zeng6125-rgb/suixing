@@ -32,6 +32,24 @@ internal fun reorderWithinSection(
     return if (updated == order) null else updated
 }
 
+/** Drag preview changes only the crossed section, without rebuilding/sorting the feed. */
+internal fun previewDrawerReorder(
+    sections: DrawerSections,
+    dragging: String,
+    target: String,
+): DrawerSections? {
+    if (dragging == target) return null
+    fun move(rows: List<Conversation>): List<Conversation>? {
+        val from = rows.indexOfFirst { it.id == dragging }
+        val to = rows.indexOfFirst { it.id == target }
+        if (from < 0 || to < 0) return null
+        return rows.toMutableList().apply { add(to, removeAt(from)) }
+    }
+    move(sections.pinned)?.let { return sections.copy(pinned = it) }
+    move(sections.normal)?.let { return sections.copy(normal = it) }
+    return null
+}
+
 /** 把 [item] 从表里取出、插到 [target] 原来的槽位（相邻行的一次次换位就是它重复的结果）。 */
 private fun moved(list: List<String>, item: String, target: String): List<String> {
     val from = list.indexOf(item)

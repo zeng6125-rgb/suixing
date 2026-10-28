@@ -68,6 +68,7 @@ import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.FileTypeColors
 import com.suixing.agent.ui.theme.MonoStyle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -140,40 +141,43 @@ fun FilesScreen(onBack: () -> Unit) {
     // thread and land in state; doing it inside composition stutters the list.
     LaunchedEffect(current, reload) {
         listing = true
-        val children = withContext(Dispatchers.IO) {
-            // 先取排序键再排序：`isDirectory` 是一次 stat、`name.lowercase()` 是一次分配，
-            // 放在比较器里会变成 O(n log n) 次 syscall（1000 个文件约 1 万次）。
-            // sortedWith 是稳定排序，键与顺序都和原来逐项相同。
-            current.listFiles()
-                ?.map { Triple(it, !it.isDirectory, it.name.lowercase()) }
-                ?.sortedWith(compareBy({ it.second }, { it.third }))
-                ?.map { it.first }
+        val listed = withContext(Dispatchers.IO) {
+            // 插件根是应用私有目录，首次进入时创建；文件操作也留在 IO 线程。
+            if (current == pluginRoot) pluginRoot.mkdirs()
+            val children = current.listFiles() ?: return@withContext null
+            // 每次列目录独占 formatter，避免取消中的旧读取与新读取共用非线程安全对象。
+            val timeFormat = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
+            // 只取一次目录类型，排序、图标和大小复用同一份元数据；切目录后及时停止旧目录
+            // 的逐文件 stat，避免大目录的废弃读取继续占 IO 工作线程。
+            val keyed = children.map { file ->
+                ensureActive()
+                val isDir = file.isDirectory
+                val (iconRes, tint) = iconFor(isDir, file.extension)
+                val entry = Entry(
+                    file = file,
+                    name = file.name,
+                    size = if (isDir) "文件夹" else humanSize(file.length()),
+                    modified = timeFormat.format(Date(file.lastModified())),
+                    isDirectory = isDir,
+                    iconRes = iconRes,
+                    tint = tint,
+                )
+                entry to entry.name.lowercase()
+            }
+            ensureActive()
+            // 稳定排序：文件夹优先、名称忽略大小写，同名排序键保持原枚举顺序。
+            keyed.sortedWith(compareBy({ !it.first.isDirectory }, { it.second }))
+                .map {
+                    ensureActive()
+                    it.first
+                }
         }
-        if (children == null) {
+        if (listed == null) {
             listError = "无法读取该目录，可能缺少「所有文件访问权限」"
             entries = emptyList()
         } else {
             listError = null
-            entries = withContext(Dispatchers.IO) {
-                // 每次列目录现建：SimpleDateFormat 不是线程安全的，切目录时上一轮 IO
-                // 还没跑完（map/format 之间没有挂起点，取消拦不住它），共用一份会写坏结果。
-                val timeFormat = SimpleDateFormat("M月d日 HH:mm", Locale.getDefault())
-                children.map { file ->
-                    // `isDirectory` 这一次 stat 同时供图标、行尾箭头和大小文案使用：以前
-                    // `iconFor` 和行里各问文件系统一遍，那两次都发生在组合期的主线程上。
-                    val isDir = file.isDirectory
-                    val (iconRes, tint) = iconFor(isDir, file.extension)
-                    Entry(
-                        file = file,
-                        name = file.name,
-                        size = if (isDir) "文件夹" else humanSize(file.length()),
-                        modified = timeFormat.format(Date(file.lastModified())),
-                        isDirectory = isDir,
-                        iconRes = iconRes,
-                        tint = tint,
-                    )
-                }
-            }
+            entries = listed
         }
         listing = false
     }
@@ -244,7 +248,6 @@ fun FilesScreen(onBack: () -> Unit) {
                                 // 先确保它存在。目录还没建过时 listFiles() 返回 null，而那条
                                 // 失败文案说的是「可能缺少所有文件访问权限」—— 对一个我们自己拥有的
                                 // 私有目录，那是误导。PluginStore 自己也是先 mkdirs() 再列。
-                                pluginRoot.mkdirs()
                                 root = pluginRoot
                                 current = pluginRoot
                                 notice = null

@@ -21,15 +21,20 @@ class ChatScroll internal constructor(
     var stickToBottom by mutableStateOf(initialFollowing)
     internal var restoring by mutableStateOf(true)
     internal var pinActive by mutableStateOf(false)
-    val atBottom by derivedStateOf { !listState.canScrollBackward }
+    val atBottom by derivedStateOf { !listState.canScrollForward }
     internal suspend fun toBottom() = listState.pinToBottom()
 }
 
-internal suspend fun LazyListState.pinToBottom() { scrollToItem(0) }
+/** A normal transcript anchors readers at its top; only explicit following seeks the end. */
+internal const val TRANSCRIPT_END_OFFSET = Int.MAX_VALUE / 2
+internal suspend fun LazyListState.pinToBottom() {
+    val last = layoutInfo.totalItemsCount - 1
+    if (last >= 0) scrollToItem(last, TRANSCRIPT_END_OFFSET)
+}
 
 private data class FollowWant(
-    val index: Int,
-    val offset: Int,
+    val awayFromBottom: Boolean,
+    val scrolling: Boolean,
     val stick: Boolean,
     val pressed: Boolean,
     val guard: Boolean,
@@ -49,14 +54,14 @@ fun rememberChatScroll(
     val scroll = remember(listState) { ChatScroll(listState, conversationId.toString(), initialFollowing) }
     LaunchedEffect(listState) {
         snapshotFlow {
-            !listState.canScrollBackward && !listState.isScrollInProgress &&
+            !listState.canScrollForward && !listState.isScrollInProgress &&
                 !scroll.restoring && !pressedNow() && !guardNow()
         }.collectLatest { reachedBottom ->
             if (!reachedBottom) return@collectLatest
             val index = listState.firstVisibleItemIndex
             // Keep the existing overscroll/selection settling interval.
             delay(420)
-            if (!listState.canScrollBackward && !listState.isScrollInProgress && !scroll.restoring &&
+            if (!listState.canScrollForward && !listState.isScrollInProgress && !scroll.restoring &&
                 !pressedNow() && !guardNow() && listState.firstVisibleItemIndex == index) {
                 scroll.pinActive = false
                 scroll.stickToBottom = true
@@ -67,12 +72,12 @@ fun rememberChatScroll(
     LaunchedEffect(listState, autoFollow) {
         if (!autoFollow) return@LaunchedEffect
         snapshotFlow {
-            FollowWant(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset,
+            FollowWant(listState.canScrollForward, listState.isScrollInProgress,
                 scroll.stickToBottom, pressedNow(), guardNow(), scroll.restoring)
         }.collect { want ->
             if (want.stick && !want.pressed && !want.guard && !want.restoring &&
-                !listState.isScrollInProgress && (want.index != 0 || want.offset != 0)) {
-                listState.scrollToItem(0)
+                !want.scrolling && want.awayFromBottom) {
+                listState.pinToBottom()
             }
         }
     }

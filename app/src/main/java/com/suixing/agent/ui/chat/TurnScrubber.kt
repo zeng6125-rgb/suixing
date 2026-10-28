@@ -2,6 +2,8 @@
 package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -25,10 +27,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -48,6 +54,9 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /**
  * Which line a finger at [y] is on. Rows are found by their centre rather than by their box,
@@ -139,6 +148,52 @@ private val ScrubTickShape = RoundedCornerShape(1.dp)
 /** 滚动条标签卡圆角。 */
 private val ScrubLabelShape = RoundedCornerShape(8.dp)
 
+/** Only touched/chosen rows and rows still shrinking own animation state. */
+private class ScrubberScales(private val scope: CoroutineScope) {
+    private class Entry {
+        val animation: Animatable<Float, AnimationVector1D> = Animatable(1f)
+        var target = 1f
+        var job: Job? = null
+    }
+
+    private val entries = mutableStateMapOf<Int, Entry>()
+
+    /** Called from graphicsLayer: neither map changes nor frames subscribe composition. */
+    fun value(turn: Int): Float = entries[turn]?.animation?.value ?: 1f
+
+    fun update(visible: IntRange, chosen: Int?, pressed: Int?) {
+        for (turn in entries.keys.toList()) {
+            if (turn !in visible) {
+                entries.remove(turn)?.job?.cancel()
+            } else if (turn != chosen && turn != pressed) {
+                target(turn, 1f)
+            }
+        }
+        pressed?.takeIf { it != chosen && it in visible }?.let { target(it, SCRUBBER_TOUCH_SCALE) }
+        chosen?.takeIf { it in visible }?.let { target(it, SCRUBBER_PRESS_SCALE) }
+    }
+
+    private fun target(turn: Int, scale: Float) {
+        val entry = entries[turn] ?: if (scale == 1f) return else Entry().also { entries[turn] = it }
+        if (entry.target == scale) return
+        entry.target = scale
+        entry.job?.cancel()
+        entry.job = scope.launch {
+            entry.animation.animateTo(scale, tween(110, easing = SCRUBBER_EASING))
+            // A newer target can have replaced this job; only a completed return to rest
+            // releases the row. Leaving a row never snaps its scale back in the same frame.
+            if (scale == 1f && entry.target == 1f && entries[turn] === entry) {
+                entries.remove(turn)
+            }
+        }
+    }
+
+    fun clear() {
+        entries.values.forEach { it.job?.cancel() }
+        entries.clear()
+    }
+}
+
 /**
  * One horizontal line per turn, stacked on the list's right edge: the user asked for
  * 「一条一条横线」 in place of the old ◀ i/N ▶ arrows, which also fought the status
@@ -227,6 +282,18 @@ internal fun TurnScrubber(
     var selectionRow by remember { mutableIntStateOf(0) }
     var shown by remember { mutableStateOf(false) }
     val selected = selectionRow.coerceIn(0, rowCount - 1)
+    val animationScope = rememberCoroutineScope()
+    val rowScales = remember(conversationId, animationScope) { ScrubberScales(animationScope) }
+    DisposableEffect(rowScales) {
+        onDispose { rowScales.clear() }
+    }
+    SideEffect {
+        rowScales.update(
+            visible = window,
+            chosen = if (shown) rows.getOrNull(selected) else null,
+            pressed = rows.getOrNull(pressRow),
+        )
+    }
 
     val density = LocalDensity.current
     val rowPx = with(density) { SCRUBBER_ROW.toPx() }
@@ -396,15 +463,6 @@ internal fun TurnScrubber(
                 val read = turn < currentTurn
                 val active = turn == currentTurn
                 val chosen = shown && row == selected
-                val scale = animateFloatAsState(
-                    targetValue = when {
-                        chosen -> SCRUBBER_PRESS_SCALE
-                        row == pressRow -> SCRUBBER_TOUCH_SCALE
-                        else -> 1f
-                    },
-                    animationSpec = tween(110, easing = SCRUBBER_EASING),
-                    label = "scrubber_row_scale",
-                )
                 Box(
                     modifier = Modifier.height(SCRUBBER_ROW),
                     contentAlignment = Alignment.Center,
@@ -423,8 +481,9 @@ internal fun TurnScrubber(
                             // line off the 4dp edge gap, and never re-lays-out the rows under a
                             // finger that is still dragging.
                             .graphicsLayer {
-                                scaleX = scale.value
-                                scaleY = scale.value
+                                val scale = rowScales.value(turn)
+                                scaleX = scale
+                                scaleY = scale
                                 transformOrigin = TransformOrigin(1f, 0.5f)
                             }
                             .clip(ScrubTickShape)
