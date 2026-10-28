@@ -256,7 +256,7 @@ class PluginStore(private val baseDir: File) {
             val manifest = File(dir, MANIFEST_FILE)
             if (!manifest.exists()) continue
             runCatching { PluginJson.decodeFromString<PluginSpec>(manifest.readText()) }
-                .getOrNull()?.tools?.forEach { names += "${dir.name}.${it.name}" }
+                .getOrNull()?.tools?.forEach { names += "${dir.name}_${it.name}" }
         }
         return names
     }

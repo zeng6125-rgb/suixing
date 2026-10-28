@@ -450,12 +450,25 @@ class SkillStore(private val context: Context) {
         }
     }
 
+
+    /** 临时文件 + rename；rename 不可用时退回直写（与 ChatStore 的做法一致）。 */
+    private fun writeAtomically(target: java.io.File, text: String) {
+        val temp = java.io.File(target.parentFile, target.name + ".tmp")
+        temp.writeText(text)
+        if (!temp.renameTo(target)) {
+            target.writeText(text)
+            temp.delete()
+        }
+    }
+
     private fun writeState(state: SkillState) {
-        stateFile.writeText(json.encodeToString(DISABLED_SERIALIZER, state.disabled))
+        // **原子写**（issue #54 A-4）：直写若中途被打断，读回失败会退回 emptySet() =
+        // 「全部启用」（降级方向错误）。先写临时文件再 rename。
+        writeAtomically(stateFile, json.encodeToString(DISABLED_SERIALIZER, state.disabled))
         // Written only once there is something to remember: a device that never downloaded a
         // skill should not carry an empty file around for it.
         if (state.origins.isNotEmpty() || originFile.isFile) {
-            originFile.writeText(json.encodeToString(ORIGIN_SERIALIZER, state.origins))
+            writeAtomically(originFile, json.encodeToString(ORIGIN_SERIALIZER, state.origins))
         }
     }
 

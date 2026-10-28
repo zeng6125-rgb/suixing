@@ -28,6 +28,17 @@ import java.io.File
  * Every call says which route it took, so a failure is explainable instead of silent.
  */
 /** 落盘的截图只留最近这么多张：够回溯几步，又不会把存储吃光。 */
+
+/** 无障碍调用失败就当"做不到"，但**取消必须原样抛出**（issue #54 A-2）。 */
+private inline fun attemptAction(block: () -> Boolean): Boolean = try {
+    block()
+} catch (cancel: kotlinx.coroutines.CancellationException) {
+    throw cancel
+} catch (_: Throwable) {
+    false
+}
+
+
 private const val SHOTS_KEPT = 20
 
 /** `ui_key` 支持的按键（与 spec 的 enumValues 同一份事实来源）。 */
@@ -271,7 +282,7 @@ class UiTools(
         fx: () -> Unit,
     ): ToolResult {
         val service = accessibility()
-        if (service != null && runCatching { accessibilityAction(service) }.getOrDefault(false)) {
+        if (service != null && attemptAction { accessibilityAction(service) }) {
             return ToolResult.success(successText)
         }
         if (!privileged()) {
@@ -429,7 +440,7 @@ class UiTools(
         if (text.isEmpty()) return ToolResult.failure("缺少参数 text")
         val exact = args.bool("exact", false)
 
-        if (service != null && runCatching { service.clickByText(text, exact) }.getOrDefault(false)) {
+        if (service != null && attemptAction { service.clickByText(text, exact) }) {
             return ToolResult.success("已点击「$text」")
         }
         if (!privileged()) {
@@ -493,7 +504,7 @@ class UiTools(
                     "现在可以改用 ui_click_text 点输入框 + ui_type 输入。",
             )
         }
-        val ok = runCatching { service.typeIntoField(label, text) }.getOrDefault(false)
+        val ok = attemptAction { service.typeIntoField(label, text) }
         return if (ok) {
             TouchFx.noteDriving(context)
             ToolResult.success("已在「$label」输入 ${text.length} 字")

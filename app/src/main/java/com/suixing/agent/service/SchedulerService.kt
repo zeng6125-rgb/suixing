@@ -75,7 +75,13 @@ class SchedulerService : Service() {
     }
 
     private suspend fun fire(id: String) {
-        val schedule = Core.schedules.find(id) ?: return
+        // 提醒在闹钟已挂、响铃前被删时：系统仍会投递 ACTION_FIRE。这里若直接 return，
+        // 就不会走到 finally 里唯一的 `arm()` ⇒ 一次性闹钟体系整块失效（issue #54 A-1）。
+        // 早退前补一次重排。
+        val schedule = Core.schedules.find(id) ?: run {
+            arm(this@SchedulerService)
+            return
+        }
         getSystemService(NotificationManager::class.java)?.notify(REMINDER_ID, buildNotification(id))
         val question = StoredMessage(
             id = UUID.randomUUID().toString(),
