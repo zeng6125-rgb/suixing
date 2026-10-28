@@ -403,8 +403,8 @@ internal fun ProcessCard(
                     text = title,
                     // 折叠块统一：标题一律 labelMedium（原来这里是 labelLarge×13/14）。三处
                     // （思考块 / 工具行 / 本轮用量）的表头现在同一行高、同一字号、同一内边距。
-                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
-                    color = scheme.onSurface,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = scheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     // The name takes what it needs, not half the row. `weight(1f, fill = false)`

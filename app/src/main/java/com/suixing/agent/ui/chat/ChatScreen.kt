@@ -866,6 +866,8 @@ fun ChatScreen(
 
     // **分批填充**（打开/切换会话时 12 轮一次性组合 = 100~150ms，frame.log 实测：
     val scroll = rememberChatScroll(
+        // 内容版本：消息条数 + 流式/思考字符数。只在真正"长高"时变，滚动本身不会触发。
+        contentVersion = state.messages.size to (state.streaming.length + state.reasoning.length),
         listState = listState,
         autoFollow = settings.autoFollow,
         pressedNow = { pressed },

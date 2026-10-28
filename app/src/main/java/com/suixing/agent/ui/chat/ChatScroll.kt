@@ -50,8 +50,19 @@ fun rememberChatScroll(
     conversationId: Any? = Unit,
     trace: (String) -> Unit = {},
     initialFollowing: Boolean = true,
+    /** 内容版本（消息数 + 流式/思考字符数）。变化即"这一帧内容要长高"。 */
+    contentVersion: Any? = null,
 ): ChatScroll {
     val scroll = remember(listState) { ChatScroll(listState, conversationId.toString(), initialFollowing) }
+    // **贴底前移**：内容变化这一帧、测量之前先请求滚动到底。
+    // LaunchedEffect 在组合应用后、布局前运行 ⇒ 本帧就贴底，不再"先长高、下一帧拉回"，
+    // 从而消掉流式时那一帧的位移残影（用户反馈）。只加这一处，
+    // 与下面 FollowWant 的状态机（是否算追底）分工不变。
+    LaunchedEffect(contentVersion) {
+        if (contentVersion != null && scroll.stickToBottom && !scroll.restoring) {
+            listState.pinToBottom()
+        }
+    }
     LaunchedEffect(listState) {
         snapshotFlow {
             !listState.canScrollForward && !listState.isScrollInProgress &&
@@ -75,9 +86,10 @@ fun rememberChatScroll(
             FollowWant(listState.canScrollForward, listState.isScrollInProgress,
                 scroll.stickToBottom, pressedNow(), guardNow(), scroll.restoring)
         }.collect { want ->
-            // 方案 B 第 1 项：这条"内容长高→下一帧拉回"的路径是回弹的来源，已停用。
-            // 跟随改由 ChatScreen 在内容变化那一帧、布局之前完成（LaunchedEffect 先于测量）。
-            // 状态机（是否贴底）仍由上面 reached-bottom 那条流维护，这里不做任何滚动。
+            if (want.stick && !want.pressed && !want.guard && !want.restoring &&
+                !want.scrolling && want.awayFromBottom) {
+                listState.pinToBottom()
+            }
 
         }
     }
