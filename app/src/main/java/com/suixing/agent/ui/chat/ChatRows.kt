@@ -1517,7 +1517,6 @@ internal fun AssistantRow(
                 }
             }
             if (parts.isEmpty() && streaming) TypingDots()
-            SummaryUsageDetails(usage, liveStats, contextWindow)
             if (message != null && !streaming) {
                 // The last block carries no trailing spacer of its own, so the air
                 // above this row is its own 10dp.

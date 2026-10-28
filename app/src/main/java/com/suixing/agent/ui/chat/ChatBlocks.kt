@@ -363,6 +363,8 @@ internal fun ProcessCard(
     previewTail: (@Composable () -> Unit)? = null,
     /** The turn summary owns its seam with the flat tail; other cards keep their usual air. */
     contentBottomPadding: Dp = 6.dp,
+    /** false = 没有可展开内容：不响应点击、不画箭头（卡片仍显示，用来报用时）。 */
+    expandable: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -376,9 +378,9 @@ internal fun ProcessCard(
                 // nothing in the row wraps (every text is maxLines 1).
                 .height(36.dp)
                 // 整块按下反馈（见 blockPress）：这一行是折叠条的入口，涟漪是一颗小圆角矩形。
-                .blockPress(ProcessHeaderShape) {
-                    onToggle()
-                }
+                .then(
+                    if (expandable) Modifier.blockPress(ProcessHeaderShape) { onToggle() } else Modifier,
+                )
                 .padding(horizontal = 0.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -401,7 +403,7 @@ internal fun ProcessCard(
                     text = title,
                     // 折叠块统一：标题一律 labelMedium（原来这里是 labelLarge×13/14）。三处
                     // （思考块 / 工具行 / 本轮用量）的表头现在同一行高、同一字号、同一内边距。
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
                     color = scheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -412,10 +414,11 @@ internal fun ProcessCard(
                     // preview beside it the name yields at [PROCESS_TITLE_MAX]; without one it
                     // still holds the row, which is what lets the summary card's long header
                     // ellipsize instead of the chip after it.
+                    // 标题吃满剩余宽度 ⇒ 箭头贴行最右（有 preview 的卡片才收缩）。
                     modifier = if (preview != null) {
                         Modifier.widthIn(max = PROCESS_TITLE_MAX)
                     } else {
-                        Modifier.weight(1f, fill = false)
+                        Modifier.weight(1f)
                     },
                 )
                 if (trailing != null) {
@@ -440,7 +443,7 @@ internal fun ProcessCard(
                     )
                     previewTail?.invoke()
                 }
-                Icon(
+                if (expandable) Icon(
                     imageVector = if (expanded) {
                         ImageVector.vectorResource(R.drawable.ic_chevron_up)
                     } else {
@@ -1471,27 +1474,15 @@ internal fun TurnSummary(
     // While a run streams, the engine's copy of the endpoint's last report is fresher than
     // anything already stored, so it wins.
     val context = live?.lastPromptTokens?.takeIf { it > 0 } ?: usage?.prompt ?: 0
+    val elapsedMs = live?.elapsedMs ?: settled?.elapsedMs ?: 0L
     val headline = buildList {
+        if (elapsedMs > 0) add("用时 ${formatDuration(elapsedMs)}")
         if (thoughts.isNotEmpty()) add("思考 ${thoughts.size} 段")
         if (calls.isNotEmpty()) add("工具 ${calls.size} 个")
     }
     // While a run streams the header shows the numbers that move; a settled reply shows
     // the ones the endpoint reported.
-    val tail = buildList {
-        if (live != null) {
-            add("输出 ${live.tokensOut}")
-            // 官方取整（≥10 整数、<10 一位小数），与统计卡、悬浮窗一致 —— 不是统一的 %.1f。
-            if (live.tokPerSec > 0) add("${Tps.format(live.tokPerSec.toDouble())} tok/s")
-            if (live.elapsedMs > 0) add(formatDuration(live.elapsedMs))
-        } else if (settled != null) {
-            if (settled.prompt > 0) add("输入 ${settled.prompt}")
-            if (settled.completion > 0) add("输出 ${settled.completion}")
-            if (settled.perSecond > 0) {
-                add("${Tps.format(settled.perSecond)} tok/s")
-            }
-            if (settled.elapsedMs > 0) add(formatDuration(settled.elapsedMs))
-        }
-    }
+    val tail = emptyList<String>()
     // The numbers ride inside the title rather than in their own slot, so they shorten
     // with it and the chip after them is never the thing that gets squeezed.
     // 标题串只在输入变化时重算（每次重组 3 个 buildList + joinToString 是纯浪费）。
@@ -1507,6 +1498,7 @@ internal fun TurnSummary(
     ProcessCard(
         icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
         title = header,
+        expandable = parts.isNotEmpty() && processTailStart(parts) > 0,
         expanded = expanded,
         contentBottomPadding = 0.dp,
         onToggle = { reasoningExpansion.set(summarySlot(runId), !expanded) },
@@ -1514,12 +1506,6 @@ internal fun TurnSummary(
             if (live != null) {
                 Spacer(Modifier.width(8.dp))
                 ProcessSpinner(MaterialTheme.colorScheme.primary)
-            }
-            // In the header, not only in the details: how full the window is decides
-            // whether the next question even fits, so it cannot hide behind a tap.
-            if (context > 0) {
-                Spacer(Modifier.width(8.dp))
-                ContextChip(tokens = context, window = contextWindow, live = live)
             }
         },
     ) {
@@ -1605,82 +1591,7 @@ internal fun TurnSummary(
     }
 }
 
-/** Final usage arrives below the prose, never inserts height above the reading point. */
-@Composable
-internal fun SummaryUsageDetails(usage: Usage?, live: StreamStats?, contextWindow: Int) {
-    val settled = usage?.takeIf { it.known }
-    val context = live?.lastPromptTokens?.takeIf { it > 0 } ?: usage?.prompt ?: 0
-    val detailText = remember(settled, live) {
-        buildList {
-            if (settled != null) {
-                if (settled.prompt > 0) add("输入 ${settled.prompt}")
-                if (settled.completion > 0) add("输出 ${settled.completion}")
-                if (settled.reasoning > 0) add("思考 ${settled.reasoning}")
-                if (settled.cached > 0) add("缓存 ${settled.cached}")
-            } else if (live != null) {
-                add("输出 ${live.tokensOut}")
-                if (live.thinkingTokens > 0) add("思考 ${live.thinkingTokens}")
-            }
-        }.joinToString(" · ")
-    }
-    if (detailText.isNotEmpty() || context > 0) {
-        Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (detailText.isNotEmpty()) Text(
-                text = detailText,
-                style = metaStyle(),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            if (context > 0) {
-                if (detailText.isNotEmpty()) Spacer(Modifier.width(6.dp))
-                ContextChip(tokens = context, window = contextWindow, live = live)
-            }
-        }
-    }
-}
 
 /** One line inside [TurnSummary] is gone with the segment rows; the expanded card now
  * draws full thinking blocks and two-level tool rows instead. */
 
-/** 上下文 Xk, or Xk / Yk once the window is known; it turns amber near the ceiling. */
-@Composable
-internal fun ContextChip(tokens: Int, window: Int, live: StreamStats? = null) {
-    var open by remember { mutableStateOf(false) }
-    val full = window > 0 && tokens * 100 / window >= 80
-    val scheme = MaterialTheme.colorScheme
-    val tone = if (full) scheme.tertiary else scheme.onSurfaceVariant
-    // 挂在**每张**助手卡的表头上 ⇒ 每帧都在付这两下；值不变就复用（审计 2§A17）。
-    val chipColor = remember(full, scheme) {
-        if (full) scheme.tertiary.copy(alpha = 0.14f) else scheme.surfaceContainer
-    }
-    val label = remember(tokens, window) {
-        if (window > 0) {
-            "上下文 ${tokens / 1000}k / ${window / 1000}k"
-        } else {
-            "上下文 ${tokens / 1000}k"
-        }
-    }
-    Surface(
-        onClick = { open = true },
-        shape = CircleShape,
-        color = chipColor,
-    ) {
-        Text(
-            text = label,
-            style = metaStyle(),
-            color = tone,
-            // One line, never wrapped: a squeezed chip used to stack its characters
-            // vertically and stretch the row it sat in.
-            maxLines = 1,
-            softWrap = false,
-            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
-        )
-    }
-
-    if (open) {
-        ContextBreakdownDialog(tokens = tokens, window = window, live = live, onDismiss = { open = false })
-    }
-}

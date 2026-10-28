@@ -75,10 +75,10 @@ fun rememberChatScroll(
             FollowWant(listState.canScrollForward, listState.isScrollInProgress,
                 scroll.stickToBottom, pressedNow(), guardNow(), scroll.restoring)
         }.collect { want ->
-            if (want.stick && !want.pressed && !want.guard && !want.restoring &&
-                !want.scrolling && want.awayFromBottom) {
-                listState.pinToBottom()
-            }
+            // 方案 B 第 1 项：这条"内容长高→下一帧拉回"的路径是回弹的来源，已停用。
+            // 跟随改由 ChatScreen 在内容变化那一帧、布局之前完成（LaunchedEffect 先于测量）。
+            // 状态机（是否贴底）仍由上面 reached-bottom 那条流维护，这里不做任何滚动。
+
         }
     }
     return scroll
