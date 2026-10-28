@@ -57,7 +57,7 @@ import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.data.modelOffers
-import com.suixing.agent.ui.chat.MENU_EXIT_MS
+import com.suixing.agent.ui.components.MENU_EXIT_MS
 import com.suixing.agent.ui.chat.POPUP_EDGE_AIR
 import com.suixing.agent.ui.chat.popupCap
 import com.suixing.agent.ui.chat.reasoningWire

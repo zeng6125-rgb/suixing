@@ -44,3 +44,9 @@ internal fun Modifier.popupCardSurface(color: Color): Modifier = this
     )
     .clip(PopupCardShape)
     .background(color)
+
+/** How long a popup card's exit animation runs before the popup is taken down. */
+internal const val MENU_EXIT_MS = 140L
+
+/** 全站小浮层统一时长（用户：所有统一为七处那一套，140ms）。 */
+internal const val POPUP_ANIM_MS = 110

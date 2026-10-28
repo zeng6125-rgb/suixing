@@ -1,4 +1,4 @@
-package com.suixing.agent.ui.components
+package com.suixing.agent.ui.chat.markdown
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals

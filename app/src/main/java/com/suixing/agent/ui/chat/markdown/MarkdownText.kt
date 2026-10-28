@@ -1,4 +1,4 @@
-package com.suixing.agent.ui.components
+package com.suixing.agent.ui.chat.markdown
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border

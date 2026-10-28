@@ -82,7 +82,7 @@ import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.data.ContextCheckpoint
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Tps
-import com.suixing.agent.ui.components.MarkdownText
+import com.suixing.agent.ui.chat.markdown.MarkdownText
 import kotlin.math.abs
 import kotlin.math.roundToInt
 

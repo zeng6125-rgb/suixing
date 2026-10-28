@@ -1,4 +1,4 @@
-package com.suixing.agent.ui.components
+package com.suixing.agent.ui.chat.markdown
 
 private data class SettledMarkdownKey(val block: MdBlock, val occurrence: Int)
 private data class TailMarkdownKey(val kind: kotlin.reflect.KClass<out MdBlock>)

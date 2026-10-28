@@ -1,4 +1,4 @@
-package com.suixing.agent.ui
+package com.suixing.agent.ui.chat.markdown
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.LinkAnnotation
@@ -6,11 +6,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
-import com.suixing.agent.ui.components.MdBlock
-import com.suixing.agent.ui.components.inlineMarkdown
-import com.suixing.agent.ui.components.listStart
-import com.suixing.agent.ui.components.orderedMarker
-import com.suixing.agent.ui.components.parseMarkdown
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue

@@ -132,12 +132,6 @@ internal fun statusLineStyle(): TextStyle = MaterialTheme.typography.labelMedium
  * hang it off an edge. Right-aligned because centring it on the capsule put the sheet's mass
  * left of the ring, which the user read as left-aligned.
  */
-/** How long a popup card's exit animation runs before the popup is taken down. */
-internal const val MENU_EXIT_MS = 140L
-
-/** 全站小浮层统一时长（用户：所有统一为七处那一套，140ms）。 */
-internal const val POPUP_ANIM_MS = 110
-
 /** The margin a popup keeps from the window's own edges. */
 internal val POPUP_EDGE = 8.dp
 

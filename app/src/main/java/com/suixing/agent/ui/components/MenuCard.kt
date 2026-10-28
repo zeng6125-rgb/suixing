@@ -56,8 +56,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
-import com.suixing.agent.ui.chat.MENU_EXIT_MS
-import com.suixing.agent.ui.chat.POPUP_ANIM_MS
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 /**

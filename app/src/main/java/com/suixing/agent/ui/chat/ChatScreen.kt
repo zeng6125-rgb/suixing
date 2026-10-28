@@ -65,9 +65,11 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.LayoutCoordinates
+import com.suixing.agent.ui.chat.markdown.SettledBlocks
+import com.suixing.agent.ui.chat.markdown.MdBlock
 import com.suixing.agent.ui.components.bottomInsetPadding
-import com.suixing.agent.ui.components.LocalPreparedMarkdown
-import com.suixing.agent.ui.components.prepareMarkdownTexts
+import com.suixing.agent.ui.chat.markdown.LocalPreparedMarkdown
+import com.suixing.agent.ui.chat.markdown.prepareMarkdownTexts
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -111,7 +113,7 @@ import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.FullScreenOverlay
 import com.suixing.agent.ui.components.LocalDrawerBusy
 import com.suixing.agent.ui.components.LocalHeldImePx
-import com.suixing.agent.ui.components.LocalPathClick
+import com.suixing.agent.ui.chat.markdown.LocalPathClick
 import com.suixing.agent.ui.components.LocalSetSelectionActive
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import java.io.File
@@ -487,7 +489,7 @@ fun ChatScreen(
         HashMap<String, LayoutCoordinates>()
     }
     val rowHeights = remember(rowCoordinates) { HashMap<String, Int>() }
-    val rowDocuments = remember(state.conversationId) { HashMap<String, Map<String, List<com.suixing.agent.ui.components.MdBlock>>>() }
+    val rowDocuments = remember(state.conversationId) { HashMap<String, Map<String, List<MdBlock>>>() }
     val geometryVersion = remember(rowCoordinates) { mutableIntStateOf(0) }
     val visibleIds = remember(visible) { visible.mapTo(HashSet()) { it.message.id } }
     val visibleKeys = remember(rowKeys) { rowKeys.toHashSet() }
@@ -890,7 +892,7 @@ fun ChatScreen(
         for (row in rows) {
             val texts = row.parts.filterIsInstance<Part.Text>().map { it.text }
             val current = rowDocuments[row.message.id]
-            if (current == null || texts.any { it.length >= com.suixing.agent.ui.components.SettledBlocks.MIN_CHARS && it !in current }) {
+            if (current == null || texts.any { it.length >= SettledBlocks.MIN_CHARS && it !in current }) {
                 val prepared = prepareMarkdownTexts(texts)
                 // A parser may finish after a branch/page/chat changed during suspension.
                 // Its old document must not publish into, or evict, the current row cache.

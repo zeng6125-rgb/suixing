@@ -72,9 +72,9 @@ import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.ui.assistant.AssistantAvatar
-import com.suixing.agent.ui.components.MarkdownText
+import com.suixing.agent.ui.chat.markdown.MarkdownText
 import com.suixing.agent.ui.components.SuixingMark
-import com.suixing.agent.ui.components.markdownBody
+import com.suixing.agent.ui.chat.markdown.markdownBody
 import java.util.Locale
 
 // 模型层：气泡分组、分页、圆环读数、待办行、跳转轨窗口、附件。纯函数，单测覆盖。

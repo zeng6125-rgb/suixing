@@ -1,4 +1,4 @@
-package com.suixing.agent.ui.usage
+package com.suixing.agent.ui.settings
 
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SettingSectionTitle
