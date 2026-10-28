@@ -59,9 +59,10 @@ class DictationRecorder(private val context: Context) {
     @Volatile
     var onAutoStop: (() -> Unit)? = null
 
-    private var record: AudioRecord? = null
-    private var thread: Thread? = null
-    private var pcm: java.io.ByteArrayOutputStream? = null
+    // 这三个字段被录音线程与主线程交叉读写：不加 @Volatile 时停止/收尾可能读到旧值（issue #54 A-11）。
+    @Volatile private var record: AudioRecord? = null
+    @Volatile private var thread: Thread? = null
+    @Volatile private var pcm: java.io.ByteArrayOutputStream? = null
 
     /** 抓音开始。返回 false 表示这台设备/这个权限拿不到麦克风。 */
     fun start(): Boolean {
@@ -108,6 +109,8 @@ class DictationRecorder(private val context: Context) {
                         onAutoStop?.invoke()
                         return@Thread
                     }
+                    // read == 0 是"暂时没数据"：不休眠会让这个线程空转吃满 CPU。
+                    Thread.sleep(5)
                     continue
                 }
                 var sum = 0.0

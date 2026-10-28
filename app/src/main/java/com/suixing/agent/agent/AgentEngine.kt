@@ -247,9 +247,13 @@ class ApprovalGate(
         waiters[chatId] = deferred
         val request = Request(id, toolName, args, requestSequence.incrementAndGet())
         _pending.update { it + (chatId to request) }
-        val decision = deferred.await()
-        waiters.remove(chatId)
-        _pending.update { it - chatId }
+        // 取消/异常时也要摘掉门，否则这个会话的审批门永久残留（issue #54 A-7）。
+        val decision = try {
+            deferred.await()
+        } finally {
+            waiters.remove(chatId)
+            _pending.update { it - chatId }
+        }
         if (decision.always) {
             if (decision.approved) rememberAlways(toolName) else rememberDenied(toolName)
         }

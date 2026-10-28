@@ -294,8 +294,10 @@ object Shell {
             if (!finished) process.killAndReap()
             outThread.join(if (finished) 1500L else 500L)
             errThread.join(if (finished) 1500L else 500L)
+            // 读者线程没 join 完 ⇒ stdout/stderr 可能只读了一半，这时不能报成功（issue #54 A-6）。
+            val drained = !outThread.isAlive && !errThread.isAlive
             return ShellResult(
-                finished && process.exitValue() == 0,
+                finished && drained && process.exitValue() == 0,
                 stdout.snapshot(),
                 if (finished) stderr.snapshot() else "命令超时（${DEFAULT_TIMEOUT_MS / 1000}s）已终止",
                 if (finished) process.exitValue() else -1,
