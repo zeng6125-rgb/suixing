@@ -25,6 +25,17 @@ import java.util.concurrent.TimeUnit
  * Everything that reaches out to the network. A phone agent is only as useful as
  * the facts it can look up, and the model's memory is not one of them.
  */
+
+/** DuckDuckGo 结果解析用的两条正则：提到文件级，避免每次搜索重复编译（issue #53 B-1）。 */
+private val DDG_LINK = Regex(
+    "<a[^>]+class=\"[^\"]*result__a[^\"]*\"[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+)
+private val DDG_SNIPPET = Regex(
+    "<a[^>]+class=\"[^\"]*result__snippet[^\"]*\"[^>]*>(.*?)</a>",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+)
+
 class WebTools(
     private val context: Context,
     private val settings: SettingsRepository,
@@ -253,14 +264,8 @@ class WebTools(
     }
 
     private fun parseDuckDuckGo(html: String, count: Int): List<String> {
-        val linkPattern = Regex(
-            "<a[^>]+class=\"[^\"]*result__a[^\"]*\"[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>",
-            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
-        )
-        val snippetPattern = Regex(
-            "<a[^>]+class=\"[^\"]*result__snippet[^\"]*\"[^>]*>(.*?)</a>",
-            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
-        )
+        val linkPattern = DDG_LINK
+        val snippetPattern = DDG_SNIPPET
         val links = linkPattern.findAll(html).toList()
         val snippets = snippetPattern.findAll(html).toList()
         return links.take(count).mapIndexed { index, match ->

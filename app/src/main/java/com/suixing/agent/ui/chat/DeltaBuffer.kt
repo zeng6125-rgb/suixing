@@ -62,6 +62,10 @@ internal class DeltaBuffer {
     fun take(chatId: String): Pair<String, String> {
         val text = texts.remove(chatId)?.toString().orEmpty()
         val reasoning = reasonings.remove(chatId)?.toString().orEmpty()
+        // **不清 lastPublishAt**（issue #53 D-1 提议在这里清，实测会被 DeltaBufferTest 否掉）：
+        // 节流窗口必须跨「取走→再写入」保持，否则每次 take 都重置计时，
+        // `throttling holds the text until the interval is over` 立刻失败。
+        // 代价只是一个 String→Long 条目随会话存续；会话销毁时 `drop()` 会连带清掉。
         return text to reasoning
     }
 

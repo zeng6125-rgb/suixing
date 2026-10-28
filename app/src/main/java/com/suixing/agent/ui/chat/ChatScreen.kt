@@ -399,11 +399,18 @@ fun ChatScreen(
     } ?: PAGE_TURNS
     val anchorWindow = remember(state.conversationId, state.messagesRevision, openingBookmark) {
         if (openingBookmark == null || openingBookmark.followLatest) PAGE_TURNS else {
-            val at = state.messages.indexOfFirst { message ->
-                message.id == openingBookmark.messageId ||
-                    openingBookmark.runId != null && message.runId == openingBookmark.runId ||
-                    message.id in openingBookmark.nearbyMessageIds
+            // issue #53 B-2：用一次建表替换「每落一条消息扫一遍全表」的线性查找。
+            // 语义保持 indexOfFirst：各自最早命中取最小 ⇒ 与「第一个满足任一条件的下标」等价。
+            val positions = state.messages.firstPositions()
+            val candidates = buildList {
+                positions[openingBookmark.messageId]?.let(::add)
+                openingBookmark.nearbyMessageIds.forEach { positions[it]?.let(::add) }
+                openingBookmark.runId?.let { rid ->
+                    val i = state.messages.indexOfFirst { it.runId == rid }
+                    if (i >= 0) add(i)
+                }
             }
+            val at = candidates.minOrNull() ?: -1
             if (at < 0) PAGE_TURNS else state.messages.asSequence().drop(at)
                 .count { it.role == Roles.USER && !it.steer } + 1
         }
@@ -571,8 +578,10 @@ fun ChatScreen(
     // 全局表不会串数据；LRU 上限防内存。纯函数与单测见 TokenEstimateCache。
     val transcriptEstimate = remember(state.messagesRevision, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
+        // issue #53 B-2：同一次建表里查 id（firstPositions 保留首个重复 id 的语义）。
+        val positions = state.messages.firstPositions()
         val start = last?.let { cp ->
-            val i = state.messages.indexOfFirst { it.id == cp.toMessageId }
+            val i = positions[cp.toMessageId] ?: -1
             if (i >= 0) i + 1 else 0
         } ?: 0
         val kept = if (start in 1..state.messages.lastIndex) {
