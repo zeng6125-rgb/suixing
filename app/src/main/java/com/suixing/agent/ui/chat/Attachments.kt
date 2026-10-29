@@ -345,10 +345,43 @@ internal fun ImagePreviewBytes(
     var bitmap by remember(bytes) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(bytes) {
         bitmap = withContext(Dispatchers.Default) {
-            bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
+            // 降采样再解（审计 D-3）：这里原来直接全尺寸 `decodeByteArray`。当前入口写进来的图
+            // 已被 [bitmapAttachment] 压到 1280 宽，但历史消息里的 base64 可能是更早版本或别的
+            // 来源写下的更大图。只在超过 [PREVIEW_MAX_WIDTH] 时采样 ⇒ 1280 及以下与改动前逐像素
+            // 相同（预览观感不变），大图不再按原尺寸进堆。
+            bytes?.let { runCatching { decodePreviewBytes(it)?.asImageBitmap() }.getOrNull() }
         }
     }
     bitmap?.let { ImagePreviewDialog(it, contentDescription, keepKeyboard, onDismiss) }
+}
+
+/** 全屏预览解图的最长边上限：再大在这个缩放级别也看不出差别，却要付平方级的内存。 */
+private const val PREVIEW_MAX_WIDTH = 2048
+
+/**
+ * 预览解图的降采样倍数：解出来的最长边**不超过** [PREVIEW_MAX_WIDTH]（2 的幂采样，与
+ * [decodeAttachment] 同一套做法）。0 边界（解不出尺寸）按 1 处理。
+ *
+ * 纯函数、无 Android 依赖，单测见 `ImagePreviewSampleTest`。
+ */
+internal fun previewSampleSize(width: Int, height: Int): Int {
+    val longest = maxOf(width, height)
+    if (longest <= 0) return 1
+    var sample = 1
+    while (longest / sample > PREVIEW_MAX_WIDTH) sample *= 2
+    return sample
+}
+
+/** 预览用解码：先读边界再按 [previewSampleSize] 采样，避免整张大图进堆。 */
+internal fun decodePreviewBytes(bytes: ByteArray): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    return BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply { inSampleSize = previewSampleSize(bounds.outWidth, bounds.outHeight) },
+    )
 }
 
 @Composable

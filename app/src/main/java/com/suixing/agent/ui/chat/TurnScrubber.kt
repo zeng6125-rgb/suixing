@@ -184,11 +184,22 @@ private class ScrubberScales(private val scope: CoroutineScope) {
 
     private val entries = mutableStateMapOf<Int, Entry>()
 
+    /**
+     * 遍历用的可复用表（审计 5.50）：`update` 挂在 `SideEffect` 上，每次重组都跑一遍，
+     * 原来 `entries.keys.toList()` 每次都分配一个新 List，正好落在跨轮滚动那几帧上。
+     * 只复用这张表，窗口/命中/动画逻辑一律不动（高亮与滚动联动是已验收行为）。
+     */
+    private val scratch = ArrayList<Int>(16)
+
     /** Called from graphicsLayer: neither map changes nor frames subscribe composition. */
     fun value(turn: Int): Float = entries[turn]?.animation?.value ?: 1f
 
     fun update(visible: IntRange, chosen: Int?, pressed: Int?) {
-        for (turn in entries.keys.toList()) {
+        // 边遍历边改 `entries` 会并发修改，所以先拷下标再改。
+        scratch.clear()
+        scratch.addAll(entries.keys)
+        for (i in scratch.indices) {
+            val turn = scratch[i]
             if (turn !in visible) {
                 entries.remove(turn)?.job?.cancel()
             } else if (turn != chosen && turn != pressed) {

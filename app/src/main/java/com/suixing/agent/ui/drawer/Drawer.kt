@@ -278,10 +278,14 @@ internal fun Drawer(
 
     // 「排序模式是一次性模式」：任何非拖动的交互都从这一个口子关掉它，
     // 免得一半路径忘了关、模式残留到下一次拉开抽屉。
-    val exitSortMode: () -> Unit = {
-        sortMode = false
-        draggingState.value = null
-        dragPreview.value = null
+    // remember 起来：它被当成下面 drawerRow 的记忆键之一，每次重组换新实例会让那个 remember 失效
+    // （体内只写上面三个 remember 出来的 MutableState，不读任何可能过期的值）。
+    val exitSortMode: () -> Unit = remember {
+        {
+            sortMode = false
+            draggingState.value = null
+            dragPreview.value = null
+        }
     }
 
     // 面板：库负责拖动/回弹/遮罩/位移，视觉参数逐条覆盖回自绘那版——
@@ -370,129 +374,137 @@ internal fun Drawer(
 
             // 两个区块共用同一行（只差顺序，不差样子）：抽成局部 lambda，免得把二十来行
             // 回调抄两遍。animateItem 只在 item 作用域里拿得到，所以由调用处传进来。
-            val drawerRow: @Composable (Conversation, Modifier) -> Unit = { conversation, anim ->
-                // 把手的拖动手势建一次就固定住：手势进行中如果 block 换实例，Compose 会把
-                // 这次拖动取消，于是「拖到一半断了」。
-                val dragHandle = remember(conversation.id) {
-                    Modifier.pointerInput(conversation.id) {
-                        try {
-                            detectDragGestures(
-                            onDragStart = {
-                                val row = listState.layoutInfo.visibleItemsInfo
-                                    .firstOrNull { it.key == conversation.id }
-                                if (row != null) {
-                                    draggingState.value = conversation.id
-                                    dragPreview.value = sectionsNow.value
-                                    dragTracker.pointerY = row.offset + row.size / 2f
-                                }
-                            },
-                            onDrag = { change, amount ->
-                                change.consume()
-                                val dragging = draggingState.value
-                                if (dragging != null) {
-                                    dragTracker.pointerY += amount.y
-                                    val hit = listState.layoutInfo.visibleItemsInfo
-                                        .firstOrNull {
-                                            dragTracker.pointerY >= it.offset &&
-                                                dragTracker.pointerY <= it.offset + it.size
-                                        }
-                                        ?.key as? String
-                                    if (hit != null) {
-                                        val reordered = previewDrawerReorder(
-                                            sections = dragPreview.value ?: sectionsNow.value,
-                                            dragging = dragging,
-                                            target = hit,
-                                        )
-                                        if (reordered != null) dragPreview.value = reordered
+            // **只加 remember**（性能审计 #54 C-2）：这个 lambda 捕获了 `runningId: Set<String>`
+            // 这种不稳定类型，强跳过不会替它做记忆 —— 抽屉每重组一次就换一个新实例，`items` 里
+            // 的内容 lambda 跟着换，可见行全部重组。键只放会变的入参；其余捕获项（listState /
+            // draggingState / orderStore / persistOrder…）都是 remember 出来的稳定对象，在体内
+            // 读取不会拿到过期值。
+            val drawerRow: @Composable (Conversation, Modifier) -> Unit = remember(
+                activeId, runningId, context, exporter,
+                onOpenConversation, onTogglePin, onToggleArchive, exitSortMode,
+            ) { { conversation, anim ->
+                    // 把手的拖动手势建一次就固定住：手势进行中如果 block 换实例，Compose 会把
+                    // 这次拖动取消，于是「拖到一半断了」。
+                    val dragHandle = remember(conversation.id) {
+                        Modifier.pointerInput(conversation.id) {
+                            try {
+                                detectDragGestures(
+                                onDragStart = {
+                                    val row = listState.layoutInfo.visibleItemsInfo
+                                        .firstOrNull { it.key == conversation.id }
+                                    if (row != null) {
+                                        draggingState.value = conversation.id
+                                        dragPreview.value = sectionsNow.value
+                                        dragTracker.pointerY = row.offset + row.size / 2f
                                     }
+                                },
+                                onDrag = { change, amount ->
+                                    change.consume()
+                                    val dragging = draggingState.value
+                                    if (dragging != null) {
+                                        dragTracker.pointerY += amount.y
+                                        val hit = listState.layoutInfo.visibleItemsInfo
+                                            .firstOrNull {
+                                                dragTracker.pointerY >= it.offset &&
+                                                    dragTracker.pointerY <= it.offset + it.size
+                                            }
+                                            ?.key as? String
+                                        if (hit != null) {
+                                            val reordered = previewDrawerReorder(
+                                                sections = dragPreview.value ?: sectionsNow.value,
+                                                dragging = dragging,
+                                                target = hit,
+                                            )
+                                            if (reordered != null) dragPreview.value = reordered
+                                        }
+                                    }
+                                },
+                                onDragEnd = {
+                                    if (draggingState.value != null) dragPreview.value?.let { preview ->
+                                        orderState.value = DrawerOrder(
+                                            pinned = preview.pinned.map { it.id },
+                                            normal = preview.normal.map { it.id },
+                                        ).prunedTo(conversationsNow.value.map { it.id }.toSet())
+                                        persistOrder()
+                                    }
+                                    dragPreview.value = null
+                                    draggingState.value = null
+                                },
+                                onDragCancel = {
+                                    dragPreview.value = null
+                                    draggingState.value = null
+                                },
+                                )
+                            } finally {
+                                if (draggingState.value == conversation.id) {
+                                    draggingState.value = null
+                                    dragPreview.value = null
                                 }
-                            },
-                            onDragEnd = {
-                                if (draggingState.value != null) dragPreview.value?.let { preview ->
-                                    orderState.value = DrawerOrder(
-                                        pinned = preview.pinned.map { it.id },
-                                        normal = preview.normal.map { it.id },
-                                    ).prunedTo(conversationsNow.value.map { it.id }.toSet())
-                                    persistOrder()
-                                }
-                                dragPreview.value = null
-                                draggingState.value = null
-                            },
-                            onDragCancel = {
-                                dragPreview.value = null
-                                draggingState.value = null
-                            },
-                            )
-                        } finally {
-                            if (draggingState.value == conversation.id) {
-                                draggingState.value = null
-                                dragPreview.value = null
                             }
                         }
                     }
-                }
-                ConversationRow(
-                    conversation = conversation,
-                    selected = conversation.id == activeId,
-                    running = conversation.id in runningId,
-                    completedUnread = conversation.id in unreadCompleted,
-                    menuOpen = menuFor == conversation.id,
-                    sortMode = sortMode,
-                    dragging = draggingState.value == conversation.id,
-                    dragHandleModifier = dragHandle,
-                    modifier = anim,
-                    // 点行、长按、以及菜单里的每一个动作都先退出排序模式：用户要的是
-                    // 「做了别的事就别再停在拖动态」。
-                    onClick = {
-                        // 埋点：抽屉里点会话到底发生了什么（用户：要点好几下）。
-                        exitSortMode()
-                        onOpenConversation(conversation)
-                    },
-                    onLongClick = {
-                        exitSortMode()
-                        menuFor = conversation.id
-                    },
-                    onMenuDismiss = {
-                        exitSortMode()
-                        menuFor = null
-                    },
-                    onRename = {
-                        exitSortMode()
-                        menuFor = null
-                        pendingRename = conversation
-                    },
-                    onDelete = {
-                        exitSortMode()
-                        menuFor = null
-                        pendingDelete = conversation
-                    },
-                    onTogglePin = {
-                        exitSortMode()
-                        menuFor = null
-                        // 置顶就追加到置顶表末尾（置顶区有自己的顺序）；取消置顶只从置顶表
-                        // 摘掉，于是它按 updatedAt 回到普通区该在的位置。
-                        orderState.value = pinToggled(orderState.value, conversation)
-                        persistOrder()
-                        onTogglePin(conversation)
-                    },
-                    onToggleArchive = {
-                        exitSortMode()
-                        menuFor = null
-                        onToggleArchive(conversation)
-                    },
-                    onCopyTitle = {
-                        exitSortMode()
-                        menuFor = null
-                        copyTitle(context, conversation.title)
-                    },
-                    onExport = {
-                        exitSortMode()
-                        menuFor = null
-                        pendingExport = conversation
-                        exporter.launch(exportName(conversation.title))
-                    },
-                )
-            }
+                    ConversationRow(
+                        conversation = conversation,
+                        selected = conversation.id == activeId,
+                        running = conversation.id in runningId,
+                        completedUnread = conversation.id in unreadCompleted,
+                        menuOpen = menuFor == conversation.id,
+                        sortMode = sortMode,
+                        dragging = draggingState.value == conversation.id,
+                        dragHandleModifier = dragHandle,
+                        modifier = anim,
+                        // 点行、长按、以及菜单里的每一个动作都先退出排序模式：用户要的是
+                        // 「做了别的事就别再停在拖动态」。
+                        onClick = {
+                            // 埋点：抽屉里点会话到底发生了什么（用户：要点好几下）。
+                            exitSortMode()
+                            onOpenConversation(conversation)
+                        },
+                        onLongClick = {
+                            exitSortMode()
+                            menuFor = conversation.id
+                        },
+                        onMenuDismiss = {
+                            exitSortMode()
+                            menuFor = null
+                        },
+                        onRename = {
+                            exitSortMode()
+                            menuFor = null
+                            pendingRename = conversation
+                        },
+                        onDelete = {
+                            exitSortMode()
+                            menuFor = null
+                            pendingDelete = conversation
+                        },
+                        onTogglePin = {
+                            exitSortMode()
+                            menuFor = null
+                            // 置顶就追加到置顶表末尾（置顶区有自己的顺序）；取消置顶只从置顶表
+                            // 摘掉，于是它按 updatedAt 回到普通区该在的位置。
+                            orderState.value = pinToggled(orderState.value, conversation)
+                            persistOrder()
+                            onTogglePin(conversation)
+                        },
+                        onToggleArchive = {
+                            exitSortMode()
+                            menuFor = null
+                            onToggleArchive(conversation)
+                        },
+                        onCopyTitle = {
+                            exitSortMode()
+                            menuFor = null
+                            copyTitle(context, conversation.title)
+                        },
+                        onExport = {
+                            exitSortMode()
+                            menuFor = null
+                            pendingExport = conversation
+                            exporter.launch(exportName(conversation.title))
+                        },
+                    )
+            } }
             // 置顶区空着时连标签都不出现：空标签只会让人以为还有东西没加载出来。
             LazyColumn(
                 state = listState,

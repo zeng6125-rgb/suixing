@@ -1383,14 +1383,12 @@ internal fun TurnSummary(
     }
     // While a run streams the header shows the numbers that move; a settled reply shows
     // the ones the endpoint reported.
-    val tail = emptyList<String>()
     // The numbers ride inside the title rather than in their own slot, so they shorten
     // with it and the chip after them is never the thing that gets squeezed.
     // 标题串只在输入变化时重算（每次重组 3 个 buildList + joinToString 是纯浪费）。
-    val header = remember(headline, tail, note, streaming) {
+    val header = remember(headline, note, streaming) {
         buildList {
         add(if (headline.isEmpty()) if (streaming) "正在回复" else "本轮用量" else "本轮：${headline.joinToString(" · ")}")
-        addAll(tail)
         // After the numbers, before nothing else: the compression line is a fact about this
         // turn, so it rides in the same title and folds away with the card.
         if (note.isNotBlank()) add(note)

@@ -68,36 +68,6 @@ internal object TurnMarks {
     }
 
     /**
-     * 视口顶部那一行在**喂序**里的下标 —— 单 item 转录专用。
-     *
-     * 整页装进一个 LazyColumn item 之后 `firstVisibleItemIndex` 恒为 0，没有 item 边界
-     * 可读，只能按像素反查：从最新一端（底部）往上累加各行高度，第一个跨过
-     * 「距底偏移 + 视口高」的行就是视口顶部那一行。
-     *
-     * @param offsetFromBottom `firstVisibleItemScrollOffset`（倒序布局里就是距最新端的像素）
-     * @param viewport 视口高（像素）
-     * @param heightsOldestFirst 各行高度（**可见正序、旧→新**，已含行间距）；0 = 还没量到
-     * @return 喂序下标（0 = 最新）；没量到高度时返回当前近似值
-     */
-    fun topFedIndex(
-        offsetFromBottom: Int,
-        viewport: Int,
-        heightsOldestFirst: IntArray,
-    ): Int {
-        val n = heightsOldestFirst.size
-        if (n <= 0) return 0
-        val target = offsetFromBottom + viewport
-        var acc = 0
-        for (r in 0 until n) {
-            val h = heightsOldestFirst[n - 1 - r]
-            if (h <= 0) return r
-            if (acc + h > target) return r
-            acc += h
-        }
-        return n - 1
-    }
-
-    /**
      * 视口内 [PROBE_FRACTION] 位置那一行在**喂序**里的下标 —— 这才是"当前读到哪一轮"。
      *
      * **口径取自 Aether**（`shared/.../ConversationTimeline.kt` 的 `currentTimelineIndex`）：
@@ -106,7 +76,7 @@ internal object TurnMarks {
      * timelineTargets.indexOfLast { … it.offset <= probe … }
      * ```
      * 即：取视口**靠上 28%** 处的那一轮当"当前"，而不是顶部、也不是底部。
-     * 之前用顶部（[topFedIndex]）算当前轮，导航条的高亮与条数全都对不上。
+     * 之前用顶部算当前轮，导航条的高亮与条数全都对不上。
      *
      * 随行是单 item 化（整页一个 item），没有 item 边界可读，只能按像素反查：从最新端
      * （底部）往上累加各行高度，第一个跨过「距底偏移 + 视口高 × 0.28」的行就是它。

@@ -153,4 +153,28 @@ class TranscriptTest {
             Transcript.active(rows, activeRuns, turnOf).map { it.id },
         )
     }
+
+    @Test
+    fun `a run choice the caller already computed selects the same rows`() {
+        // 2.5：组行时 `runs`/`chosen` 已经在手里，交进来就不该再重扫一遍 `runsByTurn`；
+        // 省掉那趟扫描的前提是**结果一模一样**，所以两条路径要对同一份列表给出同一答案。
+        val rows = listOf(
+            StoredMessage(id = "u1", role = Roles.USER, text = "q1"),
+            StoredMessage(id = "a1", role = Roles.ASSISTANT, text = "a1", runId = "r1"),
+            StoredMessage(id = "a2", role = Roles.ASSISTANT, text = "a2", runId = "r2"),
+            StoredMessage(id = "u2", role = Roles.USER, text = "q2"),
+            StoredMessage(id = "a3", role = Roles.ASSISTANT, text = "a3", runId = "r3"),
+        )
+        val activeRuns = mapOf("u1" to "r1")
+        val turnOf = Transcript.turnOf(rows)
+        val chosen = Transcript.chosenFrom(Transcript.runsByTurn(rows, turnOf), activeRuns)
+        assertEquals(
+            listOf("u1", "a1", "u2", "a3"),
+            Transcript.active(rows, activeRuns, turnOf, chosen).map { it.id },
+        )
+        assertEquals(
+            Transcript.active(rows, activeRuns, turnOf).map { it.id },
+            Transcript.active(rows, activeRuns, turnOf, chosen).map { it.id },
+        )
+    }
 }

@@ -47,15 +47,20 @@ internal object TokenEstimateCache {
     /**
      * 返回这条消息的 token 估算：[stamp]（内容指纹）与缓存一致就复用，否则重算并写回。
      */
-    fun tokensFor(message: StoredMessage, stamp: Long): Int = synchronized(entries) {
-        val hit = entries[message.id]
-        if (hit != null && hit[0] == stamp) {
-            hit[1].toInt()
-        } else {
-            val tokens = estimateTokens(message)
-            entries[message.id] = longArrayOf(stamp, tokens.toLong())
-            tokens
+    fun tokensFor(message: StoredMessage, stamp: Long): Int {
+        // **锁只包住查表/写表**（审计 4.18）：估算（逐字符 CJK 判定）原来整段跑在
+        // `synchronized` 里，未命中时调用方线程（组合期＝主线程）会持着全局锁算完
+        // 5~20 万字符，并发调用还被串行化。命中路径仍零分配、零重算。
+        val hit = synchronized(entries) {
+            val entry = entries[message.id]
+            if (entry != null && entry[0] == stamp) entry[1].toInt() else null
         }
+        if (hit != null) return hit
+        val tokens = estimateTokens(message)
+        // 并发 miss 时后写者覆盖先写者：同一 stamp 下估算是纯函数、值相同，覆盖无害；
+        // 不同 stamp 时最坏只留一条要重算的旧条目（指纹对不上就重算，读不到脏值）。
+        synchronized(entries) { entries[message.id] = longArrayOf(stamp, tokens.toLong()) }
+        return tokens
     }
 
     /** 清空（仅测试用：让每个用例从干净表开始）。 */

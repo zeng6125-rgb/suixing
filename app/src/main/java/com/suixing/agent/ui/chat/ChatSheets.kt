@@ -77,7 +77,9 @@ internal fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                items(todos) { item -> TodoSheetRow(item) }
+                // 清单由 `todo_write` 整体重写，可能中途插删：按稳定 id 作 key，
+                // 否则后续行按位置错位、行内 remember 状态串到邻行（审计 5.51）。
+                items(todos, key = { it.id }, contentType = { "todo" }) { item -> TodoSheetRow(item) }
             }
         }
     }

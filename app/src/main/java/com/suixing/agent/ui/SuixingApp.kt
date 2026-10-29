@@ -194,7 +194,15 @@ fun SuixingApp() {
             showOnboarding = true
         }
     }
-    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    // **整份 AppSettings 不在外壳根部订阅**（性能审计 #54 5.48）：那一行让任何一个设置变化
+    // （切 provider、改窗口大小、换个头像…）都把整个外壳连同下面的页面、抽屉、覆盖层重跑一遍，
+    // 和上面「会话列表不在外壳根部订阅」是同一个毛病。外壳自己只用到 `floatingConsole`，
+    // 所以这里按值订阅这一个字段；另外三处要整份 settings 的地方（助手设置页、抽屉那张半屏表、
+    // 助手编辑器覆盖层）都下沉成各自的子组合（见文件末尾三个 private composable），
+    // 与 `DrawerBackHandler` 同一个思路。
+    val consoleOn by remember {
+        Core.settings.flow.map { it.floatingConsole }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Returning from the system's overlay page is the only moment the grant can have
@@ -492,9 +500,9 @@ fun SuixingApp() {
                             closeDrawer()
                             shellAssistants = true
                         },
-                        consoleOn = settings.floatingConsole,
+                        consoleOn = consoleOn,
                         onToggleConsole = {
-                            if (settings.floatingConsole) {
+                            if (consoleOn) {
                                 // Written first, then stopped: the switch is what the run checks,
                                 // and a console left running after the switch went off would
                                 // linger until the run ended on its own.
@@ -699,10 +707,8 @@ fun SuixingApp() {
                             // 于是「编辑助手」只有一条路、一个实现；半屏的表只剩聊天页那个随手
                             // 切换助手的窗口。
                             composable("assistants") {
-                                AssistantScreen(
-                                    assistants = settings.assistants,
-                                    activeId = assistantId.ifBlank { settings.activeAssistantId },
-                                    settings = settings,
+                                AssistantsRoute(
+                                    activeId = assistantId,
                                     onUse = { chat.useAssistant(it) },
                                     onSetDefault = { chat.setDefaultAssistant(it) },
                                     onSave = { chat.saveAssistant(it) },
@@ -749,10 +755,8 @@ fun SuixingApp() {
     // 抽屉里那张半屏表。挂在外壳、不在任何一页里：抽屉是外壳自己的面板，表跟着它走，
     // 与聊天页那张共用同一个 AssistantSheet（回调也同一套）。
     if (shellAssistants) {
-        AssistantSheet(
-            assistants = settings.assistants,
-            activeId = assistantId.ifBlank { settings.activeAssistantId },
-            settings = settings,
+        ShellAssistantSheet(
+            activeId = assistantId,
             onUse = { chat.useAssistant(it) },
             onSetDefault = { chat.setDefaultAssistant(it) },
             // 编辑/新建：收掉半屏表，编辑器画在主窗口的全屏覆盖层（结构路，0.8.105）。
@@ -774,26 +778,16 @@ fun SuixingApp() {
     FullScreenOverlay(visible = editorAssistantId != null) {
         val id = editorAssistantId ?: lastEditorId
         if (id != null) {
-            val servers by Core.mcp.servers.collectAsStateWithLifecycle()
-            val toolNames = remember(servers) { Core.tools.names() + com.suixing.agent.agent.SUBAGENT_SPECS.map { it.name } }
-            val target = settings.assistants.firstOrNull { it.id == id }
-                ?: Assistant(id = id, avatar = "🧭")
-            AssistantEditor(
-                initial = target,
-                settings = settings,
-                toolNames = toolNames,
+            AssistantEditorHost(
+                id = id,
                 backEnabled = editorAssistantId != null,
                 onSave = {
                     chat.saveAssistant(it)
                     editorAssistantId = null
                 },
-                onDelete = if (settings.assistants.size > 1) {
-                    {
-                        chat.deleteAssistant(target)
-                        editorAssistantId = null
-                    }
-                } else {
-                    null
+                onDelete = {
+                    chat.deleteAssistant(it)
+                    editorAssistantId = null
                 },
                 onDismiss = { editorAssistantId = null },
             )
@@ -812,4 +806,81 @@ private fun DrawerDismissLayer(state: androidx.compose.material3.DrawerState, on
                 .pointerInput(state) { detectTapGestures { closeNow() } },
         )
     }
+}
+
+/**
+ * 助手设置整页。整份 settings 下沉到这一层订阅（#54 5.48）：改任何设置只重跑这一页，
+ * 不再把外壳连同抽屉、聊天页一起拖进来重组 —— 与上面 `DrawerBackHandler` 同一个思路。
+ */
+@Composable
+private fun AssistantsRoute(
+    activeId: String,
+    onUse: (Assistant) -> Unit,
+    onSetDefault: (Assistant) -> Unit,
+    onSave: (Assistant) -> Unit,
+    onDelete: (Assistant) -> Unit,
+    onBack: () -> Unit,
+) {
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    AssistantScreen(
+        assistants = settings.assistants,
+        activeId = activeId.ifBlank { settings.activeAssistantId },
+        settings = settings,
+        onUse = onUse,
+        onSetDefault = onSetDefault,
+        onSave = onSave,
+        onDelete = onDelete,
+        onBack = onBack,
+    )
+}
+
+/** 抽屉那张半屏助手表，订阅同理（#54 5.48）。 */
+@Composable
+private fun ShellAssistantSheet(
+    activeId: String,
+    onUse: (Assistant) -> Unit,
+    onSetDefault: (Assistant) -> Unit,
+    onOpenEditor: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    AssistantSheet(
+        assistants = settings.assistants,
+        activeId = activeId.ifBlank { settings.activeAssistantId },
+        settings = settings,
+        onUse = onUse,
+        onSetDefault = onSetDefault,
+        onOpenEditor = onOpenEditor,
+        onDismiss = onDismiss,
+    )
+}
+
+/**
+ * 助手编辑器的内容（主窗口全屏覆盖层里那一层）。订阅同样下沉到这里：
+ * 覆盖层开着时改设置，只有编辑器本身重跑（#54 5.48）。
+ */
+@Composable
+private fun AssistantEditorHost(
+    id: String,
+    backEnabled: Boolean,
+    onSave: (Assistant) -> Unit,
+    onDelete: (Assistant) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val servers by Core.mcp.servers.collectAsStateWithLifecycle()
+    val toolNames = remember(servers) {
+        Core.tools.names() + com.suixing.agent.agent.SUBAGENT_SPECS.map { it.name }
+    }
+    val target = settings.assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
+    AssistantEditor(
+        initial = target,
+        settings = settings,
+        toolNames = toolNames,
+        backEnabled = backEnabled,
+        onSave = onSave,
+        // 只剩一个助手时不给删（删完就没有「当前助手」了）。
+        onDelete = if (settings.assistants.size > 1) { { onDelete(target) } } else null,
+        onDismiss = onDismiss,
+    )
 }

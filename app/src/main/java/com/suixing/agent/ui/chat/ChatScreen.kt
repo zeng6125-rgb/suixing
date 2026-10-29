@@ -51,7 +51,6 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -529,7 +528,12 @@ fun ChatScreen(
     // 并标「约」。跳变的老根因是两个口径轮流上屏，所以估算值绝不与实测值并列成链。
     // tokens 是上次请求的绝对用量，没有绑定窗口。切 provider 仍保留这个会话的最近实测，
     // 分母单独按当前模型计算；下次请求上报后再更新，避免切模型即丢失唯一实测。
-    val heldPrompt = rememberSaveable(state.conversationId) { mutableIntStateOf(0) }
+    // **按会话保持**（审计 5.25）：`rememberSaveable(state.conversationId)` 在 inputs 变化时会
+    // 重新初始化（不是按 key 分槽保存）⇒ A→B→A 后归 0，圆环掉回估算档 —— 正是上面这段注释
+    // 要消除的口径轮换。改成进程内的 per-chat 表：切回某个会话沿用它上次的实测数。
+    // 代价是旋转/进程重建后不再恢复这一档（下面的落盘实测 persistedContext 照旧接住）。
+    val heldPrompts = remember { mutableStateMapOf<String, Int>() }
+    val heldPrompt = heldPrompts[state.conversationId] ?: 0
     // 请求级快照（prompt/breaks 变才发射）——body 不再订阅 120ms 的 elapsedMs。
     val runStatsNow by viewModel.requestStats.collectAsStateWithLifecycle()
     // **实时统计属于"正在跑的那一次请求"**：它挂在 ViewModel 上全局共享，切会话/新建会话时
@@ -539,7 +543,7 @@ fun ChatScreen(
     val liveStatsHere = runStatsNow.takeIf { state.runningHere }
     val reported = liveStatsHere?.lastPromptTokens ?: 0
     LaunchedEffect(state.conversationId, reported) {
-        if (reported > 0) heldPrompt.intValue = reported
+        if (reported > 0) heldPrompts[state.conversationId] = reported
     }
     // 落盘的实测上下文（issue #41 真问题 1）：run 结束瞬间前两级归零，这一档接住圆环。
     // meta 里 O(1) 命中（totalsAt==messageCount 时），每轮落盘自动更新。
@@ -548,7 +552,7 @@ fun ChatScreen(
         ?.forConversation(state.conversationId)
     val persistedContext = session?.contextTokens ?: 0
     val reading = ringReading(
-        liveReported = if (reported > 0) reported else heldPrompt.intValue,
+        liveReported = if (reported > 0) reported else heldPrompt,
         newestStored = newestUsage?.prompt ?: 0,
         liveEstimate = liveStatsHere?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
         transcriptEstimate = transcriptEstimate,
@@ -727,7 +731,7 @@ fun ChatScreen(
     // 就要重跑一遍。把读取推迟到 `TurnScrubber` 内部（见下面 `current = { … }`），
     // 跨边界时只有导航条自己重组。用 `remember` 持有 State 对象而不是 `by` —— `by` 一取就立刻读了。
     // **单 item 化之后 `firstVisibleItemIndex` 恒为 0**，读数导航必须改口径：
-    // 用「距最新的像素偏移 + 视口高」反查视口顶部是哪一行（`TurnMarks.topFedIndex`，
+    // 用视口里已量到的行按像素反查「28% 读数线」落在哪一行（`TurnMarks.probeOffset`，
     // 带单测）。仍然用 `remember` 持有 State、把 `.value` 的读取推迟到 `TurnScrubber`
     // 内部（issue #26 原因一），滚动时只有导航条自己重组。
     // The list's measured visible rows determine the turn at the 28% reading probe.
@@ -1620,7 +1624,14 @@ fun ChatScreen(
                         navigationJob[0] = scope.launch {
                             try {
                                 previousNavigation?.join()
-                                snapshotFlow { viewport.presented }.first { it }
+                                // **等呈现要有上限**（审计 5.28）：`presented` 由恢复协程在
+                                // 「定位 + 补读更早页」之后置位，那次恢复若早退或被取消，这个
+                                // `first{}` 永不返回；而 `pendingTurn` 只在 token 匹配的 finally
+                                // 里清除 ⇒ 导航条高亮会一直钉在被点的那一轮。超时只是让这次跳转
+                                // 作废（用户再点一下），不会动滚动几何与命中逻辑。
+                                if (withTimeoutOrNull(NAVIGATION_PRESENT_TIMEOUT_MS) {
+                                        snapshotFlow { viewport.presented }.first { it }
+                                    } == null) return@launch
                                 if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
                                 scroll.allowBottomResume = false
                                 scroll.stickToBottom = false
@@ -1889,26 +1900,6 @@ fun ChatScreen(
 }
 
 /**
- * 报出 [reported] 的高度，但内容按**不受限**的高度测量（真实自然高度写进 [natural]）。
- *
- * `reported <= 0` ⇒ 直接报自然高度（贴底时走这条，行为与改动前完全一致）。
- * 内容比 [reported] 高时由调用方加 `clipToBounds()` 裁掉 —— 被裁的只是这一帧多出来的边缘。
- */
-/**
- * 钉住期间，**气泡**该报多高（不含状态行）。
- *
- * 钉的是"气泡 + 状态行"的总高（`LivePinState.height = natural + outside`），所以气泡要报
- * `总高 − 当前状态行高度`，这样 item 总高恒等于钉住值，上面的内容才不动。
- *
- * 两个边界都写在这里、并各有一条断言：
- * - `reported <= 0`（没钉）⇒ 直接用自然高度，行为与改动前完全一致；
- * - `outside >= reported`（小气泡 + 三行重试提示）⇒ 钳到 1px。**这是刻意的取舍**：
- *   这种情况下总高会比钉住值大（内容被推一下），换的是"错误提示要显示全"。
- */
-internal fun laggedBubbleHeight(reported: Int, outside: Int, natural: Int): Int =
-    if (reported > 0) (reported - outside).coerceAtLeast(1) else natural
-
-/**
  * 把「手势条让位」从组合期搬到**布局期**：键盘盖住手势条时让位是 0，键盘收起时是完整的手势条高度。
  *
  * 为什么需要它（用户：「输入框被输入法抬起收回时掉帧」）：这一项原来算在 `stackFootprint` 里，
@@ -1938,3 +1929,13 @@ private fun Modifier.keyboardAwareImePad(
     navBarPx: Int,
     ime: androidx.compose.runtime.State<Int>,
 ): Modifier = bottomInsetPadding { (ime.value - navBarPx).coerceAtLeast(0) }
+
+/**
+ * 导航条跳转最多等「内容已呈现」多久（审计 5.28）。
+ *
+ * 恢复协程置 `presented` 之前要定位、必要时补读更早的页；它若早退/被取消，跳转协程会永远
+ * 停在 `snapshotFlow { presented }.first { it }` 上，而 `pendingTurn` 只在 token 匹配的
+ * finally 里清除 ⇒ 高亮一直钉在被点的那一轮。10s 远长于一次正常恢复，超时只是让这次跳转
+ * 作废，用户再点一下即可。
+ */
+private const val NAVIGATION_PRESENT_TIMEOUT_MS = 10_000L

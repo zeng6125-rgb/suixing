@@ -1806,11 +1806,17 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
     var searchApiKey by remember { mutableStateOf(stored.searchApiKey) }
     var endpointEdited by remember { mutableStateOf(false) }
     var keyEdited by remember { mutableStateOf(false) }
-    LaunchedEffect(stored.searchEndpoint, stored.searchApiKey) {
+    // 语音转写模型原来逐击键 `persist{}`：一个字符一次「整份 JSON 编码 + Keystore 加密 +
+    // 文件重写 + 广播」，而输入框显示的值就来自那条写回 —— 打得快会看到字符回退、光标跳。
+    // 与上面两个搜索字段同一套（#54 C-1）：本地态即时显示，**停手 400ms 才落盘**。
+    var asrModelText by remember { mutableStateOf(stored.asrModel) }
+    var asrModelEdited by remember { mutableStateOf(false) }
+    LaunchedEffect(stored.searchEndpoint, stored.searchApiKey, stored.asrModel) {
         // Seed from the first real repository emission, without a delayed disk echo
         // replacing characters typed after an earlier debounced batch was dispatched.
         if (!endpointEdited) searchEndpoint = stored.searchEndpoint
         if (!keyEdited) searchApiKey = stored.searchApiKey
+        if (!asrModelEdited) asrModelText = stored.asrModel
     }
 
     Scaffold(
@@ -1906,8 +1912,12 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
                 item {
                     OutlinedTextField(
                         textStyle = settingsFieldText,
-                        value = stored.asrModel,
-                        onValueChange = { value -> scope.persist { it.copy(asrModel = value) } },
+                        value = asrModelText,
+                        onValueChange = { value ->
+                            asrModelEdited = true
+                            asrModelText = value
+                            pendingFields.put("asr-model") { it.copy(asrModel = value) }
+                        },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
                         label = { Text("语音转写模型") },
                         placeholder = { Text("whisper-1") },
@@ -2018,6 +2028,10 @@ internal fun ConversationManagerScreen(
     var drawerOrder by remember { mutableStateOf(DrawerOrder()) }
     LaunchedEffect(Unit) { drawerOrder = orderStore.load() }
     LaunchedEffect(pendingInfo) {
+        // 换一条会话（或关掉弹窗）先把上一份文件信息清掉：读盘在 IO 上要几十毫秒，而弹窗
+        // 在点下去那一帧就已经画出来了 —— 留着旧的会先闪一眼**上一条会话**的路径与大小
+        // （issue #55 5.27：chatFileInfo 切会话不复位）。
+        chatFileInfo = null
         val chat = pendingInfo ?: return@LaunchedEffect
         // **走仓库的 chatFile**：它知道日志在 `chats/store/<id>.<gen>.jsonl`。
         // 原来这里读旧的 `chats/<id>.json`，迁移之后那个文件不存在 ⇒ 对每个会话都显示

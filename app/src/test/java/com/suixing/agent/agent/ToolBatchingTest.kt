@@ -57,4 +57,18 @@ class ToolBatchingTest {
         // 顺序单调：回写顺序必须与模型给出的顺序一致。
         assertEquals(names.indices.toList(), groups.flatten())
     }
+
+    @Test
+    fun `两次读被两个手势隔开时切成四组`() {
+        // issue #48 第四项点名的原样场景：中间那两段读任何一段都不许与手势交叠。
+        val groups = batchGroups(listOf("read_file", "ui_tap", "read_file", "ui_swipe"), parallel = 8)
+        assertEquals(listOf(listOf(0), listOf(1), listOf(2), listOf(3)), groups)
+    }
+
+    @Test
+    fun `空批与单调用`() {
+        assertEquals(emptyList<List<Int>>(), batchGroups(emptyList(), parallel = 4))
+        assertEquals(listOf(listOf(0)), batchGroups(listOf("read_file"), parallel = 4))
+        assertEquals(listOf(listOf(0)), batchGroups(listOf("run_shell"), parallel = 4))
+    }
 }

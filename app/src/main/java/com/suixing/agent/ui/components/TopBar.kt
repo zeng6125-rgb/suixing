@@ -19,9 +19,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -240,9 +237,11 @@ fun PageTopBar(
                 //
                 // 历史（别再退回补丁）：这里曾用 `.offset(y = if (subtitle != null) 9.dp else 0.dp)`
                 // 上下挪整列 —— 那是补偿数字，还写反过一次符号（−9 让标题比不改更歪 18dp）。
-                // Read only during placement: a font/layout change requests placement,
-                // without subscribing the header composition to its measured geometry.
-                var opticalShift by remember(title, subtitle) { mutableFloatStateOf(0f) }
+                // 只存在普通数组里，**不进快照**（issue #54 C-8）：`onTextLayout` 在测量/布局
+                // 阶段回调，写 State 就是跨阶段回写 —— 每次文本排版都要多一轮组合+布局。
+                // 位移在一趟布局里先测量后放置，存放位即可读到本次测量值；
+                // 读点在 `offset { }` 里（放置阶段），与 MarkdownText 的 `caret[0]` 同一写法。
+                val opticalShift = remember(title, subtitle) { FloatArray(1) }
                 Box(Modifier.weight(1f)) {
                     Text(
                         text = title,
@@ -255,13 +254,13 @@ fun PageTopBar(
                         ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        onTextLayout = { layout -> opticalShift = opticalCenterShift(layout) },
+                        onTextLayout = { layout -> opticalShift[0] = opticalCenterShift(layout) },
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             // 字形视觉中心 vs 行盒中心：字体上伸/下伸不对称，居中盒子并不等于居中字。
                             // 用文字自己报上来的 baseline 算差多少，再补回同样的距离 —— 换字号/字体
                             // 自动跟随，不是写死的 ±Ndp。
-                            .offset { IntOffset(0, opticalShift.roundToInt()) },
+                            .offset { IntOffset(0, opticalShift[0].roundToInt()) },
                     )
                     if (subtitle != null) {
                         // 行高**先取成局部 val**：`MaterialTheme.typography` 是 @Composable 读取，而

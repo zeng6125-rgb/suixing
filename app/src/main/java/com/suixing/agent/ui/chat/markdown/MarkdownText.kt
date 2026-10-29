@@ -351,20 +351,6 @@ private class LineInfo(
     val ordered: MatchResult?,
 )
 
-// Must test the same constructs, in the same order, as the dispatch above.
-private fun opensBlock(lines: List<String>, index: Int): Boolean {
-    val line = lines[index]
-    val trimmed = line.trim()
-    return trimmed.isEmpty() ||
-        MD_FENCE.matches(trimmed) ||
-        MD_HEADING.matches(trimmed) ||
-        MD_RULE.matches(trimmed) ||
-        trimmed.startsWith('>') ||
-        isTableStart(lines, index) ||
-        MD_BULLET.matches(line) ||
-        MD_ORDERED.matches(line)
-}
-
 private fun isTableStart(lines: List<String>, index: Int): Boolean {
     if (!lines[index].contains('|')) return false
     val separator = lines.getOrNull(index + 1)?.trim() ?: return false
@@ -985,24 +971,6 @@ internal object SettledBlocks {
                 cachedChars -= oldest.next().key.length
                 oldest.remove()
             }
-        }
-    }
-
-    /**
-     * 预热：把「马上要显示」的定稿文本**在后台线程**先解析好、放进缓存。
-     *
-     * 切会话那一帧最重的成本是冷解析：新会话的十几行正文/思考块各自从零 `parseMarkdown`，
-     * 全落在主线程的组合期里 ⇒ 一帧塞进十几份解析，必然连丢几帧（实测切会话后有连续 4~8 个
-     * 超时帧）。解析是纯函数、与渲染无关，提前算好只是把同一份工作挪到别的线程。
-     *
-     * 不改变任何可见行为：命中缓存时 `blocksFor` 走的就是这份结果，输出逐字节相同。
-     * 已在缓存里的跳过；短于 [MIN_CHARS] 的本来就不缓存，也跳过。
-     */
-    internal fun prewarm(texts: List<String>) {
-        for (t in texts) {
-            if (t.length < MIN_CHARS || t.length > MAX_CHARS) continue
-            if (get(t) != null) continue
-            put(t, parseMarkdown(t))
         }
     }
 }

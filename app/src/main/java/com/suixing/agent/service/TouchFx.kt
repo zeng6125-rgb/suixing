@@ -1119,7 +1119,7 @@ object TouchFx {
             return null
         }
         val bounds = displayBounds(host)
-        val fx = FxView(host, bounds, screenCornerRadius(host))
+        val fx = FxView(host, bounds, screenCornerRadius(host)) { displayBounds(it) }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -1275,15 +1275,21 @@ object TouchFx {
  * 逐帧淡出，淡尽后既不排帧也不绘制。窗口的生死只由 [TouchFx.release] 决定。
  *
  * [screenBounds] is the display's real extent, captured by [TouchFx.overlay] when the window was
- * created, and is what the edge light is drawn on rather than this view's own measured size — see
+ * created and refreshed in [onSizeChanged] when the display is rotated or resized, and is what the
+ * edge light is drawn on rather than this view's own measured size — see
  * [TouchFx.displayBounds]. [cornerPx] is the panel's own corner radius, so the ring follows the
  * screen's shape rather than a guess at it.
  */
 private class FxView(
     context: Context,
-    private val screenBounds: Rect,
+    initialBounds: Rect,
     private val cornerPx: Float,
+    // 重新问一次显示器的真实尺寸 —— 常驻窗口不随旋转重建，构造期的快照会过期（issue #55 5.15）。
+    private val currentBounds: (Context) -> Rect,
 ) : View(context) {
+
+    /** 边缘光画在这个矩形上；旋转 / 分屏 / 折叠后由 [onSizeChanged] 换成新的。 */
+    private var screenBounds: Rect = initialBounds
 
     private class Ring(val x: Float, val y: Float, val startAt: Long, val holdMs: Long, val delayMs: Long)
 
@@ -1401,6 +1407,20 @@ private class FxView(
     fun flashEdge() {
         edgeStart = SystemClock.uptimeMillis()
         invalidate()
+    }
+
+    /**
+     * 窗口常驻，只 addView 一次（见类注释），所以构造期的 [screenBounds] 会一直用到下次重建 ——
+     * 旋转、分屏、折叠屏展开之后它还停在旧尺寸上，边缘光于是短在一边或者溢出屏幕（issue #55 5.15）。
+     * 这里重新问一次显示器：只有真的变了才换，首次布局两者本来就相等，等于空操作。
+     */
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        val actual = currentBounds(getContext())
+        if (actual != screenBounds) {
+            screenBounds = actual
+            invalidate()
+        }
     }
 
     override fun onDraw(canvas: Canvas) {

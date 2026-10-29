@@ -84,14 +84,21 @@ object Transcript {
         activeRuns: Map<String, String>,
         /** 同上：组行时调用方已经算过，别再重算一遍。 */
         turnOf: Map<String, String> = turnOf(messages),
+        /**
+         * 调用方用 [chosenFrom] 已经算好的「每轮画哪个 run」。
+         *
+         * 传进来就不再走 [chosenRuns] —— 它内部要重扫一遍 [runsByTurn]，而组行时那份
+         * `runs` 本来就摆在调用方手里。不传则与不带这个参数时逐字同一结果。
+         */
+        chosen: Map<String, String>? = null,
     ): List<StoredMessage> {
-        val chosen = chosenRuns(messages, activeRuns, turnOf)
+        val perTurn = chosen ?: chosenRuns(messages, activeRuns, turnOf)
         return messages.filter { message ->
             if (message.role == Roles.USER) return@filter true
             val turn = turnOf[message.id].orEmpty()
             // A transcript that starts mid-turn has no question to hang off; keep it.
             if (turn.isEmpty()) return@filter true
-            runOf(message) == chosen[turn]
+            runOf(message) == perTurn[turn]
         }
     }
 
