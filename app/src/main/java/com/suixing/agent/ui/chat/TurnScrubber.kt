@@ -230,6 +230,8 @@ internal fun TurnScrubber(
     modifier: Modifier = Modifier,
     labelOf: (Int) -> String,
     onJumpTo: (Int) -> Unit,
+    /** 正在恢复位置（切会话/回书签）：视觉直接取目标值，不做补间，避免高亮从上往下扫。 */
+    settling: Boolean = false,
 ) {
     // Draw only existing loaded turns, up to twelve.
     if (totalTurns <= 0) return
@@ -441,26 +443,30 @@ internal fun TurnScrubber(
                 val distance = abs(turn.toLong() - currentTurn)
                 // Animate visual properties inside a fixed slot; hit boxes and
                 // conversation positioning never participate in these springs.
-                val tickWidth = animateFloatAsState(
-                    when {
-                        active -> 20f
-                        exists && distance == 1L -> 16f
-                        exists && distance <= 3L -> 12f
-                        else -> 8f
-                    },
-                    spring(dampingRatio = 0.86f, stiffness = 800f), label = "turn_width")
-                val tickHeight = animateFloatAsState(
-                    if (active) 3f else 2f,
-                    spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
-                val tickColor = animateColorAsState(
-                    when {
-                        !exists -> scheme.outlineVariant.copy(alpha = 0.35f)
-                        chosen || active -> scheme.primary
-                        distance == 1L -> scheme.primary.copy(alpha = 0.48f)
-                        distance <= 3L -> scheme.primary.copy(alpha = 0.32f)
-                        else -> scheme.primary.copy(alpha = 0.22f)
-                    },
-                    tween(120, easing = SCRUBBER_EASING), label = "turn_color")
+                val targetWidth = when {
+                    active -> 20f
+                    exists && distance == 1L -> 16f
+                    exists && distance <= 3L -> 12f
+                    else -> 8f
+                }
+                val targetHeight = if (active) 3f else 2f
+                val targetColor = when {
+                    !exists -> scheme.outlineVariant.copy(alpha = 0.35f)
+                    chosen || active -> scheme.primary
+                    distance == 1L -> scheme.primary.copy(alpha = 0.48f)
+                    distance <= 3L -> scheme.primary.copy(alpha = 0.32f)
+                    else -> scheme.primary.copy(alpha = 0.22f)
+                }
+                val animatedWidth = animateFloatAsState(
+                    targetWidth, spring(dampingRatio = 0.86f, stiffness = 800f), label = "turn_width")
+                val animatedHeight = animateFloatAsState(
+                    targetHeight, spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
+                val animatedColor = animateColorAsState(
+                    targetColor, tween(120, easing = SCRUBBER_EASING), label = "turn_color")
+                // 恢复期直接取目标值：动画状态仍在，只是不参与渲染。
+                val tickWidth = if (settling) targetWidth else animatedWidth.value
+                val tickHeight = if (settling) targetHeight else animatedHeight.value
+                val tickColor = if (settling) targetColor else animatedColor.value
                 Box(
                     modifier = Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW),
                     contentAlignment = Alignment.Center,
@@ -473,12 +479,12 @@ internal fun TurnScrubber(
                             .height(3.dp)
                             .graphicsLayer {
                                 val scale = rowScales.value(turn)
-                                scaleX = minOf(tickWidth.value * scale, SCRUBBER_RAIL.value) / 20f
-                                scaleY = tickHeight.value / 3f * scale
+                                scaleX = minOf(tickWidth * scale, SCRUBBER_RAIL.value) / 20f
+                                scaleY = tickHeight / 3f * scale
                                 transformOrigin = TransformOrigin.Center
                             }
                             .clip(ScrubTickShape)
-                            .drawBehind { drawRect(tickColor.value) },
+                            .drawBehind { drawRect(tickColor) },
                     )
                 }
             }

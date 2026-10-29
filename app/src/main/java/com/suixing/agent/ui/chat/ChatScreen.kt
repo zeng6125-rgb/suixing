@@ -1613,6 +1613,9 @@ fun ChatScreen(
             // 起点偏一轮 ⇒ 标签念错一句、点最新那条还会越界（`getOrNull` 拿到 null，
             // 于是一下都不动 —— 用户说的「点不中 / 对应不上」）。全局轮号才是真坐标。
             val firstDrawnTurn = page.earlier + 1
+            // **点击后立刻高亮目标轮**：导航是动画（240–340ms），若等滚动经过再更新高亮，
+            // 观感就是"点了没反应"。这里先乐观置位，导航结束时清掉（用户要求实时响应）。
+            var pendingTurn by remember(state.conversationId) { mutableStateOf<Int?>(null) }
             TurnScrubber(
                 conversationId = state.conversationId,
                 totalTurns = page.turns,
@@ -1620,14 +1623,18 @@ fun ChatScreen(
                 // 「已加载到第几轮」全按它算，与 `firstDrawnTurn` 同一口径。
                 drawnTurns = page.drawn,
                 current = {
-                    if (live && currentPhysicalRow.value >= rowOffset + visible.size) page.turns.coerceAtLeast(1)
-                    else TurnMarks.currentAtRow(
+                    pendingTurn ?: if (live && currentPhysicalRow.value >= rowOffset + visible.size) {
+                        page.turns.coerceAtLeast(1)
+                    } else TurnMarks.currentAtRow(
                         physicalIndex = currentPhysicalRow.value,
                         turnIndices = turnIndices,
                         drawnTurns = page.drawn,
                         totalTurns = page.turns,
                     )
                 },
+                // 切会话/恢复位置期间不做补间：否则 currentTurn 从 1 跳到真实轮次时，
+                // 高亮会从上往下扫一遍（用户反馈的现象）。
+                settling = scroll.restoring,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     // 键盘抬起时导航条跟着上移（用户：「抬起时为什么导航条不动」）。
@@ -1667,6 +1674,7 @@ fun ChatScreen(
                     // 底锚下 feed index 0 即底部 ⇒ 明确滚到底，不吞这次点击。
                     val inWindow = turn - firstDrawnTurn
                     val index = turnIndices.getOrNull(inWindow)
+                    pendingTurn = turn
                     val token = ++navigationToken[0]
                     val previousNavigation = navigationJob[0]
                     previousNavigation?.cancel()
@@ -1688,6 +1696,7 @@ fun ChatScreen(
                                 viewport.navigation.navigate(listState, (itemCount - 1).coerceAtLeast(0), TRANSCRIPT_END_OFFSET)
                             }
                         } finally {
+                            if (token == navigationToken[0]) pendingTurn = null
                             if (token == navigationToken[0] && scroll.conversationId == state.conversationId) scroll.restoring = false
                         }
                     }
