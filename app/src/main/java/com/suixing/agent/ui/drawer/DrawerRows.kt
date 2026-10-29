@@ -66,6 +66,10 @@ internal fun DrawerBackHandler(
     BackHandler(enabled = drawerState.isOpen && route == "empty") { onClose() }
 }
 
+/** A child button or drag owns its gesture; it must not also open the conversation. */
+internal fun drawerRowTapCanContinue(consumed: Boolean, travel: Float, touchSlop: Float): Boolean =
+    !consumed && travel <= touchSlop
+
 /**
  * 抽屉里那一行的点击：**不因节点移动而丢**。
  *
@@ -100,6 +104,7 @@ private fun Modifier.drawerRowTap(
             val longMs = viewConfiguration.longPressTimeoutMillis
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
+                if (!drawerRowTapCanContinue(down.isConsumed, 0f, slop)) return@awaitEachGesture
                 val press = androidx.compose.foundation.interaction.PressInteraction.Press(down.position)
                 rippleScope.launch { interaction.emit(press) }
                 var travel = 0f
@@ -118,13 +123,13 @@ private fun Modifier.drawerRowTap(
                     }
                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
                     travel += (change.position - change.previousPosition).getDistance()
-                    if (!change.pressed) {
-                        tapped = travel <= slop
+                    if (!drawerRowTapCanContinue(change.isConsumed, travel, slop)) {
+                        // Let child controls or list/drawer dragging own the rest of this gesture.
+                        cancelled = true
                         break
                     }
-                    if (travel > slop) {
-                        // 拖动：不消费，交给 LazyColumn 滚动 / 抽屉边缘拖动。
-                        cancelled = true
+                    if (!change.pressed) {
+                        tapped = true
                         break
                     }
                 }
@@ -154,7 +159,7 @@ internal fun ConversationRow(
     onToggleArchive: () -> Unit,
     onCopyTitle: () -> Unit,
     onExport: () -> Unit,
-    /** 排序模式：行尾的垃圾桶换成拖拽把手（两个手势各占一处，长按行仍是菜单）。 */
+    /** 排序模式：行尾显示拖拽把手；普通模式只有选中行显示菜单按钮。 */
     sortMode: Boolean = false,
     /** 正在被拖动的那一行：给一层浅底，让「拖住了」看得见。 */
     dragging: Boolean = false,
@@ -206,7 +211,10 @@ internal fun ConversationRow(
             },
         ) {
             Row(
-                modifier = Modifier.padding(start = 14.dp, end = 2.dp),
+                modifier = Modifier
+                    // Row height must not depend on whether its trailing button is visible.
+                    .minimumInteractiveComponentSize()
+                    .padding(start = 14.dp, end = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (running) {
@@ -221,7 +229,7 @@ internal fun ConversationRow(
                     Spacer(Modifier.width(2.dp))
                 }
                 // 置顶标记：仓库里**没有** ic_pin，按约定复用既有的 ic_star（不新造 drawable）。
-                // 放标题**左边**：右边是删除按钮，夹在中间会被读成「点了会取消置顶」。
+                // 放标题左边，与行尾的菜单/排序把手区分开。
                 if (conversation.pinned) {
                     Icon(
                         painter = painterResource(R.drawable.ic_star),
@@ -239,7 +247,7 @@ internal fun ConversationRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                // 排序模式下，行尾换成拖拽把手：两枚控件同尺寸同位置，切换时列表不会跳。
+                // 只有排序模式显示把手；所有行的最小高度由共同的 Row 保证。
                 if (sortMode) {
                     Box(
                         modifier = Modifier
