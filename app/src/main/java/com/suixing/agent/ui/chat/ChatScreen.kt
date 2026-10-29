@@ -1616,6 +1616,15 @@ fun ChatScreen(
             // **点击后立刻高亮目标轮**：导航是动画（240–340ms），若等滚动经过再更新高亮，
             // 观感就是"点了没反应"。这里先乐观置位，导航结束时清掉（用户要求实时响应）。
             var pendingTurn by remember(state.conversationId) { mutableStateOf<Int?>(null) }
+            val scrubberSettling by remember(viewport, scroll) {
+                derivedStateOf {
+                    scrubberHighlightSettling(
+                        restoring = scroll.restoring,
+                        presented = viewport.presented,
+                        entrance = viewport.entrance.value,
+                    )
+                }
+            }
             TurnScrubber(
                 conversationId = state.conversationId,
                 totalTurns = page.turns,
@@ -1632,9 +1641,8 @@ fun ChatScreen(
                         totalTurns = page.turns,
                     )
                 },
-                // 切会话/恢复位置期间不做补间：否则 currentTurn 从 1 跳到真实轮次时，
-                // 高亮会从上往下扫一遍（用户反馈的现象）。
-                settling = scroll.restoring,
+                // 恢复位置及会话入场完成前不做补间，避免高亮从临时轮次向真实轮次下扫。
+                settling = scrubberSettling,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     // 键盘抬起时导航条跟着上移（用户：「抬起时为什么导航条不动」）。

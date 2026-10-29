@@ -33,11 +33,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -135,6 +134,33 @@ internal const val SCRUBBER_TOUCH_SCALE = 1.12f
 
 /** Aether's motion curve, borrowed for the row scale and the label's entry and exit. */
 internal val SCRUBBER_EASING = CubicBezierEasing(0.22f, 0.84f, 0.18f, 1f)
+
+/** One tick's target look: the values the rail draws when it is not animating. */
+internal data class ScrubberTickStyle(
+    val width: Float,
+    val height: Float,
+    val color: Color,
+)
+
+/** Settling discards the old animations; normal reading starts from the current target. */
+@Composable
+internal fun scrubberTickStyle(
+    conversationId: String,
+    target: ScrubberTickStyle,
+    settling: Boolean,
+): ScrubberTickStyle = key(conversationId) {
+    if (settling) {
+        target
+    } else {
+        val animatedWidth = animateFloatAsState(
+            target.width, spring(dampingRatio = 0.86f, stiffness = 800f), label = "turn_width")
+        val animatedHeight = animateFloatAsState(
+            target.height, spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
+        val animatedColor = animateColorAsState(
+            target.color, tween(120, easing = SCRUBBER_EASING), label = "turn_color")
+        ScrubberTickStyle(animatedWidth.value, animatedHeight.value, animatedColor.value)
+    }
+}
 
 /** 滚动条刻度（列表里每行一个，原来每次重组都 new）。 */
 private val ScrubTickShape = RoundedCornerShape(1.dp)
@@ -269,24 +295,6 @@ internal fun TurnScrubber(
     val selected = selectionRow.coerceIn(0, rowCount - 1)
     val animationScope = rememberCoroutineScope()
     val rowScales = remember(conversationId, animationScope) { ScrubberScales(animationScope) }
-    /**
-     * **按会话记一次**：这一轮真正稳定下来（不在恢复位置、且轮号已落定两帧）之前不补间。
-     *
-     * 只靠 `settling = scroll.restoring` 不够：`restoring` 在书签落位那一刻就置 false，
-     * 而列表的布局/入场动画还会让 `currentTurn` 再跳一次（第 0 行 → 真实轮次），
-     * 那次跳变发生在 settling 已经关掉之后 ⇒ 高亮仍然从上往下扫一遍。
-     */
-    var snapUntilStable by remember(conversationId) { mutableStateOf(true) }
-    LaunchedEffect(conversationId, settling, currentTurn) {
-        if (settling || currentTurn <= 0) {
-            snapUntilStable = true
-        } else {
-            withFrameNanos { }
-            withFrameNanos { }
-            snapUntilStable = false
-        }
-    }
-    val snap = settling || snapUntilStable
     DisposableEffect(rowScales) {
         onDispose { rowScales.clear() }
     }
@@ -488,16 +496,8 @@ internal fun TurnScrubber(
                     distance <= 3L -> scheme.primary.copy(alpha = 0.32f)
                     else -> scheme.primary.copy(alpha = 0.22f)
                 }
-                val animatedWidth = animateFloatAsState(
-                    targetWidth, spring(dampingRatio = 0.86f, stiffness = 800f), label = "turn_width")
-                val animatedHeight = animateFloatAsState(
-                    targetHeight, spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
-                val animatedColor = animateColorAsState(
-                    targetColor, tween(120, easing = SCRUBBER_EASING), label = "turn_color")
-                // 恢复期直接取目标值：动画状态仍在，只是不参与渲染。
-                val tickWidth = if (snap) targetWidth else animatedWidth.value
-                val tickHeight = if (snap) targetHeight else animatedHeight.value
-                val tickColor = if (snap) targetColor else animatedColor.value
+                val targetStyle = ScrubberTickStyle(targetWidth, targetHeight, targetColor)
+                val tickStyle = scrubberTickStyle(conversationId, targetStyle, settling)
                 Box(
                     modifier = Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW),
                     contentAlignment = Alignment.Center,
@@ -510,12 +510,12 @@ internal fun TurnScrubber(
                             .height(3.dp)
                             .graphicsLayer {
                                 val scale = rowScales.value(turn)
-                                scaleX = minOf(tickWidth * scale, SCRUBBER_RAIL.value) / 20f
-                                scaleY = tickHeight / 3f * scale
+                                scaleX = minOf(tickStyle.width * scale, SCRUBBER_RAIL.value) / 20f
+                                scaleY = tickStyle.height / 3f * scale
                                 transformOrigin = TransformOrigin.Center
                             }
                             .clip(ScrubTickShape)
-                            .drawBehind { drawRect(tickColor) },
+                            .drawBehind { drawRect(tickStyle.color) },
                     )
                 }
             }
