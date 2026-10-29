@@ -27,9 +27,13 @@ internal class NavigationMotion {
     }
 
     private companion object {
-        val SCROLL_EASING = CubicBezierEasing(0.22f, 0f, 0.14f, 1f)
+        // 慢入快出的曲线在长距离上显得"弹一下就停"，观感生硬；换成标准减速曲线
+        // （起手柔和、尾段收敛），配合更长的时长读起来才像"滑过去"而不是"跳过去"。
+        val SCROLL_EASING = CubicBezierEasing(0.33f, 0f, 0.16f, 1f)
     }
 }
 
 internal fun navigationDuration(distance: Long, viewportHeight: Int): Int =
-    (240f + 100f * (abs(distance).toFloat() / viewportHeight.coerceAtLeast(1)).coerceIn(0f, 1f)).roundToInt()
+    // 240–340ms → 420–640ms：用户反馈"太快、太生硬"。近距离 420ms 保证看得清移动方向，
+    // 远距离封顶 640ms，再长就会觉得"点了半天没到"。
+    (420f + 220f * (abs(distance).toFloat() / viewportHeight.coerceAtLeast(1)).coerceIn(0f, 1f)).roundToInt()

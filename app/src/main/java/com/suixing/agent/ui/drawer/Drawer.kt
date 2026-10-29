@@ -825,31 +825,20 @@ private class DrawerDragTracker {
     var pointerY: Float = 0f
 }
 
-/** 行尾的删除按钮（排序模式下被拖拽把手顶替）。 */
+
+/**
+ * 行尾的「更多」：三个圆点。仓库没有 ellipsis 图标，按既有约定（见 [DrawerGripIcon]）
+ * 用 Canvas 画，不新造 drawable。
+ */
 @Composable
-internal fun DrawerDeleteButton(running: Boolean, onDelete: () -> Unit) {
-    val scheme = MaterialTheme.colorScheme
-    // A run owns its conversation and the view model refuses to delete it, so an
-    // enabled button here was a tap that silently did nothing. The icon is dimmed
-    // to Material's disabled alpha by hand because the explicit tint below would
-    // otherwise keep it looking live.
-    // The icon keeps its 18dp and the ripple its 36dp disc; the 48dp minimum sits
-    // outside them, so only the touch area grows.
-    IconButton(
-        onClick = onDelete,
-        enabled = !running,
-        modifier = Modifier.minimumInteractiveComponentSize().size(36.dp),
-    ) {
-        Icon(
-            painter = painterResource(R.drawable.ic_trash),
-            contentDescription = "删除会话",
-            tint = if (running) {
-                scheme.onSurfaceVariant.copy(alpha = 0.38f)
-            } else {
-                scheme.onSurfaceVariant
-            },
-            modifier = Modifier.size(18.dp),
-        )
+internal fun DrawerMoreIcon(tint: Color, modifier: Modifier = Modifier.size(18.dp)) {
+    Canvas(modifier) {
+        val radius = 1.5.dp.toPx()
+        val step = size.width / 4f
+        val y = size.height / 2f
+        for (index in 1..3) {
+            drawCircle(color = tint, radius = radius, center = Offset(step * index, y))
+        }
     }
 }
 

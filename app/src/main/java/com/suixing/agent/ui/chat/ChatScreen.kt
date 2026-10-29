@@ -1815,17 +1815,18 @@ fun ChatScreen(
                         icon = ImageVector.vectorResource(R.drawable.ic_arrow_down),
                         contentDescription = "回到最新",
                         onClick = { jumpToLatest() },
-                        size = 48.dp,
+                        size = 44.dp,
                         containerColor = MaterialTheme.colorScheme.surface,
                         // 与浮层卡片同一套阴影（用户：「参考浮层卡片的阴影效果」）：
                         // PopupStyle.kt 的规格是 elevation 10dp + ambient/spot 同为 18% 黑，
                         // 扩散大、浓度低、没有方向性 —— 比默认 elevation 阴影（偏灰、发脏）高级。
                         shadowElevation = 10.dp,
                         shadowColor = Color.Black.copy(alpha = 0.18f),
-                        iconSize = 22.dp,
+                        iconSize = 20.dp,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .offset(y = -(48.dp + 12.dp))
+                            // 跟着按钮直径走（44 + 12 = 56dp），否则缩小后离 composer 会多出 4dp 空隙。
+                            .offset(y = -(44.dp + 12.dp))
                             .padding(end = 24.dp),
                     )
                 }

@@ -1315,7 +1315,9 @@ internal fun AssistantRow(
                 Spacer(Modifier.width(12.dp))
                 Text(
                     text = name,
-                    style = metaStyle(),
+                    // 与大总结条（ProcessCard）标题同字号：都用 labelMedium（ChatBlocks.kt:292），
+                    // 不再走 metaStyle() 的 12/13 缩放 —— 用户要求两者对齐。
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

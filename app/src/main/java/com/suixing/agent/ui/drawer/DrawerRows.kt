@@ -259,8 +259,22 @@ internal fun ConversationRow(
                             modifier = Modifier.size(18.dp),
                         )
                     }
-                } else {
-                    DrawerDeleteButton(running = running, onDelete = onDelete)
+                } else if (selected) {
+                    // 只有**高亮选中的那一条**行尾放三点：常驻删除图标已按用户要求去掉，
+                    // 删除走长按菜单；选中行点三点直接开那张菜单。
+                    Box(
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .size(36.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = onLongClick,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        DrawerMoreIcon(tint = scheme.onSurfaceVariant)
+                    }
                 }
             }
         }

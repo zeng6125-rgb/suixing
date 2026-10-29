@@ -36,6 +36,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -267,6 +269,24 @@ internal fun TurnScrubber(
     val selected = selectionRow.coerceIn(0, rowCount - 1)
     val animationScope = rememberCoroutineScope()
     val rowScales = remember(conversationId, animationScope) { ScrubberScales(animationScope) }
+    /**
+     * **按会话记一次**：这一轮真正稳定下来（不在恢复位置、且轮号已落定两帧）之前不补间。
+     *
+     * 只靠 `settling = scroll.restoring` 不够：`restoring` 在书签落位那一刻就置 false，
+     * 而列表的布局/入场动画还会让 `currentTurn` 再跳一次（第 0 行 → 真实轮次），
+     * 那次跳变发生在 settling 已经关掉之后 ⇒ 高亮仍然从上往下扫一遍。
+     */
+    var snapUntilStable by remember(conversationId) { mutableStateOf(true) }
+    LaunchedEffect(conversationId, settling, currentTurn) {
+        if (settling || currentTurn <= 0) {
+            snapUntilStable = true
+        } else {
+            withFrameNanos { }
+            withFrameNanos { }
+            snapUntilStable = false
+        }
+    }
+    val snap = settling || snapUntilStable
     DisposableEffect(rowScales) {
         onDispose { rowScales.clear() }
     }
@@ -341,6 +361,8 @@ internal fun TurnScrubber(
                         // awaited without a deadline, so a slow drag is never cut short.
                         var waiting = true
                         var pressed = true
+                        // 长按已经跳过的轮次：抬手时若目标没变就不再跳第二次（避免滚动被重置）。
+                        var holdJumped: Int? = null
                         while (pressed) {
                             val event = if (waiting) {
                                 withTimeoutOrNull(SCRUBBER_LONG_PRESS_MS) { awaitPointerEvent() }
@@ -348,10 +370,16 @@ internal fun TurnScrubber(
                                 awaitPointerEvent()
                             }
                             if (event == null) {
-                                // The hold ran out: the label comes up and stays up until the
-                                // finger lifts. This is the "press and hold to see it" half.
+                                // 长按到底：标签亮起，并且**当场定位**到手指所在的这一轮
+                                // （用户要求"长按导航条时显示高亮并定位到对应位置"；
+                                // 原来只亮标签、非要等抬手才跳，长按像没反应）。
                                 waiting = false
                                 shown = true
+                                val target = latestRows.getOrNull(selectionRow)?.takeIf { it > 0 }
+                                if (target != null) {
+                                    holdJumped = target
+                                    latestJump(target)
+                                }
                                 continue
                             }
                             val change = event.changes.firstOrNull { it.id == down.id }
@@ -430,7 +458,10 @@ internal fun TurnScrubber(
                         // [latestRows], not the snapshot the hit test was matched against: a
                         // drag that unlocked its way up the conversation is aimed at a turn
                         // that snapshot never held.
-                        if (!cancelled) latestRows.getOrNull(destination)?.takeIf { it > 0 }?.let(latestJump)
+                        if (!cancelled) {
+                            val target = latestRows.getOrNull(destination)?.takeIf { it > 0 }
+                            if (target != null && target != holdJumped) latestJump(target)
+                        }
                     }
                 },
             verticalArrangement = Arrangement.spacedBy(SCRUBBER_GAP),
@@ -464,9 +495,9 @@ internal fun TurnScrubber(
                 val animatedColor = animateColorAsState(
                     targetColor, tween(120, easing = SCRUBBER_EASING), label = "turn_color")
                 // 恢复期直接取目标值：动画状态仍在，只是不参与渲染。
-                val tickWidth = if (settling) targetWidth else animatedWidth.value
-                val tickHeight = if (settling) targetHeight else animatedHeight.value
-                val tickColor = if (settling) targetColor else animatedColor.value
+                val tickWidth = if (snap) targetWidth else animatedWidth.value
+                val tickHeight = if (snap) targetHeight else animatedHeight.value
+                val tickColor = if (snap) targetColor else animatedColor.value
                 Box(
                     modifier = Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW),
                     contentAlignment = Alignment.Center,
