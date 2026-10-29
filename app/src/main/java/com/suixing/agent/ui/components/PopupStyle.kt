@@ -26,25 +26,26 @@ import androidx.compose.ui.unit.dp
 internal val PopupCardShape = RoundedCornerShape(20.dp)
 
 /**
- * 投影：**轻**、**不带偏移**（用户：「阴影我不需要很重的，全部改轻，同时阴影不要有偏移，
- * 要有质感的阴影」）。
+ * 投影：**轻**、**单层**（用户：「阴影我不需要很重的，全部改轻」「阴影不要有偏移」，
+ * 后来又报「有分层」「刚出来被截一点」，0.8.553 上又报「没有阴影了」）。
  *
- * 做法：`ambientColor` 与 `spotColor` 同色同浓度 ⇒ 只有环境光没有方向性偏移，看着是"浮起
- * 一层纸"而不是"贴在某一边"。elevation 从 8dp 降到 3dp，配合 18% 的黑 ⇒ 轻。
+ * 机制（0.8.553 实测踩到的坑）：Android 的 **ambient 阴影还要再乘主题的
+ * `ambientShadowAlpha`**，而该主题属性的默认值只有 **0.039**（AOSP：`core/res/res/values/
+ * themes.xml:457` 指向 `core/res/res/values/dimens.xml:756` 的 0.039；spot 对应 0.19，
+ * 见 dimens.xml:757）。所以只开 ambient 等于没有阴影 —— 哪怕给的是 18% 的黑。
+ * 真正看得见的那层一直是 `spotColor`。反过来，ambient+spot 同时开着，
+ * 两层模糊半径/偏移不同，叠在一起就是用户说的「分层」。
  *
- * 用 `ambientColor`/`spotColor` 显式给色，而不是靠 elevation 推算：Material 的默认阴影色
- * 偏灰且随 elevation 加重，用户看到的"重"就是它。
+ * 结论：**只留 spot 一层**。浓度与 elevation 沿用用户认可过的 18% / 10dp；
+ * `ambientColor` 置透明，`clip = false` 让阴影画到节点边界之外（给 24dp 余量）。
  */
 internal fun Modifier.popupCardSurface(color: Color): Modifier = this
     .shadow(
-        // 扩散加大（用户：「阴影扩散再大一点，现在感觉聚在一起没有质感」）：elevation 决定
-        // 模糊半径，从 3dp 提到 10dp 光晕摊得更开；浓度同时从 18% 降到 10%，否则摊开之后
-        // 会发黑发脏。ambient 与 spot 同色 ⇒ 没有方向性偏移。
         elevation = 10.dp,
         shape = PopupCardShape,
         clip = false,
-        ambientColor = Color.Black.copy(alpha = 0.18f),
-        spotColor = Color.Transparent,
+        ambientColor = Color.Transparent,
+        spotColor = Color.Black.copy(alpha = 0.18f),
     )
     .clip(PopupCardShape)
     .background(color)
