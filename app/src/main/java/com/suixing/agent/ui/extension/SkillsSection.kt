@@ -50,6 +50,7 @@ import com.suixing.agent.ui.theme.Tone
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 
 /** 一份就够：只在组合里读（主线程），每次重组现建等于白花一次 Locale 查询与分配。 */
 private val SKILL_DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
@@ -71,15 +72,16 @@ fun SkillsSection(
     val rootPath = remember { Core.skills.root.absolutePath }
 
     LaunchedEffect(refresh) {
-        // list() 一路走到 parseSkill 的 file.readText()（SkillStore.kt:482），技能根目录是
-        // 用户可见的外部存储：任何一个读不了的文件都会让这个 effect 抛异常 —— 以前是协程炸掉，
-        // skills 仍是 null，页面永远停在转圈，失败与「正在加载」不可区分。
-        runCatching { Core.skills.list() }
-            .onSuccess {
-                skills = it
-                error = null
-            }
-            .onFailure { error = "读取技能失败：${it.message ?: it::class.java.simpleName}" }
+        // Listing needs metadata only; the selected dialog loads one full document.
+        // External-storage failure is shown separately from the initial loading state.
+        try {
+            skills = Core.skills.listHeaders()
+            error = null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            error = "读取技能失败：${failure.message ?: failure::class.java.simpleName}"
+        }
     }
 
     val loaded = skills
@@ -311,17 +313,34 @@ private fun SkillCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onView) { Text("查看全文") }
             Spacer(Modifier.weight(1f))
-            Text(
-                text = "${skill.body.length} 字",
-                style = SettingsStyle.badge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (skill.body.isNotEmpty()) {
+                Text(
+                    text = "${skill.body.length} 字",
+                    style = SettingsStyle.badge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
 
 @Composable
 fun SkillViewDialog(skill: Skill, onDismiss: () -> Unit) {
+    var loaded by remember(skill.id, skill.body) {
+        mutableStateOf(skill.takeIf { it.body.isNotEmpty() })
+    }
+    var failure by remember(skill.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(skill.id, skill.body) {
+        if (loaded != null) return@LaunchedEffect
+        try {
+            loaded = Core.skills.load(skill.id)
+            if (loaded == null) failure = "技能已不存在，请刷新列表。"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            failure = "读取技能失败：${error.message ?: error::class.java.simpleName}"
+        }
+    }
     SuixingDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -342,7 +361,7 @@ fun SkillViewDialog(skill: Skill, onDismiss: () -> Unit) {
                 color = MaterialTheme.colorScheme.surfaceContainer,
             ) {
                 Text(
-                    text = skill.body,
+                    text = loaded?.body ?: failure ?: "正在读取…",
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 420.dp)

@@ -192,15 +192,31 @@ class SkillStore(private val context: Context) {
         ignoreUnknownKeys = true
         prettyPrint = true
     }
+    @Volatile private var lastDisabled: Set<String>? = null
 
     suspend fun list(): List<Skill> = withContext(Dispatchers.IO) {
-        val found = scanSkills(root)
+        listScanned(includeBody = true)
+    }
+
+    /** Catalogue and list cards need metadata, not every instruction document. */
+    suspend fun listHeaders(): List<Skill> = withContext(Dispatchers.IO) {
+        listScanned(includeBody = false)
+    }
+
+    private fun listScanned(includeBody: Boolean): List<Skill> {
+        val found = scanSkills(root, includeBody)
         val stored = readState()
         // Ids whose folder is gone: dropping them here is what keeps a re-imported
         // skill from coming back switched off because of an old entry.
         val state = stored.pruning(found.map { it.id }.toSet())
         if (state != stored) writeState(state)
-        found.map { state.of(it) }
+        return found.map { state.of(it) }
+    }
+
+    /** UI preview may read a disabled skill; only find() admits one to the model. */
+    suspend fun load(id: String): Skill? = withContext(Dispatchers.IO) {
+        val header = scanSkills(root, includeBody = false).firstOrNull { it.id == id } ?: return@withContext null
+        readState().of(parseSkill(File(header.path).parentFile!!, File(header.path)))
     }
 
     /** The skill the model may actually use: a disabled one is not findable. */
@@ -208,10 +224,12 @@ class SkillStore(private val context: Context) {
         val wanted = query.trim()
         if (wanted.isEmpty()) return@withContext null
         val state = readState()
-        scanSkills(root)
+        scanSkills(root, includeBody = false)
             .firstOrNull { it.id.equals(wanted, true) || it.name.equals(wanted, true) }
             ?.let { state.of(it) }
             ?.takeIf { it.enabled }
+            ?.let { parseSkill(File(it.path).parentFile!!, File(it.path)).copy(
+                enabled = it.enabled, source = it.source, sourceUrl = it.sourceUrl, sourceAt = it.sourceAt) }
     }
 
     suspend fun setEnabled(id: String, enabled: Boolean): Unit = withContext(Dispatchers.IO) {
@@ -325,7 +343,7 @@ class SkillStore(private val context: Context) {
             throw IllegalArgumentException("链接必须以 http:// 或 https:// 开头")
         }
         ensureRoot()
-        val existing = scanSkills(root)
+        val existing = scanSkills(root, includeBody = false)
         if (existing.size >= MAX_IMPORT_FILES) {
             throw IllegalStateException("技能数量已达上限（$MAX_IMPORT_FILES 个），先删掉一些再导入")
         }
@@ -426,17 +444,23 @@ class SkillStore(private val context: Context) {
     }
 
     /**
-     * A state file that cannot be read must not hide the user's skills, so a corrupt one
-     * degrades to "everything enabled, everything user-made" and the next write replaces it.
+     * A damaged switch file must never enable previously untrusted instructions.
+     * Keep the last valid switches, or disable all present skills on a cold recovery.
      */
     private fun readState(): SkillState = SkillState(disabled = readDisabled(), origins = readOrigins())
 
     private fun readDisabled(): Set<String> {
         if (!stateFile.isFile) return emptySet()
         return try {
-            json.decodeFromString(DISABLED_SERIALIZER, stateFile.readText())
+            json.decodeFromString(DISABLED_SERIALIZER, stateFile.readText()).also { lastDisabled = it }
         } catch (error: Exception) {
-            emptySet()
+            val safe = lastDisabled ?: scanSkills(root, includeBody = false).map { it.id }.toSet()
+            lastDisabled = safe
+            runCatching { stateFile.copyTo(File(stateFile.parentFile, stateFile.name + ".corrupt"), overwrite = true) }
+            // Keep the corrupt original if recovery cannot be persisted; the next read
+            // must take the same safe path rather than treating it as a missing file.
+            runCatching { writeAtomically(stateFile, json.encodeToString(DISABLED_SERIALIZER, safe)) }
+            safe
         }
     }
 
@@ -451,12 +475,17 @@ class SkillStore(private val context: Context) {
     }
 
 
-    /** 临时文件 + rename；rename 不可用时退回直写（与 ChatStore 的做法一致）。 */
+    /** Never overwrite the valid target in place when atomic rename is unavailable. */
     private fun writeAtomically(target: java.io.File, text: String) {
-        val temp = java.io.File(target.parentFile, target.name + ".tmp")
-        temp.writeText(text)
-        if (!temp.renameTo(target)) {
-            target.writeText(text)
+        val temp = java.io.File.createTempFile(target.name, ".tmp", target.parentFile)
+        try {
+            java.io.FileOutputStream(temp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            java.nio.file.Files.move(temp.toPath(), target.toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } finally {
             temp.delete()
         }
     }
@@ -465,6 +494,7 @@ class SkillStore(private val context: Context) {
         // **原子写**（issue #54 A-4）：直写若中途被打断，读回失败会退回 emptySet() =
         // 「全部启用」（降级方向错误）。先写临时文件再 rename。
         writeAtomically(stateFile, json.encodeToString(DISABLED_SERIALIZER, state.disabled))
+        lastDisabled = state.disabled
         // Written only once there is something to remember: a device that never downloaded a
         // skill should not carry an empty file around for it.
         if (state.origins.isNotEmpty() || originFile.isFile) {
@@ -506,8 +536,8 @@ internal val SKILL_FILE_NAMES = listOf("SKILL.md", "skill.md", "Skill.md")
  * falls back to the folder (or file) name and the description to the first
  * non-blank line of the body.
  */
-internal fun parseSkill(folder: File, file: File): Skill {
-    val raw = file.readText()
+internal fun parseSkill(folder: File, file: File, includeBody: Boolean = true): Skill {
+    val raw = if (includeBody) file.readText() else skillHeaderText(file)
     val (meta, body) = splitFrontmatter(raw)
     val id = if (file.name.equals(SKILL_FILE_NAME, ignoreCase = true)) {
         folder.name
@@ -521,7 +551,7 @@ internal fun parseSkill(folder: File, file: File): Skill {
         id = id,
         name = name,
         description = description,
-        body = body,
+        body = if (includeBody) body else "",
         path = file.absolutePath,
     )
 }
@@ -531,7 +561,7 @@ internal fun parseSkill(folder: File, file: File): Skill {
  * one per loose `.md` file. Sorted so the catalogue order is stable across runs —
  * a prompt that reshuffles every request would miss the prefix cache.
  */
-internal fun scanSkills(dir: File): List<Skill> {
+internal fun scanSkills(dir: File, includeBody: Boolean = true): List<Skill> {
     if (!dir.isDirectory) return emptyList()
     val out = mutableListOf<Skill>()
     for (child in dir.listFiles().orEmpty().sortedBy { it.name.lowercase() }) {
@@ -540,13 +570,46 @@ internal fun scanSkills(dir: File): List<Skill> {
                 val file = SKILL_FILE_NAMES
                     .map { File(child, it) }
                     .firstOrNull { it.isFile }
-                if (file != null) out += parseSkill(child, file)
+                if (file != null) out += parseSkill(child, file, includeBody)
             }
 
-            child.isFile && child.name.endsWith(".md", ignoreCase = true) -> out += parseSkill(dir, child)
+            child.isFile && child.name.endsWith(".md", ignoreCase = true) -> out += parseSkill(dir, child, includeBody)
         }
     }
     return out
+}
+
+/** Frontmatter and the first body line are sufficient for metadata fallbacks. */
+private fun skillHeaderText(file: File): String = file.bufferedReader().use { reader ->
+    val text = StringBuilder()
+    var first = true
+    var frontmatter = false
+    var headerEnded = false
+    while (text.length < 32_768) {
+        // readLine() itself can allocate a multi-megabyte malformed header line.
+        // Bound characters before allocating either the line or the metadata prefix.
+        val remaining = 32_768 - text.length
+        val raw = buildString {
+            while (length < remaining) {
+                val next = reader.read()
+                if (next < 0) break
+                append(next.toChar())
+                if (next == '\n'.code) break
+            }
+        }
+        if (raw.isEmpty()) break
+        text.append(raw)
+        val line = raw.trimEnd('\n', '\r')
+        if (first && line.isBlank()) continue
+        if (first) {
+            first = false
+            frontmatter = line.trimStart().startsWith("---")
+            if (!frontmatter && line.isNotBlank()) break
+        } else if (frontmatter && !headerEnded) {
+            if (line.startsWith("---")) headerEnded = true
+        } else if (line.isNotBlank()) break
+    }
+    text.toString()
 }
 
 /**

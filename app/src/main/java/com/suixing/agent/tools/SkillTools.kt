@@ -83,7 +83,7 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
         // Only what the user left switched on: the prompt catalogue is filtered the
         // same way, and a tool that advertised a disabled skill would invite the
         // model to reach for something the user deliberately turned off.
-        val all = skills.list()
+        val all = skills.listHeaders()
         val usable = all.filter { it.enabled }
         if (usable.isEmpty()) {
             // New skills are saved switched off, so "none" usually means "none switched on
@@ -114,7 +114,7 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
 
     /** A skill that exists but is switched off is a different answer from "no such thing". */
     private suspend fun missing(wanted: String): ToolResult {
-        val off = skills.list().firstOrNull { it.id.equals(wanted, true) || it.name.equals(wanted, true) }
+        val off = skills.listHeaders().firstOrNull { it.id.equals(wanted, true) || it.name.equals(wanted, true) }
         return if (off == null) {
             ToolResult.failure("No such skill: \"$wanted\". Use skill_list to see what exists.")
         } else {

@@ -65,6 +65,7 @@ class DictationRecorder(private val context: Context) {
     @Volatile private var pcm: java.io.ByteArrayOutputStream? = null
 
     /** 抓音开始。返回 false 表示这台设备/这个权限拿不到麦克风。 */
+    @Synchronized
     fun start(): Boolean {
         if (record != null) return true
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -139,6 +140,7 @@ class DictationRecorder(private val context: Context) {
      *
      * 44 字节头按最小 WAVE 格式手拼，不引依赖：PCM16 单声道，字节率与块对齐都由采样率算出来。
      */
+    @Synchronized
     fun stop(): File? {
         val recorder = record ?: return null
         record = null
@@ -161,6 +163,7 @@ class DictationRecorder(private val context: Context) {
     }
 
     /** 丢掉这次录音，不留文件。 */
+    @Synchronized
     fun cancel() {
         val recorder = record
         record = null

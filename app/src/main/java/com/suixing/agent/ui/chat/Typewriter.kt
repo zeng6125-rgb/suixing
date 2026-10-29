@@ -11,23 +11,34 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
 
+/** The text's identity owns progress, rather than its current composition group. */
+internal class TextRevealState {
+    var revealed by mutableIntStateOf(-1)
+    var everStreamed = false
+    var startedTyping = false
+
+    fun startIfNeeded(enabled: Boolean) {
+        if (!startedTyping && enabled) {
+            startedTyping = true
+            everStreamed = true
+            revealed = 0
+        }
+    }
+
+    fun advance(goal: Int) {
+        revealed = (revealed.coerceAtLeast(0) + typeStep(goal - revealed.coerceAtLeast(0))).coerceAtMost(goal)
+    }
+}
+
 /**
  * 打字机：把**已经收到**的文本按"追得上的速度"逐字放出来。
  *
- * 三条约束决定了它长这样：
+ * 节拍为 16ms，最多约 62.5 次/秒。积压不超过 8 字时每拍放 2 字；超过时放到
+ * 只剩 4 字，避免快端点输出积压。它没有 40ms 上限，也没有固定 5 字的步长。
+ * Markdown 的稳定块复用由 LiveBlocks 负责，最后一个未闭合块仍可能随节拍重新排版。
  *
- * 1. **看得见在打，但不许掉队**。每拍 2~6 个字（50~150 字/秒）：慢端点也看得见在动，正常
- *    积压下封顶 150 字/秒。旧公式 `backlog/4` 会在第一拍就推上去几十上百个字（正文一个 delta
- *    常带几百字）—— 「正文没能逐字」就是它；思考块的 delta 小，所以一直看着正常。
- *    积压超过一屏（300 字）才额外加速，避免长尾巴吊着。反过来，固定速度在快端点上会越积越多、
- *    变成一个永远追不上的尾巴，那是比整块跳更糟的体验 —— 所以是"上限 + 超量加速"，不是纯固定。
- * 2. **不许逐帧重排 Markdown**。节拍是 40ms（25 次/秒），不是每一帧：正文每换一次前缀都要
- *    整段重新解析，60fps 会把这个代价翻一倍多（见 ChatViewModel 里 `DELTA_PUBLISH_MS` 的注释，
- *    渲染缓存是按文本内容做键的，文本一变就是一次 miss）。
- * 3. **只在流式时用**。调用方传 `enabled = streaming`：一轮结束后直接给全文，尾巴不会被
- *    "打字"拖住，也就不会出现"已经答完了却还在慢慢蹦字"。
- *
- * 文本变短（换到新的一段、新的块）时立刻对齐，绝不回放旧内容。
+ * 只有参与过流式的文本才逐字显示；结束后继续放完尾部，纯历史直接给全文。
+ * 调用方可按run/part提供retained进度，跨过程区与完成交接沿用；未提供时归当前组合组。
  */
 @Composable
 internal fun rememberTypedText(
@@ -36,6 +47,7 @@ internal fun rememberTypedText(
     bornAtMs: Long = 0L,
     /** live 块强制的起点：true 时**永远从 0 开始**，不吃「诞生多久」那套推断。 */
     startAtZero: Boolean = false,
+    retained: TextRevealState? = null,
 ): String {
     if (!LocalTypewriter.current) return text
     // **一旦开始打就一直打完**（含流式结束之后）。原来 `enabled=false` 立刻返回全文 ——
@@ -44,22 +56,20 @@ internal fun rememberTypedText(
     // **只有"参与过流式"的块才打字**（用户：「为什么对已输出的旧内容逐字出现啊；我要的是
     // 对话进行中的流式」）。这道门必须对所有调用方生效：历史消息、切会话后首次显示的块、
     // 以及定型后才第一次组合的块，`enabled` 都是 false 且从没流过 ⇒ 直接给全文，绝不重播。
-    val everStreamed = remember { booleanArrayOf(false) }
-    if (enabled) everStreamed[0] = true
-    if (!everStreamed[0]) return text
+    val progress = retained ?: remember { TextRevealState() }
+    if (enabled) progress.everStreamed = true
+    if (!progress.everStreamed) return text
     val target = rememberUpdatedState(text)
-    // 初值见 [initialRevealed]（issue #46）：刚诞生的块从 0 打，早就存在的块直接给全文。
-    var revealed by remember {
-        mutableIntStateOf(
-            if (startAtZero) 0 else initialRevealed(text.length, nowMs() - bornAtMs),
-        )
+    remember(progress) {
+        if (progress.revealed < 0) progress.revealed =
+            if (startAtZero) 0 else initialRevealed(text.length, nowMs() - bornAtMs)
+        progress
     }
     // **一旦开始流式就要真的从头打**（用户反复报「正文没有逐字」的根因）：
     // `revealed` 是 remember 的，初值在块第一次组合时就定死 —— 那一刻 `enabled` 往往还是
     // false（还没开始流），于是被初始化成"当前全文长度"。之后 streaming 变 true、文本继续增长，
     // `revealed` 只会从那个大数往上加，永远不会从 0 打起 ⇒ 屏幕上是整段整段地出。
     // 这里用一个普通标记：第一次看到 enabled=true 时把进度归零，重新起打。
-    var startedTyping = remember { booleanArrayOf(false) }
     // **协程要有出口**（优化清单 chat-P1）：原来是 `LaunchedEffect(Unit){ while(true){ delay(16) } }`
     // —— 打完字之后每个参与过流式的块仍然每 16ms 醒一次，一页十几块常驻组合就是每秒几百次
     // 空转。现在：追平且不再流式 ⇒ 结束；`enabled` 再变 true（新一轮开始）⇒ 协程重启。
@@ -70,20 +80,17 @@ internal fun rememberTypedText(
     // **不能用"追平就退出"的写法**：退出之后文本若再变长，`text.take(revealed)` 会把新内容
     // 永久截掉（那样才是真的改行为）。
     val enabledNow = rememberUpdatedState(enabled)
-    LaunchedEffect(Unit) {
+    LaunchedEffect(progress) {
         snapshotFlow { target.value.length }.collect {
-            if (!startedTyping[0] && enabledNow.value) {
-                startedTyping[0] = true
-                revealed = 0
-            }
-            while (revealed < target.value.length) {
+            progress.startIfNeeded(enabledNow.value)
+            while (progress.revealed < target.value.length) {
                 delay(TYPE_TICK_MS)
                 val goal = target.value.length
-                revealed = (revealed + typeStep(goal - revealed)).coerceAtMost(goal)
+                progress.advance(goal)
             }
         }
     }
-    return remember(revealed, text) { text.take(revealed) }
+    return remember(progress.revealed, text) { text.take(progress.revealed.coerceAtLeast(0)) }
 }
 
 /**
@@ -133,23 +140,13 @@ internal fun initialRevealed(textLength: Int, ageMs: Long): Int =
 private const val TYPE_FRESH_MS = 500L
 
 /**
- * 这一拍放几个字（40ms 一拍 ⇒ 25 拍/秒）。
- *
- * **2026-10-25 第四次修（用户：不要分档，任何长度都要逐字）**：
- * 恒定 5 字/拍（125 字/秒），**不再按落后量提速**。前几版分别用 `backlog/4`、上限 6 字/拍、
- * 按落后量分档 —— 设备实测生成速度 51~175 tokens/s（中文约 100~200 字/秒），只要揭示速度
- * 接近或超过到达速度，每一拍就会把新到的字一次放完，看着就是整块出现。恒定慢速才始终逐字。
- *
- * 代价（用户明确接受）：整段答完的速度会比模型慢。900 字的回答约 12 秒打完。
- *
- * 另外**流式结束后继续打完**（见下面的 [TextTyper]）：否则模型一停，剩下的尾巴会被一次性
- * 补上 —— 那正是「一下子全部显示」的最后一段。
+ * 16ms 一拍的揭示步长。小积压为 2 字，大积压保留最后 4 字给后续节拍。
  */
 internal fun typeStep(backlog: Int): Int {
     // **积压越多放越快**（issue #44 §5 的 Eta 做法）：固定 2 字/拍在快模型下永远追不上，
-    // 于是文本一直落后、最后一刻还在补字。这里按积压量提速：
+    // 于是文本一直落后、最后一刻还在补字。当前实现按积压量提速：
     //   backlog ≤ 8   ⇒ 2 字/拍（125 字/秒，慢速端点也能看见在动）
-    //   否则          ⇒ backlog / 4（积压 108 字 ⇒ 27 字/拍 ≈ 1.7k 字/秒，立刻追平）
+    //   否则          ⇒ backlog - 4（积压 108 字 ⇒ 104 字/拍，只留 4 字）
     // 追平后回落到 2 字/拍，观感始终是"逐字往上推"，而不是"一段一段蹦"。
     // **滞后上限只有 4 个字**（用户：「正文也会滞后」）：原来大积压时放 `backlog / 4`，那是
     // 指数收敛 —— 到达多快就恒定落后 4 倍（每秒 1000 字时落后约 80 字，看起来永远慢半拍）。
@@ -158,6 +155,5 @@ internal fun typeStep(backlog: Int): Int {
     return if (backlog <= 8) TYPE_STEP else maxOf(TYPE_STEP, backlog - 4)
 }
 
-/** 每拍放几个字，恒定不变：2 字/拍 × 62.5 拍/秒 = 125 字/秒。**任何长度的正文都按这个速度逐字**，
- * 不按落后量提速 —— 分档会让「积压多的时候又快成整块」，那等于没有打字机。 */
+/** 小积压的基础步长：2 字/拍 × 62.5 拍/秒 = 125 字/秒；大积压走 typeStep 的加速分支。 */
 private const val TYPE_STEP = 2

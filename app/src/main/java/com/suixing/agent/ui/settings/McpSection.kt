@@ -20,7 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Surface
 import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
@@ -311,7 +311,7 @@ internal fun McpEditorDialog(
                     label = { Text("名称（会进工具名，建议用英文）") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
                 Spacer(Modifier.height(10.dp))
 
@@ -345,7 +345,7 @@ internal fun McpEditorDialog(
                         placeholder = { Text("http://127.0.0.1:3000/mcp") },
                         singleLine = true,
                         shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(

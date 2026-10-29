@@ -7,6 +7,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.File
+import java.io.Reader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -181,26 +182,25 @@ class FileTools(private val context: Context) : ToolGroup() {
                         "可以用 run_shell 配合 head/tail 分段读取",
                 )
             }
-            val bytes = file.readBytes()
-            // 只看前 4096 字节，且**不装箱**：`bytes.take(4096)` 会把每个 Byte 装成 List<Byte>。
-            if (hasNulByte(bytes, 4096)) {
-                return@withContext ToolResult.success("二进制文件：${file.absolutePath}（${humanSize(file.length())}），无法按文本读取")
+            val input = file.inputStream().buffered()
+            val window = input.use {
+                it.mark(4096)
+                val prefix = ByteArray(4096)
+                val count = it.read(prefix)
+                if (hasNulByte(prefix, count.coerceAtLeast(0))) {
+                    return@withContext ToolResult.success("二进制文件：${file.absolutePath}（${humanSize(file.length())}），无法按文本读取")
+                }
+                it.reset()
+                scanTextWindow(it.reader(Charsets.UTF_8), args.int("offset", 1).coerceAtLeast(1),
+                    args.int("limit", 400).coerceIn(1, 5000))
             }
-            // **整份字节只解码一次**（原来 toString 两次：一次得 lines、一次算 revision，
-            // ≤4MB 的文件会有两份大 String 同时存活）。
-            val text = bytes.toString(Charsets.UTF_8)
-            val lines = text.lines()
             val offset = args.int("offset", 1).coerceAtLeast(1)
-            val limit = args.int("limit", 400).coerceIn(1, 5000)
-            if (offset > lines.size) {
-                return@withContext ToolResult.failure("起始行 $offset 超出文件总行数 ${lines.size}")
+            if (offset > window.totalLines) {
+                return@withContext ToolResult.failure("起始行 $offset 超出文件总行数 ${window.totalLines}")
             }
-            val slice = lines.subList(offset - 1, minOf(lines.size, offset - 1 + limit))
-            val header = "${file.absolutePath}（共 ${lines.size} 行，显示 $offset-${offset + slice.size - 1}）\n" +
-                // **revision 交给模型**（issue #44 第八项）：edit_file 带上它就能做乐观锁，
-                // 读到与改写之间文件被改过会被拒绝，而不是静默覆盖。
-                "revision=${revisionOf(text)}\n"
-            ToolResult.success(header + slice.joinToString("\n"))
+            val header = "${file.absolutePath}（共 ${window.totalLines} 行，显示 $offset-${offset + window.lines.size - 1}）\n" +
+                "revision=${window.revision}\n"
+            ToolResult.success(header + window.lines.joinToString("\n"))
         } catch (error: Exception) {
             ToolResult.failure("读取失败：${error.message ?: error.javaClass.simpleName}")
         }
@@ -452,33 +452,44 @@ class FileTools(private val context: Context) : ToolGroup() {
                 if (file.absolutePath.contains(exclude)) return@walk
                 if (file.length() > MAX_SEARCH_BYTES) return@walk
                 scanned++
-                val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@walk
-                if ((0 until minOf(2048, bytes.size)).any { bytes[it] == 0.toByte() }) return@walk
-                val lines = bytes.toString(Charsets.UTF_8).lines()
-                var lastEmitted = -1
-                for ((index, line) in lines.withIndex()) {
-                    val matched = searchLineMatches(line, query, caseSensitive, regex)
-                    if (!matched) continue
-                    if (filesOnly) {
-                        hitFiles.add(file.absolutePath)
-                        return@walk
-                    }
-                    if (context == 0) {
-                        hits.add(file.absolutePath + ":" + (index + 1) + ": " + line.trim().take(200))
-                    } else {
-                        // 上下文窗口；`lastEmitted` 防止相邻匹配把同一行重复打印。
-                        val from = (index - context).coerceAtLeast(0)
-                        val to = (index + context).coerceAtMost(lines.lastIndex)
-                        for (i in from..to) {
-                            if (i <= lastEmitted) continue
-                            val mark = if (i == index) ":" else "-"
-                            hits.add(
-                                file.absolutePath + ":" + (i + 1) + mark + " " + lines[i].trim().take(200),
-                            )
+                runCatching {
+                    file.inputStream().buffered().use { input ->
+                        input.mark(2048)
+                        val prefix = ByteArray(2048)
+                        if (hasNulByte(prefix, input.read(prefix).coerceAtLeast(0))) return@use
+                        input.reset()
+                        var number = 0
+                        var after = 0
+                        var lastEmitted = 0
+                        val previous = ArrayDeque<Pair<Int, String>>()
+                        fun emit(at: Int, line: String, mark: String) {
+                            if (at > lastEmitted && hits.size < limit) {
+                                hits.add("${file.absolutePath}:$at$mark ${line.trim().take(200)}")
+                                lastEmitted = at
+                            }
                         }
-                        lastEmitted = to
+                        forEachLogicalLine(input.reader(Charsets.UTF_8)) { line ->
+                            number++
+                            val matched = searchLineMatches(line, query, caseSensitive, regex)
+                            if (matched && filesOnly) {
+                                hitFiles.add(file.absolutePath)
+                                return@forEachLogicalLine false
+                            }
+                            if (matched) {
+                                previous.forEach { (at, text) -> emit(at, text, "-") }
+                                emit(number, line, ":")
+                                after = context
+                            } else if (after > 0) {
+                                emit(number, line, "-")
+                                after--
+                            }
+                            if (context > 0) {
+                                previous.addLast(number to line)
+                                if (previous.size > context) previous.removeFirst()
+                            }
+                            hits.size < limit
+                        }
                     }
-                    if (hits.size >= limit) return@walk
                 }
             }
             val found: List<String> = if (filesOnly) hitFiles.toList() else hits
@@ -602,6 +613,44 @@ internal fun sweepStaleParts(
 internal fun revisionOf(text: String): String {
     val hash = text.hashCode().toUInt().toString(16)
     return "${text.length.toString(16)}-$hash"
+}
+
+internal data class TextWindow(val totalLines: Int, val lines: List<String>, val revision: String)
+
+/** Keep only the requested lines, but hash every original UTF-16 code unit for edit_file compatibility. */
+internal fun scanTextWindow(reader: Reader, offset: Int, limit: Int): TextWindow {
+    var length = 0
+    var hash = 0
+    var number = 0
+    val lines = ArrayList<String>()
+    forEachLogicalLine(reader, onChar = { ch -> length++; hash = 31 * hash + ch.code }) { line ->
+        number++
+        if (number >= offset && number.toLong() < offset.toLong() + limit) lines.add(line)
+        true
+    }
+    return TextWindow(number, lines, "${length.toString(16)}-${hash.toUInt().toString(16)}")
+}
+
+/** Same CR/LF/CRLF and trailing-empty-line semantics as String.lines(), with bounded live storage. */
+internal fun forEachLogicalLine(reader: Reader, onChar: (Char) -> Unit = {}, line: (String) -> Boolean) {
+    val chars = CharArray(8192)
+    val current = StringBuilder()
+    var previousCr = false
+    while (true) {
+        val count = reader.read(chars)
+        if (count < 0) break
+        for (index in 0 until count) {
+            val ch = chars[index]
+            onChar(ch)
+            if (ch == '\n' && previousCr) { previousCr = false; continue }
+            previousCr = ch == '\r'
+            if (ch == '\n' || ch == '\r') {
+                if (!line(current.toString())) return
+                current.setLength(0)
+            } else current.append(ch)
+        }
+    }
+    line(current.toString())
 }
 
 internal fun humanSize(bytes: Long): String = when {

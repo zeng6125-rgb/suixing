@@ -10,6 +10,7 @@ import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -37,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -47,7 +49,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -132,12 +134,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.collect
 
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
 
-/** How long the provider-name field waits after the last keystroke before writing through. */
-private const val NAME_WRITE_DEBOUNCE_MS = 400L
 
 /**
  * The pages the root list opens. 权限 is deliberately missing: it is not a page of this
@@ -437,56 +438,43 @@ internal fun CoroutineScope.persist(block: (AppSettings) -> AppSettings) {
 }
 
 /**
- * Writes one provider's change straight through, addressed by id *inside* the update block:
- * the draft may hold edits that are not saved yet, and handing it the whole provider list
- * would write those down with it — and could carry a stale list over a concurrent writer's
- * change. [com.suixing.agent.data.SettingsRepository.update] runs the block inside the
- * DataStore edit, so the read-modify-write is one transaction.
- */
-private fun CoroutineScope.persistProvider(id: String?, block: (ProviderConfig) -> ProviderConfig) {
-    if (id.isNullOrEmpty()) return
-    launch {
-        Core.settings.update { current ->
-            current.copy(providers = current.providers.map { if (it.id == id) block(it) else it })
-        }
-    }
-}
-
-/**
  * 模型与生成: the only page with a draft and a save button, because its fields are a
  * group — a new address with an old key is not a state anyone wants half of.
  */
 @Composable
 private fun ModelSettingsPage(onBack: () -> Unit) {
-    val raw by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
-    // 仓库里存的是**密文**（Keystore 加密），页面里一律用**明文**：Key 框要显示它，
-    // 「有未保存的改动」的比对也要拿明文跟明文比（拿密文比会永远判定成改过）。
-    //
-    // 解密放 IO 线程：AndroidKeyStore 每次进程首次访问要 ~150ms，放主线程会掉一帧。
-    // 页面里的比较与保存都走这份明文副本，保存时由落盘层重新加密。
-    val stored by produceState(AppSettings(), raw) {
-        value = withContext(Dispatchers.IO) { raw.decrypted() }
+    val pendingFields = rememberDebouncedSettingsWrites()
+    // Null distinguishes loading from a genuinely empty supplier list.
+    val loadedStored by produceState<AppSettings?>(null) {
+        Core.settings.flow.collect { incoming ->
+            value = withContext(Dispatchers.IO) { incoming.decrypted() }
+        }
     }
-    // The draft starts from whatever the repository holds at first emission. The flow's
-    // initial value is the raw default (no providers yet — migration runs inside the
-    // flow), so the draft is re-seeded once the migrated settings arrive; without that
-    // the provider chip row never appeared and the page reported unsaved changes on
-    // entry. Keyless on purpose: a write-through below rewrites `stored`, and a keyed
-    // remember would reset the draft and throw away unsaved edits to baseUrl/apiKey/model.
+    val stored = loadedStored ?: AppSettings()
     var form by remember { mutableStateOf(stored) }
     var seeded by remember { mutableStateOf(false) }
-    LaunchedEffect(stored) {
-        if (!seeded && stored.providers.isNotEmpty()) {
+    LaunchedEffect(loadedStored) {
+        if (!seeded && loadedStored != null) {
             form = stored
             seeded = true
         }
     }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        try { Core.settings.cleanupEmptyProviders() }
+        catch (failure: Exception) {
+            if (failure is kotlinx.coroutines.CancellationException) throw failure
+            snackbar.showSnackbar("供应商清理未保存，请稍后重试")
+        }
+    }
     val client = remember { LlmClient() }
     var testing by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
     var loadingModels by remember { mutableStateOf(false) }
-    var pickerOpen by remember { mutableStateOf(false) }
+    var providerPickerOpen by remember { mutableStateOf(false) }
+    var modelsOpen by remember { mutableStateOf(false) }
+    var addingModel by remember { mutableStateOf(false) }
     var outcome by remember { mutableStateOf<TestOutcome?>(null) }
     val context = LocalContext.current
     // Android 17 起访问局域网要先拿到 ACCESS_LOCAL_NETWORK。这里只在**目标像内网**时请求，
@@ -507,10 +495,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         outcome = TestOutcome(false, "已请求「局域网访问」权限，允许后再点一次。")
         return false
     }
-    // The chip being edited. Keyed on the provider ids, never on `stored` itself: the name
-    // field writes through on every keystroke, and a selection re-derived from `stored` on
-    // each of those writes would snap back to the active provider mid-word — the rest of the
-    // name would then be written to whichever provider it snapped to.
+    // Keep selection by identity while the supplier's editable draft changes.
     var selectedId by remember { mutableStateOf("") }
     LaunchedEffect(stored.providers.map { it.id }) {
         // Re-point only when the chip the user is on has gone away (migration, a deletion
@@ -531,67 +516,56 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     // so counting it would call a plain switch "unsaved"; a hand edit there is exactly what
     // `endpointEdited` reports. Saving writes the draft (a blank address keeps the live
     // endpoint — see forSaving), so this clears by itself.
-    // **记忆化右边那个**：`stored` 在键入期间不变，而 dirty 每改一个字都要重算；
-    // 原来每次都要 copy 两份 AppSettings + 建一份 providers 列表再做整棵深比较。
-    val storedNormalized = remember(stored) { stored.normalizedForDirty() }
-    val dirty = seeded && (endpointEdited || form.differsOutsideEndpointNormalized(storedNormalized))
-    // The name is a write-through field — nothing to save — but one DataStore transaction per
-    // keystroke made every observer of the settings flow recompose, which is what turned the
-    // subtitle above into a flicker and the title into a shake. So the draft takes the
-    // keystroke and the write happens once the typing stops. The scope is the app's, not the
-    // screen's: a rememberCoroutineScope would be cancelled on the way out and drop the name.
-    var pendingName by remember { mutableStateOf<Pair<String, String>?>(null) }
-    LaunchedEffect(pendingName) {
-        val pending = pendingName ?: return@LaunchedEffect
-        delay(NAME_WRITE_DEBOUNCE_MS)
-        Core.appScope.persistProvider(pending.first) { it.copy(name = pending.second) }
-        if (pendingName == pending) pendingName = null
-    }
-    // Leaving the page cancels the effect above, so a name still waiting out its debounce is
-    // written here instead — the user typed it, it must not evaporate with the screen.
-    DisposableEffect(Unit) {
-        onDispose {
-            pendingName?.let { pending ->
-                Core.appScope.persistProvider(pending.first) { it.copy(name = pending.second) }
-            }
-        }
-    }
+    val dirty = seeded && (endpointEdited || form.differsOutsideEndpoint(stored))
+    // Names, credentials and models now share the same explicit save boundary.
+    var leavingWithDraft by remember { mutableStateOf(false) }
     var pendingSwitch by remember { mutableStateOf<String?>(null) }
     val switchProvider: (ProviderConfig) -> Unit = { provider ->
         selectedId = provider.id
-        form = form.copy(
+        modelsOpen = false
+        outcome = null
+        form = form.discardUncommittedProviders(stored, selected?.id).copy(
             baseUrl = provider.baseUrl,
             apiKey = provider.apiKey,
+            protocol = provider.protocol,
             model = provider.enabled.firstOrNull() ?: form.model,
         )
     }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     val deleteProvider: (ProviderConfig) -> Unit = { provider ->
         val rest = form.providers.filterNot { it.id == provider.id }
-        val next = rest.first()
-        selectedId = next.id
+        val next = rest.firstOrNull()
+        selectedId = next?.id.orEmpty()
         form = form.copy(
-            providers = rest,
-            baseUrl = next.baseUrl,
-            apiKey = next.apiKey,
-            model = next.enabled.firstOrNull() ?: form.model,
+            providers = rest, providersInitialized = true,
+            baseUrl = next?.baseUrl ?: stored.baseUrl,
+            apiKey = next?.apiKey ?: stored.apiKey,
+            protocol = next?.protocol ?: stored.protocol,
+            model = next?.enabled?.firstOrNull() ?: stored.model,
         )
-        // 同新建：删除也是结构操作，草稿里删了磁盘上还在会让切换器继续列出已经不存在的提供方。
-        // 但全局 active 只在下一个提供方真的填过地址时才跟着换：落到一个还没填的空壳上，
-        // 会把正在跑的会话指到空地址，下一轮就带着空 model 出去（同「新建」那条）。
-        scope.persist {
-            if (next.baseUrl.isNotBlank()) {
-                it.copy(
-                    providers = form.providers,
-                    baseUrl = form.baseUrl,
-                    apiKey = form.apiKey,
-                    model = form.model,
-                )
-            } else {
-                it.copy(providers = form.providers)
+    }
+    fun leavePage() {
+        val kept = form.discardUncommittedProviders(stored, selected?.id)
+        val remaining = kept.providers.firstOrNull { it.id == selected?.id }
+            ?: kept.activeProvider() ?: kept.providers.firstOrNull()
+        form = kept
+        selectedId = remaining?.id.orEmpty()
+        if (endpointHandEdited(kept, stored, remaining) || kept.differsOutsideEndpoint(stored)) leavingWithDraft = true
+        else onBack()
+    }
+    suspend fun saveForm() {
+        val snapshot = form
+        val saved = snapshot.forSaving(stored)
+        Core.settings.save(saved)
+        // Do not replace edits typed while persistence was running.
+        if (form === snapshot) {
+            form = saved
+            if (saved.providers.none { it.id == selectedId }) {
+                selectedId = saved.activeProvider()?.id ?: saved.providers.firstOrNull()?.id.orEmpty()
             }
         }
     }
+    androidx.activity.compose.BackHandler(enabled = seeded) { leavePage() }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -599,9 +573,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         topBar = {
             PageTopBar(
                 title = SettingsPage.MODEL.title,
-                onBack = onBack,
-                // 副标题（`if (dirty) "有未保存的改动"`）搬到内容区第一行 —— 它是这一页**唯一**的
-                // 真信息，不能随「任何页都不要副标题」一起丢掉（见下面 LazyColumn 的第一项）。
+                onBack = { if (seeded) leavePage() else onBack() },
+                // Draft status stays in the fixed action area, without shifting form rows.
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
@@ -621,58 +594,55 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         Spacer(Modifier.height(8.dp))
                     }
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        // 两个按钮按内容居中：转圈那一枚比文字矮一点，Top 对齐会让这一排看起来
-                        // "两个按钮不一样高"（用户截图里报的就是这个）。
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    Core.settings.save(form.forSaving(stored))
-                                    snackbar.showSnackbar("已保存")
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                        ) { Text(if (dirty) "保存改动" else "保存") }
-                        OutlinedButton(
-                            enabled = !testing,
+                        val statusColor = if (dirty) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(5.dp).background(statusColor.copy(alpha = 0.65f), CircleShape))
+                            Text(when {
+                                saving -> "保存中"
+                                !seeded -> "读取中"
+                                dirty -> "未保存"
+                                else -> "已保存"
+                            }, style = SettingsStyle.description, color = statusColor, maxLines = 1)
+                        }
+                        ModelActionButton(
+                            text = if (testing) "测试中" else "测试连接", busy = testing,
+                            enabled = seeded && !saving && !loadingModels,
+                            icon = R.drawable.ic_rotate_cw,
                             onClick = {
                                 scope.launch {
                                     if (!ensureLocalNetwork()) return@launch
                                     testing = true
                                     outcome = null
-                                    // 同保存：空地址不写进全局 active（新建后停在空 provider 上
-                                    // 点测试，不该把正在用的接口清掉）。
-                                    Core.settings.save(form.forSaving(stored))
-                                    outcome = runCatching {
-                                        client.complete(
-                                            settings = form,
-                                            messages = listOf(ChatMessage.user("你好，请只回复两个字：可用")),
-                                            tools = emptyList(),
+                                    try {
+                                        // Test the draft without committing an unsaved supplier.
+                                        outcome = runCatching {
+                                            client.complete(settings = form,
+                                                messages = listOf(ChatMessage.user("你好，请只回复两个字：可用")),
+                                                tools = emptyList())
+                                        }.fold(
+                                            onSuccess = { TestOutcome(true, "连接成功，模型回了：${it.text.trim().take(60)}") },
+                                            onFailure = { TestOutcome(false, describeError(it)) },
                                         )
-                                    }.fold(
-                                        onSuccess = {
-                                            TestOutcome(true, "连接成功，模型回了：${it.text.trim().take(60)}")
-                                        },
-                                        onFailure = { TestOutcome(false, describeError(it)) },
-                                    )
-                                    testing = false
+                                    } finally { testing = false }
                                 }
                             },
-                        ) {
-                            if (testing) {
-                                // size，不是 height：只给高度的话，M3 的指示器会按自己的 40dp
-                                // 直径去要宽度，最后画成一个 40×16 的扁弧——用户看到的就是
-                                // 「icon 飞到哪里去了」。转圈只占图标的位置，标签照旧跟着它。
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                )
-                                Spacer(Modifier.width(8.dp))
-                            }
-                            Text(if (testing) "测试中" else "测试连接")
-                        }
+                        )
+                        ModelActionButton(
+                            text = if (saving) "保存中" else "保存", primary = true, busy = saving,
+                            enabled = seeded && !testing && !loadingModels, icon = R.drawable.ic_check,
+                            onClick = {
+                                scope.launch {
+                                    saving = true
+                                    try { saveForm() } finally { saving = false }
+                                    snackbar.showSnackbar("已保存")
+                                }
+                            },
+                        )
                     }
                 }
             }
@@ -686,169 +656,33 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             contentPadding = settingsPagePadding(),
             verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
         ) {
-            // 从顶栏搬下来的「有未保存的改动」（顶栏不再有副标题）：dirty 时才出现，放在内容区
-            // 第一行 —— 用户改完设置抬头就能看到，不用去找保存键。
-            if (dirty) {
-                item {
-                    Text(
-                        text = "有未保存的改动",
-                        style = SettingsStyle.badge,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-            item { SectionHeader("服务商与接口", first = true) }
             item {
-                // The provider row: one chip per endpoint, the active one filled, plus
-                // 新建. Renaming and deleting ride each chip's own long-press menu, so
-                // the row stays a row. It sits after the context presets, in the field
-                // order the page keeps.
-                if (form.providers.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        form.providers.forEach { provider ->
-                            var menuOpen by remember { mutableStateOf(false) }
-                            var renaming by remember { mutableStateOf(false) }
-                            Box {
-                                FilterChip(
-                                    selected = provider.id == selected?.id,
-                                    onClick = {
-                                        if (endpointEdited) {
-                                            pendingSwitch = provider.id
-                                        } else {
-                                            switchProvider(provider)
-                                        }
-                                    },
-                                    label = {
-                                        Text(
-                                            text = provider.label,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.widthIn(max = 110.dp),
-                                        )
-                                    },
-                                    // clip 必须在 combinedClickable **之前**：涟漪要跟着 chip 的圆角
-                                    // 走，否则它是一块方角盖在圆角 chip 上（全文件唯一一处漏了 clip）。
-                                    modifier = Modifier
-                                        .clip(MaterialTheme.shapes.small)
-                                        .combinedClickable(
-                                        onClick = {
-                                            if (endpointEdited) {
-                                                pendingSwitch = provider.id
-                                            } else {
-                                                switchProvider(provider)
-                                            }
-                                        },
-                                        onLongClick = { menuOpen = true },
-                                    ),
-                                )
-                                DropdownMenu(
-                                    expanded = menuOpen,
-                                    onDismissRequest = { menuOpen = false },
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("重命名") },
-                                        onClick = {
-                                            menuOpen = false
-                                            renaming = true
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("删除") },
-                                        enabled = form.providers.size > 1,
-                                        onClick = {
-                                            menuOpen = false
-                                            if (endpointEdited) {
-                                                pendingDelete = provider.id
-                                            } else {
-                                                deleteProvider(provider)
-                                            }
-                                        },
-                                    )
-                                }
-                            }
-                            if (renaming) {
-                                RenameDialog(
-                                    initial = provider.name,
-                                    onDismiss = { renaming = false },
-                                    onConfirm = { name ->
-                                        renaming = false
-                                        form = form.mapProvider(provider.id) { it.copy(name = name) }
-                                        scope.persist {
-                                            it.copy(providers = form.providers)
-                                        }
-                                    },
-                                )
-                            }
+                ProviderDropdown(
+                    providers = form.providers, selected = selected, enabled = seeded && !loadingModels && !testing && !saving,
+                    onSelect = { provider ->
+                        if (provider.id != selected?.id) {
+                            if (endpointEdited && stored.providers.any { it.id == selected?.id }) pendingSwitch = provider.id
+                            else switchProvider(provider)
                         }
-                        AssistChip(
-                            onClick = {
-                                val id = "p" + System.currentTimeMillis().toString(36)
-                                selectedId = id
-                                form = form.copy(
-                                    providers = form.providers + ProviderConfig(id = id),
-                                    baseUrl = "",
-                                    apiKey = "",
-                                    model = "",
-                                )
-                                // 点选即落盘：新建的提供方若只留在草稿里，离开页面就没了。
-                                // 只落 providers：草稿里那三个空值属于还没填完的新提供方，
-                                // 一起写下去会把全局 active 的接口地址/Key/模型清空，正在跑的
-                                // 会话下一轮就会带着空 model 出去。
-                                scope.persist { it.copy(providers = form.providers) }
-                            },
-                            label = { Text("新建") },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            },
-                        )
-                        // 删除原来只藏在「长按 chip」里（onLongClick），用户找不到 —— 这里给一个
-                        // 可见入口，删的是**当前选中的**提供方；只剩一个时禁用（删完会没有接口可用，
-                        // deleteProvider 也要求至少留一个）。
-                        val current = form.providers.firstOrNull { it.id == selected?.id }
-                        if (current != null) {
-                            Spacer(Modifier.width(8.dp))
-                            AssistChip(
-                                enabled = form.providers.size > 1,
-                                onClick = {
-                                    if (endpointEdited) {
-                                        pendingDelete = current.id
-                                    } else {
-                                        deleteProvider(current)
-                                    }
-                                },
-                                label = { Text("删除") },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = ImageVector.vectorResource(R.drawable.ic_x),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
+                    },
+                    onAdd = {
+                        if (endpointEdited && stored.providers.any { it.id == selected?.id })
+                            outcome = TestOutcome(false, "请先保存当前接口改动，再添加供应商。")
+                        else providerPickerOpen = true
+                    },
+                    onDelete = { selected?.let { provider ->
+                        if (endpointEdited) pendingDelete = provider.id else deleteProvider(provider)
+                    } },
+                )
             }
+            item { SectionHeader("接口配置") }
             item {
                 // 协议在地址之上：换了协议，同一个地址要拼的路径、要带鉴权头都不一样，
                 // 所以用户是先选「这个端点说哪种话」，再填地址。
-                ProtocolPicker(
+                CompactProtocolPicker(
                     protocol = selected?.protocol.orEmpty(),
                     onPick = { picked ->
-                        form = form.mapProvider(selected?.id) { it.copy(protocol = picked) }
-                        // 结构性选择（同「独立采样参数」）：点选即落盘，不留草稿。
-                        scope.persist { it.copy(providers = form.providers) }
+                        form = form.copy(protocol = picked).mapProvider(selected?.id) { it.copy(protocol = picked) }
                     },
                 )
                 // Anthropic 的提示只在这个协议下出现：默认地址栏那句「填到 /v1 即可」
@@ -872,10 +706,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         form = form.copy(baseUrl = value)
                             .mapProvider(selected?.id) { it.copy(baseUrl = value) }
                     },
-                    // 设置页输入框的统一规格（本文件其余十几处同此，不重复注释）：
-                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。**别再压死高度**——写死
-                    // height(48.dp) 会在「外观 → 字号」放大时裁掉汉字下缘（工具页搜索框就是这么
-                    // 出事的，那段注释在 ToolsScreen.kt:524-527）；矮是字号给的，不是把盒子压扁来的。
+                    // Compact field shares the 48dp editing minimum with selectors/actions;
+                    // floating labels, supporting text and larger fonts may grow naturally.
                     label = { Text("接口地址") },
                     // 明文 http 是刻意留着的（局域网里的 Ollama / LM Studio 就只有 http），但
                     // key 会跟着明文走——这一句是用户敲下那个地址之前唯一的提醒。
@@ -887,35 +719,24 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = SettingsStyle.ControlHeight),
                 )
             }
             item {
                 // The provider's own name, editable in place: the chip row's long-press
                 // rename stays, but the name is read every day and typed once a month.
                 OutlinedTextField(
-                    // 单行输入框的统一规格（本文件其余十几处同此，不重复注释）：
-                    // bodyMedium(14sp) + `heightIn(min = 52.dp)`。
-                    //
-                    // **为什么看起来「没变矮」**（写给下一轮，别再试 `height(...)`）：
-                    // material3 1.3.1 的 `OutlinedTextField` 自带 **56dp 最小高度**
-                    // （TextFieldDefaults.MinHeight），而且**没有 `contentPadding` 参数**
-                    // （OutlinedTextFieldDefaults.contentPadding() 只服务自绘 decoration）
-                    // ⇒ 在不裁字的前提下**压不到 56dp 以下**；写死 `height(52.dp)` 是把 56dp 的
-                    // 容器硬压扁，会裁掉汉字下缘（工具页搜索框就是这么出过事的）。要真的更矮，
-                    // 只能手绘输入框 —— 那是另一个量级的活。所以这里用 min：跟着字号长、永不裁字。
+                    // Uses CompactOutlinedTextField via the import alias; the shared
+                    // editing minimum stays flexible rather than clipping scaled text.
                     textStyle = settingsFieldText,
                     value = selected?.name.orEmpty(),
                     onValueChange = { value ->
                         form = form.mapProvider(selected?.id) { it.copy(name = value) }
-                        // 只改草稿：每敲一键写一次盘，会让所有观察 settings 的地方跟着重组，
-                        // 内容区那一行「有未保存的改动」一闪一灭，看起来就是那行字在抖。停手后再落盘。
-                        pendingName = selected?.id?.takeIf { it.isNotEmpty() }?.let { it to value }
                     },
                     label = { Text("提供方名称") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = SettingsStyle.ControlHeight),
                 )
             }
             item {
@@ -943,7 +764,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
                     visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = SettingsStyle.ControlHeight),
                 )
             }
             item {
@@ -957,40 +778,29 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 )
             }
-            item { SectionHeader("模型与能力") }
-            item {
-                // The raw id, not the alias: what is typed here is what goes on the wire, so
-                // a display name typed or pasted in would be sent as the model and 404. The
-                // alias stays read-only, under the field and on the picker's chips.
-                val alias = selected?.aliases?.get(form.model)
-                OutlinedTextField(
-                    textStyle = settingsFieldText,
-                    value = form.model,
-                    onValueChange = { form = form.copy(model = it) },
-                    label = { Text("当前模型") },
-                    supportingText = if (alias != null) {
-                        { Text("别名：$alias") }
-                    } else {
-                        null
-                    },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                )
-            }
+            item { SectionHeader("模型列表") }
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
-                        enabled = !loadingModels,
+                        enabled = !loadingModels && selected != null && form.baseUrl.isNotBlank(),
+                        modifier = Modifier.heightIn(min = SettingsStyle.ControlHeight),
+                        shape = MaterialTheme.shapes.small,
                         onClick = {
                             scope.launch {
                                 // 内网地址且还没授权时，先弹系统授权；不发出注定超时的请求。
                                 if (!ensureLocalNetwork()) return@launch
                                 loadingModels = true
                                 outcome = null
-                                runCatching { client.listModelDetails(form) }.fold(
-                                    onSuccess = { details ->
-                                        val fetched = details.map { it.id }
+                                val requestForm = form
+                                val requestProviderId = selectedId
+                                runCatching { client.listModelDetails(requestForm) }.fold(
+                                    onSuccess = fetchedModels@{ details ->
+                                        if (selectedId != requestProviderId || form.baseUrl != requestForm.baseUrl ||
+                                            form.apiKey != requestForm.apiKey || form.protocol != requestForm.protocol) {
+                                            outcome = TestOutcome(false, "接口配置已变化，请重新获取模型列表。")
+                                            return@fetchedModels
+                                        }
+                                        val fetched = details.map { it.id }.distinct()
                                         // **上游说了算**（issue #3）：原来这里是
                                         // `(fetched + selected?.models.orEmpty()).distinct()` —— 和上一次
                                         // 保存的清单做并集，网关删掉的模型一个都不会消失（面板 103 个 vs
@@ -1020,20 +830,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                                 .withUpstreamDefaults(windows)
                                                 .filterKeys { it in allModels },
                                         )
-                                        // 拉到的清单属于提供方结构，同样点选即落盘。
-                                        scope.persist {
-                                            it.copy(
-                                                providers = form.providers,
-                                                modelContexts = form.modelContexts,
-                                                baseUrl = form.baseUrl,
-                                                apiKey = form.apiKey,
-                                                model = form.model,
-                                            )
-                                        }
+                                        modelsOpen = true
                                         if (merged.isEmpty()) {
                                             outcome = TestOutcome(false, "接口没返回任何模型，直接手填吧。")
                                         } else {
-                                            pickerOpen = true
+                                            outcome = TestOutcome(true, "已获取 ${merged.size} 个模型。")
                                         }
                                     },
                                     onFailure = { outcome = TestOutcome(false, describeError(it)) },
@@ -1063,10 +864,44 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "从接口的 /models 拉一份清单，勾选后按提供方分组出现在顶部的模型切换里。",
+                    text = "从接口获取后在弹窗选择模型，修改后点底部保存。",
                     style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            item { SectionHeader("已启用模型") }
+            if (selected?.enabled.isNullOrEmpty()) {
+                item { Text("尚未启用模型。获取后在弹窗选择，或添加自定义模型。",
+                    style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+            items(selected?.enabled.orEmpty(), key = { "enabled:${selected?.id}:$it" },
+                contentType = { "enabled-model" }) { id ->
+                EnabledModelCard(
+                    id = id, alias = selected?.aliases?.get(id).orEmpty(),
+                    contextWindow = form.modelContexts[id] ?: 0, maxTokens = form.modelMaxTokens[id] ?: 0,
+                    testModel = form.model == id,
+                    onTest = { form = form.copy(model = id) },
+                    onEdit = { alias, contextWindow, output ->
+                        form = form.mapProvider(selected?.id) {
+                            it.copy(aliases = if (alias.isBlank()) it.aliases - id else it.aliases + (id to alias))
+                        }.let { updated -> updated.copy(
+                            modelContexts = updated.modelContexts.withContextWindow(id, contextWindow),
+                            modelMaxTokens = updated.modelMaxTokens.withMaxTokens(id, output),
+                        ) }
+                    },
+                    onRemove = { form = form.mapProvider(selected?.id) { it.withModelEnabled(id, false) } },
+                )
+            }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(enabled = selected != null, onClick = { modelsOpen = true }) { Text("选择模型") }
+                    TextButton(onClick = { addingModel = true }) { Text("添加自定义模型") }
+                }
+            }
+            item {
+                OutlinedTextField(value = form.model, onValueChange = { form = form.copy(model = it) },
+                    textStyle = settingsFieldText, label = { Text("测试连接使用的模型 ID") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
             }
             item {
                 SettingRow(
@@ -1081,39 +916,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item { SectionHeader("生成参数") }
-            item(key = "max-tokens") {
-                // 最大输出**按模型**（用户：「取消全局性的，改用各模型默认＋可自定义，跟上下文
-                // 窗口一样」）：存 [AppSettings.modelMaxTokens]，键是裸模型 id（与 modelContexts
-                // 同一套键规则）；留空＝不说、模型/端点默认。老文件的 provider 级值由迁移搬进来。
-                //
-                // 输入框的 value 是**本地 raw 文本**，不是从 form 反推（用户：「输入一个，输入框自动
-                // 关了」）：打第一个字符时 parsed 写回 form、整页重组、无 key 的 item 被重建 ⇒ 焦点
-                // 丢、键盘收。raw 只跟手指走，form 只在解析后单向写；item 带 key 稳定身份。
-                val model = form.model
-                val modelMax = form.maxTokensFor(model)
-                var raw by remember(model) {
-                    mutableStateOf(if (modelMax <= 0) "" else modelMax.toString())
-                }
-                OutlinedTextField(
-                    textStyle = settingsFieldText,
-                    value = raw,
-                    onValueChange = { input ->
-                        val digits = input.filter { it.isDigit() }.take(6)
-                        raw = digits
-                        val parsed = digits.toIntOrNull() ?: 0
-                        form = form.copy(
-                            modelMaxTokens = form.modelMaxTokens.withMaxTokens(model, parsed),
-                        )
-                        scope.persist { it.copy(modelMaxTokens = form.modelMaxTokens) }
-                    },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                    label = { Text("当前模型最大输出 tokens（留空 = 模型默认）") },
-                    placeholder = { Text("例如 4096") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    shape = MaterialTheme.shapes.small,
-                )
-            }
             // 「最大工具轮数」与「显示思考过程」搬到了「对话配置」页：一个是它一次任务能跑几轮、
             // 一个是对话里显示什么，都不属于模型端点本身。字段与存储没动。
             //
@@ -1172,7 +974,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                 checked = selected?.ownSampling == true,
                                 onCheckedChange = { on ->
                                     form = form.mapProvider(selected?.id) { it.copy(ownSampling = on) }
-                                    scope.persist { it.copy(providers = form.providers) }
                                 },
                             )
                         },
@@ -1262,7 +1063,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                     }
                                     .toMap()
                                 form = form.copy(requestHeaders = parsed)
-                                scope.persist { it.copy(requestHeaders = parsed) }
+                                pendingFields.put("request-headers") { it.copy(requestHeaders = parsed) }
                             },
                             minLines = 3,
                             shape = MaterialTheme.shapes.small,
@@ -1275,51 +1076,51 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         }
     }
 
-    if (pickerOpen && selected != null && selected.models.isNotEmpty()) {
-        ModelPickerDialog(
-            models = selected.models,
-            enabled = selected.enabled,
-            contexts = form.modelContexts,
-            maxTokensMap = form.modelMaxTokens,
-            provider = selected,
-            onContext = { model, window ->
-                // Written through immediately: the window belongs to the model, and the
-                // dialog's confirm button is about which models are enabled. The draft is
-                // updated first so the page's other unsaved edits survive the write.
-                form = form.copy(modelContexts = form.modelContexts.withContextWindow(model, window))
-                scope.persist { it.copy(modelContexts = form.modelContexts) }
+    if (modelsOpen && selected != null) {
+        androidx.compose.runtime.key(selected.id) {
+            FetchedModelsDialog(
+                provider = selected,
+                onToggle = { id, enabled -> form = form.mapProvider(selected.id) { it.withModelEnabled(id, enabled) } },
+                onDismiss = { modelsOpen = false },
+            )
+        }
+    }
+    if (providerPickerOpen) {
+        AddProviderDialog(onDismiss = { providerPickerOpen = false }, onAdd = { provider ->
+            val retained = form.discardUncommittedProviders(stored, selected?.id)
+            form = retained.copy(providers = retained.providers + provider,
+                baseUrl = provider.baseUrl, apiKey = provider.apiKey, model = "", protocol = provider.protocol)
+            selectedId = provider.id
+            modelsOpen = false
+            providerPickerOpen = false
+        })
+    }
+    if (addingModel) {
+        AddModelDialog(onDismiss = { addingModel = false }, onConfirm = { id ->
+            form = form.mapProvider(selected?.id) { it.withModelEnabled(id, true) }
+            addingModel = false
+        })
+    }
+    if (leavingWithDraft) {
+        SuixingDialog(
+            onDismissRequest = { leavingWithDraft = false },
+            title = { Text("保存模型配置？") },
+            text = { Text("供应商、已启用模型或生成参数还有未保存的改动。") },
+            confirmButton = { dialog ->
+                TextButton(onClick = { dialog.closeThen {
+                    leavingWithDraft = false
+                    scope.launch {
+                        saveForm()
+                        onBack()
+                    }
+                } }) { Text("保存并返回") }
             },
-            onMaxTokens = { model, tokens ->
-                form = form.copy(modelMaxTokens = form.modelMaxTokens.withMaxTokens(model, tokens))
-                scope.persist { it.copy(modelMaxTokens = form.modelMaxTokens) }
-            },
-            onAlias = { model, name ->
-                form = form.mapProvider(selected.id) { cfg ->
-                    cfg.copy(
-                        aliases = if (name.isEmpty()) cfg.aliases - model else cfg.aliases + (model to name),
-                    )
+            dismissButton = { dialog ->
+                Row {
+                    TextButton(onClick = { dialog.closeThen { leavingWithDraft = false; onBack() } }) { Text("放弃") }
+                    TextButton(onClick = { dialog.closeThen { leavingWithDraft = false } }) { Text("继续编辑") }
                 }
-                scope.persist { it.copy(providers = form.providers) }
             },
-            onAdd = { modelId ->
-                form = form.mapProvider(selected.id) { cfg ->
-                    cfg.copy(models = (cfg.models + modelId).distinct(), enabled = (cfg.enabled + modelId).distinct())
-                }
-                scope.persist { it.copy(providers = form.providers) }
-            },
-            onRemove = { modelId ->
-                form = form.mapProvider(selected.id) { cfg ->
-                    cfg.copy(models = cfg.models - modelId, enabled = cfg.enabled - modelId)
-                }
-                scope.persist { it.copy(providers = form.providers) }
-            },
-            onConfirm = { picked ->
-                form = form.mapProvider(selected.id) { it.copy(enabled = picked) }
-                // provider 不再默认指定模型（用户：「对于 provider 不再默认指定模型」）：
-                // 勾选只是把模型加进这个提供方的可用清单，用哪个由聊天页的模型选择器决定。
-                pickerOpen = false
-            },
-            onDismiss = { pickerOpen = false },
         )
     }
 
@@ -1472,6 +1273,18 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
             // 「自动整理用户画像」与「画像整理间隔」搬到了用户画像页（ProfileScreen）：它们管的是
             // 那份画像本身怎么维护，与这一页的对话行为不是一回事，而「数据」页是纯入口列表、
             // 放开关会破坏它的形态。字段与存储没动。
+            item {
+                SettingRow(title = "并行子任务",
+                    subtitle = "复杂任务可拆分处理；共用当前模型与工具权限，可能增加模型调用。",
+                    control = { SettingsSwitch(checked = stored.subagentsEnabled,
+                        onCheckedChange = { on -> scope.persist { it.copy(subagentsEnabled = on) } }) })
+            }
+            if (stored.subagentsEnabled) item {
+                LabeledSlider(label = "子任务并行数 ${stored.subagentParallelism.coerceIn(1, 3)}",
+                    hint = "每轮最多创建6个子任务；父任务结束或停止时，未完成的子任务会一同取消。",
+                    value = stored.subagentParallelism.coerceIn(1, 3).toFloat(), range = 1f..3f, steps = 1,
+                    onValueChange = { value -> scope.persist { it.copy(subagentParallelism = value.toInt()) } })
+            }
             item { SectionHeader("审批与授权") }
             item {
                 LabeledBlock(label = "工具审批", hint = "模型每次动手前要不要问你。") {
@@ -1987,6 +1800,17 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
 private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
     val stored by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val scope = rememberCoroutineScope()
+    val pendingFields = rememberDebouncedSettingsWrites()
+    var searchEndpoint by remember { mutableStateOf(stored.searchEndpoint) }
+    var searchApiKey by remember { mutableStateOf(stored.searchApiKey) }
+    var endpointEdited by remember { mutableStateOf(false) }
+    var keyEdited by remember { mutableStateOf(false) }
+    LaunchedEffect(stored.searchEndpoint, stored.searchApiKey) {
+        // Seed from the first real repository emission, without a delayed disk echo
+        // replacing characters typed after an earlier debounced batch was dispatched.
+        if (!endpointEdited) searchEndpoint = stored.searchEndpoint
+        if (!keyEdited) searchApiKey = stored.searchApiKey
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -2005,8 +1829,12 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             item {
                 OutlinedTextField(
                     textStyle = settingsFieldText,
-                    value = stored.searchEndpoint,
-                    onValueChange = { value -> scope.persist { it.copy(searchEndpoint = value) } },
+                    value = searchEndpoint,
+                    onValueChange = { value ->
+                        endpointEdited = true
+                        searchEndpoint = value
+                        pendingFields.put("search-endpoint") { it.copy(searchEndpoint = value) }
+                    },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
                     label = { Text("搜索接口（可留空）") },
                     placeholder = { Text("https://api.tavily.com/search") },
@@ -2020,8 +1848,12 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             item {
                 OutlinedTextField(
                     textStyle = settingsFieldText,
-                    value = stored.searchApiKey,
-                    onValueChange = { value -> scope.persist { it.copy(searchApiKey = value) } },
+                    value = searchApiKey,
+                    onValueChange = { value ->
+                        keyEdited = true
+                        searchApiKey = value
+                        pendingFields.put("search-api-key") { it.copy(searchApiKey = value) }
+                    },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
                     label = { Text("搜索接口 Key（可留空）") },
                     singleLine = true,

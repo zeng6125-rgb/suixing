@@ -2,6 +2,8 @@ package com.suixing.agent.agent
 
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.ContextCheckpoint
+import com.suixing.agent.llm.FINISH_CUT
 
 /**
  * 上下文压缩的**共用规则**：把会话历史切成「要被折叠的一段」与「原样保留的尾巴」。
@@ -33,6 +35,7 @@ internal fun planCompaction(
     history: List<StoredMessage>,
     keepRecent: Int = KEEP_RECENT_MESSAGES,
     minMessages: Int = MIN_MESSAGES_TO_COMPACT,
+    checkpoints: List<ContextCheckpoint> = emptyList(),
 ): CompactionPlan? {
     if (history.size <= minMessages) return null
     var cut = history.size - keepRecent
@@ -40,11 +43,59 @@ internal fun planCompaction(
     if (cut <= 0) return null
     val covered = history.subList(0, cut)
     if (covered.isEmpty()) return null
+    val previous = reusableCheckpoint(history, checkpoints)
+    val resumeAt = previous?.let { saved -> history.indexOfFirst { it.id == saved.toMessageId } } ?: -1
+    // Nothing new can be folded without touching the recent tail. Reuse the saved result.
+    if (resumeAt >= cut - 1) return null
+    val fresh = covered.subList(resumeAt + 1, covered.size)
+    val from = previous?.let { saved -> history.indexOfFirst { it.id == saved.fromMessageId } } ?: 0
     return CompactionPlan(
-        transcript = covered.joinToString("\n") { renderForCompaction(it) },
-        coveredIds = covered.map { it.id },
-        foldedMessages = covered.size,
+        transcript = buildString {
+            if (previous != null) append("system: [上下文摘要] ").append(previous.summary).append('\n')
+            append(fresh.joinToString("\n") { renderForCompaction(it) })
+        },
+        coveredIds = history.subList(from, cut).map { it.id },
+        foldedMessages = cut - from,
     )
+}
+
+/** A stale checkpoint must not hide an earlier usable one after a branch/edit. */
+internal fun reusableCheckpoint(history: List<StoredMessage>, checkpoints: List<ContextCheckpoint>): ContextCheckpoint? {
+    if (checkpoints.isEmpty()) return null
+    val endpoints = HashSet<String>()
+    checkpoints.forEach { endpoints += it.fromMessageId; endpoints += it.toMessageId }
+    val positions = HashMap<String, Int>(endpoints.size)
+    history.forEachIndexed { index, message -> if (message.id in endpoints) positions[message.id] = index }
+    return checkpoints.asReversed().firstOrNull {
+        val from = positions[it.fromMessageId]
+        val to = positions[it.toMessageId]
+        it.summary.isNotBlank() && from != null && to != null && from <= to
+    }
+}
+
+internal data class SummaryAttempt(val text: String, val commit: Boolean, val why: String = "")
+
+internal fun checkedSummary(text: String, finishReason: String?, sourceChars: Int): SummaryAttempt {
+    val summary = text.trim()
+    val reason = when {
+        summary.isBlank() -> "模型没有返回摘要"
+        finishReason == FINISH_CUT || finishReason == "length" || finishReason == "max_tokens" ||
+            finishReason == "content_filter" -> "摘要被截断或未完整返回"
+        summary.length > 32_000 || (sourceChars < 2000 && summary.length > 2000) -> "摘要过长"
+        sourceChars >= 2000 && summary.length.toLong() * 2 >= sourceChars -> "摘要没有比原文更小"
+        else -> ""
+    }
+    return SummaryAttempt(summary, reason.isEmpty(), reason)
+}
+
+/** Failed summaries retain the original wire. Retry after useful growth, or an explicit request. */
+internal class CompactionRetryGate {
+    private var rejectedRows = -1
+    private var rejectedChars = 0
+    fun allows(rows: Int, chars: Int, manual: Boolean): Boolean = manual || rejectedRows < 0 ||
+        rows >= rejectedRows + 4 || chars.toLong() >= rejectedChars.toLong() + maxOf(2048, rejectedChars / 10)
+    fun rejected(rows: Int, chars: Int) { rejectedRows = rows; rejectedChars = chars }
+    fun reset() { rejectedRows = -1; rejectedChars = 0 }
 }
 
 /**

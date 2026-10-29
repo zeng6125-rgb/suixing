@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -56,7 +56,7 @@ internal fun SkillUrlImportDialog(
                     placeholder = { Text("https://example.com/SKILL.md") },
                     singleLine = true,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
                 if (url.isNotBlank() && !usable) {
                     Spacer(Modifier.height(6.dp))

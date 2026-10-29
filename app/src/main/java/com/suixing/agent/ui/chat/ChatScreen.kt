@@ -146,55 +146,6 @@ internal val SUGGESTIONS = listOf(
  * 白块消失 ⇒ 与钉住这套有关；白块照旧 ⇒ 无关，回到基础列表找。
  * 对照做完把它改回 `true`（或删掉这个开关）。
  */
-/**
- * 钉住状态机的**触发信号**。
- *
- * 为什么要一个类型而不是 `Triple`：评审第三轮指出「`livePin` 实例被 `LaunchedEffect` 捕获」
- * 与「`itemCount` 被冻结成常量」是同一类事故 —— 判定的所有输入都必须出现在
- * `snapshotFlow` 的读取集里。把输入收成一个类型，漏一个就编译不过（而不是静默冻结）。
- */
-private data class PinSignals(
-    val chatId: String,
-    val notAtBottom: Boolean,
-    val hasLiveContent: Boolean,
-    val pinActive: Boolean,
-)
-
-// **关掉"钉住布局高度"**（用户明确要求）：它会让流式行只露出半截/或只剩提示条，
-// 而用户要的是「正常生长」。代价是回到"读历史时新内容会把上面的位置推走"，
-// 那要靠"把流式内容移出列表"来根治（issue #25 的做法，只移流式那一行）。
-private const val PIN_LIVE_HEIGHT = false
-
-
-/**
- * #17 验收用的**轻量痕迹**：只在状态翻转时写一行。
- *
- * 为什么不用 logcat：这台机器上 MIUI 把 logcat 通道限得很死（`adb logcat` 读不到），
- * 而 `run-as` 对 release 包不可用。写文件至少能用 root 的 `adb shell su -c cat` 捞出来。
- *
- * **只在翻转时调用**（一轮对话通常 3~5 行），并带大小上限，绝不做逐帧 IO
- * —— 0.8.333 已经吃过一次"逐帧写盘反而造成卡顿"的教训。
- */
-private val NL_PIN = 10.toChar().toString()
-
-// 写盘放到自己的 IO 作用域（`SupervisorJob` 保证一条写失败不影响后续）：
-// 调用点在 Compose 的 effect 里、跑在**主线程**上，直接 `appendText` 就是一次主线程 IO。
-// 只在状态翻转时触发（一轮几条），但没理由让它占主线程。
-private val PIN_TRACE_SCOPE =
-    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
-
-private fun pinTrace(message: String) {
-    PIN_TRACE_SCOPE.launch {
-        runCatching {
-            val dir = Core.appContext.filesDir
-            val file = java.io.File(dir, "pin.log")
-            if (file.length() > 64 * 1024) file.writeText("")
-            file.appendText(System.currentTimeMillis().toString() + " " + message + NL_PIN)
-        }
-    }
-}
-
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
@@ -634,11 +585,13 @@ fun ChatScreen(
         persistedContext = persistedContext,
     )
     // 切会话时算一次兜底读数（网关没报过用量时那两行占比要有数）。
-    LaunchedEffect(state.conversationId) {
+    LaunchedEffect(state.conversationId, viewport) {
+        if (state.conversationId.isEmpty()) return@LaunchedEffect
+        // Tool/plugin estimation is not needed to display the transcript's first frame.
+        snapshotFlow { viewport.presented && viewport.entrance.value >= 1f }.first { it }
         viewModel.refreshContextBreakdown()
     }
     val contextUsed = reading.tokens
-    // 圆环读数诊断（用户选的「加日志抓，不再猜」）：任一候选源或 run 状态变化时记一行，含全部
     val sessionTokens = session?.tokens ?: 0
     val sessionTurns = session?.turns ?: 0
     // The cumulative row's own floor, for the same conversations as above: every turn re-sent the
@@ -741,15 +694,6 @@ fun ChatScreen(
     val reasoningExpansion = remember(state.conversationId) {
         ReasoningExpansion(state.conversationId, reasoningExpanded)
     }
-    val retainReadingNow = rememberUpdatedState {
-        val current = viewModel.currentLiveContent()
-        if (current.chatId == state.conversationId && current.runId.isNotBlank()) {
-            // Capture on the gesture, before a completion can replace the live
-            // composition and skip its last SideEffect in the same frame.
-            val parts = LivePartProjection(current.runId).project(current.parts, settings.showReasoning)
-            reasoningExpansion.retainForReading(parts, current.runId, settings.expandTools)
-        }
-    }
     SideEffect {
         if (state.liveRunId.isNotBlank() && reasoningExpansion.stored("time:${state.liveRunId}") == null) {
             // Do not insert a newly-created timestamp above an already-read live reply.
@@ -806,7 +750,6 @@ fun ChatScreen(
     // Keep the scrubber's legacy reverse coordinate, while physical rows are chronological.
     // Temporary rows are now at the end; only load-earlier precedes stored messages.
     val feedPrefix = slots.feedPrefix
-    fun fedIndexOf(oldVisible: Int) = rowOffset + oldVisible
 
     // **不在 ChatScreen 组合体里读 `.value`**（issue #26 原因一）：`firstVisibleItemIndex` 滚动时
     // 每跨一个 item 就变一次，一旦在这里读，整个 ChatScreen（1600 行、几十个 Composable 调用）
@@ -822,21 +765,12 @@ fun ChatScreen(
     // **当前读到哪一轮 = 视口内 28% 位置那一行**（口径取自 Aether 的 `currentTimelineIndex`）。
     // 原来取的是**视口顶部**那一行 ⇒ 导航条高亮与条数全都对不上（用户：对应轮次很奇怪、
     // 条数不增加）。单 item 化后没有 item 边界可读，按像素反查。
-    val firstVisibleFed = remember(visible, feedPrefix, rowCoordinates, listState, rowKeyIndices) {
+    val currentPhysicalRow = remember(listState) {
         derivedStateOf {
-            geometryVersion.intValue
-            listState.firstVisibleItemIndex
-            listState.firstVisibleItemScrollOffset
-            val probeY = viewportTopY.value + listState.layoutInfo.viewportSize.height * TurnMarks.PROBE_FRACTION
-            val measured = listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
-                val index = rowKeyIndices[item.key] ?: return@mapNotNull null
-                val coords = rowCoordinates[item.key]?.takeIf { it.isAttached } ?: return@mapNotNull null
-                index to coords.positionInWindow().y
-            }
-            val at = measured.filter { it.second <= probeY }.maxByOrNull { it.second }?.first
-                ?: measured.minByOrNull { it.second }?.first
-            // Keep the scrubber's synthetic reverse coordinate independent of physical order.
-            if (at == null) feedPrefix else feedPrefix + visible.lastIndex - at
+            val layout = listState.layoutInfo
+            val probe = TurnMarks.probeOffset(layout.viewportStartOffset, layout.viewportEndOffset)
+            layout.visibleItemsInfo.lastOrNull { it.offset <= probe }?.index
+                ?: layout.visibleItemsInfo.firstOrNull()?.index ?: 0
         }
     }
 
@@ -874,15 +808,9 @@ fun ChatScreen(
     }
     // composition local 只能在组合里读：先在组合层捕获，守护协程里用这个引用。
     val setSelectionActive = LocalSetSelectionActive.current
-    // **临时诊断（查完就删）**：长按复制会跳位置，且只有本次进程第一次出现。
-    // 记下"按下 / 抬手 / 守护撤销"几个时刻的滚动坐标，就能看出那次跳动是程序滚的、
-    // 还是列表自己重新锚定的。
-    val traceCtx = LocalContext.current
-
     // **分批填充**（打开/切换会话时 12 轮一次性组合 = 100~150ms，frame.log 实测：
     val scroll = rememberChatScroll(
         // 内容版本：消息条数 + 流式/思考字符数。只在真正"长高"时变，滚动本身不会触发。
-        contentVersion = state.messages.size to (state.streaming.length + state.reasoning.length),
         listState = listState,
         autoFollow = settings.autoFollow,
         pressedNow = { pressed },
@@ -890,6 +818,25 @@ fun ChatScreen(
         conversationId = state.conversationId,
         initialFollowing = openingBookmark?.followLatest != false,
     )
+
+    val transcriptPosition = remember(listState) { TranscriptPosition(listState) }
+    val followPositionNow = rememberUpdatedState {
+        settings.autoFollow && scroll.stickToBottom && !scroll.restoring &&
+            !pressed && !pressGuardOn && !listState.isScrollInProgress
+    }
+    val readingPositionNow = rememberUpdatedState {
+        !scroll.stickToBottom && !scroll.restoring && !pressed && !pressGuardOn &&
+            !listState.isScrollInProgress && viewport.presented && viewport.entrance.value >= 1f
+    }
+    SideEffect {
+        transcriptPosition.following = { followPositionNow.value() }
+        transcriptPosition.reading = { readingPositionNow.value() }
+    }
+    LaunchedEffect(transcriptPosition) {
+        snapshotFlow {
+            listOf(scroll.stickToBottom, scroll.restoring, pressed, pressGuardOn, listState.isScrollInProgress)
+        }.collect { transcriptPosition.interactionChanged() }
+    }
 
     // A successful page publishes a larger turn window, even if grouping/filtering keeps the
     // same row count. Never release restoration merely because the read was accepted.
@@ -1069,186 +1016,6 @@ fun ChatScreen(
     // **不是冻结**：内容照常生长、照常可见，只是高度晚一帧生效（最多裁掉 16ms 宽的一条边缘）。
     // **不是移出列表**：流式行仍在 LazyColumn 里。
     // 只在「用户上翻读历史」时启用；贴底时高度直接跟自然值，行为与以前完全一致。
-    val lagNatural = remember { intArrayOf(0) }
-    // #17 定位用：流式行在根坐标系里的 y，以及「钉住那一刻的 y」。
-    // 只有这两个数才能回答**用户到底看到了什么**：「钉住了没动」还是「钉住了但还在动」。
-    // 普通数组（不进快照）⇒ 每帧写也不会触发重组；`onGloballyPositioned` 本来就在布局后回调。
-    val liveRowTop = remember { floatArrayOf(Float.NaN) }
-    val armedTop = remember { floatArrayOf(Float.NaN) }
-    // 状态行（「思考中 · 12.3s」/ 重试提示）的高度。它在**裁剪之外**（要一直可见），
-    // 所以钉住值要含它、并且气泡报出的高度要把它扣掉 —— 见 `liveRowLagHeight` 的 `outside`。
-    val statusHeight = remember { intArrayOf(0) }
-    // ─── #17 修复（v0.8.319）：**读历史时把流式行的布局高度钉住** ──────────────
-    //
-    // 前面三版（dispatchRawDelta / heightIn(max) / anchorKey+scrollToItem）都死在同一个地方：
-    // 「**检测偏差 → 纠正**」追不上流式的**连续推力**。这一版不检测、不纠正 ——
-    // 它让流式行在读历史期间**根本不长高**（布局层面），于是上面的内容**一帧都不动**。
-    //
-    // 做法（issue #17 自己列的方向 1「在布局前把锚点钉住」）：
-    //  - `pinnedLiveHeight` = 用户开始读历史那一刻，流式行的自然高度；**此后不再变**。
-    //  - 流式行用 `liveRowLagHeight(reported = pinnedLiveHeight, natural = lagNatural)`：
-    //    **报的**高度是钉住的那个，**量的**高度永远是自然高度（内容照常长、照常可见）。
-    //  - 回到底部（stickToBottom）时把 `pinnedLiveHeight` 清零 ⇒ 高度跟自然值 ⇒ 行为与以前完全一致。
-    //
-    // 为什么这能治本：
-    //  - 漂移的**唯一来源**是「流式行布局高度增长 ⇒ 上面的内容被顶走」。
-    //    高度不增长 ⇒ 顶不动 ⇒ 漂移为 0。这不是「追」，是「不发生」。
-    //  - 完全不碰滚动位置：不写 `firstVisibleItemIndex/Offset`、不 `dispatchRawDelta`、
-    //    不 `scrollToItem`。LazyColumn 的测量与我们的逻辑互不干扰 ⇒ 不会「飞到列表最顶部」。
-    //
-    // 与「冻结内容」（issue #17 方案 3、v0.8.236 的 heightIn(max)）的区别：
-    // 那些方案把**内容**也冻住 ⇒ 用户看不到后续输出（用户当时就否了）。
-    // 这里只冻**布局高度**，内容照常流、照常看得到，只是列表不因它而重新排版。
-    //
-    // 代价：读历史期间，若流式行已经比钉住时高，多出来的部分不占布局高度（内容仍在，
-    // 但那一块的下方是空白）。回到底部立刻恢复。**这是"读历史"场景下的合理取舍** ——
-    // 用户在那段时间本来就在读旧内容，不是在看新输出。
-    var pinnedLiveHeight by remember { mutableIntStateOf(0) }
-    // 纯状态机（`LivePinState`，带单测）：这条链连续几版"改了没生效"，两次都是状态机问题
-    // （判定值被一次性捕获、解除时 latch 没清）。逻辑移出去之后可以用断言守住。
-    val livePin = remember(state.conversationId) { LivePinState() }
-    // **切会话必须清零**（评审确证）：`pinnedLiveHeight` 与 pin effect 里的 `pinned` 都不随会话变，
-    // 而 `stickToBottom` 是按会话存的 —— A 里钉住 H_A 之后切到 B，若 B 也「不在底部且有活 run」，
-    // `lagging` 恒 true ⇒ **不会重新捕获** ⇒ B 的流式行按 H_A 报高（去掉 `minOf` 之后没有钳制，
-    // 会留下大片空白或裁掉内容）。
-    LaunchedEffect(state.conversationId) {
-        pinnedLiveHeight = 0
-        scroll.pinActive = false
-        livePin.reset()
-        // 自然高度也必须清：`lagNatural` 是普通数组，切会话后要到**下一次布局**才被写；
-        // 若不清，状态机可能在拿到新值之前先用旧会话的高度钉住（评审指出的顺序洞）。
-        lagNatural[0] = 0
-        // 状态行高度同理：它是普通数组、只在状态行**存在**时才被写，不清就会拿上个会话/上轮的
-        // 幽灵值参与「钉住总值」与「气泡扣减」（评审第三轮 B 段）。
-        statusHeight[0] = 0
-    }
-    // **不做「变短就解钉」的逐帧判断**（第二轮评审确证这个思路错）：220ms 是**时长**不是降幅，
-    // 而降幅等于折叠块高度 —— 思考链上限 180dp，收起后 natural/pinned ≈ 40%，必然穿过 60% 采样点
-    // ⇒ 每次手动收起折叠块都会解除钉住。真正需要兜底的场景（`RoundRestarted`、一轮结束）由
-    // `liveForPin`（活内容清空 ⇒ 解钉）覆盖；高度不足时的空白由下一条「钉住值不超过自然高度」兜住。
-    // **钉住的高度**（0 = 不钉）。
-    //
-    // 捕获时机：**从「贴底」切到「读历史」的那一帧**，把当时的自然高度钉住，之后不再变。
-    //
-    // 为什么不在每帧更新：每帧更新就等于「高度继续长」⇒ 还在顶 ⇒ 还在漂。
-    // 为什么不用 `laggingNow` 做 key 的 LaunchedEffect：`laggingNow` 是 `rememberUpdatedState`，
-    // 它的**值**变化不重组，而 key 用的是当时的快照 ⇒ 转换点会漏。
-    // 所以直接监听 `scroll.stickToBottom` 这个真正的状态源。
-    //
-    // **释放时机**（v0.8.319 二次修正）：不是"回到底部"，而是**流式行滚出可视范围**。
-    //
-    // 原因：钉住 = 流式行的**布局高度**冻结，而内容照常长 ⇒ 超出冻结高度的那部分
-    // 在布局里没有位置。流式行在读历史时位于屏幕下方（底锚 + 上翻 ⇒ 它在视口外），
-    // 裁掉的部分用户看不见；可一旦它**进入视野**（用户往回滚），裁掉的就是正在显示的
-    // 新输出 —— 用户会看到"输出少了一截"。
-    //
-    // 所以：**钉住期间只要流式行还在视野内就立刻释放**（宁可那一刻跳一下，也不要持续显示被裁的输出）。
-    // 跳的那一刻内容整体上移/下移，是"一次性"的；持续的漂移才是用户受不了的。
-
-    // Prepare each actual batch before publishing its mount count. Cancellation on chat switch
-
-    val streamingKey = liveRowKey(state.conversationId, state.liveRunId)
-    // 有活内容（正文/思考/工具）才值得钉住 —— 空的行不钉。
-    // 正文只存一份（#38）：`streaming` 是派生值、不再单独保存 ⇒ "有没有活内容"看 liveParts。
-    // 这个子表达式下面还要用一次，别写两遍 —— 现在它就是 VM 的 liveActive（布尔 flow，
-    // distinct 去重）：思考期的 40ms 批次不再把 body 拖进重组。
-    val liveForPin by viewModel.liveActive.collectAsStateWithLifecycle()
-    // **`liveForPin` 必须用 rememberUpdatedState 取最新值**（第二轮评审的关键发现）：
-    // 它是个普通 `val`，若被 `snapshotFlow` 的 lambda 直接捕获，捕获的是**首次组合**那一帧的值，
-    // 而 ChatScreen 常驻、不随会话重建（`SuixingApp.kt:569`）⇒ 首帧没有活内容时它永远是 false
-    // ⇒ `snapshotFlow` 恒 false ⇒ **钉住从来不会生效**（这才是「钉了还在动」的真正原因）。
-    val liveForPinNow by rememberUpdatedState(liveForPin)
-    // **`livePin` 也不能被直接捕获**：`LaunchedEffect(listState)` 的 body 是首次组合那一句
-    // lambda，key 永不变 ⇒ 里面拿到的永远是 ChatScreen 第一次组合时的那个实例。
-    // 后果：`livePin.reset()` 作用在新建的空实例上（空操作），而 collector 用旧实例跑
-    // ⇒ 旧实例 active 时会把上一个会话的高度写回来，正好推翻切会话的复位。
-    val livePinNow by rememberUpdatedState(livePin)
-    LaunchedEffect(listState) {
-        // Native row-key anchoring replaces the disabled whole-transcript pin policy.
-        if (!PIN_LIVE_HEIGHT) return@LaunchedEffect
-        snapshotFlow {
-            // 四个量一起进读取集：任一变化都要重新判定（少一个就会出现"清 0 之后不再发一次"）。
-            // 第一个是**会话身份**：它决定 `livePin` 是哪个实例，必须参与触发。
-            PinSignals(
-                chatId = state.conversationId,
-                // **arm 迟滞带**（issue #42 补充的振荡环）：pin 的 arm 收缩布局会把用户
-                // 弹回 index 0，弹回触发 release，release 又推出去 —— 自激振荡（pin.log
-                // 同位置 4 对 arm/release 循环）。要求离底 ≥2 个 item 才算 notAtBottom：
-                // 被 arm 弹回 index 0 时不再立刻 re-arm，环断。
-                notAtBottom = !scroll.stickToBottom && !scroll.restoring &&
-                    listState.firstVisibleItemIndex >= 2,
-                hasLiveContent = liveForPinNow,
-                pinActive = scroll.pinActive,
-            )
-        }.collect { signals ->
-            val notAtBottom = signals.notAtBottom
-            val live = signals.hasLiveContent
-            var needWait = livePinNow.update(
-                notAtBottom = notAtBottom,
-                hasLiveContent = live,
-                natural = lagNatural[0],
-                outside = statusHeight[0],
-            )
-            // 高度要到**布局之后**才有；`lagNatural` 是普通数组（不进快照，避免测量期写 state
-            // 触发重测），所以这里最多等 30 帧把它拿到 —— 只在状态翻转时发生一次。
-            var tries = 0
-            while (needWait && tries < 30) {
-                withFrameNanos { }
-                needWait = livePinNow.update(
-                    notAtBottom = notAtBottom,
-                    hasLiveContent = live,
-                    natural = lagNatural[0],
-                    outside = statusHeight[0],
-                )
-                tries++
-            }
-            // 等了 30 帧还没量到高度 ⇒ **这一轮不会钉住**（这正是历史上"钉了还是动"的形态之一）。
-            if (needWait) {
-                android.util.Log.i("suixing-pin", "arm-timeout tries=$tries")
-                pinTrace("arm-timeout tries=$tries natural=${lagNatural[0]}")
-            }
-            val wasActive = pinnedLiveHeight > 0
-            pinnedLiveHeight = livePinNow.height
-            // 以滚动层的 pinActive 为**唯一真值**（它还要被"到底是否自动打开贴底"的 collector 读）。
-            if (scroll.pinActive != livePinNow.active) scroll.pinActive = livePinNow.active
-            // **只在翻转时打一行**（#17 验收用）：不逐帧、不写盘。下次连上手机时
-            // `adb logcat -s suixing-pin` 就能直接回答"到底钉上了没有、什么时候解除的"。
-            val nowActive = pinnedLiveHeight > 0
-            if (nowActive != wasActive) {
-                if (nowActive) {
-                    armedTop[0] = liveRowTop[0]
-                    android.util.Log.i("suixing-pin", "arm h=${pinnedLiveHeight} status=${statusHeight[0]}")
-                    pinTrace("arm h=${pinnedLiveHeight} status=${statusHeight[0]} top=${liveRowTop[0]}")
-                } else {
-                    // **位移**：钉住期间流式行在屏幕上挪了多少像素。
-                    // 0（或 ±1）＝ 钉住真的把位置定住了；明显非 0 ＝ 还有别的东西在推。
-                    // 这一列就是「用户报的还在动」到底发生在哪一层」的判据。
-                    val drift = if (armedTop[0].isNaN() || liveRowTop[0].isNaN()) {
-                        Float.NaN
-                    } else {
-                        liveRowTop[0] - armedTop[0]
-                    }
-                    // **区分解除原因**：这一轮结束时状态行会消失，那一瞬的位移（≈状态行高度）
-                    // 并不代表"钉住期间内容在漂"。只有 `streaming`（这轮还活着）时的 drift 才有判读价值。
-                    val why = when {
-                        !live -> "runEnd"
-                        !notAtBottom -> "atBottom"
-                        else -> "other"
-                    }
-                    android.util.Log.i("suixing-pin", "release reason=$why drift=$drift")
-                    pinTrace("release reason=$why notAtBottom=$notAtBottom live=$live drift=$drift")
-                }
-            }
-        }
-    }    // 门与 RevealHeight 同一套：只在**不在底部**时滞后+补偿；贴底时高度直接跟自然值。
-    // 不额外看 `pressed` —— RevealHeight 在手指按着时也照补，那条路已实测 ±1px。
-    // **抑制信号必须是"外层真的在冻结高度"**，而不是"用户在读历史"（我引入的不一致）：
-    // `LocalLiveRowLag` 用来告诉流式行里的 `RevealHeight`「别自己补，外层统一补」——
-    // 但外层只有在**钉住生效**时才冻结高度（`pinnedLiveHeight > 0` ⇒ `scroll.pinActive`）。
-    // 两者不等价时（读历史了、但钉住没量到高度/没活内容），流式行里的折叠块会**两边都不补** ⇒ 展开时跳。
-    val laggingNow by rememberUpdatedState(PIN_LIVE_HEIGHT && scroll.pinActive)
-    /** 用户是否在读历史（不在底部、也不在恢复位置）。 */
-    val readingHistory = !scroll.stickToBottom && !scroll.restoring
     // 外观 → 气泡宽度. Measured against the screen, which is what the setting promises
     // in its own words: 标准 (0.94) stays wider than the transcript's own 16dp margins,
     // so the default leaves every card exactly as wide as it has always been, and only
@@ -1259,6 +1026,7 @@ fun ChatScreen(
     fun jumpToLatest() {
         viewport.followOverride = true
         scope.launch {
+            scroll.allowBottomResume = true
             scroll.stickToBottom = true
             if (itemCount > 0) {
                 scroll.toBottom()
@@ -1357,6 +1125,7 @@ fun ChatScreen(
                         LocalTypewriter provides settings.typewriter,
                         // 不在底部时展开要"向下展开"（块顶边钉住），需要摸到主列表状态。
                         LocalChatListState provides listState,
+                        LocalTranscriptPosition provides transcriptPosition,
                         // 按下期间拦住「把选中内容滚进视口」的请求（issue #14 的修法，见上面的说明）。
                         LocalBringIntoViewSpec provides revealGuardSpec,
                         LocalSelectionFocusTracker provides selectionTracker,
@@ -1368,6 +1137,7 @@ fun ChatScreen(
                         // message in place. Follow-to-end is explicit and pauses on user scrolling.
                         reverseLayout = false,
                         modifier = Modifier
+                            .transcriptPosition(transcriptPosition)
                             // 手势条那一截**在布局期让出来**（键盘盖住它时让位是 0）：
                             // 放在 `fillMaxSize()` 之外，列表拿到的是「窗口 − 键盘 − 手势条」。
                             .keyboardAwareImePad(navBarPx, imePxState)
@@ -1395,7 +1165,7 @@ fun ChatScreen(
                              .graphicsLayer {
                                  val progress = switchEntrance.value
                                  alpha = ConversationEntrance.alpha(progress)
-                                 translationY = ConversationEntrance.remainingTravel(progress) * 12.dp.toPx()
+                                 translationY = ConversationEntrance.remainingTravel(progress) * ConversationEntrance.TRAVEL_DP.dp.toPx()
                              }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(state.conversationId) {
@@ -1404,6 +1174,10 @@ fun ChatScreen(
                                         while (true) {
                                             val down = awaitPointerEvent(PointerEventPass.Initial)
                                             if (down.changes.none { it.pressed }) continue
+                                            if (navigationJob[0]?.isActive == true) {
+                                                navigationJob[0]?.cancel()
+                                                scroll.restoring = false
+                                            }
                                             val downY = down.changes.first().position.y
                                             val downAt = SystemClock.uptimeMillis()
                                             pressed = true
@@ -1438,8 +1212,8 @@ fun ChatScreen(
                                                 if (!moved && change != null && change.pressed &&
                                                     (dy > CANCEL_FOLLOW_PX || dy < -CANCEL_FOLLOW_PX)
                                                 ) {
+                                                    scroll.allowBottomResume = true
                                                     scroll.stickToBottom = false
-                                                    retainReadingNow.value()
                                                     moved = true
                                                     pressMoved = true
                                                     // 滚动不是选字：解除 reveal 拦截
@@ -1612,7 +1386,10 @@ fun ChatScreen(
                                         ?.let { "${it.label} / ${it.displayModel(row.message.model)}" }
                                         ?: row.message.model
                                 }
-                                CompositionLocalProvider(LocalPreparedMarkdown provides rowDocuments[row.message.id].orEmpty()) {
+                                CompositionLocalProvider(
+                                    LocalPreparedMarkdown provides rowDocuments[row.message.id].orEmpty(),
+                                    LocalReadingRowKey provides rowKeys[fed],
+                                ) {
                                 MessageRow(
                                     row = row,
                                     assistantName = assistant?.label ?: "随行",
@@ -1692,7 +1469,7 @@ fun ChatScreen(
                                         // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
                                         // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
                                         // 裁剪是死路），位置由上面那段 key 锚点纠正，这里只负责量高度。
-                                        CompositionLocalProvider(LocalLiveRowLag provides laggingNow) {
+                                        CompositionLocalProvider(LocalReadingRowKey provides liveRowKey(state.conversationId, state.liveRunId)) {
                                         Column(Modifier.fillMaxWidth()) {
                                             // **只把气泡**放进「钉住 + 裁剪」里：状态行（思考中 · 12.3s）在自然内容的
                                             // 最底部，若跟气泡一起被裁，钉住期间整行连 spinner 都会消失（评审确证）。
@@ -1704,17 +1481,7 @@ fun ChatScreen(
                                                 Modifier
                                                     .fillMaxWidth()
                                                     .clipToBounds()
-                                                    .liveRowLagHeight(
-                                                        // 读历史时钉住：高度不增长 ⇒ 上面的内容不动。
-                                                        // 贴底时 0 ⇒ 直接用自然高度（行为与改动前完全一致）。
-                                                        // 实验开关：false 时完全不钉。
-                                                        reported = if (PIN_LIVE_HEIGHT) pinnedLiveHeight else 0,
-                                                        natural = lagNatural,
-                                                        outside = statusHeight,
-                                                    )
-                                                    // #17 定位用：记下这一行在屏幕上的 y（普通数组，不进快照）。
-                                                    // 钉住期间它与 `armedTop` 的差值就是"用户看到的位移"。
-                                                    .onGloballyPositioned { liveRowTop[0] = it.positionInRoot().y },
+
                                             ) {
                                             LiveMessageParts(viewModel, state.conversationId, state.liveRunId,
                                                 settings.showReasoning) { liveParts ->
@@ -1760,9 +1527,6 @@ fun ChatScreen(
                                                     // **量在 padding 之前**：`outside` 要代表"状态行占掉的整段高度"
                                                     // （含 12dp 间距），否则气泡扣减与 item 总高度天生差 12dp。
                                                     modifier = Modifier
-                                                        .onGloballyPositioned {
-                                                            statusHeight[0] = it.size.height
-                                                        }
                                                         .padding(start = 4.dp, top = 12.dp, bottom = 0.dp),
                                                 )
                                             }
@@ -1856,11 +1620,9 @@ fun ChatScreen(
                 // 「已加载到第几轮」全按它算，与 `firstDrawnTurn` 同一口径。
                 drawnTurns = page.drawn,
                 current = {
-                    TurnMarks.current(
-                        firstVisibleFed = firstVisibleFed.value,
-                        feedPrefix = feedPrefix,
-                        visibleSize = visible.size,
-                        rowOffset = rowOffset,
+                    if (live && currentPhysicalRow.value >= rowOffset + visible.size) page.turns.coerceAtLeast(1)
+                    else TurnMarks.currentAtRow(
+                        physicalIndex = currentPhysicalRow.value,
                         turnIndices = turnIndices,
                         drawnTurns = page.drawn,
                         totalTurns = page.turns,
@@ -1906,31 +1668,24 @@ fun ChatScreen(
                     val inWindow = turn - firstDrawnTurn
                     val index = turnIndices.getOrNull(inWindow)
                     val token = ++navigationToken[0]
-                    navigationJob[0]?.cancel()
+                    val previousNavigation = navigationJob[0]
+                    previousNavigation?.cancel()
                     navigationJob[0] = scope.launch {
-                        snapshotFlow { viewport.presented }.first { it }
-                        if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
-                        scroll.stickToBottom = false
-                        scroll.restoring = true
                         try {
+                            previousNavigation?.join()
+                            snapshotFlow { viewport.presented }.first { it }
+                            if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
+                            scroll.allowBottomResume = false
+                            scroll.stickToBottom = false
+                            scroll.restoring = true
                             val row = index?.let { visible.getOrNull(it - rowOffset) }
                             if (row != null) {
-                                 val targetKey = rowKeys[index - rowOffset]
-                                 if (rowCoordinates[targetKey]?.isAttached != true) {
-                                     listState.animateScrollToItem(fedIndexOf(index - rowOffset))
-                                 }
-                                 val attached = withTimeoutOrNull(2_000) {
-                                    snapshotFlow { geometryVersion.intValue }.first {
-                                        rowCoordinates[targetKey]?.isAttached == true
-                                    }
-                                }
-                                if (attached == null) return@launch
-                                if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
-                                val coordinates = rowCoordinates[targetKey] ?: return@launch
-                                val probeY = viewportTopY.value + viewportH.intValue * TurnMarks.PROBE_FRACTION
-                                listState.animateScrollBy(-probeJumpDelta(coordinates.positionInWindow().y, probeY))
+                                val layout = listState.layoutInfo
+                                // Both nearby and distant targets arrive through scrolling.
+                                viewport.navigation.navigate(listState, index,
+                                    TurnMarks.navigationScrollOffset(layout.viewportStartOffset, layout.viewportEndOffset))
                             } else if (inWindow >= turnIndices.size) {
-                                listState.animateScrollToItem((itemCount - 1).coerceAtLeast(0), TRANSCRIPT_END_OFFSET)
+                                viewport.navigation.navigate(listState, (itemCount - 1).coerceAtLeast(0), TRANSCRIPT_END_OFFSET)
                             }
                         } finally {
                             if (token == navigationToken[0] && scroll.conversationId == state.conversationId) scroll.restoring = false
@@ -1949,6 +1704,7 @@ fun ChatScreen(
             ) {
                 ComposerDraftText(viewModel, state.conversationId) { input ->
                 Composer(
+                    subagentChatId = state.conversationId,
                     input = input,
                     onInput = { setDraft(text = it) },
                     onRestoreSteer = { steer -> scope.launch { restoreQueuedSteer(steer) } },
@@ -1998,6 +1754,7 @@ fun ChatScreen(
                         val (body, images) = withAttachment(attachments, input)
                         viewModel.send(body, images)
                         // 发送 = 明确要回到最新：先放行追底再跳，并清掉阅读位置记忆。
+                        scroll.allowBottomResume = true
                         scroll.stickToBottom = true
                         jumpToLatest()
                     },
@@ -2136,7 +1893,7 @@ fun ChatScreen(
         val id = editorAssistantId ?: lastEditorId
         if (id != null) {
             val servers by Core.mcp.servers.collectAsStateWithLifecycle()
-            val toolNames = remember(servers) { Core.tools.names() }
+            val toolNames = remember(servers) { Core.tools.names() + com.suixing.agent.agent.SUBAGENT_SPECS.map { it.name } }
             val target = settings.assistants.firstOrNull { it.id == id }
                 ?: Assistant(id = id, avatar = "🧭")
             AssistantEditor(
@@ -2200,44 +1957,6 @@ fun ChatScreen(
  */
 internal fun laggedBubbleHeight(reported: Int, outside: Int, natural: Int): Int =
     if (reported > 0) (reported - outside).coerceAtLeast(1) else natural
-
-private fun Modifier.liveRowLagHeight(
-    reported: Int,
-    natural: IntArray,
-    /** 与本行同属一个 item、但**在裁剪之外**的那部分高度（状态行）。见下面的说明。 */
-    outside: IntArray,
-): Modifier =
-    this.layout { measurable, constraints ->
-        val placeable = measurable.measure(
-            Constraints(maxWidth = constraints.maxWidth, maxHeight = Constraints.Infinity),
-        )
-        natural[0] = placeable.height
-        // **报的高度不超过内容实际高度**（真机白块：一轮失败/重试会把 liveParts 清空，
-        // 而钉住的高度还是失败前的几千 px ⇒ 这个 item 留一大片空白）。
-        // 钉住只用来「不许长高」，不该用来「占着没有内容的空位」。
-        // **钉住期间无条件报钉住值**，不要 `minOf(reported, natural)`：
-        // `pinnedLiveHeight` 钉住期间不跟踪自然高度，而 minOf 会跟 —— 高度成了「只降不升的
-        // 单向棘轮」。思考块/工具块走 RevealHeight，收起时按 220ms 缓动**逐帧下降**，
-        // 那 220ms 里报出的高度跟着掉、收起完再弹回 ⇒ 用户看到「读着读着跳一下再回来」。
-        // 内容真变短（一轮失败/重试清空 liveParts）时会留一段空白，但那由 `liveForPin` 兜住
-        // （没有活内容就不钉），且「读历史期间宁可空白也不要动」正是 #17 要的语义。
-        // `reported` 是**整个 item** 的钉住高度；状态行在裁剪之外、不算进这里，
-        // 所以要把它扣回来 —— 这样状态行换行（重试/429 的提示会有两三行）时，
-        // 气泡的报出高度会反向缩小同样的量，**item 总高度不变** ⇒ 上面的内容不会被推。
-        // 扣掉的是"最新输出"那一段，本来就在裁剪里，用户看不见。
-        // **判据是 `reported`，不是扣完之后的 `own`**：状态行比被钉住的气泡还高时（小气泡 +
-        // 三行 429 提示）`own <= 0`，若拿它当判据就会**静默放弃钉住**（而 `pinActive` 仍为 true
-        // ⇒ 自动贴底被禁、内容瞬间跳到真实高度）。钉住期间永远至少报 1px。
-        //
-        // **「item 总高度不变」有一个例外**（写清楚，别让后来的人以为这里恒成立）：
-        // 当 `outside`（状态行）本身就比 `reported` 还大时（小气泡 + 三行重试提示），
-        // `own` 被钳到 1 ⇒ 总高 = 1 + outside > reported ⇒ **内容会被推一次**。
-        // 这是刻意的取舍：另一种选择是把状态行一起裁掉（总高恒定），但那会违反
-        // 「错误的提示要显示全」（用户明确要求过），而"读历史时看不到失败原因"比"推一下"更糟。
-        // 触发条件很窄：只在钉住期间状态行**从 1~2 行涨到比气泡还高**的那一瞬。
-        val height = laggedBubbleHeight(reported = reported, outside = outside[0], natural = placeable.height)
-        layout(placeable.width, height) { placeable.place(0, 0) }
-    }
 
 /**
  * 把「手势条让位」从组合期搬到**布局期**：键盘盖住手势条时让位是 0，键盘收起时是完整的手势条高度。

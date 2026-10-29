@@ -245,6 +245,14 @@ class MarkdownTest {
         )
     }
 
+    @Test fun `table outer pipes remain optional but header delimiter counts must match`() {
+        val table = MdBlock.Table(listOf("a", "b"), listOf(listOf("1", "2")))
+        assertEquals(listOf(table), parseMarkdown("a | b\n--- | ---\n1 | 2"))
+        assertEquals(listOf(table), parseMarkdown("| a | b\n--- | --- |\n1 | 2"))
+        val mismatch = "a | b | c\n--- | ---"
+        assertEquals(listOf(MdBlock.Paragraph(mismatch)), parseMarkdown(mismatch))
+    }
+
     @Test
     fun `a table ends at a row without pipes`() {
         assertEquals(
@@ -344,6 +352,16 @@ class MarkdownTest {
         assertEquals(linkColor, span.item.color)
         assertNull("路径无下划线（区别于 URL）", span.item.textDecoration)
         assertEquals("null 回调时路径不可点，无 link annotation", 0, result.getLinkAnnotations(0, result.length).size)
+    }
+
+    @Test fun `Chinese prose can touch a local path without linking ASCII path fragments`() {
+        val chinese = inline("文件在/sdcard/a.txt")
+        assertEquals(1, chinese.spanStyles.size)
+        assertEquals(3, chinese.spanStyles.single().start)
+        assertEquals(linkColor, chinese.spanStyles.single().item.color)
+        for (text in listOf("in/sdcard/a.txt", "7/sdcard/a.txt", "_/sdcard/a.txt", "/other/sdcard/a.txt")) {
+            assertEquals(text, 0, inline(text).spanStyles.size)
+        }
     }
 
     @Test

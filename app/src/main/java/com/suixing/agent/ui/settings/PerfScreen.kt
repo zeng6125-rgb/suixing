@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onVisibilityChanged
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -47,9 +48,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
-import androidx.compose.material3.TextButton
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 
 /**
  * 设置 → 性能：三段。
@@ -61,7 +59,6 @@ import androidx.compose.ui.text.AnnotatedString
  * **只显示真的测到的数字**：GPU 利用率在 Android 上没有公开 API、部分机型的 sysfs 也不给读，
  * 所以它显示为「—」而不是 0 —— 0 会被读成"测得是零"，那是另一种撒谎。
  */
-private val NL_PERF = 10.toChar().toString()
 
 @Composable
 internal fun PerfScreen(onBack: () -> Unit) {
@@ -78,29 +75,6 @@ internal fun PerfScreen(onBack: () -> Unit) {
     }
     val health = remember(records) { PerfHealth.of(records) }
 
-
-    // #17 定位用：把 `pin.log` 的尾部搬进界面。
-    //
-    // 为什么放在这里而不是只写文件：这台机器 MIUI 把 `adb logcat` 限死、release 包 `run-as`
-    // 也不可用 ⇒ 之前只能靠 root 的 `adb shell su -c cat` 才能读到。放进性能页之后，
-    // 复现一次、点「复制」就能贴出来，验证不再依赖电脑。
-    var pinLog by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) {
-        pinLog = withContext(Dispatchers.IO) {
-            runCatching {
-                val ctx = Core.appContext
-                // **带上版本**：这份痕迹会被贴到对话里，没有版本号就无法确认是哪个构建产生的
-                // （同一台机器上装过很多个 0.8.3xx）。
-                val version = runCatching {
-                    ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
-                }.getOrNull().orEmpty()
-                val file = java.io.File(ctx.filesDir, "pin.log")
-                val body = if (!file.isFile) "" else com.suixing.agent.data.readJobLog(file, tail = 30, since = 0)
-                if (body.isEmpty()) "" else "version=$version" + NL_PERF + body
-            }.getOrDefault("")
-        }
-    }
-    val clipboard = LocalClipboardManager.current
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -127,23 +101,6 @@ internal fun PerfScreen(onBack: () -> Unit) {
                 }
             }
             item(key = "live") { DeviceMetrics() }
-            item(key = "pinlog") {
-                Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
-                    SettingSectionTitle("流式上翻痕迹（最近 30 行）")
-                    Text(
-                        text = pinLog.ifBlank {
-                            "（还没有痕迹：发一条长消息、流式中往上滑一下就会生成）"
-                        },
-                        style = SettingsStyle.description,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (pinLog.isNotBlank()) {
-                        TextButton(onClick = { clipboard.setText(AnnotatedString(pinLog)) }) {
-                            Text("复制")
-                        }
-                    }
-                }
-            }
             item(key = "health") {
                 Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
                     SettingSectionTitle("会话健康（最近 ${health.runs} 轮）")
@@ -184,19 +141,22 @@ private fun DeviceMetrics() {
     val scheme = MaterialTheme.colorScheme
     val sampler = remember { LiveSampler() }
     val owner = LocalLifecycleOwner.current
+    var visible by remember { mutableStateOf(false) }
     var live by remember { mutableStateOf<LiveMetrics?>(null) }
-    LaunchedEffect(sampler, owner) {
-        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+    LaunchedEffect(sampler, owner, visible) {
+        if (!visible) return@LaunchedEffect
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             while (true) {
                 live = withContext(Dispatchers.IO) { sampler.sample() }
                 delay(1000)
             }
         }
     }
-    val frame = rememberFrameStat()
+    val frame = rememberFrameStat(visible)
     // 委派属性（by remember）不能智能转换，先落到局部变量；顺带保证这一帧读的是同一份采样。
     val metrics = live
-    Column(Modifier.padding(bottom = SettingsStyle.SectionGap)) {
+    Column(Modifier.onVisibilityChanged(minFractionVisible = 0f) { visible = it }
+        .padding(bottom = SettingsStyle.SectionGap)) {
         SettingSectionTitle("设备实时")
         MetricRow("CPU（本进程）", percentText(metrics?.processCpuPercent))
         MetricRow("CPU（整机）", percentText(metrics?.systemCpuPercent))
@@ -258,44 +218,34 @@ private fun MetricRow(label: String, value: String) {
 }
 
 /** 帧间隔统计：fps 取最近 60 帧均值，p90 取最近秩。 */
-private data class FrameStat(val fps: Int, val p90Ms: Int)
-
-/**
- * 本页可见期间的帧率。逐帧 `postFrameCallback` 会让 Choreographer 一直出帧 ——
- * 这正是"帧率"要测的东西，页面不可见时协程随组合销毁，回调自然停。
- */
+/** One native callback per sampling burst, reused across frames; hidden items do not sample. */
 @Composable
-private fun rememberFrameStat(): FrameStat? {
+private fun rememberFrameStat(visible: Boolean): FrameStat? {
     var stat by remember { mutableStateOf<FrameStat?>(null) }
     val owner = LocalLifecycleOwner.current
-    LaunchedEffect(owner) {
-        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+    LaunchedEffect(owner, visible) {
+        if (!visible) return@LaunchedEffect
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             val choreographer = Choreographer.getInstance()
-            val intervals = ArrayDeque<Long>()
             while (true) {
-                intervals.clear()
-                val until = System.nanoTime() + 1_000_000_000L
-                var last = 0L
-                while (System.nanoTime() < until) {
-                    val now = suspendCancellableCoroutine<Long> { cont ->
-                        val callback = Choreographer.FrameCallback { if (cont.isActive) cont.resume(it) }
-                        cont.invokeOnCancellation { choreographer.removeFrameCallback(callback) }
-                        choreographer.postFrameCallback(callback)
+                val measured = suspendCancellableCoroutine<FrameStat?> { continuation ->
+                    val samples = FrameSamples()
+                    var start = 0L
+                    var last = 0L
+                    val callback = object : Choreographer.FrameCallback {
+                        override fun doFrame(now: Long) {
+                            if (!continuation.isActive) return
+                            if (start == 0L) start = now
+                            if (last > 0L) samples.add(now - last)
+                            last = now
+                            if (now - start >= 1_000_000_000L) continuation.resume(samples.summary())
+                            else choreographer.postFrameCallback(this)
+                        }
                     }
-                    if (last > 0L) {
-                        intervals.addLast((now - last).coerceAtLeast(0L))
-                        while (intervals.size > 60) intervals.removeFirst()
-                    }
-                    last = now
+                    continuation.invokeOnCancellation { choreographer.removeFrameCallback(callback) }
+                    choreographer.postFrameCallback(callback)
                 }
-                if (intervals.size >= 10) {
-                    val mean = intervals.average()
-                    val sorted = intervals.sorted()
-                    stat = FrameStat(
-                        fps = if (mean > 0.0) (1_000_000_000.0 / mean).roundToInt() else 0,
-                        p90Ms = (sorted[(sorted.size * 9) / 10] / 1_000_000L).toInt(),
-                    )
-                }
+                if (measured != null) stat = measured
                 delay(1000)
             }
         }

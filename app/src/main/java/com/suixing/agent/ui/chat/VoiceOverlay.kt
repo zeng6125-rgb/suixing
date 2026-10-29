@@ -36,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -54,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
+import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.chat.VoicePhase
@@ -61,6 +63,8 @@ import com.suixing.agent.voice.Dictation
 import com.suixing.agent.voice.DictationRecorder
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,12 +99,13 @@ internal fun VoiceOverlay(
     var phase by remember { mutableStateOf<VoicePhase>(VoicePhase.Preparing) }
     // The microphone's own level, 0..1: what the capsule's bars are drawn from.
     val level = remember { mutableFloatStateOf(0f) }
-    var elapsed by remember { mutableStateOf(0L) }
+    var elapsed by remember { mutableLongStateOf(0L) }
     // Set the moment this card hands the job to the system's own speech screen. That screen is
     // a screen, not a dialog behind ours, so drawing the card while it is up stacks the two.
     var handedOff by remember { mutableStateOf(false) }
     // 我们自己的录音：这条路完全不碰 SpeechRecognizer，所以屏幕上不会出现任何系统识别面板。
     val recorder = remember { DictationRecorder(context) }
+    val autoStopPending = remember { booleanArrayOf(false) }
     val asrReady = remember(settings.asrModel, settings.baseUrl, settings.apiKey) {
         Dictation.configured(settings)
     }
@@ -144,23 +149,39 @@ internal fun VoiceOverlay(
             return
         }
         // Assign before the recorder thread can detect silence.
-        recorder.onAutoStop = { scope.launch { finish() } }
-        phase = VoicePhase.Listening
-        if (!recorder.start()) {
-            phase = VoicePhase.Failed("拿不到麦克风", 0)
-            return
+        autoStopPending[0] = false
+        recorder.onAutoStop = {
+            scope.launch {
+                if (phase is VoicePhase.Preparing) autoStopPending[0] = true else finish()
+            }
+        }
+        phase = VoicePhase.Preparing
+        scope.launch {
+            try {
+                val started = withContext(Dispatchers.IO) { recorder.start() }
+                phase = if (started) VoicePhase.Listening else VoicePhase.Failed("拿不到麦克风", 0)
+                if (started && autoStopPending[0]) finish()
+            } catch (cancelled: CancellationException) {
+                withContext(NonCancellable + Dispatchers.IO) { recorder.cancel() }
+                throw cancelled
+            }
         }
     }
 
     DisposableEffect(Unit) {
         begin()
-        onDispose { recorder.cancel() }
+        onDispose {
+            // Opening/releasing AudioRecord may wait on the audio service. Disposal
+            // must not block the UI behind an in-flight start on IO.
+            Core.appScope.launch(Dispatchers.IO) { recorder.cancel() }
+        }
     }
     // 秒数与竖条：从录音器读，10 次/秒足够，也省掉一条动画。
     LaunchedEffect(phase) {
         while (phase is VoicePhase.Listening) {
             level.floatValue = recorder.level
-            elapsed = recorder.elapsedMs / 1000 * 1000
+            val seconds = recorder.elapsedMs / 1000 * 1000
+            if (elapsed != seconds) elapsed = seconds
             delay(100)
         }
         level.floatValue = 0f
@@ -193,28 +214,29 @@ internal fun VoiceOverlay(
         }
     }
     val useSystemInput: () -> Unit = {
-        // 我们自己的录音要先放手，否则系统界面拿不到麦克风。
-        recorder.cancel()
         phase = VoicePhase.Preparing
         // From here on the system screen owns the job, and this card stops drawing: it is not a
         // dialog behind ours, it is the foreground.
         handedOff = true
-        try {
-            systemInput.launch(
-                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(
-                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
-                    )
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-                    putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
-                },
-            )
-        } catch (missing: ActivityNotFoundException) {
-            // Nothing was handed off after all: putting the card back is the only way the user
-            // ever sees why there is no way out on this device.
-            handedOff = false
-            phase = VoicePhase.Failed("这台设备没有可用的系统语音输入", 0)
+        scope.launch {
+            // Release before handing the microphone to another service, off Main.
+            withContext(Dispatchers.IO) { recorder.cancel() }
+            try {
+                systemInput.launch(
+                    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(
+                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                        )
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
+                    },
+                )
+            } catch (missing: ActivityNotFoundException) {
+                // No hand-off occurred: show why the system path is unavailable.
+                handedOff = false
+                phase = VoicePhase.Failed("这台设备没有可用的系统语音输入", 0)
+            }
         }
     }
     val failure = phase as? VoicePhase.Failed

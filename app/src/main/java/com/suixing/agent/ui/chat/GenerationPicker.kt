@@ -173,6 +173,8 @@ internal fun GenerationSheet(
     onChooseReasoning: (String) -> Unit,
     /** Whether the card is open. It animates in and out on this, so it stays composed. */
     visible: Boolean,
+    /** Composer supplies one shared outside-tap window for its three cards. */
+    scrim: Boolean = true,
     onPickModel: (ProviderConfig, String) -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
@@ -246,6 +248,7 @@ internal fun GenerationSheet(
     }
 
     MenuCard(
+        scrim = scrim,
         // Anchored to the composer's own top edge, not a sheet from the screen's bottom:
         // the picker is a control of the row that opened it. Start-aligned plus [nudge] is
         // how the card ends up centred on the model button.

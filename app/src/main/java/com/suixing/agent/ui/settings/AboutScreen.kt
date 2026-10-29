@@ -24,6 +24,21 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
+import com.suixing.agent.ui.components.SuixingDialog
+import com.suixing.agent.data.AppLinks
+import com.suixing.agent.data.ReleaseChecker
+import com.suixing.agent.data.ReleaseInfo
+import com.suixing.agent.data.ReleaseRelation
+import com.suixing.agent.data.releaseRelation
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -59,6 +74,39 @@ fun AboutScreen(onBack: () -> Unit) {
         }
     }
 
+    val scope = rememberCoroutineScope()
+    val checker = remember { ReleaseChecker() }
+    var checking by remember { mutableStateOf(false) }
+    var showUpdate by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<ReleaseInfo?>(null) }
+    var updateMessage by remember { mutableStateOf("") }
+    var updateAvailable by remember { mutableStateOf(false) }
+    fun checkUpdates() {
+        if (checking || version == "?") return
+        checking = true
+        scope.launch {
+            try {
+                val info = checker.latest()
+                updateInfo = info
+                val relation = info?.let { releaseRelation(version, it.version) }
+                updateAvailable = relation == ReleaseRelation.UPDATE_AVAILABLE
+                updateMessage = when (relation) {
+                    ReleaseRelation.UPDATE_AVAILABLE -> "当前版本 v$version，可更新至 ${info?.version}。"
+                    ReleaseRelation.CURRENT -> "当前已是最新正式版本 v$version。"
+                    ReleaseRelation.LOCAL_AHEAD -> "当前 v$version，已领先最新正式版 ${info?.version}。"
+                    null -> "暂时没有可供检查的正式版本。"
+                }
+                showUpdate = true
+            } catch (failure: Exception) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                updateInfo = null
+                updateAvailable = false
+                updateMessage = "检查更新失败：${failure.message ?: "请检查网络后重试"}"
+                showUpdate = true
+            } finally { checking = false }
+        }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -91,6 +139,14 @@ fun AboutScreen(onBack: () -> Unit) {
                     style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+
+            SuixingCard {
+                SettingRow(title = "检查更新", subtitle = if (checking) "正在查询最新正式版本…" else "查看最新正式版本与更新说明",
+                    onClick = { checkUpdates() },
+                    control = { if (checking) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else RowChevron() })
+                AboutLink("问题反馈", "填写复现步骤，提交前可自行检查内容", AppLinks.feedback(version))
+                AboutLink("源代码仓库", "源码、构建说明与项目文档", AppLinks.REPOSITORY)
             }
 
             SuixingCard {
@@ -179,24 +235,6 @@ fun AboutScreen(onBack: () -> Unit) {
                 )
                 Spacer(Modifier.height(10.dp))
                 AboutLink(
-                    title = "本应用源码",
-                    subtitle = "GPL 组件与构建脚本都在这个仓库里",
-                    url = "https://github.com/zeng6125-rgb/suixing",
-                )
-                Spacer(Modifier.height(10.dp))
-                AboutLink(
-                    title = "版本发布与安装包",
-                    subtitle = "每个版本的 APK 与更新说明",
-                    url = "https://github.com/zeng6125-rgb/suixing/releases",
-                )
-                Spacer(Modifier.height(10.dp))
-                AboutLink(
-                    title = "问题反馈与已知缺陷",
-                    subtitle = "报 bug、看正在处理的问题",
-                    url = "https://github.com/zeng6125-rgb/suixing/issues",
-                )
-                Spacer(Modifier.height(10.dp))
-                AboutLink(
                     title = "构建说明与文档",
                     subtitle = "如何从源码自己编译出这个应用",
                     url = "https://github.com/zeng6125-rgb/suixing#readme",
@@ -205,6 +243,32 @@ fun AboutScreen(onBack: () -> Unit) {
 
         }
     }
+    if (showUpdate) SuixingDialog(
+        onDismissRequest = { showUpdate = false },
+        title = { Text(if (updateAvailable) "发现新版本" else "检查更新") },
+        text = {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(updateMessage, style = SettingsStyle.body)
+                val info = updateInfo
+                if (updateAvailable && info != null && info.notes.isNotBlank()) {
+                    Text(info.notes.take(2000), style = SettingsStyle.description,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        },
+        confirmButton = { dialog ->
+            val info = updateInfo
+            TextButton(onClick = { dialog.closeThen {
+                showUpdate = false
+                if (info != null) openAboutUrl(context, info.url)
+            } }) { Text(if (info == null) "知道了" else if (updateAvailable) "前往下载" else "查看发布页") }
+        },
+        dismissButton = { dialog ->
+            if (updateInfo != null) TextButton(onClick = { dialog.closeThen { showUpdate = false } }) { Text("关闭") }
+        },
+    )
+
 }
 
 /** 一行外链：点开交给系统浏览器，打不开就明说。 */
@@ -215,15 +279,12 @@ private fun AboutLink(title: String, subtitle: String, url: String) {
     SettingRow(
         title = title,
         subtitle = subtitle,
-        onClick = {
-            // 设备上没有浏览器时 startActivity 会抛 ActivityNotFoundException：以前这里只
-            // runCatching，异常被吞掉、屏幕一动不动，用户以为是自己没点中。
-            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                .onFailure {
-                    // 说出原因：这条路径上失败几乎只有「没有应用能处理这个链接」一种。
-                    Toast.makeText(context, "打不开链接：设备上没有可用的浏览器", Toast.LENGTH_SHORT).show()
-                }
-        },
+        onClick = { openAboutUrl(context, url) },
         control = { RowChevron() },
     )
+}
+
+private fun openAboutUrl(context: android.content.Context, url: String) {
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        .onFailure { Toast.makeText(context, "打不开链接：设备上没有可用的浏览器", Toast.LENGTH_SHORT).show() }
 }

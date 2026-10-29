@@ -23,7 +23,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -164,10 +164,10 @@ fun ProfileScreen(onBack: () -> Unit) {
                 label = { Text("画像") },
                 placeholder = { Text("例如：叫我老王；住杭州；回复尽量短，别客套。") },
                 isError = over,
-                minLines = 8,
+                minLines = 4,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 180.dp, max = 360.dp),
+                    .heightIn(min = 112.dp, max = 360.dp),
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),

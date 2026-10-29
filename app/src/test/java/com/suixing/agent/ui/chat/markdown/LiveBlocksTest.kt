@@ -12,6 +12,17 @@ import org.junit.Test
  */
 class LiveBlocksTest {
 
+    @Test fun `nonzero tail offsets keep final newlines and prior list snapshots stable`() {
+        val live = LiveBlocks()
+        val firstSource = "first\n\nsecond\n\nthird"
+        val first = live.blocksFor(firstSource)
+        for (suffix in listOf("\n", "\n\n", "\n\nfourth", "\n\nfourth\n\nlast")) {
+            val source = firstSource + suffix
+            assertEquals(parseMarkdown(source), live.blocksFor(source))
+            assertEquals(parseMarkdown(firstSource), first)
+        }
+    }
+
     @Test fun `newly completed paragraphs retain existing parsed blocks`() {
         val parser = LiveBlocks()
         val first = parser.blocksFor("first\n\nsecond")

@@ -535,8 +535,12 @@ fun SuixingApp() {
                     // **只在首启时这样**：设置里「重新看一遍引导」时 chat 已经在组合里，
                     // 盖一层引导不能把常驻的 chat 拆了。
                     if (!(showOnboarding && onboardingIsFirstRun)) {
-                        ObserveConversationRead(chat, visible = route == "empty")
-                        ChatScreen(viewModel = chat, onOpenSettings = remember(open) { { open("settings") } })
+                        val chatVisible = route == "empty" && !showOnboarding && editorAssistantId == null
+                        val chatLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(chatVisible)
+                        CompositionLocalProvider(androidx.lifecycle.compose.LocalLifecycleOwner provides chatLifecycle) {
+                            ObserveConversationRead(chat, visible = chatVisible)
+                            ChatScreen(viewModel = chat, onOpenSettings = remember(open) { { open("settings") } })
+                        }
                     }
                 }
             }
@@ -771,7 +775,7 @@ fun SuixingApp() {
         val id = editorAssistantId ?: lastEditorId
         if (id != null) {
             val servers by Core.mcp.servers.collectAsStateWithLifecycle()
-            val toolNames = remember(servers) { Core.tools.names() }
+            val toolNames = remember(servers) { Core.tools.names() + com.suixing.agent.agent.SUBAGENT_SPECS.map { it.name } }
             val target = settings.assistants.firstOrNull { it.id == id }
                 ?: Assistant(id = id, avatar = "🧭")
             AssistantEditor(

@@ -143,14 +143,12 @@ class ModelDraftTest {
     }
 
     @Test
-    fun `typing a provider name is not an edit, while its switches still are`() {
+    fun `provider names and switches both require explicit saving`() {
         val a = provider("a")
         val disk = stored(a)
 
-        // Names are written through a beat after typing stops. Counting them lit 「有未保存的改动」
-        // on every keystroke, and that subtitle appearing and disappearing is what shook the title.
-        assertFalse(
-            "a typed name must not flip the dirty flag",
+        assertTrue(
+            "a typed name is a draft until explicitly saved",
             disk.copy(providers = listOf(a.copy(name = "改了一半的名字"))).differsOutsideEndpoint(disk),
         )
         assertTrue(
@@ -158,4 +156,53 @@ class ModelDraftTest {
             disk.copy(allowInsecureTls = !disk.allowInsecureTls).differsOutsideEndpoint(disk),
         )
     }
+    @Test fun `leaving removes only uncommitted suppliers and restores the saved endpoint`() {
+        val saved = stored(provider("a"))
+        val draft = provider("new", baseUrl = "http://lan:8000/v1", enabled = emptyList())
+        val form = saved.copy(providers = saved.providers + draft, baseUrl = draft.baseUrl,
+            apiKey = draft.apiKey, model = "", protocol = "anthropic")
+        val kept = form.discardUncommittedProviders(saved, draft.id)
+        assertEquals(saved, kept)
+        assertFalse(kept.differsOutsideEndpoint(saved))
+    }
+
+    @Test fun `discarding a new supplier retains edits to existing suppliers and generation parameters`() {
+        val saved = stored(provider("a"), provider("b"))
+        val draft = provider("new")
+        val form = saved.copy(providers = saved.providers.map { if (it.id == "a") it.copy(name = "重命名") else it } + draft,
+            baseUrl = draft.baseUrl, apiKey = draft.apiKey, model = draft.enabled.first(), maxToolRounds = 9)
+        val kept = form.discardUncommittedProviders(saved, draft.id)
+        assertEquals(listOf("a", "b"), kept.providers.map { it.id })
+        assertEquals("重命名", kept.providers.first().name)
+        assertEquals(9, kept.maxToolRounds)
+        assertTrue(kept.differsOutsideEndpoint(saved))
+    }
+
+    @Test fun `a supplier remains after it has been explicitly saved`() {
+        val saved = stored(provider("a"), provider("b"))
+        assertSame(saved, saved.discardUncommittedProviders(saved, "b"))
+    }
+
+    @Test fun `discarding supplier limits removes orphan edits but retains shared model limits`() {
+        val a = provider("a", enabled = listOf("shared"))
+        val saved = stored(a).copy(modelContexts = mapOf("historic" to 2048))
+        val b = provider("b", enabled = listOf("shared", "new", "historic"))
+        val form = saved.copy(providers = listOf(a, b),
+            modelContexts = mapOf("shared" to 32000, "new" to 128000, "historic" to 4096),
+            modelMaxTokens = mapOf("new" to 8192, "shared" to 1024))
+        val result = form.discardUncommittedProviders(saved, "b")
+        assertEquals(mapOf("shared" to 32000, "historic" to 2048), result.modelContexts)
+        assertEquals(mapOf("shared" to 1024), result.modelMaxTokens)
+    }
+
+    @Test fun `saving prunes an unnamed supplier without clearing the live connection`() {
+        val saved = stored(provider("a"))
+        val draft = saved.copy(providers = saved.providers + provider("bad", name = ""))
+        val result = draft.forSaving(saved)
+        assertEquals(saved.providers, result.providers)
+        assertEquals(saved.baseUrl, result.baseUrl)
+        assertEquals(saved.apiKey, result.apiKey)
+        assertEquals(saved.model, result.model)
+    }
+
 }

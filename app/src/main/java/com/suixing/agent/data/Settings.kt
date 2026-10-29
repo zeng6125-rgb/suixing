@@ -9,6 +9,9 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -225,6 +228,9 @@ data class AppSettings(
      * 工具并发可能互相踩（同时写一个文件），所以默认保持 1，由用户按需开。
      */
     val toolParallel: Int = 1,
+    /** Children inherit the current run's tools and approval policy. */
+    val subagentsEnabled: Boolean = true,
+    val subagentParallelism: Int = 2,
     /**
      * 插话落在哪里。0 排队：等这一轮模型说完，在下一轮请求前注入，模型把它当成
      * 「用户在我干活时说的」；1 立即：掐断在途的流，让模型马上看到这句话——代价是
@@ -334,6 +340,8 @@ data class AppSettings(
      * the app has to know that providers exist.
      */
     val providers: List<ProviderConfig> = emptyList(),
+    /** An intentionally cleared list must not be recreated by the legacy endpoint migration. */
+    val providersInitialized: Boolean = false,
     /** The personas the user built. Never empty once [migrated] has run. */
     val assistants: List<Assistant> = emptyList(),
     val activeAssistantId: String = "",
@@ -598,9 +606,25 @@ class SettingsRepository(private val context: Context) {
     }
     private val key = stringPreferencesKey("settings_json")
 
-    val flow: Flow<AppSettings> = context.settingsDataStore.data.map { prefs -> decode(prefs[key]) }
+    private val snapshots = SnapshotDecoder(::decodeUncached)
+
+    val flow: Flow<AppSettings> = context.settingsDataStore.data
+        .map { prefs -> prefs[key] }
+        .distinctUntilChanged()
+        .map { raw -> decode(raw) }
+        .flowOn(Dispatchers.Default)
 
     suspend fun current(): AppSettings = flow.first()
+
+    /** Persist explicit supplier cleanup on model-page entry, without adding work to cold startup. */
+    suspend fun cleanupEmptyProviders() {
+        context.settingsDataStore.edit { prefs ->
+            val raw = prefs[key] ?: return@edit
+            val parsed = runCatching { json.decodeFromString<AppSettings>(raw) }.getOrNull() ?: return@edit
+            val clean = parsed.withoutEmptyProviders()
+            if (clean !== parsed) prefs[key] = json.encodeToString(AppSettings.serializer(), clean.encrypted())
+        }
+    }
 
     suspend fun save(settings: AppSettings) {
         context.settingsDataStore.edit { prefs ->
@@ -625,7 +649,9 @@ class SettingsRepository(private val context: Context) {
      * One decoder for [flow] and [update] both: what counts as a valid settings file,
      * and how it migrates, must not depend on which path happened to read it.
      */
-    private fun decode(raw: String?): AppSettings {
+    private fun decode(raw: String?): AppSettings = snapshots.read(raw)
+
+    private fun decodeUncached(raw: String?): AppSettings {
         val parsed = if (raw.isNullOrBlank()) {
             AppSettings()
         } else {
@@ -638,7 +664,7 @@ class SettingsRepository(private val context: Context) {
         // 显示 Key 见设置页与引导页）。
         //
         // 迁移把顶层的 Key 复制进第一个 provider：两个字段都是密文，复制过去是对的。
-        return parsed.migrated()
+        return parsed.withoutEmptyProviders().migrated()
     }
 
     /**
@@ -720,8 +746,8 @@ private fun AppSettings.withMaxTokensMigration(): AppSettings {
     return if (moved === modelMaxTokens) this else copy(modelMaxTokens = moved)
 }
 
-private fun AppSettings.withProviders(): AppSettings {
-    if (providers.isNotEmpty() || baseUrl.isBlank()) return this
+internal fun AppSettings.withProviders(): AppSettings {
+    if (providers.isNotEmpty() || providersInitialized || baseUrl.isBlank()) return this
     val seeded = ProviderConfig(
         id = "default",
         name = "默认",

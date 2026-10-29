@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.KeyboardOptions
 import com.suixing.agent.ui.components.SuixingDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -86,7 +86,7 @@ internal fun ContextWindowDialog(
                     // 打不出「.」的话，1.5k 这种值就只有建议按钮写得进去。
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     isError = invalid,
                     supportingText = supporting,
                 )

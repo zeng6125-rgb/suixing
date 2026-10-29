@@ -349,13 +349,14 @@ class WebTools(
         const val MAX_FETCH_BYTES = 1024 * 1024
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-        val client: OkHttpClient = OkHttpClient.Builder()
+        val client: OkHttpClient by lazy { OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
             .callTimeout(90, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
+        }
     }
 }
 

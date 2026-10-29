@@ -562,92 +562,28 @@ internal fun turnPage(messages: List<StoredMessage>, want: Int): TurnPage {
     )
 }
 
-/**
- * 导航条显示几条（**用户定的规则**）：
- *
- *  · 常驻 5 条 —— 读最新那几轮时就在这 5 条里滚；
- *  · 读到常驻区之外（更早的轮次）时**逐步解锁**：第 6 条、第 7 条 …… 最多 12 条；
- *  · 会话本身不足 5 轮就画实际条数。
- *
- * 判据是「当前读的这一轮**距最新**多少轮」：[current] 是 1 基的当前轮号（[TurnMarks.current]），
- * 所以 `turns - current` 就是"往回走了几轮"。
- *
- * 参考：Aether 的 `compactTimelineIndices`（`shared/.../ConversationTimeline.kt`）用的是
- * **恒定 4 条 + 窗口随当前轮滑动**，长按时才展开全部；但 Aether 是整页全量加载、没有分页，
- * 而随行要分页加载更早的内容，窗口会被新内容顶走，所以这里按"条数随解锁增长"来做。
- * **"当前轮"的口径取自 Aether**（视口内 28% 位置那一行，见 [TurnMarks.probeFedIndex]）。
- */
-/**
- * 导航条显示几条。
- *
- * 参数全部是**全局**口径：
- *  · [totalTurns]  会话总轮数（[TurnPage.turns]）
- *  · [currentTurn] 当前读到第几轮（全局，1 基）
- *
- * 规则（用户定的）：常驻 5 条；读到更早的轮次时逐步解锁 —— 距最新 6 轮时 6 条、7 轮时 7 条 …，
- * 最多 12 条。会话本身不足 5 轮就画实际条数。
- */
-internal fun scrubberRowCount(totalTurns: Int, currentTurn: Int): Int {
-    if (totalTurns <= 0) return 0
-    val distance = (totalTurns - currentTurn).coerceAtLeast(0)
-    return (distance + 1).coerceIn(SCRUBBER_VISIBLE_MIN, SCRUBBER_VISIBLE_MAX).coerceAtMost(totalTurns)
-}
+/** At most twelve real turns; short conversations do not reserve empty slots. */
+internal fun scrubberRowCount(totalTurns: Int, currentTurn: Int): Int =
+    totalTurns.coerceIn(0, SCRUBBER_VISIBLE_MAX)
 
-/**
- * 导航条画哪几轮。
- *
- * 口径取自 Aether（`compactTimelineWindowStart`）：**条数固定**（min(总轮数, 常驻条数)），
- * **窗口起点跟着当前轮**：`start = (current - 1).coerceIn(0, turns - size)`。
- * 长按时 [forceRows] = 全部轮次（Aether 的 `navigating` 分支画 `entries.size` 格）。
- */
-/**
- * 导航条画哪几轮 —— **全部是全局轮号**（1 基，最新那轮 = 总轮数）。
- *
- * 旧实现把同一个 `turn` 当两种坐标用：条数按"窗口内轮数"算、标签按"全局轮号"算、
- * 跳转按"窗口内下标"算 ⇒ 条数涨不上去、标签与行错位。这里统一成全局轮号：
- *
- *  · [totalTurns]  会话总轮数
- *  · [currentTurn] 当前读到第几轮（全局 1 基）
- *  * [drawnTurns]  已经**加载出来**的轮数（窗口之外的还在盘上，没加载就不能跳）
- *
- * 窗口 = 当前轮附近的一段；条数由 [scrubberRowCount] 决定（常驻 5、越往回读越多、最多 12）。
- * 长按时 [forceRows] = 全部已加载轮数（Aether 的 `navigating` 分支画全部）。
- */
+/** Twelve consecutive loaded turns, sliding to include the current global turn. */
 internal fun scrubberWindow(
     totalTurns: Int,
     currentTurn: Int,
     drawnTurns: Int,
     unlocked: Int = 0,
-    forceRows: Int = 0,
 ): IntRange {
     if (totalTurns <= 0 || drawnTurns <= 0) return IntRange.EMPTY
-    val size = if (forceRows > 0) {
-        forceRows.coerceAtMost(drawnTurns)
-    } else {
-        // **必须是 `totalTurns`**（本版修）：`currentTurn` 是全局轮号，`scrubberRowCount`
-        // 的判据是 `totalTurns - currentTurn`。原来这里传的是 `drawnTurns`（已加载轮数），
-        // 分页会话里 `drawnTurns < currentTurn` 恒成立 ⇒ `distance` 恒 0 ⇒ 条数永远锁在 5 条，
-        // 「常驻 5 → 读到更早逐级解锁到 12」对超过一页的会话根本没生效（用户报的「条数不对」）。
-        // 传 `totalTurns` 不会画出没加载的轮次：下面 `start >= oldestDrawn`、`end <= newest`
-        // 两处夹紧，窗口永远落在已加载范围内（单测 `the turn being read is always on the strip`）。
-        scrubberRowCount(totalTurns, currentTurn)
-    }
-    if (size <= 0) return IntRange.EMPTY
-    // **窗口里能画的最新的那一轮 = 全局第 totalTurns 轮**（已加载的是最后 drawnTurns 轮，
-    // 最新那轮当然也是全局最新的那一轮）。
-    val newest = totalTurns
-    // 能画的最旧那一轮 = 全局第 (totalTurns - drawnTurns + 1) 轮（更早的还没加载，不能画）。
-    val oldestDrawn = (totalTurns - drawnTurns + 1).coerceAtLeast(1)
-    // 窗口跟着当前轮走，且当前轮必须在窗口里。
-    var start = (currentTurn - size + 1).coerceAtLeast(oldestDrawn)
-    val maxStart = newest - size + 1
-    if (start > maxStart) start = maxStart
-    if (start < oldestDrawn) start = oldestDrawn
-    // 上拉解锁：整体再往上（但不越过"已加载"的最旧那一轮）。
-    start = (start - unlocked.coerceAtLeast(0)).coerceAtLeast(oldestDrawn)
-    val end = (start + size - 1).coerceAtMost(newest)
-    return start..end
+    val loaded = drawnTurns.coerceAtMost(totalTurns)
+    val size = minOf(SCRUBBER_VISIBLE_MAX, loaded)
+    val oldest = totalTurns - loaded + 1
+    val start = ((currentTurn.coerceIn(oldest, totalTurns) - size / 2)
+        .coerceIn(oldest, totalTurns - size + 1) - unlocked.coerceAtLeast(0)).coerceAtLeast(oldest)
+    return start..(start + size - 1)
 }
+
+/** Every visible slot represents an existing loaded turn, in chronological order. */
+internal fun scrubberSlots(window: IntRange): List<Int> = window.toList().takeLast(SCRUBBER_VISIBLE_MAX)
 
 /**
  * How far the strip has been unlocked by a finger at [y], given how far it already was: the top
@@ -664,10 +600,7 @@ internal fun scrubberPull(y: Float, rowPx: Float, pitchPx: Float, pull: Int): In
     return maxOf(pull, (overshoot / pitchPx).toInt() + 1)
 }
 
-/** 导航条常驻条数（用户：常驻五条就够）。 */
-internal const val SCRUBBER_VISIBLE_MIN = 5
-
-/** 读到很靠前的轮次时条数的上限（第 12 轮起不再增加）。 */
+/** The rail never expands while pressing or dragging. */
 internal const val SCRUBBER_VISIBLE_MAX = 12
 
 /** 看板上画几行。 */
@@ -1349,6 +1282,7 @@ internal fun AssistantRow(
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
+    val foldSlots = remember(parts, processRun) { processFoldSlots(parts, processRun) }
     Surface(
         // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
         // constraint, or the inner fill would win and the card could never narrow.
@@ -1399,6 +1333,7 @@ internal fun AssistantRow(
                     streaming = streaming,
                     runningTool = runningTool,
                     runId = processRun,
+                    foldSlots = foldSlots,
                     preserveExpanded = preserveExpanded,
                     contextWindow = contextWindow,
                     // The run's note, when there was one: it lives on the stats for as long as
@@ -1417,10 +1352,9 @@ internal fun AssistantRow(
                     reasoningExpansion = reasoningExpansion,
                     onEdit = onEdit,
                 )
-                // Expanded content already owns the single 6dp seam with the flat
-                // tail, including when its prefix is empty. A collapsed header
-                // needs that same seam outside its unmounted content instead.
-                Spacer(Modifier.height(if (reasoningExpansion.summaryExpanded(parts, processRun, streaming)) 0.dp else 6.dp))
+                // Keep the seam outside the animation constant. Toggling it
+                // immediately made prose move backwards before the height changed.
+                Spacer(Modifier.height(6.dp))
             }
             // The last text slot follows the current snapshot; versioned live parts must
             // never be memoized across actual text changes.
@@ -1452,7 +1386,7 @@ internal fun AssistantRow(
                                 runStreaming = streaming,
                                 // A live block keeps its slot for the whole run, and the
                                 // stored copy of the same run answers to the same key.
-                                blockId = thinkSlot(parts, index, processRun),
+                                blockId = foldSlots[index]!!,
                                 expansion = reasoningExpansion,
                                 reasoningTokens = part.tokens,
                                 elapsedMs = part.elapsedMs,
@@ -1474,7 +1408,7 @@ internal fun AssistantRow(
                             ToolBundle(
                                 tools = part.calls,
                                 expansion = reasoningExpansion,
-                                blockId = processFoldSlot(parts, index, processRun)!!,
+                                blockId = foldSlots[index]!!,
                                 // Only the newest block can be the one waiting on a tool.
                                 runningTool = runningTool.takeIf { streaming && last },
                                 startExpanded = expandTools,
@@ -1483,7 +1417,8 @@ internal fun AssistantRow(
                         }
 
                         is Part.Text -> {
-                            AssistantProse(part, streaming)
+                            AssistantProse(part, streaming, readingKey = "$processRun:text:$index",
+                                viewport = reasoningExpansion.viewport("$processRun:text:$index"))
                             if (!last) Spacer(Modifier.height(6.dp))
                         }
 
@@ -1510,7 +1445,7 @@ internal fun AssistantRow(
                         // 压缩块：位置就是它发生的地方。
                         is Part.Compress -> {
                             CompressionBlock(part.checkpoint, reasoningExpansion,
-                                processFoldSlot(parts, index, processRun)!!)
+                                foldSlots[index]!!)
                             if (!last) Spacer(Modifier.height(6.dp))
                         }
                     }
@@ -1553,7 +1488,13 @@ internal fun AssistantRow(
 
 /** Keep typewriter state reads inside the prose rather than the whole reply content. */
 @Composable
-internal fun AssistantProse(part: Part.Text, streaming: Boolean, typewriter: Boolean = true) {
+internal fun AssistantProse(
+    part: Part.Text,
+    streaming: Boolean,
+    typewriter: Boolean = true,
+    readingKey: String = "",
+    viewport: ReasoningViewport? = null,
+) {
     // History is selectable immediately. A newly mounted live block waits one frame,
     // and selection still waits for streaming and the remaining typed text to finish.
     var selectable by remember { mutableStateOf(!streaming) }
@@ -1568,7 +1509,10 @@ internal fun AssistantProse(part: Part.Text, streaming: Boolean, typewriter: Boo
         text = part.text,
         enabled = typewriter && (streaming || liveText),
         startAtZero = typewriter && liveText,
+        retained = viewport?.prose,
     )
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalReadingTextKey provides readingKey, LocalProseViewport provides viewport) {
     if (streaming || !selectable || shown.length < part.text.length) {
         MarkdownText(
             text = shown,
@@ -1579,6 +1523,7 @@ internal fun AssistantProse(part: Part.Text, streaming: Boolean, typewriter: Boo
         )
     } else {
         SelectableWhenArmed { MarkdownText(text = part.text) }
+    }
     }
 }
 

@@ -6,13 +6,14 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
+import android.view.ViewTreeObserver
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -35,9 +36,10 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStart() {
         super.onStart()
+        val appContext = applicationContext
         Core.appScope.launch {
             if (Core.settings.current().floatingConsole && !FloatConsoleService.isRunning()) {
-                FloatConsoleService.start(this@MainActivity)
+                FloatConsoleService.start(appContext)
             }
         }
     }
@@ -66,9 +68,8 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         transparentNavigationBar()
         super.onCreate(savedInstanceState)
-        requestNotificationPermission()
         setContent {
-            val settings by Core.settings.flow.collectAsState(initial = AppSettings())
+            val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
             val systemDark = isSystemInDarkTheme()
             val dark = when (settings.themeMode) {
                 1 -> false
@@ -108,6 +109,21 @@ class MainActivity : ComponentActivity() {
                 SuixingApp()
             }
         }
+        // A posted callback runs after this draw. Do not launch permission UI or
+        // optional maintenance before Compose has had its first chance to paint.
+        val decor = window.decorView
+        decor.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
+            private var posted = false
+            override fun onDraw() {
+                if (posted) return
+                posted = true
+                decor.post {
+                    if (decor.viewTreeObserver.isAlive) decor.viewTreeObserver.removeOnDrawListener(this)
+                    Core.startup.firstFrameDrawn()
+                    if (!isFinishing && !isDestroyed) requestNotificationPermission()
+                }
+            }
+        })
     }
 
     /**

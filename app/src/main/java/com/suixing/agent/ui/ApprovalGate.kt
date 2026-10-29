@@ -36,7 +36,7 @@ internal fun PendingApprovals(conversations: StateFlow<List<Conversation>>) {
         chatId = first.key,
         toolName = first.value.toolName,
         args = first.value.args,
-        sourceTitle = chats.firstOrNull { it.id == first.key }?.title,
+        sourceTitle = first.value.sourceTitle ?: chats.firstOrNull { it.id == first.key }?.title,
         otherWaiting = pending.size - 1,
     )
 }
@@ -71,7 +71,7 @@ internal fun ApprovalDialog(
                 // Only worth a line when it is true: one blocked chat is the normal case.
                 if (otherWaiting > 0) {
                     Text(
-                        text = "还有 $otherWaiting 个会话在等待",
+                        text = "还有 $otherWaiting 项工具请求在等待",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

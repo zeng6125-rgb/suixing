@@ -49,7 +49,7 @@ fun AssistantScreen(
     // BACK 先关编辑、再退页面（编辑器自己的 BackHandler 优先）。
     var editingId by remember { mutableStateOf<String?>(null) }
     val servers by Core.mcp.servers.collectAsStateWithLifecycle()
-    val toolNames = remember(servers) { Core.tools.names() }
+    val toolNames = remember(servers) { Core.tools.names() + com.suixing.agent.agent.SUBAGENT_SPECS.map { it.name } }
     val editing = editingId?.let { id ->
         assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
     }

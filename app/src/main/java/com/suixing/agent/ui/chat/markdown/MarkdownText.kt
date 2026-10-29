@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -12,9 +13,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
@@ -31,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,7 +66,12 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
+import com.suixing.agent.ui.chat.LocalReadingTextKey
+import com.suixing.agent.ui.chat.LocalProseViewport
+import com.suixing.agent.ui.chat.ReasoningViewport
+import com.suixing.agent.ui.chat.readingText
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableFloatStateOf
@@ -154,12 +164,26 @@ internal fun parseMarkdown(source: String, checkpoint: (() -> Unit)?): List<MdBl
 private fun parseMarkdownBlocks(
     source: String,
     checkpoint: (() -> Unit)?,
+    fromIndex: Int = 0,
     onStableBoundary: ((offset: Int, blockCount: Int) -> Unit)? = null,
 ): List<MdBlock> {
     checkpoint?.invoke()
     // **没有 CR 就不做两次全串 replace**：绝大多数文本只有 \n，原来无条件复制两遍整串。
     val normalized = if (source.indexOf('\r') < 0) source else source.replace("\r\n", "\n").replace('\r', '\n')
-    val lines = normalized.split('\n')
+    require(fromIndex in 0..normalized.length)
+    // Build only the tail's lines; don't first copy the complete suffix of an
+    // ever-growing source. Each line is already the parser's owned String.
+    val lines = ArrayList<String>()
+    var lineStart = fromIndex
+    while (true) {
+        val lineEnd = normalized.indexOf('\n', lineStart)
+        if (lineEnd < 0) {
+            lines += normalized.substring(lineStart)
+            break
+        }
+        lines += normalized.substring(lineStart, lineEnd)
+        lineStart = lineEnd + 1
+    }
     val lineStarts = if (onStableBoundary != null) {
         var offset = 0
         IntArray(lines.size) { index -> offset.also { offset += lines[index].length + 1 } }
@@ -231,7 +255,7 @@ private fun parseMarkdownBlocks(
         if (trimmed.isEmpty()) {
             // Only the parser's outer loop knows this blank line is outside a code
             // block/table/list. Never infer these boundaries from backtick counts.
-            if (line.isEmpty() && lineStarts != null && index > 0 && lineStarts[index] < normalized.length) {
+            if (line.isEmpty() && lineStarts != null && index > 0 && lineStarts[index] < normalized.length - fromIndex) {
                 onStableBoundary?.invoke(lineStarts[index] + 1, blocks.size)
             }
             index++
@@ -344,7 +368,9 @@ private fun opensBlock(lines: List<String>, index: Int): Boolean {
 private fun isTableStart(lines: List<String>, index: Int): Boolean {
     if (!lines[index].contains('|')) return false
     val separator = lines.getOrNull(index + 1)?.trim() ?: return false
-    return isTableSeparator(separator)
+    // GFM permits optional outer pipes. What must match is the number of header
+    // and delimiter cells; otherwise an ordinary pipe-containing line is prose.
+    return isTableSeparator(separator) && splitTableRow(lines[index]).size == splitTableRow(separator).size
 }
 
 private fun isTableSeparator(line: String): Boolean {
@@ -641,9 +667,13 @@ private class InlineScanner(
         return index + URL_HTTP.length <= to && text.startsWith(URL_HTTP, index)
     }
 
-    // 一个 '/' 处是不是某类绝对路径根（§1.3）。前一字符是字母数字就不算（避开 http://… 里的 /）。
+    // CJK prose can touch an absolute path. ASCII word/path continuations cannot:
+    // this also avoids picking an embedded /sdcard out of a larger path or URL.
     private fun startsPath(index: Int, to: Int): Boolean {
-        if (index > 0 && text[index - 1].isLetterOrDigit()) return false
+        if (index > 0) {
+            val before = text[index - 1]
+            if (before in 'a'..'z' || before in 'A'..'Z' || before in '0'..'9' || before == '_' || before == '/') return false
+        }
         return PATH_ROOTS.any { root ->
             index + root.length <= to && text.regionMatches(index, root, 0, root.length)
         }
@@ -754,6 +784,9 @@ private data class MarkdownPalette(
     val codeFontSize: TextUnit,
 )
 
+private val LocalGrowingMarkdown = compositionLocalOf { false }
+private val LocalMarkdownBlockIndex = compositionLocalOf { 0 }
+
 @Composable
 fun MarkdownText(
     text: String,
@@ -780,7 +813,9 @@ fun MarkdownText(
     settled: Boolean = !cursor,
 ) {
     val blocks = rememberGrowingMarkdown(text, settled)
-    MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
+    CompositionLocalProvider(LocalGrowingMarkdown provides !settled) {
+        MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
+    }
 }
 
 /**
@@ -866,20 +901,31 @@ internal class LiveBlocks {
         }
         // The parser itself reports completed blocks, so fence-looking table rows
         // and blank lines inside code cannot incorrectly freeze a partial result.
-        val suffix = normalized.substring(stableEnd)
-        if (suffix.isEmpty()) return prefixBlocks
+        if (stableEnd == normalized.length) return prefixBlocks
         var completed = 0
         var completedBlocks = 0
-        val parsed = parseMarkdownBlocks(suffix, null) { offset, count ->
+        val parsed = parseMarkdownBlocks(normalized, null, stableEnd) { offset, count ->
             completed = offset
             completedBlocks = count
         }
-        val result = if (prefixBlocks.isEmpty()) parsed else prefixBlocks + parsed
+        val result = if (prefixBlocks.isEmpty()) parsed else JoinedMarkdownBlocks(prefixBlocks, parsed)
         if (completed > 0) {
             if (completedBlocks > 0) prefixBlocks = prefixBlocks + parsed.take(completedBlocks)
             stableEnd += completed
         }
         return result
+    }
+}
+
+/** Both lists are immutable snapshots; appending a tail needn't copy settled references. */
+private class JoinedMarkdownBlocks(
+    private val prefix: List<MdBlock>,
+    private val tail: List<MdBlock>,
+) : AbstractList<MdBlock>() {
+    override val size: Int get() = prefix.size + tail.size
+    override fun get(index: Int): MdBlock {
+        if (index !in 0 until size) throw IndexOutOfBoundsException("index=$index, size=$size")
+        return if (index < prefix.size) prefix[index] else tail[index - prefix.size]
     }
 }
 
@@ -1072,18 +1118,29 @@ fun MarkdownBlocks(
         return
     }
     val keys = remember(blocks) { markdownBlockKeys(blocks) }
+    val readingKey = LocalReadingTextKey.current
     Column(modifier) {
         blocks.forEachIndexed { index, block ->
             key(keys[index]) {
                 if (index > 0) Spacer(Modifier.height(gapBetween(blocks[index - 1], block)))
-                MarkdownBlock(
-                    block = block,
-                    style = style,
-                    color = color,
-                    palette = palette,
-                    onUrlClick = onUrlClick,
-                    cursor = index == cursorAt,
-                )
+                // Lists and tables refine the block key by item/child or row/cell below.
+                val blockReadingKey = readingKey?.takeIf {
+                    block is MdBlock.Paragraph || block is MdBlock.Heading ||
+                        block is MdBlock.Quote || block is MdBlock.Code || block is MdBlock.Bullet || block is MdBlock.Table
+                }?.let { "$it:block:$index" }
+                CompositionLocalProvider(
+                    LocalReadingTextKey provides blockReadingKey,
+                    LocalMarkdownBlockIndex provides index,
+                ) {
+                    MarkdownBlock(
+                        block = block,
+                        style = style,
+                        color = color,
+                        palette = palette,
+                        onUrlClick = onUrlClick,
+                        cursor = index == cursorAt,
+                    )
+                }
             }
         }
     }
@@ -1217,6 +1274,7 @@ private fun CaretText(
     // 读 alpha 不触发重组、也不触发重新排版（本仓 `ChatBlocks.kt` 的 `RevealHeight`
     // 与 `ChatScreen` 的 `switchAlpha` 都是同一个写法）。
     val caret = remember { arrayOfNulls<TextLayoutResult>(1) }
+    val readingModifier = modifier.readingText { caret[0] }
     val caretAlpha = if (cursor) blinkingCursorAlphaState() else null
     // **光标直接接在文字末尾**（用户：「直接往文字最后加不就行了吗」）：
     // 在文本末尾追加一个**带背景色的窄字符段**（▏），排版器会为它留出位置并把它算作
@@ -1239,9 +1297,9 @@ private fun CaretText(
     Text(
         text = textWithCaret,
         modifier = if (caretAlpha == null) {
-            modifier
+            readingModifier
         } else {
-            modifier.drawBehind {
+            readingModifier.drawBehind {
                 val layout = caret[0] ?: return@drawBehind
                 if (layout.lineCount == 0) return@drawBehind
                 // **画在末尾那个占位符的位置上**：占位符是文本的最后一个字符，
@@ -1265,7 +1323,7 @@ private fun CaretText(
         },
         style = style,
         color = color,
-        onTextLayout = { if (caretAlpha != null) caret[0] = it },
+        onTextLayout = { caret[0] = it },
     )
 }
 
@@ -1349,6 +1407,7 @@ private fun BulletBlock(
     cursor: Boolean = false,
     parentDepth: Int = 0,
 ) {
+    val readingKey = LocalReadingTextKey.current
     // The marker sits on the first line's centre, not on the row's top: a 4dp dot level
     // with the top edge reads as floating above the text it belongs to.
     val markerOffset = with(LocalDensity.current) {
@@ -1392,6 +1451,7 @@ private fun BulletBlock(
                         )
                     }
                 }
+                CompositionLocalProvider(LocalReadingTextKey provides readingKey?.let { "$it:item:$index" }) {
                 InlineText(
                     text = item,
                     style = style,
@@ -1401,8 +1461,10 @@ private fun BulletBlock(
                     cursor = itemCursor && children.isEmpty(),
                     modifier = Modifier.weight(1f),
                 )
+                }
             }
             children.forEachIndexed { childIndex, child ->
+                CompositionLocalProvider(LocalReadingTextKey provides readingKey?.let { "$it:item:$index:child:$childIndex" }) {
                 BulletBlock(
                     block = child,
                     style = style,
@@ -1412,6 +1474,7 @@ private fun BulletBlock(
                     cursor = itemCursor && childIndex == children.lastIndex,
                     parentDepth = block.depth,
                 )
+                }
             }
         }
     }
@@ -1534,6 +1597,7 @@ private fun TableBlock(
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
 ) {
+    val readingKey = LocalReadingTextKey.current
     val cellStyle = MaterialTheme.typography.bodySmall
     // 12sp semibold, scaled off bodySmall so the header still follows the 字号 setting.
     val headerStyle = cellStyle.copy(
@@ -1555,12 +1619,12 @@ private fun TableBlock(
             onUrlClick = onUrlClick,
             header = true,
             cursor = cursor && block.rows.isEmpty(),
+            readingKey = readingKey?.let { "$it:header" },
         )
+        // Vertical gestures belong to the transcript, including fling velocity.
+        // An inner capped list split one reading gesture into two scroll ranges.
         block.rows.forEachIndexed { index, row ->
-            HorizontalDivider(
-                color = MaterialTheme.colorScheme.outlineVariant,
-                thickness = 1.dp,
-            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 1.dp)
             TableRow(
                 cells = row,
                 style = cellStyle,
@@ -1569,6 +1633,7 @@ private fun TableBlock(
                 onUrlClick = onUrlClick,
                 header = false,
                 cursor = cursor && index == block.rows.lastIndex,
+                readingKey = readingKey?.let { "$it:row:$index" },
             )
         }
     }
@@ -1583,6 +1648,7 @@ private fun TableRow(
     onUrlClick: ((String) -> Unit)?,
     header: Boolean,
     cursor: Boolean = false,
+    readingKey: String? = null,
 ) {
     val separators = remember(cells.size) { FloatArray((cells.size - 1).coerceAtLeast(0)) { Float.NaN } }
     val dividerColor = MaterialTheme.colorScheme.outlineVariant
@@ -1608,6 +1674,7 @@ private fun TableRow(
                         .onPlaced { separators[index - 1] = it.positionInParent().x },
                 )
             }
+            CompositionLocalProvider(LocalReadingTextKey provides readingKey?.let { "$it:cell:$index" }) {
             InlineText(
                 text = cell,
                 cursor = cursor && index == cells.lastIndex,
@@ -1619,6 +1686,7 @@ private fun TableRow(
                     .weight(1f)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
+            }
         }
     }
 }

@@ -1,5 +1,15 @@
 package com.suixing.agent.agent
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/** All parent/child engines operate on one device and shell session. Reads remain parallel. */
+internal class SharedToolExecution {
+    private val device = Mutex()
+    suspend fun <T> run(name: String, block: suspend () -> T): T =
+        if (isParallelizable(name)) block() else device.withLock { block() }
+}
+
 /**
  * Which tool calls may run **at the same time** as the others in one batch.
  *

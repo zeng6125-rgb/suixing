@@ -39,6 +39,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -939,19 +940,25 @@ class ChatViewModel : ViewModel() {
             }
         }
         viewModelScope.launch {
+            // Independent disk reads should overlap instead of serializing settings,
+            // metadata and the last-opened marker before the transcript can be opened.
+            val loadedChats = async(Dispatchers.IO) {
+                if (Core.chats.conversations.value.isEmpty()) Core.chats.load()
+            }
+            val savedOpened = async(Dispatchers.IO) { lastOpenedId ?: Core.chats.readLastOpened() }
             val settings = Core.settings.current()
             val assistantId = settings.activeAssistant()?.id.orEmpty()
             // Only the cold path reads the files: when the conversations are already in
             // memory the state above is the real one, and loading them again would only
             // make the screen wait for something it already has.
-            if (Core.chats.conversations.value.isEmpty()) Core.chats.load()
+            loadedChats.await()
             val conversations = Core.chats.conversations.value
             // The conversation the user was last in — and only if it is still there: the
             // marker can outlive its conversation (deleted from another entry point), and
             // opening a chat that no longer exists would leave the screen on nothing. The
             // in-memory id is preferred because it is what this process last showed; the
             // file is the cold-start answer.
-            val reopened = (lastOpenedId ?: Core.chats.readLastOpened())?.let { id ->
+            val reopened = savedOpened.await()?.let { id ->
                 conversations.firstOrNull { it.id == id }
             }
             val existing = reopened ?: conversations.firstOrNull()
@@ -2127,7 +2134,7 @@ class ChatViewModel : ViewModel() {
                 // 最后一条消息 —— 否则压缩块会按"被折叠的最后一条"落到旧历史里（看不见）。
                 val anchorId = sessions[chatId]?.messages?.lastOrNull()?.id
                     ?: shown.messages.lastOrNull()?.id.orEmpty()
-                Core.engine.compressNow(history, settings) { checkpoint ->
+                Core.engine.compressNow(history, settings, sessions[chatId]?.checkpoints ?: shown.checkpoints) { checkpoint ->
                     recordCheckpoint(chatId, checkpoint.copy(anchorId = anchorId))
                 }?.let { reason ->
                     // 压缩没成就把原因说出来（消息太少 / 网络失败 / 模型没给摘要）——

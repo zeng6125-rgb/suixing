@@ -59,6 +59,10 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onVisibilityChanged
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
@@ -89,6 +93,7 @@ import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.chat.GenerationSheet
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.MENU_EXIT_MS
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
@@ -669,11 +674,16 @@ internal fun BlinkingCursor() {
     // 真机实测（0.8.382，一轮在跑、手指不动）：15 秒 3194 帧 ≈ 213 fps、单核 42%
     // —— 长回答/长工具调用时就是持续发热与耗电，而同屏还有悬浮窗在同时动画。
     // 闪烁只需要"两档"，用 480ms 的步进替代：观感一样，重绘从 ~120 次/秒降到 ~2 次/秒。
-    val alpha = remember { mutableFloatStateOf(1f) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(480)
-            alpha.floatValue = if (alpha.floatValue > 0.5f) 0.15f else 1f
+    val cursorAlpha = remember { mutableFloatStateOf(1f) }
+    var visible by remember { mutableStateOf(false) }
+    val owner = LocalLifecycleOwner.current
+    LaunchedEffect(owner, visible) {
+        if (!visible) return@LaunchedEffect
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                delay(480)
+                cursorAlpha.floatValue = if (cursorAlpha.floatValue > 0.5f) 0.15f else 1f
+            }
         }
     }
     // 光标画成一条**细线**而不是字符「▍」：那个字形本身有宽度（一个全角块的宽度），
@@ -688,7 +698,8 @@ internal fun BlinkingCursor() {
         modifier = Modifier
             .width(1.5.dp)
             .height(lineHeight)
-            .alpha(alpha.floatValue)
+            .onVisibilityChanged(minFractionVisible = 0f) { visible = it }
+            .graphicsLayer { alpha = cursorAlpha.floatValue }
             .background(
                 color = MaterialTheme.colorScheme.primary,
                 shape = RoundedCornerShape(1.dp),
@@ -860,6 +871,7 @@ internal fun Composer(
      * transcript (the caller adds the strip under it and its own 12dp of air).
      */
     onHeightChanged: (Dp) -> Unit,
+    subagentChatId: String? = null,
     /** Called once the stack has been placed for this frame: the caller's follow pin rides it. */
 ) {
     // 每 120ms 重组的只有这一个环（含时间读数），不拖别人。
@@ -897,7 +909,15 @@ internal fun Composer(
     // 纯遮罩：三张卡片都是 [MenuCard]，进出场在卡片自己身上，这层什么都不画、也不加动画修饰符。
     // `keeping` 只做一件事：卡片退场那段让遮罩留在组合里，否则「点卡片外面」会在卡片还看得见的
     // 时候漏到下面的对话流上。
-    if (menuOpen || sheetOpen || approvalOpen) {
+    val anyCardOpen = menuOpen || sheetOpen || approvalOpen
+    var keepCardScrim by remember { mutableStateOf(false) }
+    LaunchedEffect(anyCardOpen) {
+        if (anyCardOpen) keepCardScrim = true else {
+            delay(MENU_EXIT_MS)
+            keepCardScrim = false
+        }
+    }
+    if (anyCardOpen || keepCardScrim) {
         Popup(properties = PopupProperties(focusable = false)) {
             Box(
                 Modifier
@@ -915,7 +935,7 @@ internal fun Composer(
     }
     // Focus-less popups do not receive BACK either: without this the press falls through to
     // the activity and finishes it.
-    BackHandler(enabled = menuOpen || sheetOpen || approvalOpen) {
+    BackHandler(enabled = anyCardOpen || keepCardScrim) {
         menuOpen = false
         sheetOpen = false
         approvalOpen = false
@@ -1221,6 +1241,7 @@ internal fun Composer(
                         // screen, instead of a Material dropdown here and a card there.
                         MenuCard(
                             visible = menuOpen,
+                            scrim = false,
                             onDismiss = { menuOpen = false },
                             // Opens upward from the button it belongs to. BottomStart puts the
                             // popup's bottom edge on the anchor's bottom edge, and the anchor is the
@@ -1324,6 +1345,7 @@ internal fun Composer(
                         }
                         MenuCard(
                             visible = approvalOpen,
+                            scrim = false,
                             onDismiss = { approvalOpen = false },
                             alignment = Alignment.BottomStart,
                             offset = with(density) {
@@ -1363,6 +1385,7 @@ internal fun Composer(
                             )
                         }
                     }
+                    subagentChatId?.let { SubagentStatusAction(it) }
                     // One selector for both decisions: the model and the reasoning
                     // level live together in the 生成设置 sheet, so the row keeps a
                     // single caption instead of two competing ones.
@@ -1408,6 +1431,7 @@ internal fun Composer(
                                     conversationReasoningEffort = conversationReasoningEffort,
                                     onChooseReasoning = onChooseReasoning,
                                     visible = sheetOpen,
+                                    scrim = false,
                                     onPickModel = onPickModel,
                                     onOpenSettings = onOpenSettings,
                                     onDismiss = { sheetOpen = false },

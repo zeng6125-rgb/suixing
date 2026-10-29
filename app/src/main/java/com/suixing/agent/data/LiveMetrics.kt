@@ -60,12 +60,15 @@ class LiveSampler {
             "/sys/class/kgsl/kgsl-3d0/gpuclk",
             "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq",
         )
+        private val FIRST_INTEGER = Regex("-?\\d+")
     }
 
     private var lastWallMs = 0L
     private var lastProcessCpuMs = -1L
     private var lastSysTotal = 0L
     private var lastSysIdle = 0L
+    private val systemStatFile = File("/proc/stat")
+    private var systemStatReadable: Boolean? = null
 
     /** PSS 的节流状态。 */
     private var lastPssAt = 0L
@@ -124,9 +127,14 @@ class LiveSampler {
     }
 
     /** /proc/stat 第一行：cpu user nice system idle iowait irq softirq steal ... ⇒ (总, 闲)。 */
-    private fun systemStat(): Pair<Long, Long>? = runCatching {
-        File("/proc/stat").useLines { lines -> lines.firstOrNull() }
-    }.getOrNull()
+    private fun systemStat(): Pair<Long, Long>? {
+        // Like GPU probing, a denied node stays unavailable for this page instance.
+        // Re-entering creates a fresh sampler, so changed system availability can be retried.
+        if (systemStatReadable == null) systemStatReadable = runCatching { systemStatFile.canRead() }.getOrDefault(false)
+        if (systemStatReadable != true) return null
+        return runCatching {
+            systemStatFile.useLines { lines -> lines.firstOrNull() }
+        }.getOrElse { systemStatReadable = false; null }
         ?.takeIf { it.startsWith("cpu ") }
         ?.let { line ->
             val parts = line.trim().split(' ')
@@ -135,6 +143,7 @@ class LiveSampler {
                 .mapNotNull { it.toLongOrNull() }
             if (parts.size < 5) null else parts.sum() to (parts[3] + parts[4])
         }
+    }
 
     /** 见 [PSS_INTERVAL_SECONDS]：贵的那个按这个间隔量，中间沿用上次的数。 */
     private fun pssMb(wall: Long): Int? {
@@ -192,6 +201,6 @@ class LiveSampler {
 
     private fun readFirstInt(path: String): Int? = runCatching {
         File(path).takeIf { it.canRead() }?.readText()?.trim()
-            ?.let { text -> Regex("-?\\d+").find(text)?.value?.toInt() }
+            ?.let { text -> FIRST_INTEGER.find(text)?.value?.toInt() }
     }.getOrNull()
 }

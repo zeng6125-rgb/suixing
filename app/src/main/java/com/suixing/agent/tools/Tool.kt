@@ -182,6 +182,7 @@ class ToolRegistry private constructor() {
         add(SessionTools())
     }
 
+    @Synchronized
     fun add(group: ToolGroup) {
         for (spec in group.specs) {
             check(!builtin.containsKey(spec.name)) { "工具名重复：${spec.name}" }
@@ -206,6 +207,7 @@ class ToolRegistry private constructor() {
      * map; a name that would collide with a builtin is rejected instead of
      * silently shadowing it.
      */
+    @Synchronized
     fun replaceDynamic(prefix: String, tools: List<Tool>) {
         dynamic.keys.removeAll { it.startsWith(prefix) }
         for (tool in tools) {
@@ -215,23 +217,26 @@ class ToolRegistry private constructor() {
     }
 
     /**
-     * A live view without [names], for a persona that must not reach for them.
-     *
-     * The maps are shared, not copied, so an MCP server that connects later still
-     * shows up in the filtered view.
+     * A tool snapshot without [names], for a persona that must not reach for them.
+     * New runs snapshot the current MCP catalog; in-flight tool tables stay fixed.
      */
+    @Synchronized
     fun excluding(names: Set<String>): ToolRegistry {
         if (names.isEmpty()) return this
         return ToolRegistry().also {
             it.builtin.putAll(builtin)
             it.dynamic.putAll(dynamic)
-            it.hidden = names
+            it.hidden = hidden + names
         }
     }
 
+    @Synchronized
     fun all(): List<Tool> =
         (builtin.values + dynamic.values).filter { it.spec.name !in hidden }
 
+    fun isHidden(name: String): Boolean = name in hidden
+
+    @Synchronized
     fun find(name: String): Tool? =
         if (name in hidden) null else builtin[name] ?: dynamic[name]
 

@@ -34,4 +34,25 @@ class MarkdownBlockKeysTest {
         val after = markdownBlockKeys(listOf(MdBlock.Heading(1, "text")))
         assertNotEquals(before.single(), after.single())
     }
+
+    @Test fun `a growing table preserves its viewport when later prose settles it`() {
+        val first = MdBlock.Table(listOf("a", "b"), listOf(listOf("1", "2")))
+        val grown = first.copy(rows = first.rows + listOf(listOf("3", "4")))
+        val tailKey = markdownBlockKeys(listOf(first)).single()
+        assertEquals(tailKey, markdownBlockKeys(listOf(grown)).single())
+        assertEquals(tailKey, markdownBlockKeys(listOf(grown, MdBlock.Paragraph("after"))).first())
+        val duplicates = markdownBlockKeys(listOf(first, grown, first))
+        assertEquals(3, duplicates.toSet().size)
+    }
+
+    @Test fun `table key calculation never reads body cells`() {
+        val rows = object : AbstractList<List<String>>() {
+            override val size = 10_000
+            override fun get(index: Int): List<String> = error("table body must not be hashed for keys")
+        }
+        val table = MdBlock.Table(listOf("a", "b"), rows)
+        val first = markdownBlockKeys(listOf(table, MdBlock.Paragraph("tail")))
+        val second = markdownBlockKeys(listOf(table, MdBlock.Paragraph("tail changes")))
+        assertEquals(first, second)
+    }
 }

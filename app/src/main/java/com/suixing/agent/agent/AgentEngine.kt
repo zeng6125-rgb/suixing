@@ -48,10 +48,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -190,7 +196,7 @@ class ApprovalGate(
     private val settings: SettingsRepository? = null,
     private val scope: CoroutineScope? = null,
 ) {
-    data class Request(val id: String, val toolName: String, val args: String, val sequence: Long = 0)
+    data class Request(val id: String, val toolName: String, val args: String, val sequence: Long = 0, val sourceTitle: String? = null)
 
     private val requestSequence = AtomicLong()
 
@@ -234,7 +240,7 @@ class ApprovalGate(
         }
     }
 
-    suspend fun request(chatId: String, toolName: String, args: String, mode: ApprovalMode): Boolean {
+    suspend fun request(chatId: String, toolName: String, args: String, mode: ApprovalMode, sourceTitle: String? = null): Boolean {
         when (mode) {
             ApprovalMode.AUTO -> return true
             ApprovalMode.DENY -> return false
@@ -245,7 +251,7 @@ class ApprovalGate(
         val id = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Decision>()
         waiters[chatId] = deferred
-        val request = Request(id, toolName, args, requestSequence.incrementAndGet())
+        val request = Request(id, toolName, args, requestSequence.incrementAndGet(), sourceTitle)
         _pending.update { it + (chatId to request) }
         // 取消/异常时也要摘掉门，否则这个会话的审批门永久残留（issue #54 A-7）。
         val decision = try {
@@ -400,6 +406,7 @@ class AgentEngine(
     private val llm: LlmClient = LlmClient(),
     private val scope: CoroutineScope? = null,
     private val onCompleted: (String) -> Unit = {},
+    private val approvalSourceTitle: String? = null,
 ) {
 
     private val runs = MutableStateFlow<Map<String, RunHandle>>(emptyMap())
@@ -409,6 +416,9 @@ class AgentEngine(
 
     /** The runs in flight right now, keyed by conversation id. */
     val runsFlow: StateFlow<Map<String, RunHandle>> = runs.asStateFlow()
+    private val childStates = MutableStateFlow<Map<String, List<SubagentSnapshot>>>(emptyMap())
+    internal val subagentsFlow = childStates.asStateFlow()
+    internal fun cancelSubagent(chatId: String, id: String): Boolean = runs.value[chatId]?.cancelSubagent(id) ?: false
 
     /**
      * Per-conversation state that outlives its run.
@@ -661,6 +671,8 @@ class AgentEngine(
     init {
         scope?.launch {
             while (isActive) {
+                // Suspend without periodic wakeups until there is a live run again.
+                if (runs.value.isEmpty()) runs.first { it.isNotEmpty() }
                 runs.value.values.forEach { it.tick() }
                 delay(STATS_TICK_MS)
             }
@@ -686,9 +698,11 @@ class AgentEngine(
     suspend fun compressNow(
         history: List<StoredMessage>,
         settings: AppSettings,
+        checkpoints: List<ContextCheckpoint> = emptyList(),
         onCheckpoint: (ContextCheckpoint) -> Unit,
     ): String? {
-        val plan = planCompaction(history) ?: return "消息太少，没有可压缩的内容"
+        val plan = withContext(Dispatchers.Default) { planCompaction(history, checkpoints = checkpoints) }
+            ?: return "没有足够的新增内容可压缩，已有摘要会继续复用"
         val turn = runCatching {
             llm.complete(
                 settings = settings,
@@ -702,8 +716,9 @@ class AgentEngine(
             if (error is CancellationException) throw error
             return "压缩失败：${error.message ?: error.javaClass.simpleName}"
         }
-        val summary = turn.text.trim()
-        if (summary.isBlank()) return "压缩失败：模型没有返回摘要"
+        val attempt = checkedSummary(turn.text, turn.finishReason, plan.transcript.length)
+        if (!attempt.commit) return "压缩未提交：${attempt.why}，已保留原文"
+        val summary = attempt.text
         val first = plan.coveredIds.firstOrNull() ?: return "没有找到可压缩的消息范围"
         val last = plan.coveredIds.lastOrNull() ?: return "没有找到可压缩的消息范围"
         onCheckpoint(
@@ -728,6 +743,9 @@ class AgentEngine(
     ) {
         private val _state = MutableStateFlow<RunState>(RunState.Idle)
         private val completionReported = AtomicBoolean(false)
+        @Volatile private var subagents: SubagentPool? = null
+        private val compactionRetry = CompactionRetryGate()
+        internal fun cancelSubagent(id: String): Boolean = subagents?.cancel(id) ?: false
 
         /** This conversation's state, from the moment it starts to long after it ends. */
         val state: StateFlow<RunState> = _state.asStateFlow()
@@ -1137,14 +1155,10 @@ class AgentEngine(
         // Asked through all() rather than find(): "skill_read is not in the visible set" is the
         // question, and it is the same list the prompt is about to summarise.
         val readable = registry.all().any { it.spec.name == "skill_read" }
-        val skillCatalog = if (readable) skills.catalog(skills.list()) else ""
-        val systemText = systemPrompt(
-            settings,
-            registry,
-            skillCatalog,
-            memory.entries.value,
-            profile.text.value,
-        )
+        val systemText = withContext(Dispatchers.Default) {
+            val skillCatalog = if (readable) skills.catalog(skills.listHeaders()) else ""
+            systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value)
+        }
         breakSystem = systemText.length / 4
         wire += ChatMessage.system(systemText)
 
@@ -1153,7 +1167,7 @@ class AgentEngine(
         // prefix would never match the previous request — which is exactly what the endpoint's
         // prompt cache keys on.
         val window = settings.contextWindowFor(settings.model)
-        val checkpoint = checkpoints.lastOrNull()
+        val checkpoint = withContext(Dispatchers.Default) { reusableCheckpoint(history, checkpoints) }
         val resumeAt = checkpoint?.let { saved -> history.indexOfFirst { it.id == saved.toMessageId } }
         val hasCheckpoint = checkpoint != null && resumeAt != null && resumeAt >= 0
         // **这段纯计算挪出主线程**（issue #36）：`trim` 要对历史做 O(条数) 的 token 估算与列表切片，
@@ -1165,7 +1179,7 @@ class AgentEngine(
             if (hasCheckpoint) {
                 // **裁完必须仍有人问的那句话**（issue #37 第一条）：若裁出来的只有一条超大工具结果，
                 // `sanitize` 会把它当孤儿丢掉 ⇒ 请求里没有任何 user，模型答非所问。
-                sanitize(ensureQuestionKept(trim(history.drop(resumeAt!! + 1), window), history))
+                sanitize(ensureQuestionKept(trim(history.drop(resumeAt + 1), window), history))
             } else {
                 // No checkpoint, or one whose message is no longer in the transcript: the transcript is
                 // what decides the prompt, so a checkpoint that no longer lines up is ignored rather
@@ -1173,23 +1187,18 @@ class AgentEngine(
                 sanitize(ensureQuestionKept(trim(history, window), history))
             }
         }
-        if (hasCheckpoint) wire += ChatMessage.system("[上下文摘要] ${checkpoint!!.summary}")
+        if (hasCheckpoint) wire += ChatMessage.system("[上下文摘要] ${checkpoint.summary}")
         // The messages themselves are never removed from the conversation — the usage watermark
         // counts them — which is why the span is found by id and the replay is a slice, not a rewrite.
         // **消息 → wire 的转换也放后台**（issue #36 同类）：每条都要做字符串拼装
         // （工具输出最长 8000 字符/条、一轮几十条），而它每轮都在主线程上跑一遍。
-        // 转换是纯函数，`wire`/`spans` 的写入仍在主线程、顺序不变。
-        val wireChunks = withContext(Dispatchers.Default) {
-            replayed.map { message ->
-                val one = ArrayList<ChatMessage>(1)
-                appendToWire(one, message, settings)
-                message.id to one
+        // This block exclusively owns wire/spans until it returns; no per-message list/Pair.
+        withContext(Dispatchers.Default) {
+            for (message in replayed) {
+                val from = wire.size
+                appendToWire(wire, message, settings)
+                spans += WireSpan(message.id, from, wire.size)
             }
-        }
-        for ((id, chunk) in wireChunks) {
-            val from = wire.size
-            wire.addAll(chunk)
-            spans += WireSpan(id, from, wire.size)
         }
 
         // A ceiling of 0 (or less) means the user set none: the loop then ends only when
@@ -1234,7 +1243,7 @@ class AgentEngine(
             // 也才知道去哪取（见 spillToolOutput）。落盘失败时同样会写明"截断了且没存下来"。
             // 切 IO：这一行会 mkdirs + writeText + 列目录清理，原来是跑在 runLoop 的
             // 调用线程上（`viewModelScope` = Main.immediate）⇒ 大输出（>8000 字）时主线程卡一下。
-            val spill = withContext(Dispatchers.IO) { spillToolOutput(
+            val spill = if (result.output.length <= MAX_TOOL_OUTPUT) null else withContext(Dispatchers.IO) { spillToolOutput(
                 dir = File(Core.appContext.filesDir, "toolout"),
                 tool = call.name,
                 output = result.output,
@@ -1283,11 +1292,48 @@ class AgentEngine(
             // **工具目录在 run 开始时定一次**（issue #44 第三项，见循环内的说明）。
             // 放 Default 上拼：`enabledPlugins()` 在 TTL 过期时扫目录 + 逐插件 readText +
             // JSON 解析，`breakTools` 的 parameters.toString() 是全量序列化 —— 都不该在 Main。
+            val delegationAllowed = settings.subagentsEnabled && settings.approvalMode != ApprovalMode.DENY &&
+                !registry.isHidden("spawn_agent")
+            if (delegationAllowed) {
+                subagents = SubagentPool(CoroutineScope(currentCoroutineContext() + Dispatchers.Default),
+                    parallelism = settings.subagentParallelism,
+                    onChanged = { states -> childStates.update { it + (chatId to states) } }) { task ->
+                    SUBAGENT_EXECUTION_SLOTS.withPermit {
+                        val child = AgentEngine(llm = llm, approvalSourceTitle = "$title · 子任务：${task.name}")
+                        // A sibling cancellation relay can abort blocking HTTP/shell work as soon
+                        // as a parent stop or timeout cancels this task, rather than waiting for IO.
+                        val relay = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
+                            try { awaitCancellation() } finally { child.cancel(task.id) }
+                        }
+                        try {
+                            var failure: String? = null
+                            val childSettings = settings.copy(subagentsEnabled = false, autoProfile = false,
+                                maxToolRounds = if (settings.maxToolRounds > 0) minOf(settings.maxToolRounds, 12) else 12,
+                                systemPrompt = settings.systemPrompt + "\n\n" + CHILD_AGENT_INSTRUCTIONS)
+                            val input = buildString {
+                                append("Task:\n").append(task.task)
+                                if (task.context.isNotBlank()) append("\n\nRelevant context:\n").append(task.context)
+                            }
+                            val messages = child.startRun(chatId = task.id, title = task.name,
+                                history = listOf(StoredMessage(id = UUID.randomUUID().toString(), role = Roles.USER, text = input)),
+                                settings = childSettings,
+                                registry = registry.excluding(SUBAGENT_TOOL_NAMES + setOf("todo_read", "todo_write")),
+                                capabilities = capabilities, skills = skills, memory = memory, profile = profile, gate = gate,
+                                onEvent = { event -> if (event is AgentEvent.Failed) failure = event.message })
+                            failure?.let { error(it) }
+                            messages.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }?.text
+                                ?: "子任务结束，未返回文字结果。"
+                        } finally { relay.cancel() }
+                    }
+                }
+            }
             val frozenTable = withContext(Dispatchers.Default) {
-                val builtinSpecs = registry.all().map { it.spec } + COMPRESS_CONTEXT_SPEC
+                val delegationSpecs = if (delegationAllowed) SUBAGENT_SPECS.filterNot { registry.isHidden(it.name) } else emptyList()
+                val builtinSpecs = registry.all().map { it.spec } +
+                    listOf(COMPRESS_CONTEXT_SPEC).filterNot { registry.isHidden(it.name) } + delegationSpecs
                 val pluginSpecs = PluginRuntime.enabledPlugins()
                 val toolSpecs = builtinSpecs +
-                    PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet())
+                    PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet()).filterNot { registry.isHidden(it.name) }
                 ToolTable(
                     pluginSpecs,
                     toolSpecs,
@@ -1344,10 +1390,9 @@ class AgentEngine(
                 // 缓存前缀的稳定性比"中途装个插件立刻能用"更值钱。
                 val pluginSpecs = frozenTable.plugins
                 val toolSpecs = frozenTable.specs
-                // 接线点 B（HOST-DEV §5）：这一轮的 hooks 快照，与工具表同一次读盘。分发处每条
-                // 调用都过一遍 [PluginRuntime.preExecute] —— 每轮读一次目录是刻意的（热插拔），
-                // 每条调用查一次 hook 是纯函数、不碰磁盘。
-                val hooks = PluginRuntime.hooksFor(pluginSpecs)
+                // Hooks follow the same frozen plugin snapshot as the tool catalog. Flatten once
+                // on Default; each invocation still evaluates every applicable hook.
+                val hooks = frozenTable.hooks
                 // The frozen table's estimate is computed once on Default, including
                 // JSON serialization. No signature allocation or schema work per round.
                 breakTools = frozenTable.estimatedTokens
@@ -1673,6 +1718,9 @@ class AgentEngine(
             // rebuilt: the original rides along as the cause, so nothing about it is lost.
             throw if (retriesThisRound > 0) LlmException(message, error) else error
         } finally {
+            withContext(NonCancellable) { subagents?.close() }
+            subagents = null
+            childStates.update { it - chatId }
             inFlight = null
             // Nothing is published here. The run has already said how it ended, and that
             // answer is what the conversation's state flow keeps for whoever still reads it.
@@ -1921,6 +1969,8 @@ class AgentEngine(
 
         val older = wire.subList(1, cut).filter { it.role != ROLE_SYSTEM }
         if (older.isEmpty()) return
+        val prefixChars = wire.subList(1, cut).sumOf { promptMessageChars(it) }
+        if (!compactionRetry.allows(cut, prefixChars, asked)) return
 
         val attempt = try {
             onBusy(true)
@@ -1940,7 +1990,13 @@ class AgentEngine(
         // **摘要提交门槛**（issue #44 第七项规则 2）：只提交「完整、有界、且实际变小」的摘要。
         // 截断 / 空转 / 反而更大的摘要一律不提交 —— 保留原文，下一轮再试。宁可这一轮不压缩
         // （wire 大一点），也不能拿半截摘要换掉模型真正做过的那些事。
-        if (!attempt.commit) return
+        if (!attempt.commit) {
+            compactionRetry.rejected(cut, prefixChars)
+            contextNote = "压缩未提交：${attempt.why}，保留原文"
+            tick()
+            return
+        }
+        compactionRetry.reset()
         val summary = attempt.text
         if (summary.isBlank()) return
 
@@ -2021,7 +2077,7 @@ class AgentEngine(
 
     /** One call to the same endpoint, asking only for prose: no tools, no streaming UI. */
     private suspend fun summarize(older: List<ChatMessage>, settings: AppSettings): SummaryAttempt {
-        val transcript = older.joinToString("\n") { renderForSummary(it) }
+        val transcript = withContext(Dispatchers.Default) { older.joinToString("\n") { renderForSummary(it) } }
         val turn = llm.complete(
             settings = settings,
             messages = listOf(
@@ -2031,21 +2087,7 @@ class AgentEngine(
             tools = emptyList(),
             onCall = { inFlight = it },
         )
-        val text = turn.text.trim()
-        if (text.isBlank()) return SummaryAttempt(text, false, "模型没有返回摘要")
-        // **截断的摘要不提交**：`finish_reason == length` 说明它还没写完就被长度上限掐断，
-        // 后半截丢了。这种摘要覆盖掉原文 = 上下文凭空少一段。
-        if (turn.finishReason == "length") {
-            return SummaryAttempt(text, false, "摘要被长度上限截断")
-        }
-        // **没变小的摘要通常不提交**：压缩的目的是让 wire 变小，摘要反而更大就只有成本没有收益。
-        // 但**原文很短时不挡**（借鉴 ≠ 照搬 Eta 的"必须缩小才提交"）：一段 200 字的原文摘要出
-        // 300 字很正常，若一律拒绝，这类会话就永远压不掉、wire 一直涨到爆窗口 —— 那比"压缩
-        // 收益小"糟得多。短原文下摘要的绝对开销极小，收下它换来的"这段历史有记录"更值。
-        if (transcript.length >= SHRINK_CHECK_MIN_CHARS && text.length * 2 >= transcript.length) {
-            return SummaryAttempt(text, false, "摘要没有比原文更小")
-        }
-        return SummaryAttempt(text, true)
+        return checkedSummary(turn.text, turn.finishReason, transcript.length)
     }
 
     private fun renderForSummary(message: ChatMessage): String = buildString {
@@ -2290,6 +2332,17 @@ class AgentEngine(
         // asked for in the same breath do not run either.
         if (cancelled.get()) return null
         val argsPreview = call.arguments.take(600)
+        if (registry.isHidden(call.name)) return ToolOutcome(call,
+            ToolResult.failure("当前人设已禁用此工具"), 0, argsPreview)
+        if (call.name in SUBAGENT_TOOL_NAMES) {
+            val pool = subagents
+            if (pool == null || registry.isHidden(call.name)) return ToolOutcome(call,
+                ToolResult.failure("当前运行未启用此子任务工具"), 0, argsPreview)
+            onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
+            val started = System.currentTimeMillis()
+            val result = pool.execute(call.name, parseArgs(call.arguments))
+            return ToolOutcome(call, result, System.currentTimeMillis() - started, argsPreview)
+        }
         // 「压缩上下文」是引擎自己的虚拟工具（用户：「要有压缩上下文的指令工具」）：不进 registry
         // （没有要跑的实现、没有能力档），在分发前拦截 —— 置 [compressNow]，本轮边界上由
         // [compressContext] 消费。它不碰手机也不发网络请求，所以不发 ToolStarted、不进 TouchFx
@@ -2376,7 +2429,7 @@ class AgentEngine(
                 // deny 仍拦（不弹窗，只让那次调用失败并说明原因）；ASK/DENY 档与
                 // 「总是允许」照旧。要守卫插件真拦人，把审批档设成「每次询问」。
                 val mode = settings.approvalMode
-                if (!gate.request(chatId, call.name, argsPreview, mode)) {
+                if (!gate.request(chatId, call.name, argsPreview, mode, approvalSourceTitle)) {
                     ToolResult.failure("用户拒绝了这次调用。")
                 } else {
                     val startedAt = System.currentTimeMillis()
@@ -2390,7 +2443,9 @@ class AgentEngine(
                     // （Main）继续发事件、写回写，所以 `ToolStarted` → `ToolFinished` 的次序、
                     // 以及 `onEvent` 的线程假设全部不变。
                     runCatching {
-                        withContext(Dispatchers.IO) { runner(parseArgs(call.arguments)) }
+                        withContext(Dispatchers.IO) {
+                            SHARED_TOOL_EXECUTION.run(call.name) { runner(parseArgs(call.arguments)) }
+                        }
                     }.getOrElse { error ->
                         if (error is CancellationException) throw error
                         ToolResult.failure("工具执行异常：${error.message ?: error::class.java.simpleName}")
@@ -2416,6 +2471,11 @@ class AgentEngine(
         append(SYSTEM_PROMPT_BASE)
         append("\n\n## Available tools\n")
         append(registry.promptSummary())
+        if (settings.subagentsEnabled && settings.approvalMode != ApprovalMode.DENY && !registry.isHidden("spawn_agent")) append(
+            "\n\nFor substantial independent tasks, you may use spawn_agent to work in parallel. " +
+                "Keep simple work local. Pass only relevant context: children do not inherit this conversation. " +
+                "Use wait_agents to collect results, verify them, and cancel unneeded children. " +
+                "Children are cancelled when this run ends; never finish while required results are outstanding.")
         // 接线点 A（HOST-DEV §5）：让模型知道插件工具也能调，命名与内置一致。
         // 这句是**固定文案**：插件列表是实时变的，而 systemPrompt() 不是 suspend（读盘要 suspend），
         // 所以不在这里读插件；没有启用插件时多说一句也无害（模型看不到那个名字就不会去调）。
@@ -2454,6 +2514,13 @@ class AgentEngine(
     }
 
     companion object {
+        private val SUBAGENT_EXECUTION_SLOTS = Semaphore(3)
+        private val SHARED_TOOL_EXECUTION = SharedToolExecution()
+        private const val CHILD_AGENT_INSTRUCTIONS =
+            "You are an independent subagent. Work only on the assigned task and supplied context; " +
+                "you do not see the parent conversation. Respect all inherited tool and approval restrictions. " +
+                "Do not delegate or modify the parent's task board. Return a concise final result with evidence, " +
+                "changed paths when relevant, and any remaining limitation. The parent verifies your result."
         /** How much of the streamed answer the console's live line keeps, in characters. */
         private const val LIVE_LINE_CHARS = 40
 
@@ -2516,22 +2583,6 @@ class AgentEngine(
  * function and has to price images the same way.
  */
 private const val IMAGE_TOKENS = 1000
-
-/**
- * 摘要「必须比原文更小」这条门槛的**生效下限**（字符数）。
- *
- * 低于这个长度的原文不做缩小检查：短原文摘要出更长的内容很正常，若一律拒绝，这类会话就
- * 永远压不掉、wire 一直涨到爆窗口。见 [summarize] 里的说明。
- */
-private const val SHRINK_CHECK_MIN_CHARS = 2000
-
-/**
- * 一次摘要尝试的结果（issue #44 第七项规则 2）。
- *
- * [commit] 为 false 表示这份摘要**不该提交**：被截断或空转的摘要是半成品，把它写进 wire 会把
- * 原文丢掉、换成一段读不懂的话，比不压缩更糟。调用方据此保留原文，下一轮再试。
- */
-private data class SummaryAttempt(val text: String, val commit: Boolean, val why: String = "")
 
 /**
  * 「压缩上下文」虚拟工具的名字（用户：「要有压缩上下文的指令工具」）。
@@ -2684,4 +2735,6 @@ private class ToolTable(
     val plugins: List<PluginSpec>,
     val specs: List<ToolSpec>,
     val estimatedTokens: Int,
-)
+) {
+    val hooks = PluginRuntime.hooksFor(plugins)
+}

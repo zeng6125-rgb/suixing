@@ -4,6 +4,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import okio.Buffer
+import okio.Source
+import okio.Timeout
+import okio.buffer
 
 /**
  * SSE 多行 JSON 的括号配平。
@@ -16,6 +20,48 @@ import org.junit.Test
  * 「闭合后又来一个新事件」、以及"拆行位置落在括号/引号中间"。
  */
 class SseFramesTest {
+    @Test fun `bounded line reader preserves CRLF blank lines and final unterminated payload`() {
+        val source = Buffer().writeUtf8("data: first\r\n\r\ndata: final")
+        assertEquals("data: first", readSseLine(source))
+        assertEquals("", readSseLine(source))
+        assertEquals("data: final", readSseLine(source))
+        assertEquals(null, readSseLine(source))
+    }
+
+    @Test fun `newline-less gateway fails after bounded reading instead of buffering indefinitely`() {
+        var bytesRead = 0L
+        val source = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                val count = minOf(byteCount, 8192L)
+                sink.writeUtf8("x".repeat(count.toInt()))
+                bytesRead += count
+                return count
+            }
+            override fun timeout(): Timeout = Timeout.NONE
+            override fun close() = Unit
+        }.buffer()
+        try {
+            readSseLine(source)
+            org.junit.Assert.fail("newline-less oversized line must fail")
+        } catch (expected: LlmException) {
+            assertTrue(expected.message!!.contains("SSE"))
+            assertTrue(bytesRead <= MAX_SSE_LINE_BYTES + 8192L)
+        } finally {
+            source.close()
+        }
+    }
+    @org.junit.Test fun `malformed frames are bounded including the multi-line separator`() {
+        checkSseFrameSize(0, 1_048_576)
+        checkSseFrameSize(100, 1_048_475)
+        for ((pending, next) in listOf(0 to 1_048_577, 100 to 1_048_476, Int.MAX_VALUE to Int.MAX_VALUE)) {
+            try {
+                checkSseFrameSize(pending, next)
+                org.junit.Assert.fail("oversized frame must fail")
+            } catch (expected: LlmException) {
+                org.junit.Assert.assertTrue(expected.message!!.contains("SSE"))
+            }
+        }
+    }
 
     /** 把 chunks 依次喂进同一个状态（配平是跨行的），返回每步是否触发。 */
     private fun feed(vararg chunks: String): List<Boolean> {

@@ -8,6 +8,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FoldHandoverTest {
+    @Test fun `single pass fold identities preserve raw run ordinals and cumulative calls`() {
+        val firstCall = ToolLine("run-shell", "{}", false, true, 0)
+        val source = listOf(
+            Part.Thinking("legacy", 0, 0, ""),
+            Part.Tools(listOf(firstCall, firstCall)),
+            Part.Thinking("named", 0, 0, "fallback"),
+            Part.Thinking("legacy again", 0, 0, ""),
+            Part.Text("body"),
+            Part.Tools(listOf(firstCall)),
+        )
+        val expected = source.indices.map { processFoldSlot(source, it, "fallback") }
+        assertEquals(expected, processFoldSlots(source, "fallback"))
+        assertEquals(listOf("fallback:0", "fallback:tools:0", "fallback:0", "fallback:1", null,
+            "fallback:tools:2"), expected)
+    }
+
+    @Test fun `fold identity indexing reads a long process once`() {
+        var reads = 0
+        val source = object : AbstractList<Part>() {
+            override val size = 10_000
+            override fun get(index: Int): Part {
+                reads++
+                return Part.Thinking("think", 0, 0, "run")
+            }
+        }
+        val slots = processFoldSlots(source, "run")
+        assertEquals(10_000, reads)
+        assertEquals("run:9999", slots.last())
+    }
+
     private val think = Part.Thinking("already read", 10, 20, "run")
     private val call = ToolLine("run-shell", "{}", false, true, 0)
     private val parts = listOf(think, Part.Tools(listOf(call)), Part.Text("answer"))
@@ -43,7 +73,6 @@ class FoldHandoverTest {
     @Test fun `explicit summary close overrides both open descendants and reading latch`() {
         val state = ReasoningExpansion("chat", mutableMapOf())
         state.set(thinkSlot(parts, 0, "run"), true)
-        state.retainForReading(parts, "run", expandTools = true)
         state.set(summarySlot("run"), false)
         assertFalse(state.summaryExpanded(parts, "run", streaming = true))
         assertFalse(state.summaryExpanded(parts, "run", streaming = false))
@@ -51,21 +80,17 @@ class FoldHandoverTest {
         assertTrue(state.summaryExpanded(parts, "run", streaming = false))
     }
 
-    @Test fun `reading preserves open defaults across completion without overwriting manual close`() {
+    @Test fun `reading does not count as manually opening a fold`() {
         val state = ReasoningExpansion("chat", mutableMapOf())
-        val toolSlot = processFoldSlot(parts, 1, "run")!!
-        state.set(toolSlot, false)
-        state.retainForReading(parts, "run", expandTools = true)
-        assertEquals(true, state.stored(thinkSlot(parts, 0, "run")))
-        assertEquals(false, state.stored(toolSlot))
-        assertTrue(state.summaryExpanded(parts, "run", streaming = false))
+        assertTrue(state.summaryExpanded(parts, "run", streaming = true))
+        assertNull(state.stored(thinkSlot(parts, 0, "run")))
+        assertFalse(state.summaryExpanded(parts, "run", streaming = false))
     }
 
-    @Test fun `reading the current live think preserves it with history default closed`() {
+    @Test fun `legacy reading latch cannot prevent automatic completion collapse`() {
         val state = ReasoningExpansion("chat", mutableMapOf())
-        state.retainForReading(listOf(think), "run", expandTools = false)
-        assertEquals(true, state.stored(thinkSlot(listOf(think), 0, "run")))
-        assertTrue(state.summaryExpanded(listOf(think, Part.Text("done")), "run", streaming = false))
+        state.set("run:reading", true)
+        assertFalse(state.summaryExpanded(parts, "run", streaming = false))
     }
 
     @Test fun `different conversations and runs never share manual choices`() {

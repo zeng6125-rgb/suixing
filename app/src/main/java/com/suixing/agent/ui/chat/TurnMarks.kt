@@ -10,6 +10,27 @@ package com.suixing.agent.ui.chat
 
 internal object TurnMarks {
 
+    fun probeOffset(viewportStart: Int, viewportEnd: Int): Float =
+        viewportStart + (viewportEnd - viewportStart) * PROBE_FRACTION
+
+    /** Native normal-list offsets: a negative scroll offset places the item below its start. */
+    fun navigationScrollOffset(viewportStart: Int, viewportEnd: Int): Int =
+        -kotlin.math.floor(probeOffset(viewportStart, viewportEnd).toDouble()).toInt()
+
+    /** Main list indices are chronological and include the load-earlier row. */
+    fun currentAtRow(
+        physicalIndex: Int,
+        turnIndices: List<Int>,
+        drawnTurns: Int,
+        totalTurns: Int,
+    ): Int {
+        val newest = totalTurns.coerceAtLeast(1)
+        if (turnIndices.isEmpty() || drawnTurns <= 0) return newest
+        val inWindow = turnIndices.indexOfLast { it <= physicalIndex }.coerceAtLeast(0)
+        val oldest = (totalTurns - drawnTurns + 1).coerceAtLeast(1)
+        return (oldest + inWindow).coerceIn(1, newest)
+    }
+
     /**
      * @param firstVisibleFed `/…/` 喂序里的首可见项下标（0 = 最底 = 最新）
      * @param feedPrefix 喂序前缀（临时行数）

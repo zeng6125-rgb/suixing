@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** The three privilege tiers the agent can act through. */
 enum class Tier {
@@ -143,6 +145,7 @@ data class CapabilityState(
 class CapabilityHub(
     private val context: Context,
     private val settings: SettingsRepository,
+    private val beforeInitialProbe: suspend () -> Unit = {},
 ) {
     private val _state = MutableStateFlow(CapabilityState())
     val state: StateFlow<CapabilityState> = _state.asStateFlow()
@@ -160,6 +163,7 @@ class CapabilityHub(
 
     /** Outlives any screen: probing must not be tied to a composable's lifetime. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val refreshMutex = Mutex()
 
     private val rootProbe = RootProbe(scope, known = {
         _state.value.let { if (it.rootProbed) it.root else null }
@@ -209,10 +213,17 @@ class CapabilityHub(
             }
             return
         }
+        // Cached capability facts still appear immediately. Only the first automatic
+        // su probe yields to startup; an explicit tool or manual probe never waits here.
+        beforeInitialProbe()
         ensureRootProbed()
     }
 
     fun refresh() {
+        scope.launch { refreshMutex.withLock { refreshNow() } }
+    }
+
+    private fun refreshNow() {
         // External queries run once, outside the retryable StateFlow update.
         val accessibility = SuixingAccessibilityService.isConnected()
         val installed = ShizukuManager.isInstalled(context)

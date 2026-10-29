@@ -2,6 +2,7 @@ package com.suixing.agent.ui.settings
 
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ProviderConfig
+import com.suixing.agent.data.withoutEmptyProviders
 
 /**
  * The pure half of 模型与生成: which provider a draft edit addresses, and whether the draft
@@ -16,41 +17,11 @@ internal fun AppSettings.mapProvider(id: String?, block: (ProviderConfig) -> Pro
     return copy(providers = providers.map { if (it.id == id) block(it) else it })
 }
 
-/**
- * True when the two settings differ anywhere that the save button is responsible for. Two
- * fields are left out on purpose:
- *
- * - the endpoint triple, which a chip tap rewrites in the draft without writing to disk (a
- *   hand edit there is what [endpointHandEdited] reports);
- * - provider names, which are written through a beat after typing stops (see the name field).
- *   Counting them would light up 「有未保存的改动」 on every keystroke, and that subtitle
- *   appearing and disappearing is what made the page's title look like it was shaking.
+/** Only the endpoint triple is excluded: selection rewrites it without editing a provider.
+ * Names, protocols, model choices and all other fields share the explicit save boundary.
  */
-internal fun AppSettings.differsOutsideEndpoint(other: AppSettings): Boolean {
-    val mine = copy(baseUrl = other.baseUrl, apiKey = other.apiKey, model = other.model).withoutNames()
-    return mine != other.withoutNames()
-}
-
-/**
- * 与 [differsOutsideEndpoint] 等价，但 [other] 由调用方预先 `withoutNames()` 过 ——
- * 草稿每改一个字都会重算 dirty，而 `other` 在键入期间不变：把它的规范化结果
- * `remember` 起来，就省掉每次的两份 `AppSettings` 拷贝 + 一份 providers 列表。
- */
-internal fun AppSettings.differsOutsideEndpointNormalized(otherNormalized: AppSettings): Boolean {
-    val mine = copy(
-        baseUrl = otherNormalized.baseUrl,
-        apiKey = otherNormalized.apiKey,
-        model = otherNormalized.model,
-    ).withoutNames()
-    return mine != otherNormalized
-}
-
-/** 供调用方 `remember(stored)` 复用：把 provider 名字抹掉（见 [withoutNames]）。 */
-internal fun AppSettings.normalizedForDirty(): AppSettings = withoutNames()
-
-/** The same settings with every provider name blanked, so names can be compared out. */
-private fun AppSettings.withoutNames(): AppSettings =
-    copy(providers = providers.map { it.copy(name = "") })
+internal fun AppSettings.differsOutsideEndpoint(other: AppSettings): Boolean =
+    copy(baseUrl = other.baseUrl, apiKey = other.apiKey, model = other.model) != other
 
 /**
  * True when the draft holds a hand edit to the endpoint triple (address, key, model).
@@ -79,12 +50,43 @@ internal fun endpointHandEdited(form: AppSettings, stored: AppSettings, provider
  * conversation with no address and no model — it would fail on its next turn instead of
  * keeping the endpoint the user is still on. The rest of the draft saves as usual.
  */
-internal fun AppSettings.forSaving(current: AppSettings): AppSettings =
-    if (baseUrl.isBlank()) {
-        copy(baseUrl = current.baseUrl, apiKey = current.apiKey, model = current.model)
+internal fun AppSettings.forSaving(current: AppSettings): AppSettings {
+    val clean = withoutEmptyProviders()
+    return if (clean.baseUrl.isBlank() || clean.model.isBlank()) {
+        clean.copy(baseUrl = current.baseUrl, apiKey = current.apiKey, model = current.model, protocol = current.protocol)
     } else {
-        this
+        clean
     }
+}
+
+/** A supplier added on this page exists only until explicitly saved; switching/leaving discards it. */
+internal fun AppSettings.discardUncommittedProviders(saved: AppSettings, selectedId: String?): AppSettings {
+    val committed = saved.providers.mapTo(HashSet()) { it.id }
+    val kept = providers.filter { it.id in committed }
+    if (kept.size == providers.size) return this
+    val selectedWasDraft = selectedId != null && selectedId !in committed && providers.any { it.id == selectedId }
+    val sharedModels = kept.flatMap { it.models + it.enabled }.toSet()
+    val discardedModels = providers.filter { it.id !in committed }
+        .flatMap { it.models + it.enabled }.toSet() - sharedModels
+    fun restoreDiscarded(values: Map<String, Int>, original: Map<String, Int>): Map<String, Int> {
+        if (discardedModels.isEmpty()) return values
+        return values.toMutableMap().apply {
+            for (id in discardedModels) {
+                val previous = original[id]
+                if (previous == null) remove(id) else put(id, previous)
+            }
+        }
+    }
+    return copy(
+        providers = kept,
+        baseUrl = if (selectedWasDraft) saved.baseUrl else baseUrl,
+        apiKey = if (selectedWasDraft) saved.apiKey else apiKey,
+        model = if (selectedWasDraft) saved.model else model,
+        protocol = if (selectedWasDraft) saved.protocol else protocol,
+        modelContexts = restoreDiscarded(modelContexts, saved.modelContexts),
+        modelMaxTokens = restoreDiscarded(modelMaxTokens, saved.modelMaxTokens),
+    )
+}
 
 /**
  * [model]'s window in the settings map — the one place the key is decided, shared by every

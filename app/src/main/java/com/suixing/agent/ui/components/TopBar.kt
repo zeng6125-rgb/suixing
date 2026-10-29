@@ -240,6 +240,8 @@ fun PageTopBar(
                 //
                 // 历史（别再退回补丁）：这里曾用 `.offset(y = if (subtitle != null) 9.dp else 0.dp)`
                 // 上下挪整列 —— 那是补偿数字，还写反过一次符号（−9 让标题比不改更歪 18dp）。
+                // Read only during placement: a font/layout change requests placement,
+                // without subscribing the header composition to its measured geometry.
                 var opticalShift by remember(title, subtitle) { mutableFloatStateOf(0f) }
                 Box(Modifier.weight(1f)) {
                     Text(

@@ -1,6 +1,9 @@
 
 package com.suixing.agent.ui.chat
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
@@ -69,28 +72,17 @@ internal fun scrubberRowFor(y: Float, rowPx: Float, pitchPx: Float, rows: Int): 
 }
 
 /**
- * The turns the strip draws: [SCRUBBER_VISIBLE] lines ending at the newest turn, slid up so the
- * turn being read is on them, and — while a finger has pulled past the top line — slid up
- * [unlocked] turns further, so the turns above the window can be reached.
- *
- * The window is a fixed number of lines that moves rather than one that grows. Growing it would
- * change the rail's height mid-drag, and the rail is centred: every line would shift down by
- * half of what was added, under a finger that is holding one of them. Sliding keeps every line
- * where it is and changes only which turn each one names, so the line under the finger is always
- * the line the label is on.
+ * The rail has up to twelve slots, each representing one real, consecutive loaded turn.
+ * Short conversations have no placeholders. A full window slides around the turn being read.
  */
 
 /** The rail's width, and so every row's hit width: the longest line the rail draws. */
 internal val SCRUBBER_RAIL = 24.dp
 
-/**
- * One row's box. Shorter than the old 18dp because the finger is matched to the nearest line
- * instead of having to land inside a box — the rows no longer need to be big enough to hit,
- * only far enough apart to tell apart.
- */
-internal val SCRUBBER_ROW = 14.dp
+/** A longer rhythm with the same twelve slots and shared drawing/hit geometry. */
+internal val SCRUBBER_ROW = 8.dp
 
-/** Air between rows: half the old 6dp, which was most of what made the strip read as sparse. */
+/** Twelve slots occupy 129dp; spacing also drives drag selection and the floating label. */
 internal val SCRUBBER_GAP = 3.dp
 
 /** How far the finger travels before a press turns into a drag. Aether's own threshold. */
@@ -107,8 +99,8 @@ internal val SCRUBBER_EXIT_TOLERANCE = 28.dp
 internal const val SCRUBBER_LONG_PRESS_MS = 220L
 
 /** The label's fade in, and its fade out once the finger lifts. Aether's own pair. */
-internal const val SCRUBBER_LABEL_IN_MS = 150
-internal const val SCRUBBER_LABEL_OUT_MS = 110
+internal const val SCRUBBER_LABEL_IN_MS = 90
+internal const val SCRUBBER_LABEL_OUT_MS = 100
 
 /**
  * How long the label takes to glide to the line the finger has reached. Deliberately the same
@@ -179,7 +171,7 @@ private class ScrubberScales(private val scope: CoroutineScope) {
         entry.target = scale
         entry.job?.cancel()
         entry.job = scope.launch {
-            entry.animation.animateTo(scale, tween(110, easing = SCRUBBER_EASING))
+            entry.animation.animateTo(scale, spring(dampingRatio = 0.82f, stiffness = 850f))
             // A newer target can have replaced this job; only a completed return to rest
             // releases the row. Leaving a row never snaps its scale back in the same frame.
             if (scale == 1f && entry.target == 1f && entries[turn] === entry) {
@@ -201,9 +193,8 @@ private class ScrubberScales(private val scope: CoroutineScope) {
  *
  * Only the newest few turns are drawn, one line each — no sampling, so every line is a real
  * turn and a tap lands where the eye aims — and the window slides up when the user is
- * reading something older than it, so "where am I" is always on screen. The turn being read
- * is the longest line and the only brand-coloured one; turns already read keep a weaker
- * brand tint, and the ones still ahead are outline grey.
+ * reading something older than it, so "where am I" is always on screen. The current turn
+ * is strongest; width and tint fall away symmetrically on either side of it.
  *
  * Dragging to the top line unlocks what is above it: the window slides up for as long as the
  * finger keeps pushing past the rail's top edge, one turn per row of travel, so a long
@@ -240,47 +231,37 @@ internal fun TurnScrubber(
     labelOf: (Int) -> String,
     onJumpTo: (Int) -> Unit,
 ) {
-    // 一轮都没有 ⇒ 不画（只有一轮时导航条也没有意义）。
-    if (totalTurns <= 1) return
+    // Draw only existing loaded turns, up to twelve.
+    if (totalTurns <= 0) return
     val scheme = MaterialTheme.colorScheme
     // How far above the window the finger has pulled the strip — the turns it has unlocked in
     // this conversation. Kept for as long as the chat is open, dropped the moment another is
     // opened: a deep conversation unlocked in one chat must not decide what the next one shows.
     var unlocked by remember(conversationId) { mutableIntStateOf(0) }
-    // **长按展开更多条**（用户：长按应显示更多轮次导航条）。状态不保存：重开应用/切会话都重置。
-    var expanded by remember(conversationId) { mutableStateOf(false) }
-    // The last few turns, always including the one being read: sampling the whole
-    // conversation into five evenly spaced lines is what made "which line is which turn"
-    // impossible to tell, and made the jump land somewhere the user did not point at.
+    // Keep consecutive real turns around the current one; every enabled line has one target.
     //
     // **current() 现在返回全局轮号**（1 基），与 [scrubberWindow] 的坐标一致。
     val currentTurn = current()
-    val window = remember(totalTurns, drawnTurns, currentTurn, unlocked, expanded) {
+    val window = remember(totalTurns, drawnTurns, currentTurn, unlocked) {
         scrubberWindow(
             totalTurns = totalTurns,
             currentTurn = currentTurn,
             drawnTurns = drawnTurns,
             unlocked = unlocked,
-            // 长按展开：把**已加载的全部**轮次都画出来（Aether 的 `navigating` 分支同理）。
-            forceRows = if (expanded) drawnTurns else 0,
         )
     }
-    val rows = remember(window) { window.toList() }
+    val rows = remember(window) { scrubberSlots(window) }
+    if (rows.isEmpty()) return
     val rowCount = rows.size
-    // 窗口可能为空而会话不止一轮：元信息已知有 N 轮、正文还没读回来（drawnTurns = 0）时
-    // [scrubberWindow] 返回空区间。少了这一行会**崩溃** —— 下面的
-    // `selectionRow.coerceIn(0, rowCount - 1)` 在 rowCount = 0 时是 coerceIn(0, -1)，
-    // Kotlin 直接抛 IllegalArgumentException（Cannot coerce value to an empty range）。
-    if (rowCount == 0) return
     // A gesture outlives the recomposition it started in, so it reads the turns and the
     // jump through these instead of closing over values a new message has replaced.
     val latestRows by rememberUpdatedState(rows)
     val latestJump by rememberUpdatedState(onJumpTo)
     // Which row the finger is on, which row the label names, and whether the label is out.
     // All three are cleared when the finger lifts, so no frame can leave the rail stuck open.
-    var pressRow by remember { mutableIntStateOf(-1) }
-    var selectionRow by remember { mutableIntStateOf(0) }
-    var shown by remember { mutableStateOf(false) }
+    var pressRow by remember(conversationId, rowCount) { mutableIntStateOf(-1) }
+    var selectionRow by remember(conversationId, rowCount) { mutableIntStateOf(0) }
+    var shown by remember(conversationId, rowCount) { mutableStateOf(false) }
     val selected = selectionRow.coerceIn(0, rowCount - 1)
     val animationScope = rememberCoroutineScope()
     val rowScales = remember(conversationId, animationScope) { ScrubberScales(animationScope) }
@@ -307,9 +288,9 @@ internal fun TurnScrubber(
     // Animated, not computed straight from the row: dragging the finger down three lines then
     // has the label glide to each one instead of teleporting, which is what makes the drag read
     // as moving along the strip rather than as three separate taps.
-    val labelDyPx by animateFloatAsState(
+    val labelDyPx = animateFloatAsState(
         targetValue = selected * (rowPx + gapPx) + rowPx / 2f - railHeightPx / 2f,
-        animationSpec = tween(SCRUBBER_SELECT_MS, easing = SCRUBBER_EASING),
+        animationSpec = spring(dampingRatio = 0.9f, stiffness = 900f),
         label = "scrubber_label_dy",
     )
 
@@ -331,7 +312,7 @@ internal fun TurnScrubber(
                 // One handler for the whole rail instead of a clickable per row: the finger
                 // is matched to the nearest line, so a press between two lines still lands
                 // on one of them and a drag can cross rows without dropping the gesture.
-                .pointerInput(Unit) {
+                .pointerInput(conversationId, rowCount) {
                     val hitRowPx = SCRUBBER_ROW.toPx()
                     val hitGapPx = SCRUBBER_GAP.toPx()
                     val hitPitchPx = SCRUBBER_ROW.toPx() + SCRUBBER_GAP.toPx()
@@ -342,9 +323,10 @@ internal fun TurnScrubber(
                         val railRows = latestRows
                         if (railRows.isEmpty()) return@awaitEachGesture
                         val down = awaitFirstDown(requireUnconsumed = false)
-                        down.consume()
                         val startRow =
                             scrubberRowFor(down.position.y, hitRowPx, hitPitchPx, railRows.size)
+                        if (railRows[startRow] <= 0) return@awaitEachGesture
+                        down.consume()
                         pressRow = startRow
                         selectionRow = startRow
                         shown = false
@@ -368,8 +350,6 @@ internal fun TurnScrubber(
                                 // finger lifts. This is the "press and hold to see it" half.
                                 waiting = false
                                 shown = true
-                                // 长按到点：顺带把导航条展开到最多条数（松手即恢复）。
-                                expanded = true
                                 continue
                             }
                             val change = event.changes.firstOrNull { it.id == down.id }
@@ -397,7 +377,7 @@ internal fun TurnScrubber(
                                     hitRowPx,
                                     hitPitchPx,
                                     railRows.size,
-                                )
+                                ).coerceAtLeast(railRows.indexOfFirst { it > 0 }.coerceAtLeast(0))
                                 // On the top line the strip gives ground: a finger that keeps
                                 // pushing up unlocks the turns above the window, one row of
                                 // travel at a time, so the whole conversation is reachable in
@@ -429,11 +409,8 @@ internal fun TurnScrubber(
                         // the lift did nothing at all. Which is what "导航条条数没增加" is: the
                         // strip had unlocked a line or two and then thrown the jump away.
                         //
-                        // Measured here rather than read from the composition's own rail height:
-                        // this handler is keyed on Unit and never restarts, so a window that has
-                        // since gained or lost a turn would be judged against a stale box. It
-                        // cannot: the window is a fixed number of lines that slides, so its size —
-                        // the only thing this needs — is the same at the lift as at the press.
+                        // The handler restarts if the slot count changes; a sliding full window
+                        // keeps its gesture. Exit bounds use the same rows as the initial hit test.
                         val railBottomPx =
                             hitRowPx * railRows.size + hitGapPx * (railRows.size - 1)
                         val cancelled = dragged && (
@@ -442,7 +419,6 @@ internal fun TurnScrubber(
                                 pointer.y > railBottomPx + exitPx
                             )
                         pressRow = -1
-                        expanded = false
                         shown = false
                         // The strip recentres on wherever the jump lands: the unlocked turns
                         // were the ones this drag could reach, and the window goes back to
@@ -452,51 +428,57 @@ internal fun TurnScrubber(
                         // [latestRows], not the snapshot the hit test was matched against: a
                         // drag that unlocked its way up the conversation is aimed at a turn
                         // that snapshot never held.
-                        if (!cancelled) latestRows.getOrNull(destination)?.let(latestJump)
+                        if (!cancelled) latestRows.getOrNull(destination)?.takeIf { it > 0 }?.let(latestJump)
                     }
                 },
             verticalArrangement = Arrangement.spacedBy(SCRUBBER_GAP),
-            horizontalAlignment = Alignment.End,
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             rows.forEachIndexed { row, turn ->
-                // `turn` 是**全局轮号**（1 基）：比当前轮早的是"已读过"，等于当前轮的是"正在读"。
-                val read = turn < currentTurn
-                val active = turn == currentTurn
-                val chosen = shown && row == selected
+                val exists = turn > 0
+                val active = exists && turn == currentTurn
+                val chosen = exists && shown && row == selected
+                val distance = abs(turn.toLong() - currentTurn)
+                // Animate visual properties inside a fixed slot; hit boxes and
+                // conversation positioning never participate in these springs.
+                val tickWidth = animateFloatAsState(
+                    when {
+                        active -> 20f
+                        exists && distance == 1L -> 16f
+                        exists && distance <= 3L -> 12f
+                        else -> 8f
+                    },
+                    spring(dampingRatio = 0.86f, stiffness = 800f), label = "turn_width")
+                val tickHeight = animateFloatAsState(
+                    if (active) 3f else 2f,
+                    spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
+                val tickColor = animateColorAsState(
+                    when {
+                        !exists -> scheme.outlineVariant.copy(alpha = 0.35f)
+                        chosen || active -> scheme.primary
+                        distance == 1L -> scheme.primary.copy(alpha = 0.48f)
+                        distance <= 3L -> scheme.primary.copy(alpha = 0.32f)
+                        else -> scheme.primary.copy(alpha = 0.22f)
+                    },
+                    tween(120, easing = SCRUBBER_EASING), label = "turn_color")
                 Box(
-                    modifier = Modifier.height(SCRUBBER_ROW),
+                    modifier = Modifier.width(SCRUBBER_RAIL).height(SCRUBBER_ROW),
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(
                         Modifier
-                            // The turn being read is the longest and the only full-strength
-                            // brand line. It used to fall into the "not reached" branch and come
-                            // out grey, which is exactly backwards.
-                            // **细条，宽度再收一档**（用户：「条宽比例缩小一下先」）：
-                            // 当前轮 / 已读 / 未读 = 20 / 16 / 10 dp（原 24/20/12 的等比例缩小），
-                            // 高度不动（3/2dp 已经是最细的可读档）。
-                            .width(if (active) 20.dp else if (read) 16.dp else 10.dp)
-                            .height(if (active) 3.dp else 2.dp)
-                            // Grown out of its right edge: the enlargement then never walks the
-                            // line off the 4dp edge gap, and never re-lays-out the rows under a
-                            // finger that is still dragging.
+                            // A centred fixed drawing surface keeps both ends balanced while
+                            // visual widths animate, without changing the rail's hit geometry.
+                            .width(20.dp)
+                            .height(3.dp)
                             .graphicsLayer {
                                 val scale = rowScales.value(turn)
-                                scaleX = scale
-                                scaleY = scale
-                                transformOrigin = TransformOrigin(1f, 0.5f)
+                                scaleX = minOf(tickWidth.value * scale, SCRUBBER_RAIL.value) / 20f
+                                scaleY = tickHeight.value / 3f * scale
+                                transformOrigin = TransformOrigin.Center
                             }
                             .clip(ScrubTickShape)
-                            .background(
-                                when {
-                                    // Lit while it is the one being previewed, so dragging
-                                    // onto a turn that has not been read yet still shows up.
-                                    chosen -> scheme.primary
-                                    active -> scheme.primary
-                                    read -> scheme.primary.copy(alpha = 0.45f)
-                                    else -> scheme.outlineVariant
-                                },
-                            ),
+                            .drawBehind { drawRect(tickColor.value) },
                     )
                 }
             }
@@ -507,18 +489,23 @@ internal fun TurnScrubber(
                 .align(Alignment.CenterEnd)
                 // Layout-neutral on purpose: the label hangs off the rail's left edge and must
                 // not widen it, or the strip would drift out over the bubbles it clears today.
-                .offset { IntOffset(-(railPx + labelGapPx).roundToInt(), labelDyPx.roundToInt()) },
+                .graphicsLayer {
+                    translationX = -(railPx + labelGapPx)
+                    translationY = labelDyPx.value
+                },
             enter = fadeIn(tween(SCRUBBER_LABEL_IN_MS)) + scaleIn(
-                initialScale = 0.96f,
-                animationSpec = tween(190, easing = SCRUBBER_EASING),
+                initialScale = 0.94f,
+                transformOrigin = TransformOrigin(1f, 0.5f),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = 800f),
             ),
             exit = fadeOut(tween(SCRUBBER_LABEL_OUT_MS)) + scaleOut(
-                targetScale = 0.98f,
-                animationSpec = tween(130, easing = SCRUBBER_EASING),
+                targetScale = 0.97f,
+                transformOrigin = TransformOrigin(1f, 0.5f),
+                animationSpec = tween(100, easing = SCRUBBER_EASING),
             ),
         ) {
             Text(
-                text = latestRows.getOrNull(selected)?.let(labelOf).orEmpty(),
+                text = latestRows.getOrNull(selected)?.takeIf { it > 0 }?.let(labelOf).orEmpty(),
                 // labelMedium rather than labelSmall, and a roomier box: the bubble floats
                 // over the transcript for as long as a finger holds the rail, so it has to be
                 // read at a glance. Still one line, and still capped at SCRUBBER_LABEL_MAX, so

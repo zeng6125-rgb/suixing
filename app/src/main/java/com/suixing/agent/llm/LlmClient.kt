@@ -281,7 +281,14 @@ internal fun samplingFields(settings: AppSettings): List<Pair<String, kotlinx.se
         if (settings.sendTopP) add("top_p" to JsonPrimitive(settings.topP))
     }
 
-class LlmClient(private val http: OkHttpClient = defaultClient()) {
+class LlmClient(http: OkHttpClient? = null) {
+
+    // Core constructs the engine before the first Activity. TLS/provider setup belongs
+    // to the IO request path, not that constructor; injected clients retain their identity.
+    private val defaultHttp: OkHttpClient by lazy { http ?: defaultClient() }
+
+    /** Local setup only: no DNS lookup, connection, or credentials are used. */
+    internal fun prepare() { defaultHttp }
 
     /** Built on first use: only endpoints that need it pay for the relaxed socket factory. */
     private val relaxedHttp: OkHttpClient by lazy { insecureClient() }
@@ -292,7 +299,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
      * `allowInsecureTls` opts those endpoints into the relaxed client.
      */
     private fun clientFor(settings: AppSettings): OkHttpClient =
-        if (settings.allowInsecureTls) relaxedHttp else http
+        if (settings.allowInsecureTls) relaxedHttp else defaultHttp
 
     /**
      * Ask the endpoint which models it serves (`GET {base}/models`).
@@ -382,7 +389,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
     ): AssistantTurn = withContext(Dispatchers.IO) {
         val protocol = settings.protocol
         val url = endpoint(settings.baseUrl, protocol)
-        val payload = requestBody(settings, messages, tools, protocol)
+        val payloadText = requestBody(settings, messages, tools, protocol).toString()
         val builder = Request.Builder()
             .url(url)
             .header("Content-Type", "application/json")
@@ -393,7 +400,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
             if (name.isNotBlank()) builder.header(name, value)
         }
         val request = builder
-            .post(payload.toString().toRequestBody(JSON_MEDIA))
+            .post(payloadText.toRequestBody(JSON_MEDIA))
             .build()
 
         val maxRetries = if (settings.retryOnFailure) {
@@ -431,7 +438,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                             val dump = buildJsonObject {
                                 put("code", JsonPrimitive(response.code))
                                 put("response", JsonPrimitive(errBody.take(8_000)))
-                                put("request", JsonPrimitive(payload.toString().take(2_000_000)))
+                                put("request", JsonPrimitive(payloadText.take(2_000_000)))
                             }
                             java.io.File(app.filesDir, "last-http-error.json").writeText(dump.toString())
                         }
@@ -491,7 +498,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         acceptChunk(chunk)
                     }
                     while (true) {
-                        val line = source.readUtf8Line() ?: break
+                        val line = readSseLine(source) ?: break
                         if (line.isEmpty()) {
                             // 事件边界：把攒着的多行 data 拼成一条再解析。
                             if (pending.isNotEmpty()) {
@@ -504,6 +511,7 @@ class LlmClient(private val http: OkHttpClient = defaultClient()) {
                         if (!line.startsWith("data:")) continue
                         val data = line.removePrefix("data:").trim()
                         if (data.isEmpty()) continue
+                        checkSseFrameSize(pending.length, data.length)
                         // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
                         // connection open afterwards would otherwise leave this loop blocked until the
                         // read timeout — or the 10-minute call cap — with the answer already in hand.

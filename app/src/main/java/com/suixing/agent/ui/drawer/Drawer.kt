@@ -39,7 +39,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -147,7 +147,7 @@ internal fun Drawer(
     // 而抽屉里其实只画了 5 行会话。
     val drawerAssistant by remember {
         Core.settings.flow.map { settings -> settings.activeAssistant() }
-    }.collectAsState(initial = null)
+    }.collectAsStateWithLifecycle(initialValue = null)
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

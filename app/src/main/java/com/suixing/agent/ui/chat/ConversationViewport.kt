@@ -26,6 +26,7 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.ViewportBookmark
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -82,18 +83,25 @@ internal class ConversationViewport(val conversationId: String, val bookmark: Vi
     // One target transcript, with opacity finishing before its small spatial settle. Reads
     // stay in graphicsLayer; changing this clock never recomposes or remeasures the rows.
     val entrance = Animatable(0f)
+    val navigation = NavigationMotion()
     var prepared by mutableStateOf(false)
     var presented by mutableStateOf(false)
     var followOverride by mutableStateOf(false)
 }
 
 internal object ConversationEntrance {
-    const val DURATION_MS = 240
+    const val DURATION_MS = 300
+    const val TRAVEL_DP = 18f
     private val fade = CubicBezierEasing(0f, 0f, 0.2f, 1f)
-    private val settle = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
-    fun alpha(progress: Float): Float = fade.transform((progress * 2f).coerceIn(0f, 1f))
-    fun remainingTravel(progress: Float): Float = 1f - settle.transform(progress.coerceIn(0f, 1f))
+    // Opacity settles in 100ms. A critically damped spatial response then eases
+    // into its resting place, with no bounce or scaling of already-readable text.
+    fun alpha(progress: Float): Float = fade.transform((progress * 3f).coerceIn(0f, 1f))
+    fun remainingTravel(progress: Float): Float {
+        val t = progress.coerceIn(0f, 1f)
+        val end = 1f - 9f * exp(-8f)
+        return (1f - (1f - (1f + 8f * t) * exp(-8f * t)) / end).coerceIn(0f, 1f)
+    }
 }
 
 /** A new row projection matters even when a streamed/edited row keeps its list index. */
@@ -285,6 +293,7 @@ internal fun BindConversationViewport(
                 acknowledged = true
             }
         }
+        Core.startup.contentPresented()
     }
 
     LaunchedEffect(viewport, scroll) {

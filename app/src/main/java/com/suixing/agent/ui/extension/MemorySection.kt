@@ -17,7 +17,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.minimumInteractiveComponentSize
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -230,7 +230,7 @@ private fun MemoryEditorDialog(
                     label = { Text("名称") },
                     singleLine = true,
                     enabled = draft.isNew,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
@@ -240,7 +240,7 @@ private fun MemoryEditorDialog(
                     label = { Text("内容") },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 120.dp, max = 260.dp),
+                        .heightIn(min = 96.dp, max = 260.dp),
                 )
                 failure?.let { message ->
                     Spacer(Modifier.height(8.dp))

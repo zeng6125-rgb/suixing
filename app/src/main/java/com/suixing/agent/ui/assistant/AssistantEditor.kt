@@ -39,7 +39,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -478,7 +478,7 @@ private fun PromptSection(draft: Assistant, onDraft: (Assistant) -> Unit) {
             onValueChange = { onDraft(draft.copy(systemPrompt = it)) },
             // 150 → 120：提示词框也是"太高"被点名的之一，而这里同样用**下限**——写多长它长多高，
             // 永远不会因为框小而把字裁掉。
-            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp),
             placeholder = { Text("留空则沿用「设置」里的系统提示词") },
         )
     }

@@ -25,7 +25,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -87,6 +87,7 @@ private const val OTHER_GROUP = "其它"
  * MCP 前缀归到 [MCP_GROUP]，没声明分组的归到 [OTHER_GROUP]，两组都排在最后。
  */
 private fun groupOf(name: String): String = when {
+    name in com.suixing.agent.agent.SUBAGENT_TOOL_NAMES -> "子任务"
     name.startsWith(McpManager.MCP_PREFIX) -> MCP_GROUP
     else -> Core.tools.groupOf(name).ifBlank { OTHER_GROUP }
 }
@@ -409,7 +410,7 @@ private fun ToolsTab() {
     val tools = remember(servers) {
         // 引擎的虚拟工具不在注册表里（compress_context 在分发前被拦截，见 AgentEngine），
         // 但模型看得到它，所以页面上也要有这一行 —— 否则用户会觉得工具列表不全。
-        Core.tools.all() + virtualTool(COMPRESS_CONTEXT_SPEC)
+        Core.tools.all() + virtualTool(COMPRESS_CONTEXT_SPEC) + com.suixing.agent.agent.SUBAGENT_SPECS.map(::virtualTool)
     }
     var query by rememberSaveable { mutableStateOf("") }
 
@@ -439,8 +440,8 @@ private fun ToolsTab() {
                 // 有自己的最小高度，把外层约束压到 44dp 之后放不下，字的下缘（带降部的汉字/字母）
                 // 就被裁掉 —— 0.8.76 收紧密度时压的就是这一处，用户看到的截断即它。
                 // 密度靠下面那些行内边距与间距拿，不靠裁这一个唯一有输入文字的控件。
-                // 字号与最小高度按设置页的统一规格：bodyMedium(14sp) + heightIn(min = 52.dp)。
-                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                // 字号与最小高度按设置页的统一规格：bodyMedium(14sp) + heightIn(min = 48.dp)。
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 singleLine = true,
                 label = { Text("搜索工具名") },
             )

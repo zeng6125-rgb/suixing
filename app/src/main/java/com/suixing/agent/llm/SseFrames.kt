@@ -1,5 +1,30 @@
 package com.suixing.agent.llm
 
+import okio.BufferedSource
+
+// A UTF-16 code unit needs at most three UTF-8 bytes. Allow the data: prefix,
+// then enforce the stricter character bound after decoding. No line can cause
+// unbounded buffering before that check, even if a gateway never sends a newline.
+internal const val MAX_SSE_LINE_BYTES = 3L * 1_048_576L + 16L
+
+internal fun readSseLine(source: BufferedSource): String? {
+    val newline = source.indexOf('\n'.code.toByte(), 0L, MAX_SSE_LINE_BYTES + 1L)
+    if (newline >= 0L) return source.readUtf8LineStrict(MAX_SSE_LINE_BYTES)
+    if (source.buffer.size > MAX_SSE_LINE_BYTES) {
+        throw LlmException("流式响应无法解析：单行 SSE 数据过大，端点格式可能不兼容")
+    }
+    // A final event need not end in LF. indexOf has reached EOF here; preserve
+    // readUtf8Line's final-line behavior instead of treating ordinary EOF as overflow.
+    return if (source.buffer.size == 0L) null else source.readUtf8(source.buffer.size)
+}
+
+/** Bound malformed or oversized events before adding them to the pending buffer. */
+internal fun checkSseFrameSize(pendingChars: Int, nextChars: Int) {
+    if (pendingChars.toLong() + nextChars + (if (pendingChars > 0) 1 else 0) > 1_048_576L) {
+        throw LlmException("流式响应无法解析：单个 SSE 事件超过 1 MiB 字符上限，端点格式可能不兼容")
+    }
+}
+
 /**
  * SSE 帧的**括号配平** —— 判断「一个完整的 JSON 刚结束」。
  *

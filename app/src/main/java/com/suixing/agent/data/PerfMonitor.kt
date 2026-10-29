@@ -72,10 +72,13 @@ class PerfMonitor(private val file: File) {
     private val lock = Any()
 
     private val records = ArrayDeque<PerfRecord>()
+    private var loaded = false
 
     /** 从磁盘载入；坏文件当作空，不让监测本身把应用带崩。 */
     fun load() {
         synchronized(lock) {
+            if (loaded) return
+            loaded = true
             records.clear()
             if (!file.exists()) return
             val text = runCatching { file.readText() }.getOrNull() ?: return
@@ -92,6 +95,7 @@ class PerfMonitor(private val file: File) {
     /** 记一轮，超过上限就丢最旧的。 */
     fun record(entry: PerfRecord) {
         synchronized(lock) {
+            load()
             records.addLast(entry)
             while (records.size > MAX_RECORDS) records.removeFirst()
             persist()
@@ -100,11 +104,13 @@ class PerfMonitor(private val file: File) {
 
     /** 最近的记录，最新在最前。 */
     fun recent(limit: Int = 50): List<PerfRecord> = synchronized(lock) {
+        load()
         List(limit.coerceIn(0, records.size)) { index -> records[records.lastIndex - index] }
     }
 
     /** 顶部几个数字。没有任何记录时全 0，而不是编一个数。 */
     fun summary(limit: Int = 50): PerfSummary = synchronized(lock) {
+        load()
         val count = limit.coerceAtLeast(1).coerceAtMost(records.size)
         val window = List(count) { index -> records[records.size - count + index] }
         if (window.isEmpty()) return PerfSummary()
@@ -136,6 +142,7 @@ class PerfMonitor(private val file: File) {
 
     fun clear() {
         synchronized(lock) {
+            loaded = true
             records.clear()
             runCatching { file.delete() }
         }

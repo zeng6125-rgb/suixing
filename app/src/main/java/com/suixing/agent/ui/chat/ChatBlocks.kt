@@ -170,6 +170,7 @@ internal val LocalTypewriter = compositionLocalOf { true }
  */
 @Composable
 internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
+    val position = LocalTranscriptPosition.current
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     return this
@@ -181,7 +182,10 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
                 Color.Transparent
             },
         )
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        .clickable(interactionSource = interaction, indication = null) {
+            position?.pauseForUserChange()
+            onClick()
+        }
 }
 
 /**
@@ -195,152 +199,32 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
  */
 internal val LocalLiveRowLag = compositionLocalOf { false }
 
-/**
- * 折叠块的展开/收起：**纯高度动画**。
- *
- * 不用 `AnimatedVisibility(expandVertically)` 是因为这里要按内容自然高度逐帧写 progress，
- * 且展开与收起共用一套裁剪。滚动不在这里做 —— 转录是底锚（reverseLayout），index 0 的
- * 卡片长高天然向上、底边不动；旧版在这里逐帧 `dispatchRawDelta` 同步列表，两处抢同一份
- * 列表才是"先向下、再向上"回弹的来源，已随底锚一起删掉。
- *
- * 展开/收起一律有动画（0.8.319 起不再按「是否在读历史」区分：那个 signal 的唯一
- * 作用变成了「上翻时把正在跑的动画打断重启」，已删除）。
- */
-/**
- * ③ **收尾按实测位移对账**：逐帧补偿用的是推算高度，遇到外层约束（钳位、`weight`、嵌套滚动）
- * 就会多补。这里用 `positionInRoot` 量出来的真实位移补差值：逐帧补偿正确时它是空操作，
- * 有偏差时它正好是那份差值。
- */
-private fun reconcileRevealTop(
-    outer: androidx.compose.foundation.lazy.LazyListState?,
-    before: Float,
-    after: Float,
-) {
-    if (outer == null || !outer.layoutInfo.reverseLayout || !outer.canScrollBackward) return
-    if (before.isNaN() || after.isNaN()) return
-    val drift = after - before
-    if (abs(drift) > 1f) outer.dispatchRawDelta(-drift)
-}
-
+/** One monotonic height animation; the transcript owns scrolling and anchoring. */
 @Composable
 private fun RevealHeight(
     visible: Boolean,
     durationMs: Int,
     content: @Composable () -> Unit,
 ) {
-    // 外层流式行正在做滞后补偿时，这里只动高度、不碰滚动（见 [LocalLiveRowLag]）。
-    // **必须经 `rememberUpdatedState` 读**（评审 M1）：帧循环所在的 `LaunchedEffect(visible)`
-    // 只以 `visible` 为 key，局部 `val` 变了**不会重启协程** ⇒ 读到的是动画开始那一刻的值。
-    // 后果：钉住期间（外层已把高度钉死、补偿必须为 0）它仍是旧值 false ⇒ 帧循环继续
-    // `dispatchRawDelta(comp)`，把内容按剩余补偿量推走 —— 正是 #17 要治的那份漂移。
-    val suppressOuterCompensation by rememberUpdatedState(LocalLiveRowLag.current)
-    var progress by remember { mutableFloatStateOf(if (visible) 1f else 0f) }
-    // 内容的自然高度（px）。普通数组而不是 State：只在动画循环里读，不参与组合。
-    val natural = remember { intArrayOf(0) }
-    val outer = LocalChatListState.current
-    // **这个块在根坐标系里的 y**（issue #22）：补偿量不再靠"推算长了多少"，而是量
-    // "动画前后这个块实际移动了多少"。任何布局约束（`heightIn(max)`、嵌套滚动、`weight`）
-    // 让实际高度 ≠ 自然高度时，推算都会错，测量不会。
-    //
-    // 用普通数组而不是 State：它**每帧**写一次，State 每写一次都要发一次快照通知
-    // （TODO #29 列的嫌疑项之一）。数组读出来就是最新值，语义与 State 一致。
-    val topInRoot = remember { floatArrayOf(Float.NaN) }
-
+    val fraction = remember { androidx.compose.animation.core.Animatable(if (visible) 1f else 0f) }
+    val position = LocalTranscriptPosition.current
     LaunchedEffect(visible) {
-        val target = if (visible) 1f else 0f
-        val start = progress
-        if (start == target) return@LaunchedEffect
-        // 展开的第一帧还没量过内容：先让出一帧让 Layout 量一次，再决定怎么动。
-        var px = natural[0]
-        if (px <= 0) {
-            withFrameNanos { }
-            px = natural[0]
-        }
-        // **一律有动画**（用户：「折叠展开一会有一会没有」）：原来是
-        // `if (pinned) 0 else durationMs` —— 贴底时有动画，往上翻过之后变成瞬间展开，
-        // 于是同一个动作时有时无。位置稳定交给 ChatScroll 的阅读锚点，不再靠"取消动画"。
-        val dur = durationMs
-        if (dur <= 0 || px <= 0) {
-            progress = target
-            return@LaunchedEffect
-        }
-        // ① 先让一帧落地，记下动画开始前的真实位置。
-        withFrameNanos { }
-        val beforeTop = topInRoot[0]
-        // ② 高度动画 + 逐帧补偿，**恢复成原来的 `px * progress` 增量式**。
-        //
-        // 上一版改成"逐帧按实测位移补"，结果第一层也偏了 —— 原因有两个：
-        //  · 丢了 `canScrollBackward` 这个门：贴底时（底锚天然钉住底边）本来就不该补，
-        //    现在照补，于是第一层一展开就把画面推下去；
-        //  · `topInRoot` 是 `onGloballyPositioned` 在**布局之后**写的，动画循环里读到的是
-        //    上一帧的值，补偿永远慢一拍，形成"补一点、位置又变、再补"的回路。
-        // 所以逐帧回到原来的写法（对第一层已验证有效），把"跟实际位移的偏差"交给 ③ 的收尾对账。
-        val begin = withFrameNanos { it }
-        while (true) {
-            val now = withFrameNanos { it }
-            val t = ((now - begin) / 1_000_000f / dur).coerceIn(0f, 1f)
-            val oldH = px * progress
-            progress = start + (target - start) * REVEAL_EASING.transform(t)
-            // **这一帧该补多少**：必须和高度变化落在**同一帧**，晚一拍就一直在抖。
-            //
-            // 真机埋点（0.8.295，153 帧）实测：补偿晚一帧时，块顶边每帧正好偏「一帧的高度增量」
-            // （5~75px），最后靠收尾对账拉回来 ⇒ 观感就是「展开/收起时位置一直在变，最后位置是对的」。
-            //
-            // 补偿量 = 这个块自己的高度增量（0.8.298 起**所有层**都这样）。
-            //
-            // 以前嵌套层要另外算「外层容器的高度增量」，是因为工具条那个容器**有高度上限**：
-            // 容器顶到上限后不再跟着内容长，块自己长高 ≠ 容器长高，差多少得看钳位
-            // （真机实测 0.8.296：跨上限那一帧差 6~7px ⇒ 顶边跳一下）。
-            // 现在工具条的外层改成**普通 Column、没有上限**（用户：工具条不该是虚拟列表，
-            // 也不该被截断）⇒ 容器高度 == 内容高度 ⇒ 容器长高 == 这个块长高 ⇒ 一套算法通吃。
-            val growth = px * progress - oldH
-            val comp = growth
-            // 外层流式行在补时这里绝不能补（否则同一份增量补两次 ⇒ 抖动）。
-            if (!suppressOuterCompensation && comp != 0f && outer != null &&
-                outer.layoutInfo.reverseLayout && outer.canScrollBackward) {
-                outer.dispatchRawDelta(comp)
-            }
-            if (t >= 1f) break
-        }
-        // ③ 收尾按实测位移对账。
-        withFrameNanos { }
-        withFrameNanos { }
-        if (!suppressOuterCompensation) {
-            reconcileRevealTop(outer = outer, before = beforeTop, after = topInRoot[0])
+        val tracked = position?.beginRevealTransition() == true
+        try {
+            fraction.animateTo(if (visible) 1f else 0f,
+                androidx.compose.animation.core.tween(durationMs, easing = REVEAL_EASING))
+        } finally {
+            if (tracked) position?.endRevealTransition()
         }
     }
-
-    // **折叠静止时内容不进组合**（issue #42 补充，13ms 帧的主因）：`Layout(content=)` 原来
-    // 无条件组合内容 —— 折叠只是测量跳过，节点创建照付。用户「历史思考块默认展开=关」⇒
-    // 每张卡里的思考块都是折叠态 ⇒ 每次进视口都白付内层 LazyColumn+snapshotFlow 的组合成本
-    // ⇒ 帧时 13ms > 8.3ms（120Hz 预算）⇒ 掉半帧率的「顿」。展开/收起动画期间（progress>0）
-    // 照常组合，动画不受影响。
-    // Composition observes only mounting/unmounting. Fractional height stays a measure read,
-    // so each animation frame can reuse the unchanged content's composition and constraints.
-    val contentMounted by remember(visible) { derivedStateOf { visible || progress > 0f } }
-    if (contentMounted) Layout(
+    val mounted by remember(visible) { derivedStateOf { visible || fraction.value > 0f } }
+    if (mounted) Layout(
         content = content,
-        modifier = Modifier
-            .fillMaxWidth()
-            // 高度在动画中间时内容会超出自己的框，裁掉，否则它会画到下一行上。
-            // **0.8.285 回退**：0.8.277~0.8.284 曾改用 `graphicsLayer { clip = … }`（为了少一层
-            // saveLayer），但实测展开/收起会出现残影；这里回到最初的 `clipToBounds()`。
-            .clipToBounds()
-            .onGloballyPositioned { coords -> topInRoot[0] = coords.positionInRoot().y },
+        modifier = Modifier.fillMaxWidth().clipToBounds(),
     ) { measurables, constraints ->
-        // 收起且没有动画时不量：一列收起的长思维链没有理由每次都测一遍。
-        if (!visible && progress <= 0f) {
-            layout(constraints.maxWidth, 0) { }
-        } else {
-            val placeable = measurables.first().measure(constraints.copy(minHeight = 0))
-            // **注意：不能用 `constraints.maxHeight` 钳**（issue #24 情况 A 在这里不成立）。
-            // `LazyColumn` 测量子项时，滚动方向给的是 `Constraints.Infinity` —— 两层 RevealHeight
-            // 都嵌在 LazyColumn 的 item 里，所以拿到的 maxHeight 都是无穷大，钳了等于没钳（实测
-            // 加过这行、是空操作，已撤回）。
-            natural[0] = placeable.height
-            val h = (placeable.height * progress).roundToInt().coerceIn(0, placeable.height)
-            layout(constraints.maxWidth, h) { placeable.place(0, 0) }
-        }
+        val child = measurables.first().measure(constraints.copy(minHeight = 0))
+        val height = (child.height * fraction.value).roundToInt().coerceIn(0, child.height)
+        layout(child.width, height) { child.place(0, 0) }
     }
 }
 
@@ -654,43 +538,56 @@ internal class ReasoningExpansion(
         entries["$conversationId:$blockId"] = expanded
     }
 
-    fun hasOpenFold(parts: List<Part>, runId: String): Boolean = parts.indices.any { index ->
-        val slot = processFoldSlot(parts, index, runId) ?: return@any false
+    fun hasOpenFold(parts: List<Part>, runId: String,
+                    slots: List<String?> = processFoldSlots(parts, runId)): Boolean = parts.indices.any { index ->
+        val slot = slots[index] ?: return@any false
         if (stored(slot) == true) return@any true
         val tool = parts[index] as? Part.Tools ?: return@any false
         stored(slot) != false && tool.calls.indices.any { stored("$slot:call:$it") == true }
     }
 
-    fun summaryExpanded(parts: List<Part>, runId: String, streaming: Boolean): Boolean =
-        stored(summarySlot(runId)) ?: (streaming || stored("$runId:reading") == true || hasOpenFold(parts, runId))
+    fun summaryExpanded(parts: List<Part>, runId: String, streaming: Boolean,
+                        slots: List<String?> = processFoldSlots(parts, runId)): Boolean =
+        stored(summarySlot(runId)) ?: (streaming || hasOpenFold(parts, runId, slots))
 
-    /** Reading is a user action too: don't auto-close what was open under that reader. */
-    fun retainForReading(parts: List<Part>, runId: String, expandTools: Boolean) {
-        protectRun(runId)
-        if (stored("$runId:reading") != true) set("$runId:reading", true)
-        parts.forEachIndexed { index, part ->
-            val slot = processFoldSlot(parts, index, runId) ?: return@forEachIndexed
-            if (stored(slot) == null && when (part) {
-                is Part.Thinking -> true
-                is Part.Tools -> expandTools
-                else -> false
-            }) set(slot, true)
-        }
-    }
+
 }
 
 @Stable
 internal class ReasoningViewport {
-    val listState = LazyListState()
+    private val tableChildren = HashMap<Int, ReasoningViewport>()
+    fun table(index: Int): ReasoningViewport = tableChildren.getOrPut(index) { ReasoningViewport() }
+    val prose = TextRevealState()
+    val listState by lazy { LazyListState() }
     val scrollState by lazy { ScrollState(0) }
     var follow by mutableStateOf(true)
 }
+
+internal val LocalProseViewport = compositionLocalOf<ReasoningViewport?> { null }
 
 internal fun summarySlot(runId: String): String = "$runId:summary"
 
 /** Last prose and anything that arrived after it stay in source order outside the process card. */
 internal fun processTailStart(parts: List<Part>): Int =
     parts.indexOfLast { it is Part.Text }.takeIf { it >= 0 } ?: parts.size
+
+/** One pass preserves raw-run think ordinals and the preceding tool-call count. */
+internal fun processFoldSlots(parts: List<Part>, runId: String): List<String?> {
+    val thinks = HashMap<String, Int>()
+    var calls = 0
+    return parts.map { part ->
+        when (part) {
+            is Part.Thinking -> {
+                val ordinal = thinks[part.runId] ?: 0
+                thinks[part.runId] = ordinal + 1
+                "${part.runId.ifEmpty { runId }}:$ordinal"
+            }
+            is Part.Tools -> "$runId:tools:$calls".also { calls += part.calls.size }
+            is Part.Compress -> "$runId:compression:${part.checkpoint.id}"
+            else -> null
+        }
+    }
+}
 
 internal fun processFoldSlot(parts: List<Part>, index: Int, runId: String): String? = when (val part = parts[index]) {
     is Part.Thinking -> thinkSlot(parts, index, runId)
@@ -780,7 +677,7 @@ internal fun ReasoningBlock(
     // a think that is still arriving is open (watching it arrive is why the model was asked to
     // think), and one that has settled follows 历史思考块默认展开. Off, a finished think folds to
     // its header — the reader's tap is the way in, and the table remembers it per conversation.
-    val expanded = expansion.stored(blockId) ?: (runStreaming || expandReasoning)
+    val expanded = expansion.stored(blockId) ?: (streaming || (!runStreaming && expandReasoning))
     // **增量切行**（见 [IncrementalLines]）：文本是逐字变长的，`text.split('\n')` 每一拍都在
     // 全文上重做一次切分 + 分配一个新列表。切分器记住上一次的文本与结果，只切新增那一段。
     val splitter = remember { IncrementalLines() }
@@ -1449,6 +1346,7 @@ internal fun TurnSummary(
     messageId: String = "",
     reasoningExpansion: ReasoningExpansion,
     runId: String = messageId,
+    foldSlots: List<String?>? = null,
     streaming: Boolean = false,
     runningTool: String? = null,
     preserveExpanded: Boolean = false,
@@ -1457,11 +1355,10 @@ internal fun TurnSummary(
     // Metadata only: establish protection before the child viewport lookups compose.
     // Keep it through completion; the next live run releases it into bounded history.
     if (streaming) reasoningExpansion.protectRun(runId)
-    val expanded = reasoningExpansion.summaryExpanded(parts, runId, streaming)
+    val slots = foldSlots ?: remember(parts, runId) { processFoldSlots(parts, runId) }
+    val expanded = reasoningExpansion.summaryExpanded(parts, runId, streaming, slots)
     SideEffect {
-        if (streaming && preserveExpanded) {
-            reasoningExpansion.retainForReading(parts, runId, expandTools)
-        } else if (!streaming && reasoningExpansion.stored(summarySlot(runId)) == null) {
+        if (!streaming && reasoningExpansion.stored(summarySlot(runId)) == null) {
             // Latch the hand-over once. Closing an inner block later must not close
             // the whole process card around the reader as a side effect.
             reasoningExpansion.set(summarySlot(runId), expanded)
@@ -1539,7 +1436,7 @@ internal fun TurnSummary(
         // The prefix and flat tail form one visual sequence. Whether a new prose
         // part moves the former tail here must not add padding above that content.
         Column(
-            modifier = Modifier.padding(top = 6.dp, bottom = if (tailStart > 0) 6.dp else 0.dp),
+            modifier = Modifier.padding(top = if (tailStart > 0) 6.dp else 0.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             // The answer itself is already drawn by the bubble below this card (the settled
@@ -1562,7 +1459,7 @@ internal fun TurnSummary(
                             runStreaming = streaming,
                             // One message can hold several thinks (think → tool → think);
                             // the slot is the run plus the think's place inside it.
-                            blockId = thinkSlot(parts, index, runId),
+                            blockId = slots[index]!!,
                             expansion = reasoningExpansion,
                             reasoningTokens = part.tokens,
                             elapsedMs = part.elapsedMs,
@@ -1582,7 +1479,7 @@ internal fun TurnSummary(
                             ToolBundle(
                                 tools = part.calls,
                                 expansion = reasoningExpansion,
-                                blockId = processFoldSlot(parts, index, runId)!!,
+                                blockId = slots[index]!!,
                                 runningTool = runningTool.takeIf { streaming && index == parts.lastIndex },
                                 startExpanded = expandTools,
                             )
@@ -1593,7 +1490,9 @@ internal fun TurnSummary(
                         // column's 8dp keeps it off its neighbours.
                         // This prose already appeared in the flat tail. Reparenting
                         // it here must never replay its typewriter from an empty string.
-                        is Part.Text -> AssistantProse(part, streaming, typewriter = false)
+                        is Part.Text -> AssistantProse(part, streaming,
+                            readingKey = "$runId:text:$index",
+                            viewport = reasoningExpansion.viewport("$runId:text:$index"))
 
                         // Earlier steering remains at its actual position in the process.
                         is Part.Steer -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -1605,7 +1504,7 @@ internal fun TurnSummary(
 
                         // 压缩块：位置就是它发生的地方（思考 → 工具 → 压缩 → 继续）。
                         is Part.Compress -> CompressionBlock(part.checkpoint, reasoningExpansion,
-                            processFoldSlot(parts, index, runId)!!)
+                            slots[index]!!)
                     }
                 }
             }

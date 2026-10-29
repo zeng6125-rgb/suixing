@@ -18,6 +18,8 @@ object SettingsStyle {
     val RowPadding = 12.dp
     val ControlGap = 12.dp
     val FieldGap = 8.dp
+    // Editing surfaces and action buttons share a minimum, while large text may grow.
+    val ControlHeight = 48.dp
     // 分组标题上下的呼吸：8dp 贴得略紧（用户：「上下的间距再大一点点」）。
     // 各加 2dp（10/10）；行内与卡片内边距一概不动。
     val SectionTop = 10.dp

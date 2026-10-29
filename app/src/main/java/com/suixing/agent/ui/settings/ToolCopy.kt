@@ -7,6 +7,10 @@ package com.suixing.agent.ui.settings
  * 表里没有的名字（新加的内置工具、插件/MCP 工具）回落到英文描述，不会空着。
  */
 private val TOOL_COPY_ZH: Map<String, String> = mapOf(
+    "spawn_agent" to "创建独立上下文的并行子任务",
+    "wait_agents" to "等待并汇总指定子任务结果",
+    "list_agents" to "查看本轮子任务状态和结果",
+    "cancel_agent" to "取消指定子任务",
     // 文件
     "read_file" to "读取文件内容（可分页）",
     "write_file" to "写文件，大文件分段追加",

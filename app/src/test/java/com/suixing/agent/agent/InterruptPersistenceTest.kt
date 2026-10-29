@@ -66,7 +66,7 @@ class InterruptPersistenceTest {
     private fun quietDeps(): Deps = Deps(
         capabilities = mockk { every { state } returns MutableStateFlow(CapabilityState()) },
         skills = mockk {
-            coEvery { list() } returns emptyList<Skill>()
+            coEvery { listHeaders() } returns emptyList<Skill>()
             every { catalog(any()) } returns ""
         },
         memory = mockk {
@@ -76,6 +76,7 @@ class InterruptPersistenceTest {
     )
 
     private fun registryWith(tool: Tool): ToolRegistry = mockk {
+        every { isHidden(any()) } returns false
         every { all() } returns listOf(tool)
         every { find(tool.spec.name) } returns tool
         every { promptSummary() } returns "- ${tool.spec.name}: test"

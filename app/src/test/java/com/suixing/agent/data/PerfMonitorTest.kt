@@ -11,6 +11,14 @@ import java.io.File
  * 性能记录：有界、可落盘、可重载；没数据时不编数字。
  */
 class PerfMonitorTest {
+    @Test fun `a record arriving before background load retains old records and late load is harmless`() {
+        monitor().record(entry(1))
+        val warm = monitor()
+        warm.record(entry(2))
+        warm.load()
+        assertEquals(listOf(2L, 1L), warm.recent().map { it.at })
+        assertEquals(listOf(2L, 1L), monitor().apply { load() }.recent().map { it.at })
+    }
 
     @get:Rule
     val folder = TemporaryFolder()

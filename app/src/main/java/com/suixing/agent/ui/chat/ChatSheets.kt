@@ -20,7 +20,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
+import com.suixing.agent.ui.components.CompactOutlinedTextField as OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ripple
@@ -237,7 +237,7 @@ internal fun EditDialog(
                     onValueChange = { draft = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 140.dp, max = 300.dp),
+                        .heightIn(min = 96.dp, max = 300.dp),
                     textStyle = MaterialTheme.typography.bodyMedium,
                 )
                 if (message.role == Roles.USER) {
