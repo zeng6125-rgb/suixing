@@ -217,6 +217,8 @@ class FloatConsoleService : Service() {
     /** 底部动作行的「停止」按钮：单 run 时显示在「回到对话」右侧，多 run 时隐藏（改走标题行）。 */
     private lateinit var stopButton: TextView
 
+    private var initializing = false
+    private var settingsLoaded = false
     private var attached = false
     private var dotPulse: ValueAnimator? = null
     private var dotRunning: Boolean? = null
@@ -236,6 +238,10 @@ class FloatConsoleService : Service() {
     /** 同一手柄的纵向分量：落点与当时的高（0＝自适应模式下从当前实测高度起算）。 */
     private var resizeStartY = 0f
     private var resizeStartHeight = 0
+    private var resizeMinWidth = 0
+    private var resizeMaxWidth = 0
+    private var resizeMinHeight = 0
+    private var resizeMaxHeight = 0
 
     /**
      * The three settings this service reads synchronously, kept as one readable copy.
@@ -281,11 +287,14 @@ class FloatConsoleService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Core.startup.backgroundStarting()
         markRunning(true)
         ensureChannel()
         startForegroundCompat()
-        if (!::root.isInitialized) {
+        if (!::root.isInitialized && !initializing) {
+            initializing = true
             scope.launch {
+                try {
                 // Read once, as the console appears: the theme belongs to the user, and
                 // re-reading it mid-run would repaint a window they are looking at.
                 palette = paletteFor(Core.settings.current().themeMode)
@@ -299,8 +308,9 @@ class FloatConsoleService : Service() {
                 // first decision is "stay hidden", and the observer above catches the moment the
                 // user leaves — or a run starting while they are away.
                 refreshVisibility()
+                } finally { initializing = false }
             }
-        } else {
+        } else if (::root.isInitialized) {
             refreshVisibility()
         }
         return START_NOT_STICKY
@@ -386,6 +396,8 @@ class FloatConsoleService : Service() {
     }
 
     private fun createWindow() {
+        val oldX = if (::params.isInitialized) params.x else dp(12)
+        val oldY = if (::params.isInitialized) params.y else dp(180)
         val (host, type) = windowHost()
         // The host's own WindowManager: an accessibility overlay belongs to that service's window
         // stack, and every later updateViewLayout goes through the same one.
@@ -403,8 +415,8 @@ class FloatConsoleService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(12)
-            y = dp(180)
+            x = oldX
+            y = oldY
         }
         trace("window host=${if (type == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) "accessibility" else "application"}")
     }
@@ -474,6 +486,8 @@ class FloatConsoleService : Service() {
                 "resident=${settings.resident} whileRunning=${settings.whileRunning} visible=$visible attached=$attached",
         )
         if (visible) attach() else detach()
+        // A transient console has no further work once its final run has ended.
+        if (settingsLoaded && !settings.resident && !running) stopSelf()
     }
 
     /**
@@ -500,9 +514,9 @@ class FloatConsoleService : Service() {
                 if (file.length() > CONSOLE_TRACE_MAX_BYTES) {
                     // 头尾都留：尾部是刚发生的事，而头部那条 `service=start` 是判读的起点 ——
                     // 只留尾部会把起点先丢掉，那正是「球不出现」最需要的一行。
-                    val text = file.readText()
-                    val head = text.take(CONSOLE_TRACE_HEAD_BYTES)
-                    val tail = text.takeLast(CONSOLE_TRACE_KEEP_BYTES)
+                    val bytes = file.readBytes()
+                    val head = utf8Prefix(bytes, CONSOLE_TRACE_HEAD_BYTES)
+                    val tail = utf8Suffix(bytes, CONSOLE_TRACE_KEEP_BYTES)
                     file.writeText("$head\n— 中间已截断（上限 ${CONSOLE_TRACE_MAX_BYTES / 1024}KB）—\n$tail")
                 }
                 file.appendText(entry)
@@ -611,7 +625,14 @@ class FloatConsoleService : Service() {
      */
     private fun clampX(extraWidth: Int = 0) {
         val width = maxOf(root.width, extraWidth, dp(44))
-        params.x = params.x.coerceIn(0, (windowWidthPx() - width).coerceAtLeast(0))
+        params.x = boundedOverlayOffset(params.x, windowWidthPx(), width)
+        clampY()
+    }
+
+    private fun clampY() {
+        // Keep the ball and the expanded panel reachable after a drag or configuration change.
+        val height = if (panel.visibility == View.VISIBLE) maxOf(root.height, dp(44)) else dp(44)
+        params.y = boundedOverlayOffset(params.y, windowHeightPx(), height)
     }
 
     /**
@@ -847,19 +868,23 @@ class FloatConsoleService : Service() {
             resizeStartY = event.rawY
             // 从自适应起步时，用当前实测高度当锚点，这样第一下拖动是连续的、不会跳。
             resizeStartHeight = contentScroll.height
+            resizeMinWidth = panelMinWidth()
+            resizeMaxWidth = panelMaxWidth()
+            resizeMinHeight = contentMinHeight()
+            resizeMaxHeight = contentMaxHeight()
             true
         }
 
         MotionEvent.ACTION_MOVE -> {
             val width = (resizeStartWidth + (event.rawX - resizeStartX)).toInt()
-                .coerceIn(panelMinWidth(), panelMaxWidth())
+                .coerceIn(resizeMinWidth, resizeMaxWidth)
             (panel.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
                 layout.width = width
                 panel.layoutParams = layout
             }
             // 纵向：手柄在底部，手指往下拖＝要看更多内容＝内容区变高。夹在 [min,max] 内。
             val height = (resizeStartHeight + (event.rawY - resizeStartY)).toInt()
-                .coerceIn(contentMinHeight(), contentMaxHeight())
+                .coerceIn(resizeMinHeight, resizeMaxHeight)
             (contentScroll.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
                 layout.height = height
                 contentScroll.layoutParams = layout
@@ -952,6 +977,7 @@ class FloatConsoleService : Service() {
             if (dragging) {
                 params.x = windowStartX + dx.toInt()
                 params.y = windowStartY + dy.toInt()
+                clampY()
                 if (attached) runCatching { windowManager.updateViewLayout(root, params) }
             }
             true
@@ -1018,6 +1044,7 @@ class FloatConsoleService : Service() {
      */
     private fun observeRun() {
         scope.launch {
+            var lastChatId: String? = null
             // The console follows whichever run started last; the map re-emits on every
             // start/stop, so a newer run takes the panel over and an ended one hands it
             // back to the previous run or hides the panel when none is left.
@@ -1029,7 +1056,12 @@ class FloatConsoleService : Service() {
                     // area, unlike the panel, shows every run in flight.
                     val orderedRuns = runs.values.sortedByDescending { it.startedAt }
                     val handle = orderedRuns.firstOrNull()
-                    val state = handle?.state?.value ?: RunState.Idle
+                    if (handle != null) lastChatId = handle.chatId
+                    renderStopArea(orderedRuns)
+                    renderConversation()
+                    refreshVisibility()
+                    val stateFlow = lastChatId?.let { Core.engine.stateOf(it) }
+                    suspend fun renderState(state: RunState) {
                     stateText.text = consoleStatus(state, handle)
                     showStats(state.detail())
                     // The live line is re-read on every state, and the engine ticks its state
@@ -1045,13 +1077,9 @@ class FloatConsoleService : Service() {
                     // reads the same way, so the two never disagree about what a tap will do.
                     sendButton.text = if (state is RunState.Running) "插话" else "发送"
                     setStatusDot(state is RunState.Running)
-                    renderStopArea(orderedRuns)
-                    renderConversation()
-                    // Re-decided here as well, because a run can also start with the app already
-                    // in the background (a reminder): this is the only place that sees one
-                    // appear, and without it the ball would wait for the next trip out of the
-                    // app to show up — or never show for a run that both starts and ends there.
-                    refreshVisibility()
+                    }
+                    if (stateFlow == null) renderState(RunState.Idle)
+                    else stateFlow.collect { renderState(it) }
                 }
         }
         // Which conversation the panel is talking about: the list re-emits on every save, so the
@@ -1064,6 +1092,7 @@ class FloatConsoleService : Service() {
         // also the only writer of [consoleSettings] — the synchronous copy everything else reads.
         scope.launch {
             Core.settings.flow.collect { stored ->
+                settingsLoaded = true
                 consoleSettings = ConsoleSettings(
                     resident = stored.floatingConsole,
                     whileRunning = stored.consoleWhileRunning,

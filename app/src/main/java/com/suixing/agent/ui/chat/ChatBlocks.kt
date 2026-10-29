@@ -49,8 +49,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -348,7 +346,7 @@ internal fun ProcessCard(
             RevealHeight(visible = expanded, durationMs = PROCESS_EXPAND_MS) {
                 Column {
                     // Header and content are one card; the hairline is their only seam.
-                    HorizontalDivider(color = scheme.outlineVariant)
+                    if (expandable) HorizontalDivider(color = scheme.outlineVariant)
                     // The grid the expanded rows share: 12dp of side air, 8dp above and
                     // below, and every row inside lines its own column up to this edge.
                     Column(
@@ -1350,6 +1348,8 @@ internal fun TurnSummary(
     streaming: Boolean = false,
     runningTool: String? = null,
     preserveExpanded: Boolean = false,
+    runningElapsed: androidx.compose.runtime.State<Long>? = null,
+    runElapsedMs: Long = 0L,
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     // Metadata only: establish protection before the child viewport lookups compose.
@@ -1373,29 +1373,11 @@ internal fun TurnSummary(
     // While a run streams, the engine's copy of the endpoint's last report is fresher than
     // anything already stored, so it wins.
     val context = live?.lastPromptTokens?.takeIf { it > 0 } ?: usage?.prompt ?: 0
-    // 运行中的用时**自己走**（与状态行同一口径：从这一轮开始算起，每秒跳一次），
-    // 结算后用端点上报的耗时。原来只取 `live.elapsedMs`，运行中拿到的是 0 ⇒ 标题不显示用时。
-    var elapsedTick by remember { mutableIntStateOf(0) }
-    val runStartedAt = remember { mutableLongStateOf(0L) }
-    LaunchedEffect(streaming) {
-        if (streaming) {
-            if (runStartedAt.longValue == 0L) runStartedAt.longValue = android.os.SystemClock.elapsedRealtime()
-            while (true) {
-                kotlinx.coroutines.delay(1_000)
-                elapsedTick++
-            }
-        } else {
-            runStartedAt.longValue = 0L
-        }
-    }
-    val runningElapsed = if (streaming && runStartedAt.longValue > 0L) {
-        elapsedTick.let { android.os.SystemClock.elapsedRealtime() - runStartedAt.longValue }
-    } else {
-        0L
-    }
-    val elapsedMs = if (runningElapsed > 0L) runningElapsed else (live?.elapsedMs ?: settled?.elapsedMs ?: 0L)
+    // A newly composed/recreated summary must not restart the run's clock.
+    val elapsedMs = if (streaming) runningElapsed?.value ?: 0L
+        else runElapsedMs.takeIf { it > 0L } ?: live?.elapsedMs ?: settled?.elapsedMs ?: 0L
     val headline = buildList {
-        if (elapsedMs > 0) add("用时 ${formatDuration(elapsedMs)}")
+        if (streaming || elapsedMs > 0) add("用时 ${formatRunElapsed(elapsedMs)}")
         if (thoughts.isNotEmpty()) add("思考 ${thoughts.size} 段")
         if (calls.isNotEmpty()) add("工具 ${calls.size} 个")
     }
@@ -1421,12 +1403,6 @@ internal fun TurnSummary(
         expanded = expanded,
         contentBottomPadding = 0.dp,
         onToggle = { reasoningExpansion.set(summarySlot(runId), !expanded) },
-        trailing = {
-            if (live != null) {
-                Spacer(Modifier.width(8.dp))
-                ProcessSpinner(MaterialTheme.colorScheme.primary)
-            }
-        },
     ) {
         // Expanding means the run as it happened: every piece in arrival order —
         // thinking blocks (foldable, full text), tool rows, every stretch of prose

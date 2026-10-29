@@ -1,5 +1,7 @@
 package com.suixing.agent.mcp
 
+import com.suixing.agent.llm.readCancellable
+import com.suixing.agent.llm.sseDataValue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -10,6 +12,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -46,6 +51,8 @@ interface McpTransport {
 
 /** How long a killed MCP process gets to exit on its own before it is killed forcibly. */
 private const val PROCESS_GRACE_MS = 300L
+private val PROCESS_REAPER = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+private const val MAX_MCP_MESSAGE_BYTES = 1_048_576L
 
 /**
  * Spawns a child process and speaks newline-delimited JSON-RPC over its
@@ -62,8 +69,11 @@ class StdioTransport(
 ) : McpTransport {
     override val label: String = command.joinToString(" ")
 
-    private var process: Process? = null
-    private var writer: BufferedWriter? = null
+    @Volatile private var process: Process? = null
+    @Volatile private var writer: BufferedWriter? = null
+    private val lifecycleLock = Any()
+    private var outThread: Thread? = null
+    private var errThread: Thread? = null
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<JsonObject>>()
     private val stderrTail = ArrayDeque<String>()
     private val writeLock = Any()
@@ -72,10 +82,9 @@ class StdioTransport(
      * Only for reaping the child process: [close] has to return at once because it is called from
      * the UI, while a server that ignores SIGTERM can take a moment to die.
      */
-    private val reaper = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     override suspend fun start() = withContext(Dispatchers.IO) {
-        if (process != null) return@withContext
+        synchronized(lifecycleLock) {
+        if (process != null) return@synchronized
         if (command.isEmpty()) throw McpException("stdio 传输需要一条启动命令")
         val builder = ProcessBuilder(command)
         if (environment.isNotEmpty()) builder.environment().putAll(environment)
@@ -89,13 +98,14 @@ class StdioTransport(
         }
         process = started
         writer = BufferedWriter(OutputStreamWriter(started.outputStream, Charsets.UTF_8))
-        Thread({ readLoop(started) }, "mcp-stdio-out").apply {
+        outThread = Thread({ readLoop(started) }, "mcp-stdio-out").apply {
             isDaemon = true
             start()
         }
-        Thread({ errorLoop(started) }, "mcp-stdio-err").apply {
+        errThread = Thread({ errorLoop(started) }, "mcp-stdio-err").apply {
             isDaemon = true
             start()
+        }
         }
     }
 
@@ -119,15 +129,20 @@ class StdioTransport(
     }
 
     override fun close() {
-        val started = process
-        process = null
-        writer = null
-        failAll("MCP 传输已关闭")
+        val (started, readers) = synchronized(lifecycleLock) {
+            val captured = process to listOfNotNull(outThread, errThread)
+            process = null
+            writer = null
+            outThread = null
+            errThread = null
+            failAll("MCP 传输已关闭")
+            captured
+        }
         // The wait does not belong on the caller's thread: `close()` is called from the UI when a
         // server is removed or switched off, and a stdio server that ignores SIGTERM would hold
         // the frame for the whole grace period. Reaping moves to IO — the caller only needs the
         // handles gone, which has already happened above.
-        reaper.launch {
+        PROCESS_REAPER.launch {
             val running = started ?: return@launch
             runCatching {
                 running.destroy()
@@ -136,6 +151,10 @@ class StdioTransport(
             runCatching { running.inputStream.close() }
             runCatching { running.errorStream.close() }
             runCatching { running.outputStream.close() }
+            readers.forEach { thread ->
+                thread.interrupt()
+                runCatching { thread.join(PROCESS_GRACE_MS) }
+            }
         }
     }
 
@@ -170,6 +189,20 @@ class StdioTransport(
                     }
                     continue
                 }
+                if (message["method"] != null && message["id"] != null) {
+                    val reply = buildJsonObject {
+                        put("jsonrpc", "2.0")
+                        put("id", message.getValue("id"))
+                        put("error", buildJsonObject {
+                            put("code", -32601)
+                            put("message", "Client method not supported")
+                        })
+                    }
+                    synchronized(writeLock) {
+                        if (process === started) writer?.apply { write(reply.toString()); newLine(); flush() }
+                    }
+                    continue
+                }
                 val id = (message["id"] as? JsonPrimitive)?.content?.toLongOrNull() ?: continue
                 pending.remove(id)?.complete(message)
             }
@@ -177,7 +210,9 @@ class StdioTransport(
         } catch (_: Exception) {
             // The stream ends when the process dies; the finally below reports it.
         } finally {
-            failAll("MCP 进程已退出：$label${stderrHint()}")
+            synchronized(lifecycleLock) {
+                if (process === started) failAll("MCP 进程已退出：$label${stderrHint()}")
+            }
         }
     }
 
@@ -238,13 +273,12 @@ class HttpTransport(
 
     override suspend fun exchange(message: JsonObject, timeoutMs: Long): JsonObject =
         withContext(Dispatchers.IO) {
-            val body = post(message, timeoutMs)
-            if (body.isBlank()) throw McpException("MCP 服务器返回了空响应：$url")
-            parse(body)
+            post(message, timeoutMs, expectReply = true)
+                ?: throw McpException("MCP 服务器返回了空响应：$url")
         }
 
     override suspend fun notify(message: JsonObject) {
-        withContext(Dispatchers.IO) { post(message, McpTransport.DEFAULT_TIMEOUT_MS) }
+        withContext(Dispatchers.IO) { post(message, McpTransport.DEFAULT_TIMEOUT_MS, expectReply = false) }
     }
 
     override fun close() {
@@ -253,7 +287,7 @@ class HttpTransport(
         client.connectionPool.evictAll()
     }
 
-    private fun post(message: JsonObject, timeoutMs: Long): String {
+    private suspend fun post(message: JsonObject, timeoutMs: Long, expectReply: Boolean): JsonObject? {
         // The caller's deadline is honoured per call. A client built from [client] shares its
         // dispatcher and connection pool, so this neither changes the 180s default nor breaks
         // close(); stdio has always honoured timeoutMs, the HTTP path used to ignore it.
@@ -268,38 +302,56 @@ class HttpTransport(
             .header("Accept", "application/json, text/event-stream")
             .apply { headers.forEach { (key, value) -> header(key, value) } }
             .build()
-        val response = try {
-            callClient.newCall(request).execute()
-        } catch (error: Exception) {
-            throw McpException("请求 MCP 服务器失败：${error.message ?: error::class.java.simpleName}")
-        }
-        response.use {
-            val text = it.body?.string().orEmpty()
-            if (!it.isSuccessful) {
-                throw McpException("MCP 服务器返回 HTTP ${it.code}：${text.take(300)}")
+        return callClient.newCall(request).readCancellable { response ->
+            if (!response.isSuccessful) throw McpException("MCP 服务器返回 HTTP ${response.code}")
+            if (!expectReply) return@readCancellable null
+            val body = response.body ?: throw McpException("MCP 服务器返回了空响应：$url")
+            val source = body.source()
+            val sse = response.header("Content-Type").orEmpty().contains("text/event-stream", true) ||
+                (source.request(1) && source.buffer[0].toInt().toChar() !in "{[ \t\r\n")
+            if (!sse) {
+                if (source.request(MAX_MCP_MESSAGE_BYTES + 1)) throw McpException("MCP 响应超过 1 MiB 上限")
+                val parsed = parseObject(source.readUtf8())
+                if (!isResponseFor(parsed, message["id"])) throw McpException("MCP 响应 id 与请求不匹配")
+                return@readCancellable parsed
             }
-            return text
+            val data = StringBuilder()
+            var total = 0L
+            fun event(): JsonObject? {
+                if (data.isEmpty()) return null
+                val payload = data.toString()
+                data.setLength(0)
+                if (payload == "[DONE]") return null
+                val parsed = parseObject(payload)
+                return parsed.takeIf { isResponseFor(it, message["id"]) }
+            }
+            while (true) {
+                val newline = source.indexOf('\n'.code.toByte(), 0, MAX_MCP_MESSAGE_BYTES + 1)
+                if (newline < 0 && source.buffer.size > MAX_MCP_MESSAGE_BYTES) throw McpException("MCP SSE 行超过 1 MiB 上限")
+                val line = if (newline >= 0) source.readUtf8LineStrict(MAX_MCP_MESSAGE_BYTES)
+                    else if (source.buffer.size > 0) source.readUtf8() else break
+                total += line.length + 1L
+                if (total > 16 * MAX_MCP_MESSAGE_BYTES) throw McpException("MCP SSE 响应超过 16 MiB 上限")
+                if (line.isEmpty()) {
+                    event()?.let { return@readCancellable it }
+                } else if (line.startsWith("data:")) {
+                    val value = sseDataValue(line)
+                    if (data.length.toLong() + value.length + 1 > MAX_MCP_MESSAGE_BYTES) throw McpException("MCP SSE 事件超过 1 MiB 上限")
+                    if (data.isNotEmpty()) data.append('\n')
+                    data.append(value)
+                }
+            }
+            event() ?: throw McpException("MCP SSE 流中没有与请求 id 匹配的响应")
         }
     }
 
-    private fun parse(body: String): JsonObject {
-        val trimmed = body.trim()
-        val looksLikeSse = trimmed.startsWith("event:") || trimmed.startsWith("data:")
-        if (looksLikeSse) {
-            for (line in trimmed.lineSequence()) {
-                if (!line.startsWith("data:")) continue
-                val payload = line.removePrefix("data:").trim()
-                if (payload.isEmpty() || payload == "[DONE]") continue
-                val parsed = runCatching {
-                    McpProtocol.json.parseToJsonElement(payload).jsonObject
-                }.getOrNull() ?: continue
-                return parsed
-            }
-            throw McpException("MCP 服务器返回的 SSE 流里没有 JSON-RPC 消息：${trimmed.take(300)}")
-        }
-        return runCatching { McpProtocol.json.parseToJsonElement(trimmed).jsonObject }
-            .getOrElse { throw McpException("MCP 服务器返回的不是 JSON：${trimmed.take(300)}") }
-    }
+    private fun parseObject(body: String): JsonObject =
+        runCatching { McpProtocol.json.parseToJsonElement(body).jsonObject }
+            .getOrElse { throw McpException("MCP 服务器返回的不是 JSON：${body.take(300)}") }
+
+    private fun isResponseFor(message: JsonObject, id: JsonElement?): Boolean =
+        id != null && message["id"] == id && message["method"] == null &&
+            (message.containsKey("result") || message.containsKey("error"))
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()

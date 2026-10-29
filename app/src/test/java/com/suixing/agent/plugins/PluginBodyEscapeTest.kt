@@ -18,6 +18,15 @@ import org.junit.Test
  *  - `{{count}}` 是数字位置 ⇒ 转义会让 `8` 变成 `"8"`，同样 400。
  */
 class PluginBodyEscapeTest {
+    @Test fun `many placeholders preserve JSON string state across escaped quotes`() {
+        val template = (0 until 200).joinToString(",", "{", "}") { index ->
+            "\"v$index\":\"before\\\"{{q}}\",\"n$index\":{{count}}"
+        }
+        val body = renderBody(template, mapOf("q" to "a\"b", "count" to "8"))
+        val parsed = Json.parseToJsonElement(body).jsonObject
+        assertEquals("before\"a\"b", parsed["v199"]!!.jsonPrimitive.content)
+        assertEquals(JsonPrimitive(8), parsed["n199"])
+    }
 
     private fun renderBody(template: String, vars: Map<String, String>): String =
         PluginRuntime.render(

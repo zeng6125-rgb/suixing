@@ -86,23 +86,22 @@ private fun ModelSelectionAnchor(label: String, value: String, enabled: Boolean,
     }
 }
 
+/** Both connection selectors open the same quiet, anchor-width native menu. */
 @Composable
-private fun ModelChoiceRow(title: String, subtitle: String, chosen: Boolean, onClick: () -> Unit) {
-    Surface(onClick = onClick, shape = MaterialTheme.shapes.small,
-        color = if (chosen) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
-            else MaterialTheme.colorScheme.surface) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Column(Modifier.weight(1f)) {
-                Text(title, style = SettingsStyle.body, fontWeight = FontWeight.Medium,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (subtitle.isNotBlank()) Text(subtitle, style = SettingsStyle.description,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), null, Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.primary)
-        }
-    }
+private fun ModelDropdownMenu(
+    expanded: Boolean, onDismiss: () -> Unit, anchorWidth: Int,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+) {
+    val density = LocalDensity.current
+    DropdownMenu(
+        expanded = expanded, onDismissRequest = onDismiss,
+        modifier = (if (anchorWidth > 0) Modifier.width(with(density) { anchorWidth.toDp() }) else Modifier)
+            .heightIn(max = 360.dp),
+        shape = MaterialTheme.shapes.medium,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 0.dp, shadowElevation = 8.dp,
+        content = content,
+    )
 }
 
 @Composable
@@ -112,7 +111,6 @@ internal fun ProviderDropdown(
 ) {
     var open by remember { mutableStateOf(false) }
     var anchorWidth by remember { mutableIntStateOf(0) }
-    val density = LocalDensity.current
     val colors = MaterialTheme.colorScheme
     val rotation = animateFloatAsState(if (open && enabled) 180f else 0f, tween(160), label = "providerArrow")
     val endpoint = remember(selected?.baseUrl) { providerEndpointLabel(selected?.baseUrl.orEmpty()) }
@@ -141,12 +139,8 @@ internal fun ProviderDropdown(
                     Modifier.size(18.dp).graphicsLayer { rotationZ = rotation.value }, tint = colors.onSurfaceVariant)
             }
         }
-        DropdownMenu(
-            expanded = open && enabled, onDismissRequest = { open = false },
-            modifier = (if (anchorWidth > 0) Modifier.width(with(density) { anchorWidth.toDp() }) else Modifier)
-                .heightIn(max = 360.dp),
-            shape = MaterialTheme.shapes.medium, containerColor = colors.surfaceContainerLowest,
-            tonalElevation = 0.dp, shadowElevation = 8.dp,
+        ModelDropdownMenu(
+            expanded = open && enabled, onDismiss = { open = false }, anchorWidth = anchorWidth,
         ) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("切换供应商", style = SettingsStyle.metadata, color = colors.onSurfaceVariant, modifier = Modifier.weight(1f))
@@ -179,7 +173,7 @@ internal fun ProviderDropdown(
                     },
                     onClick = { open = false; onSelect(provider) },
                     modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
-                        .background(if (chosen) colors.surfaceContainerLow else colors.surfaceContainerLowest)
+                        .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
                         .semantics { this.selected = chosen },
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 )
@@ -216,27 +210,42 @@ internal fun ProviderIdentity(name: String) {
 @Composable
 internal fun CompactProtocolPicker(protocol: String, onPick: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    val options = listOf(PROTOCOL_OPENAI to "OpenAI 兼容", PROTOCOL_ANTHROPIC to "Anthropic",
-        PROTOCOL_RESPONSES to "OpenAI Responses")
-    ModelSelectionAnchor("接口协议", options.firstOrNull { it.first == protocol }?.second ?: options.first().second,
-        enabled = true, expanded = open) { open = true }
-    if (open) SuixingDialog(
-        onDismissRequest = { open = false }, title = { Text("接口协议") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                options.forEach { (value, label) ->
-                    val chosen = value == protocol || protocol.isBlank() && value == PROTOCOL_OPENAI
-                    val detail = when (value) {
-                        PROTOCOL_ANTHROPIC -> "Messages API"
-                        PROTOCOL_RESPONSES -> "Responses API"
-                        else -> "Chat Completions API"
-                    }
-                    ModelChoiceRow(label, detail, chosen) { open = false; onPick(value) }
-                }
+    var anchorWidth by remember { mutableIntStateOf(0) }
+    val colors = MaterialTheme.colorScheme
+    val options = remember { listOf(PROTOCOL_OPENAI to "OpenAI 兼容", PROTOCOL_ANTHROPIC to "Anthropic",
+        PROTOCOL_RESPONSES to "OpenAI Responses") }
+    Box(Modifier.fillMaxWidth().onSizeChanged { anchorWidth = it.width }) {
+        ModelSelectionAnchor("接口协议", options.firstOrNull { it.first == protocol }?.second ?: options.first().second,
+            enabled = true, expanded = open) { open = true }
+        ModelDropdownMenu(expanded = open, onDismiss = { open = false }, anchorWidth = anchorWidth) {
+            options.forEach { (value, label) ->
+                val chosen = value == protocol || protocol.isBlank() && value == PROTOCOL_OPENAI
+                DropdownMenuItem(
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(label, style = SettingsStyle.body,
+                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal)
+                            Text(when (value) {
+                                PROTOCOL_ANTHROPIC -> "Messages API"
+                                PROTOCOL_RESPONSES -> "Responses API"
+                                else -> "Chat Completions API"
+                            }, style = SettingsStyle.description, color = colors.onSurfaceVariant)
+                        }
+                    },
+                    trailingIcon = {
+                        Box(Modifier.size(18.dp)) {
+                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前协议", tint = colors.primary)
+                        }
+                    },
+                    onClick = { open = false; onPick(value) },
+                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
+                        .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
+                        .semantics { this.selected = chosen },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                )
             }
-        },
-        confirmButton = { dialog -> TextButton(onClick = { dialog.closeThen { open = false } }) { Text("取消") } },
-    )
+        }
+    }
 }
 
 @Composable
@@ -263,7 +272,9 @@ internal fun FetchedModelsDialog(provider: ProviderConfig, onToggle: (String, Bo
                                 modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
                         }
                         items(ids, key = { "model:$it" }, contentType = { "model-choice" }) { id ->
-                            Surface(onClick = { onToggle(id, id !in provider.enabled) }, shape = MaterialTheme.shapes.small) {
+                            Surface(onClick = { onToggle(id, id !in provider.enabled) }, shape = MaterialTheme.shapes.small,
+                                color = if (id in provider.enabled) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f)
+                                    else androidx.compose.ui.graphics.Color.Transparent) {
                                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Checkbox(checked = id in provider.enabled, onCheckedChange = { onToggle(id, it) })
                                     Text(provider.displayModel(id), style = SettingsStyle.body, modifier = Modifier.weight(1f))

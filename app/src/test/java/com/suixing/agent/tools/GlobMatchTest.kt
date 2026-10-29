@@ -15,6 +15,17 @@ import java.io.File
  * 手写而不是转 Regex，是 issue 明确要求的：整条路径转 Regex 的转义太容易错。
  */
 class GlobMatchTest {
+    @Test fun `path matching ignores case and literal prefixes prune only unrelated directories`() {
+        val root = File("build/tmp/glob-prefix")
+        val matches = Glob.pathMatcher("SRC/main/*.KT", root)
+        assertTrue(matches(File(root, "src/Main/Test.kt")))
+        val descend = Glob.directoryMatcher("src/main/*.kt", root)
+        assertTrue(descend(File(root, "src")))
+        assertTrue(descend(File(root, "src/main/deeper")))
+        assertFalse(descend(File(root, "src/test")))
+        assertFalse(descend(File(root, "other")))
+        assertTrue(Glob.directoryMatcher("**/main/*.kt", root)(File(root, "other")))
+    }
     private fun file(path: String) = File(path)
 
     // --- 名称 glob（不含 /）---

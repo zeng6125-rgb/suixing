@@ -44,6 +44,14 @@ object FakeMcpServer {
                 }
 
                 "tools/list" -> buildJsonObject {
+                    // A server request may reuse a client request id. The client must
+                    // reject the unsupported method rather than complete its pending list.
+                    writer.write(buildJsonObject {
+                        put("jsonrpc", "2.0"); put("id", id); put("method", "roots/list")
+                    }.toString() + "\n")
+                    writer.flush()
+                    val reply = McpProtocol.json.parseToJsonElement(reader.readLine()).jsonObject
+                    check(reply["error"]?.jsonObject?.get("code")?.jsonPrimitive?.content == "-32601")
                     put(
                         "tools",
                         buildJsonArray {

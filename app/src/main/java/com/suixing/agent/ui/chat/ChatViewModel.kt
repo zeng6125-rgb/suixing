@@ -401,7 +401,7 @@ class ChatViewModel : ViewModel() {
     private val engine = Core.engine
     private val gate = Core.gate
     /** Only used to ask an endpoint what windows its models advertise; see [prefetchWindows]. */
-    private val llm = LlmClient()
+    private val llm by lazy { Core.llm }
     /** Endpoints already asked in this process, so opening the sheet twice costs one call. */
     private val windowsAsked = mutableSetOf<String>()
 
@@ -3333,6 +3333,7 @@ class ChatViewModel : ViewModel() {
         stateWatcher?.cancel()
         jobs.values.forEach { it.cancel() }
         jobs.clear()
+        attachmentCache.clear()
         super.onCleared()
     }
 }

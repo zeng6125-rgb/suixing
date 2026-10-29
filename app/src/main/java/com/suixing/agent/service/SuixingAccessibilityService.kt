@@ -17,6 +17,9 @@ import android.view.accessibility.AccessibilityNodeInfo
 import androidx.annotation.RequiresApi
 import com.suixing.agent.core.Core
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -29,6 +32,9 @@ import kotlin.coroutines.resume
  * text entry. No background automation happens on its own.
  */
 class SuixingAccessibilityService : AccessibilityService() {
+
+    private val screenshotJob = SupervisorJob()
+    private val screenshotScope = CoroutineScope(screenshotJob + Dispatchers.Default)
 
     companion object {
         private const val MAX_SEARCH_NODES = 3000
@@ -43,6 +49,7 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        Core.startup.backgroundStarting()
         active = this
         // Gives the effects an accessibility-overlay host: from here on they need no
         // SYSTEM_ALERT_WINDOW permission and MIUI keeps them visible while the app is in the
@@ -52,6 +59,7 @@ class SuixingAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        screenshotJob.cancelChildren()
         active = null
         // The system destroys the effects' accessibility window with this service; TouchFx has to
         // drop its reference or every later effect silently draws into a dead view.
@@ -61,6 +69,7 @@ class SuixingAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        screenshotJob.cancel()
         active = null
         TouchFx.unbindService(this)
         runCatching { Core.capabilities.onAccessibilityChanged(false) }
@@ -179,14 +188,15 @@ class SuixingAccessibilityService : AccessibilityService() {
     }
 
     /** The caller owns node; ownership of only the returned child is transferred. */
-    private fun firstEditable(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
-        if (depth > 30) return null
+    private fun firstEditable(node: AccessibilityNodeInfo, depth: Int, remaining: IntArray = intArrayOf(MAX_SEARCH_NODES)): AccessibilityNodeInfo? {
+        if (depth > 30 || remaining[0]-- <= 0) return null
         if (node.isEditable) return node
         for (index in 0 until node.childCount) {
+            if (remaining[0] <= 0) break
             val child = node.getChild(index) ?: continue
             var found: AccessibilityNodeInfo? = null
             try {
-                found = firstEditable(child, depth + 1)
+                found = firstEditable(child, depth + 1, remaining)
                 if (found != null) return found
             } finally { if (found !== child) child.recycleIfLegacy() }
         }
@@ -276,15 +286,10 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     suspend fun typeIntoField(label: String, text: String): Boolean {
         val node = findNodeByText(label, exact = false) ?: return false
-        try {
-            clickNode(node)
-            delay(350L)
-            if (setText(text)) return true
-            val editable = if (node.isEditable) node else firstEditable(node, 0)
-            if (editable == null) return false
-            return try { setTextOn(editable, text) }
-            finally { if (editable !== node) editable.recycleIfLegacy() }
-        } finally { node.recycleIfLegacy() }
+        try { clickNode(node) } finally { node.recycleIfLegacy() }
+        delay(350L)
+        // Clicking may replace the entire window. Query its current focused/editable node once.
+        return setText(text)
     }
 
     private fun setTextOn(node: AccessibilityNodeInfo, text: String): Boolean = runCatching {
@@ -321,6 +326,9 @@ class SuixingAccessibilityService : AccessibilityService() {
         val (width, height) = screenSize()
         val builder = StringBuilder()
         builder.append("屏幕: ").append(width).append('x').append(height).append('\n')
+        val windowBounds = Rect().also { root.getBoundsInScreen(it) }
+        builder.append("活动窗口 bounds=(").append(windowBounds.left).append(',').append(windowBounds.top)
+            .append(',').append(windowBounds.right).append(',').append(windowBounds.bottom).append(")；坐标为屏幕绝对坐标\n")
         builder.append("包名: ").append(root.packageName?.toString() ?: "未知").append('\n')
         val counter = intArrayOf(0)
         try { walk(root, 0, maxDepth, maxNodes, builder, counter) }
@@ -395,18 +403,34 @@ class SuixingAccessibilityService : AccessibilityService() {
                     // copy(ARGB_8888) → createScaledBitmap → JPEG 压缩）都在**主线程**跑，
                     // 一张全尺寸位图就是几十毫秒，期间 UI 完全不动。
                     // ScreenshotResult 的 hardwareBuffer 在 close 之前有效，可以跨线程使用。
-                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                    val buffer = screenshot.hardwareBuffer
+                    // A cancelled launch may never enter its body: completion owns the buffer
+                    // from the callback onward, including cancellation before dispatch.
+                    val work = screenshotScope.launch {
                         val bytes = runCatching {
-                            val buffer = screenshot.hardwareBuffer
-                            val wrapped = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
-                            val software = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
-                            buffer.close()
-                            software?.let { bitmap ->
-                                val scaled = scaleTo(bitmap, maxWidth)
-                                toJpeg(scaled, quality)
+                            var wrapped: Bitmap? = null
+                            var software: Bitmap? = null
+                            var scaled: Bitmap? = null
+                            try {
+                                if (!continuation.isActive) return@runCatching null
+                                wrapped = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                                software = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
+                                software?.let { bitmap ->
+                                    scaled = scaleTo(bitmap, maxWidth.coerceAtLeast(1))
+                                    toJpeg(scaled!!, quality)
+                                }
+                            } finally {
+                                if (scaled !== software) scaled?.recycle()
+                                software?.recycle()
+                                wrapped?.recycle()
                             }
                         }.getOrNull()
                         if (continuation.isActive) continuation.resume(bytes)
+                    }
+                    continuation.invokeOnCancellation { work.cancel() }
+                    work.invokeOnCompletion {
+                        buffer.close()
+                        if (continuation.isActive) continuation.resume(null)
                     }
                 }
 
@@ -427,7 +451,7 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     private fun toJpeg(bitmap: Bitmap, quality: Int): ByteArray {
         val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+        check(bitmap.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(0, 100), stream)) { "JPEG compression failed" }
         return stream.toByteArray()
     }
 }

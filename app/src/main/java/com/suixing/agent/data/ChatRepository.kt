@@ -43,6 +43,14 @@ class ChatRepository(
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val dir: File get() = File(context.filesDir, "chats").apply { if (!exists()) mkdirs() }
     private val lock = Mutex()
+    private data class DraftMessages(
+        val runId: String,
+        val messages: java.lang.ref.WeakReference<List<StoredMessage>>,
+        val name: String,
+    )
+    private val draftMessages = object : LinkedHashMap<String, DraftMessages>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DraftMessages>?): Boolean = size > 16
+    } // guarded by lock; no decoded recovery payloads are retained here
 
     /**
      * 「最后一个 checkpoint 在日志里的字节偏移」缓存。
@@ -261,7 +269,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         withContext(Dispatchers.IO) {
             lock.withLock {
                 val meta = store.readMeta(id) ?: return@withLock ChatTotals.EMPTY
-                if (meta.totalsAt == meta.messageCount) return@withLock meta.totals
+                if (meta.totalsAt == meta.messageCount && meta.totals.trailingRunId != null) return@withLock meta.totals
                 val totals = runCatching {
                     foldTotals(store.all(meta))
                 }.onFailure {
@@ -516,6 +524,9 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             //
             // 现在改成：**只要盘上有日志（logBytes > 0），就必须核对首条 id**。
             var diskMeta = runCatching { store.readMeta(conversation.id) }.getOrNull()
+            if (diskMeta == null && logExists(conversation.id)) {
+                return@withLock SaveResult.Refused("会话元数据无法读取；为保护已有历史没有写入")
+            }
             var diskHasLog = diskMeta != null && diskMeta.logBytes > 0
 
             // ─── **allowShrink 不许当后门**（评审 M1：#33 的原形状）──────────────────
@@ -613,12 +624,16 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
                 }
             }
             val stored = if (tailOnly != null) {
-                writeTail(stamped, tailOnly)
+                writeTail(stamped, tailOnly, diskMeta)
             } else {
-                write(stamped, allowShrink)
+                write(stamped, allowShrink, diskMeta)
             }
             val rest = _conversations.value.filterNot { it.id == stored.id }
-            _conversations.value = (listOf(stored) + rest).sortedByDescending { it.updatedAt }
+            // Preserve unchanged item identities and ordering, including future-dated imports
+            // and clock changes. Only the saved item needs insertion into the sorted index.
+            val insertion = rest.indexOfFirst { it.updatedAt <= stored.updatedAt }
+                .let { if (it < 0) rest.size else it }
+            _conversations.value = rest.toMutableList().apply { add(insertion, stored) }
             SaveResult.Written
         }
     }
@@ -674,6 +689,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             // A deleted chat's draft is garbage nobody will ever read: the conversation it
             // belongs to is gone from the list, so nothing will look for it again.
             liveFile(id).delete()
+            clearDraftMessages(id)
             // **顺带清掉它留下的坏草稿**（评审 10 的 S3）：删会话是用户的明确意图，
             // 而 `.live.json.<millis>.corrupt` 不会被任何清理路径碰到，会永久残留。
             runCatching {
@@ -696,12 +712,25 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * run ends: a draft kept there would be lost exactly when it is needed.
      */
     suspend fun saveLive(draft: LiveDraft) = withContext(Dispatchers.IO) {
-        // Encoding is pure snapshot work; it must not block another chat's tail read.
-        // The run awaits its writer's cancellation before clearing this file.
-        val text = json.encodeToString(LiveDraft.serializer(), draft)
         currentCoroutineContext().ensureActive()
         lock.withLock {
+            val previous = draftMessages[draft.chatId]
+            val payload = if (draft.messages.isEmpty()) null else {
+                previous?.takeIf { it.runId == draft.runId && it.messages.get() == draft.messages }
+                    ?: DraftMessages(draft.runId, java.lang.ref.WeakReference(draft.messages),
+                        "${draft.chatId}.live-${UUID.randomUUID()}.messages").also {
+                        // Immutable payload first, then the small manifest. A crash can only
+                        // leave an unused payload; it cannot invalidate the preceding draft.
+                        writeAtomically(File(dir, it.name), json.encodeToString(
+                            kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()), draft.messages))
+                    }
+            }
+            val text = json.encodeToString(LiveDraft.serializer(),
+                draft.copy(messages = emptyList(), messageSnapshot = payload?.name))
             writeAtomically(liveFile(draft.chatId), text)
+            if (payload != null) draftMessages[draft.chatId] = payload else draftMessages.remove(draft.chatId)
+            // Only discard the prior payload after the replacement manifest is durable.
+            if (previous != null && previous.name != payload?.name) File(dir, previous.name).delete()
         }
     }
 
@@ -722,9 +751,18 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * 改名之后 [readLive] 再也读不到它，[delete] 清会话时一并清掉。
      */
     suspend fun readLive(chatId: String): LiveDraft? = withContext(Dispatchers.IO) {
+        lock.withLock {
         val file = liveFile(chatId)
-        if (!file.exists()) return@withContext null
-        runCatching { json.decodeFromString(LiveDraft.serializer(), file.readText()) }
+        if (!file.exists()) return@withLock null
+        runCatching {
+            val draft = json.decodeFromString(LiveDraft.serializer(), file.readText())
+            val name = draft.messageSnapshot ?: return@runCatching draft // legacy inline format
+            require(name.startsWith("$chatId.live-") && name.endsWith(".messages") &&
+                name == File(name).name) { "invalid draft message snapshot" }
+            val messages = json.decodeFromString(
+                kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()), File(dir, name).readText())
+            draft.copy(messages = messages, messageSnapshot = null)
+        }
             .getOrElse {
                 // **解析失败不要删**（评审建议，与「用户没发话不删文件」同口径）：
                 // 草稿是进程被杀后唯一的副本；文件坏了多半只是"写到一半被切断"，
@@ -738,11 +776,21 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
                 }
                 null
             }
+        }
     }
 
     /** Called once the draft has been appended to the transcript, so it is not read twice. */
     suspend fun clearLive(chatId: String) {
-        withContext(Dispatchers.IO) { lock.withLock { liveFile(chatId).delete() } }
+        withContext(Dispatchers.IO) { lock.withLock {
+            liveFile(chatId).delete()
+            clearDraftMessages(chatId)
+        } }
+    }
+
+    private fun clearDraftMessages(chatId: String) {
+        draftMessages.remove(chatId)
+        dir.listFiles { f -> f.name.startsWith("$chatId.live-") && f.name.endsWith(".messages") }
+            ?.forEach { it.delete() }
     }
 
     /**
@@ -803,8 +851,12 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
      * in memory). So a save from the UI cannot hand the writer a full list; it hands it the
      * tail that is new. The history on disk stays exactly as it is.
      */
-    private fun writeTail(conversation: Conversation, newMessages: List<StoredMessage>): Conversation {
-        val onDisk = runCatching { store.readMeta(conversation.id) }.getOrNull()
+    private fun writeTail(
+        conversation: Conversation,
+        newMessages: List<StoredMessage>,
+        onDisk: ChatStore.ConversationMeta?,
+    ): Conversation {
+        val committedMeta = onDisk
             ?: run {
                 // 评审 S2/M4：这里的兜底原来是 `return write(conversation)`，
                 // 而 meta 读不出来时 `write` 只会用 newMeta + 窗口 —— 等于"窗口当全量"。
@@ -818,7 +870,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         // the old fields and writing them again cost a second meta fsync for every save.
         // The log is still synced before its single metadata commit; no durability boundary
         // or watermark validation is removed.
-        val updated = onDisk.copy(
+        val updated = committedMeta.copy(
             title = conversation.title,
             updatedAt = conversation.updatedAt,
             pinned = conversation.pinned,
@@ -845,7 +897,11 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             file.name.startsWith("$id.") && file.name.endsWith(LOG_SUFFIX)
         }?.isNotEmpty() == true
 
-    private fun write(conversation: Conversation, allowShrink: Boolean = false): Conversation {
+    private fun write(
+        conversation: Conversation,
+        allowShrink: Boolean = false,
+        onDisk: ChatStore.ConversationMeta? = runCatching { store.readMeta(conversation.id) }.getOrNull(),
+    ): Conversation {
         val started = System.currentTimeMillis()
         // **meta 读不出来 ≠ 没有历史**（评审 M4，不可逆）。
         //
@@ -854,7 +910,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         // "元数据说 0 字节，文件却非空" ⇒ **`setLength(0)` 把整份日志清空**，再写进手里的窗口。
         // 迁移出来的会话 gen 本来就是 0，被清空的往往就是那份完整日志本身。
         // 所以：只要**日志文件还在**、meta 又读不出来，就什么都不写，抛出让人看得见的错。
-        if (runCatching { store.readMeta(conversation.id) }.getOrNull() == null && logExists(conversation.id)) {
+        if (onDisk == null && logExists(conversation.id)) {
             throw IllegalStateException(
                 "meta unreadable but a log exists for ${conversation.id}: refusing to rewrite the log " +
                     "from a paged window",
@@ -866,7 +922,6 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         // 教训：第一版直接复用 `store.readMeta()` 当 committed，于是每次保存都把
         // 盘上的**旧**标题/置顶/归档写回去 —— 置顶/归档"重启后丢失"就是这么来的
         // （单测 `pinning and archiving survive a restart` 抓到的）。
-        val onDisk = runCatching { store.readMeta(conversation.id) }.getOrNull()
         val committed = if (onDisk == null) {
             store.newMeta(conversation)
         } else {
@@ -1050,4 +1105,6 @@ data class LiveDraft(
      * was actually made of.
      */
     val messages: List<StoredMessage> = emptyList(),
+    /** Internal immutable payload pointer; readLive resolves it before returning to callers. */
+    val messageSnapshot: String? = null,
 )

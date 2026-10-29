@@ -53,24 +53,30 @@ internal object Glob {
 
     /** 针对**相对 [root]** 的路径 glob：`*` 不跨 `/`，`**` 跨任意段。 */
     fun pathMatches(pattern: String, file: File, root: File): Boolean {
-        if (!pattern.contains('/')) return nameMatches(pattern, file.name)
+        return pathMatcher(pattern, root)(file)
+    }
+
+    /** Compile once and normalize the root once for a whole search. */
+    fun pathMatcher(pattern: String, root: File): (File) -> Boolean {
+        if (!pattern.contains('/')) return { nameMatches(pattern, it.name) }
         val rx = pathCache[pattern] ?: buildPathRegex(pattern)?.also {
             if (pathCache.size >= CACHE_MAX) pathCache.clear()
             pathCache[pattern] = it
-        } ?: return false
-        return rx.matches(relativeTo(file, root))
+        } ?: return { false }
+        val base = root.absolutePath.replace('\\', '/').trimEnd('/') + "/"
+        return { file -> rx.matches(file.absolutePath.replace('\\', '/').removePrefix(base)) }
     }
 
-    /** 相对 root 的路径，统一成 `/`（与原来逐字相同的规范化）。 */
-    private fun relativeTo(file: File, root: File): String {
-        val base = root.absolutePath.trimEnd('/')
-        val full = file.absolutePath
-        // **统一成 `/`**：Windows 上 File.absolutePath 用反斜杠，而 glob 模式按 `/` 分段
-        // （诊断实测：rel = "src\a.kt" 时 `src/*.kt` 匹配失败；Android 用 `/` 所以真机看不出来，
-        // 只有 JVM 单测在这台 Windows 上会暴露 —— 但规范化本身在任何平台都无害且更稳）。
-        return (if (full.startsWith(base)) full.removePrefix(base) else full)
-            .replace('\\', '/')
-            .trimStart('/')
+    /** A literal directory prefix can exclude subtrees without changing wildcard semantics. */
+    fun directoryMatcher(pattern: String?, root: File): (File) -> Boolean {
+        val prefix = pattern?.trimStart('/')?.substringBeforeLast('/', "")?.split('/')
+            ?.takeWhile { it.isNotEmpty() && '*' !in it && '?' !in it }.orEmpty()
+        if (prefix.isEmpty()) return { true }
+        val base = root.absolutePath.replace('\\', '/').trimEnd('/') + "/"
+        return { dir ->
+            val parts = dir.absolutePath.replace('\\', '/').removePrefix(base).split('/')
+            parts.zip(prefix).all { (part, expected) -> part.equals(expected, ignoreCase = true) }
+        }
     }
 
     private fun buildPathRegex(pattern: String): Regex? {
@@ -105,7 +111,7 @@ internal object Glob {
             }
         }
         regex.append('$')
-        return runCatching { Regex(regex.toString()) }.getOrNull()
+        return runCatching { Regex(regex.toString(), RegexOption.IGNORE_CASE) }.getOrNull()
     }
 
     /** 需要转义的正则元字符（只列在 glob 里可能出现的）。 */

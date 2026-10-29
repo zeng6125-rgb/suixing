@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.LlmClient
@@ -61,7 +62,7 @@ fun ModelPage(
     onChange: (OnboardingDraft) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val client = remember { LlmClient() }
+    val client = remember { Core.llm }
     var loading by remember { mutableStateOf(false) }
     var fetched by remember { mutableStateOf<List<ProviderModel>>(emptyList()) }
     var pickerOpen by remember { mutableStateOf(false) }

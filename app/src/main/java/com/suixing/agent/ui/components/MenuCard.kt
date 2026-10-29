@@ -1,12 +1,7 @@
 package com.suixing.agent.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -57,7 +52,6 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
 import kotlin.math.roundToInt
-import kotlinx.coroutines.delay
 /**
  * The app's one popup card: rounded, shadowed, and animated in and out.
  *
@@ -94,29 +88,26 @@ internal fun MenuCard(
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    var keepMounted by remember { mutableStateOf(false) }
-    // 入场进度：0 = 刚从下方 12dp 上来，1 = 落位。
-    //
-    // **内容始终组合**：原来这里用 `AnimatedVisibility(visible = visible && appeared)` 加一个
-    // `appeared` 状态机，让内容"先空后有"——**空帧把 Popup 量成 0 宽**，于是 Popup 先按
-    // "卡片宽 0"定位在按钮右缘，内容出现后再滑到左边：用户看到的就是「卡片从右边进来」
-    // 而且「偏左」。现在内容一直在，首帧就是真实尺寸 ⇒ 位置一次算对。
-    val enterProgress = remember { Animatable(0f) }
-    // 入场时长 130ms（用户：130ms）。
-    val enterMs = 130
+    var keepMounted by remember { mutableStateOf(visible) }
+    val motion = remember { PopupMotionState() }
+    var origin by remember { mutableStateOf(TransformOrigin(0.5f, 1f)) }
+    val shadowMargin = with(LocalDensity.current) { PopupShadowMargin.roundToPx() }
+    val shadowProvider = remember(popupPositionProvider, alignment, offset, shadowMargin) {
+        ShadowPopupPositionProvider(shadowMargin, popupPositionProvider, alignment, offset) { origin = it }
+    }
     LaunchedEffect(visible) {
         if (visible) {
             keepMounted = true
-            enterProgress.snapTo(0f)
-            enterProgress.animateTo(1f, tween(enterMs))
-        } else {
-            delay(MENU_EXIT_MS)
+            // Keep real content measured before starting the shared entrance motion.
+            androidx.compose.runtime.withFrameNanos { }
+            motion.show()
+        } else if (keepMounted) {
+            motion.hide()
             keepMounted = false
         }
     }
-    // A plain return from this composable, before any group is opened: while the card is
-    // closed there is no popup at all, and nothing to intercept a touch with.
-    if (!keepMounted) return
+    // A re-open reverses the current animation, rather than jumping back to scale zero.
+    if (!visible && !keepMounted) return
     // **自带遮罩**：focus-less 的 Popup 窗口看不到外部点击与 BACK，没有这层就"点哪都关不掉"。
     // 放在卡片 Popup 之前组合 —— 窗口按组合顺序叠，先组合的在下面。
     if (visible && scrim) {
@@ -132,69 +123,30 @@ internal fun MenuCard(
             )
         }
     }
-    // 上浮幅度固定 12dp：原来按卡片高度的 1/6，卡片越高跳得越厉害（用户：幅度太大）。
-    val slidePx = with(androidx.compose.ui.platform.LocalDensity.current) { 12.dp.roundToPx() }
-    // 定位二选一：同时传 alignment/offset 与 provider 编译不过。
     val cardBody: @Composable () -> Unit = {
-        AnimatedVisibility(
-            visible = visible,
-            // 入场由下面的 graphicsLayer 驱动（**上浮 12dp + 缩放 0.92→1，不淡入**），
-            // 这里必须置 None，否则两者叠加成两段位移。
-            enter = EnterTransition.None,
-            // 退场**原样保留**（用户没让改）：淡出 + 缩回 + 下落。
-            exit = fadeOut(tween(POPUP_ANIM_MS)) +
-                scaleOut(tween(POPUP_ANIM_MS), targetScale = 0.92f) +
-                slideOutVertically(tween(POPUP_ANIM_MS)) { slidePx },
-        ) {
-            Column(
-                modifier = modifier
-                    // **阴影画在离屏层之外**（链首，在 graphicsLayer 之前）：阴影若画在
-                    // graphicsLayer 建立的离屏层**内部**，入场缩放会把它一起放大并带上方向性
-                    // 偏移 —— 用户看到的「阴影很重、有偏移」就是这个。画在层外，它始终是那
-                    // 一层轻薄的、有质感的投影。
-                    .popupCardSurface(containerColor)
-                    // **动画层在阴影之后**：graphicsLayer 变换它**之后**的全部绘制（白底+内容），
-                    // 两者一起动 ⇒ 卡片不会先于内容出现（用户：「感觉卡片比内容先出来」）。
-                    .graphicsLayer {
-                        val p = enterProgress.value
-                        translationY = (1f - p) * slidePx
-                        val s = 0.92f + 0.08f * p
-                        scaleX = s
-                        scaleY = s
-                        // **缩放原点放在底边中点**（不是默认的中心）：以中心缩放时，卡片
-                        // 底边在入场全程一动不动 —— 12dp 的上浮正好被缩放抵消，于是"上浮一点
-                        // 感觉没有"。以底边缩放，底边跟着位移真的往上走 12dp，上浮才看得见。
-                        transformOrigin = TransformOrigin(0.5f, 1f)
-                        // 入场淡入（用户：淡入也要）。
-                        alpha = p
-                    }
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {},
-                    )
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
-                content = content,
-            )
+        // The motion layer owns the shadow margin, not just the card: group opacity composites
+        // into a buffer sized to this node, and a card-sized buffer sliced the shadow off for
+        // the first frames of every fade.
+        Box(Modifier.popupMotion(motion) { origin }.padding(PopupShadowMargin)) {
+        Column(
+            modifier = modifier
+                .popupCardSurface(containerColor)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                )
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            content = content,
+        )
         }
     }
-    val provider = popupPositionProvider
-    if (provider != null) {
-        Popup(
-            popupPositionProvider = provider,
-            onDismissRequest = onDismiss,
-            properties = PopupProperties(focusable = focusable),
-            content = cardBody,
-        )
-    } else {
-        Popup(
-            alignment = alignment,
-            offset = offset,
-            onDismissRequest = onDismiss,
-            properties = PopupProperties(focusable = focusable),
-            content = cardBody,
-        )
-    }
+    Popup(
+        popupPositionProvider = shadowProvider,
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = focusable, clippingEnabled = false),
+        content = cardBody,
+    )
 }
 
 /**

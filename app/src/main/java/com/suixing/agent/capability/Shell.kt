@@ -3,6 +3,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
@@ -227,7 +228,7 @@ object Shell {
             }
             if (!currentCoroutineContext().isActive) {
                 process.killAndReap()
-                throw CancellationException("已停止")
+                currentCoroutineContext().ensureActive()
             }
             if (System.currentTimeMillis() >= deadline) break
         }
@@ -235,8 +236,13 @@ object Shell {
             process.killAndReap()
             false
         } else {
-            val text = process.inputStream.bufferedReader().readText()
-            process.exitValue() == 0 && text.contains("uid=0")
+            try {
+                val text = process.inputStream.bufferedReader().use { it.readText() }
+                process.exitValue() == 0 && text.contains("uid=0")
+            } finally {
+                runCatching { process.errorStream.close() }
+                runCatching { process.outputStream.close() }
+            }
         }
     }.getOrElse { error ->
         if (error is CancellationException) throw error
@@ -267,7 +273,7 @@ object Shell {
             }
         }
 
-    private suspend fun collect(process: Process): ShellResult {
+    internal suspend fun collect(process: Process): ShellResult {
         // Commands arrive through -c; this API has no stdin writer. Send EOF now so
         // commands (or login profiles) reading stdin cannot wait until the timeout.
         runCatching { process.outputStream.close() }
@@ -287,7 +293,7 @@ object Shell {
                 }
                 if (!currentCoroutineContext().isActive) {
                     process.killAndReap()
-                    throw CancellationException("已停止")
+                    currentCoroutineContext().ensureActive()
                 }
                 if (System.currentTimeMillis() >= deadline) break
             }
@@ -322,7 +328,7 @@ object Shell {
         }
 
         @Synchronized fun snapshot(): String = if (total <= text.length) text.toString() else
-            text.toString() + "\n…（输出过长已截断：只保留前 $MAX_OUTPUT_CHARS 字符，完整输出共约 $total 字节）"
+            text.toString() + "\n…（输出过长已截断：只保留前 $MAX_OUTPUT_CHARS 字符，完整输出共 $total 字符）"
     }
 
     /**

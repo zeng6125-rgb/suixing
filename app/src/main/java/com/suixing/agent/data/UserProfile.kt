@@ -193,12 +193,18 @@ class UserProfileStore(private val context: Context) {
         // Write-then-rename, so a kill mid-save cannot leave a half-written file that [read]
         // would quarantine — the old profile survives instead.
         val temp = File(target.parentFile, "${target.name}.tmp")
-        temp.writeText(value)
+        java.io.FileOutputStream(temp).use { out ->
+            out.write(value.toByteArray(Charsets.UTF_8))
+            out.fd.sync()
+        }
         if (!temp.renameTo(target)) {
             // renameTo reports failure by returning false, so fall back to a direct write;
             // its exception has to stay visible rather than lose the text.
             try {
-                target.writeText(value)
+                java.io.FileOutputStream(target).use { out ->
+                    out.write(value.toByteArray(Charsets.UTF_8))
+                    out.fd.sync()
+                }
             } finally {
                 temp.delete()
             }

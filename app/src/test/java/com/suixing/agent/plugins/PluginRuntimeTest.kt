@@ -22,6 +22,12 @@ import org.junit.Test
  * 唯一能拿到的信号。
  */
 class PluginRuntimeTest {
+    @Test fun `guard checks deny patterns beyond the UI preview boundary`() {
+        val plugin = spec("guard", hooks = listOf(hook(action = "deny", regex = "protected-tail")))
+        val verdict = PluginRuntime.preExecute(PluginRuntime.hooksFor(listOf(plugin)), "run_shell",
+            "x".repeat(700) + "protected-tail", null)
+        assertTrue(verdict.deny)
+    }
 
     private fun spec(
         id: String,

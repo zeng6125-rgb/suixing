@@ -18,6 +18,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.charset.Charset
 import java.util.concurrent.TimeUnit
 
@@ -138,6 +140,7 @@ class WebTools(
                 // very target is deleted below, and this clears the ones nobody will retry.
                 sweepStaleParts(workspaceDir(context))
                 val target = resolveUserPath(context, rawPath)
+                requireWritableUserPath(context, target)
                 target.parentFile?.mkdirs()
                 client.newCall(request(url).build()).execute().use { response ->
                     if (!response.isSuccessful) {
@@ -158,7 +161,7 @@ class WebTools(
                     part.delete()
                     try {
                         body.byteStream().use { input ->
-                            part.outputStream().use { output -> input.copyTo(output) }
+                            part.outputStream().use { output -> copyDownloadCapped(input, output, MAX_DOWNLOAD_BYTES) }
                         }
                         if (part.length() > MAX_DOWNLOAD_BYTES) {
                             part.delete()
@@ -357,6 +360,19 @@ class WebTools(
             .followSslRedirects(true)
             .build()
         }
+    }
+}
+
+/** Enforce the cap during production, including chunked bodies with no declared length. */
+internal fun copyDownloadCapped(input: InputStream, output: OutputStream, limit: Long) {
+    val buffer = ByteArray(16 * 1024)
+    var written = 0L
+    while (true) {
+        val read = input.read(buffer, 0, minOf(buffer.size.toLong(), limit - written + 1).toInt())
+        if (read < 0) return
+        if (written + read > limit) throw java.io.IOException("下载超过 ${limit / 1024 / 1024} MB 上限")
+        output.write(buffer, 0, read)
+        written += read
     }
 }
 

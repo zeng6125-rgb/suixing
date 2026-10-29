@@ -33,6 +33,25 @@ class StartupReadinessTest {
         withTimeout(1_000) { StartupReadiness(fallbackMillis = 1).awaitMaintenance() }
     }
 
+    @Test fun `known headless startup releases an already waiting scan immediately`() = runBlocking {
+        val ready = StartupReadiness(fallbackMillis = 60_000)
+        val waiting = async(start = CoroutineStart.UNDISPATCHED) { ready.awaitMaintenance() }
+        assertFalse(waiting.isCompleted)
+        ready.backgroundStarting()
+        withTimeout(1_000) { waiting.await() }
+    }
+
+    @Test fun `a service starting alongside Activity cannot bypass real content readiness`() = runBlocking {
+        val ready = StartupReadiness()
+        ready.uiStarting()
+        ready.backgroundStarting()
+        ready.firstFrameDrawn()
+        val waiting = async(start = CoroutineStart.UNDISPATCHED) { ready.awaitMaintenance() }
+        assertFalse(waiting.isCompleted)
+        ready.contentPresented()
+        withTimeout(1_000) { waiting.await() }
+    }
+
     @Test fun `optional scans are serialized and failure releases the next task`() = runBlocking {
         val ready = StartupReadiness()
         ready.firstFrameDrawn()

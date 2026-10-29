@@ -329,7 +329,7 @@ internal fun accumulateSlices(
             // 但把不用的水位留着是雷，丢掉最省心。）
             val fixed = previous.copy(
                 scanned = start,
-                scannedBytes = if (slice.endOffsets != null) 0L else previous.scannedBytes,
+                scannedBytes = if (slice.endOffsets != null && slice.gen != previous.scannedGen) 0L else previous.scannedBytes,
                 scannedGen = if (slice.endOffsets != null) slice.gen else previous.scannedGen,
             )
             if (fixed != previous) chats[slice.id] = fixed

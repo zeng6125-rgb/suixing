@@ -99,7 +99,7 @@ class SubagentsTest {
         pool.spawn("queued")
         withTimeout(2000) { started.await() }
         pool.close()
-        assertTrue(pool.snapshots().all { it.status == SubagentStatus.CANCELLED })
+        assertTrue(pool.snapshots().isEmpty())
         assertThrows(IllegalStateException::class.java) { pool.spawn("late") }
         Unit
     }
@@ -125,6 +125,16 @@ class SubagentsTest {
         withTimeout(2000) { started.await() }
         parent.cancel()
         pool.close()
-        assertEquals(SubagentStatus.CANCELLED, pool.snapshots().single().status)
+        assertTrue(pool.snapshots().isEmpty())
+    }
+
+    @Test fun `close releases completed result snapshots and publishes the empty pool`() = runBlocking {
+        var latest = emptyList<SubagentSnapshot>()
+        val pool = SubagentPool(this, onChanged = { latest = it }) { "x".repeat(64_000) }
+        pool.spawn("task")
+        assertEquals(64_000, pool.waitFor(timeoutMs = 2000).single().result.length)
+        pool.close()
+        assertTrue(pool.snapshots().isEmpty())
+        assertTrue(latest.isEmpty())
     }
 }

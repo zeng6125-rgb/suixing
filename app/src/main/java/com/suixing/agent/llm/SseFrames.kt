@@ -6,6 +6,10 @@ import okio.BufferedSource
 // then enforce the stricter character bound after decoding. No line can cause
 // unbounded buffering before that check, even if a gateway never sends a newline.
 internal const val MAX_SSE_LINE_BYTES = 3L * 1_048_576L + 16L
+internal const val MAX_STREAM_TURN_CHARS = 16L * 1024L * 1024L
+
+/** SSE removes at most one ASCII space after the colon, preserving every other character. */
+internal fun sseDataValue(line: String): String = line.removePrefix("data:").removePrefix(" ")
 
 internal fun readSseLine(source: BufferedSource): String? {
     val newline = source.indexOf('\n'.code.toByte(), 0L, MAX_SSE_LINE_BYTES + 1L)

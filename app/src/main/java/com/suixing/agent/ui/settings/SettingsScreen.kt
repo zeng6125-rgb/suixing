@@ -468,7 +468,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             snackbar.showSnackbar("供应商清理未保存，请稍后重试")
         }
     }
-    val client = remember { LlmClient() }
+    val client = remember { Core.llm }
     var testing by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var loadingModels by remember { mutableStateOf(false) }
@@ -783,7 +783,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
                         enabled = !loadingModels && selected != null && form.baseUrl.isNotBlank(),
-                        modifier = Modifier.heightIn(min = SettingsStyle.ControlHeight),
+                        modifier = Modifier.heightIn(min = 36.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                         shape = MaterialTheme.shapes.small,
                         onClick = {
                             scope.launch {
@@ -853,7 +854,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             )
                         }
                         Spacer(Modifier.width(6.dp))
-                        Text(if (loadingModels) "获取中…" else "获取模型列表")
+                        Text(if (loadingModels) "获取中…" else "获取模型列表", style = SettingsStyle.metadata)
                     }
                     Spacer(Modifier.width(10.dp))
                     Text(

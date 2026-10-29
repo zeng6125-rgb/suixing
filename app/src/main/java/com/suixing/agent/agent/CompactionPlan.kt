@@ -43,12 +43,13 @@ internal fun planCompaction(
     if (cut <= 0) return null
     val covered = history.subList(0, cut)
     if (covered.isEmpty()) return null
-    val previous = reusableCheckpoint(history, checkpoints)
-    val resumeAt = previous?.let { saved -> history.indexOfFirst { it.id == saved.toMessageId } } ?: -1
+    val reusable = reusableCheckpointPosition(history, checkpoints)
+    val previous = reusable?.checkpoint
+    val resumeAt = reusable?.to ?: -1
     // Nothing new can be folded without touching the recent tail. Reuse the saved result.
     if (resumeAt >= cut - 1) return null
     val fresh = covered.subList(resumeAt + 1, covered.size)
-    val from = previous?.let { saved -> history.indexOfFirst { it.id == saved.fromMessageId } } ?: 0
+    val from = reusable?.from ?: 0
     return CompactionPlan(
         transcript = buildString {
             if (previous != null) append("system: [上下文摘要] ").append(previous.summary).append('\n')
@@ -60,16 +61,22 @@ internal fun planCompaction(
 }
 
 /** A stale checkpoint must not hide an earlier usable one after a branch/edit. */
-internal fun reusableCheckpoint(history: List<StoredMessage>, checkpoints: List<ContextCheckpoint>): ContextCheckpoint? {
+internal fun reusableCheckpoint(history: List<StoredMessage>, checkpoints: List<ContextCheckpoint>): ContextCheckpoint? =
+    reusableCheckpointPosition(history, checkpoints)?.checkpoint
+
+private data class CheckpointPosition(val checkpoint: ContextCheckpoint, val from: Int, val to: Int)
+
+private fun reusableCheckpointPosition(history: List<StoredMessage>, checkpoints: List<ContextCheckpoint>): CheckpointPosition? {
     if (checkpoints.isEmpty()) return null
     val endpoints = HashSet<String>()
     checkpoints.forEach { endpoints += it.fromMessageId; endpoints += it.toMessageId }
     val positions = HashMap<String, Int>(endpoints.size)
     history.forEachIndexed { index, message -> if (message.id in endpoints) positions[message.id] = index }
-    return checkpoints.asReversed().firstOrNull {
+    return checkpoints.asReversed().firstNotNullOfOrNull {
         val from = positions[it.fromMessageId]
         val to = positions[it.toMessageId]
-        it.summary.isNotBlank() && from != null && to != null && from <= to
+        if (it.summary.isNotBlank() && from != null && to != null && from <= to)
+            CheckpointPosition(it, from, to) else null
     }
 }
 

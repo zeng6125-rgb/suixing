@@ -60,6 +60,7 @@ class DictationRecorder(private val context: Context) {
     var onAutoStop: (() -> Unit)? = null
 
     // 这三个字段被录音线程与主线程交叉读写：不加 @Volatile 时停止/收尾可能读到旧值（issue #54 A-11）。
+    private val releaseLock = Any()
     @Volatile private var record: AudioRecord? = null
     @Volatile private var thread: Thread? = null
     @Volatile private var pcm: java.io.ByteArrayOutputStream? = null
@@ -99,7 +100,9 @@ class DictationRecorder(private val context: Context) {
             val chunk = ShortArray(bufferSize / 2)
             var silentFor = 0L
             val startedAt = System.currentTimeMillis()
-            runCatching { recorder.startRecording() }
+            var autoStop = false
+            try {
+            recorder.startRecording()
             while (record === recorder) {
                 val read = recorder.read(chunk, 0, chunk.size)
                 if (read <= 0) {
@@ -107,8 +110,8 @@ class DictationRecorder(private val context: Context) {
                     // updates the clock below, so without this the thread would spin at 100% and
                     // MAX_MS would never fire.
                     if (read < 0 || System.currentTimeMillis() - startedAt >= MAX_MS) {
-                        onAutoStop?.invoke()
-                        return@Thread
+                        autoStop = true
+                        break
                     }
                     // read == 0 是"暂时没数据"：不休眠会让这个线程空转吃满 CPU。
                     Thread.sleep(5)
@@ -127,9 +130,18 @@ class DictationRecorder(private val context: Context) {
                 elapsedMs = now - startedAt
                 silentFor = if (rms < SILENCE_RMS) silentFor + (read * 1000L / SAMPLE_RATE) else 0L
                 if (silentFor >= SILENCE_MS || elapsedMs >= MAX_MS) {
-                    onAutoStop?.invoke()
-                    return@Thread
+                    autoStop = true
+                    break
                 }
+            }
+            } catch (_: Exception) {
+                // stop/release may interrupt read() with an exception on some audio HALs.
+                autoStop = record === recorder
+            } finally {
+                releaseRecorder(recorder)
+                level = 0f
+                // Keep PCM available for stop(), but release the microphone before notifying UI.
+                if (autoStop) runCatching { onAutoStop?.invoke() }
             }
         }, "dictation-recorder").apply { isDaemon = true; start() }
         return true
@@ -142,11 +154,9 @@ class DictationRecorder(private val context: Context) {
      */
     @Synchronized
     fun stop(): File? {
-        val recorder = record ?: return null
-        record = null
-        runCatching { recorder.stop() }
-        runCatching { recorder.release() }
-        thread?.join(1_000)
+        val recorder = record
+        if (recorder != null) releaseRecorder(recorder)
+        thread?.takeUnless { it === Thread.currentThread() }?.join(1_000)
         thread = null
         val samples = pcm?.toByteArray() ?: ByteArray(0)
         pcm = null
@@ -166,13 +176,20 @@ class DictationRecorder(private val context: Context) {
     @Synchronized
     fun cancel() {
         val recorder = record
-        record = null
-        runCatching { recorder?.stop() }
-        runCatching { recorder?.release() }
+        if (recorder != null) releaseRecorder(recorder)
+        thread?.takeUnless { it === Thread.currentThread() }?.join(1_000)
         thread = null
         pcm = null
         level = 0f
         elapsedMs = 0L
+    }
+
+    /** A reader and a stop/cancel caller can race; only one owns native release. */
+    private fun releaseRecorder(recorder: AudioRecord) = synchronized(releaseLock) {
+        if (record !== recorder) return@synchronized
+        record = null
+        runCatching { recorder.stop() }
+        runCatching { recorder.release() }
     }
 
     private fun wavHeader(dataBytes: Int): ByteArray {

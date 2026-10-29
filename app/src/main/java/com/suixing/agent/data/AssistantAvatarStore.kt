@@ -102,19 +102,18 @@ object AssistantAvatarStore {
         cap: Int = AVATAR_CROP_WORK_PX,
     ): Bitmap? = withContext(Dispatchers.IO) {
         runCatching {
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: return@runCatching null
             // Bounds only: the point is to learn the size before allocating the pixels.
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            BitmapFactory.decodeByteArray(
-                bytes,
-                0,
-                bytes.size,
-                BitmapFactory.Options().apply {
+            val boundsStream = context.contentResolver.openInputStream(uri) ?: return@runCatching null
+            boundsStream.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply {
                     inSampleSize = avatarSampleSize(bounds.outWidth, bounds.outHeight, cap)
-                },
-            )
+                })
+            }
         }.getOrNull()
     }
 

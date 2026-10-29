@@ -383,13 +383,17 @@ class UiTools(
 
         val file = scratch("screen.png")
         withContext(Dispatchers.IO) { runCatching { file.delete() } }
-        val result = shell("screencap -p ${file.absolutePath}") ?: return blocked()
-        val png = withContext(Dispatchers.IO) {
-            runCatching { if (file.exists()) file.readBytes() else ByteArray(0) }.getOrDefault(ByteArray(0))
+        var result: ShellResult? = null
+        val png = try {
+            result = shell("screencap -p ${file.absolutePath}") ?: return blocked()
+            withContext(Dispatchers.IO) {
+                runCatching { if (file.exists()) file.readBytes() else ByteArray(0) }.getOrDefault(ByteArray(0))
+            }
+        } finally {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { runCatching { file.delete() } }
         }
-        withContext(Dispatchers.IO) { runCatching { file.delete() } }
         if (png.isEmpty()) {
-            return ToolResult.failure("${shellName()} 截图没有产出内容：${result.render(300)}")
+            return ToolResult.failure("${shellName()} 截图没有产出内容：${result?.render(300)}")
         }
 
         val bytes = withContext(Dispatchers.IO) { encodeJpeg(png, maxWidth, quality) }
@@ -420,17 +424,21 @@ class UiTools(
     private fun encodeJpeg(png: ByteArray, maxWidth: Int, quality: Int): ByteArray? = runCatching {
         val decoded = BitmapFactory.decodeByteArray(png, 0, png.size)
             ?: throw IllegalStateException("decode failed")
-        val scaled = if (decoded.width > maxWidth) {
+        var scaled: Bitmap? = null
+        try {
+        scaled = if (decoded.width > maxWidth) {
             val height = (decoded.height.toLong() * maxWidth / decoded.width).toInt().coerceAtLeast(1)
             Bitmap.createScaledBitmap(decoded, maxWidth, height, true)
         } else {
             decoded
         }
         val out = ByteArrayOutputStream()
-        scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        if (scaled !== decoded) scaled.recycle()
-        decoded.recycle()
+        check(scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)) { "JPEG compression failed" }
         out.toByteArray()
+        } finally {
+            if (scaled !== decoded) scaled?.recycle()
+            decoded.recycle()
+        }
     }.getOrNull()
 
     // ---------------------------------------------------------------- 操作

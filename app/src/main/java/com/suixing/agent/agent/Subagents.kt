@@ -141,6 +141,8 @@ internal class SubagentPool(
         synchronized(lock) { closed = true }
         supervisor.cancel()
         supervisor.join()
+        synchronized(lock) { entries.clear() }
+        changed()
     }
 
     suspend fun execute(name: String, args: JsonObject): ToolResult {

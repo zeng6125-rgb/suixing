@@ -224,8 +224,17 @@ class SkillStore(private val context: Context) {
         val wanted = query.trim()
         if (wanted.isEmpty()) return@withContext null
         val state = readState()
-        scanSkills(root, includeBody = false)
-            .firstOrNull { it.id.equals(wanted, true) || it.name.equals(wanted, true) }
+        val direct = root.listFiles().orEmpty().sortedBy { it.name.lowercase() }.firstNotNullOfOrNull { child ->
+            when {
+                child.isDirectory && child.name.equals(wanted, true) -> SKILL_FILE_NAMES
+                    .map { File(child, it) }.firstOrNull { it.isFile }
+                child.isFile && child.extension.equals("md", true) && child.nameWithoutExtension.equals(wanted, true) -> child
+                else -> null
+            }
+        }
+        val header = direct?.let { parseSkill(it.parentFile!!, it, includeBody = false) }
+            ?: scanSkills(root, includeBody = false).firstOrNull { it.name.equals(wanted, true) }
+        header
             ?.let { state.of(it) }
             ?.takeIf { it.enabled }
             ?.let { parseSkill(File(it.path).parentFile!!, File(it.path)).copy(

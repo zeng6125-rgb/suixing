@@ -115,6 +115,9 @@ object Core {
     val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     internal val startup = StartupReadiness()
 
+    /** One lazily prepared network owner for runs, setup and model metadata. */
+    val llm: LlmClient by lazy { LlmClient() }
+
     /**
      * Shared on purpose: an approval prompt must be visible no matter which tab
      * the user is on, so the gate lives here and the dialog is rendered above the
@@ -165,7 +168,6 @@ object Core {
             )
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)
-            val llm = LlmClient()
             engine = AgentEngine(llm = llm, scope = appScope, onCompleted = conversationReads::completed)
             appScope.launch(Dispatchers.IO) {
                 // Construct TLS in the background before the usual first send; no network request.

@@ -18,7 +18,7 @@ import java.io.File
  * "元数据说 0 字节、文件却非空" ⇒ **`setLength(0)` 把整份日志清空**，再写进手里的窗口。
  * 迁移出来的会话 gen 本来就是 0，被清空的往往就是那份完整日志本身 —— 不可逆。
  *
- * 现在的契约：**拒绝写**（抛异常由调用方接住并显示"本次未写入"），日志一个字节不动。
+ * 现在的契约：返回 **SaveResult.Refused**，日志一个字节不动，保存协程不崩溃。
  */
 class MetaUnreadableTest {
 
@@ -59,8 +59,8 @@ class MetaUnreadableTest {
 
         // 手里只有窗口（3 条）—— 正是 #33 的形状。
         val window = conversation("c1", 20).copy(messages = conversation("c1", 20).messages.take(3))
-        val failed = runCatching { repository.save(window) }.isFailure
-        assertTrue("必须失败（由调用方接住并显示未写入），而不是静默清空日志", failed)
+        val result = repository.save(window)
+        assertTrue("必须返回未写入，而且不能让异常逃出保存协程", result is ChatRepository.SaveResult.Refused)
 
         val logsAfter = storeDir.listFiles { f -> f.name.endsWith(".jsonl") }.orEmpty()
             .map { it.name to it.length() }.toSet()

@@ -212,9 +212,14 @@ class FileTools(private val context: Context) : ToolGroup() {
             if (path.isNullOrBlank()) return@withContext ToolResult.failure("缺少参数 path")
             val file = resolve(path)
             if (file.isDirectory) return@withContext ToolResult.failure("${file.absolutePath} 是目录")
-            file.parentFile?.mkdirs()
+            requireWritableUserPath(context, file)
             val content = args.str("content").orEmpty()
             val append = args.bool("append", false)
+            require(content.length <= MAX_TEXT_BYTES &&
+                content.toByteArray(Charsets.UTF_8).size.toLong() + (if (append) file.length() else 0L) <= MAX_TEXT_BYTES) {
+                "写入后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限"
+            }
+            file.parentFile?.mkdirs()
             if (append) file.appendText(content) else file.writeText(content)
             ToolResult.success("已${if (append) "追加" else "写入"} ${content.length} 字 → ${file.absolutePath}")
         } catch (error: Exception) {
@@ -235,6 +240,7 @@ class FileTools(private val context: Context) : ToolGroup() {
             val new = args.str("new_string").orEmpty()
             val replaceAll = args.bool("replace_all", false)
             val file = resolve(path)
+            requireWritableUserPath(context, file)
             if (!file.exists()) return@withContext ToolResult.failure("文件不存在：${file.absolutePath}")
             if (file.isDirectory) return@withContext ToolResult.failure("${file.absolutePath} 是目录，请改用 run_shell 的 ls")
             if (file.length() > MAX_TEXT_BYTES) {
@@ -272,6 +278,9 @@ class FileTools(private val context: Context) : ToolGroup() {
             }
             val changed = if (replaceAll) text.replace(old, new) else {
                 text.substring(0, hits.first()) + new + text.substring(hits.first() + old.length)
+            }
+            require(changed.length <= MAX_TEXT_BYTES && changed.toByteArray(Charsets.UTF_8).size <= MAX_TEXT_BYTES) {
+                "修改后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限"
             }
             file.writeText(changed)
             val preview = buildString {
@@ -395,7 +404,10 @@ class FileTools(private val context: Context) : ToolGroup() {
             val maxDepth = args.int("max_depth", 8).coerceIn(1, 30)
             val limit = args.int("limit", 60).coerceIn(1, 500)
             val hits = ArrayList<String>()
-            walk(root, 0, maxDepth, { hits.size >= limit }) { file ->
+            val matches = pattern?.let { Glob.pathMatcher(it, root) }
+            val descend = Glob.directoryMatcher(pattern, root)
+            walk(root, 0, maxDepth, { hits.size >= limit },
+                descend = { descend(it) && (exclude == null || !it.absolutePath.contains(exclude)) }) { file ->
                 if (hits.size >= limit || file == root) return@walk
                 val kindOk = when (kind) {
                     "dir" -> file.isDirectory
@@ -405,7 +417,7 @@ class FileTools(private val context: Context) : ToolGroup() {
                 if (!kindOk) return@walk
                 if (exclude != null && file.absolutePath.contains(exclude)) return@walk
                 // pattern 优先：它能表达「所有 .kt」这种最常见的查询，比子串精确。
-                val matched = if (pattern != null) Glob.pathMatches(pattern, file, root)
+                val matched = if (matches != null) matches(file)
                 else file.name.contains(name, ignoreCase = true)
                 if (matched) hits.add(file.absolutePath)
             }
@@ -446,7 +458,8 @@ class FileTools(private val context: Context) : ToolGroup() {
             val hits = ArrayList<String>()
             val hitFiles = LinkedHashSet<String>()
             var scanned = 0
-            walk(root, 0, 12, { hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles }) { file ->
+            walk(root, 0, 12, { hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles },
+                descend = { !it.absolutePath.contains(exclude) }) { file ->
                 val full = hits.size >= limit || hitFiles.size >= limit || scanned >= maxFiles
                 if (full || !file.isFile) return@walk
                 if (file.absolutePath.contains(exclude)) return@walk
@@ -515,6 +528,7 @@ class FileTools(private val context: Context) : ToolGroup() {
         depth: Int,
         maxDepth: Int,
         stop: () -> Boolean,
+        descend: (File) -> Boolean = { true },
         action: (File) -> Unit,
     ) {
         if (depth > maxDepth || stop() || !currentCoroutineContext().isActive) return
@@ -522,7 +536,7 @@ class FileTools(private val context: Context) : ToolGroup() {
         for (child in children) {
             if (stop() || !currentCoroutineContext().isActive) return
             action(child)
-            if (child.isDirectory) walk(child, depth + 1, maxDepth, stop, action)
+            if (child.isDirectory && descend(child)) walk(child, depth + 1, maxDepth, stop, descend, action)
         }
     }
 
@@ -543,6 +557,21 @@ class FileTools(private val context: Context) : ToolGroup() {
  */
 internal fun workspaceDir(context: Context): File =
     context.getExternalFilesDir(null) ?: context.filesDir
+
+/** Protect app-owned state; the workspace (including the internal-storage fallback) stays writable. */
+internal fun requireWritableUserPath(context: Context, file: File) {
+    val target = file.canonicalFile.toPath()
+    val internal = context.filesDir.canonicalFile
+    val directories = listOf("chats", "datastore", "jobs", "plugins")
+        .map { File(internal, it) } + listOf("databases", "shared_prefs")
+        .map { File(internal.parentFile, it) }
+    val files = listOf("todos.json", "schedules.json", "mcp.json", "memory.json", "profile.md",
+        "profile.state.json", "usage.json", "perf.json")
+    require(directories.none { target.startsWith(it.canonicalFile.toPath()) } &&
+        files.none { target == File(internal, it).canonicalFile.toPath() }) {
+        "这是应用内部状态文件，不能用文件工具覆写：${file.absolutePath}"
+    }
+}
 
 /** Shared by the file tools and the download tool so `~` means the same thing in both. */
 internal fun resolveUserPath(context: Context, raw: String?): File {

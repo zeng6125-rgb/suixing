@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import androidx.compose.runtime.AbstractApplier
 import androidx.compose.runtime.BroadcastFrameClock
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Recomposer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,6 +35,88 @@ class ScrubberHighlightTest {
     private val narrow = ScrubberTickStyle(8f, 2f, Color(0xFF336699))
     private val mid = ScrubberTickStyle(12f, 2f, Color(0xFF663399))
     private val wide = ScrubberTickStyle(20f, 3f, Color(0xFF993366))
+
+    @Test
+    fun `reading animations advance without recomposing the rail for every frame`() = runBlocking {
+        withScrubber(initial = narrow, settling = false) {
+            target = wide
+            awaitComposition(compositions)
+            val afterTarget = compositions
+            pumpFrames(5)
+            val midway = requireNotNull(style)
+            assertTrue("width animation did not advance", midway.width > narrow.width + 0.5f)
+            assertTrue("width animation already finished", midway.width < wide.width - 0.1f)
+            assertEquals("animation frames recomposed the parent rail", afterTarget, compositions)
+            pumpFrames(120)
+            assertStyle(wide, style, "finished without parent recomposition")
+            assertEquals("settling animation recomposed the parent rail", afterTarget, compositions)
+        }
+    }
+
+    @Test
+    fun `rail mounts with the restored transcript before entrance completes and navigation keeps it mounted`() = runBlocking {
+        withScrubber(initial = narrow, settling = true, usePresentationGate = true) {
+            assertTrue("unrestored rail must not be visible", style == null)
+            target = mid
+            pumpFrames(3)
+            presented = true
+            target = wide
+            pumpFrames(2)
+            assertStyle(wide, style, "rail must mount at the start of entrance")
+            assertEquals(1, mounts)
+
+            entrance = 0.4f
+            pumpFrames(4)
+            assertStyle(wide, style, "rail must enter together with the restored transcript")
+            assertEquals(1, mounts)
+
+            entrance = 1f
+            settling = false
+            pumpFrames(3)
+            assertStyle(wide, style, "first presented target")
+            assertEquals(1, mounts)
+
+            // Navigation also sets restoring, but must not remove/recreate the visible rail.
+            settling = true
+            target = mid
+            pumpFrames(3)
+            assertStyle(mid, style, "normal navigation")
+            assertEquals(1, mounts)
+            assertEquals(0, disposals)
+        }
+    }
+
+    @Test
+    fun `switching conversation removes the previous rail until the new viewport is ready`() = runBlocking {
+        withScrubber(initial = narrow, settling = true, usePresentationGate = true) {
+            presented = true
+            entrance = 1f
+            settling = false
+            pumpFrames(3)
+            assertStyle(narrow, style, "conversation A")
+
+            conversationId = "conversation-b"
+            presented = false
+            entrance = 0f
+            settling = true
+            target = mid
+            pumpFrames(3)
+            assertTrue("old or temporary highlight survived the switch", style == null)
+            assertEquals(1, disposals)
+            target = wide
+            presented = true
+            entrance = 0.8f
+            pumpFrames(3)
+            assertStyle(wide, style, "conversation B must enter with its restored transcript")
+            assertEquals(2, mounts)
+
+            entrance = 1f
+            settling = false
+            pumpFrames(3)
+            assertStyle(wide, style, "conversation B first presentation")
+            assertEquals(2, mounts)
+        }
+    }
 
     @Test
     fun `restoring keeps tick animations disabled`() {
@@ -216,9 +299,10 @@ class ScrubberHighlightTest {
         conversationId: String = "conversation-a",
         initial: ScrubberTickStyle,
         settling: Boolean = false,
+        usePresentationGate: Boolean = false,
         block: suspend ScrubberHarness.() -> Unit,
     ) {
-        val harness = ScrubberHarness(this, conversationId, initial, settling)
+        val harness = ScrubberHarness(this, conversationId, initial, settling, usePresentationGate)
         try {
             harness.start()
             harness.block()
@@ -232,13 +316,21 @@ class ScrubberHighlightTest {
         initialConversationId: String,
         initialTarget: ScrubberTickStyle,
         initialSettling: Boolean,
+        private val usePresentationGate: Boolean,
     ) {
         var conversationId by mutableStateOf(initialConversationId)
         var target by mutableStateOf(initialTarget)
         var settling by mutableStateOf(initialSettling)
-
-        var style: ScrubberTickStyle? = null
+        var presented by mutableStateOf(false)
+        var entrance by mutableStateOf(0f)
+        var mounts = 0
             private set
+        var disposals = 0
+            private set
+
+        private var styleState: androidx.compose.runtime.State<ScrubberTickStyle>? = null
+        // Production reads the returned state in graphicsLayer/drawBehind, outside composition.
+        val style: ScrubberTickStyle? get() = styleState?.value
         var compositions: Int = 0
             private set
 
@@ -261,8 +353,18 @@ class ScrubberHighlightTest {
                 recomposer.runRecomposeAndApplyChanges()
             }
             composition.setContent {
-                style = scrubberTickStyle(conversationId, target, settling)
                 compositions++
+                if (usePresentationGate) {
+                    ScrubberPresentation(conversationId, presented = { presented }, entrance = { entrance }) {
+                        DisposableEffect(Unit) {
+                            mounts++
+                            onDispose { disposals++; styleState = null }
+                        }
+                        styleState = scrubberTickStyle(conversationId, target, settling)
+                    }
+                } else {
+                    styleState = scrubberTickStyle(conversationId, target, settling)
+                }
             }
             awaitComposition(after = 0, maxFrames = 10)
             pumpFrames(2)

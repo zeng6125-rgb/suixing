@@ -428,36 +428,10 @@ fun ChatScreen(
     }
     val listState = viewport.listState
 
-    // 每行实测高度（visible 正序，已含 12dp 行间距）：单 item 化后
-    // `firstVisibleItemIndex` 恒为 0，读数导航改为「像素偏移 → 第几轮」反查。
-    // **按消息 id 存实测高度，不要随 `visible` 重建数组**：
-    // 原来 `remember(visible) { IntArray(visible.size) }` 在内容一变（流式每来一条、翻页、
-    // 展开折叠块）就换成全 0 数组，而行只在**布局变化**时回调 `onGloballyPositioned` ——
-    // 已经稳定的行不会再报一次高度 ⇒ 数组长期是 0 ⇒ `topFedIndex` 恒返回 0 ⇒
-    // 导航条高亮永远停在最后一轮（用户报「滑到对应轮次没有显示当前对应的导航条」）。
-    // 按 id 存就没有这个生命周期问题：行第一次量到以后一直有效。
-    // **"正在读哪一行"改成直接量几何**（导航条重写的输入源）。
-    //
-    // 这里存的是每一行在**窗口坐标**里的顶边 y，由行自己的 `onGloballyPositioned` 报上来；
-    // 阅读区（LazyColumn）自己也报一份窗口矩形，探针线 = 阅读区顶边 + 28% 阅读区高
-    // （28% 的口径取自 Aether 的 `currentTimelineIndex`，见 `TurnMarks.PROBE_FRACTION`）。
-    //
-    // 为什么不再用 `firstVisibleItemScrollOffset` 累加行高反查：那套算法有三处隐含前提 ——
-    // 「偏移 = 距最新端的像素」、「行高数组已经完整」、「前缀项高度也算准了」，任何一处
-    // 不成立，"当前轮"就掉回最新那一轮（条数不涨、高亮不动、点条对不上）。而这三处前提
-    // 在这个列表里全都不稳：`reverseLayout` + 逐条消息项 + `contentPadding` + 流式行/
-    // 状态行/错误行这些前缀项。直接量 y 就没有任何换算。
-    val rowCoordinates = remember(state.conversationId) {
-        HashMap<String, LayoutCoordinates>()
-    }
-    val rowHeights = remember(rowCoordinates) { HashMap<String, Int>() }
+    // Markdown preparation is cached by message; navigation reads LazyList's own layout.
     val rowDocuments = remember(state.conversationId) { HashMap<String, Map<String, List<MdBlock>>>() }
-    val geometryVersion = remember(rowCoordinates) { mutableIntStateOf(0) }
     val visibleIds = remember(visible) { visible.mapTo(HashSet()) { it.message.id } }
-    val visibleKeys = remember(rowKeys) { rowKeys.toHashSet() }
     SideEffect {
-        rowCoordinates.keys.retainAll(visibleKeys)
-        rowHeights.keys.retainAll(visibleKeys)
         rowDocuments.keys.retainAll(visibleIds)
     }
     val navigationToken = remember(state.conversationId) { intArrayOf(0) }
@@ -465,8 +439,6 @@ fun ChatScreen(
     DisposableEffect(navigationJob) {
         onDispose { navigationJob[0]?.cancel() }
     }
-    val viewportTopY = remember { androidx.compose.runtime.mutableStateOf(0f) }
-    val viewportH = remember { androidx.compose.runtime.mutableIntStateOf(0) }
     // 回执（落盘的 system 消息）**内联画在它那一轮后面**（用户：「一轮错误就跟在一轮后面」）——
     // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
     // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
@@ -478,9 +450,7 @@ fun ChatScreen(
     val errorLine = remember(state.error, receipts) {
         state.error?.let { err -> receipts.none { isSameFailure(it.text, err) } } ?: false
     }
-    // Whatever the run produces first — a tool call, a thought or a word — opens the live
-    // bubble. Waiting for text is what used to leave a tool call stranded on its own until
-    // the reply arrived and merged the two into one.
+    // Content activity is observed separately; the reply card itself exists from run start.
     // 流式气泡开关与 pin 信号都只需要「有没有活内容」这个布尔：
     // 收 VM 的 liveActive（distinct 去抖），思考期的 40ms 批次不再重组整屏。
     val live by viewModel.liveActive.collectAsStateWithLifecycle()
@@ -685,6 +655,7 @@ fun ChatScreen(
                 .forEach { runStartedAt.remove(it) }
         }
     }
+    val runElapsedClock = rememberRunElapsed(runStartedAt[runKey] ?: 0L, state.runningHere, clockKey = runKey)
     // Which thinking blocks are open, per conversation. One table for the screen, because
     // the live block and the stored block it becomes are two different composables — a
     // remember inside the block was born fresh on that hand-over, which is why a think
@@ -759,12 +730,7 @@ fun ChatScreen(
     // 用「距最新的像素偏移 + 视口高」反查视口顶部是哪一行（`TurnMarks.topFedIndex`，
     // 带单测）。仍然用 `remember` 持有 State、把 `.value` 的读取推迟到 `TurnScrubber`
     // 内部（issue #26 原因一），滚动时只有导航条自己重组。
-    // **必须 keyed on `rowHeights`**：`remember {}` 无 key 会把第一次那个数组永远捕获在闭包里，
-    // 之后内容变化（新数组、按 id 补上的真实高度）它都读不到 ⇒ 反查恒用旧值。
-    // 这是"导航条高亮停在最后一轮"的第二个原因（第一个见 rowHeightsById 的注释）。
-    // **当前读到哪一轮 = 视口内 28% 位置那一行**（口径取自 Aether 的 `currentTimelineIndex`）。
-    // 原来取的是**视口顶部**那一行 ⇒ 导航条高亮与条数全都对不上（用户：对应轮次很奇怪、
-    // 条数不增加）。单 item 化后没有 item 边界可读，按像素反查。
+    // The list's measured visible rows determine the turn at the 28% reading probe.
     val currentPhysicalRow = remember(listState) {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -1142,13 +1108,6 @@ fun ChatScreen(
                             // 放在 `fillMaxSize()` 之外，列表拿到的是「窗口 − 键盘 − 手势条」。
                             .keyboardAwareImePad(navBarPx, imePxState)
                             .fillMaxSize()
-                            // 阅读区的窗口矩形：导航条的探针线要它（顶边 + 28% 高度）。
-                            .onGloballyPositioned { coords ->
-                                val top = coords.positionInWindow().y
-                                if (viewportTopY.value != top) viewportTopY.value = top
-                                val h = coords.size.height
-                                if (viewportH.intValue != h) viewportH.intValue = h
-                            }
                             // 常驻入场层（0.8.284 回退）：条件挂载会导致本列表的布局修饰符链在
                             // `switching` 翻转时重建，展开/收起折叠块时出现残影（用户实测）。
                             //
@@ -1312,13 +1271,6 @@ fun ChatScreen(
                             contentType = { fed -> visible[fed].message.role },
                         ) { fed ->
                             val row = visible[fed]
-                            val presentationKey = rowKeys[fed]
-                            DisposableEffect(presentationKey, rowCoordinates) {
-                                onDispose {
-                                    rowCoordinates.remove(presentationKey)
-                                    rowHeights.remove(presentationKey)
-                                }
-                            }
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             // One placeable per item: the list's own 16dp spacing applies
                             // between the placeables of a single item as well, which is what
@@ -1353,13 +1305,7 @@ fun ChatScreen(
                             }
                             Column(
                                 Modifier
-                                    .then(if (heavyRow) Modifier.graphicsLayer() else Modifier)
-                                    .onGloballyPositioned { coords ->
-                                        val id = presentationKey
-                                        val firstPlacement = rowCoordinates.put(id, coords) == null
-                                        val heightChanged = rowHeights.put(id, coords.size.height) != coords.size.height
-                                        if (firstPlacement || heightChanged) geometryVersion.intValue++
-                                    },
+                                    .then(if (heavyRow) Modifier.graphicsLayer() else Modifier),
                             ) {
                                 // 外观 → 显示时间: off means no labels at all, not fewer.
                                 if (settings.showTimestamps && row.showTimeLabel &&
@@ -1459,12 +1405,8 @@ fun ChatScreen(
                                 )
                             }
                         }
-                        if (live) {
-                            // Keyed by conversation: the live row keeps its slot for as long
-                            // as it is on screen, and a switch used to hand the next chat
-                            // whatever the previous one had left in that slot.
-                            // 贴底时它照旧在列表里：这时内容往上长正是你想要的。
-                            if (live) {
+                        // Keep one keyed assistant item from the initial wait through the last token.
+                        if (live || state.runningHere) {
                                     item(key = liveRowKey(state.conversationId, state.liveRunId), contentType = "assistant") {
                                         // 流式行（喂序 index 0）每长高一点，上面的内容就被顶上去一点 ——
                                         // 往上翻着读旧内容时这是最烦人的漂移。**内容照常长**（issue #11：
@@ -1489,6 +1431,7 @@ fun ChatScreen(
                                             // Versioned text is refreshed; unchanged tool lists keep their identity.
                                             parts = liveParts,
                                                 streaming = true,
+                                                runningElapsed = runElapsedClock,
                                                 // The live bubble is the persona's reply too:
                                                 // without these two it fell back to the brand name
                                                 // and feather while every stored bubble showed the
@@ -1519,6 +1462,7 @@ fun ChatScreen(
                                                 RunStatusLine(
                                                     text = liveStatusText,
                                                     startedAt = runStartedAt[runKey] ?: 0L,
+                                                    elapsed = runElapsedClock,
                                                     // 压缩不再占用这一行（它有自己的过程块），所以时钟一直走。
                                                     timed = true,
                                                     // 量高度给外层用：状态行在裁剪之外，钉住值要含它、
@@ -1533,23 +1477,6 @@ fun ChatScreen(
                                         }
                                         }
                                     }
-                            }
-                        } else if (state.runningHere) {
-                            // Sent, not yet answered: the line holds the place the bubble is
-                            // about to fill, so the reply lands where the user is already
-                            // looking. It is also the only caption the user sees while the
-                            // model is still thinking, which is why its clock starts at the
-                            // send rather than at the first token.
-                            item(key = "live-status:${state.conversationId}") {
-                                RunStatusLine(
-                                    text = liveStatusText,
-                                    startedAt = runStartedAt[runKey] ?: 0L,
-                                    timed = true,
-                                    // 上下都 12dp：项间距已是 12dp，无需再 lift（原 lift 是从 16 里吃 4）。
-                                    modifier = Modifier
-                                        .padding(start = 4.dp, top = 0.dp, bottom = 0.dp),
-                                )
-                            }
                         }
 
                     }
@@ -1625,91 +1552,96 @@ fun ChatScreen(
                     )
                 }
             }
-            TurnScrubber(
-                conversationId = state.conversationId,
-                totalTurns = page.turns,
-                // 已加载的轮数用 `page.drawn`（窗口的**定义**）：条数、窗口起点、
-                // 「已加载到第几轮」全按它算，与 `firstDrawnTurn` 同一口径。
-                drawnTurns = page.drawn,
-                current = {
-                    pendingTurn ?: if (live && currentPhysicalRow.value >= rowOffset + visible.size) {
-                        page.turns.coerceAtLeast(1)
-                    } else TurnMarks.currentAtRow(
-                        physicalIndex = currentPhysicalRow.value,
-                        turnIndices = turnIndices,
-                        drawnTurns = page.drawn,
-                        totalTurns = page.turns,
-                    )
-                },
-                // 恢复位置及会话入场完成前不做补间，避免高亮从临时轮次向真实轮次下扫。
-                settling = scrubberSettling,
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    // 键盘抬起时导航条跟着上移（用户：「抬起时为什么导航条不动」）。
-                    // 整页不再按 IME 缩高之后，CenterEnd 的居中点是满高的 H/2，而旧结构里
-                    // 居中在 (H − I) 的框内 ⇒ 等价于往上挪 I/2。只在**放置阶段**读 IME，
-                    // 不触发重组、不重测列表。
-                    .offset { androidx.compose.ui.unit.IntOffset(0, -(imePxState.value / 2)) }
-                    // **离右边缘 4dp**（用户要求在 4dp 上「稍微收一点」的同时定了这个数）。
-                    // 观感/位置只按你说的数字动。
-                    .padding(end = 4.dp),
-                labelOf = { turn ->
-                    // `turn` 是**全局轮号**（1 基），标签直接用它。
-                    // 找这一轮的开头文字要换算成**窗口内**下标（0 基）：`turnIndices` 里装的是
-                    // 窗口内各轮的开头行，窗口第一轮 = 全局 `firstDrawnTurn`。
-                    val inWindow = turn - firstDrawnTurn
-                    val opening = visible.getOrNull(
-                        turnIndices.getOrElse(inWindow) { -1 } - rowOffset,
-                    )
-                        ?.message
-                        ?.text
-                        ?.lineSequence()
-                        ?.firstOrNull { it.isNotBlank() }
-                        ?.trim()
-                        .orEmpty()
-                    if (opening.isEmpty()) {
-                        "第 $turn 轮"
-                    } else {
-                        "第 $turn 轮 · ${opening.take(8)}"
-                    }
-                },
-                onJumpTo = { turn ->
-                    // `turn` 是**全局轮号** ⇒ 换成窗口内下标再查 `turnIndices`。
-                    // **最新那一轮在流式期间可能不在 `turnIndices` 里**（`groupRows` 把
-                    // `runId == liveRunId` 的行过滤掉了 ⇒ 它的开头行被滤走，列表尾部少一项）：
-                    // 原来 `getOrNull` 拿到 null 就**整段跳过** —— 点最新那根一下不动
-                    // （用户：「点条的也不对应」）。它没有行可指，但它就是"最新"，
-                    // 底锚下 feed index 0 即底部 ⇒ 明确滚到底，不吞这次点击。
-                    val inWindow = turn - firstDrawnTurn
-                    val index = turnIndices.getOrNull(inWindow)
-                    pendingTurn = turn
-                    val token = ++navigationToken[0]
-                    val previousNavigation = navigationJob[0]
-                    previousNavigation?.cancel()
-                    navigationJob[0] = scope.launch {
-                        try {
-                            previousNavigation?.join()
-                            snapshotFlow { viewport.presented }.first { it }
-                            if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
-                            scroll.allowBottomResume = false
-                            scroll.stickToBottom = false
-                            scroll.restoring = true
-                            val row = index?.let { visible.getOrNull(it - rowOffset) }
-                            if (row != null) {
-                                val layout = listState.layoutInfo
-                                // Both nearby and distant targets arrive through scrolling.
-                                viewport.navigation.navigate(listState, index,
-                                    TurnMarks.navigationScrollOffset(layout.viewportStartOffset, layout.viewportEndOffset))
-                            } else if (inWindow >= turnIndices.size) {
-                                viewport.navigation.navigate(listState, (itemCount - 1).coerceAtLeast(0), TRANSCRIPT_END_OFFSET)
-                            }
-                        } finally {
-                            if (token == navigationToken[0]) pendingTurn = null
-                            if (token == navigationToken[0] && scroll.conversationId == state.conversationId) scroll.restoring = false
+            ScrubberPresentation(state.conversationId,
+                presented = { viewport.presented },
+                entrance = { switchEntrance.value }) { entranceModifier ->
+                TurnScrubber(
+                    conversationId = state.conversationId,
+                    totalTurns = page.turns,
+                    // 已加载的轮数用 `page.drawn`（窗口的**定义**）：条数、窗口起点、
+                    // 「已加载到第几轮」全按它算，与 `firstDrawnTurn` 同一口径。
+                    drawnTurns = page.drawn,
+                    current = {
+                        pendingTurn ?: if (live && currentPhysicalRow.value >= rowOffset + visible.size) {
+                            page.turns.coerceAtLeast(1)
+                        } else TurnMarks.currentAtRow(
+                            physicalIndex = currentPhysicalRow.value,
+                            turnIndices = turnIndices,
+                            drawnTurns = page.drawn,
+                            totalTurns = page.turns,
+                        )
+                    },
+                    // 恢复位置及会话入场完成前不做补间，避免高亮从临时轮次向真实轮次下扫。
+                    settling = scrubberSettling,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .then(entranceModifier)
+                        // 键盘抬起时导航条跟着上移（用户：「抬起时为什么导航条不动」）。
+                        // 整页不再按 IME 缩高之后，CenterEnd 的居中点是满高的 H/2，而旧结构里
+                        // 居中在 (H − I) 的框内 ⇒ 等价于往上挪 I/2。只在**放置阶段**读 IME，
+                        // 不触发重组、不重测列表。
+                        .offset { androidx.compose.ui.unit.IntOffset(0, -(imePxState.value / 2)) }
+                        // **离右边缘 4dp**（用户要求在 4dp 上「稍微收一点」的同时定了这个数）。
+                        // 观感/位置只按你说的数字动。
+                        .padding(end = 4.dp),
+                    labelOf = { turn ->
+                        // `turn` 是**全局轮号**（1 基），标签直接用它。
+                        // 找这一轮的开头文字要换算成**窗口内**下标（0 基）：`turnIndices` 里装的是
+                        // 窗口内各轮的开头行，窗口第一轮 = 全局 `firstDrawnTurn`。
+                        val inWindow = turn - firstDrawnTurn
+                        val opening = visible.getOrNull(
+                            turnIndices.getOrElse(inWindow) { -1 } - rowOffset,
+                        )
+                            ?.message
+                            ?.text
+                            ?.lineSequence()
+                            ?.firstOrNull { it.isNotBlank() }
+                            ?.trim()
+                            .orEmpty()
+                        if (opening.isEmpty()) {
+                            "第 $turn 轮"
+                        } else {
+                            "第 $turn 轮 · ${opening.take(8)}"
                         }
-                    }
-                },
-            )
+                    },
+                    onJumpTo = { turn ->
+                        // `turn` 是**全局轮号** ⇒ 换成窗口内下标再查 `turnIndices`。
+                        // **最新那一轮在流式期间可能不在 `turnIndices` 里**（`groupRows` 把
+                        // `runId == liveRunId` 的行过滤掉了 ⇒ 它的开头行被滤走，列表尾部少一项）：
+                        // 原来 `getOrNull` 拿到 null 就**整段跳过** —— 点最新那根一下不动
+                        // （用户：「点条的也不对应」）。它没有行可指，但它就是"最新"，
+                        // 底锚下 feed index 0 即底部 ⇒ 明确滚到底，不吞这次点击。
+                        val inWindow = turn - firstDrawnTurn
+                        val index = turnIndices.getOrNull(inWindow)
+                        pendingTurn = turn
+                        val token = ++navigationToken[0]
+                        val previousNavigation = navigationJob[0]
+                        previousNavigation?.cancel()
+                        navigationJob[0] = scope.launch {
+                            try {
+                                previousNavigation?.join()
+                                snapshotFlow { viewport.presented }.first { it }
+                                if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
+                                scroll.allowBottomResume = false
+                                scroll.stickToBottom = false
+                                scroll.restoring = true
+                                val row = index?.let { visible.getOrNull(it - rowOffset) }
+                                if (row != null) {
+                                    val layout = listState.layoutInfo
+                                    // Both nearby and distant targets arrive through scrolling.
+                                    viewport.navigation.navigate(listState, index,
+                                        TurnMarks.navigationScrollOffset(layout.viewportStartOffset, layout.viewportEndOffset))
+                                } else if (inWindow >= turnIndices.size) {
+                                    viewport.navigation.navigate(listState, (itemCount - 1).coerceAtLeast(0), TRANSCRIPT_END_OFFSET)
+                                }
+                            } finally {
+                                if (token == navigationToken[0]) pendingTurn = null
+                                if (token == navigationToken[0] && scroll.conversationId == state.conversationId) scroll.restoring = false
+                            }
+                        }
+                    },
+                )
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)

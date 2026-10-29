@@ -1262,6 +1262,8 @@ internal fun AssistantRow(
     contextWindow: Int = 0,
     /** What the whole run took; 0 falls back to the message's own round. */
     runElapsedMs: Long = 0L,
+    /** Shared with the status line, including the wait before the first response part. */
+    runningElapsed: androidx.compose.runtime.State<Long>? = null,
     /** 「提供方 / 模型」 for the usage card; blank leaves that line out. */
     engineLabel: String = "",
     message: StoredMessage? = null,
@@ -1333,6 +1335,8 @@ internal fun AssistantRow(
                     usage = usage,
                     live = null,
                     streaming = streaming,
+                    runningElapsed = runningElapsed,
+                    runElapsedMs = runElapsedMs,
                     runningTool = runningTool,
                     runId = processRun,
                     foldSlots = foldSlots,
@@ -1453,7 +1457,6 @@ internal fun AssistantRow(
                     }
                 }
             }
-            if (parts.isEmpty() && streaming) TypingDots()
             if (message != null && !streaming) {
                 // The last block carries no trailing spacer of its own, so the air
                 // above this row is its own 10dp.

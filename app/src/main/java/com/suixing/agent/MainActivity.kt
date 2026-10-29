@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Core.startup.uiStarting()
         // 启动窗口的底色来自主题，而主题里的 @color/window_background 是 uiMode 限定符
         // （values-night 里换）：用户**在 app 里强制深色**、而系统是浅色时，系统会先按浅色画
         // 一帧白，再切成 app 的深色（反向同理）。这里在 setContentView 之前换成不依赖系统

@@ -20,6 +20,11 @@ import okio.buffer
  * 「闭合后又来一个新事件」、以及"拆行位置落在括号/引号中间"。
  */
 class SseFramesTest {
+    @org.junit.Test fun `SSE data preserves whitespace except one optional leading space`() {
+        org.junit.Assert.assertEquals(" hello  ", sseDataValue("data:  hello  "))
+        org.junit.Assert.assertEquals("\thello\t", sseDataValue("data:\thello\t"))
+        org.junit.Assert.assertEquals("", sseDataValue("data: "))
+    }
     @Test fun `bounded line reader preserves CRLF blank lines and final unterminated payload`() {
         val source = Buffer().writeUtf8("data: first\r\n\r\ndata: final")
         assertEquals("data: first", readSseLine(source))

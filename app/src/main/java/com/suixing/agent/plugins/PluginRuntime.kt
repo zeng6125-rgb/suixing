@@ -2,15 +2,17 @@ package com.suixing.agent.plugins
 
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.core.Core
+import com.suixing.agent.llm.readCancellable
 import com.suixing.agent.tools.ToolResult
 import com.suixing.agent.tools.ToolSpec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -367,21 +369,14 @@ object PluginRuntime {
         // 每次调用单独设 callTimeout：`timeout_seconds` 是每个工具自己的（与 MCP 那边同一个办法）。
         val client = HTTP_CLIENT.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build()
         val call = client.newCall(builder.build())
-        // 点停即停：阻塞的 execute() 挂在 IO 线程上，只有 cancel() 能把它拽回来（与 LlmClient
-        // 的 inFlight 同一个口径）。取消在 OkHttp 里以 IOException 现形，所以下面要把它翻回取消。
-        val job = currentCoroutineContext()[Job]
-        val cancelHook = job?.invokeOnCompletion { if (job.isCancelled) call.cancel() }
         return withContext(Dispatchers.IO) {
             try {
-                call.execute().use { response ->
+                call.readCancellable { response ->
                     val raw = String(readCapped(response.body), Charsets.UTF_8)
                     shape(raw, response.code, response.isSuccessful, exec.response)
                 }
             } catch (error: IOException) {
-                if (job?.isCancelled == true) throw CancellationException("已停止")
                 ToolResult.failure("请求失败：${error.message ?: error::class.java.simpleName}")
-            } finally {
-                cancelHook?.dispose()
             }
         }
     }
@@ -503,16 +498,27 @@ object PluginRuntime {
         transform: (String) -> String = { it },
         /** body 专用：在 JSON 字符串内才转义，数字位置原样（见 [jsonEscapeIfInString]）。 */
         jsonAware: ((value: String, inString: Boolean) -> String)? = null,
-    ): String = TEMPLATE_VAR.replace(template) { match ->
+    ): String {
+        var cursor = 0
+        var inString = false
+        fun stringAt(index: Int): Boolean {
+            while (cursor < index && cursor < template.length) {
+                val ch = template[cursor++]
+                if (ch == JSON_BACKSLASH) cursor++ else if (ch == '"') inString = !inString
+            }
+            return inString
+        }
+        return TEMPLATE_VAR.replace(template) { match ->
         val key = match.groupValues[1]
         val value = vars[key]
         if (value == null) {
             if (key !in missing) missing += key
             match.value
         } else if (jsonAware != null) {
-            jsonAware(value, isInsideJsonString(template, match.range.first))
+            jsonAware(value, stringAt(match.range.first))
         } else {
             transform(value)
+        }
         }
     }
 
@@ -704,6 +710,19 @@ private const val TRACE_MAX_BYTES = 64 * 1024
 private val NL_CHAR = 10.toChar()
 
 internal fun appendPluginTrace(line: String) {
+    TRACE_LINES.trySend(line.take(16_384))
+}
+
+/** Diagnostics stay bounded even if storage is stalled; one IO consumer serializes rotation. */
+private val TRACE_LINES: Channel<String> by lazy {
+    Channel<String>(128, onBufferOverflow = BufferOverflow.DROP_OLDEST).also { lines ->
+        Core.appScope.launch(Dispatchers.IO) {
+            for (line in lines) writePluginTrace(line)
+        }
+    }
+}
+
+private fun writePluginTrace(line: String) {
     val app = Core.appContext
     val file = java.io.File(app.filesDir, "plugin-trace.log")
     val stamp = TRACE_STAMP.get()?.format(java.util.Date()).orEmpty()

@@ -9,6 +9,8 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.tools.ToolSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -324,7 +326,7 @@ class LlmClient(http: OkHttpClient? = null) {
             .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
             .build()
-        clientFor(settings).newCall(request).execute().use { response ->
+        clientFor(settings).newCall(request).readCancellable { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw LlmException(friendlyHttp(response.code, body))
             parseModels(body)
@@ -352,7 +354,7 @@ class LlmClient(http: OkHttpClient? = null) {
             .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
             .build()
-        clientFor(settings).newCall(request).execute().use { response ->
+        clientFor(settings).newCall(request).readCancellable { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw LlmException(friendlyHttp(response.code, body))
             parseModelDetails(body)
@@ -425,7 +427,7 @@ class LlmClient(http: OkHttpClient? = null) {
             // that breaks after delivering text still has to hand that text back — see `received`.
             var partial: StreamTurn? = null
             val outcome = runCatching {
-                call.execute().use { response ->
+                call.readCancellable { response ->
                     val body = response.body
                     if (!response.isSuccessful || body == null) {
                         // 取证（真机 0.8.116 报障：压缩后首轮被网关 400，错误体只说「request was
@@ -498,6 +500,7 @@ class LlmClient(http: OkHttpClient? = null) {
                         acceptChunk(chunk)
                     }
                     while (true) {
+                        if (call.isCanceled()) throw java.io.IOException("请求已取消")
                         val line = readSseLine(source) ?: break
                         if (line.isEmpty()) {
                             // 事件边界：把攒着的多行 data 拼成一条再解析。
@@ -509,7 +512,7 @@ class LlmClient(http: OkHttpClient? = null) {
                             continue
                         }
                         if (!line.startsWith("data:")) continue
-                        val data = line.removePrefix("data:").trim()
+                        val data = sseDataValue(line)
                         if (data.isEmpty()) continue
                         checkSseFrameSize(pending.length, data.length)
                         // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
@@ -573,6 +576,10 @@ class LlmClient(http: OkHttpClient? = null) {
             // OkHttp reports a cancelled call as an IOException, so the call's own flag is the
             // reliable way to tell "the user stopped this" from "the network broke".
             val cancelled = call.isCanceled() || !isActive
+            currentCoroutineContext().ensureActive()
+            // Protocol/validation failures are real answers; only transport failures and
+            // explicit HTTP retry statuses may resend an already billed request.
+            if (failure !is java.io.IOException && failure !is CutFailure && failure !is AttemptFailure) throw failure
             val serverSeconds = (failure as? AttemptFailure)?.retryAfterSeconds
             val seconds = serverSeconds
                 ?: settings.retryDelaySeconds.coerceIn(MIN_RETRY_DELAY_SECONDS, MAX_RETRY_DELAY_SECONDS)
@@ -646,6 +653,13 @@ class LlmClient(http: OkHttpClient? = null) {
      * so it can be tested against fixtures instead of against a live provider.
      */
     internal class StreamTurn(private val protocol: String = PROTOCOL_OPENAI) {
+        private var accumulatedChars = 0L
+        private fun reserve(chars: Int) {
+            if (accumulatedChars + chars > MAX_STREAM_TURN_CHARS) {
+                throw LlmException("流式响应超过单轮 16 MiB 字符上限")
+            }
+            accumulatedChars += chars
+        }
         private val text = StringBuilder()
         private val thinking = StringBuilder()
         private val calls = LinkedHashMap<Int, MutableToolCall>()
@@ -669,12 +683,14 @@ class LlmClient(http: OkHttpClient? = null) {
 
         private fun emitText(piece: String?, onDelta: (String) -> Unit) {
             if (piece.isNullOrEmpty()) return
+            reserve(piece.length)
             text.append(piece)
             onDelta(piece)
         }
 
         private fun emitThinking(piece: String?, onReasoning: (String) -> Unit) {
             if (piece.isNullOrBlank()) return
+            reserve(piece.length)
             thinking.append(piece)
             onReasoning(piece)
         }
@@ -686,6 +702,8 @@ class LlmClient(http: OkHttpClient? = null) {
          * reader below).
          */
         private fun appendCall(index: Int, id: String?, name: String?, arguments: String?) {
+            if (index !in calls && calls.size >= 1024) throw LlmException("单轮工具调用数量超过 1024 上限")
+            reserve((id?.length ?: 0) + (name?.length ?: 0) + (arguments?.length ?: 0))
             val call = calls.getOrPut(index) { MutableToolCall() }
             id?.takeIf { it.isNotBlank() }?.let { call.id = it }
             name?.takeIf { it.isNotBlank() }?.let { call.name = it }
@@ -1425,7 +1443,7 @@ internal fun parseUsage(usage: JsonObject): Usage? {
         "cache_read_input_tokens",
         "cached_tokens",
     )
-    if (prompt == 0 && completion == 0 && reasoning == 0) return null
+    if (prompt == 0 && completion == 0 && reasoning == 0 && cached == 0) return null
     return Usage(prompt, completion, reasoning, cached)
 }
 

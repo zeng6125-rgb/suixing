@@ -11,6 +11,17 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 class SkillLoadingTest {
+    @Test fun `find resolves directory ids loose files and display names with admission state`() = runBlocking {
+        addSkill("folder-id", "---\nname: Display Name\n---\nfolder body")
+        File(tmp.root, "skills/loose.md").writeText("loose body")
+        val store = store()
+        assertEquals("folder-id", store.find("FOLDER-ID")!!.id)
+        assertEquals("folder-id", store.find("Display Name")!!.id)
+        assertEquals("loose", store.find("loose")!!.id)
+        store.setEnabled("folder-id", false)
+        assertNull(store.find("folder-id"))
+        assertNull(store.find("Display Name"))
+    }
     @get:Rule val tmp = TemporaryFolder()
 
     private fun store(): SkillStore {

@@ -72,6 +72,7 @@ class AgentForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Core.startup.backgroundStarting()
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "正在执行任务"
         ensureChannel()
         acquireWakeLock()

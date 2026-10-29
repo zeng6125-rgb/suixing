@@ -32,6 +32,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -148,9 +150,9 @@ internal fun scrubberTickStyle(
     conversationId: String,
     target: ScrubberTickStyle,
     settling: Boolean,
-): ScrubberTickStyle = key(conversationId) {
+): State<ScrubberTickStyle> = key(conversationId) {
     if (settling) {
-        target
+        rememberUpdatedState(target)
     } else {
         val animatedWidth = animateFloatAsState(
             target.width, spring(dampingRatio = 0.86f, stiffness = 800f), label = "turn_width")
@@ -158,7 +160,11 @@ internal fun scrubberTickStyle(
             target.height, spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
         val animatedColor = animateColorAsState(
             target.color, tween(120, easing = SCRUBBER_EASING), label = "turn_color")
-        ScrubberTickStyle(animatedWidth.value, animatedHeight.value, animatedColor.value)
+        // Do not subscribe the rail's composition to every tick of all twelve animations.
+        // The caller samples this state only from graphicsLayer/drawBehind.
+        remember {
+            derivedStateOf { ScrubberTickStyle(animatedWidth.value, animatedHeight.value, animatedColor.value) }
+        }
     }
 }
 
@@ -509,13 +515,14 @@ internal fun TurnScrubber(
                             .width(20.dp)
                             .height(3.dp)
                             .graphicsLayer {
+                                val style = tickStyle.value
                                 val scale = rowScales.value(turn)
-                                scaleX = minOf(tickStyle.width * scale, SCRUBBER_RAIL.value) / 20f
-                                scaleY = tickStyle.height / 3f * scale
+                                scaleX = minOf(style.width * scale, SCRUBBER_RAIL.value) / 20f
+                                scaleY = style.height / 3f * scale
                                 transformOrigin = TransformOrigin.Center
                             }
                             .clip(ScrubTickShape)
-                            .drawBehind { drawRect(tickStyle.color) },
+                            .drawBehind { drawRect(tickStyle.value.color) },
                     )
                 }
             }

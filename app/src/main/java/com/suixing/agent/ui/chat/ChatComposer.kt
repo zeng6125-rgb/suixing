@@ -738,19 +738,10 @@ internal fun RunStatusLine(
     timed: Boolean,
     modifier: Modifier = Modifier,
     color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    elapsed: androidx.compose.runtime.State<Long>? = null,
 ) {
-    var tick by remember { mutableStateOf(0) }
-    LaunchedEffect(startedAt) {
-        if (startedAt <= 0) return@LaunchedEffect
-        while (true) {
-            delay(1000)
-            tick++
-        }
-    }
-    val caption = remember(tick, startedAt, text, timed) {
-        if (!timed || startedAt <= 0) text
-        else "$text，用时 ${formatRunElapsed(System.currentTimeMillis() - startedAt)}"
-    }
+    val clock = elapsed ?: rememberRunElapsed(startedAt, timed)
+    val caption = if (!timed) text else "$text，用时 ${formatRunElapsed(clock.value)}"
     Text(
         text = caption,
         style = statusLineStyle(),

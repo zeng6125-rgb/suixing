@@ -72,17 +72,39 @@ class McpManager(
     private val store: McpStore,
     private val registry: ToolRegistry,
     private val clientVersion: String = store.appVersionName(),
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
+    private val managerJob = SupervisorJob(scope.coroutineContext[Job])
+    private val scope = CoroutineScope(scope.coroutineContext + managerJob)
     private val mutex = Mutex()
     private val stateLock = Any()
     private val jobLock = Any()
     private val clients = mutableMapOf<String, McpClient>()
+    private val connectingClients = mutableSetOf<McpClient>()
+    @Volatile private var closed = false
     private val toolsByServer = mutableMapOf<String, List<McpToolSpec>>()
     private val reconnectJobs = mutableMapOf<String, Job>()
 
     private val _servers = MutableStateFlow<List<McpServerState>>(emptyList())
     val servers: StateFlow<List<McpServerState>> = _servers.asStateFlow()
+
+    /** Releases this manager without cancelling an injected application scope. */
+    suspend fun close() {
+        closed = true
+        managerJob.cancel()
+        synchronized(jobLock) { reconnectJobs.clear() }
+        mutex.withLock {
+            clients.values.forEach { it.close() }
+            connectingClients.forEach { it.close() }
+            connectingClients.clear()
+            clients.clear()
+            toolsByServer.clear()
+        }
+        registry.replaceDynamic(MCP_PREFIX, emptyList())
+        synchronized(stateLock) {
+            _servers.value = _servers.value.map { it.copy(status = McpStatus.DISCONNECTED, toolCount = 0) }
+        }
+    }
 
     /**
      * Reads the saved servers and connects every enabled one. Each connect runs on
@@ -133,6 +155,7 @@ class McpManager(
      * loop rather than parking the server dead.
      */
     suspend fun connect(name: String) {
+        if (closed) return
         val config = configOf(name) ?: return
         cancelReconnect(name)
         setAttempt(name, 0)
@@ -168,6 +191,10 @@ class McpManager(
      */
     suspend fun test(config: McpServerConfig): String {
         val client = McpClient(buildTransport(config))
+        mutex.withLock {
+            if (closed) { client.close(); return "MCP 管理器已关闭" }
+            connectingClients += client
+        }
         return try {
             client.connect()
             val specs = client.listTools()
@@ -185,6 +212,9 @@ class McpManager(
             "连接失败：${error.message ?: error::class.java.simpleName}"
         } finally {
             client.close()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                mutex.withLock { connectingClients.remove(client) }
+            }
         }
     }
 
@@ -194,11 +224,22 @@ class McpManager(
      * records the error, returning false so the caller decides whether to retry.
      */
     private suspend fun attemptConnect(name: String, config: McpServerConfig): Boolean {
+        mutex.withLock {
+            clients.remove(name)?.close()
+            toolsByServer.remove(name)
+        }
+        publishTools()
         val client = McpClient(buildTransport(config))
+        mutex.withLock {
+            if (closed) { client.close(); return false }
+            connectingClients += client
+        }
         return try {
             client.connect()
             val specs = client.listTools()
             mutex.withLock {
+                if (closed) throw CancellationException("MCP manager closed")
+                connectingClients.remove(client)
                 clients.put(name, client)?.close()
                 toolsByServer[name] = specs
             }
@@ -214,8 +255,17 @@ class McpManager(
             publishTools()
             true
         } catch (error: Throwable) {
-            if (error is CancellationException) throw error
             client.close()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                mutex.withLock {
+                    connectingClients.remove(client)
+                    if (clients[name] === client) {
+                        clients.remove(name)
+                        toolsByServer.remove(name)
+                    }
+                }
+            }
+            if (error is CancellationException) throw error
             mutex.withLock { toolsByServer.remove(name) }
             update(name) {
                 it.copy(
@@ -235,6 +285,7 @@ class McpManager(
      * disconnect can cancel the pending delay without waiting it out.
      */
     private fun scheduleReconnect(name: String) {
+        if (closed) return
         val config = configOf(name) ?: return
         if (!config.enabled) {
             update(name) { it.copy(status = McpStatus.DISCONNECTED, attempt = 0) }
@@ -268,9 +319,17 @@ class McpManager(
     private fun onTransportFailure(name: String) {
         val status = synchronized(stateLock) { _servers.value.firstOrNull { it.config.name == name }?.status }
         if (status != McpStatus.READY) return
+        update(name) { it.copy(status = McpStatus.RECONNECTING, toolCount = 0) }
         cancelReconnect(name)
         setAttempt(name, 0)
-        scheduleReconnect(name)
+        scope.launch {
+            mutex.withLock {
+                clients.remove(name)?.close()
+                toolsByServer.remove(name)
+            }
+            publishTools()
+            scheduleReconnect(name)
+        }
     }
 
     private fun configOf(name: String): McpServerConfig? =

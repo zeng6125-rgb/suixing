@@ -212,13 +212,15 @@ class ShellTools(
                 "shizuku" -> Shell.shizuku(getCmd)
                 else -> Shell.local(getCmd)
             }
-            r.stdout.trim().trim('"')
-        }.getOrNull()
+            r.takeIf { it.ok }?.stdout?.trim()?.trim('"')
+        }.getOrElse { error ->
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
         if (actual == null) {
             return "\n[verify] ${write.ns}/${write.key}: 读回失败，无法确认是否生效 —— 请勿假设已修改"
         }
-        // `settings get` 对不存在的键返回 null；写了空值也会是 null，都算"达到了预期"。
-        val verified = actual == write.value || actual == "null"
+        val verified = settingWriteVerified(write.value, actual)
         return "\n[verify] ${write.ns}/${write.key}: expected=${write.value} actual=$actual " +
             "verified=$verified" +
             if (!verified) " — 写入未生效，请勿假设已修改" else ""
@@ -409,6 +411,10 @@ class ShellTools(
      */
     private fun quote(raw: String): String = "'" + raw.replace("'", "'\\''") + "'"
 }
+
+/** A missing key is printed as null by Android and cannot prove a successful write. */
+internal fun settingWriteVerified(expected: String, actual: String): Boolean =
+    actual != "null" && actual == expected
 
 /**
  * The channel a `run_shell` call runs through: **the lower of what was asked for and what the

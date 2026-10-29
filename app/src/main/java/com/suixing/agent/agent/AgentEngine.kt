@@ -428,6 +428,7 @@ class AgentEngine(
      * with it.
      */
     private val states = mutableMapOf<String, java.lang.ref.WeakReference<MutableStateFlow<RunState>>>()
+    private var stateAccesses = 0
     private val recentStates = object : LinkedHashMap<String, MutableStateFlow<RunState>>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutableStateFlow<RunState>>?): Boolean = size > 16
     }
@@ -442,7 +443,8 @@ class AgentEngine(
 
     /** The writable side of [stateOf], for the runs that publish into it. */
     private fun stateFlowOf(chatId: String): MutableStateFlow<RunState> = synchronized(states) {
-        states.entries.removeAll { it.value.get() == null }
+        // Publishing one token must not scan every conversation ever opened.
+        if (++stateAccesses % 64 == 0) states.entries.removeAll { it.value.get() == null }
         val flow = states[chatId]?.get() ?: MutableStateFlow(runs.value[chatId]?.state?.value ?: RunState.Idle).also {
             states[chatId] = java.lang.ref.WeakReference(it)
         }
@@ -840,7 +842,7 @@ class AgentEngine(
         @Volatile
         private var lastPromptTokens = 0
         /** 当前轮请求的估算大小，见 [StreamStats.currentPrompt]。每轮定型时刷新。 */
-        private var currentPromptEstimate = 0
+        @Volatile private var currentPromptEstimate = 0
 
         /** Wire size in characters when [lastPromptTokens] was recorded, to price the growth. */
         @Volatile
@@ -1967,9 +1969,14 @@ class AgentEngine(
         while (cut > 1 && wire[cut].role == ROLE_TOOL) cut--
         if (cut <= 1) return
 
-        val older = wire.subList(1, cut).filter { it.role != ROLE_SYSTEM }
-        if (older.isEmpty()) return
-        val prefixChars = wire.subList(1, cut).sumOf { promptMessageChars(it) }
+        val prefix = wire.subList(1, cut)
+        var olderCount = 0
+        var prefixChars = 0
+        for (message in prefix) {
+            if (message.role != ROLE_SYSTEM) olderCount++
+            prefixChars += promptMessageChars(message)
+        }
+        if (olderCount == 0) return
         if (!compactionRetry.allows(cut, prefixChars, asked)) return
 
         val attempt = try {
@@ -1977,7 +1984,7 @@ class AgentEngine(
             // The whole span, system notes included: the summary this one replaces has to be folded
             // into it. Otherwise the rebuild that resumes from the checkpoint — which can only carry
             // one summary — would drop the older one and its context with it.
-            summarize(wire.subList(1, cut), settings)
+            summarize(prefix, settings)
         } catch (error: IOException) {
             // A stop during the summary is still a stop: let the caller's check see it
             // rather than reporting the abort as a failure of the whole run.
@@ -2030,7 +2037,7 @@ class AgentEngine(
         // Counted in transcript messages, not in wire entries: the card that shows this number also
         // shows how many messages the span covers, and the two have to be the same fact. A wire
         // entry that came from nowhere — the screenshot note, a steer line — would make them differ.
-        val folded = if (covered.isEmpty()) older.size else covered.size
+        val folded = if (covered.isEmpty()) olderCount else covered.size
 
         // Handed up rather than kept here: the summary has to outlive this run, or the next one
         // starts from the full history and pays to summarise the same messages all over again.
@@ -2306,10 +2313,6 @@ class AgentEngine(
         }
     }
 
-    private fun parseArgs(raw: String): JsonObject =
-        runCatching { Json.parseToJsonElement(raw.ifBlank { "{}" }).jsonObject }
-            .getOrElse { JsonObject(emptyMap()) }
-
     /**
      * 跑**一条**工具调用，只产出 [ToolOutcome]，不碰 run 级的可变状态（wire/spans/produced/
      * openCalls 都在 [runLoop] 的局部里，回写由那边的 commitTool 做）—— 这是并行的前提：
@@ -2332,6 +2335,11 @@ class AgentEngine(
         // asked for in the same breath do not run either.
         if (cancelled.get()) return null
         val argsPreview = call.arguments.take(600)
+        val args = try {
+            parseToolArguments(call.arguments)
+        } catch (failure: IllegalArgumentException) {
+            return ToolOutcome(call, ToolResult.failure("工具参数不是合法 JSON 对象，请重新生成调用"), 0, argsPreview)
+        }
         if (registry.isHidden(call.name)) return ToolOutcome(call,
             ToolResult.failure("当前人设已禁用此工具"), 0, argsPreview)
         if (call.name in SUBAGENT_TOOL_NAMES) {
@@ -2340,7 +2348,7 @@ class AgentEngine(
                 ToolResult.failure("当前运行未启用此子任务工具"), 0, argsPreview)
             onEvent(AgentEvent.ToolStarted(call.name, argsPreview))
             val started = System.currentTimeMillis()
-            val result = pool.execute(call.name, parseArgs(call.arguments))
+            val result = pool.execute(call.name, args)
             return ToolOutcome(call, result, System.currentTimeMillis() - started, argsPreview)
         }
         // 「压缩上下文」是引擎自己的虚拟工具（用户：「要有压缩上下文的指令工具」）：不进 registry
@@ -2401,7 +2409,7 @@ class AgentEngine(
                 PluginRuntime.logPluginError("risk 推断失败（已兜底跳过）", error)
                 null
             }
-        val verdict = runCatching { PluginRuntime.preExecute(hooks, call.name, argsPreview, risk) }
+        val verdict = runCatching { PluginRuntime.preExecute(hooks, call.name, call.arguments, risk) }
             .getOrElse { error ->
                 PluginRuntime.logPluginError("hook 裁决失败（已兜底放行）", error)
                 HookVerdict()
@@ -2444,7 +2452,7 @@ class AgentEngine(
                     // 以及 `onEvent` 的线程假设全部不变。
                     runCatching {
                         withContext(Dispatchers.IO) {
-                            SHARED_TOOL_EXECUTION.run(call.name) { runner(parseArgs(call.arguments)) }
+                            SHARED_TOOL_EXECUTION.run(call.name) { runner(args) }
                         }
                     }.getOrElse { error ->
                         if (error is CancellationException) throw error

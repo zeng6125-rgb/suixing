@@ -44,6 +44,7 @@ class SchedulerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Core.startup.backgroundStarting()
         ensureChannel()
     }
 

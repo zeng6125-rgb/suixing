@@ -10,6 +10,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 
 /**
@@ -39,8 +42,9 @@ internal fun Modifier.popupCardSurface(color: Color): Modifier = this
         // 会发黑发脏。ambient 与 spot 同色 ⇒ 没有方向性偏移。
         elevation = 10.dp,
         shape = PopupCardShape,
+        clip = false,
         ambientColor = Color.Black.copy(alpha = 0.18f),
-        spotColor = Color.Black.copy(alpha = 0.18f),
+        spotColor = Color.Transparent,
     )
     .clip(PopupCardShape)
     .background(color)
@@ -48,5 +52,26 @@ internal fun Modifier.popupCardSurface(color: Color): Modifier = this
 /** How long a popup card's exit animation runs before the popup is taken down. */
 internal const val MENU_EXIT_MS = 140L
 
-/** 全站小浮层统一时长（用户：所有统一为七处那一套，140ms）。 */
+/** Menus leave faster than they enter; the outer touch shield outlives this exit. */
 internal const val POPUP_ANIM_MS = 110
+
+internal val PopupShadowMargin = 24.dp
+
+/** Read animation frames in the layer, keeping content measurement and popup anchors stable. */
+internal fun Modifier.popupMotion(state: PopupMotionState, origin: () -> TransformOrigin = { TransformOrigin.Center }): Modifier =
+    graphicsLayer {
+        val p = state.progress.value
+        // Group opacity composites the card **and its shadow** into one offscreen buffer sized to
+        // this node, so the caller must hand this modifier a node that already reserves the
+        // shadow margin (MenuCard's [PopupShadowMargin] box). Outsizes cannot rescue a card-sized
+        // layer: the shadow is drawn by the node's own shadow modifier, inside this buffer.
+        // ModulateAlpha is not an option either — it would show the shadow through the card.
+        clip = false
+        alpha = state.opacity.value
+        scaleX = 0.94f + 0.06f * p
+        scaleY = scaleX
+        transformOrigin = origin()
+        // Grow out of the triggering control: a menu opening upward starts lower, one opening
+        // downward starts higher, so the card reads as coming from the button that summoned it.
+        translationY = (1f - p) * 8.dp.toPx() * (transformOrigin.pivotFractionY * 2f - 1f)
+    }

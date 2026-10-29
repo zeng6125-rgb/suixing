@@ -128,12 +128,18 @@ class MemoryStore(private val context: Context) {
             // that [read] would quarantine — the old notes survive instead.
             val temp = File(file.parentFile, "${file.name}.tmp")
             val text = json.toString()
-            temp.writeText(text)
+            java.io.FileOutputStream(temp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
             if (!temp.renameTo(file)) {
                 // renameTo reports failure by returning false, so fall back to a direct
                 // write; its exception has to stay visible rather than lose the note.
                 try {
-                    file.writeText(text)
+                    java.io.FileOutputStream(file).use { out ->
+                        out.write(text.toByteArray(Charsets.UTF_8))
+                        out.fd.sync()
+                    }
                 } finally {
                     temp.delete()
                 }

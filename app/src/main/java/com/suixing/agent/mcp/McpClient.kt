@@ -2,6 +2,8 @@ package com.suixing.agent.mcp
 
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -16,19 +18,20 @@ class McpClient(
 ) {
     private val ids = AtomicLong(1)
     private var started = false
+    private val connectMutex = Mutex()
 
     var serverInfo: McpServerInfo? = null
         private set
 
-    suspend fun connect() {
-        if (started) return
+    suspend fun connect() = connectMutex.withLock {
+        if (started) return@withLock
         transport.start()
-        started = true
         val response = transport.exchange(
             McpProtocol.initialize(ids.getAndIncrement(), clientName, clientVersion),
         )
         serverInfo = McpProtocol.parseServerInfo(resultOf(response))
         transport.notify(McpProtocol.initializedNotification())
+        started = true
     }
 
     suspend fun listTools(): List<McpToolSpec> =

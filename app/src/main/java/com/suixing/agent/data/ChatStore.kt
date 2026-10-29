@@ -41,6 +41,10 @@ internal data class ChatTotals(
     val contextTokens: Int = 0,
     /** 单轮最大 token（末轮 prompt + 该轮 completion 之和）。按 runId 分组，与用量页口径一致。 */
     val longestTurnTokens: Long = 0,
+    /** Last run's accumulator, so appending part of the same run keeps its complete total. */
+    val trailingRunId: String? = null,
+    val trailingRunPromptTokens: Long = 0,
+    val trailingRunCompletionTokens: Long = 0,
 ) {
     operator fun plus(other: ChatTotals): ChatTotals = ChatTotals(
         turns = turns + other.turns,
@@ -52,6 +56,7 @@ internal data class ChatTotals(
         firstTokenMs = firstTokenMs + other.firstTokenMs,
         // 这个字段是"最后一条"而不是"求和"，所以后一段覆盖前一段。
         contextTokens = if (other.contextTokens > 0) other.contextTokens else contextTokens,
+        longestTurnTokens = maxOf(longestTurnTokens, other.longestTurnTokens),
     )
 
     companion object {
@@ -64,11 +69,11 @@ internal data class ChatTotals(
  * 它需要跨消息的 runId 分组（末轮 prompt + 该轮 completion 之和），
  * `plus` 做不到，只能在这种有序折叠里顺路算。
  */
-internal fun foldTotals(messages: List<StoredMessage>): ChatTotals {
-    var acc = ChatTotals.EMPTY
-    var runId = ""
-    var runPrompt = 0L
-    var runCompletion = 0L
+internal fun foldTotals(messages: List<StoredMessage>, initial: ChatTotals = ChatTotals.EMPTY): ChatTotals {
+    var acc = initial
+    var runId = initial.trailingRunId.orEmpty()
+    var runPrompt = initial.trailingRunPromptTokens
+    var runCompletion = initial.trailingRunCompletionTokens
     var longest = acc.longestTurnTokens
     fun settle() {
         if (runId.isNotEmpty()) {
@@ -89,7 +94,9 @@ internal fun foldTotals(messages: List<StoredMessage>): ChatTotals {
         runCompletion += message.completionTokens.toLong()
     }
     settle()
-    return if (longest > acc.longestTurnTokens) acc.copy(longestTurnTokens = longest) else acc
+    return acc.copy(longestTurnTokens = maxOf(longest, acc.longestTurnTokens),
+        trailingRunId = runId, trailingRunPromptTokens = runPrompt,
+        trailingRunCompletionTokens = runCompletion)
 }
 
 /** 一条消息贡献的统计量。 */
@@ -420,16 +427,14 @@ internal class ChatStore(private val root: File) {
             lastMessageId = tail.last().id,
             // 会话统计跟着追加走：只累加**新落盘**这几条，不重扫日志。
             // longestTurn 跨 runId，顺序折叠才能算 —— 起点带 committed 的旧值，新 tail 并入
-            totals = tail.fold(committed.totals) { acc, m -> acc + totalsOfMessage(m) }
-                .let { merged ->
-                    merged.copy(longestTurnTokens = maxOf(merged.longestTurnTokens, foldTotals(tail).longestTurnTokens))
-                },
+            totals = foldTotals(tail, committed.totals),
             // **只有原统计本来就是全量时，追加后的才是全量**（评审 S-4）。
             // 旧 meta 的 `totalsAt` 可能落后于 `messageCount`（历史版本没维护这两列），
             // 那种情况下累加出来的是"残缺基数 + 新尾巴"，若把 `totalsAt` 写成新的条数，
             // `sessionTotals` 会认为统计有效、**永远不再补算**（列表页统计从此偏小）。
             // 所以对不齐时写 -1，让下游知道"这份统计需要重算"。
-            totalsAt = if (committed.totalsAt == committed.messageCount) {
+            totalsAt = if (committed.totalsAt == committed.messageCount &&
+                (committed.messageCount == 0 || committed.totals.trailingRunId != null)) {
                 committed.messageCount + tail.size
             } else {
                 -1
@@ -481,7 +486,7 @@ internal class ChatStore(private val root: File) {
             // 后果不是丢数据，而是「条数恰好相等时（同长编辑/同长 rewrite）」`sessionTotals`
             // 会认为统计仍然有效、直接用**过期值**；不等时又要整份 `store.all` 重扫一次
             // （30MB 会话可感知）。这里顺手算掉，改写本来就要遍历一遍消息。
-            totals = messages.fold(ChatTotals.EMPTY) { acc, m -> acc + totalsOfMessage(m) },
+            totals = foldTotals(messages),
             totalsAt = messages.size,
         )
         writeAtomically(logFile(next), bytes)
@@ -588,13 +593,18 @@ internal class ChatStore(private val root: File) {
         if (end == 0L) return MessageWindow(emptyList(), 0, atStart = true)
 
         var budget = INITIAL_WINDOW_BYTES
+        var parsedFrom = end
+        var entries = emptyList<Entry>()
         while (true) {
             val rawFrom = (end - budget).coerceAtLeast(0)
             val atStart = rawFrom == 0L
             // A window that starts mid-line would decode a truncated message: skip to the next
             // line boundary. It costs one partial turn, which the cut below drops anyway.
-            val from = if (atStart) 0 else startOfNextLine(file, rawFrom, end)
-            val entries = readEntries(file, name, from, end)
+            val from = if (atStart) 0 else minOf(parsedFrom, startOfNextLine(file, rawFrom, end))
+            // Each complete line is decoded once, even when a huge turn requires expansion.
+            val prefix = readEntries(file, name, from, parsedFrom)
+            if (prefix.isNotEmpty()) entries = prefix + entries
+            parsedFrom = from
             val starts = entries.indices.filter { isTurnStart(entries[it].message) }
             val cut = when {
                 atStart && starts.size <= turns -> 0
@@ -610,7 +620,7 @@ internal class ChatStore(private val root: File) {
                 )
             }
             if (atStart) return MessageWindow(entries.map { it.message }, 0, atStart = true)
-            budget *= 4
+            budget = (budget * 4).coerceAtMost(end)
         }
     }
 
@@ -670,33 +680,24 @@ internal class ChatStore(private val root: File) {
             //  · 命中处必须是**行首**（`{"id":` 只会出现在行首，因为 id 是消息的第一个字段）⇒
             //    往前一个字节必须是换行，或就是文件开头。
             var end = limit
-            var previousChunkFirst: Byte? = null
-            var found: Long? = null
             while (end > 0) {
                 val want = minOf(SEARCH_CHUNK.toLong(), end).toInt()
                 val from = end - want
-                val buf = ByteArray(want)
-                raf.seek(from)
-                raf.readFully(buf, 0, want)
-                var i = buf.size - needle.size
-                while (i >= 0) {
+                // Prefix supplies the real preceding byte; suffix overlaps the next chunk
+                // so a message id starting in the last few bytes cannot be missed.
+                val readFrom = (from - 1).coerceAtLeast(0)
+                val readEnd = minOf(limit, end + needle.size - 1)
+                val buf = ByteArray((readEnd - readFrom).toInt())
+                raf.seek(readFrom)
+                raf.readFully(buf)
+                var i = minOf((end - readFrom - 1).toInt(), buf.size - needle.size)
+                val first = (from - readFrom).toInt()
+                while (i >= first) {
                     if (buf[i] == needle[0] && regionMatches(buf, i, needle)) {
-                        val at = from + i
-                        val atLineStart = when {
-                            at == 0L -> true
-                            i > 0 -> buf[i - 1] == NEWLINE
-                            else -> previousChunkFirst == NEWLINE
-                        }
-                        if (atLineStart) {
-                            // 记下**最靠前**的那次命中（倒扫里先遇到的是最新的，继续往前才是更早的）。
-                            found = at
-                            break
-                        }
+                        if (isLineStart(readFrom, i, buf, null)) return readFrom + i
                     }
                     i--
                 }
-                if (found != null) return found
-                previousChunkFirst = buf.first()
                 end = from
             }
         }
@@ -771,9 +772,7 @@ internal class ChatStore(private val root: File) {
             turnCount = conversation.messages.count { isTurnStart(it) },
             lastMessageId = conversation.messages.lastOrNull()?.id ?: "",
             // 传进来的一定是**完整**消息列表（新会话 / rewrite / 迁移），所以这就是整份。
-            totals = conversation.messages.fold(ChatTotals.EMPTY) { acc, m ->
-                acc + totalsOfMessage(m)
-            },
+            totals = foldTotals(conversation.messages),
             totalsAt = conversation.messages.size,
         )
 
