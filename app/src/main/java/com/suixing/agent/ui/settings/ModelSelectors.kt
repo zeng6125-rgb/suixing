@@ -43,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.PopupShadowMargin
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.data.PROTOCOL_OPENAI
 import com.suixing.agent.data.PROTOCOL_ANTHROPIC
@@ -114,6 +116,19 @@ private fun ModelDropdownMenu(
     val gapPx = with(density) { 4.dp.roundToPx() }
     // provider 必须 remember：否则每次重组都是新实例 ⇒ MenuCard 的参数恒变，开着时每帧重跑定位。
     val provider = remember { AnchorBelowProvider(gapPx) }
+    /**
+     * 阴影余量按可用空间收。
+     *
+     * 这两个下拉的卡片宽度 = 锚点宽度（几乎满宽：屏幕 385dp − 页面两侧 16dp = 353dp），
+     * 而 [MenuCard] 默认每边预留 24dp 阴影余量 ⇒ 窗口要 353 + 48 = **401dp**，屏幕只有
+     * 385dp ⇒ Popup 按约束把卡片压到 337dp，**比按钮窄一圈**（用户：「宽度没有对应上下拉
+     * 按钮宽度」）。这里把余量收到「屏幕宽 − 锚点宽」的一半，卡片因此能保持与按钮等宽。
+     *
+     * 上限仍是 24dp：屏幕够宽时（如平板）不缩。
+     */
+    val availableDp = LocalConfiguration.current.screenWidthDp.dp - width
+    // 每边再让 1dp：窗口正好等于屏幕宽时，insets/取整都可能让它差一点放不下。
+    val marginDp = (availableDp / 2 - 1.dp).coerceIn(0.dp, PopupShadowMargin)
     MenuCard(
         visible = expanded,
         onDismiss = onDismiss,
@@ -121,6 +136,15 @@ private fun ModelDropdownMenu(
         offset = IntOffset.Zero,
         popupPositionProvider = provider,
         modifier = if (anchorWidth > 0) Modifier.width(width) else Modifier,
+        shadowMargin = marginDp,
+        // **边界要两件事一起撑**（用户先报「浮层周边和背景混在一起了」，再报「边缘看不太清」）：
+        //  1. 底色换一档 —— `BrandLight` 的 `background` 与 `surface` **字面完全相同**
+        //     （都 0xFFFFFFFF），MenuCard 默认 `surface` 等于画在页面底色上。改
+        //     `surfaceContainerLow`(#F7FAF8) 才有色差，也与下拉按钮的底色一致。
+        //  2. 再加 1dp 描边 —— #F7FAF8 对 #FFFFFF 只差约 3% 亮度；而且为宽度把阴影余量
+        //     收到了 14.8dp，阴影边缘也可能被裁。描边与下拉按钮自己那条 `outlineVariant` 同款。
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
     ) {
         // **滚动必须在卡片内容里、不能挂在 MenuCard 的 modifier 上**：那个 modifier 在

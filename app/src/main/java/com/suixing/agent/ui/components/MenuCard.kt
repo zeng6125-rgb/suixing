@@ -44,6 +44,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -87,6 +88,21 @@ internal fun MenuCard(
     /** 卡片底色；默认与其它浮层一致（theme 的 surface）。 */
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
     /**
+     * 卡片描边；默认无（保持既有浮层外观）。
+     *
+     * 纯白页面上浮上来的卡片需要它才能看清边界 —— 见 [popupCardSurface] 的说明。
+     */
+    borderColor: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Transparent,
+    /**
+     * 为阴影预留的窗口余量（每边）。默认 [PopupShadowMargin]（24dp）。
+     *
+     * **下拉菜单要按可用空间收**：卡片宽度等于锚点宽度时（模型页那两个下拉就是满宽），
+     * 卡片 + 两侧余量会超出屏幕 —— Popup 窗口放不下就会被测量压扁，卡片实际宽度比按钮
+     * 窄一圈（用户看到的就是「宽度没有对应上下拉按钮宽度」）。调用方按
+     * `min(默认, (屏幕宽 − 锚点宽) / 2)` 传进来即可，卡片的**布局宽度**始终是它自己的宽度。
+     */
+    shadowMargin: Dp = PopupShadowMargin,
+    /**
      * 卡片内容的内边距。默认是「浮层卡片」那档（18/14）。
      *
      * 下拉菜单要另给一档：菜单项自己还带 `DropdownMenuItem` 的 contentPadding，两档叠起来
@@ -99,9 +115,10 @@ internal fun MenuCard(
     var keepMounted by remember { mutableStateOf(visible) }
     val motion = remember { PopupMotionState() }
     var origin by remember { mutableStateOf(TransformOrigin(0.5f, 1f)) }
-    val shadowMargin = with(LocalDensity.current) { PopupShadowMargin.roundToPx() }
-    val shadowProvider = remember(popupPositionProvider, alignment, offset, shadowMargin) {
-        ShadowPopupPositionProvider(shadowMargin, popupPositionProvider, alignment, offset) { origin = it }
+    val shadowMarginDp = shadowMargin
+    val shadowMarginPx = with(LocalDensity.current) { shadowMarginDp.roundToPx() }
+    val shadowProvider = remember(popupPositionProvider, alignment, offset, shadowMarginPx) {
+        ShadowPopupPositionProvider(shadowMarginPx, popupPositionProvider, alignment, offset) { origin = it }
     }
     LaunchedEffect(visible) {
         if (visible) {
@@ -152,11 +169,11 @@ internal fun MenuCard(
                     indication = null,
                     onClick = onDismiss,
                 )
-                .padding(PopupShadowMargin),
+                .padding(shadowMarginDp),
         ) {
         Column(
             modifier = modifier
-                .popupCardSurface(containerColor)
+                .popupCardSurface(containerColor, borderColor)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,

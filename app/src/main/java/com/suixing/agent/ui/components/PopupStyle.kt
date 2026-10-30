@@ -5,6 +5,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,7 +40,16 @@ internal val PopupCardShape = RoundedCornerShape(20.dp)
  * 结论：**只留 spot 一层**。浓度与 elevation 沿用用户认可过的 18% / 10dp；
  * `ambientColor` 置透明，`clip = false` 让阴影画到节点边界之外（给 24dp 余量）。
  */
-internal fun Modifier.popupCardSurface(color: Color): Modifier = this
+internal fun Modifier.popupCardSurface(
+    color: Color,
+    /**
+     * 卡片描边，默认无。**纯白背景上的浮层需要它**：`BrandLight` 里 `background` 与
+     * `surface` 都是 `0xFFFFFFFF`，只靠底色和一圈很淡的阴影根本分不出边界
+     * （用户：「边缘看不太清」）。描边是设计系统里最可靠的边界手段，也与下拉按钮自己
+     * 那条 `outlineVariant` 描边同款。
+     */
+    borderColor: Color = Color.Transparent,
+): Modifier = this
     .shadow(
         elevation = 10.dp,
         shape = PopupCardShape,
@@ -49,6 +59,10 @@ internal fun Modifier.popupCardSurface(color: Color): Modifier = this
     )
     .clip(PopupCardShape)
     .background(color)
+    .then(
+        if (borderColor == Color.Transparent) Modifier
+        else Modifier.border(1.dp, borderColor, PopupCardShape),
+    )
 
 /** How long a popup card's exit animation runs before the popup is taken down. */
 internal const val MENU_EXIT_MS = 140L
