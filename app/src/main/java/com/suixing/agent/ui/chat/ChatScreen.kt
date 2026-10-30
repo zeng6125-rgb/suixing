@@ -1229,7 +1229,7 @@ fun ChatScreen(
                     ) {
                         // Chronological items anchor the already-rendered text at its top.
                         if (page.hasEarlier) {
-                            item(key = "load-earlier") {
+                            item(key = "load-earlier", contentType = "load-earlier") {
                                 Box(
                                     modifier = Modifier.fillMaxWidth(),
                                     contentAlignment = Alignment.Center,
@@ -1388,14 +1388,14 @@ fun ChatScreen(
                         // 没有回执的实时失败（发送阶段错误等）画在最后一轮下面；有回执的失败由
                         // 回执自己跟在那一轮后面（内联），同文案不重复画。
                         if (errorLine) {
-                            item(key = "error:${state.conversationId}") {
+                            item(key = "error:${state.conversationId}", contentType = "error") {
                                 RunReasonLine(state.error.orEmpty())
                             }
                         }
                         // 没有 run 时手动压缩：状态行说「正在压缩上下文 · 用时 xx」。
                         // 没有这一行，点了压缩屏幕上什么都没有（用户：「啥响应也没有」）。
                         if (!state.runningHere && state.compressingSince > 0L) {
-                            item(key = "compress-status:${state.conversationId}") {
+                            item(key = "compress-status:${state.conversationId}", contentType = "compress-status") {
                                 RunStatusLine(
                                     text = "正在压缩上下文",
                                     startedAt = state.compressingSince,
