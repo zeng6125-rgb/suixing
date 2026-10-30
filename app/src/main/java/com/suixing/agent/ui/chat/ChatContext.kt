@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -28,7 +29,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -60,6 +60,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -593,6 +594,60 @@ internal fun TodoQueueRow(
  * 而不是屏幕顶上一条与内容无关的浮层。样式用卡片里既有的一档小字（labelSmall）加错误色，
  * 不再新造一种提示形态。
  */
+/**
+ * 错误提示里的「复制」图标按钮：**涟漪是一个贴着图标大小的圆**。
+ *
+ * 原来两处都不对（用户：「错误条的复制的涟漪和实际控件大小不符且还是正方形的」）：
+ *  · 回执卡那枚是 `Box(26.dp).clickable{}` —— 没 clip，Material 的 bounded 涟漪被方框切住，
+ *    看起来是**方的**；而可见图标只有 14dp，涟漪比图标大了一圈。
+ *  · 瞬时那行用的是 Material 的 `IconButton(24.dp)`：涟漪是圆的，但仍是 24dp 包着 13dp 的图标。
+ *
+ * 做法照本项目既有的写法（`Buttons.kt` 的 `FlatIconButton`、`SettingControls.kt` 的滑块拇指）：
+ * **无界圆涟漪，半径 = 可见图标的半径** ⇒ 涟漪就是图标那么大、且是圆的。
+ *
+ * 可点区大小沿用原值（回执 26dp、瞬时那行 24dp），因此布局与之前逐像素一致。
+ */
+@Composable
+private fun CopyGlyphIcon(
+    tint: Color,
+    /** 可见图标的大小。 */
+    glyphSize: Dp,
+    contentDescription: String,
+    onClick: () -> Unit,
+    /** 可点区（也是涟漪那个圆）的直径。 */
+    touchSize: Dp = 24.dp,
+    /**
+     * 按钮整体上移多少 —— 用来把**居中**的图标落到调用方指定的那条基线上
+     * （回执那枚要与左边告警图标同高）。
+     */
+    lift: Dp = 0.dp,
+) {
+    Box(
+        modifier = Modifier
+            .size(touchSize)
+            .offset(y = -lift)
+            // **圆**：涟漪被这个圆裁住（用户：「还是正方形的」）。
+            .clip(CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                // **有界涟漪**：画在按钮范围内、被上面的圆裁住。
+                // 上一版用的是**无界**涟漪（跟着手指走的小圆，半径只有图标的一半）——
+                // 于是它既小、又和图标对不上（用户：「涟漪和icon位置没不上…涟漪很小」）。
+                // 有界涟漪 + 图标居中 ⇒ 按在图标上时，涟漪的圆心就是图标的圆心。
+                indication = ripple(),
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(glyphSize),
+        )
+    }
+}
+
 @Composable
 internal fun RunReasonLine(reason: String) {
     val scheme = MaterialTheme.colorScheme
@@ -620,17 +675,13 @@ internal fun RunReasonLine(reason: String) {
         )
         // 错误提醒可复制（用户：「错误提醒怎么还不能复制」）：排查要的就是这段原文。
         val clip = LocalClipboardManager.current
-        IconButton(
+        CopyGlyphIcon(
+            tint = scheme.error,
+            glyphSize = 13.dp,
+            contentDescription = "复制错误提醒",
             onClick = { clip.setText(AnnotatedString(reason)) },
-            modifier = Modifier.size(24.dp),
-        ) {
-            Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
-                contentDescription = "复制错误提醒",
-                tint = scheme.error,
-                modifier = Modifier.size(13.dp),
-            )
-        }
+            touchSize = 24.dp,
+        )
     }
 }
 
@@ -671,7 +722,11 @@ internal fun FailureReceiptRow(text: String) {
                 imageVector = ImageVector.vectorResource(R.drawable.ic_circle_alert),
                 contentDescription = null,
                 tint = scheme.error,
-                modifier = Modifier.size(14.dp).padding(top = iconTop),
+                // **用 offset 而不是 padding**：padding 会把 14dp 的图标**压扁**成
+                // 14−iconTop 高（墨迹中心也随之偏上），两枚图标因此不等大。offset 只挪位置、
+                // 不改尺寸 ⇒ 告警图标与右边那枚复制图标都是完整的 14dp，墨迹中心都在
+                // 「正文第一行的中线 + inkShift」上（这本来就是上面那段注释的意图）。
+                modifier = Modifier.size(14.dp).offset(y = iconTop),
             )
             Spacer(Modifier.width(6.dp))
             Text(
@@ -683,24 +738,20 @@ internal fun FailureReceiptRow(text: String) {
             // 同 [RunReasonLine]：回执也要能复制（排查要原文）。
             //
             // **图标与左边那枚同高**（用户：「这两个icon要跟第一行垂直居中啊，你这样都没有对齐」）：
-            // IconButton 会把图标在 26dp 的方框里**居中**，于是它比左边的告警图标低了 6dp ——
-            // 文字换行成两行时，两枚图标更不在同一条中线上。改成 26dp 的可点区域 + 顶部对齐，
-            // 图标自己补 1dp 上边距（与左边那枚一致，正文第一行的中线就在那儿）。
+            // 早先是 Material 的 `IconButton`，它把图标在 26dp 的方框里**居中**，于是它比左边的
+            // 告警图标低了 6dp —— 文字换行成两行时，两枚图标更不在同一条中线上。现在是 26dp 的
+            // 可点区域 + 顶部对齐，图标自己补上边距（与左边那枚一致，正文第一行的中线就在那儿）。
             val clip = LocalClipboardManager.current
-            Box(
-                modifier = Modifier
-                    .size(26.dp)
-                    .clickable { clip.setText(AnnotatedString(text)) },
-                contentAlignment = Alignment.TopCenter,
-            ) {
-                Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_copy),
-                    contentDescription = "复制错误提醒",
-                    tint = scheme.error,
-                    // 同一个 iconTop ⇒ 与左边那枚完全同高，且都在第一行的中线上。
-                    modifier = Modifier.size(14.dp).padding(top = iconTop),
-                )
-            }
+            CopyGlyphIcon(
+                tint = scheme.error,
+                glyphSize = 14.dp,
+                contentDescription = "复制错误提醒",
+                onClick = { clip.setText(AnnotatedString(text)) },
+                touchSize = 24.dp,
+                // 图标在按钮里**居中**（涟漪的圆心因此就是图标的圆心），所以按钮整体要上移
+                // 「按钮半径 − 图标半径 − iconTop」，好让图标落到左边告警图标那条基线上。
+                lift = (24.dp / 2 - 14.dp / 2) - iconTop,
+            )
         }
     }
 }
