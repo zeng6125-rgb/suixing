@@ -86,6 +86,14 @@ internal fun MenuCard(
     scrim: Boolean = true,
     /** 卡片底色；默认与其它浮层一致（theme 的 surface）。 */
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
+    /**
+     * 卡片内容的内边距。默认是「浮层卡片」那档（18/14）。
+     *
+     * 下拉菜单要另给一档：菜单项自己还带 `DropdownMenuItem` 的 contentPadding，两档叠起来
+     * 文字会缩进太多、菜单项之间也显得松散。所以模型页那两个下拉传更小的一档。
+     */
+    contentPadding: androidx.compose.foundation.layout.PaddingValues =
+        androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 14.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     var keepMounted by remember { mutableStateOf(visible) }
@@ -127,7 +135,25 @@ internal fun MenuCard(
         // The motion layer owns the shadow margin, not just the card: group opacity composites
         // into a buffer sized to this node, and a card-sized buffer sliced the shadow off for
         // the first frames of every fade.
-        Box(Modifier.popupMotion(motion) { origin }.padding(PopupShadowMargin)) {
+        Box(
+            Modifier
+                .popupMotion(motion) { origin }
+                // **点阴影余量也要能关闭**（用户：「点到阴影区域好像关不了浮层」）。
+                //
+                // 卡片窗口是「卡片 + 一圈 PopupShadowMargin（24dp）」，那一圈给阴影留空间、
+                // 属于**这个窗口**。而窗口内的触摸不会穿透到下面那层遮罩 ⇒ 余量是一圈死区：
+                // 点在卡片边上 24dp 以内什么都不会发生。0.8.554 之前窗口等于卡片本身，所以
+                // 那时没有这个问题 —— 是给阴影扩窗口时引入的。
+                //
+                // `clickable` 必须写在 `padding` **之前**：写在后面只覆盖内容区，正好漏掉余量。
+                // 卡片本身（下面的 Column）有自己的 clickable，子节点先消费 ⇒ 点卡片不会误关。
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                )
+                .padding(PopupShadowMargin),
+        ) {
         Column(
             modifier = modifier
                 .popupCardSurface(containerColor)
@@ -136,7 +162,7 @@ internal fun MenuCard(
                     indication = null,
                     onClick = {},
                 )
-                .padding(horizontal = 18.dp, vertical = 14.dp),
+                .padding(contentPadding),
             content = content,
         )
         }

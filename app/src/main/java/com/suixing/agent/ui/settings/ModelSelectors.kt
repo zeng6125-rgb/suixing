@@ -8,6 +8,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -49,9 +50,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.data.ProviderConfig
+import com.suixing.agent.ui.components.MenuCard
 import com.suixing.agent.data.groupModels
 import com.suixing.agent.data.PROTOCOL_OPENAI
 import com.suixing.agent.data.PROTOCOL_ANTHROPIC
@@ -62,21 +65,71 @@ import com.suixing.agent.ui.components.SuixingDialog
 
 /** A real read-only form field; its label, padding and container match editable fields exactly. */
 /** Both connection selectors open the same quiet, anchor-width native menu. */
+/**
+ * 贴锚点下方的下拉位置：水平与锚点左缘对齐（放不下就往左收），垂直优先放下方、放不下翻到上方。
+ *
+ * 坐标是**窗口坐标**（`PopupPositionProvider` 的约定）；`popupContentSize` 收到的是**卡片**
+ * 尺寸 —— [MenuCard] 的 `ShadowPopupPositionProvider` 会先把 24dp 阴影余量减掉再传进来。
+ */
+private class AnchorBelowProvider(private val gapPx: Int) :
+    androidx.compose.ui.window.PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: androidx.compose.ui.unit.IntRect,
+        windowSize: androidx.compose.ui.unit.IntSize,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        popupContentSize: androidx.compose.ui.unit.IntSize,
+    ): androidx.compose.ui.unit.IntOffset {
+        val width = popupContentSize.width
+        val height = popupContentSize.height
+        val x = anchorBounds.left.coerceIn(0, (windowSize.width - width).coerceAtLeast(0))
+        val below = anchorBounds.bottom + gapPx
+        val above = anchorBounds.top - gapPx - height
+        val y = when {
+            below + height <= windowSize.height -> below
+            above >= 0 -> above
+            else -> (windowSize.height - height).coerceAtLeast(0)
+        }
+        return androidx.compose.ui.unit.IntOffset(x, y)
+    }
+}
+
+/**
+ * 模型页两个下拉的浮层容器。
+ *
+ * **原来用系统的 `DropdownMenu`**：12dp 圆角、系统 elevation 阴影（偏灰、有方向偏移）、
+ * 系统自带的展开入场 —— 而全站其它浮层都是 [MenuCard]（20dp 圆角、10dp elevation、
+ * 18% 黑的无偏移阴影、统一的 spring 入场）。并排看就是两种质感，用户的原话是
+ * 「模型的两个下拉的浮层感觉不好看」。
+ *
+ * 现在与 [com.suixing.agent.ui.chat.GenerationPicker] 的下拉同款：同一个 `MenuCard`、
+ * 同一套阴影与动效，只把内边距换成一档更小的（菜单项自己还带 contentPadding）。
+ */
 @Composable
 private fun ModelDropdownMenu(
     expanded: Boolean, onDismiss: () -> Unit, anchorWidth: Int,
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
-    DropdownMenu(
-        expanded = expanded, onDismissRequest = onDismiss,
-        modifier = (if (anchorWidth > 0) Modifier.width(with(density) { anchorWidth.toDp() }) else Modifier)
-            .heightIn(max = 360.dp),
-        shape = MaterialTheme.shapes.medium,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp, shadowElevation = 8.dp,
-        content = content,
-    )
+    val width = with(density) { anchorWidth.toDp() }
+    val gapPx = with(density) { 4.dp.roundToPx() }
+    // provider 必须 remember：否则每次重组都是新实例 ⇒ MenuCard 的参数恒变，开着时每帧重跑定位。
+    val provider = remember { AnchorBelowProvider(gapPx) }
+    MenuCard(
+        visible = expanded,
+        onDismiss = onDismiss,
+        alignment = Alignment.TopStart,
+        offset = IntOffset.Zero,
+        popupPositionProvider = provider,
+        modifier = if (anchorWidth > 0) Modifier.width(width) else Modifier,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+    ) {
+        // **滚动必须在卡片内容里、不能挂在 MenuCard 的 modifier 上**：那个 modifier 在
+        // `popupCardSurface()`（画背景与阴影）**外层** ⇒ 滚动时背景和阴影会跟着内容一起挪。
+        // 放在这里，卡片本体（圆角 + 阴影）固定，只有菜单项滚。
+        Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+            content()
+        }
+    }
 }
 
 
