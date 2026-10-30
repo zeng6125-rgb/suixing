@@ -1347,7 +1347,11 @@ internal fun TurnSummary(
     foldSlots: List<String?>? = null,
     streaming: Boolean = false,
     runningTool: String? = null,
-    preserveExpanded: Boolean = false,
+    // **删掉 `preserveExpanded`（本轮审计）**：它从这一层一路转传到折叠块，但全仓没有任何
+    // 读取点（`grep preserveExpanded` 只剩声明与转传）。而调用处传的是
+    // `!scroll.stickToBottom && !scroll.restoring` —— 那是在**每个 item 的组合域里**读两个
+    // 滚动状态 ⇒ 它们一翻（用户拖动跨过 8px 阈值、或回底协程置位），所有已组合的行全部失效。
+    // 值没人用，代价却是整片重组，因此整条链删除。
     runningElapsed: androidx.compose.runtime.State<Long>? = null,
     runElapsedMs: Long = 0L,
     onEdit: (StoredMessage) -> Unit = {},

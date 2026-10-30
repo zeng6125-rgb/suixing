@@ -153,7 +153,12 @@ fun ChatScreen(
     onOpenSettings: () -> Unit = {},
 ) {
     val state by viewModel.screenState.collectAsStateWithLifecycle()
-    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    // **只认本页会读的字段**（见 [sameForChat]）：整份按值订阅意味着任何一处设置写入都会让这
+    // 1941 行重新跑一遍 —— 拖动/收起悬浮控制台、在设置页敲语音转写模型都会命中，而这四个字段
+    // 本页一个都不读。判定等价时不向下游下发。
+    val settings by remember {
+        Core.settings.flow.distinctUntilChanged { a, b -> a.sameForChat(b) }
+    }.collectAsStateWithLifecycle(initialValue = AppSettings())
     val positionStorageReady by Core.conversationViewports.ready.collectAsStateWithLifecycle()
     val openingBookmark = remember(state.conversationId, positionStorageReady) {
         if (positionStorageReady) Core.conversationViewports.get(state.conversationId) else null
@@ -406,21 +411,31 @@ fun ChatScreen(
     // list, every recomposition walked the whole conversation (twelve times a second while an
     // answer streams). The revision is stamped by the view model at the one point every publish
     // goes through, so an edit to a message in the middle of the transcript still lands here.
-    val visible = remember(
+    // **转录形状 token**：`visible` 每到这些输入变化就重建一次，下游派生只需要知道
+    // 「重建过没有」。原来它们直接拿 `visible` 当 `remember` 的键 —— 而 `remember` 比较键用
+    // `equals`，即每次重组都要把**每一行的正文、思考、工具输出、图片 base64 深比较一遍**
+    // （`StoredMessage`/`Part` 都是 data class，行也是每拍新建的，引用短路的便宜都吃不到）。
+    // 流式期每秒几十拍、一页十几轮 ⇒ 主线程上白跑的字符比较。换成这个 token：键仍是原来那几项
+    // （标量 + 小 Map），比较是引用相等，真实重建才换新实例。
+    val visibleShape = remember(
         state.conversationId,
         state.messagesRevision,
         page,
         state.activeRuns,
         state.runningHere,
         state.liveRunId,
-    ) {
-        groupRows(state.messages.drop(page.from), state.activeRuns, state.runningHere)
+    ) { Any() }
+    val visible = remember(visibleShape) {
+        // `drop()` 每次都把窗口内的引用复制成新 List；流式期这条路径每 16ms 跑一次，
+        // 长会话（上千条）就是每秒几十万次引用拷贝。`subList` 是视图，零拷贝。
+        val pageMessages = state.messages.subList(page.from.coerceIn(0, state.messages.size), state.messages.size)
+        groupRows(pageMessages, state.activeRuns, state.runningHere)
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
     // Long settled bodies are parsed only for the next mount batch. Those rows consume the
     // returned blocks directly; there is no competing full-page parse or global cache prewarm.
     // The physical feed uses the same old-to-new order as this projection.
-    val rowKeys = remember(state.conversationId, visible) { presentationKeys(state.conversationId, visible) }
+    val rowKeys = remember(visibleShape) { presentationKeys(state.conversationId, visible) }
     val rowKeyIndices = remember(rowKeys) { rowKeys.withIndex().associate { it.value to it.index } }
     val viewport = remember(state.conversationId, positionStorageReady) {
         ConversationViewport(state.conversationId, openingBookmark)
@@ -429,7 +444,7 @@ fun ChatScreen(
 
     // Markdown preparation is cached by message; navigation reads LazyList's own layout.
     val rowDocuments = remember(state.conversationId) { HashMap<String, Map<String, List<MdBlock>>>() }
-    val visibleIds = remember(visible) { visible.mapTo(HashSet()) { it.message.id } }
+    val visibleIds = remember(visibleShape) { visible.mapTo(HashSet()) { it.message.id } }
     SideEffect {
         rowDocuments.keys.retainAll(visibleIds)
     }
@@ -442,7 +457,8 @@ fun ChatScreen(
     // MessageRow 的分发里画（Roles.SYSTEM → FailureReceiptRow）。这里只取一遍供去重：同文案的
     // 实时行不再画，一次失败只通知一次（用户报的「两个提醒」）。
     val receipts = remember(state.conversationId, state.messagesRevision, page) {
-        state.messages.drop(page.from).filter { it.role == Roles.SYSTEM }
+        state.messages.subList(page.from.coerceIn(0, state.messages.size), state.messages.size)
+            .filter { it.role == Roles.SYSTEM }
     }
     // 没有回执的失败（发送阶段错误等）的实时行，画在最后一轮下面。去重见 [isSameFailure]：
     // 只按完全相等比会漏，同一次失败被两条路径各写一遍时屏幕上是两张提示。
@@ -453,7 +469,11 @@ fun ChatScreen(
     // 流式气泡开关与 pin 信号都只需要「有没有活内容」这个布尔：
     // 收 VM 的 liveActive（distinct 去抖），思考期的 40ms 批次不再重组整屏。
     val live by viewModel.liveActive.collectAsStateWithLifecycle()
-    val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
+    // **每次重组都扫一遍助手表**（流式期 12.5 Hz）。下面两行把 provider×model 的解析记住了，
+    // 理由一模一样，唯独这行漏了；助手表本身也很少变，所以按它的输入记。
+    val assistant = remember(settings.assistants, settings.activeAssistantId, state.assistantId) {
+        settings.assistant(state.assistantId) ?: settings.activeAssistant()
+    }
     // The chain a run takes, resolved once for the whole screen. The context readouts
     // below divide by the window of the model that actually sends, which is not the
     // app-wide default's window once a conversation or a persona picks its own.
@@ -484,9 +504,9 @@ fun ChatScreen(
     // The cache count is the newest round's too: context is cumulative, so an older round's
     // cache figure says nothing about the window as it stands now.
     // **包 remember**（性能优化，值不变）：这是对可见行的 O(n) 反查，原来每次 ChatScreen
-    // 重组都跑一遍 —— 滚动时每秒好几次、每次扫几百行。`visible` 本身已经按 revision 记忆，
-    // 所以用 `visible` 当键是稳定的。
-    val newestUsage = remember(visible) { visible.lastOrNull { it.usage != null }?.usage }
+    // 重组都跑一遍 —— 滚动时每秒好几次、每次扫几百行。键用上面的形状 token（O(1) 引用比较），
+    // 不要拿 `visible` 本身当键：那等于每次重组都把整页正文深比较一遍。
+    val newestUsage = remember(visibleShape) { visible.lastOrNull { it.usage != null }?.usage }
     // What the endpoint never priced, sized off the text: the ring's floor for a conversation
     // 键用 **messagesRevision**，不是 rowsKey：`rowsKey` 是（会话, 条数, 末条 id），
     // 编辑某条消息、或流式把文本追加进已落盘消息时，条数与末条 id 都不变 ⇒ 估算值不刷新，
@@ -598,42 +618,16 @@ fun ChatScreen(
     // Which compression records belong under which row. A record names the first and last
     // message it folded away, so it is drawn under the row that holds that last message —
     // the place in the transcript where the model stopped seeing the conversation verbatim.
-    val checkpointsByRow = remember(state.checkpoints, visible) {
-        val byId = visible.associateBy { it.message.id }
-        val indexOf = visible.withIndex().associate { (index, row) -> row.message.id to index }
-        val roundOwner = HashMap<String, Int>()
-        visible.forEachIndexed { index, row ->
-            row.rounds.forEach { round -> roundOwner[round.id] = index }
-        }
-        val orphanToTop = mutableListOf<ContextCheckpoint>()
-        val placed = state.checkpoints.mapNotNull { checkpoint ->
-            // **锚点是压缩发生的位置**（anchorId），不是被折叠掉的最后一条（toMessageId）：
-            // 按后者定位，压缩块会跑到旧历史里，跑完这一轮就"消失"在屏幕上方（用户反馈）。
-            // 旧盘没有 anchorId（空串）⇒ 回落到 toMessageId，行为与以前一致。
-            val anchor = checkpoint.anchorId.ifEmpty { checkpoint.toMessageId }
-            // **rounds 反查用索引**（审计 1§2）：原来是每个 checkpoint 都
-            // `visible.firstOrNull { row.rounds.any { … } }` = O(checkpoints×rows×rounds)，
-            // 一张图里几十个 checkpoint 时是纯重复劳动。建一次索引即可。
-            val owner = byId[anchor] ?: roundOwner[anchor]?.let { visible.getOrNull(it) }
-            if (owner == null) {
-                // 锚点落在当前页窗口之外（转录按页后缀加载）：旧行为是**丢掉不画** —— 用户看到
-                // 的就是「压缩记录时有时无、过几轮就消失」。改挂到**本页最旧一行**顶上：折叠发生
-                // 在它们之前，这里就是折叠历史在当前页的起点，画在这里永远比消失诚实。
-                orphanToTop += checkpoint
-                return@mapNotNull null
-            }
-            val id = owner.message.id
-            val at = indexOf[id] ?: return@mapNotNull null
-            at to checkpoint
-        }.groupBy({ it.first }, { it.second })
-            .mapKeys { (index, _) -> visible[index].message.id }
-            .toMutableMap()
-        if (orphanToTop.isNotEmpty()) {
-            visible.firstOrNull()?.let { top ->
-                placed[top.message.id] = (placed[top.message.id].orEmpty()) + orphanToTop
-            }
-        }
-        placed
+    // **记忆键必须真正决定结果**（本轮对抗评审证伪了初版）：`placeCheckpoints` 的输出是按
+    // **每行的 `message.id`** 作键、按**全部轮次 id** 反查锚点，所以形状至少要包含这两样。
+    // 初版用 `rowKeys` 是错的 —— 多轮行的 rowKey 只有 `rounds.first().id`（不含 message.id），
+    // 于是"末轮换了个 id、首轮没变"这种形态会在键相同的情况下产出不同结果（评审给了反例）。
+    // 现在的形状 = 每行的 (message.id, 全部轮次 id)；比较时全是同一批 String 实例，走引用短路。
+    val checkpointRowsShape = remember(visibleShape) {
+        visible.map { row -> row.message.id to row.rounds.map { it.id } }
+    }
+    val checkpointsByRow = remember(state.checkpoints, checkpointRowsShape) {
+        placeCheckpoints(visible, state.checkpoints)
     }
     // 压缩的告知就是过程区里那一块（[CompressionBlock]，位置就是它发生的地方），不再往气泡
     // 下面塞一行提示（用户：「不需要这种在卡片下的提示」）。
@@ -1300,13 +1294,15 @@ fun ChatScreen(
                             // 键用 `imageCount`（Int）而不是 `allImages`：后者是每次访问都重建
                             // List 的 getter（`ChatModels.kt:81` 的 ifEmpty/listOfNotNull），
                             // 拿它当 remember 键等于每次重组都换一个新对象、缓存必然失效。
+                            // **不再 remember**（本轮审计）：`row.parts` 每个 delta 都新建一个 List，
+                            // 拿它当键 ⇒ 每拍每个可见行都要先做一次整行的深比较（`remember` 比较键用
+                            // `equals`）才能判断"没变"，而这段本体的成本只是 O(parts) 的类型判断。
+                            // 去掉之后省一次深比较，判定结果不变。
                             val imageCount = row.message.imageCount
-                            val heavyRow = remember(row.parts, imageCount) {
-                                imageCount > 0 ||
-                                    row.parts.any {
-                                        it is Part.Thinking || it is Part.Tools || it is Part.Compress
-                                    }
-                            }
+                            val heavyRow = imageCount > 0 ||
+                                row.parts.any {
+                                    it is Part.Thinking || it is Part.Tools || it is Part.Compress
+                                }
                             Column(
                                 Modifier
                                     .then(if (heavyRow) Modifier.graphicsLayer() else Modifier),
@@ -1359,7 +1355,6 @@ fun ChatScreen(
                                     // claims it — a stale pick is not worth a wrong name.
                                     engineLabel = engineLabel,
                                     reasoningExpansion = reasoningExpansion,
-                                    preserveExpanded = !scroll.stickToBottom && !scroll.restoring,
                                     onBranch = onBranch,
                                     onRegenerate = onRegenerate,
                                     onEdit = onEdit,
@@ -1457,7 +1452,6 @@ fun ChatScreen(
                                                 bubbleMaxWidth = bubbleMaxWidth,
                                                 reasoningExpansion = reasoningExpansion,
                                                 runId = state.liveRunId,
-                                                preserveExpanded = !scroll.stickToBottom && !scroll.restoring,
                                             )
                                             }
                                             }
@@ -1939,3 +1933,27 @@ private fun Modifier.keyboardAwareImePad(
  * 作废，用户再点一下即可。
  */
 private const val NAVIGATION_PRESENT_TIMEOUT_MS = 10_000L
+
+/**
+ * 两份设置**在聊天页看来**是否等价。
+ *
+ * 本页按值订阅整份 [AppSettings]，而整份里任何一个字段变了都会让它整页重新跑一遍。这里抹平的
+ * 是「本页一个都不读、但别处写得挺勤」的四个字段：
+ *
+ * - `consoleWidthDp` / `consoleHeightDp` / `floatingConsole`：悬浮控制台拖动结束时写
+ *   （`service/FloatConsoleService.kt:912`、`:924`），而控制台正是盖在聊天页上拖的。
+ *
+ * **`asrModel` 不在这个名单里，别再加回来**：本页自己不读它，但把整份 `settings` 传给了
+ * `VoiceOverlay`（`ChatScreen.kt:1784`），那里 `VoiceOverlay.kt:109` 用它判断「转写是否已配置」、
+ * `:325-326` 直接显示模型名。抹平它 = 用户改完转写模型回来，语音卡仍显示旧模型或「未配置」，
+ * 而且不会自愈。**判断"本页不读"必须连子组合一起看**，只看本文件会漏（这条就是这么发现的）。
+ *
+ * 抹平之后这些写入不再触发整页重组；本页真正读的字段（`assistants`、`providers`、
+ * `showReasoning`、`bubbleWidthFraction`…）照常下发。
+ *
+ * **黑名单式**，故意不做白名单：将来新增字段若忘了写进来，最坏只是少省一次重组，
+ * 绝不会让页面读到过期值。
+ */
+internal fun AppSettings.sameForChat(other: AppSettings): Boolean =
+    copy(consoleWidthDp = 0, consoleHeightDp = 0, floatingConsole = false) ==
+        other.copy(consoleWidthDp = 0, consoleHeightDp = 0, floatingConsole = false)

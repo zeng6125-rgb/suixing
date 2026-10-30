@@ -121,7 +121,6 @@ internal fun rememberTypedTextFromBirth(text: String, enabled: Boolean): String 
 private const val TYPE_TICK_MS = 16L
 
 /** 每个节拍至少放几个字：慢端点（一个 delta 一两个字）也要看得见在动。 */
-private const val TYPE_MIN_STEP = 2
 
 /**
  * 打字机初值（issue #46）：**刚诞生的块从 0 开始打，早就存在的块直接给全文**。

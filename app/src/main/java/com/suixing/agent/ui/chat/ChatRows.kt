@@ -801,7 +801,6 @@ internal fun MessageRow(
     engineLabel: String = "",
     /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
     reasoningExpansion: ReasoningExpansion,
-    preserveExpanded: Boolean = false,
     onBranch: (String, String) -> Unit,
     onRegenerate: () -> Unit,
     onEdit: (StoredMessage) -> Unit,
@@ -846,7 +845,6 @@ internal fun MessageRow(
                 followReasoning = followReasoning,
                 bubbleMaxWidth = bubbleMaxWidth,
                 reasoningExpansion = reasoningExpansion,
-                preserveExpanded = preserveExpanded,
                 onBranch = onBranch,
                 onRegenerate = onRegenerate,
                 onEdit = onEdit,
@@ -870,7 +868,6 @@ internal fun MessageRow(
                 avatarPath = assistantAvatarPath,
                 bubbleMaxWidth = bubbleMaxWidth,
                 reasoningExpansion = reasoningExpansion,
-                preserveExpanded = preserveExpanded,
             )
         }
     }
@@ -1268,7 +1265,6 @@ internal fun AssistantRow(
     engineLabel: String = "",
     message: StoredMessage? = null,
     runId: String = message?.runId.orEmpty(),
-    preserveExpanded: Boolean = false,
     expandTools: Boolean = false,
     /** 外观 → 历史思考块默认展开; see [ReasoningBlock.expandReasoning]. */
     expandReasoning: Boolean = true,
@@ -1340,7 +1336,6 @@ internal fun AssistantRow(
                     runningTool = runningTool,
                     runId = processRun,
                     foldSlots = foldSlots,
-                    preserveExpanded = preserveExpanded,
                     contextWindow = contextWindow,
                     // The run's note, when there was one: it lives on the stats for as long as
                     // the run does, which is exactly the window in which this card is drawn
