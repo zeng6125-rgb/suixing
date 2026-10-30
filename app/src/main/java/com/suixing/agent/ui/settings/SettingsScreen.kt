@@ -446,8 +446,34 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     val pendingFields = rememberDebouncedSettingsWrites()
     // Null distinguishes loading from a genuinely empty supplier list.
     val loadedStored by produceState<AppSettings?>(null) {
+        // **密文没变就不重解密**（性能审计）：`decrypted()` 会解密顶层 apiKey + **每个**
+        // provider 的 apiKey，而 `SecretBox.decrypt` 每次都要 `KeyStore.getInstance(
+        // "AndroidKeyStore").load(null)` —— N+1 次 Keystore 往返。原来只要 settings 流发射
+        // （改主题、改字号、改任何字段）就整套重解一次。
+        //
+        // 判据用**密文指纹**：顶层 apiKey + 每个 provider 的 apiKey 按顺序。指纹相同时
+        // 说明密钥压根没变，只需把非密钥字段换成新的、密钥沿用上次解密结果。
+        // 指纹里含 provider 个数 ⇒ 增删供应商必然指纹不同，按位合并不存在错位。
+        var lastSecrets: Pair<String, List<String>>? = null
+        var lastDecrypted: AppSettings? = null
         Core.settings.flow.collect { incoming ->
-            value = withContext(Dispatchers.IO) { incoming.decrypted() }
+            val secrets = incoming.apiKey to incoming.providers.map { it.apiKey }
+            val cached = lastDecrypted
+            val reused = cached != null && secrets == lastSecrets &&
+                cached.providers.size == incoming.providers.size
+            val decrypted = if (reused) {
+                incoming.copy(
+                    apiKey = cached!!.apiKey,
+                    providers = incoming.providers.mapIndexed { index, provider ->
+                        provider.copy(apiKey = cached.providers[index].apiKey)
+                    },
+                )
+            } else {
+                withContext(Dispatchers.IO) { incoming.decrypted() }
+            }
+            lastSecrets = secrets
+            lastDecrypted = decrypted
+            value = decrypted
         }
     }
     val stored = loadedStored ?: AppSettings()
@@ -2070,6 +2096,17 @@ internal fun ConversationManagerScreen(
         val archivedList = remember(conversations) {
             conversations.filter { it.archived }.sortedByDescending { it.updatedAt }
         }
+        // 活动会话的顺序（置顶区在前、普通区在后，与抽屉共用同一套排序）。
+        // **提到 LazyColumn 外面**：下面要把它们的字节数一次性批量取好，见 sizes。
+        val active = remember(sections) { sections.pinned + sections.normal }
+        // **字节数一次批量取**（性能审计）：原来每行一个 LaunchedEffect 调 chatSize，
+        // 那是每行一次 `withContext(Dispatchers.IO)` + 一次 `ChatRepository.lock`（那把锁和
+        // 会话保存、流式写盘共用）；滚动一次就抢 N 次全局锁，而且 `remember` 在 item 作用域，
+        // 滚出去再滚回来又重读一遍。现在一次线程切换、一次锁、一次遍历。
+        var sizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+        LaunchedEffect(active) {
+            sizes = Core.chats.chatSizes(active.map { it.id })
+        }
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -2080,7 +2117,7 @@ internal fun ConversationManagerScreen(
         ) {
             // 与抽屉共用同一套排序（drawerSections）：置顶在前、置顶区按手动顺序、普通区按
             // updatedAt。这一页原来是纯时间序、也不显示置顶 —— 同一枚置顶两个页面两个样子。
-            val active = sections.pinned + sections.normal
+            // `active` 已在 LazyColumn 外面算好（见 sizes 的批量取）。
             val archived = archivedList
             if (active.isEmpty() && archived.isEmpty()) {
                 item {
@@ -2098,11 +2135,8 @@ internal fun ConversationManagerScreen(
                 ) { conversation ->
                     // **读 store 里的日志**（#40 之后磁盘上已无 `<id>.json`，旧路径恒返回 -1）
                     // ⇒ 副标题里的"体积"一直不显示。`chatFile` 给的就是 meta 指向的那份日志。
-                    var bytes by remember(conversation.id) { mutableStateOf(-1L) }
-                    LaunchedEffect(conversation.id) {
-                        // 只要字节数：原来走 chatFile，它会为 tail 把整份日志读成字符串。
-                        bytes = withContext(Dispatchers.IO) { Core.chats.chatSize(conversation.id) } ?: -1L
-                    }
+                    // 字节数已在页面级**批量取好**（sizes），这里只查表，不再每行做 IO。
+                    val bytes = sizes[conversation.id] ?: -1L
                     // 副标题是一次相对时间格式化（DateUtils）+ 一次字节数格式化。按真正影响输出
                     // 的三个字段记住它：别跟着每次重组重来。文案、分隔符与原来逐字相同。
                     val subtitle = remember(

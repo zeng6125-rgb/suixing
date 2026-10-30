@@ -224,7 +224,7 @@ internal class ChatStore(private val root: File) {
      * **带缓存的 meta 读取**（优化清单 data-P1）。
      *
      * `readMeta` 原来每次都是 `isFile + readText + decode`，而一次用户操作里会被调用 2~3 遍
-     * （`save()` → `writeTail()` → `write()`，以及 `chatSize()`、列表每行）。缓存键带上
+     * （`save()` → `writeTail()` → `write()`，以及会话列表批量取尺寸的那一轮）。缓存键带上
      * 长度与 mtime，任何写入都会让键变化；`writeMeta` 里另有显式失效，兜住"同毫秒同长度"的
      * 边角情况。只留最近 16 条。
      */

@@ -198,7 +198,7 @@ internal fun GenerationSheet(
     // switch endpoints without a detour through settings, so it lists them all instead
     // of only the endpoint the assistant happens to point at. Inside one endpoint the
     // ids split by upstream vendor (an aggregating proxy prefixes them).
-    val offers = remember(settings.providers, choice.model, choice.providerId) {
+    val offers = remember(IdentityKey(settings.providers), choice.model, choice.providerId) {
         modelOffers(settings.providers, choice.model, provider)
     }
     val density = LocalDensity.current

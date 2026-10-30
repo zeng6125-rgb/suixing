@@ -187,20 +187,33 @@ class ChatRepository(
      * 「这个会话在磁盘上没有对应的文件」（用户实测）。
      */
     /**
-     * 只取日志文件尺寸（会话列表每行显示用）。
+     * 一串会话的日志尺寸（会话列表每行显示用），**一次 IO、一次锁**。
      *
-     * **为什么单独开一个入口**：`chatFile` 为了 `tail` 会把**整份日志**读成 String
+     * **为什么不走 `chatFile`**：那个为了 `tail` 会把**整份日志**读成 String
      * （30MB 会话 = 30MB 读 + 最多 60MB 中间字符串），而列表只需要 `length()`。
-     * 会话行是 LazyColumn 的 item，滚出视口即销毁 ⇒ 原文每次滚回来都重读一遍整份日志。
-     * 返回的字节数与 `chatFile().bytes` 同源同值（同一个文件、同一个 `length()`）。
+     *
+     * **为什么是批量、而不是每行一次**：会话行是 LazyColumn 的 item。原来每行一个
+     * `LaunchedEffect` 调单项版本 —— 每行一次 `withContext(Dispatchers.IO)` 线程切换 +
+     * 一次 `lock.withLock`（这把锁和会话保存、流式写盘共用）；列表有 N 行时滚动一次就抢
+     * N 次全局锁，而且 `remember` 在 item 作用域里，滚出去再滚回来**又读一遍**。
+     * 现在一次线程切换、一次锁、一次遍历。`readMeta` 自带 meta 缓存
+     * （按 path+length+lastModified），所以重复调用只有 stat 的成本。
+     *
+     * 返回的字节数与 `chatFile().bytes` 同源同值（同一个文件、同一个 `length()`）；
+     * 取不到的 id 不出现在结果里。
      */
-    internal suspend fun chatSize(id: String): Long? = withContext(Dispatchers.IO) {
-        lock.withLock {
-            val meta = store.readMeta(id) ?: return@withLock null
-            val log = store.logFileOf(meta) ?: return@withLock null
-            if (log.isFile) log.length() else null
+    internal suspend fun chatSizes(ids: List<String>): Map<String, Long> =
+        if (ids.isEmpty()) emptyMap() else withContext(Dispatchers.IO) {
+            lock.withLock {
+                val sizes = HashMap<String, Long>(ids.size)
+                for (id in ids) {
+                    val meta = store.readMeta(id) ?: continue
+                    val log = store.logFileOf(meta) ?: continue
+                    if (log.isFile) sizes[id] = log.length()
+                }
+                sizes
+            }
         }
-    }
 
     internal suspend fun chatFile(id: String): ChatFile? = withContext(Dispatchers.IO) {
         lock.withLock {

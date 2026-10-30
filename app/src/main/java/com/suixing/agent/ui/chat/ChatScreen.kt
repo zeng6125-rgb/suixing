@@ -472,7 +472,10 @@ fun ChatScreen(
     val live by viewModel.liveActive.collectAsStateWithLifecycle()
     // **每次重组都扫一遍助手表**（流式期 12.5 Hz）。下面两行把 provider×model 的解析记住了，
     // 理由一模一样，唯独这行漏了；助手表本身也很少变，所以按它的输入记。
-    val assistant = remember(settings.assistants, settings.activeAssistantId, state.assistantId) {
+    // 键用引用（IdentityKey）：这三个都是「只整体替换」的不可变数据，实例一换就重算绝不会
+    // 漏更新；而直接拿 List/整份 AppSettings 当键 ⇒ 每次重组都深比较（providers 的
+    // models/enabled/aliases Map、assistants 的提示词全文）。
+    val assistant = remember(IdentityKey(settings.assistants), settings.activeAssistantId, state.assistantId) {
         settings.assistant(state.assistantId) ?: settings.activeAssistant()
     }
     // The chain a run takes, resolved once for the whole screen. The context readouts
@@ -481,17 +484,17 @@ fun ChatScreen(
     // 每次重组都要扫 provider×model（流式期 12.5 Hz），而这三个输入很少变 —— 记住它。
     // 同一个 remember 里把**生效的模型名**一并取出：圆环面板要用它说明"这个窗口属于谁"
     // （issue #49 修法 2：切 provider 后分母变了，用户需要看出变的是窗口）。
-    val activeModel = remember(settings, state.providerId, state.model, assistant) {
+    val activeModel = remember(IdentityKey(settings), state.providerId, state.model, assistant) {
         settings.choiceFor(state.providerId, state.model, assistant).model
     }
-    val contextWindow = remember(settings, state.providerId, state.model, assistant) {
+    val contextWindow = remember(IdentityKey(settings), state.providerId, state.model, assistant) {
         settings.contextWindowFor(activeModel)
     }
     // Which endpoint a stored round ran on. A message keeps its model id and nothing else, so
     // its owner is whichever endpoint lists that id — the same question the picker asks. Built
     // once per settings change rather than per row: a long transcript redraws far more often.
     // First endpoint wins, so the user's own order settles an id two of them both list.
-    val providerOfModel = remember(settings.providers) {
+    val providerOfModel = remember(IdentityKey(settings.providers)) {
         val owners = mutableMapOf<String, ProviderConfig>()
         settings.providers.forEach { provider ->
             (provider.enabled + provider.models + provider.aliases.keys).forEach { id ->

@@ -68,6 +68,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import com.suixing.agent.R
 import com.suixing.agent.data.ASSISTANT_AVATARS
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.ui.chat.IdentityKey
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.DEFAULT_SYSTEM_PROMPT
@@ -495,7 +496,7 @@ private fun ModelSection(
     var open by remember { mutableStateOf(false) }
     // `enabledModels()` 只读 providers（data/Settings.kt:516）—— 记住它，别每次重组都
     // flatMap 一遍（每击键分配 N×M 个 Pair）。
-    val pairs = remember(settings.providers) { settings.enabledModels() }
+    val pairs = remember(IdentityKey(settings.providers)) { settings.enabledModels() }
     val follow = !draft.pinsModel
     val label = when {
         follow -> "跟随当前（${settings.shortModel.ifBlank { "未设置" }}）"
