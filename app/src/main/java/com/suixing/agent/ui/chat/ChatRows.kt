@@ -948,7 +948,9 @@ internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> U
     Row(
         // **不再自带内边距**：行首/行顶那点内边距由调用方的底部操作行统一给，
         // 否则它与「重新回答」「回答切换箭头」会错开 2dp。见 [AssistantRow] 里那一行。
+        // 盒间 1dp：图标已贴盒左（盒内右侧余 11dp），所以**图标之间正好 12dp**（用户：「都改成12dp」）。
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(1.dp),
     ) {
         TinyAction(ImageVector.vectorResource(R.drawable.ic_copy), "复制") {
             copy(message.text)
@@ -968,7 +970,10 @@ internal fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
                 indication = ripple(),
                 onClick = onClick,
             ),
-        contentAlignment = Alignment.Center,
+        // **图标贴盒子左边**（用户：「图标左边缘 → 自身盒子左边缘 5.5dp 这个改成 0dp」）：
+        // 原来是 `Center`，26dp 盒里居中 ⇒ 左右各 5.5dp。现在靠左对齐 ⇒ 左 0dp、右 11dp。
+        // 盒子仍是 26dp，点击热区不变；只是图标不再居中。
+        contentAlignment = Alignment.CenterStart,
     ) {
         Icon(
             imageVector = icon,
@@ -1309,10 +1314,19 @@ internal fun AssistantRow(
     // 列表自己有 16dp 的 contentPadding，卡片模式再叠 16dp（卡内边距）⇒ 正文距屏幕 32dp；
     // 而扁平模式没有卡片边缘了，再留 16dp 就只是白白缩窄正文。收到 0dp 后正文左缘正好落在
     // 列表的 16dp 上，与头像、与页面其它内容对齐 —— 这也是「没有了容器」该有的样子。
-    // 上下内边距不动：轮次之间的呼吸感靠它们。
+    // **扁平模式的上下也设 0**（用户：「扁平模式下的，上边距和下边距统一为 0dp 试试」）：
+    // 没有容器之后轮次之间的间隔只剩列表自己的 item 间距，先试 0 看会不会糊成一片。
+    // 卡片模式保持 16 / 10 —— 那是卡片内的边距，去掉文字就贴住卡片边了。
     val horizontalPad = if (card) 16.dp else flatPad
     val cardBody: @Composable () -> Unit = {
-        Column(Modifier.padding(start = horizontalPad, end = horizontalPad, top = 16.dp, bottom = 10.dp)) {
+        Column(
+            Modifier.padding(
+                start = horizontalPad,
+                end = horizontalPad,
+                top = if (card) 16.dp else 0.dp,
+                bottom = if (card) 10.dp else 0.dp,
+            ),
+        ) {
             // The avatar sits in the card's header rather than beside it: the reply is one
             // object, and an avatar floating outside the card made it two.
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1483,11 +1497,12 @@ internal fun AssistantRow(
                     // 顺序：复制 · 修改 · 重新回答（有才画）· 回答切换箭头 —— 箭头放在最后，
                     // 因为它是「这是第几个回答」的导航，跟在同组动作末尾比夹在中间稳。
                     MessageActions(message = message, onEdit = onEdit)
+                    // 盒间一律 1dp：图标贴盒左以后，盒右内部那 11dp + 这里 1dp = **图标间距 12dp**。
                     if (branch?.canRegenerate == true) {
-                        Spacer(Modifier.width(2.dp))
+                        Spacer(Modifier.width(1.dp))
                         RegenerateAction(onRegenerate = onRegenerate)
                     }
-                    Spacer(Modifier.width(2.dp))
+                    Spacer(Modifier.width(1.dp))
                     ActionBar(branch = branch, onBranch = onBranch)
                     Spacer(Modifier.weight(1f))
                     // The round's clock and cost, pinned to the right edge: they are two

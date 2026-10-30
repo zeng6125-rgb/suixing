@@ -128,7 +128,10 @@ internal fun BranchArrow(
             .size(26.dp)
             .clip(CircleShape)
             .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
+        // **与 `TinyAction` 同一个基准：图标贴盒子左边**（用户要的是整组对齐）。
+        // 原来这里是 `Center`（左右各 5.5dp），而复制/修改已改成左对齐 ——
+        // 只改一边会让「重新回答」比前面两个右移 5.5dp。
+        contentAlignment = Alignment.CenterStart,
     ) {
         Icon(
             imageVector = icon,
@@ -1225,7 +1228,10 @@ internal fun ToolRow(
 ) {
     val tone = when {
         !line.done -> MaterialTheme.colorScheme.primary
-        line.ok -> MaterialTheme.colorScheme.secondary
+        // **成功用中性灰**（用户：「工具卡 成功改成 灰的对齐上面两个」）：
+        // 大总结条与思考过程的表头都是 onSurfaceVariant，成功的工具没理由更显眼；
+        // 仍在跑（primary）和失败（error）保留颜色，那两种情况才需要一眼看出来。
+        line.ok -> MaterialTheme.colorScheme.onSurfaceVariant
         else -> MaterialTheme.colorScheme.error
     }
     Column(
