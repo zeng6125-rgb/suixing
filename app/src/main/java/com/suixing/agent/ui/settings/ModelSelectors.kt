@@ -3,8 +3,6 @@ package com.suixing.agent.ui.settings
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.focusProperties
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.animation.core.animateFloatAsState
@@ -63,29 +61,6 @@ import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SuixingDialog
 
 /** A real read-only form field; its label, padding and container match editable fields exactly. */
-@Composable
-private fun ModelSelectionAnchor(label: String, value: String, enabled: Boolean, expanded: Boolean, onClick: () -> Unit) {
-    val rotation = animateFloatAsState(if (expanded) 180f else 0f, tween(160), label = "modelMenuArrow")
-    Box(Modifier.fillMaxWidth()) {
-        CompactOutlinedTextField(
-            value = value, onValueChange = {}, readOnly = true, enabled = enabled,
-            label = { Text(label) }, singleLine = true,
-            modifier = Modifier.fillMaxWidth().clearAndSetSemantics {}.focusProperties { canFocus = false },
-            trailingIcon = {
-                Icon(ImageVector.vectorResource(R.drawable.ic_chevron_down), null,
-                    Modifier.size(18.dp).graphicsLayer { rotationZ = rotation.value })
-            },
-        )
-        // The field paints the native M3 decoration; this button owns focus, touch and ripple.
-        Box(Modifier.matchParentSize().padding(top = 8.dp).clip(MaterialTheme.shapes.small)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .semantics {
-                contentDescription = "$label：$value"
-                stateDescription = if (expanded) "已展开" else "已收起"
-            })
-    }
-}
-
 /** Both connection selectors open the same quiet, anchor-width native menu. */
 @Composable
 private fun ModelDropdownMenu(
@@ -104,6 +79,60 @@ private fun ModelDropdownMenu(
     )
 }
 
+
+/**
+ * 设置页那种「卡片式下拉按钮」：身份方块 + 主标题 + 副标题 + 箭头。
+ *
+ * **供应商与接口协议共用它**（用户：「模型页的接口协议的按钮也改成和供应商一样的样式」）。
+ * 原来接口协议那枚走的是一个 `CompactOutlinedTextField` 锚点，画出来是个**输入框**，
+ * 与上面那张供应商卡片完全不是一个东西；现在两者是同一套外观。
+ */
+@Composable
+private fun SelectionCardButton(
+    /** 左边的身份方块。 */
+    identity: @Composable () -> Unit,
+    title: String,
+    subtitle: String,
+    expanded: Boolean,
+    enabled: Boolean,
+    /**
+     * 无障碍描述。**不能叫 `contentDescription`** —— `semantics { }` 块里那个名字是语义属性
+     * 本身，同名会变成「把 val 赋给 val」（编译器报 "val cannot be reassigned"）。
+     */
+    description: String,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val rotation = animateFloatAsState(if (expanded && enabled) 180f else 0f, tween(160), label = "selectionArrow")
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = MaterialTheme.shapes.small,
+        color = colors.surfaceContainerLow,
+        border = BorderStroke(1.dp, if (expanded && enabled) colors.primary else colors.outlineVariant.copy(alpha = 0.65f)),
+        modifier = Modifier.fillMaxWidth().graphicsLayer { alpha = if (enabled) 1f else 0.38f }.semantics {
+            contentDescription = description
+            stateDescription = if (expanded && enabled) "已展开" else "已收起"
+        },
+    ) {
+        Row(
+            Modifier.heightIn(min = SettingsStyle.ControlHeight).padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            identity()
+            Column(Modifier.weight(1f)) {
+                Text(title, style = SettingsStyle.body, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, style = SettingsStyle.badge, color = colors.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Icon(ImageVector.vectorResource(R.drawable.ic_chevron_down), null,
+                Modifier.size(18.dp).graphicsLayer { rotationZ = rotation.value }, tint = colors.onSurfaceVariant)
+        }
+    }
+}
+
 @Composable
 internal fun ProviderDropdown(
     providers: List<ProviderConfig>, selected: ProviderConfig?, enabled: Boolean,
@@ -115,30 +144,15 @@ internal fun ProviderDropdown(
     val rotation = animateFloatAsState(if (open && enabled) 180f else 0f, tween(160), label = "providerArrow")
     val endpoint = remember(selected?.baseUrl) { providerEndpointLabel(selected?.baseUrl.orEmpty()) }
     Box(Modifier.fillMaxWidth().padding(top = 8.dp).onSizeChanged { anchorWidth = it.width }) {
-        Surface(
-            onClick = { if (providers.isEmpty()) onAdd() else open = true }, enabled = enabled,
-            shape = MaterialTheme.shapes.small,
-            color = colors.surfaceContainerLow,
-            border = BorderStroke(1.dp, if (open && enabled) colors.primary else colors.outlineVariant.copy(alpha = 0.65f)),
-            modifier = Modifier.fillMaxWidth().graphicsLayer { alpha = if (enabled) 1f else 0.38f }.semantics {
-                contentDescription = "供应商：${selected?.label ?: "添加供应商"}"
-                stateDescription = if (open && enabled) "已展开" else "已收起"
-            },
-        ) {
-            Row(Modifier.heightIn(min = SettingsStyle.ControlHeight).padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ProviderIdentity(selected?.label.orEmpty())
-                Column(Modifier.weight(1f)) {
-                    Text(selected?.label ?: "添加供应商", style = SettingsStyle.body, fontWeight = FontWeight.Medium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (selected == null) "连接模型服务或自己的网关" else endpoint,
-                        style = SettingsStyle.badge, color = colors.onSurfaceVariant,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Icon(ImageVector.vectorResource(R.drawable.ic_chevron_down), null,
-                    Modifier.size(18.dp).graphicsLayer { rotationZ = rotation.value }, tint = colors.onSurfaceVariant)
-            }
-        }
+        SelectionCardButton(
+            identity = { ProviderIdentity(selected?.label.orEmpty()) },
+            title = selected?.label ?: "添加供应商",
+            subtitle = if (selected == null) "连接模型服务或自己的网关" else endpoint,
+            expanded = open,
+            enabled = enabled,
+            description = "供应商：${selected?.label ?: "添加供应商"}",
+            onClick = { if (providers.isEmpty()) onAdd() else open = true },
+        )
         ModelDropdownMenu(
             expanded = open && enabled, onDismiss = { open = false }, anchorWidth = anchorWidth,
         ) {
@@ -193,7 +207,7 @@ internal fun ProviderDropdown(
 internal fun ProviderIdentity(name: String) {
     val mark = remember(name) {
         when (name.lowercase()) {
-            "openai" -> "AI"
+            "openai", "openai-responses" -> "AI"
             "openrouter" -> "OR"
             "deepseek" -> "DS"
             "anthropic" -> "A"
@@ -207,6 +221,21 @@ internal fun ProviderIdentity(name: String) {
     }
 }
 
+
+/** 协议在身份方块里的名字：协议 id 本身不适合直接当名字（`PROTOCOL_OPENAI` 是空串）。 */
+private fun protocolMarkName(protocol: String): String = when (protocol) {
+    PROTOCOL_ANTHROPIC -> "anthropic"
+    PROTOCOL_RESPONSES -> "openai-responses"
+    else -> "openai"
+}
+
+/** 协议对应的那种 API（按钮副标题与菜单项共用一处口径）。 */
+private fun protocolApiLabel(protocol: String): String = when (protocol) {
+    PROTOCOL_ANTHROPIC -> "Messages API"
+    PROTOCOL_RESPONSES -> "Responses API"
+    else -> "Chat Completions API"
+}
+
 @Composable
 internal fun CompactProtocolPicker(protocol: String, onPick: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
@@ -214,33 +243,40 @@ internal fun CompactProtocolPicker(protocol: String, onPick: (String) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val options = remember { listOf(PROTOCOL_OPENAI to "OpenAI 兼容", PROTOCOL_ANTHROPIC to "Anthropic",
         PROTOCOL_RESPONSES to "OpenAI Responses") }
+    val chosen = options.firstOrNull { it.first == protocol } ?: options.first()
     Box(Modifier.fillMaxWidth().onSizeChanged { anchorWidth = it.width }) {
-        ModelSelectionAnchor("接口协议", options.firstOrNull { it.first == protocol }?.second ?: options.first().second,
-            enabled = true, expanded = open) { open = true }
+        // **与供应商同一套外观**（用户：「模型页的接口协议的按钮也改成和供应商一样的样式」）：
+        // 原来是一个 `CompactOutlinedTextField` 锚点，画出来是个输入框，
+        // 与上面那张供应商卡片完全不是一个东西。
+        SelectionCardButton(
+            identity = { ProviderIdentity(protocolMarkName(chosen.first)) },
+            title = chosen.second,
+            subtitle = protocolApiLabel(chosen.first),
+            expanded = open,
+            enabled = true,
+            description = "接口协议：${chosen.second}",
+            onClick = { open = true },
+        )
         ModelDropdownMenu(expanded = open, onDismiss = { open = false }, anchorWidth = anchorWidth) {
             options.forEach { (value, label) ->
-                val chosen = value == protocol || protocol.isBlank() && value == PROTOCOL_OPENAI
+                val isChosen = value == protocol || protocol.isBlank() && value == PROTOCOL_OPENAI
                 DropdownMenuItem(
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(label, style = SettingsStyle.body,
-                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal)
-                            Text(when (value) {
-                                PROTOCOL_ANTHROPIC -> "Messages API"
-                                PROTOCOL_RESPONSES -> "Responses API"
-                                else -> "Chat Completions API"
-                            }, style = SettingsStyle.description, color = colors.onSurfaceVariant)
+                                fontWeight = if (isChosen) FontWeight.SemiBold else FontWeight.Normal)
+                            Text(protocolApiLabel(value), style = SettingsStyle.description, color = colors.onSurfaceVariant)
                         }
                     },
                     trailingIcon = {
                         Box(Modifier.size(18.dp)) {
-                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前协议", tint = colors.primary)
+                            if (isChosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前协议", tint = colors.primary)
                         }
                     },
                     onClick = { open = false; onPick(value) },
                     modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
-                        .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
-                        .semantics { this.selected = chosen },
+                        .background(if (isChosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
+                        .semantics { this.selected = isChosen },
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 )
             }

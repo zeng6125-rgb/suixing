@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 
 /**
@@ -27,10 +28,17 @@ fun SuixingTheme(
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
-    val scheme = if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    } else {
-        brandScheme(darkTheme)
+    // **配色方案要记住**（性能审计 P0.1）：ColorScheme 有约 50 个 Color，重建一次不便宜；
+    // 同一函数里的 `typography`/`shapes` 都 remember 了，只有 scheme 每次重组都重算 ——
+    // 而外壳（MainActivity）每次写设置都会重组一次，等于每次改设置都重建整份配色。
+    // 键里带 `LocalConfiguration`：动态取色跟着壁纸与深浅色走，换壁纸必须重新取一次。
+    val configuration = LocalConfiguration.current
+    val scheme = remember(context, darkTheme, dynamicColor, configuration) {
+        if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        } else {
+            brandScheme(darkTheme)
+        }
     }
     // Rebuilding the ramp is cheap but not free, and a tier only moves in settings,
     // so the two of them are keyed on the setting instead of running every recomposition.

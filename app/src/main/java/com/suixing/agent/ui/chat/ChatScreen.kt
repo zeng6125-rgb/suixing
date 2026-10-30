@@ -20,6 +20,7 @@ import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
@@ -813,15 +814,28 @@ fun ChatScreen(
                 current.messagesRevision == state.messagesRevision && current.activeRuns == state.activeRuns &&
                 current.liveRunId == state.liveRunId && current.runningHere == state.runningHere
         }
+        // **整批一次**（性能审计 改动6）：原来每个邻近行各调一次 `prepareMarkdownTexts`
+        // —— 每次都是一次 `withContext(Dispatchers.Default)` 的线程跳转。滚动帧里
+        // `layoutInfo` 一变就跑一轮，于是**每个滚动帧**都有 O(邻近行数) 次线程跳转，
+        // 外加每行两个临时 List。现在收成一次跳转、一次分发。
+        val pending = mutableListOf<Pair<String, List<String>>>()
         for (row in rows) {
             val texts = row.parts.filterIsInstance<Part.Text>().map { it.text }
             val current = rowDocuments[row.message.id]
             if (current == null || texts.any { it.length >= SettledBlocks.MIN_CHARS && it !in current }) {
-                val prepared = prepareMarkdownTexts(texts)
-                // A parser may finish after a branch/page/chat changed during suspension.
-                // Its old document must not publish into, or evict, the current row cache.
-                if (!sourceIsCurrent()) return
-                rowDocuments[row.message.id] = prepared
+                pending += row.message.id to texts
+            }
+        }
+        if (pending.isNotEmpty()) {
+            // 短文本在 `prepareMarkdownTexts` 内部就被过滤掉（那里有 MIN_CHARS 短路），
+            // 所以这里整批传过去不会让短文本被解析。
+            val prepared = prepareMarkdownTexts(pending.flatMap { it.second })
+            // A parser may finish after a branch/page/chat changed during suspension.
+            // Its old document must not publish into, or evict, the current row cache.
+            if (!sourceIsCurrent()) return
+            for ((id, texts) in pending) {
+                // 每行只拿自己那几个文本的解析结果（与原来逐行调用时的内容一致）。
+                rowDocuments[id] = prepared.filterKeys { it in texts }
             }
         }
         if (!sourceIsCurrent()) return
@@ -1311,9 +1325,11 @@ fun ChatScreen(
                                 if (settings.showTimestamps && row.showTimeLabel &&
                                     reasoningExpansion.stored("time:${row.message.runId}") != false) {
                                     TimeLabel(row.message.timestamp)
-                                    // 3dp 太挤，时间像是贴在气泡上（用户：「间距再大一点」）。6dp 让它
-                                    // 读作一行独立的抬头，又不会散开成两个东西。
-                                    Spacer(Modifier.height(6.dp))
+                                    // 3dp → 6dp 是「太挤，时间像贴在气泡上」那次改的；现在再放到 12dp
+                                    // （用户要求），让时间读作一个完整的抬头行，与正文块之间拉开一档。
+                                    // 注意：这个 Spacer 对**用户行与助手行共用**（都在同一个 Column 里），
+                                    // 所以两边一起变，正好也保证同一条转录里两处抬头间距一致。
+                                    Spacer(Modifier.height(12.dp))
                                 }
                                 // 稳定引用（issue #5）：每次重组新建 lambda ⇒ `MessageRow` 的 equals
                                 // 恒为 false ⇒ Compose 的跳过优化失效，每个可见项每帧都重组。
@@ -1367,20 +1383,14 @@ fun ChatScreen(
                             // away: that is the point in the transcript where the model
                             // stopped seeing the conversation verbatim.
                             checkpointsByRow[row.message.id].orEmpty().forEach { checkpoint ->
-                                // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
-                                // 键用 revision + checkpoint（两者任一变化才需要重算）。
-                                val originals = remember(checkpoint, state.messagesRevision) {
-                                    checkpointSpan(state.messages, checkpoint, messagePositions)
-                                }
-                                // A checkpoint whose span is not in this transcript (a
-                                // branch switch, a trimmed conversation) is not drawn: half
-                                // a record would read as data loss.
-                                if (originals != null) {
-                                    CheckpointCard(
-                                        checkpoint = checkpoint,
-                                        originals = originals,
-                                    )
-                                }
+                                // **独立成 composable**（性能审计 改动9）：原来 `remember` 写在
+                                // `forEach` 里 —— 位置记忆按调用顺序分配，槽位数随记录数变化会错位。
+                                CheckpointUnderRow(
+                                    checkpoint = checkpoint,
+                                    messages = state.messages,
+                                    revision = state.messagesRevision,
+                                    positions = messagePositions,
+                                )
                             }
                             }
                         }
@@ -1755,26 +1765,12 @@ fun ChatScreen(
                 // 「回到最新」浮钮：**画在 composer 之外**（兄弟节点），高度不参与 composer 的
                 // 测量 ⇒ 它出现/消失不会改底部让位、不会把转录顶上去（用户报的「往上滑一点点就
                 // 跳」）。位置：composer 顶再往上 12dp，右边缘 40dp 离屏边（与回合导航条留 12dp 气）。
-                if (!scroll.atBottom && !state.loading) {
-                    CircleActionButton(
-                        icon = ImageVector.vectorResource(R.drawable.ic_arrow_down),
-                        contentDescription = "回到最新",
-                        onClick = { jumpToLatest() },
-                        size = 44.dp,
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        // 与浮层卡片同一套阴影（用户：「参考浮层卡片的阴影效果」）：
-                        // PopupStyle.kt 的规格是 elevation 10dp + ambient/spot 同为 18% 黑，
-                        // 扩散大、浓度低、没有方向性 —— 比默认 elevation 阴影（偏灰、发脏）高级。
-                        shadowElevation = 10.dp,
-                        shadowColor = Color.Black.copy(alpha = 0.18f),
-                        iconSize = 20.dp,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            // 跟着按钮直径走（44 + 12 = 56dp），否则缩小后离 composer 会多出 4dp 空隙。
-                            .offset(y = -(44.dp + 12.dp))
-                            .padding(end = 24.dp),
-                    )
-                }
+                // 「回到最新」浮钮自己订阅 atBottom（见 [JumpToLatestButton] 的说明）。
+                JumpToLatestButton(
+                    scroll = scroll,
+                    loading = state.loading,
+                    onClick = { jumpToLatest() },
+                )
                 }
             }
         }
@@ -1957,3 +1953,66 @@ private const val NAVIGATION_PRESENT_TIMEOUT_MS = 10_000L
 internal fun AppSettings.sameForChat(other: AppSettings): Boolean =
     copy(consoleWidthDp = 0, consoleHeightDp = 0, floatingConsole = false) ==
         other.copy(consoleWidthDp = 0, consoleHeightDp = 0, floatingConsole = false)
+
+/**
+ * 一条压缩记录画在它折掉的那条消息下面。
+ *
+ * **独立成 composable**（性能审计 改动9）：原来 `remember` 写在 `forEach` 里 ——
+ * Compose 的位置记忆按调用顺序分配，槽位数随记录数变化会错位。抽出来后每条记录有自己的槽位。
+ */
+@Composable
+private fun CheckpointUnderRow(
+    checkpoint: ContextCheckpoint,
+    messages: List<StoredMessage>,
+    revision: Long,
+    positions: Map<String, Int>?,
+) {
+    // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
+    // 键用 revision + checkpoint（两者任一变化才需要重算）。
+    val originals = remember(checkpoint, revision) {
+        checkpointSpan(messages, checkpoint, positions)
+    }
+    // A checkpoint whose span is not in this transcript (a branch switch, a trimmed
+    // conversation) is not drawn: half a record would read as data loss.
+    if (originals != null) {
+        CheckpointCard(
+            checkpoint = checkpoint,
+            originals = originals,
+        )
+    }
+}
+
+/**
+ * 「回到最新」浮钮。
+ *
+ * **自己订阅 `atBottom`**（性能审计 A2）：原来是在 ChatScreen 的组合体里读它 ——
+ * 到/离底那一下会重组**整页**（约 1959 行、含 60 参数的 Composer），而这个浮钮只是页角
+ * 一枚按钮。抽成独立组合后，`atBottom` 翻转的失效范围只剩它自己。
+ */
+@Composable
+private fun BoxScope.JumpToLatestButton(
+    scroll: ChatScroll,
+    loading: Boolean,
+    onClick: () -> Unit,
+) {
+    if (scroll.atBottom || loading) return
+    CircleActionButton(
+        icon = ImageVector.vectorResource(R.drawable.ic_arrow_down),
+        contentDescription = "回到最新",
+        onClick = onClick,
+        size = 44.dp,
+        containerColor = MaterialTheme.colorScheme.surface,
+        // 与浮层卡片同一套阴影（用户：「参考浮层卡片的阴影效果」）：
+        // PopupStyle.kt 的规格是 elevation 10dp + ambient/spot 同为 18% 黑，
+        // 扩散大、浓度低、没有方向性 —— 比默认 elevation 阴影（偏灰、发脏）高级。
+        shadowElevation = 10.dp,
+        shadowColor = Color.Black.copy(alpha = 0.18f),
+        iconSize = 20.dp,
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            // 跟着按钮直径走（44 + 12 = 56dp），否则缩小后离 composer 会多出 4dp 空隙。
+            .offset(y = -(44.dp + 12.dp))
+            .padding(end = 24.dp),
+    )
+}
+

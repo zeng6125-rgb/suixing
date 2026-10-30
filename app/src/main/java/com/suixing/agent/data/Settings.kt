@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -144,6 +145,15 @@ fun modelOffers(
 }
 
 @Serializable
+/**
+ * **@Immutable 是性能关键**（性能审计 改动2）：`AppSettings` 带 `List`/`Map` 字段
+ * （providers / assistants / modelContexts / modelMaxTokens），编译器会把它判成 unstable
+ * ⇒ 凡是拿它当参数的组合（Composer / VoiceOverlay / AssistantSheet / AssistantEditor）
+ * 都不能被跳过。
+ *
+ * 承诺成立：这些集合**只整体替换**（`copy()` 语义），全仓没有原地改它们的路径。
+ */
+@Immutable
 data class AppSettings(
     val baseUrl: String = "https://api.deepseek.com/v1",
     val apiKey: String = "",

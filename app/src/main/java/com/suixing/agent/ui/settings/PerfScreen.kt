@@ -126,6 +126,8 @@ internal fun PerfScreen(onBack: () -> Unit) {
                     )
                 }
             } else {
+                // **不加 key**：`PerfRecord` 没有唯一字段（只有毫秒时间戳 `at`，同毫秒可能重复），
+                // 而 LazyColumn 遇到重复 key 会直接崩。没有唯一键时，不给 key 比给一个可能撞的 key 安全。
                 items(records, contentType = { "perf-record" }) { record ->
                     RecordRow(record)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

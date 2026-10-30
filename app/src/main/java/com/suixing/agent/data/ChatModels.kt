@@ -142,6 +142,15 @@ data class ContextCheckpoint(
 )
 
 @Serializable
+/**
+ * **@Immutable 是性能关键**（性能审计 改动B）：`Conversation` 带 `List`/`Map` 字段
+ * （messages / activeRuns / checkpoints），编译器判它是 runtime-unstable ⇒
+ * **抽屉的每一行每次都要重启**。仓库里 `StoredMessage`/`StoredToolCall`/`ChatRow`/
+ * `Part` 都标了，唯独它漏了。
+ *
+ * 承诺成立：仓库只整体替换 `Conversation`（`ChatRepository` 是 `copy()` 语义）。
+ */
+@Immutable
 data class Conversation(
     val id: String,
     val title: String,

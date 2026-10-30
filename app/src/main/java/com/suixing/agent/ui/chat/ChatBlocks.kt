@@ -1359,7 +1359,7 @@ internal fun TurnSummary(
     // Metadata only: establish protection before the child viewport lookups compose.
     // Keep it through completion; the next live run releases it into bounded history.
     if (streaming) reasoningExpansion.protectRun(runId)
-    val slots = foldSlots ?: remember(parts, runId) { processFoldSlots(parts, runId) }
+    val slots = foldSlots ?: remember(IdentityKey(parts), runId) { processFoldSlots(parts, runId) }
     val expanded = reasoningExpansion.summaryExpanded(parts, runId, streaming, slots)
     SideEffect {
         if (!streaming && reasoningExpansion.stored(summarySlot(runId)) == null) {
@@ -1370,8 +1370,8 @@ internal fun TurnSummary(
     }
     // **remember**（性能）：这两行在**参数变化时**才需要重算；记住后同一实例能让
     // `AbstractList.equals` 首行 `o === this` 短路，省掉逐条 Part 深比较。
-    val thoughts = remember(parts) { parts.filterIsInstance<Part.Thinking>() }
-    val calls = remember(parts) { parts.filterIsInstance<Part.Tools>().flatMap { it.calls } }
+    val thoughts = remember(IdentityKey(parts)) { parts.filterIsInstance<Part.Thinking>() }
+    val calls = remember(IdentityKey(parts)) { parts.filterIsInstance<Part.Tools>().flatMap { it.calls } }
     val settled = usage?.takeIf { it.known }
     // The prompt size of the newest round is what is actually sitting in the window now.
     // While a run streams, the engine's copy of the endpoint's last report is fresher than
@@ -1380,10 +1380,13 @@ internal fun TurnSummary(
     // A newly composed/recreated summary must not restart the run's clock.
     val elapsedMs = if (streaming) runningElapsed?.value ?: 0L
         else runElapsedMs.takeIf { it > 0L } ?: live?.elapsedMs ?: settled?.elapsedMs ?: 0L
-    val headline = buildList {
-        if (streaming || elapsedMs > 0) add("用时 ${formatRunElapsed(elapsedMs)}")
-        if (thoughts.isNotEmpty()) add("思考 ${thoughts.size} 段")
-        if (calls.isNotEmpty()) add("工具 ${calls.size} 个")
+    // 标题串只在**影响它的四个量**变了才重算（每次重组都 buildList 一遍是纯浪费）。
+    val headline = remember(streaming, elapsedMs, thoughts.size, calls.size) {
+        buildList {
+            if (streaming || elapsedMs > 0) add("用时 ${formatRunElapsed(elapsedMs)}")
+            if (thoughts.isNotEmpty()) add("思考 ${thoughts.size} 段")
+            if (calls.isNotEmpty()) add("工具 ${calls.size} 个")
+        }
     }
     // While a run streams the header shows the numbers that move; a settled reply shows
     // the ones the endpoint reported.
@@ -1398,10 +1401,13 @@ internal fun TurnSummary(
         if (note.isNotBlank()) add(note)
         }.joinToString(" · ")
     }
+    // 尾段起点只取决于 parts —— 记住它，展开判定与下面的内容用**同一个**值
+    // （原来这里又算了一遍 `processTailStart(parts)`）。
+    val tailStart = remember(IdentityKey(parts)) { processTailStart(parts) }
     ProcessCard(
         icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
         title = header,
-        expandable = parts.isNotEmpty() && processTailStart(parts) > 0,
+        expandable = parts.isNotEmpty() && tailStart > 0,
         expanded = expanded,
         contentBottomPadding = 0.dp,
         onToggle = { reasoningExpansion.set(summarySlot(runId), !expanded) },
@@ -1410,7 +1416,6 @@ internal fun TurnSummary(
         // thinking blocks (foldable, full text), tool rows, every stretch of prose
         // including the mid-run transitions, steer bubbles — the same sequence the
         // live bubble draws. Usage details stay below the final prose.
-        val tailStart = remember(parts) { processTailStart(parts) }
         // The prefix and flat tail form one visual sequence. Whether a new prose
         // part moves the former tail here must not add padding above that content.
         Column(

@@ -826,7 +826,7 @@ internal fun MessageRow(
                 // **记住过滤结果**：`List<Part>` 是 unstable 参数，每次重组都 `filterNot` 出新 list
                 // ⇒ 下游（每个 Markdown 块、思考列表、工具卡）永远跳不过。`row.parts` 本身跨重组
                 // 是稳定的（`groupRows` 按 revision 记忆），所以这个 remember 会命中。
-                parts = remember(row.parts, showReasoning) {
+                parts = remember(IdentityKey(row.parts), showReasoning) {
                     if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking }
                 },
                 streaming = false,
@@ -1280,7 +1280,7 @@ internal fun AssistantRow(
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
-    val foldSlots = remember(parts, processRun) { processFoldSlots(parts, processRun) }
+    val foldSlots = remember(IdentityKey(parts), processRun) { processFoldSlots(parts, processRun) }
     Surface(
         // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
         // constraint, or the inner fill would win and the card could never narrow.
@@ -1359,7 +1359,7 @@ internal fun AssistantRow(
             }
             // The last text slot follows the current snapshot; versioned live parts must
             // never be memoized across actual text changes.
-            val tailStart = remember(parts) { processTailStart(parts) }
+            val tailStart = remember(IdentityKey(parts)) { processTailStart(parts) }
             // key(index): without it every part's remembered state was allocated by
             // position, so a new round appearing at the front moved one block's switch onto
             // its neighbour.

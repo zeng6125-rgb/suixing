@@ -18,6 +18,8 @@ import androidx.compose.runtime.getValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.service.FloatConsoleService
@@ -70,9 +72,19 @@ class MainActivity : ComponentActivity() {
         transparentNavigationBar()
         super.onCreate(savedInstanceState)
         setContent {
-            val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+            // **按字段订阅**（性能审计 P0.2）：整份 `AppSettings` 订阅 ⇒ 任何一次写设置都让
+            // 根重组，而根一重组，下面那份 ColorScheme 也跟着重建（见 Theme 的 remember）。
+            // 这里只订阅根真正用到的四个字段，其余设置变动与根无关。
+            val themeMode by Core.settings.flow.map { it.themeMode }.distinctUntilChanged()
+                .collectAsStateWithLifecycle(initialValue = 0)
+            val paletteMode by Core.settings.flow.map { it.paletteMode }.distinctUntilChanged()
+                .collectAsStateWithLifecycle(initialValue = 0)
+            val fontScale by Core.settings.flow.map { it.fontScale }.distinctUntilChanged()
+                .collectAsStateWithLifecycle(initialValue = 1)
+            val cornerScale by Core.settings.flow.map { it.cornerScale }.distinctUntilChanged()
+                .collectAsStateWithLifecycle(initialValue = 1)
             val systemDark = isSystemInDarkTheme()
-            val dark = when (settings.themeMode) {
+            val dark = when (themeMode) {
                 1 -> false
                 2 -> true
                 else -> systemDark
@@ -103,9 +115,9 @@ class MainActivity : ComponentActivity() {
             }
             SuixingTheme(
                 darkTheme = dark,
-                dynamicColor = settings.paletteMode == 1,
-                fontScale = settings.fontScale,
-                cornerScale = settings.cornerScale,
+                dynamicColor = paletteMode == 1,
+                fontScale = fontScale,
+                cornerScale = cornerScale,
             ) {
                 SuixingApp()
             }

@@ -3,6 +3,7 @@ package com.suixing.agent.ui.chat
 import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.ViewModel
+import androidx.compose.runtime.Stable
 import androidx.lifecycle.viewModelScope
 import com.suixing.agent.agent.AgentEvent
 import com.suixing.agent.agent.RunState
@@ -394,6 +395,16 @@ private const val TAG = "ChatViewModel"
 /** 「记住上次打开」的写盘 debounce：快速连点几个会话不该连写几次。 */
 private const val LAST_OPENED_DEBOUNCE_MS = 1_200L
 
+/**
+ * **@Stable 是性能关键**（性能审计 改动1）：Compose 的自动 lambda memoization 只对
+ * 「捕获全稳定」的 lambda 生效；`ChatScreen` 里那批只捕获 `viewModel` 的回调
+ * （onStop / onSteer / onPickModel / onChooseReasoning / onPrefetchWindows / onCompressNow …）
+ * 因此拿不到记忆化，每次重组都是新实例。
+ *
+ * 承诺成立：这个类**没有任何 public 的 var**（可变字段全是 private，public/internal 的
+ * 全是稳定引用 —— StateFlow / Flow），符合 @Stable 的契约。
+ */
+@Stable
 class ChatViewModel : ViewModel() {
 
     // The process-wide instance, not a private one: the floating console has to be

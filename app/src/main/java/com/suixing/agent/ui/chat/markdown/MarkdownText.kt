@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -65,6 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import com.suixing.agent.ui.chat.IdentityKey
 import com.suixing.agent.R
 import com.suixing.agent.ui.chat.LocalReadingTextKey
 import com.suixing.agent.ui.chat.LocalProseViewport
@@ -84,6 +86,12 @@ import androidx.compose.runtime.mutableFloatStateOf
 sealed interface MdBlock {
     data class Heading(val level: Int, val text: String) : MdBlock
     data class Paragraph(val text: String) : MdBlock
+    /**
+     * **@Immutable 是性能关键**：`Bullet` 带 `List`/`Map` 字段，不标注时编译器判它 unstable
+     * ⇒ `BulletBlock` 永远不可跳过，流式期每一拍都要把整份列表重新组合一遍。
+     * 承诺成立：解析器每次新建这些集合，从不原地改。
+     */
+    @Immutable
     data class Bullet(
         val items: List<String>,
         val ordered: Boolean,
@@ -104,6 +112,8 @@ sealed interface MdBlock {
     data class Code(val language: String, val code: String) : MdBlock
     data class Quote(val text: String) : MdBlock
     data object Rule : MdBlock
+    /** 同 [Bullet]：表格是正文里最重的块之一，标注后 `TableBlock`/`TableRow` 才能被跳过。 */
+    @Immutable
     data class Table(val header: List<String>, val rows: List<List<String>>) : MdBlock
 }
 
@@ -1085,7 +1095,10 @@ fun MarkdownBlocks(
         }
         return
     }
-    val keys = remember(blocks) { markdownBlockKeys(blocks) }
+    // 键用**引用**而不是内容：`List<MdBlock>` 的 equals 会一路深到表格单元格与列表项，
+    // 每次重组都比一遍。`blocks` 本来就跟着 `remember` 的上游一起换实例，换成引用键后
+    // 「实例变了就重算」，重算只是一遍建键。
+    val keys = remember(IdentityKey(blocks)) { markdownBlockKeys(blocks) }
     val readingKey = LocalReadingTextKey.current
     Column(modifier) {
         blocks.forEachIndexed { index, block ->

@@ -51,6 +51,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -491,7 +493,9 @@ private fun ModelSection(
     onDraft: (Assistant) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
-    val pairs = settings.enabledModels()
+    // `enabledModels()` 只读 providers（data/Settings.kt:516）—— 记住它，别每次重组都
+    // flatMap 一遍（每击键分配 N×M 个 Pair）。
+    val pairs = remember(settings.providers) { settings.enabledModels() }
     val follow = !draft.pinsModel
     val label = when {
         follow -> "跟随当前（${settings.shortModel.ifBlank { "未设置" }}）"
@@ -563,14 +567,22 @@ private fun ModelSection(
             },
         )
         draft.temperature?.let { value ->
+            // **拖动期间只改本地态，松手才写 draft**（性能审计 P0.3）：原来 `onValueChange`
+            // 每帧都写 draft ⇒ 整个助手编辑器每帧重组（16 格 emoji FlowRow + 全部工具
+            // FilterChip + 3 个输入框都跟着重跑）。与 SettingsScreen 的 `LabeledSlider`
+            // 同一个修法，那份改了这份没改。
+            var local by remember { mutableFloatStateOf(value.toFloat()) }
+            // 外部值变化（重置草稿）时同步进来；拖动期间外部不会变。
+            LaunchedEffect(value) { local = value.toFloat() }
             Slider(
-                value = value.toFloat(),
-                onValueChange = { onDraft(draft.copy(temperature = it.toDouble())) },
+                value = local,
+                onValueChange = { local = it },
+                onValueChangeFinished = { onDraft(draft.copy(temperature = local.toDouble())) },
                 valueRange = 0f..2f,
                 steps = 19,
             )
             Text(
-                text = "温度 ${"%.1f".format(value)}",
+                text = "温度 ${"%.1f".format(local)}",
                 style = SettingsStyle.metadata,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
