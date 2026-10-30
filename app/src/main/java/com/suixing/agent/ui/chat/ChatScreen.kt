@@ -1366,6 +1366,8 @@ fun ChatScreen(
                                     reasoningMaxHeight = settings.reasoningHeight.dp,
                                     followReasoning = settings.followReasoning,
                                     bubbleMaxWidth = bubbleMaxWidth,
+                                    assistantCard = settings.assistantCard,
+                                    flatPad = settings.flatPaddingDp.dp,
                                     contextWindow = contextWindow,
                                     runElapsedMs = runElapsed[row.message.runId] ?: 0L,
                                     // The endpoint and the model that answered this round, as
@@ -1443,6 +1445,9 @@ fun ChatScreen(
                                             // Versioned text is refreshed; unchanged tool lists keep their identity.
                                             parts = liveParts,
                                                 streaming = true,
+                                                // 与已落地的行同一个开关：流式中途不该从卡片变成扁平。
+                                                card = settings.assistantCard,
+                                                flatPad = settings.flatPaddingDp.dp,
                                                 runningElapsed = runElapsedClock,
                                                 // The live bubble is the persona's reply too:
                                                 // without these two it fell back to the brand name

@@ -397,6 +397,27 @@ data class AppSettings(
     val fontScale: Int = 1,
     /** 0 窄, 1 标准, 2 宽 —— 助手气泡最多占屏宽的比例，由聊天页读取 */
     val bubbleWidth: Int = 1,
+    /**
+     * 助手回复是否画成**卡片**（圆角 + 底色 + 细描边）。
+     *
+     * `true`（默认）＝ 现在这张卡片；`false` ＝ 拆掉外层，只留头像与名称一行、正文直接铺在
+     * 页面上。做成开关是因为这是纯观感取舍：卡片化让每条回复自成一体，扁平化让长对话更像
+     * 一篇文章，两者没有绝对优劣（用户：「为了防止效果差，可以作为外观切换的装置」）。
+     * 用户消息不受影响，它保留自己的气泡。
+     */
+    val assistantCard: Boolean = true,
+    /**
+     * 「扁平」样式下正文的左右留白档位：0 紧凑, 1 标准, 2 宽松。
+     *
+     * 卡片模式下正文的左右留白是卡片自己的内边距（16dp）；扁平模式没有容器了，留白就是
+     * 纯视觉取舍 —— 用户要求「左右间距可以小点」，但给到哪一档是主观的，所以做成三档可调
+     * （用户：「三档都安排上，外观可改」）。列表本身还有 16dp 的 contentPadding，
+     * 所以正文距屏幕边缘 = 16 + 本档位。
+     *
+     * 三档取值是 **2 / 6 / 10dp**（用户看过 0/4/8 之后要求「再 +2dp」）：即便「紧凑」也留 2dp，
+     * 免得字形把列表那 16dp 正好吃满、看起来像贴边。
+     */
+    val flatPadding: Int = 0,
     /** 0 方正, 1 标准, 2 圆润 */
     val cornerScale: Int = 1,
     /** 是否在气泡下方显示时间 */
@@ -510,6 +531,18 @@ data class AppSettings(
             0 -> 0.82f
             2 -> 1f
             else -> 0.94f
+        }
+
+    /**
+     * [flatPadding] 档位对应的左右内边距（dp）。只有「扁平」样式读它。
+     *
+     * 列表自己还有 16dp 的 contentPadding ⇒ 正文距屏幕边缘 = 16 + 这个值。
+     */
+    val flatPaddingDp: Int
+        get() = when (flatPadding) {
+            0 -> 2
+            2 -> 10
+            else -> 6
         }
 
     /** The persona new conversations start with; falls back to the first one. */

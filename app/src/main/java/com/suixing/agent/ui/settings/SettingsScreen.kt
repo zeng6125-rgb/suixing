@@ -1717,6 +1717,35 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 }
             }
             item {
+                // **助手回复的容器形态**（用户：「去除助手的卡片化设计，也就是不需要气泡，
+                // 保留头像以及助手名称」）。做成开关而不是直接换掉，是因为这是纯观感取舍：
+                // 卡片让每条回复自成一体，扁平让长对话更像一篇文章。
+                // 只影响助手行；用户消息保留自己的气泡。
+                LabeledBlock(
+                    label = "助手回复样式",
+                    hint = "「卡片」保留圆角、底色与描边；「扁平」只留头像和名称，正文直接铺在页面上。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("卡片", "扁平"),
+                        selectedIndex = if (stored.assistantCard) 0 else 1,
+                        onSelect = { index -> scope.persist { it.copy(assistantCard = index == 0) } },
+                    )
+                }
+            }
+            item {
+                // 只对「扁平」样式生效：卡片模式下的左右留白来自卡片自己的内边距。
+                LabeledBlock(
+                    label = "扁平正文留白",
+                    hint = "「扁平」样式下正文的左右留白：2 / 6 / 10dp。列表本身还留 16dp，所以正文距屏幕边缘是 18 / 22 / 26dp。",
+                ) {
+                    SegmentedPill(
+                        options = listOf("紧凑", "标准", "宽松"),
+                        selectedIndex = stored.flatPadding.coerceIn(0, 2),
+                        onSelect = { index -> scope.persist { it.copy(flatPadding = index) } },
+                    )
+                }
+            }
+            item {
                 LabeledBlock(label = "气泡宽度", hint = "助手回复最多占屏幕的宽度比例。") {
                     SegmentedPill(
                         options = listOf("窄", "标准", "宽"),

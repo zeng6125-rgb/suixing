@@ -44,6 +44,11 @@ class ChatSettingsEquivalenceTest {
         assertFalse(base.sameForChat(base.copy(showTimestamps = !base.showTimestamps)))
         assertFalse(base.sameForChat(base.copy(enterKeySends = !base.enterKeySends)))
         assertFalse(base.sameForChat(base.copy(assistants = listOf(Assistant(id = "a1")))))
+        // 助手回复样式（卡片 / 扁平）是本页渲染时读的，切换必须让聊天页重组 ——
+        // 否则用户切了开关、回到聊天页还是旧样式。
+        assertFalse(base.sameForChat(base.copy(assistantCard = !base.assistantCard)))
+        // 扁平留白档位同理。
+        assertFalse(base.sameForChat(base.copy(flatPadding = if (base.flatPadding == 0) 1 else 0)))
     }
 
     @Test

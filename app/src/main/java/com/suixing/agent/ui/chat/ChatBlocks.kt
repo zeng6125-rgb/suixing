@@ -2,6 +2,9 @@
 package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
@@ -61,6 +64,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.Layout
@@ -84,6 +88,33 @@ import com.suixing.agent.ui.chat.markdown.MarkdownText
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+/**
+ * 折叠块的展开箭头（过程卡 / 思考块 / 单个工具共用）。
+ *
+ * 两件事一次做完（用户：「回复卡片中的箭头icon要对齐大小和位置，同时折叠展开icon要有动效」）：
+ *  · **对齐**：三处原来各写一份，尺寸是 18 / 18 / **16**dp，而且有的直接贴在行末、有的夹在
+ *    文字后面，位置随内容浮动。现在统一成「24dp 盒里居中、图标 16dp」—— 与 [ProcessCard]
+ *    左侧那枚图标（24dp 盒 + 16dp 图标）同一基准，所以左右两端对得齐。
+ *  · **动效**：原来靠 `if (expanded) chevron_up else chevron_down` 直接换资源，是硬切。
+ *    现在只用一个 chevron_down，按状态旋转 0↔180°，180ms 缓动。
+ */
+@Composable
+internal fun ExpandChevron(expanded: Boolean) {
+    val rotation = animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "expandChevron",
+    )
+    Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+        Icon(
+            imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp).graphicsLayer { rotationZ = rotation.value },
+        )
+    }
+}
+
 @Composable
 internal fun BranchArrow(
     icon: ImageVector,
@@ -103,7 +134,9 @@ internal fun BranchArrow(
             imageVector = icon,
             contentDescription = label,
             tint = scheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.35f),
-            modifier = Modifier.size(16.dp),
+            // **15dp，与同行的复制/修改/用时图标一致**：底部操作行里四类小图标同一个尺寸
+            // 才读得出是一条线（`TinyAction` 与 `MetricButton` 的注释都写着 15dp 是这个理由）。
+            modifier = Modifier.size(15.dp),
         )
     }
 }
@@ -302,7 +335,14 @@ internal fun ProcessCard(
                     modifier = if (preview != null) {
                         Modifier.widthIn(max = PROCESS_TITLE_MAX)
                     } else {
-                        Modifier.weight(1f)
+                        // **`fill = false`**（用户：「大总结条右侧折叠常驻icon改为贴内容右侧摆放」）：
+                        // `weight(1f)` 会把标题撑满剩余宽度，箭头因此被顶到卡片右边缘；
+                        // `fill = false` 只给它「可用份额」的上限、实际宽度按内容算，箭头就紧跟在
+                        // 标题后面。标题过长时仍受份额与 `maxLines`/省略号约束，不会溢出。
+                        //
+                        // 只有**大总结条**走这个分支（`preview == null` 的 ProcessCard 调用点只有它）；
+                        // 思考过程 / 工具 / 压缩卡都传了 preview，走上面那支，位置不变。
+                        Modifier.weight(1f, fill = false)
                     },
                 )
                 if (trailing != null) {
@@ -327,16 +367,7 @@ internal fun ProcessCard(
                     )
                     previewTail?.invoke()
                 }
-                if (expandable) Icon(
-                    imageVector = if (expanded) {
-                        ImageVector.vectorResource(R.drawable.ic_chevron_up)
-                    } else {
-                        ImageVector.vectorResource(R.drawable.ic_chevron_down)
-                    },
-                    contentDescription = null,
-                    tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
+                if (expandable) ExpandChevron(expanded)
             }
             // 展开体：高度动画由 [RevealHeight] 驱动（滚动交给底锚，不再逐帧同步列表）。
             // 前两版都没成：只用 expandVertically + 追底＝两套逐帧动画，谁先谁后不确定，总会
@@ -888,16 +919,7 @@ internal fun ReasoningBlock(
                         modifier = Modifier.weight(1f),
                     )
                 }
-                Icon(
-                    imageVector = if (expanded) {
-                        ImageVector.vectorResource(R.drawable.ic_chevron_up)
-                    } else {
-                        ImageVector.vectorResource(R.drawable.ic_chevron_down)
-                    },
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
+                ExpandChevron(expanded)
             }
             // 和第一层（ProcessCard）走同一条路径（用户：「第一层折叠能自适应，多个工具展开
             // 就全都往上展」）：`AnimatedVisibility(expandVertically)` 只改高度、不碰列表，
@@ -1295,12 +1317,7 @@ internal fun ToolRow(
                     modifier = Modifier.weight(1f),
                 )
             }
-            Icon(
-                imageVector = if (expanded) ImageVector.vectorResource(R.drawable.ic_chevron_up) else ImageVector.vectorResource(R.drawable.ic_chevron_down),
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp),
-            )
+            ExpandChevron(expanded)
         }
         // 同 ReasoningBlock：和第一层一样走 RevealHeight，展开时块顶边不动、内容往下长。
         RevealHeight(visible = expanded, durationMs = PROCESS_EXPAND_MS) {
@@ -1416,10 +1433,12 @@ internal fun TurnSummary(
         // thinking blocks (foldable, full text), tool rows, every stretch of prose
         // including the mid-run transitions, steer bubbles — the same sequence the
         // live bubble draws. Usage details stay below the final prose.
-        // The prefix and flat tail form one visual sequence. Whether a new prose
-        // part moves the former tail here must not add padding above that content.
+        // The prefix and flat tail form one visual sequence.
+        // **第一个折叠条上方不再留内边距**（用户：「完全去掉看看」）：分割线下面直接就是它，
+        // 中间的空隙只剩 `spacedBy` 管的「子项之间」，而它对第一个不生效。
+        // 原来这里是 `padding(top = if (tailStart > 0) 6.dp else 0.dp)` —— 给「新正文把旧尾段
+        // 挪到这儿」的情况留一点空气；现在整块不加，那种情况自然也不会冒出来。
         Column(
-            modifier = Modifier.padding(top = if (tailStart > 0) 6.dp else 0.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             // The answer itself is already drawn by the bubble below this card (the settled

@@ -794,6 +794,10 @@ internal fun MessageRow(
     /** 外观 → 思考块跟随最新; [ReasoningBlock.followReasoning]. */
     followReasoning: Boolean = true,
     bubbleMaxWidth: Dp,
+    /** 外观 → 助手回复样式（卡片 / 扁平）；见 [AssistantRow] 的 `card`。 */
+    assistantCard: Boolean = true,
+    /** 外观 → 扁平样式下的左右留白；见 [AssistantRow] 的 `flatPad`。 */
+    flatPad: Dp = 0.dp,
     contextWindow: Int,
     /** What this row's whole run took; 0 falls back to the message's own round. */
     runElapsedMs: Long = 0L,
@@ -830,6 +834,8 @@ internal fun MessageRow(
                     if (showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking }
                 },
                 streaming = false,
+                card = assistantCard,
+                flatPad = flatPad,
                 name = assistantName,
                 face = assistantFace,
                 avatarPath = assistantAvatarPath,
@@ -864,6 +870,8 @@ internal fun MessageRow(
                 parts = row.parts,
                 streaming = false,
                 message = row.message,
+                card = assistantCard,
+                flatPad = flatPad,
                 face = assistantFace,
                 avatarPath = assistantAvatarPath,
                 bubbleMaxWidth = bubbleMaxWidth,
@@ -938,7 +946,8 @@ internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> U
     // 复制走 [rememberCopyToClipboard]：写剪贴板 + Toast（用户：「复制后给个提示」）。
     val copy = rememberCopyToClipboard()
     Row(
-        modifier = Modifier.padding(top = 2.dp, end = 4.dp),
+        // **不再自带内边距**：行首/行顶那点内边距由调用方的底部操作行统一给，
+        // 否则它与「重新回答」「回答切换箭头」会错开 2dp。见 [AssistantRow] 里那一行。
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TinyAction(ImageVector.vectorResource(R.drawable.ic_copy), "复制") {
@@ -965,6 +974,9 @@ internal fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
             imageVector = icon,
             contentDescription = label,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            // **15dp 是这一行的既有约定**：`MetricButton` 的注释写明「与旁边的复制/编辑图标
+            // 同尺寸」。所以修对齐时该动的是 [com.suixing.agent.ui.chat.BranchArrow]
+            // 那枚 16dp 的箭头，不是把这里抬到 16。
             modifier = Modifier.size(15.dp),
         )
     }
@@ -1275,30 +1287,32 @@ internal fun AssistantRow(
     bubbleMaxWidth: Dp = Dp.Infinity,
     /** The screen's table of open thinking blocks; see [ReasoningExpansion]. */
     reasoningExpansion: ReasoningExpansion,
+    /**
+     * 外观 → 助手回复样式：`true` 画成卡片（圆角 + 底色 + 细描边），`false` 只留头像与名称、
+     * 正文直接铺在页面上。见 [com.suixing.agent.data.AppSettings.assistantCard]。
+     *
+     * 扁平模式拆掉的**只是最外层容器**：内边距、正文宽度上限（[bubbleMaxWidth]）、思考块与
+     * 工具块都原样保留 —— 否则会变成另一套布局，而不是同一个布局换个外壳。
+     */
+    card: Boolean = true,
+    /** 外观 → 扁平样式下的左右内边距；卡片模式忽略它（用卡片自己的 16dp）。 */
+    flatPad: Dp = 0.dp,
     onBranch: (String, String) -> Unit = { _, _ -> },
     onRegenerate: () -> Unit = {},
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
     val foldSlots = remember(IdentityKey(parts), processRun) { processFoldSlots(parts, processRun) }
-    Surface(
-        // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
-        // constraint, or the inner fill would win and the card could never narrow.
-        modifier = Modifier
-            .widthIn(max = bubbleMaxWidth)
-            .fillMaxWidth(),
-        shape = BubbleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
-        // the outline is what separates a near-white card from a white canvas in light
-        // mode, where the two surfaces are 8% apart.
-        // 每帧新建 BorderStroke ⇒ remember 住（颜色变才重建；颜色在组合期先读）。
-        border = run {
-            val outline = MaterialTheme.colorScheme.outlineVariant
-            remember(outline) { BorderStroke(1.dp, outline) }
-        },
-    ) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp)) {
+    // 内容先单独成块：卡片模式把它包进 Surface，扁平模式直接放下。
+    //
+    // **左右内边距两种模式不同**（用户：「扁平化的时候，左右间距可以小点」）：
+    // 列表自己有 16dp 的 contentPadding，卡片模式再叠 16dp（卡内边距）⇒ 正文距屏幕 32dp；
+    // 而扁平模式没有卡片边缘了，再留 16dp 就只是白白缩窄正文。收到 0dp 后正文左缘正好落在
+    // 列表的 16dp 上，与头像、与页面其它内容对齐 —— 这也是「没有了容器」该有的样子。
+    // 上下内边距不动：轮次之间的呼吸感靠它们。
+    val horizontalPad = if (card) 16.dp else flatPad
+    val cardBody: @Composable () -> Unit = {
+        Column(Modifier.padding(start = horizontalPad, end = horizontalPad, top = 16.dp, bottom = 10.dp)) {
             // The avatar sits in the card's header rather than beside it: the reply is one
             // object, and an avatar floating outside the card made it two.
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1456,16 +1470,28 @@ internal fun AssistantRow(
                 // The last block carries no trailing spacer of its own, so the air
                 // above this row is its own 10dp.
                 Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    ActionBar(
-                        branch = branch,
-                        onBranch = onBranch,
-                        onRegenerate = onRegenerate,
-                    )
+                Row(
+                    // **内边距提到整行**：原来只有 [MessageActions] 那组自带
+                    // `padding(top = 2.dp, start = 2.dp)`，于是「复制/修改」比「重新回答」
+                    // 和「回答切换箭头」低了 2dp、右了 2dp（用户：「重新回答和前面两个没有对齐」）。
+                    // 放到行上，整行四个元素共用同一个基准。
+                    modifier = Modifier.padding(top = 2.dp, start = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // **动作在左、数据在右**（用户：「复制和修改回复的icon移至左侧，如果是最
+                    // 新一轮会有个重新回答的话则加在其后面，用时和用量贴右」）。
+                    // 顺序：复制 · 修改 · 重新回答（有才画）· 回答切换箭头 —— 箭头放在最后，
+                    // 因为它是「这是第几个回答」的导航，跟在同组动作末尾比夹在中间稳。
+                    MessageActions(message = message, onEdit = onEdit)
+                    if (branch?.canRegenerate == true) {
+                        Spacer(Modifier.width(2.dp))
+                        RegenerateAction(onRegenerate = onRegenerate)
+                    }
+                    Spacer(Modifier.width(2.dp))
+                    ActionBar(branch = branch, onBranch = onBranch)
                     Spacer(Modifier.weight(1f))
-                    // The round's clock and cost, right-aligned with the card's own copy and
-                    // edit controls: they are all "about this answer", and the row reads as one
-                    // group when they share the right edge.
+                    // The round's clock and cost, pinned to the right edge: they are two
+                    // questions about the answer, read as one group.
                     TurnMetrics(
                         // The run's own clock when we have it: one round's call is not what
                         // the status line counted while the answer was arriving.
@@ -1479,10 +1505,38 @@ internal fun AssistantRow(
                         // perSecond 已按 decodeMs 算好。null（端点没报 usage）就不画那一行。
                         tps = usage?.perSecond ?: 0.0,
                     )
-                    MessageActions(message = message, onEdit = onEdit)
                 }
             }
         }
+    }
+    // 外观 → 助手回复样式。两种模式共用上面那份内容，只有外层容器不同：
+    //   卡片：圆角 + surfaceContainerLow 底色 + 1dp 描边（细线代替阴影，长对话保持平）
+    //   扁平：什么都不画，正文直接落在页面上
+    // 宽度上限（bubbleMaxWidth）两边都保留，所以「气泡宽度」这个设置在新样式下仍然有效。
+    if (card) {
+        Surface(
+            // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
+            // constraint, or the inner fill would win and the card could never narrow.
+            modifier = Modifier
+                .widthIn(max = bubbleMaxWidth)
+                .fillMaxWidth(),
+            shape = BubbleShape,
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
+            // the outline is what separates a near-white card from a white canvas in light
+            // mode, where the two surfaces are 8% apart.
+            // 每帧新建 BorderStroke ⇒ remember 住（颜色变才重建；颜色在组合期先读）。
+            border = run {
+                val outline = MaterialTheme.colorScheme.outlineVariant
+                remember(outline) { BorderStroke(1.dp, outline) }
+            },
+        ) { cardBody() }
+    } else {
+        Box(
+            Modifier
+                .widthIn(max = bubbleMaxWidth)
+                .fillMaxWidth(),
+        ) { cardBody() }
     }
 }
 
@@ -1537,11 +1591,11 @@ internal fun AssistantProse(
 internal fun ActionBar(
     branch: Branch?,
     onBranch: (String, String) -> Unit,
-    onRegenerate: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     Row(
-        modifier = Modifier.padding(start = 2.dp),
+        // 不再自带 `start` 内边距：它现在排在底部操作行里，行首/行顶那点内边距由那一行统一给，
+        // 否则它与同行的「复制 / 修改 / 重新回答」会错开 2dp。
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -1566,13 +1620,20 @@ internal fun ActionBar(
                 onClick = { onBranch(branch.turnId, branch.runs[branch.index + 1]) },
             )
         }
-        if (branch?.canRegenerate == true) {
-            BranchArrow(
-                icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
-                label = "重新回答",
-                enabled = true,
-                onClick = onRegenerate,
-            )
-        }
     }
+}
+
+/**
+ * 「重新回答」。从 [ActionBar] 里拆出来的：用户要求它跟在**复制/修改**之后、都在行的左侧
+ * （「复制和修改回复的icon移至左侧，如果是最新一轮会有个重新回答的话则加在其后面」），
+ * 而 [ActionBar] 剩下的只有「这是第几个回答」那组箭头。
+ */
+@Composable
+internal fun RegenerateAction(onRegenerate: () -> Unit) {
+    BranchArrow(
+        icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+        label = "重新回答",
+        enabled = true,
+        onClick = onRegenerate,
+    )
 }
