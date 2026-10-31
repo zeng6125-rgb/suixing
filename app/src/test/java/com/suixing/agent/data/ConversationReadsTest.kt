@@ -1,7 +1,10 @@
 package com.suixing.agent.data
 
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.okio.OkioStorage
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.PreferencesSerializer
+import okio.Path.Companion.toPath
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import java.io.File
@@ -30,10 +33,18 @@ class ConversationReadsTest {
     private val key = stringSetPreferencesKey("completed_unread")
 
     private fun owner() = CoroutineScope(SupervisorJob() + Dispatchers.IO).also { owners += it }
+    // **用 OkioStorage + WindowsSafeFileSystem 而不是 `produceFile` 重载**：
+    // DataStore 1.2+ 的默认存储走 okio，而其 `atomicMove` 在 Windows 上无法覆盖已存在的文件
+    // （第一次写成功、之后全部抛 `Unable to rename`）。测试宿主是 Windows，所以显式注入一个
+    // 把 atomicMove 降级为「先删再移」的 FileSystem；生产代码不受影响（见 WindowsSafeFileSystem）。
     private fun preferences(scope: CoroutineScope) = RecordedPreferences(
         PreferenceDataStoreFactory.create(
+            storage = OkioStorage(
+                fileSystem = WindowsSafeFileSystem,
+                serializer = PreferencesSerializer,
+                producePath = { File(folder.root, "read.preferences_pb").absolutePath.toPath() },
+            ),
             scope = scope,
-            produceFile = { File(folder.root, "read.preferences_pb") },
         ),
     )
     private suspend fun unread(reads: ConversationReads, expected: Set<String>) = withTimeout(5_000) {
