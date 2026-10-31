@@ -177,4 +177,46 @@ class TranscriptTest {
             Transcript.active(rows, activeRuns, turnOf, chosen).map { it.id },
         )
     }
+
+    @Test
+    fun `a run that is still being generated clears its turn`() {
+        // 「重新回答」按下的一瞬间：activeRuns 已指向新 runId，但新 run 还没有任何消息。
+        // 组行时把 liveRunId 作为 pendingRun 传进来 ⇒ 采用它 ⇒ 该轮只剩问题、旧答案消失
+        // （用户：「按下的时候就应该把已经输出的一轮隐藏」）。
+        val messages = listOf(question("q1"), answer("a1", "r1"), call("t1", "r1"))
+        val shown = Transcript.active(
+            messages,
+            mapOf("q1" to "fresh"),
+            pendingRun = "fresh",
+        )
+        assertEquals(listOf("q1"), shown.map { it.id })
+    }
+
+    @Test
+    fun `the same pending id falls back when it is not the one generating`() {
+        // 同一个 activeRuns，但 liveRunId 不是它（生成失败后 liveRunId 被清空的情形）
+        // ⇒ 仍然回退到最后一条已落盘的回答，那一轮不会永久消失。
+        val messages = listOf(question("q1"), answer("a1", "r1"), call("t1", "r1"))
+        val shown = Transcript.active(
+            messages,
+            mapOf("q1" to "fresh"),
+            pendingRun = null,
+        )
+        assertEquals(listOf("q1", "a1", "t1"), shown.map { it.id })
+    }
+
+    @Test
+    fun `a pending run for another turn leaves this turn alone`() {
+        // pendingRun 只对「activeRuns 指向的那个 turn」生效，不能把别的轮也清空。
+        val messages = listOf(
+            question("q1"), answer("a1", "r1"),
+            question("q2"), answer("b1", "r2"),
+        )
+        val shown = Transcript.active(
+            messages,
+            mapOf("q2" to "fresh"),
+            pendingRun = "fresh",
+        )
+        assertEquals(listOf("q1", "a1", "q2"), shown.map { it.id })
+    }
 }

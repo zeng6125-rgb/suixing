@@ -1,6 +1,7 @@
 
 package com.suixing.agent.ui.chat
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -63,6 +64,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Shape
@@ -76,6 +78,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -115,23 +118,87 @@ internal fun ExpandChevron(expanded: Boolean) {
     }
 }
 
+/**
+ * 以**图标中心**为圆心按下涟漪。
+ *
+ * 为什么不用 Material 的 `ripple()`：它只能以**触摸点**或**节点中心**为圆心。这几个小图标按钮
+ * 的图标为了贴左，在 26dp 盒里靠左对齐（左 0、右 11），于是 26dp 的有界涟漪圆心比图标中心
+ * 右移 5.5dp —— 用户看到的就是「涟漪有偏移」。
+ *
+ * 这里自己画：圆心固定在图标中心（[centerX]，默认 7.5dp = 图标宽度的一半），按下时从该点
+ * 扩散到 [maxRadius]。热区仍是调用方 26dp 的盒子，不缩小。
+ *
+ * **半径默认 13dp**（用户：「涟漪太小了吧？」）—— 26dp 盒子的高度正好是 2×13，所以按下时
+ * 是一个**盖满整颗按钮高度**的圆。圆心在 7.5dp（图标中心）而不是 13dp（盒心），所以这个圆
+ * 是**向左溢出的**：左边缘 −5.5dp、右边缘 20.5dp。这不是画错 —— 圆心必须落在图标上，
+ * 否则就回到「涟漪偏移」。调用方因此不能把 `.clip(CircleShape)` 套在它**外面**，
+ * 否则溢出的那 5.5dp 会被裁成一条直边。
+ */
+@Composable
+internal fun Modifier.iconPressRipple(
+    interaction: MutableInteractionSource,
+    centerX: Dp = 7.5.dp,
+    maxRadius: Dp = 13.dp,
+): Modifier {
+    val pressed by interaction.collectIsPressedAsState()
+    val progress = remember { Animatable(0f) }
+    LaunchedEffect(pressed) {
+        if (pressed) {
+            progress.snapTo(0f)
+            progress.animateTo(1f, tween(durationMillis = 220))
+        } else {
+            progress.animateTo(0f, tween(durationMillis = 160))
+        }
+    }
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    val density = LocalDensity.current
+    return drawBehind {
+        val p = progress.value
+        if (p > 0f) {
+            drawCircle(
+                color = color.copy(alpha = 0.16f * (1f - p * 0.55f)),
+                radius = with(density) { maxRadius.toPx() } * p,
+                center = Offset(with(density) { centerX.toPx() }, size.height / 2f),
+            )
+        }
+    }
+}
+
 @Composable
 internal fun BranchArrow(
     icon: ImageVector,
     label: String,
     enabled: Boolean,
     onClick: () -> Unit,
+    /**
+     * 图标贴盒子**右边**而不是左边。
+     *
+     * 用于「回答切换」里**夹住数字**的那一侧：左右箭头都在 26dp 盒里、图标 15dp，
+     * 若都贴左，左箭头右侧会白空 11dp ⇒ 数字左边 15dp、右边 4dp。贴右后两侧都只剩
+     * 一个 `spacedBy(4.dp)`。
+     */
+    alignEnd: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
             .size(26.dp)
+            // **涟漪在 clip 外层**：圆心必须落在图标中心，Material 的 ripple 只能按节点中心
+            // 或触摸点；而 13dp 半径会让圆向左溢出 5.5dp，套进 `clip` 会被裁成直边。
+            .iconPressRipple(interaction)
             .clip(CircleShape)
-            .clickable(enabled = enabled, onClick = onClick),
-        // **与 `TinyAction` 同一个基准：图标贴盒子左边**（用户要的是整组对齐）。
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                onClick = onClick,
+            ),
+        // 默认与 `TinyAction` 同一个基准：图标贴盒子左边（用户要的是整组对齐）。
         // 原来这里是 `Center`（左右各 5.5dp），而复制/修改已改成左对齐 ——
         // 只改一边会让「重新回答」比前面两个右移 5.5dp。
-        contentAlignment = Alignment.CenterStart,
+        // [alignEnd] 只给「夹住数字」的那一侧用，见参数说明。
+        contentAlignment = if (alignEnd) Alignment.CenterEnd else Alignment.CenterStart,
     ) {
         Icon(
             imageVector = icon,
@@ -1056,7 +1123,11 @@ internal fun ToolBundle(
                     tone = MaterialTheme.colorScheme.error,
                 )
 
-                else -> ProcessStatus("完成", MaterialTheme.colorScheme.primary)
+                // **「完成」用中性灰**（用户：「折叠后的多个工具的标题颜色还是黑的呀？」）：
+                // 上一轮只改了单个工具（ToolDetail）的 tone，漏了「多个工具」这个折叠条的
+                // 状态字 —— 它还挂着 primary（深绿 #1F6B4C），与大总结条、思考过程、以及
+                // 展开后那些成功的工具行都不一致。仍在跑（runningTool）与失败（failures）保留颜色。
+                else -> ProcessStatus("完成", MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
     ) {

@@ -312,12 +312,14 @@ internal fun groupRows(
     messages: List<StoredMessage>,
     activeRuns: Map<String, String>,
     running: Boolean,
+    /** 正在生成、尚未落盘的 run：让「重新回答」按下的一瞬间就清空旧答案。见 [Transcript.chosenFrom]. */
+    pendingRun: String? = null,
 ): List<ChatRow> {
     val turnOf = Transcript.turnOf(messages)
     val runs = Transcript.runsByTurn(messages, turnOf)
     // `turnOf` 是 O(条数) 的扫描，下面几处都要它 —— 算一次传下去（原来被重复算了 4 次）。
     // 复用上面已经算好的 `runs`：`chosenRuns` 内部会再算一遍 `runsByTurn`，所以把 `chosen` 交进去。
-    val chosen = Transcript.chosenFrom(runs, activeRuns)
+    val chosen = Transcript.chosenFrom(runs, activeRuns, pendingRun)
     val shown = Transcript.active(messages, activeRuns, turnOf, chosen)
     // A steer line is the user talking mid-answer, not a new question: only a real
     // question can be re-answered or own the branch switcher.
@@ -961,13 +963,17 @@ internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> U
 
 @Composable
 internal fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
             .size(26.dp)
+            // **涟漪在 clip 外层**：圆心落在图标中心（图标贴盒左，Material 的 ripple 会按盒心
+            // 算 ⇒ 右偏 5.5dp），而 13dp 半径会让圆向左溢出 5.5dp —— 套在 `clip` 里会被裁成直边。
+            .iconPressRipple(interaction)
             .clip(CircleShape)
             .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
+                interactionSource = interaction,
+                indication = null,
                 onClick = onClick,
             ),
         // **图标贴盒子左边**（用户：「图标左边缘 → 自身盒子左边缘 5.5dp 这个改成 0dp」）：
@@ -1621,6 +1627,10 @@ internal fun ActionBar(
                 icon = ImageVector.vectorResource(R.drawable.ic_chevron_left),
                 label = "上一个回答",
                 enabled = !atStart,
+                // **贴盒右**（用户：「左侧比右侧大，改成和右侧间距一致」）：两个箭头都在
+                // 26dp 盒里、图标 15dp。贴左时它右侧白空 11dp ⇒ 数字左边 15dp、右边 4dp。
+                // 让左箭头贴右，它与数字之间就只剩 `spacedBy(4.dp)` —— 两侧都是 4dp。
+                alignEnd = true,
                 onClick = { onBranch(branch.turnId, branch.runs[branch.index - 1]) },
             )
             Text(

@@ -1705,6 +1705,12 @@ class ChatViewModel : ViewModel() {
                 reasoning = "",
                 status = "正在重新回答…",
                 error = null,
+                // **立刻挂上 liveRunId**（用户：「按下的时候就应该把已经输出的一轮隐藏」）：
+                // 它通常要等第一条 live 更新才被设上，那之间旧答案会闪一下。先设上，
+                // 组行时 `chosenFrom` 就能认出"这是正在生成的新 run"并清空该轮。
+                // 若生成失败，`liveRunId` 会被清空（见 :2906 的 `liveRunId = ""`），
+                // 判据随之失效、旧答案自动回退显示。
+                liveRunId = fresh,
             )
         }
         if (snapshot.messageCount <= snapshot.messages.size) {

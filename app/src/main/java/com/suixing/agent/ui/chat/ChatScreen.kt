@@ -430,7 +430,13 @@ fun ChatScreen(
         // `drop()` 每次都把窗口内的引用复制成新 List；流式期这条路径每 16ms 跑一次，
         // 长会话（上千条）就是每秒几十万次引用拷贝。`subList` 是视图，零拷贝。
         val pageMessages = state.messages.subList(page.from.coerceIn(0, state.messages.size), state.messages.size)
-        groupRows(pageMessages, state.activeRuns, state.runningHere)
+        groupRows(
+            pageMessages,
+            state.activeRuns,
+            state.runningHere,
+            // 空串要变 null：`liveRunId` 用空串表示"没有在跑"。
+            state.liveRunId.ifEmpty { null },
+        )
             .filterNot { it.message.runId == state.liveRunId && state.liveRunId.isNotEmpty() }
     }
     // Long settled bodies are parsed only for the next mount batch. Those rows consume the
@@ -1665,6 +1671,16 @@ fun ChatScreen(
                     },
                 )
             }
+            val composerContextBreak = remember(
+                liveStatsHere?.breakSystem,
+                liveStatsHere?.breakTools,
+                liveStatsHere?.breakHistory,
+                state.contextBreakdown,
+            ) {
+                liveStatsHere?.let {
+                    Triple(it.breakSystem, it.breakTools, it.breakHistory)
+                } ?: state.contextBreakdown
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -1678,8 +1694,10 @@ fun ChatScreen(
                 Composer(
                     subagentChatId = state.conversationId,
                     input = input,
-                    onInput = { setDraft(text = it) },
-                    onRestoreSteer = { steer -> scope.launch { restoreQueuedSteer(steer) } },
+                    onInput = rememberStableCallback1<String> { setDraft(text = it) },
+                    onRestoreSteer = rememberStableCallback1 { steer ->
+                        scope.launch { restoreQueuedSteer(steer) }
+                    },
                     running = state.runningHere,
                     settings = settings,
                     assistantId = state.assistantId,
@@ -1687,40 +1705,44 @@ fun ChatScreen(
                     contextUsed = contextUsed,
                     contextEstimated = reading.estimated,
                     // 面板三行：run 中用实测三块，空闲用按当前上下文算出来的那份（打开面板时刷新）。
-                    contextBreak = liveStatsHere?.let {
-                        Triple(it.breakSystem, it.breakTools, it.breakHistory)
-                    } ?: state.contextBreakdown,
-                    onContextPanelOpen = { viewModel.refreshContextBreakdown() },
+                    contextBreak = composerContextBreak,
+                    onContextPanelOpen = rememberStableCallback0 { viewModel.refreshContextBreakdown() },
                     conversationProviderId = state.providerId,
                     conversationModel = state.model,
                     conversationReasoningEffort = state.reasoningEffort,
-                    onChooseReasoning = { viewModel.chooseReasoning(it) },
+                    onChooseReasoning = rememberStableCallback1 { viewModel.chooseReasoning(it) },
                     // The pick belongs to the conversation, not to the settings: it is
                     // written onto this chat alone, so choosing an endpoint here cannot
                     // change what any other conversation — or the app-wide default — runs.
-                    onPickModel = { provider, model -> viewModel.chooseModel(provider.id, model) },
-                    onPrefetchWindows = { viewModel.prefetchWindows() },
+                    onPickModel = rememberStableCallback2 { provider, model ->
+                        viewModel.chooseModel(provider.id, model)
+                    },
+                    onPrefetchWindows = rememberStableCallback0 { viewModel.prefetchWindows() },
                     pendingSteers = state.pendingSteers,
                     pendingTurns = state.pendingTurns,
-                    onPromoteTurn = { id -> viewModel.promoteTurn(state.conversationId, id) },
-                    onRetractTurn = { id -> viewModel.retractTurn(state.conversationId, id) },
+                    onPromoteTurn = rememberStableCallback1 { id ->
+                        viewModel.promoteTurn(state.conversationId, id)
+                    },
+                    onRetractTurn = rememberStableCallback1 { id ->
+                        viewModel.retractTurn(state.conversationId, id)
+                    },
                     todos = state.todos,
-                    onOpenTodos = { todoSheetOpen = true },
-                    onPromoteSteer = { viewModel.promoteSteer(it) },
-                    onRetractSteer = { viewModel.retractSteer(it) },
+                    onOpenTodos = rememberStableCallback0 { todoSheetOpen = true },
+                    onPromoteSteer = rememberStableCallback1 { viewModel.promoteSteer(it) },
+                    onRetractSteer = rememberStableCallback1 { viewModel.retractSteer(it) },
                     attachments = attachments,
-                    onRemoveAttachment = { index ->
+                    onRemoveAttachment = rememberStableCallback1 { index ->
                         viewModel.removeAttachmentAt(state.conversationId, index)
                         setDraft(imageNames = draft.imageNames.toMutableList().apply { removeAt(index) })
                     },
-                    onPickImage = {
+                    onPickImage = rememberStableCallback0 {
                         imagePicker.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                         )
                     },
-                    onTakePhoto = { cameraLauncher.launch(null) },
-                    onPickFile = { filePicker.launch("*/*") },
-                    onSend = {
+                    onTakePhoto = rememberStableCallback0 { cameraLauncher.launch(null) },
+                    onPickFile = rememberStableCallback0 { filePicker.launch("*/*") },
+                    onSend = rememberStableCallback0 {
                         // The view model clears this conversation's draft on success;
                         // a refused send keeps the text where the user left it.
                         val (body, images) = withAttachment(attachments, input)
@@ -1730,22 +1752,22 @@ fun ChatScreen(
                         scroll.stickToBottom = true
                         jumpToLatest()
                     },
-                    onStop = { viewModel.stop() },
-                    onSteer = { text, images -> viewModel.steer(text, images) },
-                    onRequestCompress = {
+                    onStop = rememberStableCallback0 { viewModel.stop() },
+                    onSteer = rememberStableCallback2 { text, images -> viewModel.steer(text, images) },
+                    onRequestCompress = rememberStableCallback0 {
                         // run 中：请引擎在轮次边界折。**空闲时不在这里压** —— 菜单会改走
                         // onCompressNow（两条路径分开，压缩过程才画得出状态行）。
                         viewModel.requestCompress()
                     },
-                    onCompressNow = { viewModel.compressNow() },
-                    onFocused = {
+                    onCompressNow = rememberStableCallback0 { viewModel.compressNow() },
+                    onFocused = rememberStableCallback0 {
                         // 底锚：只有本来就在底的转录才跟着键盘走；停在会话中段的不动（首可见项
                         // 被 LazyColumn 钉住，键盘挤压视口不会挪阅读位）。回到底＝贴底。
                         if (scroll.stickToBottom && itemCount > 0) {
                             scope.launch { scroll.toBottom() }
                         }
                     },
-                    onMic = {
+                    onMic = rememberStableCallback0 {
                         // In-app recognition needs the mic ourselves, unlike the old
                         // hand-off to the system recognizer's own app.
                         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -1760,14 +1782,14 @@ fun ChatScreen(
                     approvalMode = settings.approvalMode,
                     // Written through the same repository the settings page writes, so the two
                     // entries cannot drift: the page re-reads the flow this update feeds.
-                    onPickApproval = { mode ->
+                    onPickApproval = rememberStableCallback1 { mode ->
                         scope.launch { Core.settings.update { it.copy(approvalMode = mode) } }
                     },
                     onOpenSettings = onOpenSettings,
-                    jumpToLatest = { jumpToLatest() },
+                    jumpToLatest = rememberStableCallback0 { jumpToLatest() },
                     // 按钮已移到 composer 之外（见下），这里只保留参数以免动调用链。
                     showJump = false,
-                    onHeightChanged = { composerH = it },
+                    onHeightChanged = rememberStableCallback1 { composerH = it },
                     // 底锚：键盘起落改的是列表底 padding，index0 就在底边上 ⇒ 一个滚动都不需要。
                 )
                 // 「回到最新」浮钮：**画在 composer 之外**（兄弟节点），高度不参与 composer 的
@@ -1895,6 +1917,29 @@ fun ChatScreen(
             },
         )
     }
+}
+
+/**
+ * Keep event parameters stable when their implementation closes over values that change while
+ * the screen is composing (for example a streamed run state). The latest body is installed after
+ * composition, while children keep the same callback identity and can skip unrelated updates.
+ */
+@Composable
+private fun <R> rememberStableCallback0(block: () -> R): () -> R {
+    val latest = rememberUpdatedState(block)
+    return remember { { latest.value() } }
+}
+
+@Composable
+private fun <A> rememberStableCallback1(block: (A) -> Unit): (A) -> Unit {
+    val latest = rememberUpdatedState(block)
+    return remember { { value: A -> latest.value(value) } }
+}
+
+@Composable
+private fun <A, B, R> rememberStableCallback2(block: (A, B) -> R): (A, B) -> R {
+    val latest = rememberUpdatedState(block)
+    return remember { { first: A, second: B -> latest.value(first, second) } }
 }
 
 /**
