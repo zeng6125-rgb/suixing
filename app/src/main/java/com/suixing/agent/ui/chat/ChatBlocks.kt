@@ -171,19 +171,24 @@ internal fun BranchArrow(
     enabled: Boolean,
     onClick: () -> Unit,
     /**
-     * 图标贴盒子**右边**而不是左边。
+     * 盒子宽度，默认 26dp（与 `TinyAction` 一致）。
      *
-     * 用于「回答切换」里**夹住数字**的那一侧：左右箭头都在 26dp 盒里、图标 15dp，
-     * 若都贴左，左箭头右侧会白空 11dp ⇒ 数字左边 15dp、右边 4dp。贴右后两侧都只剩
-     * 一个 `spacedBy(4.dp)`。
+     * 「回答切换」里**夹住数字**的左侧箭头传 **15dp**（= 图标宽度）。原因：盒 26dp、图标
+     * 15dp 时，盒内右侧白空 11dp。那个箭头若贴左，数字左边 = 11 + 4 = 15dp、右边 = 4dp
+     * （用户：「左侧比右侧大」）；若贴右，数字两侧确实都是 4dp，但图标整体右移 11dp，
+     * 于是与左边的「重新回答」拉开成 **23dp**，破坏整行 12dp 的图标节奏。
+     *
+     * **盒宽收到 15dp 才能同时满足两条**：盒右沿即图标右沿 ⇒ 盒内的 11dp 白空消失，
+     * 它到数字只剩一个 `spacedBy(4.dp)`；同时盒左沿不动 ⇒ 与「重新回答」仍是 12dp。
+     * 代价：这个箭头的点击热区从 26×26dp 变成 **15×26dp**（用户已知情并选择该方案）。
      */
-    alignEnd: Boolean = false,
+    boxWidth: Dp = 26.dp,
 ) {
     val scheme = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
-            .size(26.dp)
+            .size(width = boxWidth, height = 26.dp)
             // **涟漪在 clip 外层**：圆心必须落在图标中心，Material 的 ripple 只能按节点中心
             // 或触摸点；而 13dp 半径会让圆向左溢出 5.5dp，套进 `clip` 会被裁成直边。
             .iconPressRipple(interaction)
@@ -194,11 +199,11 @@ internal fun BranchArrow(
                 enabled = enabled,
                 onClick = onClick,
             ),
-        // 默认与 `TinyAction` 同一个基准：图标贴盒子左边（用户要的是整组对齐）。
+        // 与 `TinyAction` 同一个基准：图标贴盒子左边（用户要的是整组对齐）。
         // 原来这里是 `Center`（左右各 5.5dp），而复制/修改已改成左对齐 ——
         // 只改一边会让「重新回答」比前面两个右移 5.5dp。
-        // [alignEnd] 只给「夹住数字」的那一侧用，见参数说明。
-        contentAlignment = if (alignEnd) Alignment.CenterEnd else Alignment.CenterStart,
+        // 盒宽收到 15dp（= 图标宽）时贴左/贴右等价，见 [boxWidth]。
+        contentAlignment = Alignment.CenterStart,
     ) {
         Icon(
             imageVector = icon,
@@ -1355,6 +1360,11 @@ internal fun ToolRow(
                 style = MaterialTheme.typography.labelMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                // **标题也要上色**（用户：「调用xx个工具下的次折叠条的工具的标题还是黑色的」）：
+                // 这里原来没传 color，于是回落到 `LocalContentColor`（= onSurface #161D19，近黑）。
+                // 同一行的图标和状态字早已用 `tone`，只有标题漏了 —— 补上后三个元素同一色系：
+                // 成功 = onSurfaceVariant（中性灰，与大总结条/思考过程同色）、运行中 = primary、失败 = error。
+                color = tone,
                 // The name is short and fixed — it takes what it needs and yields the rest to
                 // the argument preview. Holding a half-row share cut it in the middle instead:
                 // `run_shell` came back as 「run_sh…」, which is the fragment the user read as

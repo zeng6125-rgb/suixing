@@ -1627,10 +1627,13 @@ internal fun ActionBar(
                 icon = ImageVector.vectorResource(R.drawable.ic_chevron_left),
                 label = "上一个回答",
                 enabled = !atStart,
-                // **贴盒右**（用户：「左侧比右侧大，改成和右侧间距一致」）：两个箭头都在
-                // 26dp 盒里、图标 15dp。贴左时它右侧白空 11dp ⇒ 数字左边 15dp、右边 4dp。
-                // 让左箭头贴右，它与数字之间就只剩 `spacedBy(4.dp)` —— 两侧都是 4dp。
-                alignEnd = true,
+                // **盒宽收到 15dp（= 图标宽）**，同时满足两条（用户：「左侧比右侧大，改成和
+                // 右侧间距一致」+ 整行图标 12dp 节奏）：
+                //  · 盒右沿就是图标右沿 ⇒ 盒内那 11dp 白空消失，它到数字只剩 `spacedBy(4.dp)`；
+                //  · 盒左沿不动 ⇒ 与左边「重新回答」仍是 12dp。
+                // 曾试过把它贴盒右（`CenterEnd`）：数字两侧确实变 4dp，但图标整体右移 11dp，
+                // 与「重新回答」拉开成 23dp —— 所以改成本方案。热区因此 15×26dp。
+                boxWidth = 15.dp,
                 onClick = { onBranch(branch.turnId, branch.runs[branch.index - 1]) },
             )
             Text(
