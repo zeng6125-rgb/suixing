@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,7 +33,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -41,6 +42,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ripple
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -80,6 +82,7 @@ import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suixing.agent.R
@@ -118,51 +121,6 @@ internal fun ExpandChevron(expanded: Boolean) {
     }
 }
 
-/**
- * 以**图标中心**为圆心按下涟漪。
- *
- * 为什么不用 Material 的 `ripple()`：它只能以**触摸点**或**节点中心**为圆心。这几个小图标按钮
- * 的图标为了贴左，在 26dp 盒里靠左对齐（左 0、右 11），于是 26dp 的有界涟漪圆心比图标中心
- * 右移 5.5dp —— 用户看到的就是「涟漪有偏移」。
- *
- * 这里自己画：圆心固定在图标中心（[centerX]，默认 7.5dp = 图标宽度的一半），按下时从该点
- * 扩散到 [maxRadius]。热区仍是调用方 26dp 的盒子，不缩小。
- *
- * **半径默认 13dp**（用户：「涟漪太小了吧？」）—— 26dp 盒子的高度正好是 2×13，所以按下时
- * 是一个**盖满整颗按钮高度**的圆。圆心在 7.5dp（图标中心）而不是 13dp（盒心），所以这个圆
- * 是**向左溢出的**：左边缘 −5.5dp、右边缘 20.5dp。这不是画错 —— 圆心必须落在图标上，
- * 否则就回到「涟漪偏移」。调用方因此不能把 `.clip(CircleShape)` 套在它**外面**，
- * 否则溢出的那 5.5dp 会被裁成一条直边。
- */
-@Composable
-internal fun Modifier.iconPressRipple(
-    interaction: MutableInteractionSource,
-    centerX: Dp = 7.5.dp,
-    maxRadius: Dp = 13.dp,
-): Modifier {
-    val pressed by interaction.collectIsPressedAsState()
-    val progress = remember { Animatable(0f) }
-    LaunchedEffect(pressed) {
-        if (pressed) {
-            progress.snapTo(0f)
-            progress.animateTo(1f, tween(durationMillis = 220))
-        } else {
-            progress.animateTo(0f, tween(durationMillis = 160))
-        }
-    }
-    val color = MaterialTheme.colorScheme.onSurfaceVariant
-    val density = LocalDensity.current
-    return drawBehind {
-        val p = progress.value
-        if (p > 0f) {
-            drawCircle(
-                color = color.copy(alpha = 0.16f * (1f - p * 0.55f)),
-                radius = with(density) { maxRadius.toPx() } * p,
-                center = Offset(with(density) { centerX.toPx() }, size.height / 2f),
-            )
-        }
-    }
-}
 
 @Composable
 internal fun BranchArrow(
@@ -182,27 +140,16 @@ internal fun BranchArrow(
      * 它到数字只剩一个 `spacedBy(4.dp)`；同时盒左沿不动 ⇒ 与「重新回答」仍是 12dp。
      * 代价：这个箭头的点击热区从 26×26dp 变成 **15×26dp**（用户已知情并选择该方案）。
      */
-    boxWidth: Dp = 26.dp,
 ) {
     val scheme = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
-            .size(width = boxWidth, height = 26.dp)
-            // **涟漪在 clip 外层**：圆心必须落在图标中心，Material 的 ripple 只能按节点中心
-            // 或触摸点；而 13dp 半径会让圆向左溢出 5.5dp，套进 `clip` 会被裁成直边。
-            .iconPressRipple(interaction)
-            .clip(CircleShape)
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                enabled = enabled,
-                onClick = onClick,
-            ),
+            .size(width = 26.dp, height = 26.dp),
         // 与 `TinyAction` 同一个基准：图标贴盒子左边（用户要的是整组对齐）。
         // 原来这里是 `Center`（左右各 5.5dp），而复制/修改已改成左对齐 ——
         // 只改一边会让「重新回答」比前面两个右移 5.5dp。
-        // 盒宽收到 15dp（= 图标宽）时贴左/贴右等价，见 [boxWidth]。
+        // 盒宽 = 图标宽（15dp），贴左/贴右等价。
         contentAlignment = Alignment.CenterStart,
     ) {
         Icon(
@@ -211,7 +158,15 @@ internal fun BranchArrow(
             tint = scheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.35f),
             // **15dp，与同行的复制/修改/用时图标一致**：底部操作行里四类小图标同一个尺寸
             // 才读得出是一条线（`TinyAction` 与 `MetricButton` 的注释都写着 15dp 是这个理由）。
-            modifier = Modifier.size(15.dp),
+            // 同 `TinyAction`：点击与涟漪同节点，坐标一致；`radius = 16.dp` 放大涟漪。
+            modifier = Modifier
+                .size(15.dp)
+                .clickable(
+                    interactionSource = interaction,
+                    indication = ripple(bounded = false, radius = 16.dp),
+                    enabled = enabled,
+                    onClick = onClick,
+                ),
         )
     }
 }
@@ -233,6 +188,23 @@ internal val PROCESS_TITLE_MAX = 160.dp
  * 整段动画依然落在「抬手即放行追底」之前（见 ChatScreen 的手势段注释）。
  */
 internal const val PROCESS_EXPAND_MS = 220
+
+/**
+ * 展开时长随内容高度缩放，**让视觉速度大致恒定**（纯函数，便于单测）。
+ *
+ * 基准 [baseMs]（= [PROCESS_EXPAND_MS]）对应「矮内容」；每多 400px 加 110ms，最多加 260ms。
+ * 所以 36dp 表头那种矮块仍是 220ms，而 2000dp 的展开卡片约 480ms
+ * —— 长内容不再「220ms 内刷过 2000dp」。
+ *
+ * 上限刻意压到 +260ms：再长会让人觉得"点了没反应"。若要更匀，可提高上限，
+ * 代价是大卡片的展开等待变长。
+ */
+internal fun scaledRevealDurationMs(baseMs: Int, heightPx: Int): Int {
+    if (heightPx <= 0) return baseMs
+    // 用 1/400 的斜率：120px ≈ +33ms，1200px ≈ +330ms（已被上限截断）。
+    val extra = (heightPx / 400f) * 110f
+    return baseMs + extra.coerceIn(0f, 260f).toInt()
+}
 
 /**
  * 折叠块展开/收起的缓动曲线（0.8.297）。
@@ -314,11 +286,27 @@ private fun RevealHeight(
 ) {
     val fraction = remember { androidx.compose.animation.core.Animatable(if (visible) 1f else 0f) }
     val position = LocalTranscriptPosition.current
-    LaunchedEffect(visible) {
+    // **时长按内容高度缩放**（用户反馈：「大长总结条展开效果和中等/短的区别明显」）。
+    //
+    // 原来三个折叠块都传固定的 `PROCESS_EXPAND_MS = 220`，而展开高度 = `child.height * fraction`
+    // ⇒ 时长固定、位移随高度增长 ⇒ **同一段 220ms 里走得越远越快**。
+    // 按 120Hz 采样 `CubicBezierEasing(0.2, 0, 0, 1)` 算出的峰值速度：
+    //   40dp → 702 px/s；120dp → 2106；800dp → 14038；2000dp → 35095。
+    // 短与长差 50 倍，肉眼就是「短的很糯、大长条刷地一下」。
+    //
+    // 现在把时长也随高度增长（每 400dp 加 110ms，封顶 +260ms），让**视觉速度大致恒定**。
+    // 高度在下面的 `Layout` 里才量得到，所以先量、再启动动画：
+    // 用 `contentHeight` 记住实测高度，动画的 key 带上它 —— 高度变了才重算时长。
+    var contentHeight by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    LaunchedEffect(visible, contentHeight, durationMs) {
+        if (!visible && fraction.value == 0f) return@LaunchedEffect
         val tracked = position?.beginRevealTransition() == true
         try {
             fraction.animateTo(if (visible) 1f else 0f,
-                androidx.compose.animation.core.tween(durationMs, easing = REVEAL_EASING))
+                androidx.compose.animation.core.tween(
+                    scaledRevealDurationMs(durationMs, contentHeight),
+                    easing = REVEAL_EASING,
+                ))
         } finally {
             if (tracked) position?.endRevealTransition()
         }
@@ -329,6 +317,8 @@ private fun RevealHeight(
         modifier = Modifier.fillMaxWidth().clipToBounds(),
     ) { measurables, constraints ->
         val child = measurables.first().measure(constraints.copy(minHeight = 0))
+        // 实测高度写回（只在变化时写，避免每帧触发重组）。时长缩放靠它。
+        if (contentHeight != child.height) contentHeight = child.height
         val height = (child.height * fraction.value).roundToInt().coerceIn(0, child.height)
         layout(child.width, height) { child.place(0, 0) }
     }
