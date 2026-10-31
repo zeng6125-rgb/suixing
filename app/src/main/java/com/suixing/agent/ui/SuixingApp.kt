@@ -74,7 +74,8 @@ import com.suixing.agent.ui.components.NAV_ENTER_MS
 import com.suixing.agent.ui.components.NAV_EXIT_MS
 import com.suixing.agent.ui.components.NAV_SHIFT_DIVISOR
 import com.suixing.agent.ui.components.imePaddingBottom
-import com.suixing.agent.ui.drawer.DRAWER_MOTION_SPEC
+import com.suixing.agent.ui.drawer.DRAWER_CLOSE_SPEC
+import com.suixing.agent.ui.drawer.DRAWER_OPEN_SPEC
 import com.suixing.agent.ui.drawer.Drawer
 import com.suixing.agent.ui.drawer.DrawerBackHandler
 import com.suixing.agent.ui.extension.ExtensionScreen
@@ -259,9 +260,9 @@ fun SuixingApp() {
     // 用户自己收起抽屉（遮罩、返回键、左缘拖动）：这是用户自己的动作，走库的动画。同时清掉
     // 出发页标记——用户手动把抽屉收了，返回时就不该再自己弹出来（"状态"是他刚亲手关掉的这个）。
     val closeDrawer: () -> Unit = {
-        // 收起用 [DRAWER_MOTION_SPEC] = spring(0.9, 700)，与「面板拖动松手」同一条曲线。点遮罩不在这里（见下）
+        // 收起用 [DRAWER_CLOSE_SPEC] = tween(210, FastOutLinearIn)。点遮罩不在这里（见下）
         // （自带遮罩层调用本函数），四条路径手感一致。
-        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_MOTION_SPEC) }
+        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         drawerOrigin[0] = null
     }
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
@@ -269,8 +270,8 @@ fun SuixingApp() {
     val chatFromDrawer: () -> Unit = {
         drawerOrigin[0] = null
         // **与 `closeDrawer()`（助手 / 遮罩 / 返回键）逐字相同**：只启动同一条
-        // `animateTo(Closed, DRAWER_MOTION_SPEC)` —— 同一帧开始、同一时长、同一曲线。
-        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_MOTION_SPEC) }
+        // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
+        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         showChat()
     }
     /**
@@ -289,14 +290,14 @@ fun SuixingApp() {
         drawerBusyState.value = true
         // **方案 C：切换立刻发生，收起动画并行播完**（用户选 C）。
         // 原来是串行 —— 先 `animateTo(Closed)` 播完再切，于是动画时长直接变成切换延迟的下限；
-        // `DRAWER_MOTION_SPEC` 是 `spring(0.9, 700)`（1156px 行程约 296~393ms 才收敛），
+        // `DRAWER_CLOSE_SPEC` 是 `tween(210)`，
         // 用户因此感觉「点了要等一会」。现在切换不再被动画挡住。
         // `drawerBusyState` 仍跟动画走（它管的是聊天页的填充协程，不该在抽屉还在动时抢帧）。
         showChat()
         chat.openConversation(conversation)
         scope.launch {
             try {
-                drawerState.animateTo(DrawerValue.Closed, DRAWER_MOTION_SPEC)
+                drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
             } finally {
                 // 被后一次点击取消时不要清忙：那一次已经重新置 true 并在跑自己的动画。
                 if (drawerSwitchToken[0] == token) drawerBusyState.value = false
@@ -344,18 +345,9 @@ fun SuixingApp() {
     }
     val openSidebar: () -> Unit = remember(scope, drawerState) { {
         if (routeNow == "empty") scope.launch {
-            // **打开不能跟关闭共用 spring**（用户：「打开汉堡键的抽屉行为有问题，无法第一时间点击」）。
-            //
-            // 原因是曲线形状，不是点击逻辑：`spring(0.9, 700)` 初速度为 0，位移按二次曲线起步，
-            // **前几十毫秒几乎不动**；用户按下汉堡键看到「没反应」，会以为没点上。
-            // 而 `LinearOutSlowInEasing` 是**减速曲线，起步最快**，第一帧就在动 —— 这才是
-            // 「点了立刻有回应」的关键。
-            //
-            // 所以这里退回 tween：打开要的是**即时反馈**，关闭要的是**自然收敛**，两者本就不该同一条。
-            drawerState.animateTo(
-                DrawerValue.Open,
-                tween(260, easing = androidx.compose.animation.core.LinearOutSlowInEasing),
-            )
+            // 打开用 [DRAWER_OPEN_SPEC]：**同样 210ms**，但曲线是减速的，末端缓停不"生硬"
+            // （用户：「那个汉堡键动画改回去有点太生硬了」）。死区时长不变。
+            drawerState.animateTo(DrawerValue.Open, DRAWER_OPEN_SPEC)
         }
     } }
     val setSelectionActive: (Boolean) -> Unit = remember { { selectionActive = it } }
@@ -464,8 +456,7 @@ fun SuixingApp() {
                 gesturesEnabled = route == "empty",
                 // 遮罩浓度照搬自绘那版：M3 默认 scrim 是 32%，这块面板从第一天起是 45% 的黑。
                 // 遮罩的**视觉**仍归库（它画在面板下面：圆角、层次、浓度都对）。
-                // **关闭动效已不需要接管**：`DRAWER_MOTION_SPEC` = `spring(0.9, 700)`，
-                // 与「面板拖动松手」完全同一条曲线（真值来自 material3 **1.4.0** 源码，
+                // **关闭动效已不需要接管**：`DRAWER_CLOSE_SPEC` = `tween(210, FastOutLinearIn)`，
                 // （数值是从 material3 1.3.1 字节码里抄的，见 `Drawer.kt` 那段注释）。
                 // 以前「遮罩和别处不一样」纯粹因为我们自己传了 160ms。
                 // 现在这层**只剩一个理由**：让遮罩区域**左滑**也能关（库的遮罩只有点击）。
@@ -568,7 +559,7 @@ fun SuixingApp() {
             // 原来这里有一层透明的 `DrawerDismissLayer` 接管遮罩点击、后来又加了左滑关闭。
             // 它的存在理由本是「把遮罩的关闭动效改成和别处一样」——但**现在仍不一致**：
             // 库的 scrim 点击走 `close()` ⇒ `closeDrawerMotionSpec` = `FastEffects`
-            // （`spring(1.0, 3800)`，约 130ms），与我们这条 `spring(0.9, 700)` 不是同一条。
+            // （`spring(1.0, 3800)`，解析收敛 ≈152ms），与我们这条 `tween(210)` 不是同一条。
             // 要连遮罩也统一，只能把这层「只接管点击」的东西加回来 —— 用户已要求删掉，暂不加。
             // 而遮罩上的左滑又不跟手（`DrawerState` 没有公开的 `dragTo`），收益不抵它带来的
             // 手势冲突风险，所以整层删掉。现在遮罩：点击关闭（走库的 `FastEffects`，约 130ms）；
