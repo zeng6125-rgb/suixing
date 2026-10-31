@@ -9,7 +9,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -38,7 +37,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.components.MenuCard
@@ -294,18 +292,11 @@ internal fun ConversationRow(
         // 纯遮罩：面板本身是 [MenuCard]，进出场已经在它身上；这一层什么都不画、也不加动画修饰符。
         // `keeping` 只做一件事：面板退场那段让遮罩仍留在组合里，否则「点面板外面」会在面板还看得见
         // 的时候漏到抽屉下面的列表上。
-        if (menuOpen) {
-            Popup(properties = PopupProperties(focusable = false)) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { onMenuDismiss() },
-                )
-            }
-        }
+        // **这里不再自建遮罩**：下面那个 [MenuCard] 默认 `scrim = true`，它内部已经建了
+        // 一模一样的一层（`MenuCard.kt:138-152`，回调同为 `onDismiss = onMenuDismiss`）。
+        // 两层都留 = 每次长按同时开两个全屏 Popup 窗口、两个全屏 clickable 节点，
+        // 触摸分发要先穿过两层。所以只保留 MenuCard 自带的那个，这里只接 BACK
+        // （MenuCard 的弹窗是 `focusable = false`，看不到 BACK）。
         BackHandler(enabled = menuOpen) { onMenuDismiss() }
 
         // 面板就是输入框旁「添加」那个弹层本身：`ui/chat/ChatComposer.kt:307-362` 的 MenuCard
