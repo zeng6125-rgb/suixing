@@ -9,6 +9,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -91,27 +92,36 @@ import androidx.compose.runtime.setValue
 internal val DRAWER_SHEET_WIDTH = 300
 
 /**
- * 抽屉收起：**统一一条规格**，160ms + `FastOutLinearInEasing`（用户指定：260 → 210 → 180 → 170 → 160）。
+ * 抽屉**开合共用**这一条规格 —— `DefaultSpatial`，即「在面板上拖动松手」用的那一条。
  *
- * 之前遮罩那条和助手那条不一样，原因是有两条关闭入口：
- *  · 我们自己的 `closeDrawer()`（点助手、返回键、会话行）—— 参数由我们传；
- *  · M3 内部 `Scrim` 的 `onClose = { drawerState.close() }`
- *    （`NavigationDrawerKt$ModalNavigationDrawer$2$2$1$1`）—— 参数来自
- *    `DrawerState.anchoredDraggableMotionSpec`，App 模块拿不到（`$material3` 内部可见）。
- * 所以点遮罩始终是库默认 `TweenSpec(256ms)` + `FastOutSlowInEasing`，和助手那条不同。
+ * 打开也用它（原来打开是 `tween(260, LinearOutSlowIn)`，与关闭/拖动三条曲线各不相同，
+ * 用户要求统一）。
  *
- * 那条内部规格**改不了**（试过反射：`ModalNavigationDrawer` 每次重组都会把它重写，
- * 见 `NavigationDrawerKt` 里 `lambda$11$lambda$10` 的三处 set ⇒ 下一帧就失效）。
- * 所以改成**遮罩由我们这层接管**：`scrimColor = Color.Transparent` 关掉库的视觉，
- * 另起一层只覆盖面板右侧的自带遮罩（见 ModalNavigationDrawer 之后那段），点击走
- * `closeDrawer()` ⇒ 与助手 / 返回 / 会话行同一条 [DRAWER_CLOSE_SPEC]。
- * 打开不受影响：打开是显式传 spec 的（260ms 减速进场）。
+ * 真值来自 material3 **1.4.0** 的官方源码（`NavigationDrawer.kt`，不是猜的）：
+ * ```kotlin
+ * val anchoredDraggableMotion = MotionSchemeKeyTokens.DefaultSpatial.value()  // 拖动松手
+ * val openMotion             = MotionSchemeKeyTokens.DefaultSpatial.value()  // 打开
+ * val closeMotion            = MotionSchemeKeyTokens.FastEffects.value()     // 关闭（含点遮罩）
+ * ```
+ * 两个 token 在 `StandardMotionTokens.kt` 里是：
+ *  · `DefaultSpatial` = `spring(dampingRatio = 0.9f, stiffness = 700f)`
+ *  · `FastEffects`    = `spring(dampingRatio = 1.0f, stiffness = 3800f)`
+ * 所以**库自己的抽屉本来就不统一**：打开与拖动松手是 0.9/700，关闭是 1.0/3800。
+ * 用户指定「统一成拖动松手那条」，于是这里就取 `spring(0.9f, 700f)`。
+ *
+ * 为什么不能直接把 spec 塞给库：`ModalNavigationDrawer` 的签名里**没有** spec 参数
+ * （`drawerContent / modifier / drawerState / gesturesEnabled / scrimColor / content`），
+ * 它在 `SideEffect` 里每帧把三个 spec 写回 `drawerState`：
+ * `openDrawerMotionSpec` / `closeDrawerMotionSpec` / `anchoredDraggableMotionSpec`
+ * —— 这三个字段都是 `internal`（JVM 名带 `$material3` 后缀），反射写进去下一帧就被覆盖。
+ * 所以只能在我们**自己发起**的关闭路径上显式传这条 spec。
+ *
+ * ⚠️ 覆盖范围：返回键、助手入口、点会话行、「新对话」走本规格；
+ * **点遮罩走的是库的 `close()` → `closeDrawerMotionSpec`（FastEffects）**，
+ * 因为遮罩那层接管已经按用户要求删掉了。要连遮罩也统一，只能再把接管层加回来。
  */
-private const val DRAWER_CLOSE_MS = 160
-
-/** 抽屉收起规格（四条关闭路径共用）。`FiniteAnimationSpec` 不可变，顶层单例即可。 */
-internal val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
-    tween(DRAWER_CLOSE_MS, easing = androidx.compose.animation.core.FastOutLinearInEasing)
+internal val DRAWER_MOTION_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
+    spring(dampingRatio = 0.9f, stiffness = 700f)
 
 /**
  * The left drawer: conversations on top, everything else at the bottom.
@@ -327,14 +337,18 @@ internal fun Drawer(
                     AssistantAvatar(assistant = drawerAssistant, size = 30.dp)
                 }
                 Spacer(Modifier.width(11.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("随行", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "跟着你走的手机智能体",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = scheme.onSurfaceVariant,
-                    )
-                }
+                // **品牌区改成「当前助手」**（用户：「随行改为使用的助手名字，去掉副标题，
+                // 名字和头像垂直居中」）：原来这里是固定「随行」+ 副标题两行，现在只留一行名字，
+                // 取当前生效的助手名；助手还没加载出来时退回应用名，避免顶部突然空一块。
+                // 单行 Text 不再套 Column —— 行本身是 `CenterVertically`，头像与这行字自动共中线，
+                // 再包一层 Column 只会让「垂直居中」依赖 Column 的测量高度，多一层没意义。
+                Text(
+                    text = drawerAssistant?.name?.takeIf { it.isNotBlank() } ?: "随行",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
                 // 排序开关：把手图标 = 「拖」这件事本身。开着时行尾的垃圾桶换把手，
                 // 于是「拖」与「长按菜单」各占一处，不用在同一个手势里二选一。
                 IconButton(
@@ -353,7 +367,9 @@ internal fun Drawer(
                     Icon(
                         painter = painterResource(R.drawable.ic_compose),
                         contentDescription = "新对话",
-                        tint = scheme.primary,
+                        // **与排序按钮同色**（用户：「新对话的颜色改为和排序一样颜色」）：
+                        // 排序键常态就是 `onSurfaceVariant`，两个并列的图标按钮不该一深一亮。
+                        tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(22.dp),
                     )
                 }
