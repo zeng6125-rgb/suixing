@@ -96,7 +96,8 @@ internal val DRAWER_SHEET_WIDTH = 300
  *
  * 打开**不用**这条，见 [DRAWER_OPEN_SPEC]（同样 210ms，但减速缓停，观感柔和）。
  *
- * 历次取值：260 → 210 → 180 → 170 → 160（旧代码）→ `spring(0.9,700)`（误改，已撤）→ **210（本版）**。
+ * 历次取值：260 → 210 → 180 → 170 → **160（上一发布版）** →
+ * `spring(0.9, 700)`（曾为「与拖动松手统一」改成这条，因死区翻倍已撤回）→ **210（本版）**。
  *
  * 为什么用 `FastOutLinearIn` 而不是 spring：`NavigationDrawerKt` 把 `anchoredDraggable`
  * 套在含 `content()` 的整个容器上，**动画期间按下事件会被当作「打断动画、开始拖动」消费掉**

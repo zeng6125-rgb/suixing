@@ -275,12 +275,21 @@ fun SuixingApp() {
         showChat()
     }
     /**
-     * 点抽屉里的一行会话：**先把抽屉收起，收完再换会话**。
+     * 点抽屉里的一行会话：**切换立刻发生，收起动画并行播完**（方案 C）。
      *
-     * 用户原话：「点了侧边栏的切换会话，先有关闭侧边栏（，再）会话」。
-     * 之前把 `openConversation` 和收起动画放在同一帧，换会话要整页换状态（分组、解析、冷组合），
-     * 主线程被占住、动画的帧被吃掉 ⇒ 收起看着和助手/遮罩那几条不一样。
-     * 现在顺序拨正：动画完整播完（160ms），再 `showChat()` + 换会话。
+     * 历史沿革（两次反转，都记着，免得以后又改回去）：
+     *  · 最初是同一帧做（`openConversation` + 收起动画），换会话要整页换状态
+     *    （分组、解析、冷组合），主线程被占住、动画帧被吃掉 ⇒ 收起看着和别处不一样；
+     *  · 于是改成**串行**（用户原话「先有关闭侧边栏，再会话」）：动画播完再切。
+     *    但动画时长直接变成切换延迟的下限（当时 160ms），用户觉得「点了要等一会」；
+     *  · 现在改回**并行**（用户选 C）：`showChat()` / `openConversation()` 立刻执行，
+     *    收起动画自己跑。
+     *
+     * 实测依据（§73，文件探针，8 轮）：`tap -> state_set` 仅 2~3ms、
+     * `state_set -> content_ready` 12~37ms（冷读大会话也一样，只加载尾部窗口 24 行）。
+     * 所以"切换慢"不是数据加载，而是 **动画期间的点击死区**（见 `DRAWER_CLOSE_SPEC` 注释）。
+     *
+     * `drawerBusyState` 仍跟动画走：它管的是聊天页填充协程，不该在抽屉还在动时抢帧。
      */
     // **连点保护**：只有最后一次点击算数（第一次的协程会被第二次的动画取消，令牌随之失效）。
     val drawerSwitchToken = remember { intArrayOf(0) }
@@ -290,8 +299,7 @@ fun SuixingApp() {
         drawerBusyState.value = true
         // **方案 C：切换立刻发生，收起动画并行播完**（用户选 C）。
         // 原来是串行 —— 先 `animateTo(Closed)` 播完再切，于是动画时长直接变成切换延迟的下限；
-        // `DRAWER_CLOSE_SPEC` 是 `tween(210)`，
-        // 用户因此感觉「点了要等一会」。现在切换不再被动画挡住。
+        // `DRAWER_CLOSE_SPEC` 是 `tween(210)`。现在切换不再被动画挡住（实测见上面的 KDoc）。
         // `drawerBusyState` 仍跟动画走（它管的是聊天页的填充协程，不该在抽屉还在动时抢帧）。
         showChat()
         chat.openConversation(conversation)
@@ -456,11 +464,10 @@ fun SuixingApp() {
                 gesturesEnabled = route == "empty",
                 // 遮罩浓度照搬自绘那版：M3 默认 scrim 是 32%，这块面板从第一天起是 45% 的黑。
                 // 遮罩的**视觉**仍归库（它画在面板下面：圆角、层次、浓度都对）。
-                // **关闭动效已不需要接管**：`DRAWER_CLOSE_SPEC` = `tween(210, FastOutLinearIn)`，
-                // （数值是从 material3 1.3.1 字节码里抄的，见 `Drawer.kt` 那段注释）。
-                // 以前「遮罩和别处不一样」纯粹因为我们自己传了 160ms。
-                // 现在这层**只剩一个理由**：让遮罩区域**左滑**也能关（库的遮罩只有点击）。
-                // 若哪天把左滑也去掉，这一层就可以整段删掉，行为与现在完全一致。
+                // 遮罩的点击关闭**已交回库**：`DRAWER_CLOSE_SPEC` = `tween(210, FastOutLinearIn)`，
+                // 与库的 `FastEffects`（`spring(1.0, 3800)`，解析收敛 ≈152ms）不是同一条 ——
+                // 差异来自库内部 token，App 改不了（见 `Drawer.kt` 的说明）。
+                // 用户已要求删掉那层「接管遮罩点击/左滑」的透明层，所以现在遮罩只保留库自己的点击关闭。
                 scrimColor = Color.Black.copy(alpha = 0.45f),
                 drawerContent = {
                     val drawerConversations by chat.conversations.collectAsStateWithLifecycle()
