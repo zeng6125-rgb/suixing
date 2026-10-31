@@ -16,14 +16,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imeAnimationTarget
 import com.suixing.agent.ui.components.ImeInsetFilter
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalNavigationDrawer
+import com.suixing.agent.ui.drawer.SuixingDrawer
+import com.suixing.agent.ui.drawer.rememberSuixingDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
@@ -37,10 +41,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -74,6 +81,7 @@ import com.suixing.agent.ui.components.NAV_ENTER_MS
 import com.suixing.agent.ui.components.NAV_EXIT_MS
 import com.suixing.agent.ui.components.NAV_SHIFT_DIVISOR
 import com.suixing.agent.ui.components.imePaddingBottom
+import com.suixing.agent.ui.drawer.DRAWER_SHEET_WIDTH
 import com.suixing.agent.ui.drawer.DRAWER_CLOSE_SPEC
 import com.suixing.agent.ui.drawer.DRAWER_OPEN_SPEC
 import com.suixing.agent.ui.drawer.Drawer
@@ -117,6 +125,24 @@ private const val NAV_PUSH_MS = 280
  * 进页**不用**它 —— 进页是 0.8.91 的滑入（用户：「点进去的动画可以」）。
  */
 private const val NAV_FADE_MS = NAV_EXIT_MS
+
+/**
+ * 主页四角的圆角半径 —— **对齐屏幕自身的物理圆角**。
+ *
+ * 用户要的是「四角从一开始就是屏幕边缘模样，屏幕边缘圆角」：
+ * 抽屉关着时页面铺满屏幕，这个圆角正好压在屏幕的物理圆角上 ⇒ 看不出来；
+ * 抽屉滑开、页面右移后才显形，读成「一块和屏幕同形的面板浮在侧边栏上」。
+ *
+ * **这个数是量出来的，不是猜的**。本机（Redmi 2510DRK44C / annibale）：
+ *   `adb shell dumpsys display` → `roundedCorners RoundedCorners{[RoundedCorner{position=TopLeft,
+ *     radius=172, center=Point(172, 172)}, … 四角均 radius=172]}`
+ *   `density 480` ⇒ 缩放 480/160 = 3.0
+ *   ⇒ **172 / 3.0 = 57.33dp**
+ * （上一版先写了 30dp 的猜测值，量完发现小了一倍。）
+ *
+ * 换机型时用同一条命令读出 `radius` 与 `density`，`radius / (density/160)` 就是这里的值。
+ */
+private const val SCREEN_CORNER_DP = 57.33f
 
 
 
@@ -171,9 +197,10 @@ fun SuixingApp() {
         chat.state.map { it.assistantId }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = "")
 
-    // 抽屉本体交给 M3 的 ModalNavigationDrawer：手势（边缘拖动跟手）、遮罩、面板位移全归库。
-    // 自绘那版只能整段出现/消失——边缘拖不动，用户点名的就是这条。
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    // 抽屉本体交给 M3 的 **DismissibleNavigationDrawer**（推挤式）：手势（边缘拖动跟手）、
+    // 面板位移全归库。自绘那版只能整段出现/消失——边缘拖不动，用户点名的就是这条。
+    // 换成 Dismissible 的原因见绘图处那段注释（内容右移 = 面板宽度，留一条缝）。
+    val drawerState = rememberSuixingDrawerState()
     // 抽屉里那张半屏助手表：和聊天页那张是同一个 AssistantSheet，只是宿主换成了外壳。
     // remember 而不是 rememberSaveable（与聊天页那张表一致）：进程重启后它不该自己弹回来。
     var shellAssistants by remember { mutableStateOf(false) }
@@ -257,11 +284,12 @@ fun SuixingApp() {
     // pop 到透明的 "empty" 就等于"什么都没有在盖着 chat"。
     val showChat: () -> Unit = { navController.popBackStack("empty", inclusive = false) }
 
-    // 用户自己收起抽屉（遮罩、返回键、左缘拖动）：这是用户自己的动作，走库的动画。同时清掉
+    // 收起抽屉（返回键、抽屉内动作、左缘拖动）：用户自己的动作，走库的动画。同时清掉
     // 出发页标记——用户手动把抽屉收了，返回时就不该再自己弹出来（"状态"是他刚亲手关掉的这个）。
     val closeDrawer: () -> Unit = {
-        // 收起用 [DRAWER_CLOSE_SPEC] = tween(210, FastOutLinearIn)。点遮罩不在这里（见下）
-        // （自带遮罩层调用本函数），四条路径手感一致。
+        // 收起用 [DRAWER_CLOSE_SPEC] = tween(210, FastOutLinearIn)。
+        // **点遮罩关闭这条路径已经没有了**：换成 `DismissibleNavigationDrawer`（推挤式）后
+        // 不再画 scrim（见下面 ModalDrawerSheet 之前那段）。
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         drawerOrigin[0] = null
     }
@@ -269,7 +297,7 @@ fun SuixingApp() {
     // 用户直接落在会话里（ChatGPT 的抽屉在这里同样会关）。这里一并清掉出发页标记。
     val chatFromDrawer: () -> Unit = {
         drawerOrigin[0] = null
-        // **与 `closeDrawer()`（助手 / 遮罩 / 返回键）逐字相同**：只启动同一条
+        // **与 `closeDrawer()`（助手 / 返回键）逐字相同**：只启动同一条
         // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         showChat()
@@ -437,14 +465,30 @@ fun SuixingApp() {
             // （= 屏高 − IME）为止，下面那条缝留给根节点的渐变 —— 和 0.8.229 之前
             // （外壳被 IME 顶起、那条缝根本不画）逐像素一致；键盘收起时 heldImePx=0，铺满全屏。
             val surfaceColor = MaterialTheme.colorScheme.surface
+            // 抽屉打开时，主页缩放会在四周留出边距，露出的是**根底色**。
+            // 若根底色一直是 surface，那圈边距就是白的 —— 用户看到的「主页被套了个白框」。
+            // 所以让它随抽屉进度渐变到侧边栏底色（surfaceContainerHigh）：
+            // 主页四周露出的就变成"侧边栏"，与 DeepSeek 一致。
+            val drawerSurfaceColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            val drawerOffsetForBg = drawerState.offset
             Box(
                 Modifier
                     .matchParentSize()
-                    // **绘制期读键盘高度**：只在 draw 阶段取值 ⇒ 键盘动画期间既不重组也不重布局，
+                    // **绘制期读**键盘高度与抽屉进度：只在 draw 阶段取值 ⇒ 动画期间既不重组也不重布局，
                     // 但绘制范围仍按"画布底边 = 屏高 − IME"裁剪，键盘圆角里那圈色块不会回来。
                     .drawBehind {
                         val h = (size.height - heldImeState.value).coerceAtLeast(0f)
-                        drawRect(color = surfaceColor, size = androidx.compose.ui.geometry.Size(size.width, h))
+                        val raw = drawerOffsetForBg.value
+                        val panelPx = DRAWER_SHEET_WIDTH.dp.toPx()
+                        val p = if (raw.isNaN() || panelPx <= 0f) 0f
+                        else (1f - (-raw / panelPx)).coerceIn(0f, 1f)
+                        // **一开始滑就切换**（用户：「滑动中还是没融合，刚滑的时候一点都不融合」）。
+                        // p*4 在起始阶段仍然很白（p=0.02 → 8%），所以看上去"刚滑时一点不融合"。
+                        // 改成阈值：只要抽屉动了一点，底色立刻就是侧边栏色。
+                        // 判 p=0 时页面完全盖住，切换看不出来；关闭动画回到 0 时同理。
+                        val bgP = if (p > 0.01f) 1f else 0f
+                        val bg = androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, bgP)
+                        drawRect(color = bg, size = androidx.compose.ui.geometry.Size(size.width, h))
                     },
             )
             // 推进时下面那层（抽屉 + 聊天）跟着往左让 10%：**两层一起动**才读成"推上来"，
@@ -454,83 +498,172 @@ fun SuixingApp() {
                     .fillMaxSize()
                     .graphicsLayer { translationX = -size.width * 0.10f * baseShiftState.value },
             ) {
-            ModalNavigationDrawer(
-                drawerState = drawerState,
-                // 边缘拖动跟手（拖到一半松手会回弹）、遮罩与面板位移全归库——用户点名的「不要自绘」。
+            SuixingDrawer(
+                state = drawerState,
+                // 边缘拖动跟手（拖到一半松手会回弹）、面板位移全归库——用户点名的「不要自绘」。
                 // 但**只在会话页开着**：子页（设置主页 + 六个设置子页 + 会话管理 + 权限/工具/
                 // 文件/任务/定时任务/用量/关于/扩展/画像/助手）都是 push 上去的独立页面，各有返回
                 // 箭头，从屏幕左缘还能拉出抽屉是错的——用户原话「设置页到底是不是单独页？为什么在
                 // 设置页里面还能侧滑出侧边栏？」。只有 chat 那一层（route == "empty"）为 true。
                 gesturesEnabled = route == "empty",
-                // 遮罩浓度照搬自绘那版：M3 默认 scrim 是 32%，这块面板从第一天起是 45% 的黑。
-                // 遮罩的**视觉**仍归库（它画在面板下面：圆角、层次、浓度都对）。
-                // 遮罩的点击关闭**已交回库**：`DRAWER_CLOSE_SPEC` = `tween(210, FastOutLinearIn)`，
-                // 与库的 `FastEffects`（`spring(1.0, 3800)`，解析收敛 ≈152ms）不是同一条 ——
-                // 差异来自库内部 token，App 改不了（见 `Drawer.kt` 的说明）。
-                // 用户已要求删掉那层「接管遮罩点击/左滑」的透明层，所以现在遮罩只保留库自己的点击关闭。
-                scrimColor = Color.Black.copy(alpha = 0.45f),
+                // **推挤 + 浮起 + 缩放 + 层次 + 轻遮罩**（用户要的 DeepSeek 效果）。
+                //
+                // 为什么是 Modal 而不是 Dismissible：`DismissibleNavigationDrawer` 只做**纯平移**
+                // （`contentPlaceable.placeRelative(sheetWidth + offset)`），既没有遮罩也没有
+                // 缩放/圆角/层次。用户的要求（「主页面相当于浮起右移的，而且有点缩放，有层次」
+                // +「遮罩 deepseek 软件是有点呀」）它一个都做不到。
+                //
+                // 所以用 Modal 拿遮罩 + 手势，再在 content 外层自己叠一层变换：
+                //  · `drawerState.offset` 是**公开的** `State<Float>`（面板的 x 位置：
+                //    关闭 ≈ −面板宽，打开 = 0）⇒ 可算出 0→1 的进度；
+                //  · 进度驱动 `translationX / scale / 圆角 / 阴影`，就是"浮起"的层次感。
+                // 面板宽度 **300dp**（[DRAWER_SHEET_WIDTH]）：屏宽 385dp 时主页右侧露出 **85dp**。
+                // 用户：「不需要加阴影和遮罩」。留 0 透明度而不是删参数：`scrimColor` 是必填，
+                // 且库仍需要它来承接「点主页面区域关闭」（推挤式在 DeepSeek 里也是这么做）。
                 drawerContent = {
+                    // **侧边栏本体回到 drawerContent**：只有这一层会被库的 `offset` 驱动，
+                    // 才有进出场动画；而且 `DismissibleNavigationDrawer` 没有 Scrim，
+                    // 侧边栏才能正常响应点击。
                     val drawerConversations by chat.conversations.collectAsStateWithLifecycle()
-                    Drawer(
-                        open = drawerState.isOpen,
-                        route = route,
-                        conversations = drawerConversations,
-                        activeId = activeConversationId,
-                        runningId = runningIds,
-                        onNew = {
-                            chat.newConversation()
-                            chatFromDrawer()
-                        },
-                        onOpenConversation = { conversation ->
-                            // 收起动画与助手/遮罩那条完全一致，播完再换会话（见 `switchFromDrawer`）。
-                            switchFromDrawer(conversation)
-                        },
-                        onDeleteConversation = { chat.deleteConversation(it) },
-                        // 改名必须走 ViewModel：它手里有一份标题拷贝，每轮结束会写回盘（见
-                        // ChatViewModel.renameConversation）。置顶是纯标签，直接落仓库就够。
-                        onRenameConversation = { conversation, title ->
-                            chat.renameConversation(conversation.id, title)
-                        },
-                        onTogglePin = { conversation ->
-                            scope.launch {
-                                Core.chats.setPinned(conversation.id, !conversation.pinned)
-                            }
-                        },
-                        // 归档 = 纯标签（不动 updatedAt，也不动列表顺序）：抽屉不再显示它，
-                        // 已归档的那份在「设置 → 会话管理」里翻出来取消归档。
-                        onToggleArchive = { conversation ->
-                            scope.launch {
-                                Core.chats.setArchived(conversation.id, !conversation.archived)
-                            }
-                        },
-                        onNavigate = open,
-                        onAssistants = {
-                            // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
-                            closeDrawer()
-                            shellAssistants = true
-                        },
-                        consoleOn = consoleOn,
-                        onToggleConsole = {
-                            if (consoleOn) {
-                                // Written first, then stopped: the switch is what the run checks,
-                                // and a console left running after the switch went off would
-                                // linger until the run ended on its own.
-                                scope.launch { Core.settings.update { it.copy(floatingConsole = false) } }
-                                FloatConsoleService.stop(context)
-                            } else if (FloatConsoleService.canDrawOverlays(context)) {
-                                scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
-                                FloatConsoleService.start(context)
-                            } else {
-                                // Not persisted on the way out: without the grant the switch
-                                // would read ON while no ball could ever appear.
-                                overlayPermissionLauncher.launch(
-                                    FloatConsoleService.overlayPermissionIntent(context),
-                                )
-                            }
-                        },
-                    )
+                Drawer(
+                    open = drawerState.isOpen,
+                    route = route,
+                    conversations = drawerConversations,
+                    activeId = activeConversationId,
+                    runningId = runningIds,
+                    onNew = {
+                        chat.newConversation()
+                        chatFromDrawer()
+                    },
+                    onOpenConversation = { conversation ->
+                        // 收起动画与助手那条完全一致（见 `switchFromDrawer`）。
+                        switchFromDrawer(conversation)
+                    },
+                    onDeleteConversation = { chat.deleteConversation(it) },
+                    // 改名必须走 ViewModel：它手里有一份标题拷贝，每轮结束会写回盘（见
+                    // ChatViewModel.renameConversation）。置顶是纯标签，直接落仓库就够。
+                    onRenameConversation = { conversation, title ->
+                        chat.renameConversation(conversation.id, title)
+                    },
+                    onTogglePin = { conversation ->
+                        scope.launch {
+                            Core.chats.setPinned(conversation.id, !conversation.pinned)
+                        }
+                    },
+                    // 归档 = 纯标签（不动 updatedAt，也不动列表顺序）：抽屉不再显示它，
+                    // 已归档的那份在「设置 → 会话管理」里翻出来取消归档。
+                    onToggleArchive = { conversation ->
+                        scope.launch {
+                            Core.chats.setArchived(conversation.id, !conversation.archived)
+                        }
+                    },
+                    onNavigate = open,
+                    onAssistants = {
+                        // 半屏表挂在外壳上：抽屉先收，表从底下上来，不必再走一次页面切换。
+                        closeDrawer()
+                        shellAssistants = true
+                    },
+                    consoleOn = consoleOn,
+                    onToggleConsole = {
+                        if (consoleOn) {
+                            // Written first, then stopped: the switch is what the run checks,
+                            // and a console left running after the switch went off would
+                            // linger until the run ended on its own.
+                            scope.launch { Core.settings.update { it.copy(floatingConsole = false) } }
+                            FloatConsoleService.stop(context)
+                        } else if (FloatConsoleService.canDrawOverlays(context)) {
+                            scope.launch { Core.settings.update { it.copy(floatingConsole = true) } }
+                            FloatConsoleService.start(context)
+                        } else {
+                            // Not persisted on the way out: without the grant the switch
+                            // would read ON while no ball could ever appear.
+                            overlayPermissionLauncher.launch(
+                                FloatConsoleService.overlayPermissionIntent(context),
+                            )
+                        }
+                    },
+                )
                 },
             ) {
+                // 放在 content 里而不是 drawerContent 里，是为了让它位于主页**之下**。
+                // **主页面"浮起"层**（用户：「deepseek 的主页面相当于浮起右移的，而且有点缩放，
+                // 有层次」）。`ModalNavigationDrawer` 自己**完全不动 content**（它是覆盖式），
+                // 所以位移/缩放/圆角/阴影全部由我们在这里做。
+                //
+                // 进度来自公开的 `drawerState.offset`（面板 x 位置）：关闭 ≈ −面板宽、打开 = 0。
+                //   progress = 1 − |offset| / panelWidthPx   → 0（关）… 1（开）
+                // 面板宽要拿到 px，所以先量一次（`onSizeChanged` 随便绑在下面的 Box 上）。
+                //
+                // 参数（可调）：
+                //   · 右移 = 面板宽度（300dp），主页正好让出侧边栏那一片
+                //   · **圆角恒定 = [SCREEN_CORNER_DP]**（不随进度变）：关着时它与屏幕自身的
+                //     圆角重合，所以看不出；滑开后才显出这是一块圆角面板 —— 就是用户要的
+                //     「四角从一开始就是屏幕边缘模样，屏幕边缘圆角」。
+                //     曾经写成「0 → 22dp 随进度长」，那样关着时是尖角、滑开时才长圆角，
+                //     与屏幕边缘对不上。
+                //   · 缩放 = 1.0 → 0.92（"浮起"的透视感，端点必须 1.0 起）
+                //   · 阴影不在这里，画在侧边栏右边缘（见 drawerContent 那段）。
+                //
+                // **注意**：这一层只改绘制，不改布局尺寸 —— 用 graphicsLayer 是刻意的，
+                // 布局期改宽度会让 chat 的整个测量链重排（`imePadding` 那次教训）。
+                // **不要在组合作用域里读 `drawerState.offset`**：拖动/动画期间它每帧都变，
+                // 组合期读它 = 每帧重组整棵常驻的 chat 树 —— 正是本文件 :742 与
+                // DrawerRows.kt:54 记下的那个坑。所以下面只在 `graphicsLayer {}`（绘制期）
+                // 里读：那次读取发生在节点绘制阶段，不产生组合失效。
+                //
+                // **NaN 防护是必须的**：`drawerState.offset` 在锚点初始化前是 `Float.NaN`
+                // （`NavigationDrawer.kt:243` 写明 "or Float.NaN before the offset is initialized"）。
+                // 第一版没防，`NaN / panelWidthPx` 一路传到
+                // `RoundedCornerShape((22 * progress).dp)` ⇒ 线上崩在
+                // `IllegalArgumentException: Corner size in Px can't be negative(topStart = NaN …)`
+                // （dropbox 2026-11-01 01:03:25，v608 / 0.8.587）。
+                val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
+                val offsetState = drawerState.offset
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            // **只做水平位移**（用户：「不需要加阴影和遮罩」「四角从一开始就要是
+                            // 屏幕边缘模样」「主页浮在侧边栏上面」）：
+                            // 不缩放、不圆角、不裁剪、不投影 —— 主页始终是满屏那一块，
+                            // 右移之后右侧露出的就是它自己的右边缘，四角天然是屏幕边缘。
+                            val raw = offsetState.value
+                            val progress = if (panelWidthPx <= 0f || raw.isNaN()) {
+                                0f
+                            } else {
+                                (1f - (-raw / panelWidthPx)).coerceIn(0f, 1f)
+                            }
+                            // **不要自己写 translationX**：`DismissibleNavigationDrawer` 已经把
+                            // content 放在 `sheetWidth + offset`（NavigationDrawer.kt:530-532），
+                            // 位移是库给的；再叠一次就是双倍位移（主页会被推出屏幕）。
+                            //
+                            // 主页位移：自建宿主不再替我们平移 content（库那个版本是
+                            // `placeRelative(sheetWidth + offset)`），所以这里补回来。
+                            translationX = panelWidthPx * progress
+                            // 缩放：关 1.0 → 开 0.95。端点必须写对，否则关着时整页常年缩小。
+                            val s = 1f - 0.05f * progress
+                            scaleX = s
+                            scaleY = s
+                            // **阴影属于主页自己**（用户：「边缘阴影圆角都是主页的」）。
+                            // 用 graphicsLayer 的 shadowElevation 得到真实柔和投影，
+                            // 因为主页现在在侧边栏**之上**（侧边栏已移到 content 里），阴影能压上去。
+                            // **扩散更大、但更淡**（用户：「阴影淡是淡，你让他扩散大一点呀」）：
+                            // Compose 的 `shadowElevation` 同时决定"扩散范围"和"浓度"，
+                            // 单纯调大会一起变浓 ⇒ 配合把阴影色压到 10% 透明度，
+                            // 得到"范围宽、颜色浅"的效果（API 28+ 生效，以下机型自动忽略）。
+                            // 用户：「阴影扩散小一点点，深一点点就ok了」⇒ 22 → 16dp，10% → 18%。
+                            shadowElevation = 16.dp.toPx() * progress
+                            spotShadowColor = Color.Black.copy(alpha = 0.24f)
+                            ambientShadowColor = Color.Black.copy(alpha = 0.24f)
+                            // 从中心缩放，读成"整块浮起来"；从左拉伸会像贴纸。
+                            transformOrigin = TransformOrigin(0.5f, 0.5f)
+                            // **恒定圆角**：与屏幕四角半径一致。关着时页面铺满屏幕，
+                            // 这个圆角正好落在屏幕自身的圆角上 ⇒ 肉眼看不出；
+                            // 右移之后才显形。`clip = true` 必须开，否则圆角只影响投影不影响内容。
+                            shape = RoundedCornerShape(SCREEN_CORNER_DP.dp)
+                            clip = true
+                        },
+                ) {
                 // chat 常驻：NavHost 在离开一个目的地之后会把它**销毁**，pop 回来时是从零
                 // 重新组合的（长列表重建、markdown 重解析）——那正是用户说的「返回像重新加载」，
                 // 三处 rememberSaveable 只救了状态、救不了重建。所以 chat 移出 NavHost、永远
@@ -560,17 +693,16 @@ fun SuixingApp() {
                         }
                     }
                 }
+                }
             }
             }
-            // **遮罩交互全部交回库**（用户：「A 删掉」）。
-            // 原来这里有一层透明的 `DrawerDismissLayer` 接管遮罩点击、后来又加了左滑关闭。
-            // 它的存在理由本是「把遮罩的关闭动效改成和别处一样」——但**现在仍不一致**：
-            // 库的 scrim 点击走 `close()` ⇒ `closeDrawerMotionSpec` = `FastEffects`
-            // （`spring(1.0, 3800)`，解析收敛 ≈152ms），与我们这条 `tween(210)` 不是同一条。
-            // 要连遮罩也统一，只能把这层「只接管点击」的东西加回来 —— 用户已要求删掉，暂不加。
-            // 而遮罩上的左滑又不跟手（`DrawerState` 没有公开的 `dragTo`），收益不抵它带来的
-            // 手势冲突风险，所以整层删掉。现在遮罩：点击关闭（走库的 `FastEffects`，约 130ms）；
-            // 面板：拖动跟手（库）。**遮罩的关闭曲线与其余路径仍不同**——要统一只能把这层加回来。
+            // **现在没有遮罩层了**（改用 `DismissibleNavigationDrawer` 推挤式）：
+            //  · 推挤式本来就不画 scrim，所以「点遮罩关闭」这条路径**不存在**——
+            //    与用户的原话一致（「看聊天内容我不会自己关闭侧边栏吗」）；
+            //  · 历史上那层透明的 `DrawerDismissLayer`（接管遮罩点击/左滑）已按用户要求删除，
+            //    现在连它要接管的对象都没有了；
+            //  · 关抽屉的入口只剩两个：返回键（`DrawerBackHandler`）与抽屉内的动作
+            //    （点会话行 / 助手 / 新对话），它们仍走 `DRAWER_CLOSE_SPEC`。
             NavHost(
                             navController = navController,
                             // 覆盖层的栈底：什么都不画（透明），所以"当前是 empty"就等于"chat 露着"。
@@ -737,8 +869,9 @@ fun SuixingApp() {
                         // **只在会话页**接管 BACK：抽屉现在不随导航关闭（见 open()），覆盖层页
                         // 盖在它上面时抽屉可能还开着 —— 那种情况下 BACK 应该先退页，不是去关一个
                         // 看不见的抽屉。route != "empty" 时这里让位，交给 NavHost 自己的返回。
-                        // **不要把 `isOpen` 读进外壳的组合作用域**（用户实测：抽屉动画
-                        // **播完那一帧**点遮罩要等一会才生效，动画期间反而立刻生效）。
+                        // **不要把 `isOpen` 读进外壳的组合作用域**。历史依据是当时（还带遮罩、
+                        // 还能点遮罩关闭的年代）用户实测：抽屉动画**播完那一帧**点遮罩要等一会才生效。
+                        // 现在虽已没有遮罩，但**结论不变** —— 这里读 `isOpen` 会让那一帧整屏重组。
                         // `isOpen` 只在动画结束时翻转（`settledValue` 由 `anchoredDrag` 收尾写），
                         // 在外壳函数体里读它 ⇒ 那一帧**整个 SuixingApp 重组**，其中包括
                         // `ChatScreen(...)`（参数里有每次重组新建的 lambda，跳不过去）⇒

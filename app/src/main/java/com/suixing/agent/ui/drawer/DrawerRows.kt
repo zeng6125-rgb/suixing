@@ -51,13 +51,15 @@ import androidx.compose.runtime.setValue
  * 若把 `drawerState.isOpen` 直接写进 `SuixingApp` 的函数体（原来是 `BackHandler(enabled =
  * drawerState.isOpen && …)`），那么抽屉动画**结束那一帧**状态翻转会连带重组整个外壳 ——
  * 包括常驻的 `ChatScreen`（参数含每次重组新建的 lambda，跳不过去）⇒ 聊天页整段重跑，
- * 主线程卡住，这一瞬间点到遮罩/按钮的反应就会被推迟。用户实测的现象正是
- * 「动画期间点遮罩立刻能关、动画刚播完那一下反而要等一会」。
+ * 主线程卡住，这一瞬间落在页面上的点击反应就会被推迟。用户实测的现象正是
+ * 「动画期间点遮罩立刻能关、动画刚播完那一下反而要等一会」
+ * （**当时的抽屉还带遮罩**；现在已改成推挤式、没有遮罩，但「别把 isOpen 读进外壳组合域」
+ * 这条结论不变）。
  * 挪到本函数后，只有这一个只含 BackHandler 的作用域跟着翻转重组。
  */
 @Composable
 internal fun DrawerBackHandler(
-    drawerState: androidx.compose.material3.DrawerState,
+    drawerState: SuixingDrawerState,
     route: String,
     onClose: () -> Unit,
 ) {

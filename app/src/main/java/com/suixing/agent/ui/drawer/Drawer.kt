@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
@@ -88,8 +89,39 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
-/** 抽屉面板宽度（ModalDrawerSheet 与收起残影共用）。 */
+/**
+ * 抽屉面板宽度 —— **300dp**（原设计，本版恢复）。
+ *
+ * 上一版为做"挤压式"把它改成屏宽 90% / 屏宽−48dp，用户否掉了：
+ * 「48dp太小了，之前那个空位是多少？」——之前的空位就是
+ * **屏宽 385dp − 面板 300dp = 85dp**（主页右侧露出的那一条）。
+ * 所以面板宽度回到 300dp，主页右移量也用它（= 露出 85dp）。
+ *
+ * 库上限（保留此说明，防以后又往大调）：`DrawerSheet` 内部两层都写了
+ * `sizeIn(minWidth = 240.dp, maxWidth = NavigationDrawerTokens.ContainerWidth = 360.dp)`
+ * （`NavigationDrawer.kt:1306` / `tokens/NavigationDrawerTokens.kt:39`）。
+ */
 internal val DRAWER_SHEET_WIDTH = 300
+
+/**
+ * 抽屉开/合**共用的唯一曲线**（用户：「收起展开的动画的连续性还是要做好」）。
+ *
+ * 为什么统一成 spring，而不是原来那两条 tween：
+ *  · 手势拖动松手后要**带上手指速度**继续走，`tween` 不认初速度 ⇒ 快划松手会"顿一下再起步"，
+ *    和拖动过程断开；
+ *  · 汉堡键 / 抽屉内动作 / 返回键走的是 `animateTo(spec)`，如果那里用 tween、手势用 spring，
+ *    同一个抽屉就有两套手感。
+ *  ⇒ 现在**所有入口**都走这一条 spring，`Animatable.animateTo` 会自然吃进初速度。
+ *
+ * `dampingRatio = 1f`（临界阻尼、不回弹）、`stiffness = 700`：约 250ms 收敛，
+ * 与原来 210ms tween 的观感接近，但起步/收尾都是连续的。
+ */
+internal val DRAWER_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
+    androidx.compose.animation.core.spring(
+        dampingRatio = 1f,
+        stiffness = 700f,
+        visibilityThreshold = 0.001f,
+    )
 
 /**
  * 抽屉**收起**规格：`tween(210, FastOutLinearInEasing)`（快起、线性收尾 —— 让开视野要利落）。
@@ -104,13 +136,14 @@ internal val DRAWER_SHEET_WIDTH = 300
  * ⇒ **动画时长 = 期间点不动的窗口**。`spring(0.9, 700)` 的包络衰减率 ζω=23.81/s，
  * 1156px 行程要 ~296ms(1px)~393ms(0.1px) 才收敛，会把死区拉长近一倍；210ms 的 tween 更短可控。
  *
- * 三个**不归这里管**的路径（都在库内部）：点遮罩关闭走 `FastEffects`
+ * **注**：换成 `DismissibleNavigationDrawer`（推挤式）后**已经没有任何遮罩**，
+ * 下面的「点遮罩」条目只作为库内部事实记录（那条路径在本 App 里不再触发）。
  * （`spring(1.0, 3800)`），面板拖动松手走 `DefaultSpatial`（`spring(0.9, 700)`）。
  * `ModalNavigationDrawer` 的公开签名没有任何 spec 参数，`MaterialTheme` 的
  * `motionScheme` 也只有 getter ⇒ App 改不了它们。
  */
 internal val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
-    tween(210, easing = androidx.compose.animation.core.FastOutLinearInEasing)
+    DRAWER_SPEC
 
 /**
  * **打开专用**的曲线：同样 210ms，但换成减速（`LinearOutSlowInEasing`）。
@@ -125,11 +158,13 @@ internal val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationS
  * 时长两边都是 210ms，所以**点击死区不变**，只是曲线软硬不同。
  */
 internal val DRAWER_OPEN_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
-    tween(210, easing = androidx.compose.animation.core.LinearOutSlowInEasing)
+    DRAWER_SPEC
 /**
  * The left drawer: conversations on top, everything else at the bottom.
  *
- * 面板本体是 M3 的 [ModalDrawerSheet]（用户点名「不要自绘」）：拖动跟手、遮罩与位移都归库。
+ * 面板本体是 M3 的 [ModalDrawerSheet]（用户点名「不要自绘」）：拖动跟手、位移都归库。
+ * （外壳已换成 `DismissibleNavigationDrawer`，所以**没有遮罩**；宽度也不再是固定 300dp，
+ * 宽度固定 [DRAWER_SHEET_WIDTH] = 300dp。）
  * 圆角、底色、宽度、elevation 全部显式覆盖成自绘那版的值——换库不许换设计。
  */
 @Composable
@@ -301,17 +336,15 @@ internal fun Drawer(
         }
     }
 
-    // 面板：库负责拖动/回弹/遮罩/位移，视觉参数逐条覆盖回自绘那版——
-    // 宽度 300dp（库的 sizeIn 区间是 240–360dp）、圆角只有右侧两角 30dp（库默认四角 16dp）、
-    // 底色 surfaceContainerHigh（库默认 surfaceContainerLow）、elevation 0（库默认 16dp 的
-    // tonal elevation，那会把底色再调亮一档，用户看了几个版本的颜色就变了）。
-    // windowInsets 归零：状态栏/导航栏/键盘的内边距一直由下面这层 Column 自己管，库那层
-    // 再补一次就是双重内边距。
+    // 面板：库负责拖动/回弹/位移，视觉参数逐条覆盖回自绘那版——
+    // 宽度 **300dp**（[DRAWER_SHEET_WIDTH]，本版恢复原值）、圆角只有右侧两角 30dp
+    // （库默认四角 16dp）、底色 surfaceContainerHigh（库默认 surfaceContainerLow）、
+    // elevation 0（库默认 16dp 的 tonal elevation，那会把底色再调亮一档）。
+    // windowInsets 归零：状态栏/导航栏/键盘的内边距一直由下面这层 Column 自己管。
     ModalDrawerSheet(
         modifier = Modifier
             .fillMaxHeight()
-            // **宽度只有一处定义**（`DRAWER_SHEET_WIDTH`）：透明点击层的裁剪边界按它算，
-            // 两处各写一个魔数会在改宽时错位（点击层盖住面板 / 留缝）。
+            // **宽度只有一处定义**（[DRAWER_SHEET_WIDTH]），别再写魔数。
             .width(DRAWER_SHEET_WIDTH.dp),
         drawerShape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp),
         drawerContainerColor = scheme.surfaceContainerHigh,
