@@ -372,8 +372,7 @@ internal fun ProcessCard(
                 // 整块按下反馈（见 blockPress）：这一行是折叠条的入口，涟漪是一颗小圆角矩形。
                 .then(
                     if (expandable) Modifier.blockPress(ProcessHeaderShape) { onToggle() } else Modifier,
-                )
-                .padding(horizontal = 0.dp),
+                ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
                 // One slot for all three card families: the icon sits centred in a
@@ -461,7 +460,7 @@ internal fun ProcessCard(
                         // **上方 0dp**（用户：「折叠条分割线下方还有一处空白，不能去掉吗」）：
                         // 那 8dp 就是分割线下面那道空白，所有折叠块共用这一处，所以在这里一次去掉。
                         // 下方仍留 8dp：展开内容与卡片下沿之间需要一点收尾空气。
-                        Modifier.padding(start = 0.dp, top = 0.dp, end = 0.dp, bottom = contentBottomPadding),
+                        Modifier.padding(bottom = contentBottomPadding),
                         content = content,
                     )
                 }
@@ -958,7 +957,6 @@ internal fun ReasoningBlock(
                     // 折叠块统一（与 ProcessCard 表头、ToolRow 同一套）：固定 36dp 行高 + 12dp
                     // 水平内边距 + labelMedium 标题。折叠态每行都是 maxLines=1，固定高度不会裁字。
                     .height(36.dp)
-                    .padding(horizontal = 0.dp)
                     // 整块按下反馈（见 blockPress）：平铺后这一行就是折叠条本体，涟漪是小圆角矩形。
                     .blockPress(MaterialTheme.shapes.small, onClick = toggle),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1088,8 +1086,11 @@ internal fun ToolBundle(
     // **摘要只依赖 tools 本身**：count/标题/预览 remember 住，折叠条常驻，
     // 原来每帧都重算一遍（审计 2§A14）。
     // R4：这个 count 也是同一类 —— 它只随 tools 变，而这一行在每次重组都会被求值一遍。
-    val failures = remember(tools) { tools.count { it.done && !it.ok } }
-    val (title, preview) = remember(tools) {
+    // **键要包 IdentityKey**：`tools: List<ToolLine>` 里挂着 `StoredMessage.toolOutput`
+    // 与 `imagesBase64`（截图 base64），裸 List 当键会逐字符深比较这些内容。
+    // 本仓库已有 6 处这么用，这里漏了。重算本体只是 count + 取首行，O(calls)。
+    val failures = remember(IdentityKey(tools)) { tools.count { it.done && !it.ok } }
+    val (title, preview) = remember(IdentityKey(tools)) {
         // One call is its own name; several are a count, because the names are what the
         // expanded list is for.
         val t = if (tools.size == 1) {
@@ -1319,7 +1320,6 @@ internal fun ToolRow(
             .blockPress(MaterialTheme.shapes.small, onClick = onToggle)
             // 折叠块统一：水平 12dp 内边距与另外两处表头一致；行高加在**表头那一行**上（这一列
             // 展开后还有内容，给 Column 定高会把详情裁掉）。
-            .padding(horizontal = 0.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().height(36.dp),

@@ -990,8 +990,12 @@ internal fun Composer(
             // board itself is emptied when a run starts (see ChatViewModel.start), so a run that
             // never touches the todo tools cannot inherit the last one's list.
             if (running && todos.isNotEmpty()) {
-                val rows = todoRows(todos)
-                val done = todos.count { it.status == TODO_COMPLETED }
+                // **remember**：`todoRows` 内部会 `filterNot` 出一个新 List，而 Composer
+                // 每次按键都重组 ⇒ 原来每次按键都白跑一次全表 filter + 一次全表 count。
+                // `TodoItem` 字段全是 String/枚举 ⇒ stable，键比较很便宜。
+                val board = remember(todos) { todoRows(todos) to todos.count { it.status == TODO_COMPLETED } }
+                val rows = board.first
+                val done = board.second
                 // 一行，只一行：进行中的那条（没有就取第一条待办），右边是完成数/总数。用户的话：
                 // 「不要堆多行，就一行就行了」——整条清单改由点击这一行打开（见 TodoSheet）。
                 val current = rows.firstOrNull { it.status == TODO_IN_PROGRESS } ?: rows.firstOrNull()

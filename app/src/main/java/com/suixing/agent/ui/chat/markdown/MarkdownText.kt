@@ -780,8 +780,8 @@ private data class MarkdownPalette(
     val codeFontSize: TextUnit,
 )
 
-private val LocalGrowingMarkdown = compositionLocalOf { false }
-private val LocalMarkdownBlockIndex = compositionLocalOf { 0 }
+// 原来这里还有两个 CompositionLocal（LocalGrowingMarkdown / LocalMarkdownBlockIndex），
+// 全仓**只 provide、从不 read** ⇒ 每块每次重组白付一层 provider 节点。已删。
 
 @Composable
 fun MarkdownText(
@@ -809,9 +809,7 @@ fun MarkdownText(
     settled: Boolean = !cursor,
 ) {
     val blocks = rememberGrowingMarkdown(text, settled)
-    CompositionLocalProvider(LocalGrowingMarkdown provides !settled) {
-        MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
-    }
+    MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
 }
 
 /**
@@ -1109,10 +1107,7 @@ fun MarkdownBlocks(
                     block is MdBlock.Paragraph || block is MdBlock.Heading ||
                         block is MdBlock.Quote || block is MdBlock.Code || block is MdBlock.Bullet || block is MdBlock.Table
                 }?.let { "$it:block:$index" }
-                CompositionLocalProvider(
-                    LocalReadingTextKey provides blockReadingKey,
-                    LocalMarkdownBlockIndex provides index,
-                ) {
+                CompositionLocalProvider(LocalReadingTextKey provides blockReadingKey) {
                     MarkdownBlock(
                         block = block,
                         style = style,

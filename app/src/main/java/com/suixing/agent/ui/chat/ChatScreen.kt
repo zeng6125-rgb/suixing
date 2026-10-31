@@ -925,8 +925,12 @@ fun ChatScreen(
             }
         }
     }
-    LaunchedEffect(pressGuardOn) {
-        if (!pressGuardOn) return@LaunchedEffect
+    // **不能把 `pressGuardOn` 当 LaunchedEffect 的 key**：它是 `by pressGuardState` 的 State，
+    // 出现在 key 位就是组合期订阅 ⇒ 每次长按武装/解除各**整屏重组一次**（~58 个子组合）。
+    // 同文件上面 `pressed` / `revealBlocked` 已用 snapshotFlow 修掉，这里漏了。
+    LaunchedEffect(Unit) {
+      snapshotFlow { pressGuardOn }.collectLatest { on ->
+        if (!on) return@collectLatest
         // 按下就开始拦「把选中内容滚进视口」的请求（#14）：框架的这次滚动是为了露出选区，
         // 而用户按住的正是眼前这段文字，露出它没有意义，只会把列表推走。
         lastRevealRequestAt.longValue = SystemClock.uptimeMillis()
@@ -967,6 +971,7 @@ fun ChatScreen(
             // 组合被带走（切会话/退页）也要解冻，否则外壳的 IME clamp 永远停摆。
             setSelectionActive?.invoke(false)
         }
+      }
     }
     // Only the target list is animated, after its first valid viewport is ready.
     val switchEntrance = viewport.entrance
@@ -988,6 +993,9 @@ fun ChatScreen(
                 shownTurnsByConversation = shownTurnsByConversation.filterKeys { it in retained }
                 reasoningExpanded.keys.removeAll { it.substringBefore(':') !in retained }
                 runStartedAt.keys.removeAll { it.substringBefore(':') !in retained }
+                // `heldPrompts` 原来**漏在这一处清理里**：它是唯一只增不减的会话级表
+                // （打开过的每个会话永久留一条），与本文件自己写的「a table that only ever grows」原则相违。
+                heldPrompts.keys.removeAll { it !in retained }
             }
     }
     //
@@ -1352,7 +1360,11 @@ fun ChatScreen(
                                     { message: StoredMessage -> editing = message }
                                 }
                                 // 「提供方 / 模型」也按模型缓存：原来每帧每个可见项都新建一个 String。
-                                val engineLabel = remember(row.message.model, providerOfModel) {
+                                // **第二个键必须包 IdentityKey**（`providerOfModel` 是普通 Map）：
+                                // 直接拿 Map 当 remember 键 = 每行每拍对它做整表深比较
+                                // （P 个 provider × models/enabled 列表 + aliases Map）。
+                                // 与文件上方自己写的「不要拿 providers 的 Map 当键」同一条原则。
+                                val engineLabel = remember(row.message.model, IdentityKey(providerOfModel)) {
                                     providerOfModel[row.message.model]
                                         ?.let { "${it.label} / ${it.displayModel(row.message.model)}" }
                                         ?: row.message.model

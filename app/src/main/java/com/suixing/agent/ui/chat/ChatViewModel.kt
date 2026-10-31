@@ -85,6 +85,15 @@ data class Draft(
  * edit or delete it. The queue is deliberately never written to disk — it is the state of
  * a run that is still going, and a restarted process has no such run.
  */
+/**
+ * 一条排队中的插话。
+ *
+ * **必须 `@Immutable`**（性能审计 task-3 P1）：它含 `List<String>`，没有注解时 Compiler
+ * 判为 unstable ⇒ 消费它的 [com.suixing.agent.ui.chat.SteerQueueRow] 不可跳过 ⇒
+ * 每次按键（Composer 重组）都把整排排队行完整重组一遍。
+ * 这是真不可变值对象：没有任何地方原地修改 `imagesBase64`（与 `ChatModels.kt` 的既有做法一致）。
+ */
+@androidx.compose.runtime.Immutable
 data class PendingSteer(val id: String, val text: String, val imagesBase64: List<String> = emptyList())
 
 /**
@@ -100,6 +109,8 @@ data class PendingSteer(val id: String, val text: String, val imagesBase64: List
  * going right now. If the process dies, that run dies with it, so there is no "afterwards" left to
  * send into — and a copy on disk would come back as the app talking to itself.
  */
+/** 同 [PendingSteer]：含 `List<String>` 且缺 `@Immutable` 会拖累消费方的可跳过性。 */
+@androidx.compose.runtime.Immutable
 data class PendingTurn(val id: String, val text: String, val imagesBase64: List<String> = emptyList())
 
 /**
