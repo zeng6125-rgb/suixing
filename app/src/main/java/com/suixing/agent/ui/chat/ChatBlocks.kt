@@ -237,10 +237,15 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
                 Color.Transparent
             },
         )
-        .clickable(interactionSource = interaction, indication = null) {
-            position?.pauseForUserChange()
-            onClick()
-        }
+        .clickable(
+            interactionSource = interaction,
+            indication = null,
+            role = androidx.compose.ui.semantics.Role.Button,
+            onClick = {
+                position?.pauseForUserChange()
+                onClick()
+            },
+        )
 }
 
 /**
