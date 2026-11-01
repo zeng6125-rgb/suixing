@@ -39,9 +39,11 @@ class FileToolsSearchTest {
     }
 
     /**
-     * 构造参数对象。**数字/布尔要保持原生类型**：`JsonObject.int()` 用的是
-     * `JsonPrimitive.intOrNull`，字符串 `"10"` 会读成 null 而回落默认值 ——
-     * 于是"传了参数却没生效"在测试里看起来像功能没实现。
+     * 构造参数对象，Int/Long/Boolean 保持原生类型（其余转字符串）。
+     *
+     * **不是**因为字符串会被读成 null：实测本项目的 kotlinx 版本里
+     * `JsonPrimitive.intOrNull` 会解析数字字符串（`"limit" to "3"` 的用例断言
+     * "找到 3 个" 且通过）。保持原生类型只是让用例不依赖这种隐式解析，写起来也更直白。
      */
     private fun args(vararg pairs: Pair<String, Any>): JsonObject = buildJsonObject {
         for ((k, v) in pairs) {
