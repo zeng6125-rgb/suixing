@@ -268,16 +268,6 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
         )
 }
 
-/**
- * 「外层流式行正在做滞后补偿」——为 true 时，里面的 [RevealHeight] **不再自己补滚动**。
- *
- * 为什么需要它（issue #17，用户实测「读历史过程中还是有抖动，貌似是思考块流式后再折叠导致的」）：
- * 流式行里的思考块/工具块走 RevealHeight，它有自己的逐帧补偿；而流式行外层又会量到同一次
- * 高度变化并补一次 ⇒ **同一份增量被补两次** ⇒ 过冲/回弹。
- * 两处只能有一处补：外层滞后补偿生效时由外层统一补，RevealHeight 只负责动高度。
- * 贴底（外层不补）时这个 flag 为 false，RevealHeight 行为不变。
- */
-internal val LocalLiveRowLag = compositionLocalOf { false }
 
 /** One monotonic height animation; the transcript owns scrolling and anchoring. */
 @Composable
