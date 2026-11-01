@@ -1211,7 +1211,10 @@ fun ChatScreen(
                                                 navigationJob[0]?.cancel()
                                                 scroll.restoring = false
                                             }
-                                            val downY = down.changes.first().position.y
+                                            val downPoint = down.changes.first().position
+                                            val downY = downPoint.y
+                                            // 横坐标也要记：只看 dy 会把侧滑时的纵向抖动当成阅读（§131）。
+                                            val downX = downPoint.x
                                             val downAt = SystemClock.uptimeMillis()
                                             pressed = true
                                             // **不在这里 arm 守护**（跟手性）：原来每次按下都置 true，而
@@ -1237,20 +1240,30 @@ fun ChatScreen(
                                                 // 读上面的内容是**手指下移**（把内容拉下来），那个手势从不触发
                                                 // 取消 ⇒ 手指一松追底就重跑、内容被贴回底部（用户：「轻微滑动
                                                 // 一点点，就被锁下来了」）。
-                                                val dy = (change?.position?.y ?: downY) - downY
+                                                val pos = change?.position
+                                                val dy = (pos?.y ?: downY) - downY
+                                                val dx = (pos?.x ?: downX) - downX
+                                                // **两件事分开**（§131）：
+                                                //   · 任一方向越阈值 ⇒ 手指在拖，取消长按/点击并解除 reveal 拦截；
+                                                //   · 只有纵向主导才取消追底 —— 侧滑抽屉时的手指抖动不该让内容停跟。
+                                                // 原来只要 |dy|>4px 就同时做这两件事，于是侧滑会顺手把追底关掉。
+                                                val intent = dragIntent(dx, dy)
                                                 // `!moved`：`stickToBottom` 的 setter 是 `SnapshotStateMap.put`，
                                                 // 不做等值短路，而读它的地方就在 ChatScreen 自己的组合体里
                                                 // （底边距 / CompositionLocal）⇒ 每个 move 事件写一次 =
                                                 // 一次拖动写 60~120 次。只在本次手势首次越过阈值时写。
                                                 if (!moved && change != null && change.pressed &&
-                                                    (dy > CANCEL_FOLLOW_PX || dy < -CANCEL_FOLLOW_PX)
+                                                    intent != DragIntent.Idle
                                                 ) {
-                                                    scroll.allowBottomResume = true
-                                                    scroll.stickToBottom = false
                                                     moved = true
                                                     pressMoved = true
-                                                    // 滚动不是选字：解除 reveal 拦截
+                                                    // 拖动都不是选字：解除 reveal 拦截
                                                     revealBlocked.value = false
+                                                    // 追底只在纵向主导时取消（$131）
+                                                    if (intent == DragIntent.VerticalScroll) {
+                                                        scroll.allowBottomResume = true
+                                                        scroll.stickToBottom = false
+                                                    }
                                                 }
                                                 released = next.changes.none { it.pressed }
                                             }
