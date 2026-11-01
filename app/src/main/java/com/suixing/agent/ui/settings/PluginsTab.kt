@@ -254,10 +254,14 @@ fun PluginsTab(onNotify: (String) -> Unit) {
             onDismiss = { envFor = null },
             onSave = { values ->
                 scope.launch {
-                    values.forEach { (name, value) -> Core.plugins.setEnvValue(spec.id, name, value) }
-                    envFor = null
-                    refresh++
-                    onNotify("已保存 ${values.size} 项")
+                    val outcome = runCatching { Core.plugins.setEnvValues(spec.id, values) }
+                    if (outcome.isSuccess) {
+                        envFor = null
+                        refresh++
+                        onNotify("已保存 ${values.size} 项")
+                    } else {
+                        onNotify("安全存储不可用，插件配置未保存")
+                    }
                 }
             },
         )

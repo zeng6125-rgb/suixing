@@ -66,27 +66,26 @@ class McpStore(private val context: Context) {
     }
 
     suspend fun save(configs: List<McpServerConfig>) = withContext(Dispatchers.IO) {
-        file.parentFile?.mkdirs()
-        // Temp file then rename, as in the other stores: a kill mid-write would leave a
-        // truncated file, and a truncated file reads back as "no servers at all".
+        // Encrypt all fields before touching disk; failure keeps the previous file intact.
         val stored = configs.map {
-            // 加密不可用时**写空**，不写明文（issue #58 #3 的同一条约束）：
-            // 这里是 Token 常驻的地方，留明文等于把凭据摊在 `mcp.json` 里。
-            // 代价是这台设备上要重填一次；SecretBox 会记一条警告。
             it.copy(
-                env = SecretBox.encrypt(it.env) ?: "",
-                headers = SecretBox.encrypt(it.headers) ?: "",
+                env = SecretBox.requireEncrypted(it.env),
+                headers = SecretBox.requireEncrypted(it.headers),
             )
         }
-        val text = json.encodeToString(ListSerializer(McpServerConfig.serializer()), stored)
+        val bytes = json.encodeToString(ListSerializer(McpServerConfig.serializer()), stored)
+            .toByteArray(Charsets.UTF_8)
+        file.parentFile?.mkdirs()
         val temp = File(file.parentFile, "${file.name}.tmp")
-        temp.writeText(text)
-        if (!temp.renameTo(file)) {
-            try {
-                file.writeText(text)
-            } finally {
-                temp.delete()
+        try {
+            java.io.FileOutputStream(temp).use { out ->
+                out.write(bytes)
+                out.fd.sync()
             }
+            // Never overwrite the previous file in place when rename fails.
+            if (!temp.renameTo(file)) throw java.io.IOException("无法原子保存 MCP 配置")
+        } finally {
+            temp.delete()
         }
     }
 }
