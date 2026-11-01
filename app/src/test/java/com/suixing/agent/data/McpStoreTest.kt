@@ -91,6 +91,26 @@ class McpStoreTest {
     }
 
     @Test
+    fun `encryption failure does not overwrite existing MCP credentials`() = runBlocking {
+        val original = McpServerConfig(name = "local", env = "TOKEN=existing", headers = "Authorization: old")
+        store().save(listOf(original))
+        val before = file("mcp.json").readBytes()
+        SecretBox.crypto = object : SecretBox.Crypto {
+            override fun encrypt(plain: String): String? = if (plain.contains("new")) null else plain
+            override fun decrypt(stored: String): String = stored
+        }
+        try {
+            val failed = runCatching { store().save(listOf(original.copy(env = "TOKEN=new"))) }
+            assertTrue(failed.exceptionOrNull() is IllegalStateException)
+            assertTrue(before.contentEquals(file("mcp.json").readBytes()))
+            assertFalse(file("mcp.json.tmp").exists())
+        } finally {
+            SecretBox.crypto = SecretBox.IdentityCrypto
+        }
+        assertEquals(original, store().load().single())
+    }
+
+    @Test
     fun `a missing file reads as no servers`() = runBlocking {
         assertTrue(store().load().isEmpty())
     }
