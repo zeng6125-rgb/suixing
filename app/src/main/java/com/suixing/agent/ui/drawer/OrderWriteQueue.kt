@@ -16,28 +16,11 @@ import kotlinx.coroutines.sync.withLock
  * - 写失败不改变"最新号"，下次同内容再 enqueue 仍会被写入。
  */
 internal class OrderWriteQueue(
-    private val write: suspend (DrawerOrder) -> Unit,
+    write: suspend (DrawerOrder) -> Unit,
 ) {
-    private val mutex = Mutex()
-    private val lock = Any()
-    private var latestRevision = 0L
-    private var writtenRevision = 0L
+    private val queue = com.suixing.agent.core.LatestWriteQueue(write)
 
-    /** 当前最新修订号（测试与日志用）。 */
-    fun revision(): Long = synchronized(lock) { latestRevision }
+    fun revision(): Long = queue.revision()
 
-    /**
-     * 提交一次写。返回 true 表示这次调用真的写了盘；false 表示有更新的顺序排在后面，写被合并掉。
-     */
-    suspend fun enqueue(order: DrawerOrder): Boolean {
-        val token = synchronized(lock) { ++latestRevision }
-        return mutex.withLock {
-            // 拿到锁之后再判断：排队期间可能已经有更新的顺序进来了。
-            val isLatest = synchronized(lock) { token == latestRevision && token > writtenRevision }
-            if (!isLatest) return@withLock false
-            write(order)
-            synchronized(lock) { if (token > writtenRevision) writtenRevision = token }
-            true
-        }
-    }
+    suspend fun enqueue(order: DrawerOrder): Boolean = queue.enqueue(order)
 }

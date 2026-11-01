@@ -80,14 +80,20 @@ fun SchedulesScreen(onBack: () -> Unit) {
         schedules = withContext(Dispatchers.IO) { Core.schedules.read() }
         loaded = true
     }
-    val apply: (List<Schedule>) -> Unit = { next ->
-        schedules = next
-        scope.launch {
+    // **单写者 + 最新快照**（issue #68 P1-B）：连点两个开关时，两个整表快照会并发落盘，
+    // 先发起的那次可能后完成 ⇒ 把新状态覆盖回旧值。队列保证"最新的那份最后落盘"，
+    // 并且 `arm` 紧跟在**真正写成功**的那次之后（提醒永远对应最后落盘的快照）。
+    val writer = remember {
+        com.suixing.agent.core.LatestWriteQueue<List<Schedule>> { items ->
             withContext(Dispatchers.IO) {
-                Core.schedules.write(next)
+                Core.schedules.write(items)
                 SchedulerService.arm(context)
             }
         }
+    }
+    val apply: (List<Schedule>) -> Unit = { next ->
+        schedules = next
+        scope.launch { writer.enqueue(next) }
     }
     val scheme = MaterialTheme.colorScheme
     Scaffold(
