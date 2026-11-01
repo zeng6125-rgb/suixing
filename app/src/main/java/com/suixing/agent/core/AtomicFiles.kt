@@ -43,6 +43,14 @@ internal object AtomicFiles {
                     java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                 )
             }
+            // **目录项也要落盘**：rename 只保证"名字指向哪个文件"这一步原子，改名这件事本身
+            // 仍在页缓存里；断电后可能出现"文件在、名字没生效"。文件系统的目录不支持 fsync
+            // 时忽略（best effort，与 `ChatStore.syncDirectory` 同一口径）。
+            runCatching {
+                java.nio.channels.FileChannel
+                    .open(target.parentFile!!.toPath(), java.nio.file.StandardOpenOption.READ)
+                    .use { it.force(true) }
+            }
         } finally {
             temp.delete()
         }
