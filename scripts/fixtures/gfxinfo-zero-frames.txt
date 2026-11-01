@@ -1,0 +1,360 @@
+Applications Graphics Acceleration Info:
+Uptime: 70133308 Realtime: 111004256
+
+** Graphics info for pid 7179 [com.android.systemui] **
+
+Stats since: 70132053942933ns
+Total frames rendered: 0
+Janky frames: 0 (0.00%)
+Janky frames (legacy): 0 (0.00%)
+50th percentile: 4950ms
+90th percentile: 4950ms
+95th percentile: 4950ms
+99th percentile: 4950ms
+Number Missed Vsync: 0
+Number High input latency: 0
+Number Slow UI thread: 0
+Number Slow bitmap uploads: 0
+Number Slow issue draw commands: 0
+Number Frame deadline missed: 0
+Number Frame deadline missed (legacy): 0
+HISTOGRAM: 5ms=0 6ms=0 7ms=0 8ms=0 9ms=0 10ms=0 11ms=0 12ms=0 13ms=0 14ms=0 15ms=0 16ms=0 17ms=0 18ms=0 19ms=0 20ms=0 21ms=0 22ms=0 23ms=0 24ms=0 25ms=0 26ms=0 27ms=0 28ms=0 29ms=0 30ms=0 31ms=0 32ms=0 34ms=0 36ms=0 38ms=0 40ms=0 42ms=0 44ms=0 46ms=0 48ms=0 53ms=0 57ms=0 61ms=0 65ms=0 69ms=0 73ms=0 77ms=0 81ms=0 85ms=0 89ms=0 93ms=0 97ms=0 101ms=0 105ms=0 109ms=0 113ms=0 117ms=0 121ms=0 125ms=0 129ms=0 133ms=0 150ms=0 200ms=0 250ms=0 300ms=0 350ms=0 400ms=0 450ms=0 500ms=0 550ms=0 600ms=0 650ms=0 700ms=0 750ms=0 800ms=0 850ms=0 900ms=0 950ms=0 1000ms=0 1050ms=0 1100ms=0 1150ms=0 1200ms=0 1250ms=0 1300ms=0 1350ms=0 1400ms=0 1450ms=0 1500ms=0 1550ms=0 1600ms=0 1650ms=0 1700ms=0 1750ms=0 1800ms=0 1850ms=0 1900ms=0 1950ms=0 2000ms=0 2050ms=0 2100ms=0 2150ms=0 2200ms=0 2250ms=0 2300ms=0 2350ms=0 2400ms=0 2450ms=0 2500ms=0 2550ms=0 2600ms=0 2650ms=0 2700ms=0 2750ms=0 2800ms=0 2850ms=0 2900ms=0 2950ms=0 3000ms=0 3050ms=0 3100ms=0 3150ms=0 3200ms=0 3250ms=0 3300ms=0 3350ms=0 3400ms=0 3450ms=0 3500ms=0 3550ms=0 3600ms=0 3650ms=0 3700ms=0 3750ms=0 3800ms=0 3850ms=0 3900ms=0 3950ms=0 4000ms=0 4050ms=0 4100ms=0 4150ms=0 4200ms=0 4250ms=0 4300ms=0 4350ms=0 4400ms=0 4450ms=0 4500ms=0 4550ms=0 4600ms=0 4650ms=0 4700ms=0 4750ms=0 4800ms=0 4850ms=0 4900ms=0 4950ms=0
+50th gpu percentile: 4950ms
+90th gpu percentile: 4950ms
+95th gpu percentile: 4950ms
+99th gpu percentile: 4950ms
+GPU HISTOGRAM: 1ms=0 2ms=0 3ms=0 4ms=0 5ms=0 6ms=0 7ms=0 8ms=0 9ms=0 10ms=0 11ms=0 12ms=0 13ms=0 14ms=0 15ms=0 16ms=0 17ms=0 18ms=0 19ms=0 20ms=0 21ms=0 22ms=0 23ms=0 24ms=0 25ms=0 4950ms=0
+
+Pipeline=Skia (Vulkan)
+Memory policy:
+  Max surface area: 3190210
+  Max resource usage: 459.39MB (x48)
+  Background retention: 50% (altUiHidden = true)
+  IsSystemOrPersistent
+  GPU Context timeout: 10
+Contexts: 11 (stopped = 5)
+CPU Caches:
+  Glyph Cache: 2.12 MB (1 entry)
+  Glyph Count: 50 
+Total CPU memory usage:
+  2222205 bytes, 2.12 MB (0.00 bytes is purgeable)
+GPU Caches:
+  Other:
+    Other: 704.00 bytes (1 entry)
+    Buffer Object: 450.00 bytes (2 entries)
+    GrVkImage: 1.00 MB (1 entry)
+  Image:
+    Surface: 13.64 MB (3 entries)
+  Scratch:
+    Surface: 3.55 MB (6 entries)
+    GrVkTextureRenderTarget: 15.59 MB (51 entries)
+    GrVkImage: 1.00 MB (61 entries)
+    Buffer Object: 153.12 KB (95 entries)
+Total GPU memory usage:
+  36632832 bytes, 34.94 MB (339.21 KB is purgeable)
+Pipeline Cache: inactiveDetail dimensions: 
+Buffer Object:				768		{0x0}	18
+Buffer Object:				512		{0x0}	16
+GrVkImage:				0		{39x39}	1
+Buffer Object:				384		{0x0}	50
+GrVkTextureRenderTarget:				721344		{1156x156}	4
+GrVkImage:				0		{1280x2779}	1
+Surface:				1398101		{512x512}	1
+GrVkTextureRenderTarget:				15488		{44x44}	1
+Surface:				14228480		{1280x2779}	1
+Surface:				4		{1x1}	1
+GrVkTextureRenderTarget:				17672		{47x47}	1
+Buffer Object:				128		{0x0}	5
+GrVkImage:				0		{512x512}	2
+GrVkTextureRenderTarget:				16200		{45x45}	1
+GrVkImage:				0		{54x54}	1
+GrVkTextureRenderTarget:				14792		{43x43}	1
+GrVkTextureRenderTarget:				19208		{49x49}	1
+GrVkImage:				0		{282x68}	3
+GrVkImage:				0		{1156x144}	4
+GrVkTextureRenderTarget:				26912		{58x58}	1
+GrVkImage:				0		{1156x156}	4
+GrVkImage:				0		{1126x270}	4
+GrVkTextureRenderTarget:				25992		{57x57}	1
+Buffer Object:				49152		{0x0}	1
+GrVkTextureRenderTarget:				75308		{281x67}	4
+GrVkImage:				0		{128x64}	1
+GrVkTextureRenderTarget:				23328		{54x54}	1
+GrVkImage:				0		{43x43}	1
+GrVkImage:				0		{400x400}	3
+GrVkImage:				0		{114x114}	1
+GrVkImage:				0		{1x1}	7
+GrVkImage:				0		{60x60}	1
+GrVkTextureRenderTarget:				1216080		{1126x270}	4
+Buffer Object:				30720		{0x0}	1
+GrVkTextureRenderTarget:				13448		{41x41}	1
+Surface:				76704		{282x68}	3
+GrVkImage:				0		{51x51}	1
+GrVkTextureRenderTarget:				1280000		{400x400}	3
+GrVkImage:				0		{281x67}	4
+GrVkImage:				0		{45x45}	1
+Buffer Object:				1024		{0x0}	2
+GrVkImage:				0		{42x42}	1
+Surface:				20160		{84x60}	1
+GrVkTextureRenderTarget:				20808		{51x51}	1
+GrVkImage:				0		{55x55}	1
+GrVkTextureRenderTarget:				18432		{48x48}	1
+GrVkImage:				0		{49x49}	1
+GrVkImage:				0		{47x47}	1
+GrVkImage:				0		{50x50}	1
+GrVkImage:				0		{48x48}	1
+GrVkImage:				0		{1156x60}	4
+GrVkTextureRenderTarget:				277440		{1156x60}	4
+GrVkImage:				0		{61x61}	1
+GrVkImage:				0		{40x40}	1
+GrVkTextureRenderTarget:				665856		{1156x144}	4
+GrVkTextureRenderTarget:				12168		{39x39}	1
+Buffer Object:				256		{0x0}	1
+GrVkImage:				0		{41x41}	1
+GrVkTextureRenderTarget:				21632		{52x52}	1
+GrVkImage:				0		{44x44}	1
+GrVkTextureRenderTarget:				14112		{42x42}	1
+GrVkTextureRenderTarget:				12800		{40x40}	1
+GrVkImage:				0		{46x46}	1
+GrVkTextureRenderTarget:				29768		{61x61}	1
+GrVkTextureRenderTarget:				24200		{55x55}	1
+GrVkImage:				0		{57x57}	1
+GrVkTextureRenderTarget:				20000		{50x50}	1
+GrVkTextureRenderTarget:				28800		{60x60}	1
+GrVkImage:				0		{52x52}	1
+GrVkTextureRenderTarget:				4		{1x1}	6
+GrVkTextureRenderTarget:				16928		{46x46}	1
+GrVkImage:				0		{58x58}	1
+GrVkTextureRenderTarget:				32768		{128x64}	1
+GrVkImage:				0		{84x60}	1
+GrVkImage:				0		{2048x1024}	1
+Surface:				2097152		{2048x1024}	1
+GrVkImage:				1048576		{512x512}	2
+Buffer Object:				264		{0x0}	1
+Buffer Object:				32768		{0x0}	1
+Buffer Object:				186		{0x0}	1
+GrVkTextureRenderTarget:				262144		{512x512}	1
+Surface:				51984		{114x114}	1
+
+GraphicBufferAllocator buffers:
+            Handle |         Size |     W (Stride) x H | Layers |   Format |      Usage | Requestor
+0xb4000073952da000 |   684.00 KiB | 1156 (1216) x  144 |      1 |        1 | 0x10000b00 | VRI[StatusBar]#1(BLAST Consumer)1
+0xb400007395310df0 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb400007395313b50 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[systemui]#1480(BLAST Consumer)1480
+0xb400007395315200 |  1215.00 KiB | 1126 (1152) x  270 |      1 |        1 | 0x10000b00 | VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010
+0xb400007395331710 |   741.00 KiB | 1156 (1216) x  156 |      1 |        1 | 0x10000b00 | VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481
+0xb400007395345090 |  1215.00 KiB | 1126 (1152) x  270 |      1 |        1 | 0x10000b00 | VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010
+0xb400007395345ae0 |   285.00 KiB | 1156 (1216) x   60 |      1 |        1 | 0x10000b00 | VRI[NavigationBar0]#1009(BLAST Consumer)1009
+0xb40000739534ac00 |  1215.00 KiB | 1126 (1152) x  270 |      1 |        1 | 0x10000b00 | VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010
+0xb40000739534ba70 |  1215.00 KiB | 1126 (1152) x  270 |      1 |        1 | 0x10000b00 | VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010
+0xb4000073953501f0 | 13895.00 KiB | 1280 (1280) x 2779 |      1 |        1 | 0x     100 | AHardwareBuffer pid [7179]
+0xb40000739537d950 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb400007395394030 |   741.00 KiB | 1156 (1216) x  156 |      1 |        1 | 0x10000b00 | VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481
+0xb4000073953a67d0 |    85.00 KiB |  282 ( 320) x   68 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb4000073953b4530 |   741.00 KiB | 1156 (1216) x  156 |      1 |        1 | 0x10000b00 | VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481
+0xb4000073953bcf60 |   684.00 KiB | 1156 (1216) x  144 |      1 |        1 | 0x10000b00 | VRI[StatusBar]#1(BLAST Consumer)1
+0xb4000073953cdc30 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb4000073953cf440 |   285.00 KiB | 1156 (1216) x   60 |      1 |        1 | 0x10000b00 | VRI[NavigationBar0]#1009(BLAST Consumer)1009
+0xb4000073953ed580 |    85.00 KiB |  282 ( 320) x   68 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb4000073953feca0 |   684.00 KiB | 1156 (1216) x  144 |      1 |        1 | 0x10000b00 | VRI[StatusBar]#1(BLAST Consumer)1
+0xb400007395404810 |   285.00 KiB | 1156 (1216) x   60 |      1 |        1 | 0x10000b00 | VRI[NavigationBar0]#1009(BLAST Consumer)1009
+0xb400007395406700 |   741.00 KiB | 1156 (1216) x  156 |      1 |        1 | 0x10000b00 | VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481
+0xb40000739542d320 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[systemui]#1480(BLAST Consumer)1480
+0xb40000739543db20 |   285.00 KiB | 1156 (1216) x   60 |      1 |        1 | 0x10000b00 | VRI[NavigationBar0]#1009(BLAST Consumer)1009
+0xb400007395443320 |    85.00 KiB |  282 ( 320) x   68 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb4000073954610f0 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[systemui]#1480(BLAST Consumer)1480
+0xb4000073954a2f90 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[bili]#1495(BLAST Consumer)1495
+0xb4000073954b91a0 |   684.00 KiB | 1156 (1216) x  144 |      1 |        1 | 0x10000b00 | VRI[StatusBar]#1(BLAST Consumer)1
+0xb4000073954ce1d0 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[systemui]#1480(BLAST Consumer)1480
+0xb400007395505e30 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb40000739550cce0 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[bili]#1495(BLAST Consumer)1495
+0xb40000739550d470 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb40000739550dcb0 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000300 | passBlur-7179
+0xb40000739551c040 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[bili]#1495(BLAST Consumer)1495
+0xb40000739556f130 |     0.25 KiB |    1 (  64) x    1 |      1 |        1 | 0x10000b00 | VRI[bili]#1495(BLAST Consumer)1495
+Total allocated by GraphicBufferAllocator (estimate): 25853.50 KB
+Imported gralloc buffers:
++ name:passBlur-7179, id:157134, size:8.00KiB, w/h:1x1, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x0, compressed: true
++ name:passBlur-7179, id:157132, size:8.00KiB, w/h:1x1, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x0, compressed: true
++ name:VRI[bili]#1495(BLAST Consumer)1495, id:157130, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[bili]#1495(BLAST Consumer)1495, id:157128, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481, id:156514, size:768.00KiB, w/h:1156x156, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481, id:156513, size:768.00KiB, w/h:1156x156, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:passBlur-7179, id:157133, size:8.00KiB, w/h:1x1, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x0, compressed: true
++ name:VRI[bili]#1495(BLAST Consumer)1495, id:157131, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481, id:156511, size:768.00KiB, w/h:1156x156, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:passBlur-7179, id:156506, size:8.00KiB, w/h:1x1, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:passBlur-7179, id:156504, size:8.00KiB, w/h:1x1, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x0, compressed: true
++ name:VRI[systemui]#1480(BLAST Consumer)1480, id:156503, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[systemui]#1480(BLAST Consumer)1480, id:156501, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x0, compressed: true
++ name:VRI[bili]#1495(BLAST Consumer)1495, id:157129, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[systemui]#1480(BLAST Consumer)1480, id:156500, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:passBlur-7179, id:156505, size:8.00KiB, w/h:1x1, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x0, compressed: true
++ name:passBlur-7179, id:97570, size:104.00KiB, w/h:282x68, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:passBlur-7179, id:97569, size:104.00KiB, w/h:282x68, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:passBlur-7179, id:97568, size:104.00KiB, w/h:282x68, usage: 0x10000300, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[systemui]#1480(BLAST Consumer)1480, id:156502, size:8.00KiB, w/h:1x1, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x0, compressed: true
++ name:VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010, id:97567, size:1236.00KiB, w/h:1126x270, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010, id:97566, size:1236.00KiB, w/h:1126x270, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[DynamicIslandWindow]#1481(BLAST Consumer)1481, id:156512, size:768.00KiB, w/h:1156x156, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010, id:97565, size:1236.00KiB, w/h:1126x270, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[HyperCeiler Dock glass]#1010(BLAST Consumer)1010, id:97564, size:1236.00KiB, w/h:1126x270, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[NavigationBar0]#1009(BLAST Consumer)1009, id:97563, size:308.00KiB, w/h:1156x60, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[NavigationBar0]#1009(BLAST Consumer)1009, id:97561, size:308.00KiB, w/h:1156x60, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[NavigationBar0]#1009(BLAST Consumer)1009, id:97560, size:308.00KiB, w/h:1156x60, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[NavigationBar0]#1009(BLAST Consumer)1009, id:97562, size:308.00KiB, w/h:1156x60, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[StatusBar]#1(BLAST Consumer)1, id:74631, size:692.00KiB, w/h:1156x144, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[StatusBar]#1(BLAST Consumer)1, id:74619, size:692.00KiB, w/h:1156x144, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:VRI[StatusBar]#1(BLAST Consumer)1, id:74617, size:692.00KiB, w/h:1156x144, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:AHardwareBuffer pid [5059], id:140, size:116.00KiB, w/h:104x225, usage: 0x100, req fmt:1, fourcc/mod:875708993/0, dataspace: 0x0, compressed: false
++ name:VRI[StatusBar]#1(BLAST Consumer)1, id:74687, size:692.00KiB, w/h:1156x144, usage: 0x10000b00, req fmt:1, fourcc/mod:0/0, dataspace: 0x8810000, compressed: true
++ name:AHardwareBuffer pid [7179], id:87, size:13896.00KiB, w/h:1280x2779, usage: 0x100, req fmt:1, fourcc/mod:875708993/0, dataspace: 0x0, compressed: false
+Total imported by gralloc: 26452.00KiB
+
+Profile data in ms:
+
+	ShellDropTarget/android.view.ViewRootImpl@c286f9e (visibility=4)
+	MiuiShellDropTarget/android.view.ViewRootImpl@3932114 (visibility=4)
+	NotificationModalWindowManager/android.view.ViewRootImpl@6b22f27 (visibility=8)
+	StatusBar/android.view.ViewRootImpl@b3015ce (visibility=0)
+	NotificationShade/android.view.ViewRootImpl@8a98533 (visibility=4)
+	DynamicIslandWindow/android.view.ViewRootImpl@ced70de (visibility=0)
+	NavigationBar0/android.view.ViewRootImpl@f50c6b6 (visibility=0)
+View hierarchy:
+
+  ShellDropTarget/android.view.ViewRootImpl@c286f9e
+  9 views, 13.08 kB of render nodes
+
+  MiuiShellDropTarget/android.view.ViewRootImpl@3932114
+  1 views, 1.45 kB of render nodes
+
+  NotificationModalWindowManager/android.view.ViewRootImpl@6b22f27
+  3 views, 4.36 kB of render nodes
+
+  StatusBar/android.view.ViewRootImpl@b3015ce
+  137 views, 217.75 kB of render nodes
+
+  NotificationShade/android.view.ViewRootImpl@8a98533
+  1189 views, 1789.18 kB of render nodes
+
+  DynamicIslandWindow/android.view.ViewRootImpl@ced70de
+  160 views, 248.67 kB of render nodes
+
+  NavigationBar0/android.view.ViewRootImpl@f50c6b6
+  23 views, 39.09 kB of render nodes
+
+
+  Dynamic VRI BBQ Log.  render_draw: false  hdr_dimmer: false  blur_blend: false  hwui_window_decor: false  sync_barrier: false
+
+Total ViewRootImpl   : 7
+Total attached Views : 1522
+Total RenderNode     : 2313.58 kB (used) / 2583.23 kB (capacity)
+
+SurfaceControlRegistry
+----------------------
+Listing oldest 100 of 100
+  DefaultTaskDisplayArea#9 (RootTaskDisplayAreaOrganizer.onDisplayAreaAppeared) [110962s ago]
+  Task=1#35 (readFromParcel) [110962s ago]
+  Task=1#35 (MiuiDecorationController) [110962s ago]
+  [Gesture Monitor] MultiTaskSwitch#71 (readFromParcel) [110962s ago]
+  Display 0 name="内置屏幕"#29 (RootDisplayAreaOrganizer.onDisplayAreaAppeared) [110962s ago]
+  Task=3(Bubbles)#72 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  Task=4#74 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  Task=5(main)#76 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  MaskTopParent#80 (SurfaceControl.Builder) [110962s ago]
+  Task=6(side)#78 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  Task=7(SplitRoot)#81 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  Task=8(main)#83 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  Task=9(side)#85 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  AppZoomOut:16:16#14 (AppZoomOutDisplayAreaOrganizer.onDisplayAreaAppeared) [110962s ago]
+  AppZoomOut:2:14#8 (AppZoomOutDisplayAreaOrganizer.onDisplayAreaAppeared) [110962s ago]
+  AppZoomOut:20:22#17 (AppZoomOutDisplayAreaOrganizer.onDisplayAreaAppeared) [110962s ago]
+  AppZoomOut:0:0#5 (AppZoomOutDisplayAreaOrganizer.onDisplayAreaAppeared) [110962s ago]
+  WindowedMagnification:0:31#3 (TopLevelZoomDisplayAreaOrganizer.onDisplayAreaAppeared) [110962s ago]
+  Task=0(Bubbles-visibility-barrier)#87 (ShellTaskOrganizer.onTaskAppeared) [110962s ago]
+  Dim layer#92 (SurfaceUtils.makeColorLayer) [110962s ago]
+  SoScBlurController#91 (SurfaceControl.Builder) [110962s ago]
+  Dim layer#97 (SurfaceUtils.makeColorLayer) [110962s ago]
+  Dim layer#95 (SurfaceUtils.makeColorLayer) [110962s ago]
+  Dim layer#96 (SurfaceUtils.makeColorLayer) [110962s ago]
+  VRI-StatusBar#109 (VRI-new) [110960s ago]
+  screenFade-container#116 (SurfaceControl.Builder) [110958s ago]
+  Task=6376#5901 (MultiTaskingBaseTaskInfo) [88378s ago]
+  Task=6363#526 (MultiTaskingBaseTaskInfo) [88373s ago]
+  Task=6408#15146 (MiuiDecorationController) [74699s ago]
+  Task=6408#15146 (ShellTaskOrganizer.onTaskAppeared) [74699s ago]
+  Task=6376#5901 (MultiTaskingBaseTaskInfo) [74047s ago]
+  Task=6413#16560 (MiuiDecorationController) [71598s ago]
+  Task=6413#16560 (ShellTaskOrganizer.onTaskAppeared) [71598s ago]
+  Task=6422#19151 (MiuiDecorationController) [68982s ago]
+  Task=6422#19151 (ShellTaskOrganizer.onTaskAppeared) [68982s ago]
+  Task=6423#19428 (ShellTaskOrganizer.onTaskAppeared) [68916s ago]
+  Task=6423#19428 (MiuiDecorationController) [68916s ago]
+  Task=6437#24942 (ShellTaskOrganizer.onTaskAppeared) [33073s ago]
+  Task=6437#24942 (MiuiDecorationController) [33073s ago]
+  VRI-NavigationBar0#25082 (VRI-new) [33012s ago]
+  SurfaceControlViewHost[com.android.systemui]#25083 (SurfaceControlViewHost[untracked]) [33012s ago]
+  HyperCeiler Dock glassLeash#25084 (WindowlessWindowManager.addToDisplay) [33012s ago]
+  HyperCeiler Dock glass#25085 (WindowlessWindowManager.addToDisplay) [33012s ago]
+  HyperCeiler Dock glass#25085 (WindowlessWindowManager.relayout) [33012s ago]
+  SurfaceControlViewHost[com.android.systemui]#25083 (getSurfacePackage) [33011s ago]
+  Task=5(main)#76 (MultiTaskingBaseTaskInfo) [33011s ago]
+  Task=6(side)#78 (MultiTaskingBaseTaskInfo) [33011s ago]
+  Task=6437#24942 (MultiTaskingBaseTaskInfo) [33011s ago]
+  Task=6408#15146 (MultiTaskingBaseTaskInfo) [32675s ago]
+  Task=6441#26721 (MiuiDecorationController) [30654s ago]
+  Task=6441#26721 (ShellTaskOrganizer.onTaskAppeared) [30654s ago]
+  Task=6447#29172 (MiuiDecorationController) [28175s ago]
+  Task=6447#29172 (ShellTaskOrganizer.onTaskAppeared) [28175s ago]
+  Task=6451#30431 (MiuiDecorationController) [24113s ago]
+  Task=6451#30431 (ShellTaskOrganizer.onTaskAppeared) [24113s ago]
+  Task=6451#30431 (MultiTaskingBaseTaskInfo) [24109s ago]
+  Task=6455#31235 (ShellTaskOrganizer.onTaskAppeared) [22484s ago]
+  Task=6441#26721 (MultiTaskingBaseTaskInfo) [21324s ago]
+  Task=6468#33404 (ShellTaskOrganizer.onTaskAppeared) [15610s ago]
+  Task=6468#33404 (MiuiDecorationController) [15610s ago]
+  Task=6422#19151 (MultiTaskingBaseTaskInfo) [10382s ago]
+  Task=6455#31235 (MiuiDecorationController) [9169s ago]
+  Task=6455#31235 (MultiTaskingBaseTaskInfo) [8920s ago]
+  Task=6479#38776 (MiuiDecorationController) [4819s ago]
+  Task=6479#38776 (ShellTaskOrganizer.onTaskAppeared) [4819s ago]
+  Task=6479#38776 (MultiTaskingBaseTaskInfo) [4817s ago]
+  Task=6480#38815 (MiuiDecorationController) [4817s ago]
+  Task=6480#38815 (ShellTaskOrganizer.onTaskAppeared) [4817s ago]
+  Task=6481#38892 (ShellTaskOrganizer.onTaskAppeared) [4672s ago]
+  Task=6481#38892 (MiuiDecorationController) [4672s ago]
+  Task=6482#39095 (ShellTaskOrganizer.onTaskAppeared) [4456s ago]
+  Task=6482#39095 (MiuiDecorationController) [4456s ago]
+  Task=6482#39095 (MultiTaskingBaseTaskInfo) [4448s ago]
+  Task=6483#39328 (MiuiDecorationController) [2182s ago]
+  Task=6483#39328 (ShellTaskOrganizer.onTaskAppeared) [2182s ago]
+  Task=6481#38892 (MultiTaskingBaseTaskInfo) [2181s ago]
+  Task=6423#19428 (MultiTaskingBaseTaskInfo) [2025s ago]
+  Task=6413#16560 (MultiTaskingBaseTaskInfo) [1731s ago]
+  Task=6447#29172 (MultiTaskingBaseTaskInfo) [1674s ago]
+  Task=6480#38815 (MultiTaskingBaseTaskInfo) [1543s ago]
+  SurfaceControlViewHost[com.android.systemui]#40382 (SurfaceControlViewHost[ElementSurface-com.android.systemui]) [690s ago]
+  SurfaceControlViewHost-com.android.systemuiLeash#40383 (WindowlessWindowManager.addToDisplay) [690s ago]
+  SurfaceControlViewHost-com.android.systemui#40384 (WindowlessWindowManager.addToDisplay) [690s ago]
+  SurfaceControlViewHost[com.android.systemui]#40382 (getSurfacePackage) [690s ago]
+  element surface parent#40385 (SurfaceControl.Builder) [690s ago]
+  SurfaceControlViewHost-com.android.systemui#40384 (WindowlessWindowManager.relayout) [690s ago]
+  VRI-DynamicIslandWindow#133 (VRI-from-cache) [690s ago]
+  StatusBar Container of Task = 1#36 (readFromParcel) [492s ago]
+  Task=6483#39328 (MultiTaskingBaseTaskInfo) [491s ago]
+  VRI-NavigationBar0#25082 (regionSampling) [375s ago]
+  VRI-DynamicIslandWindow#133 (regionSampling) [375s ago]
+  VRI-NotificationShade#110 (VRI-cache) [375s ago]
+  Task=6468#33404 (MultiTaskingBaseTaskInfo) [90s ago]
+  StatusBar Container of Task = 6468#33406 (readFromParcel) [90s ago]
+  SurfaceControlViewHost[com.android.systemui]#40689 (SurfaceControlViewHost[ElementSurface-tv.danmaku.bili]) [90s ago]
+  SurfaceControlViewHost-tv.danmaku.bili#40691 (WindowlessWindowManager.addToDisplay) [90s ago]
+  SurfaceControlViewHost-tv.danmaku.biliLeash#40690 (WindowlessWindowManager.addToDisplay) [90s ago]
+  SurfaceControlViewHost[com.android.systemui]#40689 (getSurfacePackage) [90s ago]
+  element surface parent#40692 (SurfaceControl.Builder) [90s ago]
+  SurfaceControlViewHost-tv.danmaku.bili#40691 (WindowlessWindowManager.relayout) [90s ago]
+sCallStackDebuggingInitialized=true
+sCallStackDebuggingEnabled=false
+sCallStackDebuggingMatchName=
+sCallStackDebuggingMatchCall=
+sLogAllTxCallsOnApply=false

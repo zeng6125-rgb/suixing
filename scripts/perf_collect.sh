@@ -57,6 +57,8 @@ if [ -n "${PERF_GFXINFO_FILE:-}" ]; then
     exit 5
   fi
   IFS='|' read -r P50 P95 P99 JANKY TOTAL < <(parse_gfxinfo "$(cat "$PERF_GFXINFO_FILE")")
+  # **0 帧时 Android 打印 4950ms 这种占位值**（真机实测），必须显式作废。
+  if [ "${TOTAL:-0}" = "0" ]; then P50="-"; P95="-"; P99="-"; JANKY="-"; fi
   emit_row "$SCENARIO" "-" "-" "$P50" "$P95" "$P99" "$JANKY" "-" "离线解析（总帧 ${TOTAL}）"
   exit 0
 fi
@@ -84,5 +86,6 @@ RAW=$("${ADB_CMD[@]}" shell dumpsys gfxinfo "$PKG" 2>/dev/null)
 RSS=$("${ADB_CMD[@]}" shell dumpsys meminfo "$PKG" 2>/dev/null | awk '{ for (i=1;i<=NF;i++) if ($i=="PSS:") { print $(i+1); exit } }')
 
 IFS='|' read -r P50 P95 P99 JANKY TOTAL < <(parse_gfxinfo "$RAW")
+if [ "${TOTAL:-0}" = "0" ]; then P50="-"; P95="-"; P99="-"; JANKY="-"; fi
 
 emit_row "$SCENARIO" "${VER:--}" "${HZ:--} Hz" "$P50" "$P95" "$P99" "$JANKY" "${RSS:--} KB" "脚本计时 ${SECONDS_TO_SAMPLE}s，人手操作，总帧 ${TOTAL}"
