@@ -1198,18 +1198,30 @@ class ChatViewModel : ViewModel() {
     private val discardInFlight = mutableSetOf<String>()
 
     fun newConversation() {
+        // 先取代次：之后任何挂起点结束时都要确认自己还是最新意图。
+        val token = navIntents.begin()
         openingJob?.cancel()
         openingJob = null
         // 上一轮的实时统计挂在这个 ViewModel 上、全局共享：不清掉的话，新建的空会话在第一次
         // stats tick 之前仍会显示**上一个会话**的圆环读数（用户实测：新会话显示 40% / 409.5K）。
         _liveStats.value = null
+        // **回收挪出关键路径**（issue #67 P0-2）：它要读草稿、可能要删文件，原来排在建会话
+        // 之前 ⇒ 新建被上一会话的清理拖住。判据不变（shouldDiscardEmptyChat），
+        // `discardIfUntouched` 内部的 `discardInFlight` 负责把重复清理合并成一次。
+        val leavingForNew = _state.value
+        if (leavingForNew.conversationId.isNotEmpty()) {
+            viewModelScope.launch { discardIfUntouched(leavingForNew.conversationId, leavingForNew) }
+        }
         viewModelScope.launch {
-            // 误点「新建」再点别的会话会留下空壳，所以先回收正被离开的那一个（判据见
-            // shouldDiscardEmptyChat：无消息、无草稿、无 run 才删）。
-            val leavingForNew = _state.value
-            discardIfUntouched(leavingForNew.conversationId, leavingForNew)
             val settings = Core.settings.current()
+            if (!navIntents.isCurrent(token)) return@launch
             val created = Core.chats.create()
+            // **建会话是挂起点**：期间用户可能已经点开别的会话（openConversation 会 begin 新号）。
+            // 过期时只清掉自己刚建出来的空壳，绝不覆盖用户后来的选择。
+            if (!navIntents.isCurrent(token)) {
+                runCatching { Core.chats.delete(created.id) }
+                return@launch
+            }
             leaveViewport()
             _state.value = ChatUiState(
                 conversationId = created.id,
@@ -1251,11 +1263,17 @@ class ChatViewModel : ViewModel() {
     /** 排队中的「记住上次打开」写盘（debounce 用）。 */
     private var lastOpenedJob: Job? = null
 
+    /** 导航意图代次（issue #67 P0-1）：新建/打开共用，最新的说了算。 */
+    private val navIntents = NavigationIntents()
+
     /** Only the latest cold-open read can occupy the repository queue. */
     private var openingJob: Job? = null
 
     fun openConversation(conversation: Conversation) {
         if (_state.value.conversationId == conversation.id) return
+        // **一次用户点击就是一个新代次**：在途的 newConversation 会因此变成过期工作，
+        // 它建出来的空壳只能自己清掉，不许覆盖这次选择（issue #67 P0-1）。
+        val navToken = navIntents.begin()
         leaveViewport()
         openingJob?.cancel()
         openingJob = null
@@ -1355,10 +1373,16 @@ class ChatViewModel : ViewModel() {
         // 条件都是"这个会话还在屏幕上"：用户可能已经切走，那就别再写回状态去覆盖新会话。
         // 只有**没命中缓存**才读盘（#35：命中时上面已经带正文建好状态了）。
         if (cached == null && live == null) openingJob = viewModelScope.launch {
-            val opened = Core.chats.readTailWindow(conversation.id)?.let { (conversationTail, startOffset, gen) ->
-                windowStarts[conversation.id] = gen to startOffset
-                conversationTail
-            } ?: Core.chats.readTail(conversation.id)
+            val tail = Core.chats.readTailWindow(conversation.id)
+            val opened = tail?.let { (conversationTail, _, _) -> conversationTail }
+                ?: Core.chats.readTail(conversation.id)
+            // **先确认还是最新意图，再写任何共享状态**（issue #67 P1-3）：`windowStarts` 是
+            // 下一次读取的起点，过期的 I/O 不能把它的值改掉。
+            if (!navIntents.isCurrent(navToken)) {
+                openingJob = null
+                return@launch
+            }
+            tail?.let { (_, startOffset, gen) -> windowStarts[conversation.id] = gen to startOffset }
             if (opened != null && _state.value.conversationId == conversation.id &&
                 _state.value.messages.isEmpty()
             ) {
