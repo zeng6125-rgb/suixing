@@ -282,7 +282,12 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         withContext(Dispatchers.IO) {
             lock.withLock {
                 val meta = store.readMeta(id) ?: return@withLock ChatTotals.EMPTY
-                if (meta.totalsAt == meta.messageCount && meta.totals.trailingRunId != null) return@withLock meta.totals
+                // **判据只看「统计覆盖到全部消息」**（issue #56 R18）：原来还额外要求
+                // `trailingRunId != null`，而旧盘 meta 没有这个字段 ⇒ 反序列化为 null ⇒
+                // 每个会话首次进用量页都要整份日志重扫（30MB 会话可感知）。
+                // `totalsAt` 的含义就是「统计已折叠到的消息条数」，ChatStore 在无法证明
+                // 完整时会写 -1 而不是当前条数，所以 `totalsAt == messageCount` 已经足够。
+                if (meta.totalsAt == meta.messageCount) return@withLock meta.totals
                 val totals = runCatching {
                     foldTotals(store.all(meta))
                 }.onFailure {
@@ -728,6 +733,14 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
         currentCoroutineContext().ensureActive()
         lock.withLock {
             val previous = draftMessages[draft.chatId]
+            // 上一次 manifest 记着的 payload 名。**不能只信 [previous]**：LRU 超过 16 个会话
+            // 会把缓存项淘汰掉（issue #56 R34），此时 previous 为 null，下面那句
+            // `previous != null && …` 永不成立 ⇒ 旧 payload 永远不删，长会话每次换 payload
+            // 都留一个 MB 级孤儿文件。manifest 是磁盘上的真凭证，按它的名字删才准。
+            val storedPayloadName = runCatching {
+                json.decodeFromString(LiveDraft.serializer(), liveFile(draft.chatId).readText())
+                    .messageSnapshot
+            }.getOrNull()
             val payload = if (draft.messages.isEmpty()) null else {
                 previous?.takeIf { it.runId == draft.runId && it.messages.get() == draft.messages }
                     ?: DraftMessages(draft.runId, java.lang.ref.WeakReference(draft.messages),
@@ -742,8 +755,10 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
                 draft.copy(messages = emptyList(), messageSnapshot = payload?.name))
             writeAtomically(liveFile(draft.chatId), text)
             if (payload != null) draftMessages[draft.chatId] = payload else draftMessages.remove(draft.chatId)
-            // Only discard the prior payload after the replacement manifest is durable.
-            if (previous != null && previous.name != payload?.name) File(dir, previous.name).delete()
+            // Only discard the prior payloads after the replacement manifest is durable.
+            // 两个来源都收：内存缓存的（本次运行写过）与 manifest 记的（被淘汰过的那批）。
+            val stale = setOfNotNull(previous?.name, storedPayloadName).filter { it != payload?.name }
+            stale.forEach { name -> runCatching { File(dir, name).delete() } }
         }
     }
 
@@ -801,7 +816,11 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
     }
 
     private fun clearDraftMessages(chatId: String) {
-        draftMessages.remove(chatId)
+        // 已知名字就直接删这一个，不扫整个 chats/（issue #56 R24：原来在全局 lock 内
+        // `listFiles` 全量遍历，会话多时是无谓的 IO 与分配）。名字不在缓存里（被 LRU 淘汰过）
+        // 才回退到前缀扫描，兼作清理孤儿 payload 的兜底。
+        val known = draftMessages.remove(chatId)?.name
+        if (known != null && runCatching { File(dir, known).delete() }.getOrDefault(false)) return
         dir.listFiles { f -> f.name.startsWith("$chatId.live-") && f.name.endsWith(".messages") }
             ?.forEach { it.delete() }
     }
