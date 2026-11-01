@@ -218,7 +218,6 @@ internal fun ProviderDropdown(
     var open by remember { mutableStateOf(false) }
     var anchorWidth by remember { mutableIntStateOf(0) }
     val colors = MaterialTheme.colorScheme
-    val rotation = animateFloatAsState(if (open && enabled) 180f else 0f, tween(160), label = "providerArrow")
     val endpoint = remember(selected?.baseUrl) { providerEndpointLabel(selected?.baseUrl.orEmpty()) }
     Box(Modifier.fillMaxWidth().padding(top = 8.dp).onSizeChanged { anchorWidth = it.width }) {
         SelectionCardButton(

@@ -376,6 +376,10 @@ object PluginRuntime {
                     shape(raw, response.code, response.isSuccessful, exec.response)
                 }
             } catch (error: IOException) {
+                // 取消不是"网络失败"（issue #56 R5）：`call.cancel()` 会让 OkHttp 抛
+                // `IOException("Canceled")`，如果当成普通失败吞掉，协程不会取消、整轮 run 继续跑，
+                // 「点停即停」就失效了。这里把它还原成 CancellationException。
+                if (call.isCanceled()) throw CancellationException("已停止")
                 ToolResult.failure("请求失败：${error.message ?: error::class.java.simpleName}")
             }
         }

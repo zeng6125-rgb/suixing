@@ -1113,7 +1113,8 @@ fun ChatScreen(
                             .graphicsLayer {
                                 val progress = switchEntrance.value
                                 alpha = ConversationEntrance.alpha(progress)
-                                translationY = ConversationEntrance.remainingTravel(progress) * 12.dp.toPx()
+                                translationY = ConversationEntrance.remainingTravel(progress) *
+                                    ConversationEntrance.TRAVEL_DP.dp.toPx()
                             }
                             .padding(
                                 top = with(LocalDensity.current) {
