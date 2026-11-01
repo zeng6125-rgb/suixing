@@ -102,4 +102,41 @@ class DeltaBufferTest {
         val b = DeltaBuffer()
         assertEquals("", b.locked { b.peek("nobody") }.first)
     }
+
+    /**
+     * 多会话并行：一个会话的节流时钟与内容不能影响另一个（issue #59 A4 的验收项之一）。
+     * 尾部补发定时器是**按 chatId** 排的，时钟若串了，切走的会话会提前发布、或永远不发。
+     */
+    @Test
+    fun `tail flush bookkeeping is per chat`() {
+        val buffer = DeltaBuffer()
+        val now = 1_000L
+        buffer.locked {
+            buffer.append("a", "A1", null)
+            assertTrue("a 的首拍该放行", buffer.mayPublish("a", now, 16))
+            buffer.append("b", "B1", null)
+            assertTrue("b 有自己的时钟，不该被 a 挡住", buffer.mayPublish("b", now, 16))
+            buffer.append("a", "A2", null)
+            assertFalse("a 在窗口内不该再放行", buffer.mayPublish("a", now + 5, 16))
+            assertTrue("a 到点后放行", buffer.mayPublish("a", now + 16, 16))
+        }
+        assertEquals("A1A2", buffer.locked { buffer.take("a") }.first)
+        assertEquals("B1", buffer.locked { buffer.take("b") }.first)
+    }
+
+    /**
+     * 切会话 / 停止时 `drop` 必须连定时记账一起清掉：残留的 `lastPublishAt` 会让
+     * **下一轮**的首拍被无谓地压住 16ms（表现为"新回答开头顿一下才出字"）。
+     */
+    @Test
+    fun `dropping a chat clears its throttle clock and content`() {
+        val buffer = DeltaBuffer()
+        buffer.locked {
+            buffer.append("c", "text", "think")
+            assertTrue(buffer.mayPublish("c", 500L, 16))
+            buffer.drop("c")
+            assertEquals("内容清空", "" to "", buffer.take("c"))
+            assertTrue("时钟也清了：立刻就能再发", buffer.mayPublish("c", 500L, 16))
+        }
+    }
 }

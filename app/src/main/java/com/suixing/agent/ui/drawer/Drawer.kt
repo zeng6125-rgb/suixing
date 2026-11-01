@@ -218,6 +218,10 @@ internal fun Drawer(
     // 拖动时最后一次命中的目标行 key（issue #59 B3）：同一目标连续 move 不重算预览，
     // 也就不用每帧复制一遍列表。用普通数组持有，避免写 State 触发重组。
     val lastDragTarget = remember { arrayOfNulls<String>(1) }
+    // **外部列表变了就作废这个缓存**（issue #59 B3）：拖动期间别的会话来了新消息、
+    // 或被删除/归档时，行位置会变，"上次命中的那一行"不再是同一行 —— 继续沿用会让
+    // 预览停在错的位置。这里只清缓存，不动正在进行的拖动本身。
+    LaunchedEffect(conversations) { lastDragTarget[0] = null }
     val listState = rememberLazyListState()
     // 每行上次看到的 updatedAt：数值变大 = 那条会话来了新消息 ⇒ 把它从普通表里摘掉，
     // 它就按 updatedAt 冒回普通区顶部（用户：「新会话照常出现在普通会话上面」）。
