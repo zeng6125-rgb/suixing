@@ -246,7 +246,12 @@ description: 打开某 App 完成签到，用户说「签到」时使用
 - 装机前必须 `aapt dump badging` 核对 APK 的 `versionName` / `versionCode`（历史上出过一次「构建没跑、把旧包当新包装机」的事故；几个版本的 APK 字节数完全相同，光看大小分不出来）。发错了用 `gh release upload --clobber` 覆盖附件。
 - 推送到 GitHub 后 `.github/workflows/android.yml` 会自动跑：`./gradlew :app:testReleaseUnitTest` → 上传测试报告 → `./gradlew :app:assembleDebug :app:assembleRelease` → 上传 `suixing-debug` / `suixing-release` 两个 APK artifact。单测跑的是 **Release 变体**（与出包同一份编译配置，Release-only 的问题才拦得住）。
 - release 用仓库内的 `app/sideload.keystore` 自签（alias / 密码都是更名前的 `lingshu`。**不要改**：keystore 就是用这个名字生成的，改了等于换签名，已装的版本将无法覆盖安装）——这是自用侧载包，不是上架包；该 keystore 必须入库，否则覆盖安装会失败。**由此带来的安全含义（签名不等于来源证明）与校验方法见 [SECURITY.md](SECURITY.md)。**
-- release **已开 R8**（`isMinifyEnabled = true` / `isShrinkResources = true`）：APK 从 18.5MB 降到 5.27MB。`proguard-rules.pro` 里的 `@Serializable` 与 Shizuku keep 规则因此真正生效；改动这些规则后必须真机冒烟（单测跑的是未混淆类）。
+- release **已开 R8**（`isMinifyEnabled = true` / `isShrinkResources = true`，见 `app/build.gradle.kts`）：
+  APK 从 **18,556,906 B（0.8.613，未开 R8）** 降到 **5,272,728 B（0.8.614 起）**；
+  0.8.624 实测 5,275,144 B。其中约 4.2MB 是去掉 `material-icons-extended` 的收益，
+  其余来自 R8 删未使用代码 + `shrinkResources` 收资源。
+  `proguard-rules.pro` 里的 `@Serializable` 与 Shizuku keep 规则因此真正生效；
+  **改动这些规则后必须真机冒烟**（单测跑的是未混淆类，拦不住运行期反射）。
 
 ## 目录结构
 
