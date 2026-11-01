@@ -29,7 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
-import com.suixing.agent.ui.components.FeatherIcon
+import com.suixing.agent.ui.components.SuixingMark
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -80,17 +80,14 @@ fun AssistantAvatar(
                 fontSize = (size.value * 0.55f).sp,
                 maxLines = 1,
             )
-            else -> Icon(
-                imageVector = FeatherIcon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(size * 0.62f),
-            )
+            // 没有自定义形象的助手画品牌标记：整个球体（= 桌面的圆形版图标）。
+            // 之前是一根白羽，换图标后改成同一张脸，避免「清单里是羽毛、桌面是球」。
+            else -> SuixingMark(size = size)
         }
     }
 }
 
-/** The same face, read off the persona itself; null draws the brand feather. */
+/** The same face, read off the persona itself; null draws the brand bot mark. */
 @Composable
 fun AssistantAvatar(
     assistant: Assistant?,
