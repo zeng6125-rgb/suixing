@@ -1383,8 +1383,14 @@ class ChatViewModel : ViewModel() {
                 return@launch
             }
             tail?.let { (_, startOffset, gen) -> windowStarts[conversation.id] = gen to startOffset }
-            if (opened != null && _state.value.conversationId == conversation.id &&
-                _state.value.messages.isEmpty()
+            // 三条判据收敛到纯函数（issue #67 P1-3），单测能逐条钉住。
+            val current = _state.value
+            if (opened != null && canApplyColdOpen(
+                    targetChatId = conversation.id,
+                    currentChatId = current.conversationId,
+                    intentCurrent = navIntents.isCurrent(navToken),
+                    currentIsEmpty = current.messages.isEmpty(),
+                )
             ) {
                 cacheMessages(conversation.id, opened.messages, diskBacked = true)
                 _state.update {
