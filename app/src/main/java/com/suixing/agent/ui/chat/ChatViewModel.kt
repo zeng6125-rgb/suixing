@@ -681,6 +681,31 @@ class ChatViewModel : ViewModel() {
         deltaBuffer.mayPublish(chatId, now, DELTA_PUBLISH_MS)
 
     /**
+     * 每个会话一个**尾部补发**任务（issue #59 A4）。
+     *
+     * 节流判定只会在**下一个事件到来**时重跑 —— 所以「一次 publish 之后 1ms 再来一个 token、
+     * 然后连接长时间空闲」时，那个 token 要等到下一个非 delta 事件（可能是几秒后的网络超时
+     * 或流结束）才显示。这里在「被节流按住」的那一刻排一个一次性定时器，到点自行 flush。
+     *
+     * 每个会话只有一个（`map` 里已有的活跃任务直接复用），流结束/切会话/停止时由
+     * [cancelTailFlush] 取消，避免迟到的定时器把上一轮的 delta 并进下一轮。
+     */
+    private val tailFlushJobs = HashMap<String, Job>()
+
+    private fun scheduleTailFlush(chatId: String) {
+        if (tailFlushJobs[chatId]?.isActive == true) return
+        tailFlushJobs[chatId] = viewModelScope.launch {
+            delay(DELTA_PUBLISH_MS)
+            tailFlushJobs.remove(chatId)
+            flushDeltas(chatId)
+        }
+    }
+
+    private fun cancelTailFlush(chatId: String) {
+        tailFlushJobs.remove(chatId)?.cancel()
+    }
+
+    /**
      * Takes the buffered text and thinking of [chatId] out and hands them over.
      *
      * **Caller holds [deltaLock]** — the take and the publish that follows it are one step.
@@ -2558,6 +2583,7 @@ class ChatViewModel : ViewModel() {
         // `locked` 不是 inline（它要守住 DeltaBuffer 内部的锁），所以**不能**在块里 `return` ——
         // 用 `hold` 标记"这次不发布"，出块后再 return。语义与原来的 `synchronized` + return 一致。
         var hold = false
+        var needsTailFlush = false
         deltaBuffer.locked {
             if (textDelta) appendDeltaLocked(chatId, event.text, "")
             if (reasoningDelta) appendDeltaLocked(chatId, "", event.text)
@@ -2566,6 +2592,8 @@ class ChatViewModel : ViewModel() {
                 // 还没到节拍：缓冲留着，攒到下一次一起发（与改动前一致）。
                 if (!mayPublishLocked(chatId, now)) {
                     hold = true
+                    // 临界区里只登记意图，真正的调度在出块后做（临界区不许有挂起/分配外的副作用）。
+                    needsTailFlush = true
                     return@locked
                 }
                 // **不做前后台区分**（用户明确要求）：后台会话必须与前台**完全一致、依旧实时**。
@@ -2579,7 +2607,10 @@ class ChatViewModel : ViewModel() {
             // flush; for a delta it is the publish that got through the interval above.
             pending = takeDeltasLocked(chatId)
         }
-        if (hold) return
+        if (hold) {
+            if (needsTailFlush) scheduleTailFlush(chatId)
+            return
+        }
         val pendingText = pending.first
         val pendingReasoning = pending.second
         // **临界区之后重读一次**（评审 M5）：`live` 是在进入临界区**之前**取的快照，
@@ -2863,6 +2894,7 @@ class ChatViewModel : ViewModel() {
      * stopped or failed run would lose its last words.
      */
     private fun flushDeltas(chatId: String) {
+        cancelTailFlush(chatId)
         val live = sessions[chatId]
         if (live == null) {
             // 会话已经没了：缓冲里的文字无处可去，**必须丢掉**。
