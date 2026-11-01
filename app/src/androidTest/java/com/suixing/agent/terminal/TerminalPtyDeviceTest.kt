@@ -18,7 +18,7 @@ class TerminalPtyDeviceTest {
         val master = h[0].toInt()
         val pid = h[1].toInt()
         try {
-            val command = "test -t 0 && echo __SUixING_TTY_OK__\n"
+            val command = "test -t 0 && printf '__TTY_%s_OK__\\n' PASS\n"
             TerminalNative.nativeWrite(master, command.toByteArray())
             val output = StringBuilder()
             val deadline = android.os.SystemClock.elapsedRealtime() + 5000
@@ -26,9 +26,9 @@ class TerminalPtyDeviceTest {
                 val bytes = TerminalNative.nativeRead(master, 4096, 250) ?: continue
                 if (bytes.isEmpty()) break
                 output.append(String(bytes, Charsets.UTF_8))
-                if ("__SUixING_TTY_OK__" in output) break
+                if ("__TTY_PASS_OK__" in output) break
             }
-            assertTrue("PTY should be interactive; output was: $output", "__SUixING_TTY_OK__" in output)
+            assertTrue("PTY should be interactive; output was: $output", "__TTY_PASS_OK__" in output)
             TerminalNative.nativeResize(master, 110, 36)
         } finally {
             TerminalNative.nativeSignalGroup(pid, 15) // SIGTERM, child still unreaped
