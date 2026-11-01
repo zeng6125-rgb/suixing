@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -1499,6 +1500,11 @@ fun ChatScreen(
                                     messages = state.messages,
                                     revision = state.messagesRevision,
                                     positions = messagePositions,
+                                    maxWidth = bubbleMaxWidth,
+                                    // 宽度跟着外观设置走：卡片模式与扁平模式的内缩不同，
+                                    // 气泡宽度上限也要一致（用户：宽度要根据外观那些可调的）。
+                                    cardMode = settings.assistantCard,
+                                    flatPad = settings.flatPaddingDp.dp,
                                 )
                             }
                             }
@@ -2126,6 +2132,12 @@ private fun CheckpointUnderRow(
     messages: List<StoredMessage>,
     revision: Long,
     positions: Map<String, Int>?,
+    /** 与助手气泡同一个宽度上限（`AssistantRow` 用的是 `.widthIn(max = bubbleMaxWidth)`）。 */
+    maxWidth: androidx.compose.ui.unit.Dp,
+    /** 卡片模式：卡内还有 16dp 内边距，折叠块的可见边缘因此比列表留白再进 16dp。 */
+    cardMode: Boolean,
+    /** 扁平模式的左右留白（设置 → 外观）。 */
+    flatPad: androidx.compose.ui.unit.Dp,
 ) {
     // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
     // 键用 revision + checkpoint（两者任一变化才需要重算）。
@@ -2142,9 +2154,15 @@ private fun CheckpointUnderRow(
         CheckpointCard(
             checkpoint = checkpoint,
             originals = originals,
-            // **与助手卡片同一左右留白**（用户：折叠条宽度和助手卡片的折叠块对不上）。
-            // 助手行是 26dp，压缩卡原来是铺满整行，所以看起来更宽。
-            modifier = Modifier.padding(horizontal = 26.dp),
+            // **与助手卡片同一个宽度上限**（用户：折叠条宽度和助手卡片的折叠块对不上）。
+            // 不是内边距差异：助手卡是 `.widthIn(max = bubbleMaxWidth).fillMaxWidth()`，
+            // 压缩卡没有上限 ⇒ 宽屏上比气泡宽出一截。这里补上同一个约束。
+            // 与 `AssistantRow` 完全同一套：卡片模式 16dp 卡内边距、扁平模式用设置里的留白，
+            // 再叠同一个气泡宽度上限。列表自己已经给了 16dp，这里只补卡内那一层。
+            modifier = Modifier
+                .widthIn(max = maxWidth)
+                .fillMaxWidth()
+                .padding(horizontal = if (cardMode) 16.dp else flatPad),
         )
     }
 }
