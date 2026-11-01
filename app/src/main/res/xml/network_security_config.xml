@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  issue #58 #7：明文与宽松 TLS 的允许范围。
+  Network Security Config 只能按**域名**约束、无法表达「192.168.0.0/16」这类网段，
+  所以这里做的是「显式声明系统信任锚 + 明文保持允许」，真正的端点级判定在应用层：
+  `LlmClient.clientFor` 只在 `isLanHost(host)` 为真时才启用信任任意证书的客户端。
+
+  为什么不直接 `cleartextTrafficPermitted="false"`：本应用的主要用法之一是把接口地址
+  指向用户自己局域网里的 Ollama / 自建网关（`http://192.168.x.x:11434`），一刀切会
+  让这些用户直接连不上。公网地址上的明文仍会被应用层的地址判定拦在宽松 TLS 之外。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
