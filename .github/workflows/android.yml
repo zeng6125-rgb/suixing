@@ -45,6 +45,9 @@ jobs:
           # 用 grep -F 比对：`case` 的模式串里 `|` 是分支分隔符，写成 "| 8ms | ..." 会被当成
           # 多个分支，匹配不到就永远失败（上一版就是这么红的）。
           printf '%s' "$row" | grep -qF '| 8ms | 18ms | 25ms |'             || { echo "gfxinfo 解析与 fixture 真值不符：$row" >&2; exit 1; }
+          # 0 帧样本必须作废：Android 会打印 4950ms 占位值，照原样入表就是假数据。
+          zero=$(PERF_GFXINFO_FILE=scripts/fixtures/gfxinfo-zero-frames.txt bash scripts/perf_collect.sh C)
+          printf '%s' "$zero" | grep -qF '| - | - | - |'             || { echo "0 帧样本没有被作废：$zero" >&2; exit 1; }
           pss=$(awk '{ for (i=1;i<=NF;i++) if ($i=="PSS:") { print $(i+1); exit } }' scripts/fixtures/meminfo-sample.txt)
           [ "$pss" = "829857" ] || { echo "PSS 解析错：$pss" >&2; exit 1; }
           hz=$(grep -o 'renderFrameRate [0-9.]*' scripts/fixtures/display-sample.txt | head -1 | awk '{print $2}')
