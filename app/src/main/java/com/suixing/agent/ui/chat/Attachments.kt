@@ -447,7 +447,7 @@ internal fun ImageBlock(base64: String) {
     // **图片加载换 Coil 3**（issue #44 第 10 项）：原来这里是手写的 64 行 ——
     // BitmapFactory 手动降采样 + 容量 4 的 LRU（滚出 4 张就丢，滚回来重新解码一张 1080p）。
     // Coil 3 覆盖同样的事并且更强：内存 + 磁盘双缓存、按目标尺寸自动采样、生命周期感知、
-    // 解码在它自己的 Dispatcher 上 ⇒ 组合期零阻塞。手写的那套已删除（ImageDecode.kt）。
+    // 解码在它自己的 Dispatcher 上 ⇒ 组合期零阻塞。
     var full by remember { mutableStateOf(false) }
     val context = LocalContext.current
     // 图片是内存里的 base64（不是 URL），解码成字节交给 Coil 当 data：
