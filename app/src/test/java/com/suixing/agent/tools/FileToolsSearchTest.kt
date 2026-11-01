@@ -38,8 +38,20 @@ class FileToolsSearchTest {
         return FileTools(ctx)
     }
 
+    /**
+     * 构造参数对象。**数字/布尔要保持原生类型**：`JsonObject.int()` 用的是
+     * `JsonPrimitive.intOrNull`，字符串 `"10"` 会读成 null 而回落默认值 ——
+     * 于是"传了参数却没生效"在测试里看起来像功能没实现。
+     */
     private fun args(vararg pairs: Pair<String, Any>): JsonObject = buildJsonObject {
-        for ((k, v) in pairs) put(k, JsonPrimitive(v.toString()))
+        for ((k, v) in pairs) {
+            put(k, when (v) {
+                is Int -> JsonPrimitive(v)
+                is Long -> JsonPrimitive(v)
+                is Boolean -> JsonPrimitive(v)
+                else -> JsonPrimitive(v.toString())
+            })
+        }
     }
 
     // --- grep_files ---
@@ -175,5 +187,55 @@ class FileToolsSearchTest {
         val dir = workspace()
         val result = tools(dir).runForTest("find_files", args("root" to dir.path))
         assertFalse("两个都没给要明确报错，而不是列出全部", result.ok)
+    }
+
+    // --- issue #59 D1：遍历预算 ---
+
+    /** 零命中也必须报出扫描量：否则模型分不清"真没有"和"预算不够"。 */
+    @Test
+    fun `find_files reports how many nodes it scanned when nothing matches`() = runBlocking {
+        val dir = workspace()
+        repeat(5) { File(dir, "f$it.txt").writeText("") }
+        val result = tools(dir).runForTest(
+            "find_files",
+            args("root" to dir.path, "pattern" to "*.nomatch"),
+        )
+        assertTrue(result.ok)
+        assertTrue("要说明没找到：" + result.output, result.output.contains("没有找到"))
+        assertTrue("要带扫描量：" + result.output, result.output.contains("本次共扫描"))
+    }
+
+    /** `max_visited` 到顶就停，并在输出里说清是哪道闸拦的。 */
+    @Test
+    fun `find_files stops at max_visited and names the cap`() = runBlocking {
+        val dir = workspace()
+        // `max_visited` 的生产下限是 100（防误配），所以这里要造超过 100 个节点才够触发。
+        repeat(150) { File(dir, "n$it.txt").writeText("") }
+        val result = tools(dir).runForTest(
+            "find_files",
+            args(
+                "root" to dir.path,
+                "pattern" to "*.nomatch",
+                "max_visited" to 10,
+                "limit" to 100,
+            ),
+        )
+        assertTrue(result.ok)
+        assertTrue("要点名 max_visited：" + result.output, result.output.contains("max_visited"))
+        assertTrue("要提示结果可能不完整：" + result.output, result.output.contains("可能不完整"))
+    }
+
+    /** 命中够数时按 `limit` 停，不受预算影响（老行为不能被新闸改掉）。 */
+    @Test
+    fun `find_files still stops at limit before the budget`() = runBlocking {
+        val dir = workspace()
+        repeat(20) { File(dir, "k$it.kt").writeText("") }
+        val result = tools(dir).runForTest(
+            "find_files",
+            args("root" to dir.path, "pattern" to "*.kt", "limit" to "3"),
+        )
+        assertTrue(result.ok)
+        assertTrue("命中数不该超过 limit：" + result.output, result.output.contains("找到 3 个"))
+        assertTrue("要点名 limit：" + result.output, result.output.contains("limit"))
     }
 }
