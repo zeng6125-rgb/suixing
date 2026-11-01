@@ -36,24 +36,48 @@ internal object SecretBox {
     private const val IV_BYTES = 12
     private const val GCM_TAG_BITS = 128
 
+    /**
+     * 这个运行环境有没有 Android Keystore。
+     *
+     * JVM 单测（`testReleaseUnitTest`）里没有 Android 运行时，`KeyStore.getInstance` 直接抛
+     * `NoSuchAlgorithmException` —— 那种情况不是「加密失败」，而是**根本没有这层能力**。
+     * 两者必须分开：前者保持原有行为（明文），后者才按 issue #58 #3 拒绝落盘。
+     * 探测结果缓存，命中一次之后不再付异常构造的代价。
+     */
+    private val available: Boolean by lazy {
+        runCatching { KeyStore.getInstance("AndroidKeyStore").load(null) }.isSuccess
+    }
+
+    /** 见 [available]。 */
+    fun isAvailable(): Boolean = available
+
     /** 这串值是不是密文。 */
     fun isEncrypted(value: String): Boolean = value.startsWith(PREFIX)
 
     /**
      * 明文 → 可落盘的字符串。空串原样返回；已经是密文的原样返回（幂等）。
      *
-     * Keystore 不可用时（极少数 ROM）**退回明文**：宁可少一层保护，也不能因为加密失败
-     * 把用户的 Key 弄丢 —— 那样用户得重新申请 Key，代价远大于「没加密」。
+     * **加密不可用时返回 null，绝不退回明文**（issue #58 #3）。原来的 `.getOrElse { plain }`
+     * 会在 Keystore 异常（少数 ROM、密钥被系统作废）时把 Key **明文写进
+     * `Suixing_settings.preferences_pb`** —— 那正好是这层加密要防的事，而用户毫不知情。
+     *
+     * 失败时的约定：调用方**不落盘**这个字段（写空），并保留内存里的明文让本次会话继续可用；
+     * 下次冷启动用户会看到 Key 为空，需要重填。宁可见一次「没填」，不要悄悄落一份明文。
      */
-    fun encrypt(plain: String): String {
+    fun encrypt(plain: String): String? {
         if (plain.isBlank()) return ""
         if (isEncrypted(plain)) return plain
+        // 平台没有 Keystore（JVM 单测）：原样保留明文，否则每个用例都会把值清空。
+        if (!available) return plain
         return runCatching {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, key())
             val out = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
             PREFIX + Base64.encodeToString(cipher.iv + out, Base64.NO_WRAP)
-        }.getOrElse { plain }
+        }.getOrElse { error ->
+            android.util.Log.w("SecretBox", "加密不可用，Key 不落盘（本次会话仍可用）", error)
+            null
+        }
     }
 
     /**

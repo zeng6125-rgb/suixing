@@ -1,5 +1,6 @@
 package com.suixing.agent.data
 
+import com.suixing.agent.data.SecretBox
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -52,7 +53,10 @@ class McpStore(private val context: Context) {
     suspend fun load(): List<McpServerConfig> = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext emptyList()
         try {
+            // env / headers 里常放 Token（issue #58 #4），落盘是密文，这里解回明文；
+            // 旧文件里的明文不带 `enc1:` 前缀，`SecretBox.decrypt` 原样返回 ⇒ 无需单独迁移。
             json.decodeFromString(ListSerializer(McpServerConfig.serializer()), file.readText())
+                .map { it.copy(env = SecretBox.decrypt(it.env), headers = SecretBox.decrypt(it.headers)) }
         } catch (error: Exception) {
             // Never drop the user's definitions silently: keep the bad file next
             // to the original name so it can be recovered by hand.
@@ -65,7 +69,15 @@ class McpStore(private val context: Context) {
         file.parentFile?.mkdirs()
         // Temp file then rename, as in the other stores: a kill mid-write would leave a
         // truncated file, and a truncated file reads back as "no servers at all".
-        val text = json.encodeToString(ListSerializer(McpServerConfig.serializer()), configs)
+        val stored = configs.map {
+            // 加密不可用时**保留原值**：MCP 的 env/headers 是用户手填的配置，
+            // 静默清空等于丢配置。主 API Key 走的是另一条更严的路径（写空、要求重填）。
+            it.copy(
+                env = SecretBox.encrypt(it.env) ?: it.env,
+                headers = SecretBox.encrypt(it.headers) ?: it.headers,
+            )
+        }
+        val text = json.encodeToString(ListSerializer(McpServerConfig.serializer()), stored)
         val temp = File(file.parentFile, "${file.name}.tmp")
         temp.writeText(text)
         if (!temp.renameTo(file)) {

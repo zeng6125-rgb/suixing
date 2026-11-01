@@ -750,8 +750,21 @@ private fun hasPlainSecret(raw: String): Boolean =
  * 两处都要盖：顶层 [AppSettings.apiKey]（老格式迁移过来的）与每个 [ProviderConfig.apiKey]。
  */
 private fun AppSettings.encrypted(): AppSettings = copy(
-    apiKey = SecretBox.encrypt(apiKey),
-    providers = providers.map { it.copy(apiKey = SecretBox.encrypt(it.apiKey)) },
+    // `SecretBox.encrypt` 加密不可用时返回 null：这时**写空**而不是写明文
+    // （issue #58 #3）。内存里的明文不动，本次会话照常发请求；冷启动后该字段为空，
+    // 用户重填即可 —— 代价一次「重填」，换掉一个「明文落盘」。
+    apiKey = SecretBox.encrypt(apiKey) ?: "",
+    providers = providers.map { provider ->
+        provider.copy(apiKey = SecretBox.encrypt(provider.apiKey) ?: "")
+    },
+    // **搜索 Key 与自定义请求头同样是凭据**（issue #58 #4）：`searchApiKey` 是第三方搜索
+    // 服务的 Key；`requestHeaders` 的 Value 常放 Bearer token。原来两者明文躺在
+    // `preferences_pb` 里，加密只盖了 `apiKey`。头名（Key）不加密 —— 它不是秘密，
+    // 而且加密后无法检索/显示。
+    // 这两个失败时**保留原值**：清空等于把用户的搜索 Key / 请求头token 悄悄弄丢，
+    // 而它们不像主 API Key 那样有「重填」的显式流程。
+    searchApiKey = SecretBox.encrypt(searchApiKey) ?: searchApiKey,
+    requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.encrypt(value) ?: value },
 )
 
 /**
@@ -763,6 +776,10 @@ private fun AppSettings.encrypted(): AppSettings = copy(
 internal fun AppSettings.decrypted(): AppSettings = copy(
     apiKey = SecretBox.decrypt(apiKey),
     providers = providers.map { it.copy(apiKey = SecretBox.decrypt(it.apiKey)) },
+    // 与 encrypted() 对称（issue #58 #4）。旧文件里的明文值不带 `enc1:` 前缀，
+    // `SecretBox.decrypt` 原样返回 ⇒ 不需要单独的迁移步骤。
+    searchApiKey = SecretBox.decrypt(searchApiKey),
+    requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.decrypt(value) },
 )
 
 /**

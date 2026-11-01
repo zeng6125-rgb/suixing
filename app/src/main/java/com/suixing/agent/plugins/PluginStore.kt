@@ -1,5 +1,6 @@
 package com.suixing.agent.plugins
 
+import com.suixing.agent.data.SecretBox
 import android.system.Os
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -223,14 +224,20 @@ class PluginStore(private val baseDir: File) {
         val file = File(dir, ENV_FILE)
         val map = readEnvFile(file).toMutableMap()
         if (value.isEmpty()) map.remove(name) else map[name] = value
-        file.writeText(PluginJson.encodeToString(map))
+        // **0600 文件权限不等于加密**（issue #58 #4）：root/ADB 一样能读出来，这里把值也加密。
+        // 文件名与变量名保持明文（要能检索/展示），只加密值。
+        // 同 MCP：加密不可用时保留原值，不静默清空用户填的变量。
+        val stored = map.mapValues { (_, secret) -> SecretBox.encrypt(secret) ?: secret }
+        file.writeText(PluginJson.encodeToString(stored))
         runCatching { Os.chmod(file.absolutePath, MODE_PRIVATE_RW) }
         Unit
     }
 
     /** 读出 env 实值（给执行管道用；UI 别拿它直接显示）。 */
     suspend fun env(id: String): Map<String, String> = withContext(Dispatchers.IO) {
+        // 与写入对称：读出来就解回明文，执行管道拿到的仍是明文（issue #58 #4）。
         readEnvFile(File(pluginDir(id), ENV_FILE))
+            .mapValues { (_, value) -> SecretBox.decrypt(value) }
     }
 
     /**

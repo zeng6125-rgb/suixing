@@ -1,5 +1,6 @@
 package com.suixing.agent.tools
 
+import com.suixing.agent.llm.readCancellable
 import com.suixing.agent.data.SettingsRepository
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
@@ -98,7 +99,11 @@ class WebTools(
         else -> ToolResult.failure("Unknown web tool: $name")
     }
 
-    private suspend fun fetch(args: JsonObject): ToolResult {
+    // **取消要真的取消**（issue #58 #6）：这几个网络调用原来走阻塞的
+// `Call.execute()`，协程被取消时真正的请求不一定停，而且 `CancellationException`
+// 会被 `runCatching` 折成普通失败（「点停止还在跑」）。改用与 LLM 流同一套
+// `readCancellable`：`invokeOnCancellation` 里 `call.cancel()`，取消后到达的响应直接丢弃。
+private suspend fun fetch(args: JsonObject): ToolResult {
         val url = args.str("url")?.trim().orEmpty()
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             return ToolResult.failure("url must start with http:// or https://")
@@ -107,9 +112,9 @@ class WebTools(
         val raw = args.bool("raw", false)
         return withContext(Dispatchers.IO) {
             runCatching {
-                client.newCall(request(url).build()).execute().use { response ->
+                client.newCall(request(url).build()).readCancellable { response ->
                     if (!response.isSuccessful) {
-                        return@use ToolResult.failure("Request failed: HTTP ${response.code} ${response.message}")
+                        return@readCancellable ToolResult.failure("Request failed: HTTP ${response.code} ${response.message}")
                     }
                     val body = readText(response)
                     val text = if (raw) body else htmlToText(body)
@@ -142,14 +147,14 @@ class WebTools(
                 val target = resolveUserPath(context, rawPath)
                 requireWritableUserPath(context, target)
                 target.parentFile?.mkdirs()
-                client.newCall(request(url).build()).execute().use { response ->
+                client.newCall(request(url).build()).readCancellable { response ->
                     if (!response.isSuccessful) {
-                        return@use ToolResult.failure("Download failed: HTTP ${response.code} ${response.message}")
+                        return@readCancellable ToolResult.failure("Download failed: HTTP ${response.code} ${response.message}")
                     }
-                    val body = response.body ?: return@use ToolResult.failure("Download failed: empty response")
+                    val body = response.body ?: return@readCancellable ToolResult.failure("Download failed: empty response")
                     val declared = body.contentLength()
                     if (declared > MAX_DOWNLOAD_BYTES) {
-                        return@use ToolResult.failure(
+                        return@readCancellable ToolResult.failure(
                             "File too large (${declared / 1024 / 1024} MB); the limit is " +
                                 "${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB",
                         )
@@ -165,13 +170,13 @@ class WebTools(
                         }
                         if (part.length() > MAX_DOWNLOAD_BYTES) {
                             part.delete()
-                            return@use ToolResult.failure(
+                            return@readCancellable ToolResult.failure(
                                 "File exceeds ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB; deleted",
                             )
                         }
                         if (!part.renameTo(target)) {
                             part.delete()
-                            return@use ToolResult.failure("Download failed: cannot write ${target.absolutePath}")
+                            return@readCancellable ToolResult.failure("Download failed: cannot write ${target.absolutePath}")
                         }
                     } catch (error: Exception) {
                         part.delete()
@@ -191,7 +196,13 @@ class WebTools(
         val count = args.int("count", 5).coerceIn(1, 10)
         val config = settings.current()
         return if (config.searchEndpoint.isNotBlank()) {
-            tavily(config.searchEndpoint.trim(), config.searchApiKey.trim(), query, count)
+            // `searchApiKey` 落盘是密文（issue #58 #4），发出去之前要解密。
+            tavily(
+                config.searchEndpoint.trim(),
+                com.suixing.agent.data.SecretBox.decrypt(config.searchApiKey).trim(),
+                query,
+                count,
+            )
         } else {
             duckduckgo(query, count)
         }
@@ -210,15 +221,15 @@ class WebTools(
                     .url(endpoint)
                     .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
                 if (apiKey.isNotEmpty()) builder.header("Authorization", "Bearer $apiKey")
-                client.newCall(builder.build()).execute().use { response ->
+                client.newCall(builder.build()).readCancellable { response ->
                     val body = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        return@use ToolResult.failure("Search failed: HTTP ${response.code} ${body.take(200)}")
+                        return@readCancellable ToolResult.failure("Search failed: HTTP ${response.code} ${body.take(200)}")
                     }
                     val results = runCatching {
                         Json.parseToJsonElement(body).jsonObject["results"]?.jsonArray.orEmpty()
                     }.getOrElse { emptyList() }
-                    if (results.isEmpty()) return@use ToolResult.success("No results found.")
+                    if (results.isEmpty()) return@readCancellable ToolResult.success("No results found.")
                     ToolResult.success(
                         results.take(count).joinToString("\n\n") { item ->
                             val obj = item.jsonObject
@@ -241,9 +252,9 @@ class WebTools(
     private suspend fun duckduckgo(query: String, count: Int): ToolResult = withContext(Dispatchers.IO) {
         runCatching {
             val url = "https://html.duckduckgo.com/html/?q=" + java.net.URLEncoder.encode(query, "UTF-8")
-            client.newCall(request(url).build()).execute().use { response ->
+            client.newCall(request(url).build()).readCancellable { response ->
                 if (!response.isSuccessful) {
-                    return@use ToolResult.failure(
+                    return@readCancellable ToolResult.failure(
                         "Built-in search unavailable (HTTP ${response.code}). You can set a " +
                             "Tavily-compatible endpoint under 「设置 → 搜索接口」.",
                     )
@@ -251,7 +262,7 @@ class WebTools(
                 val html = readText(response)
                 val hits = parseDuckDuckGo(html, count)
                 if (hits.isEmpty()) {
-                    return@use ToolResult.failure(
+                    return@readCancellable ToolResult.failure(
                         "Built-in search parsed no results (it may be rate-limited). You can set a " +
                             "Tavily-compatible endpoint under 「设置 → 搜索接口」.",
                     )

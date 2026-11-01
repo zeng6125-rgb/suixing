@@ -2,6 +2,7 @@
 
 package com.suixing.agent.ui.settings
 
+import com.suixing.agent.data.SecretBox
 import com.suixing.agent.ui.components.settingsPagePadding
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.CompletionDot
@@ -1123,7 +1124,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     // 每次击键重组时丢焦点。
                     var headersRaw by remember {
                         mutableStateOf(
-                            form.requestHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" },
+                            // 请求头在表单里也必须是明文，否则用户看到 `enc1:…` 并把它再存一遍。
+                            form.requestHeaders.entries.joinToString("\n") {
+                                "${it.key}: ${SecretBox.decrypt(it.value)}"
+                            },
                         )
                     }
                     LabeledBlock(
@@ -1914,7 +1918,8 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val pendingFields = rememberDebouncedSettingsWrites()
     var searchEndpoint by remember { mutableStateOf(stored.searchEndpoint) }
-    var searchApiKey by remember { mutableStateOf(stored.searchApiKey) }
+    // 输入框里必须是明文（issue #58 #4）：持久化形态是 `enc1:` 密文。
+    var searchApiKey by remember { mutableStateOf(SecretBox.decrypt(stored.searchApiKey)) }
     var endpointEdited by remember { mutableStateOf(false) }
     var keyEdited by remember { mutableStateOf(false) }
     // 语音转写模型原来逐击键 `persist{}`：一个字符一次「整份 JSON 编码 + Keystore 加密 +
@@ -1926,7 +1931,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
         // Seed from the first real repository emission, without a delayed disk echo
         // replacing characters typed after an earlier debounced batch was dispatched.
         if (!endpointEdited) searchEndpoint = stored.searchEndpoint
-        if (!keyEdited) searchApiKey = stored.searchApiKey
+        if (!keyEdited) searchApiKey = SecretBox.decrypt(stored.searchApiKey)
         if (!asrModelEdited) asrModelText = stored.asrModel
     }
 

@@ -300,9 +300,40 @@ class LlmClient(http: OkHttpClient? = null) {
      * Endpoints on the LAN usually carry a self-signed certificate, which Android
      * rejects outright with `Trust anchor for certification path not found`.
      * `allowInsecureTls` opts those endpoints into the relaxed client.
+     *
+     * **只对局域网/本机主机生效**（issue #58 #7）：宽松客户端信任任意证书与任意主机名，
+     * 一旦对一个公网地址打开，等于把 API Key 交给任何能劫持 DNS/网关的一方。所以这里按
+     * 主机地址再判一次 —— 用户勾了开关也只在「自己网络里」的那个地址上放宽。
      */
-    private fun clientFor(settings: AppSettings): OkHttpClient =
-        if (settings.allowInsecureTls) relaxedHttp else defaultHttp
+    private fun clientFor(settings: AppSettings): OkHttpClient {
+        if (!settings.allowInsecureTls) return defaultHttp
+        val host = runCatching { java.net.URI(settings.baseUrl.trim()).host.orEmpty() }.getOrDefault("")
+        if (isLanHost(host)) return relaxedHttp
+        android.util.Log.w(
+            "LlmClient",
+            "allowInsecureTls 只对局域网/本机地址生效，$host 走严格校验",
+        )
+        return defaultHttp
+    }
+
+    /**
+     * 这个主机是不是「用户自己的网络里」：本机名、回环、RFC1918 私有段、链路本地、mDNS。
+     *
+     * 认不出来的（域名、公网 IP）一律按公网处理 —— 宁可让自签证书连不上、用户改回 http，
+     * 也不要在公网地址上关闭证书校验。
+     */
+    internal fun isLanHost(host: String): Boolean {
+        if (host.isEmpty()) return true // 相对地址/解析失败：交给默认客户端，这里不算放宽依据
+        val h = host.trim().lowercase().removePrefix("[").removeSuffix("]")
+        if (h == "localhost" || h.endsWith(".local") || h == "::1") return true
+        if (h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.")) return true
+        if (h.startsWith("169.254.")) return true
+        if (h.startsWith("172.")) {
+            val second = h.split('.').getOrNull(1)?.toIntOrNull() ?: return false
+            return second in 16..31
+        }
+        return false
+    }
 
     /**
      * Ask the endpoint which models it serves (`GET {base}/models`).
@@ -324,7 +355,7 @@ class LlmClient(http: OkHttpClient? = null) {
                 }
             }
             // 自定义头同样要带（高级参数）：网关若靠特殊头鉴权，/models 不带就是 401。
-            .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
+            .apply { settings.plainRequestHeaders().forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
             .build()
         clientFor(settings).newCall(request).readCancellable { response ->
@@ -352,7 +383,7 @@ class LlmClient(http: OkHttpClient? = null) {
                     header("Authorization", "Bearer $key")
                 }
             }
-            .apply { settings.requestHeaders.forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
+            .apply { settings.plainRequestHeaders().forEach { (n, v) -> if (n.isNotBlank()) header(n, v) } }
             .get()
             .build()
         clientFor(settings).newCall(request).readCancellable { response ->
@@ -399,7 +430,7 @@ class LlmClient(http: OkHttpClient? = null) {
             .header("Accept", "text/event-stream")
             .apply { authHeaders(this, settings, protocol) }
         // 自定义请求头最后加（设置→高级参数）：同名时用户的值赢过上面的默认头。
-        settings.requestHeaders.forEach { (name, value) ->
+        settings.plainRequestHeaders().forEach { (name, value) ->
             if (name.isNotBlank()) builder.header(name, value)
         }
         val request = builder
@@ -436,12 +467,26 @@ class LlmClient(http: OkHttpClient? = null) {
                         // 证伪后仍不知真因）：非 2xx 时把**完整请求体**与响应体落盘，下次复现拉文件
                         // 就能对着真 payload 找差异。截断到 2MB 防撑爆私有目录；只留最近一次。
                         val errBody = body?.string().orEmpty()
+                        // **默认只落可公开的元数据**（issue #58 #5）：完整 `request` 里有会话正文、
+                        // 工具输出、截图 base64；`response` 里有网关回灌的请求摘要。原来两者无条件
+                        // 落盘，等于把用户内容写进了诊断文件，还会被云备份带走。
+                        // 需要真 payload 时，在 `files/` 下放一个空文件 `http-dump-full`
+                        // 即打开完整转储（临时诊断用，排除在备份之外、可随时删除）。
                         runCatching {
                             val app = com.suixing.agent.core.Core.appContext
+                            val fullDump = java.io.File(app.filesDir, "http-dump-full").exists()
                             val dump = buildJsonObject {
                                 put("code", JsonPrimitive(response.code))
-                                put("response", JsonPrimitive(errBody.take(8_000)))
-                                put("request", JsonPrimitive(payloadText.take(2_000_000)))
+                                put("at", JsonPrimitive(System.currentTimeMillis()))
+                                put("model", JsonPrimitive(settings.model))
+                                put("requestChars", JsonPrimitive(payloadText.length))
+                                put("responseChars", JsonPrimitive(errBody.length))
+                                // 摘要：只留状态行，不含请求/响应正文。
+                                put("responseHead", JsonPrimitive(errBody.take(200).replace('\n', ' ')))
+                                if (fullDump) {
+                                    put("response", JsonPrimitive(errBody.take(8_000)))
+                                    put("request", JsonPrimitive(payloadText.take(2_000_000)))
+                                }
                             }
                             java.io.File(app.filesDir, "last-http-error.json").writeText(dump.toString())
                         }
@@ -1352,6 +1397,14 @@ class LlmClient(http: OkHttpClient? = null) {
      * 解不开（换机 / 密钥失效）时 [SecretBox.decrypt] 返回空串 ⇒ 当作「没填」。
      */
     private fun AppSettings.plainApiKey(): String = SecretBox.decrypt(apiKey)
+
+    /**
+     * 自定义请求头同样落盘加密（issue #58 #4），所以发请求前要在**这里**解密：
+     * `settings` 是持久化形态，直接 `header(n, v)` 会把 `enc1:…` 密文发出去。
+     * 头名不加密（不是秘密，且要能检索），只解值。
+     */
+    private fun AppSettings.plainRequestHeaders(): Map<String, String> =
+        requestHeaders.mapValues { (_, value) -> SecretBox.decrypt(value) }
 
     private fun modelsEndpoint(baseUrl: String, protocol: String = PROTOCOL_OPENAI): String {
         val trimmed = baseUrl.trim().trimEnd('/')
