@@ -17,6 +17,12 @@ class SuixingApplication : Application() {
         // 老文件里的 API Key 是**明文**躺在 settings_json 里的：启动时一次性换成 Keystore
         // 密文（顺带把明文从文件里抹掉）。之后每次落盘都自动加密（见 SettingsRepository）。
         Core.appScope.launch { Core.settings.migrateSecrets() }
+        // **诊断残留过期清理**（issue #58）：`last-http-error.json` 只在出错时覆盖写，
+        // 没有下一次错误就会一直留在私有目录里（含模型名与时间）。完整转储开关已限制 15 分钟，
+        // 文件本身也按同一窗口过期。只认这两个固定名字，绝不碰会话与工具输出。
+        Core.appScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { com.suixing.agent.llm.expireDiagnosticFiles(filesDir) }
+        }
         // **会话落盘自愈**（0.8.308）：0.8.307 那版误把会话写进了新格式（`chats/store/`），
         // 并把旧文件改名成 `<id>.json.migrated` ⇒ 对旧版本不可见、导出与文件详情也读不到。
         // 这里在启动后（不是 load() 的锁内）做一次性修复：能改名的改名回来、只有新格式副本的

@@ -64,8 +64,23 @@ class ChatRepository(
      * 结果是 manifest 继续指向旧 payload，进程重启后恢复出过时内容。
      * WeakReference 已被 GC 时保守重写；不得用 hash-only 或引用相等代替。
      */
-    private fun DraftMessages.sameContentAs(runId: String, messages: List<StoredMessage>): Boolean =
-        this.runId == runId && sameSavedDraftMessages(this.messages.get(), messages)
+    private fun DraftMessages.sameContentAs(runId: String, messages: List<StoredMessage>): Boolean {
+        if (this.runId != runId) return false
+        // 弱引用被 GC 后**不能直接判"不同"**：那会让每一拍都重写一份几百 KB 的 payload
+        // （磁盘 IO + 耗电），表现出来就是「同一份草稿每次保存都换文件名」。
+        // 也**不能**改成强引用常驻：16 个会话 × 工具输出会把 MB 级列表钉在内存里。
+        // 正确的兜底是拿磁盘上那份**精确比对** —— 它才是恢复时真正会被读到的东西。
+        val saved = this.messages.get() ?: readSavedPayload(name) ?: return false
+        return saved == messages
+    }
+
+    /** 读回已落盘的恢复副本；损坏或不存在都返回 null（调用方按"不同"处理，保守重写）。 */
+    private fun readSavedPayload(name: String): List<StoredMessage>? = runCatching {
+        json.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()),
+            File(dir, name).readText(),
+        )
+    }.getOrNull()
 
     private val draftMessages = object : LinkedHashMap<String, DraftMessages>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DraftMessages>?): Boolean = size > 16
