@@ -123,27 +123,10 @@ class MemoryStore(private val context: Context) {
             }
         }
         return runCatching {
-            file.parentFile?.mkdirs()
-            // Write-then-rename, so a kill mid-save cannot leave a half-written file
-            // that [read] would quarantine — the old notes survive instead.
-            val temp = File(file.parentFile, "${file.name}.tmp")
-            val text = json.toString()
-            java.io.FileOutputStream(temp).use { out ->
-                out.write(text.toByteArray(Charsets.UTF_8))
-                out.fd.sync()
-            }
-            if (!temp.renameTo(file)) {
-                // renameTo reports failure by returning false, so fall back to a direct
-                // write; its exception has to stay visible rather than lose the note.
-                try {
-                    java.io.FileOutputStream(file).use { out ->
-                        out.write(text.toByteArray(Charsets.UTF_8))
-                        out.fd.sync()
-                    }
-                } finally {
-                    temp.delete()
-                }
-            }
+            // 公共原子写（issue #69 P1-B）：写 .tmp → fsync → 原子替换。
+            // 旧实现在 rename 失败时回退成「原地覆盖」，那会在写失败时毁掉旧笔记；
+            // 现在失败即抛，由外层 runCatching 报 false，旧文件保持不动。
+            com.suixing.agent.core.AtomicFiles.writeText(file, json.toString())
         }.isSuccess
     }
 

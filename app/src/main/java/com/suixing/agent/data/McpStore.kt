@@ -75,17 +75,7 @@ class McpStore(private val context: Context) {
         }
         val bytes = json.encodeToString(ListSerializer(McpServerConfig.serializer()), stored)
             .toByteArray(Charsets.UTF_8)
-        file.parentFile?.mkdirs()
-        val temp = File(file.parentFile, "${file.name}.tmp")
-        try {
-            java.io.FileOutputStream(temp).use { out ->
-                out.write(bytes)
-                out.fd.sync()
-            }
-            // Never overwrite the previous file in place when rename fails.
-            if (!temp.renameTo(file)) throw java.io.IOException("无法原子保存 MCP 配置")
-        } finally {
-            temp.delete()
-        }
+        // 公共原子写（issue #69 P1-B）：语义与原实现一致（失败不原地覆盖），少一份重复代码。
+        com.suixing.agent.core.AtomicFiles.writeBytes(file, bytes)
     }
 }
