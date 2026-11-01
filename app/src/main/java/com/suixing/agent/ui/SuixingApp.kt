@@ -29,7 +29,6 @@ import androidx.compose.material3.MaterialTheme
 import com.suixing.agent.ui.drawer.SuixingDrawer
 import com.suixing.agent.ui.drawer.rememberSuixingDrawerState
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.CompositionLocalProvider
@@ -271,7 +270,7 @@ fun SuixingApp() {
     val routeNow by androidx.compose.runtime.rememberUpdatedState(route)
     val open: (String) -> Unit = remember(navController) { { target ->
         // **不关抽屉**（用户：「不用关掉侧边栏」「新页不应该在页面都最上面移动的吗？」）：
-        // 覆盖层现在画在 ModalNavigationDrawer 之上（见下面 Scaffold/Box 那段），所以新页是
+        // 覆盖层现在画在自建抽屉宿主之上（见下面 Scaffold/Box 那段），所以新页是
         // 压着抽屉滑进来的，抽屉保持打开、原样留在下面 —— 返回时揭开的就是它，状态天然保留。
         if (target != routeNow) {
             // drawerOrigin[0] 只用来决定"返回时要不要播动画"（见 popExitTransition）：从抽屉点进的
@@ -397,7 +396,7 @@ fun SuixingApp() {
         LocalDrawerBusy provides drawerBusyState,
         // 用户自己拉开抽屉（聊天页那个汉堡键，也是全仓唯一的正常开抽屉路径）：演库自己那
         // 一段滑入——用户反对的从来是「返回时把它重放一遍」，不是手动打开时的动画。
-        // 只在会话页可用（抽屉只属于会话页，见 ModalNavigationDrawer）：子页没有汉堡入口，
+        // 只在会话页可用（抽屉只属于会话页，见 SuixingDrawer）：子页没有汉堡入口，
         // 这一层判断是防止以后有人把汉堡画到子页上时它还能把抽屉拉出来。
         LocalOpenSidebar provides openSidebar,
         // The clamped keyboard height, for children that have to subtract it from an inset of
@@ -447,13 +446,13 @@ fun SuixingApp() {
                 ),
         ) {
             // **抽屉在下、覆盖层在上**（用户：「新页不应该在页面都最上面移动的吗？」）：
-            // 覆盖层的 NavHost 必须画在 ModalNavigationDrawer 之上，否则从抽屉点进新页时，
+            // 覆盖层的 NavHost 必须画在自建抽屉宿主之上，否则从抽屉点进新页时，
             // 页面只能在抽屉面板**下面**滑入 —— 用户看到的还是抽屉。现在抽屉不再关（见 open()），
             // 新页从右侧滑进来时压着它，滑完就把抽屉盖住；返回时揭开的就是那份仍开着的抽屉。
             Scaffold(
                 // **外壳不再按 IME 上缩**（用户：「侧边栏还是被顶起来」）：
                 // 这里原来是 `Modifier.padding(bottom = heldImePx)`，它把整个外壳 ——
-                // 包括 ModalNavigationDrawer 的抽屉面板 —— 一起顶上去，抽屉就被键盘挤短了。
+                // 包括抽屉面板 —— 一起顶上去，抽屉就被键盘挤短了。
                 // 现在键盘让位只作用在**聊天内容**上（见下面 ChatScreen 外层），
                 // 抽屉保持整屏高度。
                 // **底色不在这里铺**（见下面 Box 里那条背景）：0.8.229 把外壳改成整屏之后，
@@ -583,7 +582,7 @@ fun SuixingApp() {
             ) {
                 // 放在 content 里而不是 drawerContent 里，是为了让它位于主页**之下**。
                 // **主页面"浮起"层**（用户：「deepseek 的主页面相当于浮起右移的，而且有点缩放，
-                // 有层次」）。`ModalNavigationDrawer` 自己**完全不动 content**（它是覆盖式），
+                // 有层次」）。自建宿主是**覆盖式**的：它自己完全不动 content，
                 // 所以位移/缩放/圆角/阴影全部由我们在这里做。
                 //
                 // 进度来自公开的 `drawerState.offset`（面板 x 位置）：关闭 ≈ −面板宽、打开 = 0。
@@ -718,7 +717,7 @@ fun SuixingApp() {
                                 // 打到输入框、消息行、麦克风上。这一层只在真有覆盖层时才加（route
                                 // 是 "empty" 时一个 pointerInput 节点都不加，否则 chat 自己也收不到
                                 // 触摸），它把落在空白处的**点**吃掉。
-                                // 只吃"点"：拖动不消费，左缘拖出抽屉仍归 ModalNavigationDrawer；
+                                // 只吃"点"：拖动不消费，左缘拖出抽屉仍归抽屉宿主的水平拖拽；
                                 // 而它一旦被命中，下面的 chat 就整个不在命中路径里，滚动也透不过去。
                                 .then(
                                     if (route == "empty") {
@@ -855,7 +854,7 @@ fun SuixingApp() {
                                 )
                             }
                         }
-                        // 抽屉开着时 BACK 先关抽屉：ModalNavigationDrawer 只接管预测性返回的手势，
+                        // 抽屉开着时 BACK 先关抽屉：而系统返回手势不会替我们关，
                         // 普通 BACK 会交给 Activity，不收这一句就会退出应用。位置必须在 NavHost
                         // **之后**：OnBackPressedDispatcher 是后注册者优先（LIFO），注册在 NavHost
                         // 之前时，覆盖层页上按 BACK 会先被 NavHost 的回调 pop 掉、抽屉反而留着——
