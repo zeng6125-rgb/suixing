@@ -211,6 +211,10 @@ private const val CHANNEL_ID = "Suixing_console"
     private lateinit var liveText: TextView
     private lateinit var statsText: TextView
     private lateinit var conversationText: TextView
+    /** 尾部读取闸门与最近一次结果（issue #69 P1-A）：同内容重复发射不再读盘。 */
+    private val tailGate = TailReadGate()
+    private var tailCache: List<com.suixing.agent.data.StoredMessage> = emptyList()
+
     private lateinit var recentText: TextView
 
     /** 会话内容的可滚容器：手柄纵向拖动改的就是它的高度（用户拖高＝多看内容）。 */
@@ -1237,7 +1241,13 @@ private const val CHANNEL_ID = "Suixing_console"
         // 所以这里只在后台线程取；renderConversation 由 UI 线程调用，改为 post 一次。
         // 只取尾部几条就够回显；`readTail` 给的是「最近 N 轮」，比全文小一个数量级。
         val recentMessages = conversation.messages.ifEmpty {
-            runCatching { Core.chats.readTail(conversation.id)?.messages }.getOrNull().orEmpty()
+            // **同键不重读**（issue #69 P1-A）：列表会因标题/其它会话的新消息而频繁发射，
+            // 那些都与本会话正文无关。只有会话/条数/更新时间变了才读一次尾部。
+            if (tailGate.shouldRead(conversation)) {
+                tailCache = runCatching { Core.chats.readTail(conversation.id)?.messages }
+                    .getOrNull().orEmpty()
+            }
+            tailCache
         }
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         if (revision != conversationRenderRevision) return
