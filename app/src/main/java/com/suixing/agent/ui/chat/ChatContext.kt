@@ -316,8 +316,9 @@ internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Store
         ) {
             Text(
                 text = checkpoint.summary,
-                style = MaterialTheme.typography.bodySmall,
-                color = scheme.onSurface,
+                // 同 CompressionBlock：压缩摘要按思考链的样式与颜色渲染
+                style = thinkingStyle(),
+                color = scheme.onSurfaceVariant,
             )
         }
         Text(

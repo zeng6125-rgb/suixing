@@ -164,9 +164,12 @@ internal const val PROCESS_EXPAND_MS = 220
 internal fun revealDurationMsForHeight(heightDp: Float): Int {
     val height = heightDp.coerceAtLeast(0f)
     return when {
-        height <= 160f -> interpolateDurationMs(150, 190, height / 160f)
-        height <= 480f -> interpolateDurationMs(190, 420, (height - 160f) / 320f)
-        height <= 1200f -> interpolateDurationMs(420, 680, (height - 480f) / 720f)
+        // 短块区间从 160dp 拉到 200dp：用户反馈"短的大总结条还是慢了一点点"，
+        // 而 240–320dp 正落在原来爬坡最陡的那一段。
+        height <= 200f -> interpolateDurationMs(150, 190, height / 200f)
+        // 中块终点 420 → 360ms：320dp 处 305 → 275ms，480dp 处 420 → 360ms。
+        height <= 480f -> interpolateDurationMs(190, 360, (height - 200f) / 280f)
+        height <= 1200f -> interpolateDurationMs(360, 680, (height - 480f) / 720f)
         else -> 680
     }
 }
@@ -588,8 +591,9 @@ internal fun CompressionBlock(
         ) {
             Text(
                 text = checkpoint.summary,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface,
+                // 与思考链正文同口径（用户：压缩摘要的正文颜色要和思考链对齐）
+                style = thinkingStyle(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

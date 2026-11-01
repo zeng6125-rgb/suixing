@@ -18,11 +18,13 @@ class RevealDurationTest {
     @Test
     fun expansionUsesTheSpecifiedDpSegments() {
         assertEquals(150, revealDurationMsForHeight(0f))
-        assertEquals(170, revealDurationMsForHeight(80f))
-        assertEquals(190, revealDurationMsForHeight(160f))
-        assertEquals(305, revealDurationMsForHeight(320f))
-        assertEquals(420, revealDurationMsForHeight(480f))
-        assertEquals(550, revealDurationMsForHeight(840f))
+        // 短块区间 0–200dp（原 0–160dp）：240–320dp 那一段是用户觉得"慢了一点点"的地方
+        assertEquals(166, revealDurationMsForHeight(80f))
+        assertEquals(182, revealDurationMsForHeight(160f))
+        assertEquals(190, revealDurationMsForHeight(200f))
+        assertEquals(263, revealDurationMsForHeight(320f))
+        assertEquals(360, revealDurationMsForHeight(480f))
+        assertEquals(547, revealDurationMsForHeight(900f))
         assertEquals(680, revealDurationMsForHeight(1200f))
         assertEquals(680, revealDurationMsForHeight(1600f))
     }
