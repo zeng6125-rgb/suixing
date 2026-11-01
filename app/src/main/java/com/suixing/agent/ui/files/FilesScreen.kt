@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.files
 
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import com.suixing.agent.ui.components.SettingsStyle
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -135,6 +137,8 @@ fun FilesScreen(onBack: () -> Unit) {
     // 预览读取是异步的，连点两个文件会起两个协程；只认最后一次点击，否则先点的那次
     // 晚回来会把弹窗改成不是用户最后选的文件。
     var previewRequest by remember { mutableIntStateOf(0) }
+    // **唯一预览 Job**（issue #68 P1-A）：新的预览先取消前一次，页面离开时一并取消。
+    var previewJob by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
 
     // Directory listing and per-entry sizes are disk IO, so they run off the main
@@ -346,14 +350,24 @@ fun FilesScreen(onBack: () -> Unit) {
             ) { entry ->
                 EntryRow(entry) {
                     if (entry.isDirectory) {
+                        // 换目录：旧预览的结果不再有意义，取消在途读取
+                        previewJob?.cancel()
+                        previewJob = null
+                        loading = false
                         current = entry.file
                     } else {
                         val mine = ++previewRequest
-                        scope.launch {
+                        // 连点 A/B/A：只有最后一次显示，且 loading 只会被**当前**请求清掉
+                        // （原来后到的旧请求会把 loading 提前置 false）。
+                        previewJob?.cancel()
+                        previewJob = scope.launch {
                             loading = true
-                            val text = withContext(Dispatchers.IO) { readPreview(entry.file) }
-                            if (mine == previewRequest) preview = entry to text
-                            loading = false
+                            try {
+                                val text = withContext(Dispatchers.IO) { readPreview(entry.file) }
+                                if (mine == previewRequest && isActive) preview = entry to text
+                            } finally {
+                                if (mine == previewRequest) loading = false
+                            }
                         }
                     }
                 }
@@ -368,7 +382,12 @@ fun FilesScreen(onBack: () -> Unit) {
             // 大小是列目录时算好的那一份：弹窗里再问一次 `File.length()` 又是一次主线程 stat。
             size = entry.size,
             content = content,
-            onDismiss = { preview = null },
+            onDismiss = {
+                previewJob?.cancel()
+                previewJob = null
+                loading = false
+                preview = null
+            },
             // 复制按钮不关弹窗，而 notice 渲染在弹窗下面的页面里，此刻看不见；
             // 所以失败必须用 Toast 当场告诉用户，notice 只是关窗后还留着的痕迹。
             onCopy = {
