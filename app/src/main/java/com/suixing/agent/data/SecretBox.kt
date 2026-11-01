@@ -79,6 +79,13 @@ internal object SecretBox {
     }
 
     /**
+     * Saving a secret must fail the entire transaction if Keystore is unavailable.
+     * Never silently replace an existing secret with an empty value.
+     */
+    fun requireEncrypted(plain: String): String =
+        encrypt(plain) ?: throw IllegalStateException("安全存储暂不可用，配置未保存")
+
+    /**
      * 落盘的字符串 → 明文。不是密文就原样返回（旧文件里的明文 ✓）。
      *
      * **解不开就当作「没填」**：换机（密钥没跟过来）、密钥被系统作废（改了锁屏方式）、
