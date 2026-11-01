@@ -138,16 +138,9 @@ class ScheduleStore(private val file: File) {
         file.parentFile?.mkdirs()
         // Temp file then rename, as in ChatRepository: a kill mid-write would otherwise leave
         // a truncated board, and a truncated board reads back as "no reminders at all".
-        val text = json.encodeToString(items)
-        val temp = File(file.parentFile, "${file.name}.tmp")
-        temp.writeText(text)
-        if (!temp.renameTo(file)) {
-            try {
-                file.writeText(text)
-            } finally {
-                temp.delete()
-            }
-        }
+        // 公共原子写（issue #69 P1-B）：写 .tmp → fsync → 原子替换；失败就抛，
+        // 不再"rename 失败就原地覆盖"（那会在写失败时毁掉旧文件）。
+        com.suixing.agent.core.AtomicFiles.writeText(file, json.encodeToString(items))
         items.toList().also { snapshot = it }
     }
 

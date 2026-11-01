@@ -111,12 +111,8 @@ internal class DrawerOrderStore(context: Context) {
                 DrawerOrderDto.serializer(),
                 DrawerOrderDto(pinned = order.pinned, normal = order.normal),
             )
-            // 先写临时文件再改名：中途被杀不会留下半行 JSON（那会让下次读取直接判失败）。
-            tempFile.writeText(payload)
-            if (!tempFile.renameTo(file)) {
-                file.writeText(payload)
-                tempFile.delete()
-            }
+            // 公共原子写（issue #69 P1-B）：中途被杀不会留下半行 JSON。
+            com.suixing.agent.core.AtomicFiles.writeText(file, payload)
         }
         Unit
     }
