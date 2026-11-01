@@ -110,10 +110,10 @@ val INLINE_ICON_RIPPLE = 16.dp
  * 内联图标动作：文本行里 26dp 的小图标按钮。
  *
  * 形态：26dp 热区盒 + 15dp 字形，字形贴盒左（`CenterStart`，整排图标的对齐约定），
- * 点击与涟漪都挂在**字形节点**上 —— 涟漪起点用"发事件节点"的坐标系，跨节点必偏
- * 5.5dp（盒心 13dp vs 字形中心 7.5dp）；`bounded = false` + `radius = 16.dp` 画出
- * 32dp 的圆且不被节点矩形裁成方块；不加 `clip`（15dp 圆会切掉方形字形四角）。
- * 这三条是 0.8.600→0.8.609 逐版实测收敛的结果，动任何一条都会复发。
+ * 点击语义与热区挂在外层 **26dp 盒**（旧代码只让 15dp 字形可点）；
+ * 字形仍为 15dp，保持 CenterStart 对齐和 16dp 无界圆形反馈。
+ * 这种紧凑布局并不是 48dp 无障碍热区：相邻操作会重叠，应通过
+ * 独立的大尺寸操作菜单处理（issue #60 后续 PR），不能冒充全部解决。
  *
  * 禁用态：字形降到 35% 透明度（与 [com.suixing.agent.ui.chat.BranchArrow] 原行为一致）。
  *
@@ -132,21 +132,23 @@ fun InlineIconAction(
     boxWidth: Dp = INLINE_ICON_BOX,
 ) {
     Box(
-        modifier = modifier.size(boxWidth),
+        modifier = modifier
+            .size(boxWidth)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(bounded = false, radius = INLINE_ICON_RIPPLE),
+                enabled = enabled,
+                role = Role.Button,
+                onClickLabel = label,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.CenterStart,
     ) {
         Icon(
             imageVector = icon,
-            contentDescription = label,
+            contentDescription = null, // The parent supplies the single button semantics.
             tint = if (enabled) tint else tint.copy(alpha = 0.35f),
-            modifier = Modifier
-                .size(INLINE_ICON_GLYPH)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = ripple(bounded = false, radius = INLINE_ICON_RIPPLE),
-                    enabled = enabled,
-                    onClick = onClick,
-                ),
+            modifier = Modifier.size(INLINE_ICON_GLYPH),
         )
     }
 }
