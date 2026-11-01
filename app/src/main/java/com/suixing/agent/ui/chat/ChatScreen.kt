@@ -2162,7 +2162,7 @@ private fun CheckpointUnderRow(
             modifier = Modifier
                 .widthIn(max = maxWidth)
                 .fillMaxWidth()
-                .padding(horizontal = if (cardMode) 16.dp else flatPad),
+                .padding(horizontal = checkpointInsetDp(cardMode, flatPad.value).dp),
         )
     }
 }

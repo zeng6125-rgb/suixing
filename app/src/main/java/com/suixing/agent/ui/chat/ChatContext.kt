@@ -959,3 +959,16 @@ internal fun ContextBreakdownRow(label: String, value: Int, total: Int, tone: Co
         }
     }
 }
+
+/**
+ * 折叠类卡片（压缩卡）与助手卡对齐时需要的**左右内缩**。
+ *
+ * 与 `AssistantRow` 同一套口径：
+ * - **卡片模式**：卡片自己的 16dp 内边距（列表另有 16dp contentPadding）；
+ * - **扁平模式**：用「设置 → 外观」里的左右留白 `flatPad`。
+ *
+ * 抽成纯函数是为了可测：宽度这条用户已经反复提过三次，每次都是"看起来差几 dp"，
+ * 而这几个数字此前没有任何单元测试保护。
+ */
+internal fun checkpointInsetDp(cardMode: Boolean, flatPad: Float): Float =
+    if (cardMode) 16f else flatPad.coerceAtLeast(0f)
