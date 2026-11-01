@@ -100,7 +100,8 @@ private const val CHANNEL_ID = "Suixing_console"
          * The ball's one colour: a flat brand green in both themes, because the icon on it is
          * white in both. It used to be a two-stop gradient plus a 6dp elevation.
          */
-        private const val BALL_COLOR = 0xFF1F6B4C.toInt()
+        /** 与启动图标同一颗球：深翡翠 `#126341`（原来用的是更浅的 `#1F6B4C`）。 */
+        private const val BALL_COLOR = 0xFF126341.toInt()
         private const val STATUS_RUNNING = 0xFF5FD8A0.toInt()
         private const val STATUS_IDLE = 0xFF9AA5A0.toInt()
 
@@ -700,11 +701,10 @@ private const val CHANNEL_ID = "Suixing_console"
         }
         ball.addView(
             ImageView(this).apply {
-                // A dedicated vector, not the launcher's foreground: that one is drawn on a 108dp
-                // canvas with the art inside its safe zone, so at this size its ink came out about
-                // 12×18dp in a 30dp box — small, and soft from the downscale. This one is framed
-                // for the box it is drawn in. The white tint stays: the disc is the brand gradient.
-                setImageResource(R.drawable.ic_console_feather)
+                // 与桌面图标同一张脸（两只眼）。原来这里挂的是白羽，图标换成球体之后
+                // 悬浮球仍是羽毛，两套品牌并存。专用矢量而不是直接放图标位图：位图在这个
+                // 24dp 盒子里要重采样，边缘会软；矢量的胶囊在任何密度都是硬的。
+                setImageResource(R.drawable.ic_console_eyes)
                 setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
                 layoutParams = FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER)
             },

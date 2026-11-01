@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  悬浮球上的品牌标记：**两只不等的眼睛**，与桌面图标 / `SuixingMark` 同一套几何
+  （左 0.162r / −26°、右 0.104r / −25°，长均 0.376r，位置 (0.189r,−0.429r) 与 (0.607r,−0.508r)）。
+
+  原来是白羽 —— 图标改成球体脸之后，悬浮球还挂着一根羽毛就成了两套品牌。
+  胶囊用「两个圆 + 中间矩形」三个子路径拼出来：VectorDrawable 没有 rect/circle 原语，
+  而同色子路径叠加与并集等价，不必引入 clip 或 group 旋转。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13.859,8.006 a0.972,0.972 0 1 0 1.944,0 a0.972,0.972 0 1 0 -1.944,0 Z M12.733,5.698 a0.972,0.972 0 1 0 1.944,0 a0.972,0.972 0 1 0 -1.944,0 Z M13.957,8.432 L12.832,6.124 L14.579,5.272 L15.704,7.580 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M19.350,7.383 a0.624,0.624 0 1 0 1.248,0 a0.624,0.624 0 1 0 -1.248,0 Z M17.970,4.425 a0.624,0.624 0 1 0 1.248,0 a0.624,0.624 0 1 0 -1.248,0 Z M19.408,7.647 L18.029,4.689 L19.160,4.161 L20.539,7.119 Z" />
+</vector>
