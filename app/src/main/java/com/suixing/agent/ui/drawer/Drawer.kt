@@ -215,6 +215,9 @@ internal fun Drawer(
     val draggingState = remember { mutableStateOf<String?>(null) }
     val dragPreview = remember { mutableStateOf<DrawerSections?>(null) }
     val dragTracker = remember { DrawerDragTracker() }
+    // 拖动时最后一次命中的目标行 key（issue #59 B3）：同一目标连续 move 不重算预览，
+    // 也就不用每帧复制一遍列表。用普通数组持有，避免写 State 触发重组。
+    val lastDragTarget = remember { arrayOfNulls<String>(1) }
     val listState = rememberLazyListState()
     // 每行上次看到的 updatedAt：数值变大 = 那条会话来了新消息 ⇒ 把它从普通表里摘掉，
     // 它就按 updatedAt 冒回普通区顶部（用户：「新会话照常出现在普通会话上面」）。
@@ -453,6 +456,7 @@ internal fun Drawer(
                                     if (row != null) {
                                         draggingState.value = conversation.id
                                         dragPreview.value = sectionsNow.value
+                                        lastDragTarget[0] = null
                                         dragTracker.pointerY = row.offset + row.size / 2f
                                     }
                                 },
@@ -467,7 +471,12 @@ internal fun Drawer(
                                                     dragTracker.pointerY <= it.offset + it.size
                                             }
                                             ?.key as? String
-                                        if (hit != null) {
+                                        // **只在跨行时重算预览**（issue #59 B3）：`onDrag` 在拖动期间
+                                        // 每帧都跑，而 `previewDrawerReorder` 里是两次线性查找 +
+                                        // `toMutableList()` 复制；命中的目标没变时，这份复制完全是白做。
+                                        // 目标行变化、拖动开始、外部列表变化时才需要重算。
+                                        if (hit != null && hit != lastDragTarget[0]) {
+                                            lastDragTarget[0] = hit
                                             val reordered = previewDrawerReorder(
                                                 sections = dragPreview.value ?: sectionsNow.value,
                                                 dragging = dragging,
@@ -478,6 +487,7 @@ internal fun Drawer(
                                     }
                                 },
                                 onDragEnd = {
+                                    lastDragTarget[0] = null
                                     if (draggingState.value != null) dragPreview.value?.let { preview ->
                                         orderState.value = DrawerOrder(
                                             pinned = preview.pinned.map { it.id },
