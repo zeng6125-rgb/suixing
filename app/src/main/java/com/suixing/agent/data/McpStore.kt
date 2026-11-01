@@ -70,11 +70,12 @@ class McpStore(private val context: Context) {
         // Temp file then rename, as in the other stores: a kill mid-write would leave a
         // truncated file, and a truncated file reads back as "no servers at all".
         val stored = configs.map {
-            // 加密不可用时**保留原值**：MCP 的 env/headers 是用户手填的配置，
-            // 静默清空等于丢配置。主 API Key 走的是另一条更严的路径（写空、要求重填）。
+            // 加密不可用时**写空**，不写明文（issue #58 #3 的同一条约束）：
+            // 这里是 Token 常驻的地方，留明文等于把凭据摊在 `mcp.json` 里。
+            // 代价是这台设备上要重填一次；SecretBox 会记一条警告。
             it.copy(
-                env = SecretBox.encrypt(it.env) ?: it.env,
-                headers = SecretBox.encrypt(it.headers) ?: it.headers,
+                env = SecretBox.encrypt(it.env) ?: "",
+                headers = SecretBox.encrypt(it.headers) ?: "",
             )
         }
         val text = json.encodeToString(ListSerializer(McpServerConfig.serializer()), stored)

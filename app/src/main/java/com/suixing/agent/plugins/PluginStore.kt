@@ -226,8 +226,8 @@ class PluginStore(private val baseDir: File) {
         if (value.isEmpty()) map.remove(name) else map[name] = value
         // **0600 文件权限不等于加密**（issue #58 #4）：root/ADB 一样能读出来，这里把值也加密。
         // 文件名与变量名保持明文（要能检索/展示），只加密值。
-        // 同 MCP：加密不可用时保留原值，不静默清空用户填的变量。
-        val stored = map.mapValues { (_, secret) -> SecretBox.encrypt(secret) ?: secret }
+        // 同 MCP：加密不可用时写空，绝不把插件凭据明文落盘（issue #58 #3）。
+        val stored = map.mapValues { (_, secret) -> SecretBox.encrypt(secret) ?: "" }
         file.writeText(PluginJson.encodeToString(stored))
         runCatching { Os.chmod(file.absolutePath, MODE_PRIVATE_RW) }
         Unit

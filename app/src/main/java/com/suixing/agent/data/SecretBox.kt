@@ -37,19 +37,27 @@ internal object SecretBox {
     private const val GCM_TAG_BITS = 128
 
     /**
-     * 这个运行环境有没有 Android Keystore。
+     * 加解密实现。**生产固定走 Keystore**；只有单测会把它换成恒等实现。
      *
-     * JVM 单测（`testReleaseUnitTest`）里没有 Android 运行时，`KeyStore.getInstance` 直接抛
-     * `NoSuchAlgorithmException` —— 那种情况不是「加密失败」，而是**根本没有这层能力**。
-     * 两者必须分开：前者保持原有行为（明文），后者才按 issue #58 #3 拒绝落盘。
-     * 探测结果缓存，命中一次之后不再付异常构造的代价。
+     * 为什么不靠「探测平台有没有 Keystore」来决定是否落明文（issue #58 复核）：那等于让
+     * 「设备上 Keystore 坏了」和「JVM 单测」走同一条降级路径 —— 真机上加密失败也会把凭据
+     * 明文写进文件，正是这条 issue 要修的事。测试能力的问题只在测试侧解决。
      */
-    private val available: Boolean by lazy {
-        runCatching { KeyStore.getInstance("AndroidKeyStore").load(null) }.isSuccess
+    internal interface Crypto {
+        /** 加密失败返回 null —— 调用方必须**不落盘**该值。 */
+        fun encrypt(plain: String): String?
+
+        fun decrypt(stored: String): String
     }
 
-    /** 见 [available]。 */
-    fun isAvailable(): Boolean = available
+    @Volatile
+    internal var crypto: Crypto = KeystoreCrypto
+
+    /** JVM 单测用：加解密都是恒等映射，不碰 Android 运行时。 */
+    internal object IdentityCrypto : Crypto {
+        override fun encrypt(plain: String): String? = plain
+        override fun decrypt(stored: String): String = stored
+    }
 
     /** 这串值是不是密文。 */
     fun isEncrypted(value: String): Boolean = value.startsWith(PREFIX)
@@ -67,17 +75,7 @@ internal object SecretBox {
     fun encrypt(plain: String): String? {
         if (plain.isBlank()) return ""
         if (isEncrypted(plain)) return plain
-        // 平台没有 Keystore（JVM 单测）：原样保留明文，否则每个用例都会把值清空。
-        if (!available) return plain
-        return runCatching {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key())
-            val out = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
-            PREFIX + Base64.encodeToString(cipher.iv + out, Base64.NO_WRAP)
-        }.getOrElse { error ->
-            android.util.Log.w("SecretBox", "加密不可用，Key 不落盘（本次会话仍可用）", error)
-            null
-        }
+        return crypto.encrypt(plain)
     }
 
     /**
@@ -89,7 +87,23 @@ internal object SecretBox {
      */
     fun decrypt(stored: String): String {
         if (stored.isBlank() || !isEncrypted(stored)) return stored
-        return runCatching {
+        return crypto.decrypt(stored)
+    }
+
+    /** 生产实现：Android Keystore 里的 AES/GCM 密钥。 */
+    internal object KeystoreCrypto : Crypto {
+        override fun encrypt(plain: String): String? = runCatching {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key())
+            val out = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+            PREFIX + Base64.encodeToString(cipher.iv + out, Base64.NO_WRAP)
+        }.getOrElse { error ->
+            // 不落盘明文是硬约束：这里只记一条警告，由调用方把该字段写成空。
+            android.util.Log.w("SecretBox", "加密不可用，该字段不落盘（本次会话内存里仍可用）", error)
+            null
+        }
+
+        override fun decrypt(stored: String): String = runCatching {
             val raw = Base64.decode(stored.removePrefix(PREFIX), Base64.NO_WRAP)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(

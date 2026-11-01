@@ -21,6 +21,21 @@ class McpStoreTest {
     @get:Rule
     val folder = TemporaryFolder()
 
+    /**
+     * JVM 单测里没有 Android Keystore。**只在测试侧**把加解密换成恒等实现 ——
+     * 生产路径不能因为「平台没能力」就退回明文（那样真机上 Keystore 坏掉时
+     * MCP 的 token 会明文落盘，正是 issue #58 要修的事）。
+     */
+    @org.junit.Before
+    fun useIdentityCrypto() {
+        SecretBox.crypto = SecretBox.IdentityCrypto
+    }
+
+    @org.junit.After
+    fun restoreCrypto() {
+        SecretBox.crypto = SecretBox.KeystoreCrypto
+    }
+
     private fun store(): McpStore {
         val context = mockk<Context>()
         every { context.filesDir } returns folder.root

@@ -761,10 +761,9 @@ private fun AppSettings.encrypted(): AppSettings = copy(
     // 服务的 Key；`requestHeaders` 的 Value 常放 Bearer token。原来两者明文躺在
     // `preferences_pb` 里，加密只盖了 `apiKey`。头名（Key）不加密 —— 它不是秘密，
     // 而且加密后无法检索/显示。
-    // 这两个失败时**保留原值**：清空等于把用户的搜索 Key / 请求头token 悄悄弄丢，
-    // 而它们不像主 API Key 那样有「重填」的显式流程。
-    searchApiKey = SecretBox.encrypt(searchApiKey) ?: searchApiKey,
-    requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.encrypt(value) ?: value },
+    // 与主 API Key 同一条规矩：加密不可用就写空，不落明文（issue #58 #3）。
+    searchApiKey = SecretBox.encrypt(searchApiKey) ?: "",
+    requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.encrypt(value) ?: "" },
 )
 
 /**
