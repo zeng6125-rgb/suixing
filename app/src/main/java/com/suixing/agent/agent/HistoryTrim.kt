@@ -30,7 +30,8 @@ internal object HistoryTrim {
         val kept = ArrayDeque<StoredMessage>()
         var used = 0
         for (message in messages.asReversed()) {
-            val cost = estimateTokens(message)
+            // 缓存估算（issue #71 A3）：原来每次组请求都对整个历史逐字符重算。
+            val cost = TokenEstimates.of(message)
             // 最新那条永远发：`kept` 还是空的时候不受预算限制。
             if (kept.isNotEmpty() && used + cost > budget) break
             kept.addFirst(message)
