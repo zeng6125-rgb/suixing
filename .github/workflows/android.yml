@@ -67,6 +67,11 @@ jobs:
       - name: Assemble debug and release
         run: ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
 
+      # Compile instrumentation tests without an attached device; runtime PTY
+      # behavior still requires separate Android device validation (#61).
+      - name: Compile Android instrumentation tests
+        run: ./gradlew :app:assembleDebugAndroidTest --no-daemon --stacktrace
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:
