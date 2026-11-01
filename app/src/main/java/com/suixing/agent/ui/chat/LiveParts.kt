@@ -189,6 +189,18 @@ internal fun List<LivePart>.appendThinking(delta: String, segmentStart: Int): Li
 }
 
 /** 当前段里是否已有思考块（决定这一段的思考钟是续走还是重置）。 */
+/**
+ * 这一轮到目前为止的**思考全文**。
+ *
+ * 只在真正需要正文的地方调用（落盘快照、导出），不要放在每拍热路径上 —— 它会重建整串。
+ * 状态比较走 `RunSession.reasoningRevision`，不读这个（issue #57 §3）。
+ */
+internal fun List<LivePart>.thinkingText(): String = buildString {
+    for (part in this@thinkingText) {
+        if (part is LivePart.Thinking) append(part.text)
+    }
+}
+
 internal fun List<LivePart>.hasOpenThinking(segmentStart: Int): Boolean {
         val from = segmentStart.coerceIn(0, size)
         return subList(from, size).any { it is LivePart.Thinking }

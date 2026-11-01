@@ -7,8 +7,9 @@ import org.junit.Test
 
 class LiveContentTest {
     @Test fun `delta changes do not change the screen snapshot`() {
-        val first = ChatUiState(conversationId = "a", liveRunId = "r", streaming = "a", reasoning = "x")
-        val next = first.copy(streaming = "abc", reasoning = "xyz")
+        // 思考正文以修订号参与判等（issue #57 §3），这里用修订号代替原来的正文字符串。
+        val first = ChatUiState(conversationId = "a", liveRunId = "r", streaming = "a", reasoningRevision = 1)
+        val next = first.copy(streaming = "abc", reasoningRevision = 2)
         assertEquals(first.screenSnapshot(), next.screenSnapshot())
     }
 

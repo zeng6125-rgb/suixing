@@ -185,8 +185,18 @@ data class ChatUiState(
      */
     val reasoningEffort: String? = null,
     val streaming: String = "",
-    /** The thinking streamed ahead of [streaming], shown in its own block. */
-    val reasoning: String = "",
+    /**
+     * 思考正文的**修订号**，不是正文本身（issue #57 §3）。
+     *
+     * 原来这里存 `String`，每个 delta 都 `live.reasoning + delta` —— O(当前长度) 的整串复制，
+     * 16ms 一拍，长思考就是平方级分配。正文本来就在 `parts` 的 `Thinking.buffer` 里，
+     * 这里只留一个自增整数：
+     *  · 判等：整数变化 ⇒ `ChatUiState` 判不等 ⇒ 状态照常发射。**不能只靠 parts**：
+     *    缓冲是可变对象、列表引用不变，那条触发器正是当年「整屏冻结」的成因；
+     *  · 判空：`> 0` ⇔ 有过思考；
+     *  · 落盘：真正要正文时从 `parts` 取一次快照（本来就在 IO 上）。
+     */
+    val reasoningRevision: Int = 0,
     /**
      * Whether the conversation on screen has a run in flight, straight off the
      * engine's per-chat state. Runs in other conversations are none of this
@@ -312,7 +322,7 @@ private data class RunSession(
     val loadedPrefix: List<StoredMessage> = emptyList(),
     val activeRuns: Map<String, String>,
     val streaming: String = "",
-    val reasoning: String = "",
+    val reasoningRevision: Int = 0,
     val status: String = "",
     val runningTool: String? = null,
     /** When the still-open thinking block started, so its clock is its own. */
@@ -493,7 +503,7 @@ class ChatViewModel : ViewModel() {
      * state 因 equals 去重不发射，布尔天然稳定；只在开始/结束翻转时重组屏幕。
      */
     val liveActive: StateFlow<Boolean> = _state
-        .projectState { it.liveParts.isNotEmpty() || it.reasoning.isNotEmpty() }
+        .projectState { it.liveParts.isNotEmpty() || it.reasoningRevision > 0 }
 
     val conversations: StateFlow<List<Conversation>> = Core.chats.conversations
 
@@ -1284,7 +1294,7 @@ class ChatViewModel : ViewModel() {
                 reasoningEffort = live.reasoningEffort,
                 checkpoints = live.checkpoints,
                 streaming = live.streaming,
-                reasoning = live.reasoning,
+                reasoningRevision = live.reasoningRevision,
                 status = live.status,
                 runningHere = true,
                 // A conversation the screen already has is not "still opening".
@@ -1705,7 +1715,7 @@ class ChatViewModel : ViewModel() {
                 messages = it.messages + user,
                 activeRuns = it.activeRuns + (user.id to fresh),
                 streaming = "",
-                reasoning = "",
+                reasoningRevision = 0,
                 status = "正在思考中",
                 error = null,
             )
@@ -1764,7 +1774,7 @@ class ChatViewModel : ViewModel() {
             it.copy(
                 activeRuns = it.activeRuns + (question.id to fresh),
                 streaming = "",
-                reasoning = "",
+                reasoningRevision = 0,
                 status = "正在重新回答…",
                 error = null,
                 // **立刻挂上 liveRunId**（用户：「按下的时候就应该把已经输出的一轮隐藏」）：
@@ -1929,7 +1939,7 @@ class ChatViewModel : ViewModel() {
                     messages = kept,
                     activeRuns = it.activeRuns.filterKeys { key -> key in keptIds } + (id to fresh),
                     streaming = "",
-                    reasoning = "",
+                    reasoningRevision = 0,
                     status = "正在重新回答…",
                     error = null,
                     checkpoints = safeCheckpoints,
@@ -2642,7 +2652,7 @@ class ChatViewModel : ViewModel() {
                     // lets the draft carry the part no message has yet — otherwise it would hand
                     // the whole run back as one paragraph and repeat the rounds already stored.
                     streaming = "",
-                    reasoning = "",
+                    reasoningRevision = 0,
                 )
             }
 
@@ -2750,7 +2760,7 @@ class ChatViewModel : ViewModel() {
             AgentEvent.RoundRestarted -> base.copy(
                 parts = base.parts.take(base.segmentStart.coerceIn(0, base.parts.size)),
                 streaming = "",
-                reasoning = "",
+                reasoningRevision = 0,
             )
 
             // 压缩摘要正在生成：状态行改说这件事（run 中也要有，用户要求）。结束就清空，
@@ -2844,8 +2854,15 @@ class ChatViewModel : ViewModel() {
      * `reasoning` 读字符串长度、还没发布的那段用 `DeltaBuffer.sizes()`（同样只给长度）。
      */
     private fun RunSession.draftChars(pending: Pair<Int, Int>): Int =
-        parts.sumOf { part -> if (part is LivePart.Text) part.buffer.length() else 0 } +
-            reasoning.length + pending.first + pending.second
+        // 正文与思考**都在 `parts` 里**（`Text.buffer` / `Thinking.buffer`），逐块取长度即可，
+        // 不必再读一份字符串副本（issue #57 §3）。
+        parts.sumOf { part ->
+            when (part) {
+                is LivePart.Text -> part.buffer.length()
+                is LivePart.Thinking -> part.buffer.length()
+                else -> 0
+            }
+        } + pending.first + pending.second
 
     /**
      * 把这一拍攒下来的正文/思考并进 [live]。
@@ -2873,13 +2890,15 @@ class ChatViewModel : ViewModel() {
         // 现在 `streaming` 由 `parts` 派生（见 `derivedStreaming`），写入路径只碰 `parts`。
         return live.copy(
             streaming = "",
+            // 有思考就自增修订号：这就是「状态变了」的信号，取代原来的整串复制。
+            reasoningRevision = if (hasReasoning) live.reasoningRevision + 1 else live.reasoningRevision,
             // **这里必须继续产出新 String**（issue #57 §3.3，勿改成共享缓冲）：
             // 思考流式之所以还能刷新，正是因为每拍 `reasoning` 是新实例 ⇒ `ChatUiState`
             // 整体判不等 ⇒ 状态发射。换成 `GrowableText` 共享缓冲会让这条触发器失效
             // （`LiveParts.kt` 的 KDoc 记着那次「整屏冻结」事故）；同时保存路径的
             // `prior.reasoning === live.reasoning` 判等会恒真 ⇒ 草稿永远不会落盘。
             // 代价是长思考期 62.5 次/秒的整串复制 —— 已知取舍，不再往缓冲方向改。
-            reasoning = if (hasReasoning) live.reasoning + reasoning else live.reasoning,
+            // 正文不再存副本（见 `reasoningRevision` 的说明）。
             parts = parts,
             status = "",
             thinkingStartedAt = if (opening) System.currentTimeMillis() else live.thinkingStartedAt,
@@ -2942,7 +2961,7 @@ class ChatViewModel : ViewModel() {
                     messages = latest.messages,
                     activeRuns = latest.activeRuns,
                     streaming = latest.streaming,
-                    reasoning = latest.reasoning,
+                    reasoningRevision = latest.reasoningRevision,
                     status = latest.status,
                     runningTool = latest.runningTool,
                     liveParts = latest.parts,
@@ -2982,7 +3001,7 @@ class ChatViewModel : ViewModel() {
             if (live != null && snapshot.conversationId == chatId) {
                 snapshot.copy(
                     streaming = "",
-                    reasoning = "",
+                    reasoningRevision = 0,
                     status = status,
                     runningTool = null,
                     liveParts = emptyList(),
@@ -3054,7 +3073,7 @@ class ChatViewModel : ViewModel() {
             val prior = previous
             if (prior != null && prior.runId == live.runId &&
                 prior.messages === live.messages && prior.parts === live.parts &&
-                prior.reasoning === live.reasoning && previousPending == pendingSize
+                prior.reasoningRevision == live.reasoningRevision && previousPending == pendingSize
             ) continue
             // The answer, the thinking beside it, and the rounds this run has already
             // produced. The reasoning and those rounds are not "extra": the session is the
@@ -3077,7 +3096,8 @@ class ChatViewModel : ViewModel() {
                     chatId = chatId,
                     runId = live.runId,
                     text = live.derivedStreaming() + pendingText,
-                    reasoning = live.reasoning + pendingReasoning,
+                    // 正文在需要落盘这一刻从 `parts` 取一次快照（本块已在 IO 上）。
+                    reasoning = live.parts.thinkingText() + pendingReasoning,
                     messages = live.messages,
                     preparedMessages = runMessages,
                 )

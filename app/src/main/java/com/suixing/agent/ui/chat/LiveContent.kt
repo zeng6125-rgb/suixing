@@ -11,7 +11,9 @@ internal data class LiveContent(val chatId: String, val runId: String, val parts
 internal fun ChatUiState.screenSnapshot(): ChatUiState = copy(
     liveParts = emptyList(),
     streaming = "",
-    reasoning = "",
+    // 思考正文现在以修订号参与判等（issue #57 §3）；快照里把它归零，
+    // 语义与原来"清空 reasoning 字符串"一致：这份快照不再代表活的思考流。
+    reasoningRevision = 0,
 )
 
 internal fun ChatUiState.liveContent(): LiveContent = LiveContent(conversationId, liveRunId, liveParts)
