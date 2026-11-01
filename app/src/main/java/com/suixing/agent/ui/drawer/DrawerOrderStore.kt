@@ -5,8 +5,8 @@ import androidx.compose.runtime.Immutable
 import com.suixing.agent.data.Conversation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import java.io.File
 
 /**
@@ -78,37 +78,56 @@ internal class DrawerOrderStore(context: Context) {
 
     private val file = File(context.filesDir, "drawer-order")
 
+    /**
+     * 单写者（issue #66 P0-1）：并发保存时**最新顺序说了算**，旧快照不会后到覆盖。
+     * 队列本身在 `OrderWriteQueue`，这里只把"真正写盘"这一步交给它。
+     */
+    private val writer = OrderWriteQueue { order -> persist(order) }
+
     suspend fun load(): DrawerOrder = withContext(Dispatchers.IO) {
         runCatching {
-            if (!file.exists()) return@runCatching DrawerOrder()
-            val json = JSONObject(file.readText())
-            DrawerOrder(
-                pinned = json.optJSONArray("pinned").strings(),
-                normal = json.optJSONArray("normal").strings(),
-            )
+            // 主文件缺失或损坏时退回 `.tmp`（issue #66 P0-2）：上次写到一半被杀，
+            // 临时文件里往往就是完整的最后一份顺序，比直接丢掉偏好更好。
+            val source = when {
+                file.exists() -> file
+                tempFile.exists() -> tempFile
+                else -> return@runCatching DrawerOrder()
+            }
+            // **不用 org.json**：它在 JVM 单测里是 Android 桩（方法一律 not mocked），
+            // 于是这条路在 CI 上永远走 catch 分支、偏好静默丢失——换成项目已在用的
+            // kotlinx.serialization 之后，这套读写才真正能被单测覆盖（issue #66 P0-2）。
+            val dto = json.decodeFromString(DrawerOrderDto.serializer(), source.readText())
+            DrawerOrder(pinned = dto.pinned, normal = dto.normal)
         }.getOrDefault(DrawerOrder())
     }
 
-    suspend fun save(order: DrawerOrder) = withContext(Dispatchers.IO) {
+    /** 提交一次保存：走单写者队列，过期内容会被合并掉。 */
+    suspend fun save(order: DrawerOrder): Boolean = writer.enqueue(order)
+
+    /** 真正写盘（在队列的锁内调用）。 */
+    private suspend fun persist(order: DrawerOrder) = withContext(Dispatchers.IO) {
         runCatching {
-            val json = JSONObject()
-                .put("pinned", JSONArray(order.pinned))
-                .put("normal", JSONArray(order.normal))
+            val payload = json.encodeToString(
+                DrawerOrderDto.serializer(),
+                DrawerOrderDto(pinned = order.pinned, normal = order.normal),
+            )
             // 先写临时文件再改名：中途被杀不会留下半行 JSON（那会让下次读取直接判失败）。
-            val temp = File(file.parentFile, "${file.name}.tmp")
-            temp.writeText(json.toString())
-            if (!temp.renameTo(file)) {
-                file.writeText(json.toString())
-                temp.delete()
+            tempFile.writeText(payload)
+            if (!tempFile.renameTo(file)) {
+                file.writeText(payload)
+                tempFile.delete()
             }
         }
         Unit
     }
 
-    private fun JSONArray?.strings(): List<String> {
-        if (this == null) return emptyList()
-        return (0 until length()).mapNotNull { index ->
-            optString(index).takeIf { it.isNotEmpty() }
-        }
-    }
+    private val tempFile: File get() = File(file.parentFile, "${file.name}.tmp")
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    @Serializable
+    private data class DrawerOrderDto(
+        val pinned: List<String> = emptyList(),
+        val normal: List<String> = emptyList(),
+    )
 }
