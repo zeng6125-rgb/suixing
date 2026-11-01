@@ -2409,7 +2409,15 @@ class AgentEngine(
                 PluginRuntime.logPluginError("risk 推断失败（已兜底跳过）", error)
                 null
             }
-        val verdict = runCatching { PluginRuntime.preExecute(hooks, call.name, call.arguments, risk) }
+        // **hook 裁决要离开调用方线程**（issue #56 R19）：`preExecute` 对每个启用的 hook 拿
+        // 正则去扫**完整参数**（修 5.1 后从 600 字预览改成了全文，`write_file` 的 content
+        // 可达 4MB），是 O(参数长度 × hook 数) 的 CPU 活儿；而 `executeOneTool` 只把工具本体
+        // 切到 IO，这里仍跑在调用方（Main）线程上。
+        val verdict = runCatching {
+            withContext(Dispatchers.IO) {
+                PluginRuntime.preExecute(hooks, call.name, call.arguments, risk)
+            }
+        }
             .getOrElse { error ->
                 PluginRuntime.logPluginError("hook 裁决失败（已兜底放行）", error)
                 HookVerdict()

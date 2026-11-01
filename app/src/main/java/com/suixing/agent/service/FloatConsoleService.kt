@@ -632,7 +632,11 @@ private const val CHANNEL_ID = "Suixing_console"
             val height = runCatching { manager.currentWindowMetrics.bounds.height() }.getOrDefault(0)
             if (height > 0) return height
         }
-        return resources.displayMetrics.heightPixels
+        // 与 [windowWidthPx] 保持同一套回退（issue #56 R16）：分屏下 `displayMetrics` 给的是
+        // 应用窗口尺寸而不是真实屏高，少一级回退会让夹位算在错误的坐标系里。
+        val point = Point()
+        manager.defaultDisplay?.getRealSize(point)
+        return point.y.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
     }
 
     /**
@@ -1018,7 +1022,9 @@ private const val CHANNEL_ID = "Suixing_console"
             if (dragging) {
                 params.x = windowStartX + dx.toInt()
                 params.y = windowStartY + dy.toInt()
-                clampY()
+                // 拖拽期两个方向都要夹（issue #56 R11）：原来只夹 Y，X 可以拖出屏幕，
+                // 松手（ACTION_UP）才跳回来。`clampX` 内部已经含 `clampY`。
+                clampX(if (panel.visibility == View.VISIBLE) panelWidth() else 0)
                 if (attached) runCatching { windowManager.updateViewLayout(root, params) }
             }
             true
@@ -1053,7 +1059,16 @@ private const val CHANNEL_ID = "Suixing_console"
                 lp.width = panelWidth()
                 panel.layoutParams = lp
             }
+            // **夹位要等布局跑完**（issue #56 R9）：刚把 panel 置 VISIBLE、宽度刚改，
+            // `clampY` 读到的 `root.height` 还是收起态的 44dp ⇒ 靠近底部展开时按过期高度
+            // 算出的 Y 会把面板吊在屏幕外。放到 post 里，等新测量结果出来再夹一次。
             clampX(panelWidth())
+            root.post {
+                if (attached) {
+                    clampX(panelWidth())
+                    runCatching { windowManager.updateViewLayout(root, params) }
+                }
+            }
         }
         val flags = params.flags
         params.flags = if (expanded) {
