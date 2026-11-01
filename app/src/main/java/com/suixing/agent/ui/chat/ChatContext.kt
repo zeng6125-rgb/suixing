@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.chat
 
+import com.suixing.agent.ui.chat.markdown.MarkdownText
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
@@ -318,9 +319,10 @@ internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Store
                 .heightIn(max = 200.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            Text(
+            // **按 Markdown 渲染**：摘要是模型写的正文，含 `**粗体**`、有序列表；
+            // 用纯 Text 会把星号原样显示（用户截图实证）。
+            MarkdownText(
                 text = checkpoint.summary,
-                // 同 CompressionBlock：压缩摘要按思考链的样式与颜色渲染
                 style = thinkingStyle(),
                 color = scheme.onSurfaceVariant,
             )

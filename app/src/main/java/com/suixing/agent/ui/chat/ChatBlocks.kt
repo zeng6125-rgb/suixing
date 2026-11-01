@@ -589,9 +589,9 @@ internal fun CompressionBlock(
                 .heightIn(max = 200.dp)
                 .verticalScroll(remember(expansion, blockId) { expansion.viewport(blockId).scrollState }),
         ) {
-            Text(
+            // 同样按 Markdown 渲染（摘要里有粗体与有序列表）
+            MarkdownText(
                 text = checkpoint.summary,
-                // 与思考链正文同口径（用户：压缩摘要的正文颜色要和思考链对齐）
                 style = thinkingStyle(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
