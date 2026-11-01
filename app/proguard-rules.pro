@@ -4,12 +4,17 @@
 
 -keep class kotlinx.serialization.** { *; }
 
-# kotlinx.serialization looks a class's serializer up at runtime, so R8 must not rename the generated
-# companion or `$$serializer`, nor drop the `serializer()` accessor. Without these rules every
-# @Serializable model in data/ (19 classes) throws a SerializationException on the first read or
-# write — a crash only a minified build can produce. These are the rules from the library's own
-# documentation; they change nothing today (isMinifyEnabled = false) and are what would make turning
-# it on survivable.
+# kotlinx.serialization 按 **companion 上的 serializer() 访问器** 取序列化器，所以 R8 必须：
+# 保留 `serializer()` 的**名字**、保留 companion 字段、不把 `$$serializer` 类整个删掉。
+# 下面这组是库官方文档给的规则。
+#
+# 注意它们**不保证类名不变**（实测：`AppSettings$$serializer -> ng`）。真正被保住的是成员名：
+#   · `serializer()` 名字保留（mapping 里可见 `serializer():147:147 -> serializer`）；
+#   · companion / INSTANCE 字段不被删（名字可以改，Kotlin 侧是静态引用）。
+# 所以"R8 不会改名 $$serializer"是错的表述 —— 会改，只是不影响解析。
+#
+# 这些规则从 0.8.614 起**真的生效**（isMinifyEnabled = true）。它们挡的是运行期才暴露的
+# SerializationException：单测跑的是未混淆类，拦不住。改动后必须真机冒烟。
 -if @kotlinx.serialization.Serializable class **
 -keepclassmembers class <1> {
     static <1>$Companion Companion;
