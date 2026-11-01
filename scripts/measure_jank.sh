@@ -12,10 +12,11 @@
 #   4. RSS（当前 403MB，目标 <350MB）
 set -uo pipefail
 
-ADB="${ADB:-/d/dsh/fixbug/_toolchain/sdk/platform-tools/adb.exe}"
-SERIAL="${SERIAL:-192.168.0.102:40731}"
+# 设备定位走共享逻辑（issue #59 P0）：ADB 默认 `adb`，SERIAL 可选。
+. "$(dirname "$0")/_adb.sh"
 PKG="${PKG:-com.suixing.agent}"
-DEV=(-s "$SERIAL")
+adb_pick || exit 1
+DEV=("${ADB_CMD[@]:1}")
 
 cmd="${1:-report}"
 

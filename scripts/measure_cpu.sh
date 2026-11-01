@@ -3,19 +3,21 @@
 # 用法：scripts/measure_cpu.sh [滚动次数]
 # 做法：先起 top（后台采样 3 帧），同时用 input swipe 真的滚会话，再解析稳态那一帧。
 set -uo pipefail
-ADB="${ADB:-/d/dsh/fixbug/_toolchain/sdk/platform-tools/adb.exe}"
-SERIAL="${SERIAL:-192.168.0.102:40731}"
+# 设备定位走共享逻辑（issue #59 P0）：不再硬编码 adb 路径与某一次的无线端口。
+. "$(dirname "$0")/_adb.sh"
 PKG="${PKG:-com.suixing.agent}"
 N="${1:-6}"
 
-pid=$("$ADB" -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')
+adb_pick || exit 1
+pid=$(app_pid)
+[ -z "$pid" ] && { echo "应用未运行（pidof $PKG 为空）。先打开 JAgent 再跑这个脚本。"; exit 1; }
 [ -z "$pid" ] && { echo "应用未运行"; exit 1; }
 
-"$ADB" -s "$SERIAL" shell top -H -b -n 3 -d 2 -p "$pid" > /tmp/cpu.txt 2>/dev/null &
+"${ADB_CMD[@]}" shell top -H -b -n 3 -d 2 -p "$pid" > /tmp/cpu.txt 2>/dev/null &
 topjob=$!
 sleep 1
 for i in $(seq 1 "$N"); do
-  "$ADB" -s "$SERIAL" shell input swipe 540 1600 540 700 220 >/dev/null 2>&1
+  "${ADB_CMD[@]}" shell input swipe 540 1600 540 700 220 >/dev/null 2>&1
   sleep 0.4
 done
 wait $topjob 2>/dev/null
