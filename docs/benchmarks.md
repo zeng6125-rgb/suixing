@@ -24,6 +24,7 @@
 | `ui/files/FileListProjectionBenchmarkTest` | 目录列表投影（100/1000 文件，仅 lowercase + 排序） | 132.4 / 528.0 µs | 同上量级 ⇒ 不加缓存（#68 P2-D） |
 | `ui/chat/markdown/LiveBlocksMicrobenchTest` | `LiveBlocks` 前缀校验 vs 受信任游标 | 多轮中位数 27.7 vs 27.4 ms（1.01x） | JVM 上**无可测收益**；此前单次的 6.93x 是冷 JIT 假象，已撤回 |
 | `ui/chat/ChatHotPathMicrobenchTest` | A2 打字机截取 / R39 token 估算 | A2 1.02x（无差异）；R39 约 1.8ms/次（20k 字符） | A2 无可测收益；R39 的价值是把这 1.8ms 从主线程挪走 |
+| `ui/chat/DeltaBufferBenchmarkTest` | 流式 delta 的 append + take | 7 轮中位数 **1.01 µs/轮**（min/max 0.80/3.10） | 不是热点 ⇒ **不做优化**（#67 P1-4） |
 
 ## 方法论（踩过的坑）
 

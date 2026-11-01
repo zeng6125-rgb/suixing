@@ -14,19 +14,30 @@ class DeltaBufferBenchmarkTest {
     @Test
     fun `append and take stay cheap at streaming cadence`() {
         val buffer = DeltaBuffer()
-        val text = "文".repeat(40)          // 一个 delta 片段约 40 字
-        // 预热
-        repeat(2_000) { buffer.append("c", text, null); buffer.take("c") }
-        val rounds = 20_000
-        val start = System.nanoTime()
-        var total = 0
-        repeat(rounds) {
-            buffer.append("c", text, "想")
-            val (t, r) = buffer.take("c")
-            total += t.length + r.length
+        val text = "文".repeat(40)
+        fun run(): Pair<Double, Int> {
+            val rounds = 5_000
+            var total = 0
+            val start = System.nanoTime()
+            repeat(rounds) {
+                buffer.append("c", text, "想")
+                val (t, r) = buffer.take("c")
+                total += t.length + r.length
+            }
+            return (System.nanoTime() - start) / 1_000.0 / rounds to total
         }
-        val perOpUs = (System.nanoTime() - start) / 1_000.0 / rounds
-        assertEquals("每个 delta 的拼接结果必须完整", rounds * (text.length + 1), total)
-        println("P1-4 delta buffer: $rounds 轮 append+take = " + "%.2f".format(perOpUs) + "us/轮")
+        run()                                   // 预热
+        // 多轮取中位数（与 docs/benchmarks.md 的方法论一致）：单次会受 JIT/GC 影响
+        val samples = DoubleArray(7)
+        var lastTotal = 0
+        repeat(7) { i -> val (perOp, total) = run(); samples[i] = perOp; lastTotal = total }
+        val median = samples.sorted()[samples.size / 2]
+        val check = run().second
+        assertEquals("每个 delta 的拼接结果必须完整", 5_000 * (text.length + 1), check)
+        assertEquals("多轮之间总量一致", lastTotal, check)
+        println(
+            "P1-4 delta buffer: 7 轮中位数 " + "%.2f".format(median) + "us/轮" +
+                "（min/max " + "%.2f".format(samples.min()) + "/" + "%.2f".format(samples.max()) + "）",
+        )
     }
 }
