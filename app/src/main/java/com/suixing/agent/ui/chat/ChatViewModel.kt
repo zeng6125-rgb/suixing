@@ -3504,26 +3504,6 @@ class ChatViewModel : ViewModel() {
     }
 }
 
-private fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = ChatUiState(
-    conversationId = id,
-    title = title,
-    messages = messages,
-    // **总条数来自 meta**（#30）：`messages` 只是窗口（打开会话读最近 N 轮），
-    // 调用方判断"屏幕上的历史是不是完整"就是比这两个数（见 send() 的 wire 分支）。
-    messageCount = messageCount,
-    turnCount = turnCount,
-    activeRuns = activeRuns,
-    assistantId = assistantId.ifBlank { fallbackAssistantId },
-    providerId = providerId,
-    model = model,
-    reasoningEffort = reasoningEffort,
-    checkpoints = checkpoints,
-    // A conversation read from disk is not "still opening": this state is what the skeleton
-    // is replaced by, so it must not leave the flag set.
-    loading = false,
-)
-
-
 /** How many compressions of one conversation are kept; older ones are dropped. */
 private const val MAX_CHECKPOINTS = 10
 
