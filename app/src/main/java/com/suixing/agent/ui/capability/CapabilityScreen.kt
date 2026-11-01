@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.capability
 
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.SettingsStyle
@@ -80,7 +82,14 @@ import kotlinx.coroutines.withContext
 @Composable
 fun CapabilityScreen(onBack: () -> Unit) {
     val state by Core.capabilities.state.collectAsStateWithLifecycle()
-    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    // **只投影本页真正读的四个字段**（issue #68 P1-C）：原来整份 AppSettings 任何字段变化
+    // （改模型、改温度…）都会让整棵能力页子树重组。distinctUntilChanged 再挡一层：投影值
+    // 相同就不发射。
+    val settings by remember {
+        Core.settings.flow
+            .map { capabilityUiSettings(it) }
+            .distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = capabilityUiSettings(AppSettings()))
     val scope = rememberCoroutineScope()
     var probing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -160,7 +169,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 CapabilityTierPicker(
                 preferred = settings.preferredCapability,
                 state = state,
-                settings = settings,
+                rootCheckedAt = settings.rootCheckedAt,
                 onPick = { key ->
                     scope.launch { Core.settings.update { it.copy(preferredCapability = key) } }
                 },
@@ -174,7 +183,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_bot),
                 summary = "装上就有，不需要任何授权",
                 granted = true,
-                lines = tierLines(TIER_NONE, state, settings),
+                lines = tierLines(TIER_NONE, state, settings.rootCheckedAt),
                 actionLabel = "无需开启",
                 actionEnabled = false,
                 onAction = {},
@@ -187,7 +196,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_pointer),
                 summary = "读屏、点击、滑动、输入文字、截图",
                 granted = state.accessibility,
-                lines = tierLines(TIER_ACCESSIBILITY, state, settings),
+                lines = tierLines(TIER_ACCESSIBILITY, state, settings.rootCheckedAt),
                 actionLabel = if (state.accessibility) "打开设置" else "去开启",
                 onAction = { Core.capabilities.openAccessibilitySettings() },
             )
@@ -199,7 +208,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_terminal),
                 summary = "am / pm / input / dumpsys，读写 /sdcard 与 Android/data",
                 granted = state.shellReady,
-                lines = tierLines(TIER_SHELL, state, settings),
+                lines = tierLines(TIER_SHELL, state, settings.rootCheckedAt),
                 actionLabel = shizukuActionLabel(state),
                 onAction = {
                     when {
@@ -231,7 +240,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                 icon = ImageVector.vectorResource(R.drawable.ic_shield_user),
                 summary = "最高权限，可直接读写系统文件",
                 granted = state.rootReady,
-                lines = tierLines(TIER_ROOT, state, settings),
+                lines = tierLines(TIER_ROOT, state, settings.rootCheckedAt),
                 actionLabel = if (probing) "检测中…" else "检测",
                 // 探测要跑几秒，期间按钮必须点不动：否则连点会叠起多次 probeRoot()。
                 actionEnabled = !probing,
@@ -508,7 +517,7 @@ private data class TierOption(val key: String, val label: String, val ready: Boo
 private fun CapabilityTierPicker(
     preferred: String,
     state: CapabilityState,
-    settings: AppSettings,
+    rootCheckedAt: Long,
     onPick: (String) -> Unit,
 ) {
     val options = listOf(
@@ -561,7 +570,7 @@ private fun CapabilityTierPicker(
         // 「选一档看这一档解锁了什么」：条目和下面四张卡片读同一份 tierLines，不另写一套文案。
         // 条目、选中态与摘要使用同一档。
         Spacer(Modifier.height(6.dp))
-        tierLines(shown, state, settings).forEach { line ->
+        tierLines(shown, state, rootCheckedAt).forEach { line ->
             Row(Modifier.padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
@@ -586,7 +595,7 @@ private fun CapabilityTierPicker(
  * 上面选择器的明细和下面四张卡片都读这一份，两处不会再各说各的。[settings] 只有 Root 那一条
  * 用得上（上次检测时间），其余条目只看 [state]。
  */
-private fun tierLines(key: String, state: CapabilityState, settings: AppSettings): List<String> = when (key) {
+private fun tierLines(key: String, state: CapabilityState, rootCheckedAt: Long): List<String> = when (key) {
     TIER_NONE -> listOf(
         "聊天、记忆、待办、定时、技能、网络与文件工具都在这一档",
         "文件只能读写应用私有目录，碰不到 /sdcard 的其它目录",
@@ -613,8 +622,8 @@ private fun tierLines(key: String, state: CapabilityState, settings: AppSettings
             else -> "未检测到 su"
         },
         "这一档要靠 KernelSU / Magisk 给 su 授权，没装就没有",
-        if (state.rootProbed && settings.rootCheckedAt > 0L) {
-            "上次检测：${formatAgo(settings.rootCheckedAt)}（结果已记住，下次打开自动复核）"
+        if (state.rootProbed && rootCheckedAt > 0L) {
+            "上次检测：${formatAgo(rootCheckedAt)}（结果已记住，下次打开自动复核）"
         } else {
             "检测一次即可，之后每次打开都会自动复核"
         },
@@ -819,3 +828,24 @@ private fun requestIgnoreBatteryOptimizations(context: Context): Boolean {
         context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
     }.isSuccess
 }
+
+/**
+ * 能力页真正依赖的设置子集（issue #68 P1-C）。
+ *
+ * 抽成小类型是**为了重组边界**：`AppSettings` 任何字段变化都会让这批子组件重组，
+ * 而这一页只读这四个值。函数独立出来也便于断言"无关字段变化不改变投影"。
+ */
+internal data class CapabilityUiSettings(
+    val preferredCapability: String = "",
+    val floatingConsole: Boolean = false,
+    val consoleWhileRunning: Boolean = true,
+    val rootCheckedAt: Long = 0L,
+)
+
+internal fun capabilityUiSettings(settings: AppSettings): CapabilityUiSettings =
+    CapabilityUiSettings(
+        preferredCapability = settings.preferredCapability,
+        floatingConsole = settings.floatingConsole,
+        consoleWhileRunning = settings.consoleWhileRunning,
+        rootCheckedAt = settings.rootCheckedAt,
+    )
