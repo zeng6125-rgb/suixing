@@ -126,9 +126,17 @@ internal fun SuixingDrawer(
     // 面板抖动。snapshotFlow 的合帧语义正好 —— 只看最新值，一帧最多一次 snap。
     // 初始值取当前进度（不是 0）：避免消费者启动时把开着的抽屉拽回 0。
     val dragTarget = remember(state) { mutableFloatStateOf(state.progress.value) }
+    // **拖拽态闸门**：只有手指真的在拖时才把 [dragTarget] 应用到进度上。
+    //
+    // 为什么必须有（回归 0.8.611「抽屉停在中间」）：松手后 `settle` 启动 `animateTo`，
+    // 而最后一帧的 `dragTarget` 快照可能还没被消费；它一旦在动画启动后才被消费，
+    // `snapTo` 会**取消正在跑的动画**，抽屉就冻在半路，且 `settled` 不更新
+    // （`isOpen` 仍为 false，冻结层消失，底下主页又能点）。加闸门后，
+    // 松手时先把闸门关掉，残留快照直接丢弃。
+    val dragging = remember(state) { mutableStateOf(false) }
     LaunchedEffect(state) {
-        snapshotFlow { dragTarget.floatValue }.collect { target ->
-            if (state.progress.value != target) state.progress.snapTo(target)
+        snapshotFlow { dragging.value to dragTarget.floatValue }.collect { (isDragging, target) ->
+            if (isDragging && state.progress.value != target) state.progress.snapTo(target)
         }
     }
     val scope = rememberCoroutineScope()
@@ -164,6 +172,7 @@ internal fun SuixingDrawer(
                         startProgress = state.progress.value
                         accumulated = 0f
                         dragTarget.floatValue = startProgress
+                        dragging.value = true      // 开闸：拖拽帧开始生效
                         tracker.resetTracking()
                     },
                     onHorizontalDrag = { change, dragAmount ->
@@ -177,11 +186,20 @@ internal fun SuixingDrawer(
                         // 原来只看位置 50% 阈值 ⇒ 短距离快滑也会弹回去，必须拖满 150dp 才开。
                         // 现在：快速滑动（|v| > 800px/s）直接按方向吸附；否则看 25% 位置。
                         val v = tracker.calculateVelocity().x
-                        val open = if (abs(v) > 800f) v > 0f else state.progress.value > 0.25f
+                        // 关闸要在 settle 之前：残留的最后一帧快照若在动画启动后被消费，
+                        // snapTo 会取消动画 ⇒ 停在中间。
+                        dragging.value = false
+                        // 判据用 dragTarget（手指最终位置），不用 progress.value：
+                        // 后者可能还差一帧没跟上。
+                        val open = if (abs(v) > 800f) v > 0f else dragTarget.floatValue > 0.25f
                         settle(if (open) DrawerValue.Open else DrawerValue.Closed, v)
                     },
                     onDragCancel = {
-                        settle(if (state.progress.value > 0.25f) DrawerValue.Open else DrawerValue.Closed, 0f)
+                        dragging.value = false
+                        settle(
+                            if (dragTarget.floatValue > 0.25f) DrawerValue.Open else DrawerValue.Closed,
+                            0f,
+                        )
                     },
                 )
             },
@@ -231,13 +249,14 @@ internal fun SuixingDrawer(
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 if (change.changedToUp()) {
                                     change.consume()
+                                    dragging.value = false   // 先关闸，再吸附（否则残留快照会取消动画）
                                     if (!isDrag) {
                                         // **轻点 = 点遮罩**：直接关。
                                         settle(DrawerValue.Closed, 0f)
                                     } else {
                                         val v = tracker.calculateVelocity().x
                                         val open = if (abs(v) > 800f) v > 0f
-                                        else state.progress.value > 0.25f
+                                        else dragTarget.floatValue > 0.25f
                                         settle(if (open) DrawerValue.Open else DrawerValue.Closed, v)
                                     }
                                     break
@@ -246,7 +265,10 @@ internal fun SuixingDrawer(
                                 tracker.addPosition(change.uptimeMillis, change.position)
                                 horizontal += dx
                                 change.consume()   // 纵向拖动也吃掉 ⇒ 露出的主页不能滚动
-                                if (!isDrag && abs(horizontal) > viewConfiguration.touchSlop) isDrag = true
+                                if (!isDrag && abs(horizontal) > viewConfiguration.touchSlop) {
+                                    isDrag = true
+                                    dragging.value = true    // 开闸：拖拽帧开始生效
+                                }
                                 if (isDrag) {
                                     // awaitPointerEventScope 是受限挂起作用域，不能直接调
                                     // Animatable.snapTo（普通 suspend）⇒ 写 [dragTarget]，
