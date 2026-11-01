@@ -59,6 +59,18 @@ adb mdns services              # 找不到 SERIAL 时先用它
 - **采**：切换路径的主线程任务、抽屉拖动的 alloc（Perfetto）、掉帧。
 - **看**：`discardIfUntouched` 与草稿写入、抽屉拖动预览缓存（#59 B3）、尾部 delta 补发（A4）。
 
+## 采集命令
+
+```bash
+# 先在手机上打开 JAgent 并停在要测的会话（脚本不会替你启动应用）
+export SERIAL=<ip:port>            # 只有一台设备时可省
+scripts/perf_collect.sh C 6         # 采 C 组，6 秒窗口；期间你按场景操作
+scripts/perf_collect.sh E 5         # 采 E 组
+```
+
+脚本负责 `gfxinfo reset` → 计时 → `report` → 化成一行表格；A 组（冷启动）不提供，
+因为 `am start -W` 属于启动应用。
+
 ## 记录格式
 
 每组一行，字段固定，便于跨版本比对：
