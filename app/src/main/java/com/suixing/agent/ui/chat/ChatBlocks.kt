@@ -375,6 +375,10 @@ internal fun ProcessCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // **表头样式只有一个来源**：标题（已压缩上下文 · 03:44）与预览（68 条消息 → 摘要）
+    // 必须是同一个字号 —— 两处各写一遍 `labelMedium` 时已经漂移过一次
+    // （预览曾用 metaStyle()＝labelMedium×12/13，比标题小一档）。
+    val headerStyle = MaterialTheme.typography.labelMedium
     // *折叠条切换后视口不动** —— 不在这里做任何事：这一项变高变矮会把上方内容推走，而 ChatScreen
     Column(modifier.fillMaxWidth()) {
         Row(
@@ -409,7 +413,7 @@ internal fun ProcessCard(
                     text = title,
                     // 折叠块统一：标题一律 labelMedium（原来这里是 labelLarge×13/14）。三处
                     // （思考块 / 工具行 / 本轮用量）的表头现在同一行高、同一字号、同一内边距。
-                    style = MaterialTheme.typography.labelMedium,
+                    style = headerStyle,
                     color = scheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -444,9 +448,9 @@ internal fun ProcessCard(
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = preview,
-                        // **与标题同字号**（用户：68 条消息 → 摘要 这个字体要和标题一致）。
-                        // metaStyle() 是 labelMedium×12/13，比标题小一档，看起来像放错了地方。
-                        style = MaterialTheme.typography.labelMedium,
+                        // **与标题同一个变量**（用户：68 条消息 → 摘要 这个字体要和标题一致）。
+                        // 原来这里用 metaStyle()＝labelMedium×12/13，比标题小一档。
+                        style = headerStyle,
                         color = scheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
