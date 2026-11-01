@@ -15,17 +15,14 @@ mkdir -p "$OUT" || exit 1
 say() { printf '\n=== %s ===\n' "$1"; }
 
 say "1/3 找设备"
-adb devices | sed -n '1,5p'
-if ! adb get-state >/dev/null 2>&1; then
-  echo "没有已连接的设备。若开了无线调试，先执行（端口每次不同，会自动列出来）："
-  adb mdns services || true
-  echo "然后：adb connect <IP:端口>"
-  exit 2
-fi
+# 与 scripts/_adb.sh 同一套定位（issue #59 P0）：ADB 默认 `adb`，SERIAL 可选。
+# 原来这里直接用裸 `adb`，既不吃 ADB 环境变量也不吃 SERIAL，多设备时会挑中错的一台。
+. "$(dirname "$0")/../scripts/_adb.sh"
+adb_pick || exit 2
 
 say "2/3 取 pin.log（只在复现过「流式上翻」之后才有内容）"
 FILES="/data/data/${PKG}/files/pin.log"
-if adb shell "su -c 'cat ${FILES}'" >"$OUT/pin.log" 2>"$OUT/pin.err"; then
+if "${ADB_CMD[@]}" shell "su -c 'cat ${FILES}'" >"$OUT/pin.log" 2>"$OUT/pin.err"; then
   if [ -s "$OUT/pin.log" ]; then
     echo "已保存到 $OUT/pin.log，最后 12 行："
     tail -12 "$OUT/pin.log"
@@ -42,9 +39,9 @@ fi
 
 say "3/3 帧数据（这部分需要你自己用手指滑动屏幕）"
 echo "先重置："
-echo "  adb shell dumpsys gfxinfo ${PKG} reset"
+echo "  "${ADB_CMD[@]}" shell dumpsys gfxinfo ${PKG} reset"
 echo "然后【用手指】上下滑动约 3 秒（不要用 adb input swipe，它测不出卡顿），再跑："
-echo "  adb shell dumpsys gfxinfo ${PKG} | head -40"
+echo "  "${ADB_CMD[@]}" shell dumpsys gfxinfo ${PKG} | head -40"
 echo
 echo "判读重点："
 echo "  · Number Slow UI thread   ← 跟手性主要看这个"
