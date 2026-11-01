@@ -67,14 +67,18 @@ if [ -z "$pid" ]; then
 fi
 
 VER=$("${ADB_CMD[@]}" shell dumpsys package "$PKG" 2>/dev/null | awk -F= '/versionName=/{print $2; exit}' | tr -d '\r')
-HZ=$("${ADB_CMD[@]}" shell dumpsys display 2>/dev/null | grep -o 'fps=[0-9.]*' | head -1 | cut -d= -f2)
+# 刷新率取 renderFrameRate：dumpsys display 里 fps= 出现多次（每个支持的模式一次），
+# 直接取第一个是碰运气；renderFrameRate 是当前渲染速率，与帧数据一致。
+HZ=$("${ADB_CMD[@]}" shell dumpsys display 2>/dev/null | grep -o "renderFrameRate [0-9.]*" | head -1 | awk '{print $2}')
 
 "${ADB_CMD[@]}" shell dumpsys gfxinfo "$PKG" reset >/dev/null 2>&1
 say_err "采集中：请**现在**在手机上按场景 $SCENARIO 操作，${SECONDS_TO_SAMPLE} 秒后自动结束…"
 sleep "$SECONDS_TO_SAMPLE"
 
 RAW=$("${ADB_CMD[@]}" shell dumpsys gfxinfo "$PKG" 2>/dev/null)
-RSS=$("${ADB_CMD[@]}" shell dumpsys meminfo "$PKG" 2>/dev/null | awk '/TOTAL PSS|TOTAL:/{print $2; exit}')
+# 「TOTAL PSS:   829857   TOTAL RSS:   676024」—— 数字在标签**后面**一个字段，
+# 取 $2 只会拿到标签本身（PSS:）。
+RSS=$("${ADB_CMD[@]}" shell dumpsys meminfo "$PKG" 2>/dev/null | awk '{ for (i=1;i<=NF;i++) if ($i=="PSS:") { print $(i+1); exit } }')
 
 IFS='|' read -r P50 P95 P99 JANKY TOTAL < <(parse_gfxinfo "$RAW")
 

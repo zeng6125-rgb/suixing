@@ -1,0 +1,18 @@
+   EGL mtrack    43892    43892        0        0    43892                           
+    GL mtrack     7148     7148        0        0     7148                           
+      Unknown     9280     7996     1232    39980    10600                           
+        TOTAL   829857   317592   141960   347844   676024   655790   419144   229848
+ 
+ App Summary
+                       Pss(KB)                        Rss(KB)
+                        ------                         ------
+           Java Heap:   120600                         138112
+         Native Heap:    95964                         117480
+                Code:   108524                         298892
+               Stack:     4792                           5688
+            Graphics:    76716                          76724
+       Private Other:    52956
+              System:   370305
+             Unknown:                                   39128
+ 
+           TOTAL PSS:   829857            TOTAL RSS:   676024       TOTAL SWAP PSS:   347844
