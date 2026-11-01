@@ -323,7 +323,7 @@ class LlmClient(http: OkHttpClient? = null) {
      * 也不要在公网地址上关闭证书校验。
      */
     internal fun isLanHost(host: String): Boolean {
-        if (host.isEmpty()) return true // 相对地址/解析失败：交给默认客户端，这里不算放宽依据
+        if (host.isBlank()) return false // URI 无有效主机名时绝不能启用 trust-all
         val h = host.trim().lowercase().removePrefix("[").removeSuffix("]")
         if (h == "localhost" || h.endsWith(".local") || h == "::1") return true
         if (h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.")) return true
@@ -482,7 +482,6 @@ class LlmClient(http: OkHttpClient? = null) {
                                 put("requestChars", JsonPrimitive(payloadText.length))
                                 put("responseChars", JsonPrimitive(errBody.length))
                                 // 摘要：只留状态行，不含请求/响应正文。
-                                put("responseHead", JsonPrimitive(errBody.take(200).replace('\n', ' ')))
                                 if (fullDump) {
                                     put("response", JsonPrimitive(errBody.take(8_000)))
                                     put("request", JsonPrimitive(payloadText.take(2_000_000)))
