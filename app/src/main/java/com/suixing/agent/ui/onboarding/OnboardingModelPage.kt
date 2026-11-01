@@ -217,7 +217,8 @@ private fun ModelPickerDialog(
                     .heightIn(max = 380.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
-                groupModels(models.map { it.id }).forEach { (group, ids) ->
+val grouped = remember(models) { groupModels(models.map { it.id }) }
+                grouped.forEach { (group, ids) ->
                     Text(
                         text = group,
                         style = MaterialTheme.typography.labelMedium,

@@ -85,6 +85,7 @@ import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.suixing.agent.ui.components.InlineIconAction
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.data.ContextCheckpoint
@@ -128,48 +129,12 @@ internal fun BranchArrow(
     label: String,
     enabled: Boolean,
     onClick: () -> Unit,
-    /**
-     * 盒子宽度，默认 26dp（与 `TinyAction` 一致）。
-     *
-     * 「回答切换」里**夹住数字**的左侧箭头传 **15dp**（= 图标宽度）。原因：盒 26dp、图标
-     * 15dp 时，盒内右侧白空 11dp。那个箭头若贴左，数字左边 = 11 + 4 = 15dp、右边 = 4dp
-     * （用户：「左侧比右侧大」）；若贴右，数字两侧确实都是 4dp，但图标整体右移 11dp，
-     * 于是与左边的「重新回答」拉开成 **23dp**，破坏整行 12dp 的图标节奏。
-     *
-     * **盒宽收到 15dp 才能同时满足两条**：盒右沿即图标右沿 ⇒ 盒内的 11dp 白空消失，
-     * 它到数字只剩一个 `spacedBy(4.dp)`；同时盒左沿不动 ⇒ 与「重新回答」仍是 12dp。
-     * 代价：这个箭头的点击热区从 26×26dp 变成 **15×26dp**（用户已知情并选择该方案）。
-     */
-) {
-    val scheme = MaterialTheme.colorScheme
-    val interaction = remember { MutableInteractionSource() }
-    Box(
-        modifier = Modifier
-            .size(width = 26.dp, height = 26.dp),
-        // 与 `TinyAction` 同一个基准：图标贴盒子左边（用户要的是整组对齐）。
-        // 原来这里是 `Center`（左右各 5.5dp），而复制/修改已改成左对齐 ——
-        // 只改一边会让「重新回答」比前面两个右移 5.5dp。
-        // 盒宽 = 图标宽（15dp），贴左/贴右等价。
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = scheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.35f),
-            // **15dp，与同行的复制/修改/用时图标一致**：底部操作行里四类小图标同一个尺寸
-            // 才读得出是一条线（`TinyAction` 与 `MetricButton` 的注释都写着 15dp 是这个理由）。
-            // 同 `TinyAction`：点击与涟漪同节点，坐标一致；`radius = 16.dp` 放大涟漪。
-            modifier = Modifier
-                .size(15.dp)
-                .clickable(
-                    interactionSource = interaction,
-                    indication = ripple(bounded = false, radius = 16.dp),
-                    enabled = enabled,
-                    onClick = onClick,
-                ),
-        )
-    }
-}
+) = InlineIconAction(
+    icon = icon,
+    label = label,
+    onClick = onClick,
+    enabled = enabled,
+)
 
 /**
  * How wide a process block's own name may get before it starts yielding.
@@ -204,6 +169,16 @@ internal fun scaledRevealDurationMs(baseMs: Int, heightPx: Int): Int {
     // 用 1/400 的斜率：120px ≈ +33ms，1200px ≈ +330ms（已被上限截断）。
     val extra = (heightPx / 400f) * 110f
     return baseMs + extra.coerceIn(0f, 260f).toInt()
+}
+
+/**
+ * 收起时长：展开的**一半斜率、一半上限**（收起 = 让开视野，拖沓碍事）。
+ * 短块与展开同为 [PROCESS_EXPAND_MS]；2000px 的卡片收起约 350ms（展开 480ms）。
+ */
+internal fun scaledCollapseDurationMs(baseMs: Int, heightPx: Int): Int {
+    if (heightPx <= 0) return baseMs
+    val extra = (heightPx / 400f) * 55f
+    return baseMs + extra.coerceIn(0f, 130f).toInt()
 }
 
 /**
@@ -285,6 +260,9 @@ private fun RevealHeight(
     content: @Composable () -> Unit,
 ) {
     val fraction = remember { androidx.compose.animation.core.Animatable(if (visible) 1f else 0f) }
+    // 方向标记：展开与收起用不同的时长与透明度策略（见下）。只在动画启动时写，
+    // graphicsLayer lambda 里读 —— 不进组合，不产生逐帧重组。
+    var expanding by remember { androidx.compose.runtime.mutableStateOf(visible) }
     val position = LocalTranscriptPosition.current
     // **时长按内容高度缩放**（用户反馈：「大长总结条展开效果和中等/短的区别明显」）。
     //
@@ -294,26 +272,35 @@ private fun RevealHeight(
     //   40dp → 702 px/s；120dp → 2106；800dp → 14038；2000dp → 35095。
     // 短与长差 50 倍，肉眼就是「短的很糯、大长条刷地一下」。
     //
-    // 现在把时长也随高度增长（每 400dp 加 110ms，封顶 +260ms），让**视觉速度大致恒定**。
+    // 现在：展开时长随高度增长（每 400px 加 110ms，封顶 +260ms），**收起只加一半**
+    //（收起 = 让开视野，拖沓会碍事）—— 长内容的收尾比展开快约 130ms，短块两者一致。
     // 高度在下面的 `Layout` 里才量得到，所以先量、再启动动画：
     // 用 `contentHeight` 记住实测高度，动画的 key 带上它 —— 高度变了才重算时长。
     var contentHeight by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     LaunchedEffect(visible, contentHeight, durationMs) {
         if (!visible && fraction.value == 0f) return@LaunchedEffect
+        expanding = visible
         val tracked = position?.beginRevealTransition() == true
         try {
+            val dur = if (visible) scaledRevealDurationMs(durationMs, contentHeight)
+                      else scaledCollapseDurationMs(durationMs, contentHeight)
             fraction.animateTo(if (visible) 1f else 0f,
-                androidx.compose.animation.core.tween(
-                    scaledRevealDurationMs(durationMs, contentHeight),
-                    easing = REVEAL_EASING,
-                ))
+                androidx.compose.animation.core.tween(dur, easing = REVEAL_EASING))
         } finally {
             if (tracked) position?.endRevealTransition()
         }
     }
     val mounted by remember(visible) { derivedStateOf { visible || fraction.value > 0f } }
     if (mounted) Layout(
-        content = content,
+        // **展开时内容随进度淡入**（绘制期读 fraction，不逐帧重组）：纯高度裁剪的展开
+        // 读起来像「从刀口下滑出来」，最先露出的内容总是全透明度突然出现；
+        // 淡入（进度 40% 即满）让长内容的展开读成「浮现」，三态的过渡都更连续。
+        // 收起保持 1：淡出叠加裁剪是两套同向动画，只会糊。
+        content = {
+            Box(Modifier.graphicsLayer {
+                alpha = if (expanding) (fraction.value * 2.5f).coerceIn(0f, 1f) else 1f
+            }) { content() }
+        },
         modifier = Modifier.fillMaxWidth().clipToBounds(),
     ) { measurables, constraints ->
         val child = measurables.first().measure(constraints.copy(minHeight = 0))
@@ -1284,6 +1271,30 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
     line.message?.allImages?.forEach { ImageBlock(it) }
 }
 
+/**
+ * 工具类型 → 图标（任务7）：按工具名关键词归类，让搜索/终端/文件在卡片里一眼可分。
+ * 命中不了的一律 [R.drawable.ic_wrench] —— 通用工具保持原样。
+ * 顺序敏感：更具体的词放前面（如 `web_fetch` 先命中网页组）。
+ */
+internal fun toolIconRes(name: String): Int {
+    val n = name.lowercase()
+    return when {
+        // 网页与搜索：web_search / web_fetch / browse / open_url / 插件搜索…
+        listOf("web", "search", "browse", "fetch", "url", "http").any { it in n } ->
+            R.drawable.ic_globe
+        // 终端与命令：run_shell / bash / exec…
+        listOf("shell", "bash", "command", "terminal", "exec").any { it in n } ->
+            R.drawable.ic_terminal
+        // 文件写入与编辑：edit_file / write / patch
+        listOf("edit", "write", "patch").any { it in n } ->
+            R.drawable.ic_file_code
+        // 文件读取与列目录：read_file / list_dir
+        listOf("file", "read", "dir", "doc").any { it in n } ->
+            R.drawable.ic_file_text
+        else -> R.drawable.ic_wrench
+    }
+}
+
 @Composable
 internal fun ToolRow(
     line: ToolLine,
@@ -1320,7 +1331,7 @@ internal fun ToolRow(
             Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                 if (line.done) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_wrench),
+                        imageVector = ImageVector.vectorResource(toolIconRes(line.name)),
                         contentDescription = null,
                         tint = tone,
                         modifier = Modifier.size(16.dp),
@@ -1334,10 +1345,10 @@ internal fun ToolRow(
                         color = tone,
                     )
                 } else {
-                    // 历史遗留的 done=false（run 被杀后落盘）：静态扳手，不再转。
+                    // 历史遗留的 done=false（run 被杀后落盘）：静态类型图标，不再转。
                     // 不定式进度圈按屏幕刷新率重绘，常驻卡片挂着它 = 读历史一直烧帧。
                     Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_wrench),
+                        imageVector = ImageVector.vectorResource(toolIconRes(line.name)),
                         contentDescription = null,
                         tint = tone,
                         modifier = Modifier.size(14.dp),

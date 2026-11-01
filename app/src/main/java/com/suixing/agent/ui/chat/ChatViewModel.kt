@@ -255,7 +255,13 @@ data class ChatUiState(
      */
     val checkpoints: List<ContextCheckpoint> = emptyList(),
 ) {
-    /** The transcript as drawn: one run per turn, newest first pick wins. */
+    /**
+     * The transcript as drawn: one run per turn, newest first pick wins.
+     *
+     * **生产代码零调用**（UI 用 [Transcript] 自己的推导），唯一消费者是
+     * SteerRenderTest —— 它是「流式中的 steer 不得出现在转录里」这条规则的可执行规范。
+     * 不要在生产里用它：每读一次都对整条转录重算一遍。
+     */
     val visible: List<StoredMessage>
         get() = Transcript.active(messages, activeRuns)
             .filterNot { liveRunId.isNotEmpty() && it.runId == liveRunId }
@@ -1125,18 +1131,36 @@ class ChatViewModel : ViewModel() {
      *  · 它没有正在跑的 run（跑着的会话删了会把结果丢掉）；
      *  · 它**没有草稿** —— 用户打了字但没发送，那是有内容的，不能丢。
      */
-    /** 离开会话时顺手回收"从未使用过"的空会话。失败就算了（下次切走再试）。 */
-    private suspend fun discardIfUntouched(chatId: String) {
+    /**
+     * 离开会话时顺手回收"从未使用过"的空会话。失败就算了（下次切走再试）。
+     *
+     * [snapshotAtSwitch] 必须由调用方在**切走之前**捕获并传入：本函数是 fire-and-forget，
+     * 执行时 `_state` 多半已经指向新会话 —— 在函数里现读 `_state` 的话，
+     * `conversationId == chatId` 恒 false ⇒ "内存里还有消息"这条判据被静默禁用，
+     * 盘上 0 条但内存有唯一副本的会话（保存失败红条、diskBacked=false 缓存）会被误删。
+     * newConversation 路径同样先捕快照再调，两条路径判据语义一致。
+     *
+     * [discardInFlight] 去重：快速连切时每次都 launch 一个，不收敛就是几十个并发协程
+     * 反复扫同一批 id。
+     */
+    private suspend fun discardIfUntouched(chatId: String, snapshotAtSwitch: ChatUiState) {
         if (chatId.isEmpty()) return
         if (sessions[chatId] != null) return
-        val snapshot = _state.value
-        val inMemory = if (snapshot.conversationId == chatId) snapshot.messages.size else 0
-        val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }?.messageCount ?: return
-        val hasDraft = Core.chats.hasLiveDraft(chatId) ||
-            !_drafts.value[chatId]?.text.isNullOrBlank() || attachmentsFor(chatId).isNotEmpty()
-        if (!shouldDiscardEmptyChat(stored, inMemory, snapshot.runningHere, hasDraft)) return
-        runCatching { Core.chats.delete(chatId) }.onSuccess { forgetConversation(chatId) }
+        if (!discardInFlight.add(chatId)) return
+        try {
+            val inMemory = if (snapshotAtSwitch.conversationId == chatId) snapshotAtSwitch.messages.size else 0
+            val stored = Core.chats.conversations.value.firstOrNull { it.id == chatId }?.messageCount ?: return
+            val hasDraft = Core.chats.hasLiveDraft(chatId) ||
+                !_drafts.value[chatId]?.text.isNullOrBlank() || attachmentsFor(chatId).isNotEmpty()
+            if (!shouldDiscardEmptyChat(stored, inMemory, snapshotAtSwitch.runningHere, hasDraft)) return
+            runCatching { Core.chats.delete(chatId) }.onSuccess { forgetConversation(chatId) }
+        } finally {
+            discardInFlight.remove(chatId)
+        }
     }
+
+    /** 在途回收去重（见 [discardIfUntouched]）；单线程 viewModelScope 内读写，无需同步。 */
+    private val discardInFlight = mutableSetOf<String>()
 
     fun newConversation() {
         openingJob?.cancel()
@@ -1147,7 +1171,8 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             // 误点「新建」再点别的会话会留下空壳，所以先回收正被离开的那一个（判据见
             // shouldDiscardEmptyChat：无消息、无草稿、无 run 才删）。
-            discardIfUntouched(_state.value.conversationId)
+            val leavingForNew = _state.value
+            discardIfUntouched(leavingForNew.conversationId, leavingForNew)
             val settings = Core.settings.current()
             val created = Core.chats.create()
             leaveViewport()
@@ -1204,8 +1229,9 @@ class ChatViewModel : ViewModel() {
         _liveStats.value = null
         // 切走时把"什么都没发过的空会话"回收掉：判据在 shouldDiscardEmptyChat（无消息 /
         // 无草稿 / 无 run 才删），有草稿的会保留 —— 用户打了字没发那是有内容的。
-        val leavingId = _state.value.conversationId
-        viewModelScope.launch { discardIfUntouched(leavingId) }
+        // 快照在切走前捕获（函数 KDoc 说明原因）。
+        val leaving = _state.value
+        viewModelScope.launch { discardIfUntouched(leaving.conversationId, leaving) }
         // Anything the conversation on screen was still holding is published before the
         // display moves: a buffered tail would otherwise land in the conversation being
         // opened, or be lost with the one being left.

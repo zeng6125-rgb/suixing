@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.PopupPositionProvider
+import com.suixing.agent.ui.components.InlineIconAction
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.components.MenuCard
@@ -964,43 +965,8 @@ internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> U
 }
 
 @Composable
-internal fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    Box(
-        modifier = Modifier
-            // **盒子只管间距，`clickable` 挂在图标上**（用户：「为什么必须得套个盒子呢？」）。
-            // 之前把 `clickable` 放在 26dp 外盒上 ⇒ 涟漪按盒子范围画，而图标 15dp 靠左，
-            // 于是右偏 5.5dp。把点击与涟漪下放到图标本身，圆心就正了；
-            // 外盒仍保留 26dp ⇒ **图标位置和整排间距完全不变**（上一版缩盒子才导致"变窄"）。
-            .size(26.dp),
-        // **图标贴盒子左边**（用户：「图标左边缘 → 自身盒子左边缘 5.5dp 这个改成 0dp」）：
-        // 原来是 `Center`，26dp 盒里居中 ⇒ 左右各 5.5dp。现在靠左对齐 ⇒ 左 0dp、右 11dp。
-        // 盒子仍是 26dp，点击热区不变；只是图标不再居中。
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            // **15dp 是这一行的既有约定**：`MetricButton` 的注释写明「与旁边的复制/编辑图标
-            // 同尺寸」。所以修对齐时该动的是 [com.suixing.agent.ui.chat.BranchArrow]
-            // 那枚 16dp 的箭头，不是把这里抬到 16。
-            // 点击与涟漪都挂在图标上（15dp 节点）⇒ 涟漪圆心 = 图标中心。
-            // **点击与涟漪必须在同一个节点上**（用户：「还是偏的啊」）。
-            // 涟漪的起点是"按下位置"，位置来自**发事件的那个节点**的坐标系；
-            // 之前由 26dp 外盒发事件、里层 32dp 节点画涟漪 ⇒ 坐标被当成里层的，于是错位。
-            // 现在让图标自己收点击，坐标系一致，涟漪就落在手指按下的地方。
-            // `radius = 16.dp`：把涟漪画到 32dp（不用放大节点），`bounded = false` 保持圆形。
-            modifier = Modifier
-                .size(15.dp)
-                .clickable(
-                    interactionSource = interaction,
-                    indication = ripple(bounded = false, radius = 16.dp),
-                    onClick = onClick,
-                ),
-        )
-    }
-}
+internal fun TinyAction(icon: ImageVector, label: String, onClick: () -> Unit) =
+    InlineIconAction(icon, label, onClick)
 
 /**
  * The reply's own numbers, in the card's bottom row: two buttons, one for the clock and one

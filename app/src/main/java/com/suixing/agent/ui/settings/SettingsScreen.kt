@@ -61,6 +61,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
@@ -135,6 +136,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 
 /** Outcome of a connection test, shown in the fixed bar above the buttons. */
 private data class TestOutcome(val ok: Boolean, val message: String)
@@ -229,9 +232,6 @@ private fun SettingsRoot(
     onOpenPage: (SettingsPage) -> Unit,
     onOpenOnboarding: () -> Unit,
 ) {
-    val capabilities by Core.capabilities.state.collectAsStateWithLifecycle()
-    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
-
     val openNow = androidx.compose.runtime.rememberUpdatedState(onOpen)
     val onboardingNow = androidx.compose.runtime.rememberUpdatedState(onOpenOnboarding)
     val modelRows = remember {
@@ -304,7 +304,7 @@ private fun SettingsRoot(
             // 末行避让手势条（issue #47）：内容本身画到手势条底下，滚动时穿过去。
             contentPadding = settingsPagePadding(),
         ) {
-            item { SettingsStatusCard(capabilities, settings) }
+            item { SettingsStatusCard() }
             item {
                 SettingsGroup(
                     title = "模型与对话",
@@ -334,27 +334,38 @@ private fun SettingsRoot(
  * 这里只是把它们放到第一屏，不新造数据源。
  */
 @Composable
-private fun SettingsStatusCard(capabilities: CapabilityState, settings: AppSettings) {
-    val tier = when {
-        capabilities.rootReady -> "Root 档"
-        capabilities.shellReady -> "Shizuku 档"
-        capabilities.accessibility -> "无障碍档"
-        else -> "标准档"
+private fun SettingsStatusCard() {
+    // **collect 下沉到唯一消费者**（任务4 #6）：原来在 SettingsRoot 页顶 collect，改任意
+    // 设置（主题/字号/开关）都把整个 SettingsRoot + LazyColumn 拖进重组，而这份状态只有
+    // 这张卡读。下沉后改设置只重组这张卡。
+    val capabilities by Core.capabilities.state.collectAsStateWithLifecycle()
+    val settings by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    // 三个推导串 remember：只在状态真变时重拼（原来每次重组都 buildString）。
+    val tier = remember(capabilities) {
+        when {
+            capabilities.rootReady -> "Root 档"
+            capabilities.shellReady -> "Shizuku 档"
+            capabilities.accessibility -> "无障碍档"
+            else -> "标准档"
+        }
     }
-    val checks = buildString {
-        append(if (capabilities.accessibility) "无障碍 已开" else "无障碍 未开")
-        append(" · ")
-        append(if (capabilities.shellReady) "Shizuku 已连" else "Shizuku 未连")
-        append(" · ")
-        append(if (capabilities.rootReady) "Root 已就绪" else "Root 未检测")
+    val checks = remember(capabilities) {
+        buildString {
+            append(if (capabilities.accessibility) "无障碍 已开" else "无障碍 未开")
+            append(" · ")
+            append(if (capabilities.shellReady) "Shizuku 已连" else "Shizuku 未连")
+            append(" · ")
+            append(if (capabilities.rootReady) "Root 已就绪" else "Root 未检测")
+        }
     }
-    val model = if (settings.configured) {
-        val provider = settings.activeProvider()?.label
-        "模型：${settings.shortModel}" + if (provider.isNullOrBlank()) "" else "（$provider）"
-    } else {
-        "模型：还没配置接口与密钥"
+    val model = remember(settings) {
+        if (settings.configured) {
+            val provider = settings.activeProvider()?.label
+            "模型：${settings.shortModel}" + if (provider.isNullOrBlank()) "" else "（$provider）"
+        } else {
+            "模型：还没配置接口与密钥"
+        }
     }
-
     SuixingCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SoftIcon(ImageVector.vectorResource(R.drawable.ic_shield_user))
@@ -532,6 +543,38 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     }
     // The endpoint the model fields edit; tapping a chip also makes it the active one.
     val selected = form.providers.firstOrNull { it.id == selectedId } ?: form.providers.firstOrNull()
+
+    // ===== 四个端点字段的本地态（任务4 #1：击键只重组输入框，不再整页）=====
+    // 原来每键 `form = form.copy(...).mapProvider(...)`：form 引用一换，捕获它的全部组合域
+    // （dirty 判断、模型卡、整条 LazyColumn）逐键重跑。现在：本地态即时显示；
+    // **400ms 防抖**写回 form（snapshotFlow+collectLatest 合帧，喂 dirty/保存钮）；
+    // 所有"消费 form"的出口（保存/离开/换 chip/删除/测试连接/拉取模型）先 flush——
+    // 行为与逐键写 form 完全一致，打字期间零整页开销。
+    var baseUrlText by remember { mutableStateOf("") }
+    var nameText by remember { mutableStateOf("") }
+    var apiKeyText by remember { mutableStateOf("") }
+    var testModelText by remember { mutableStateOf("") }
+    var endpointTouched by remember { mutableStateOf(false) }
+    LaunchedEffect(selected?.id, seeded) {
+        // 换 provider（chip/删除/初次装载）＝三个字段全部重新播种，触碰标记清零。
+        endpointTouched = false
+        baseUrlText = selected?.baseUrl.orEmpty()
+        nameText = selected?.name.orEmpty()
+        apiKeyText = selected?.apiKey.orEmpty()
+        testModelText = form.model   // 测试模型 ID 是顶层设置，不随 provider 切换重置
+    }
+    fun flushEndpointFields() {
+        form = form.copy(baseUrl = baseUrlText, apiKey = apiKeyText, model = testModelText)
+            .mapProvider(selectedId) {
+                it.copy(baseUrl = baseUrlText, name = nameText, apiKey = apiKeyText)
+            }
+    }
+    LaunchedEffect(Unit) {
+        snapshotFlow { Triple(baseUrlText, nameText, apiKeyText) }
+            .drop(1)
+            .collectLatest { delay(400); flushEndpointFields() }
+    }
+
     // A chip tap rewrites the endpoint triple (address, key, model) in the draft without
     // writing to disk, so whether the draft holds a hand edit to it is a rule of its own —
     // see ModelDraft.kt, where it is unit tested.
@@ -547,6 +590,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     var leavingWithDraft by remember { mutableStateOf(false) }
     var pendingSwitch by remember { mutableStateOf<String?>(null) }
     val switchProvider: (ProviderConfig) -> Unit = { provider ->
+        flushEndpointFields()   // 旧 provider 的未落 form 击键先收编，再换
         selectedId = provider.id
         modelsOpen = false
         outcome = null
@@ -559,6 +603,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     val deleteProvider: (ProviderConfig) -> Unit = { provider ->
+        flushEndpointFields()
         val rest = form.providers.filterNot { it.id == provider.id }
         val next = rest.firstOrNull()
         selectedId = next?.id.orEmpty()
@@ -571,6 +616,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         )
     }
     fun leavePage() {
+        flushEndpointFields()
         val kept = form.discardUncommittedProviders(stored, selected?.id)
         val remaining = kept.providers.firstOrNull { it.id == selected?.id }
             ?: kept.activeProvider() ?: kept.providers.firstOrNull()
@@ -580,15 +626,22 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         else onBack()
     }
     suspend fun saveForm() {
+        flushEndpointFields()
         val snapshot = form
         val saved = snapshot.forSaving(stored)
         Core.settings.save(saved)
         // Do not replace edits typed while persistence was running.
         if (form === snapshot) {
             form = saved
-            if (saved.providers.none { it.id == selectedId }) {
-                selectedId = saved.activeProvider()?.id ?: saved.providers.firstOrNull()?.id.orEmpty()
-            }
+            val keptId = saved.providers.firstOrNull { it.id == selectedId }?.id
+                ?: saved.activeProvider()?.id ?: saved.providers.firstOrNull()?.id.orEmpty()
+            val keptProvider = saved.providers.firstOrNull { it.id == keptId }
+            baseUrlText = keptProvider?.baseUrl ?: saved.baseUrl
+            nameText = keptProvider?.name.orEmpty()
+            apiKeyText = keptProvider?.apiKey ?: saved.apiKey
+            testModelText = saved.model
+            endpointTouched = false
+            selectedId = keptId
         }
     }
     androidx.activity.compose.BackHandler(enabled = seeded) { leavePage() }
@@ -641,6 +694,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             icon = R.drawable.ic_rotate_cw,
                             onClick = {
                                 scope.launch {
+                                    flushEndpointFields()   // 测试的是刚敲完的字，别等防抖
                                     if (!ensureLocalNetwork()) return@launch
                                     testing = true
                                     outcome = null
@@ -727,10 +781,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     // 15sp 走比例式而不是 `15.sp`：写死 sp 会关掉「外观 → 字号」的缩放（规范第 6 条），
                     // 详见文件底部 settingsFieldText 的 KDoc。
                     textStyle = settingsFieldText,
-                    value = form.baseUrl,
+                    value = baseUrlText,
                     onValueChange = { value ->
-                        form = form.copy(baseUrl = value)
-                            .mapProvider(selected?.id) { it.copy(baseUrl = value) }
+                        endpointTouched = true
+                        baseUrlText = value
                     },
                     // Compact field shares the 48dp editing minimum with selectors/actions;
                     // floating labels, supporting text and larger fonts may grow naturally.
@@ -755,9 +809,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     // Uses CompactOutlinedTextField via the import alias; the shared
                     // editing minimum stays flexible rather than clipping scaled text.
                     textStyle = settingsFieldText,
-                    value = selected?.name.orEmpty(),
+                    value = nameText,
                     onValueChange = { value ->
-                        form = form.mapProvider(selected?.id) { it.copy(name = value) }
+                        endpointTouched = true
+                        nameText = value
                     },
                     label = { Text("提供方名称") },
                     singleLine = true,
@@ -781,10 +836,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             item {
                 OutlinedTextField(
                     textStyle = settingsFieldText,
-                    value = form.apiKey,
+                    value = apiKeyText,
                     onValueChange = { value ->
-                        form = form.copy(apiKey = value)
-                            .mapProvider(selected?.id) { it.copy(apiKey = value) }
+                        endpointTouched = true
+                        apiKeyText = value
                     },
                     label = { Text("API Key") },
                     singleLine = true,
@@ -808,7 +863,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
-                        enabled = !loadingModels && selected != null && form.baseUrl.isNotBlank(),
+                        enabled = !loadingModels && selected != null && baseUrlText.isNotBlank(),
                         modifier = Modifier.heightIn(min = 36.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                         shape = MaterialTheme.shapes.small,
@@ -926,7 +981,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 }
             }
             item {
-                OutlinedTextField(value = form.model, onValueChange = { form = form.copy(model = it) },
+                OutlinedTextField(value = testModelText,
+                    onValueChange = { testModelText = it; endpointTouched = true },
                     textStyle = settingsFieldText, label = { Text("测试连接使用的模型 ID") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth())
             }
@@ -2481,35 +2537,6 @@ private fun AdvancedSection(content: @Composable ColumnScope.() -> Unit) {
     }
 }
 
-/** A provider's new name, asked for in place: renaming is a structural edit like
- * 新建/删除, so it lands on disk the moment it is confirmed. */
-@Composable
-private fun RenameDialog(
-    initial: String,
-    onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit,
-) {
-    var name by remember { mutableStateOf(initial) }
-    SuixingDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("重命名提供方") },
-        text = {
-            OutlinedTextField(
-                textStyle = settingsFieldText,
-                value = name,
-                onValueChange = { name = it },
-                singleLine = true,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-            )
-        },
-        confirmButton = { scope ->
-            TextButton(onClick = { scope.closeThen { onConfirm(name) } }) { Text("确定") }
-        },
-        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
-    )
-}
-
 /** 一个带说明的控件块：标题、why 行在上，控件在下（卡片式设置页的统一骨架）。 */
 @Composable
 private fun LabeledBlock(
@@ -2565,139 +2592,7 @@ private fun OutcomeCard(outcome: TestOutcome, onDismiss: () -> Unit) {
     }
 }
 
-/**
- * Multi-select over everything `/models` reported, grouped by the upstream vendor
- * that an aggregating proxy prefixes onto each id (`deepseek/deepseek-chat`).
- */
-@Composable
-private fun ModelPickerDialog(
-    models: List<String>,
-    enabled: List<String>,
-    /** Per-model context windows, keyed by model name; 0 or missing means 不限. */
-    contexts: Map<String, Int>,
-    /** Per-model max output tokens, keyed by model name; 0 or missing means 模型默认. */
-    maxTokensMap: Map<String, Int> = emptyMap(),
-    /** The provider the list belongs to: names and aliases are per provider. */
-    provider: ProviderConfig,
-    onContext: (String, Int) -> Unit,
-    onMaxTokens: (String, Int) -> Unit = { _, _ -> },
-    /** Rename one model for this provider; a blank name drops the alias. */
-    onAlias: (String, String) -> Unit,
-    /** Add a model id the endpoint did not list. */
-    onAdd: (String) -> Unit,
-    /** Drop a model from the provider's list (aliases stay, harmless). */
-    onRemove: (String) -> Unit,
-    onConfirm: (List<String>) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var query by remember { mutableStateOf("") }
-    var picked by remember(models) { mutableStateOf(enabled.toSet()) }
-    var aliasing by remember { mutableStateOf<String?>(null) }
-    var adding by remember { mutableStateOf(false) }
-    val groups = remember(models, query) {
-        val shown = if (query.isBlank()) {
-            models
-        } else {
-            models.filter { it.contains(query.trim(), ignoreCase = true) }
-        }
-        groupModels(shown)
-    }
-    SuixingDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("选择模型") },
-        text = {
-            Column {
-                // Endpoints that hide a model behind a flag still serve it: typing the
-                // id is the way in, and the row appears as soon as it is added.
-                TextButton(
-                    onClick = { adding = true },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                ) {
-                    Text("自定义模型", style = SettingsStyle.badge)
-                }
-                Spacer(Modifier.height(4.dp))
-                if (models.size > 8) {
-                    OutlinedTextField(
-                        textStyle = settingsFieldText,
-                        value = query,
-                        onValueChange = { query = it },
-                        label = { Text("筛选") },
-                        singleLine = true,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-                if (groups.isEmpty()) {
-                    Text(
-                        text = "没有匹配的模型。",
-                        style = SettingsStyle.body,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                } else {
-                    LazyColumn(modifier = Modifier.heightIn(max = 380.dp)) {
-                        groups.forEach { (group, ids) ->
-                            item(key = "group-$group") {
-                                GroupHeader(
-                                    group = group,
-                                    ids = ids,
-                                    picked = picked,
-                                    onToggle = { pickAll ->
-                                        picked = if (pickAll) picked + ids else picked - ids.toSet()
-                                    },
-                                )
-                            }
-                            items(ids, key = { "model-$it" }) { id ->
-                                ModelCheckRow(
-                                    id = id,
-                                    label = provider.displayModel(id),
-                                    checked = id in picked,
-                                    contextWindow = contexts[id] ?: 0,
-                                    maxTokens = maxTokensMap[id] ?: 0,
-                                    onToggle = {
-                                        picked = if (id in picked) picked - id else picked + id
-                                    },
-                                    onContext = { onContext(id, it) },
-                                    onMaxTokens = { onMaxTokens(id, it) },
-                                    onAlias = { aliasing = id },
-                                    onRemove = { onRemove(id) },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { scope ->
-            TextButton(onClick = { scope.closeThen { onConfirm(models.filter { it in picked }) } }) {
-                Text("确定（${picked.size}）")
-            }
-        },
-        dismissButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("取消") } },
-    )
 
-    aliasing?.let { id ->
-        AliasDialog(
-            initial = provider.aliases[id].orEmpty(),
-            onDismiss = { aliasing = null },
-            onConfirm = { name ->
-                onAlias(id, name)
-                aliasing = null
-            },
-        )
-    }
-    if (adding) {
-        AddModelDialog(
-            onDismiss = { adding = false },
-            onConfirm = { modelId ->
-                onAdd(modelId)
-                adding = false
-            },
-        )
-    }
-}
-
-/** One upstream vendor's slice of the list, with a select-all shortcut. */
 @Composable
 private fun GroupHeader(
     group: String,
@@ -2902,65 +2797,6 @@ private fun ModelCheckRow(
                     onRemove()
                 },
             )
-        }
-    }
-}
-
-/**
- * The wire this endpoint speaks, as a dropdown.
- *
- * Hand-rolled from a Surface + DropdownMenu, which is how this file already does its one other
- * menu: `ExposedDropdownMenuBox` needs `menuAnchor` typing that this Material3 version shapes
- * differently, and reusing the existing pattern keeps the ripple and the corner radius the same.
- *
- * Blank is  [PROTOCOL_OPENAI]: every config written before this existed means exactly that, so
- * the default entry is the one an old file already implies.
- */
-@Composable
-private fun ProtocolPicker(protocol: String, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    val options = listOf(
-        PROTOCOL_OPENAI to "OpenAI 兼容",
-        PROTOCOL_ANTHROPIC to "Anthropic",
-        PROTOCOL_RESPONSES to "OpenAI Responses",
-    )
-    val label = options.firstOrNull { it.first == protocol }?.second ?: options.first().second
-    Column {
-        Text("接口协议", style = SettingsStyle.body)
-        Spacer(Modifier.height(6.dp))
-        Box {
-            Surface(
-                shape = MaterialTheme.shapes.small,
-                color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 52.dp)
-                    .suixingClickable(MaterialTheme.shapes.small) { open = true },
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(label, style = SettingsStyle.body, modifier = Modifier.weight(1f))
-                    Icon(
-                        imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-            }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                options.forEach { (value, text) ->
-                    DropdownMenuItem(
-                        text = { Text(text) },
-                        onClick = {
-                            open = false
-                            onPick(value)
-                        },
-                    )
-                }
-            }
         }
     }
 }

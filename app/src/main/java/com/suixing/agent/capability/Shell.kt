@@ -21,7 +21,7 @@ internal const val SECCOMP_SIGSYS_EXIT = 159
  * 列清单只会让模型据此猜错。只陈述已经发生的事，让模型自己验证。
  */
 internal const val SECCOMP_FALLBACK_NOTE =
-    "[随行] 自带 bash 被系统的 seccomp 过滤器拦下（exit 159 / SIGSYS），这条命令已改用系统 sh 执行；" +
+    "[JAgent] 自带 bash 被系统的 seccomp 过滤器拦下（exit 159 / SIGSYS），这条命令已改用系统 sh 执行；" +
         "bash 专有语法在这条命令里可能不可用，需要时请改用 POSIX 写法。\n"
 
 /** 这个退出码是不是「被 seccomp 杀掉」的信号。 */

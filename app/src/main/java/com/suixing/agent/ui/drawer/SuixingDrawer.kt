@@ -22,6 +22,8 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -97,6 +99,12 @@ internal fun rememberSuixingDrawerState(
 /**
  * 抽屉宿主：侧边栏在下、主页在上（先画侧边栏，后画主页 ⇒ 主页的阴影能压上去）。
  *
+ * ⚠️ 宿主与冻结层是**两套故意不同**的手势循环，不要"统一"成一份：
+ *  · 宿主 = `detectHorizontalDragGestures`：横向 slop 之后才消费事件，竖滑要原样放行
+ *    给聊天列表滚动；
+ *  · 冻结层 = `awaitEachGesture` 全消费：抽屉开着时竖滑也必须吞掉（挡列表滚动），
+ *    轻点算"点遮罩"。消费语义相反，合并必然破坏其中一边。
+ *
  * 位移不用调用方再算：[offset] 由本组件写进 `offset{}`（布局期），主页那一层自己读
  * `state.offset` 做缩放/圆角/阴影。
  */
@@ -108,7 +116,21 @@ internal fun SuixingDrawer(
     content: @Composable () -> Unit,
 ) {
     val panelPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
-    SideEffect { state.panelWidthPx = panelPx }
+    // 等值守卫：SideEffect 每次重组都跑，值没变就别碰状态（FloatState 同值写入无开销，
+    // 但省掉这次调用让重组路径上少一次分支）。
+    SideEffect { if (state.panelWidthPx != panelPx) state.panelWidthPx = panelPx }
+
+    // **拖拽帧的唯一消费通道**：宿主与冻结层的手势回调只写 [dragTarget]，这里每帧
+    // 合并成一次 `snapTo`。为什么不在回调里 `scope.launch { snapTo }`：拖拽回调每帧都跑
+    //（120Hz），每帧一个协程是纯分配，且 launch 的执行顺序不保证 FIFO，乱序 snap 会让
+    // 面板抖动。snapshotFlow 的合帧语义正好 —— 只看最新值，一帧最多一次 snap。
+    // 初始值取当前进度（不是 0）：避免消费者启动时把开着的抽屉拽回 0。
+    val dragTarget = remember(state) { mutableFloatStateOf(state.progress.value) }
+    LaunchedEffect(state) {
+        snapshotFlow { dragTarget.floatValue }.collect { target ->
+            if (state.progress.value != target) state.progress.snapTo(target)
+        }
+    }
     val scope = rememberCoroutineScope()
     // **松手回弹用 spring 并吃进手指速度**（用户：「手势的收起动画好像有点违和」）。
     // tween 不认初速度 ⇒ 快划松手时动画会从 0 速度重新起步，看着像"顿一下再走"。
@@ -132,20 +154,23 @@ internal fun SuixingDrawer(
                 val tracker = VelocityTracker()
                 var startProgress = 0f
                 var accumulated = 0f
+                // 拖拽帧只写 [dragTarget]（消费者在组合体里）：这里不是组合上下文，
+                // 不能放 LaunchedEffect；也不能直接 snapTo（detectHorizontalDragGestures
+                // 的回调不是挂起的）。写值 → snapshotFlow 每帧合并一次 snapTo。
                 detectHorizontalDragGestures(
                     onDragStart = {
                         // 记下起点进度并累加位移：不能每帧读 `progress.value` 再叠加，
-                        // 因为每次 snapTo 都是异步的，读到的可能是上一帧的旧值 ⇒ 拖动会"吃掉"位移。
+                        // 因为 snapTo 是异步消费的，读到的是上一帧的旧值 ⇒ 拖动会"吃掉"位移。
                         startProgress = state.progress.value
                         accumulated = 0f
+                        dragTarget.floatValue = startProgress
                         tracker.resetTracking()
                     },
                     onHorizontalDrag = { change, dragAmount ->
                         change.consume()
                         accumulated += dragAmount
                         tracker.addPosition(change.uptimeMillis, change.position)
-                        val next = (startProgress + accumulated / panelPx).coerceIn(0f, 1f)
-                        scope.launch { state.progress.snapTo(next) }
+                        dragTarget.floatValue = (startProgress + accumulated / panelPx).coerceIn(0f, 1f)
                     },
                     onDragEnd = {
                         // **带速度判断**（用户：「手势很大程度都滑不动，得滑很久」）。
@@ -223,8 +248,11 @@ internal fun SuixingDrawer(
                                 change.consume()   // 纵向拖动也吃掉 ⇒ 露出的主页不能滚动
                                 if (!isDrag && abs(horizontal) > viewConfiguration.touchSlop) isDrag = true
                                 if (isDrag) {
-                                    val next = (startProgress + horizontal / panelPx).coerceIn(0f, 1f)
-                                    scope.launch { state.progress.snapTo(next) }
+                                    // awaitPointerEventScope 是受限挂起作用域，不能直接调
+                                    // Animatable.snapTo（普通 suspend）⇒ 写 [dragTarget]，
+                                    // 由组合体里的 snapshotFlow 消费者代为执行。
+                                    dragTarget.floatValue =
+                                        (startProgress + horizontal / panelPx).coerceIn(0f, 1f)
                                 }
                             }
                         }

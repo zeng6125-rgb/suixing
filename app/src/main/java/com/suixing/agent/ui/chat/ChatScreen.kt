@@ -44,6 +44,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.DisposableEffect
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.CompositionLocalProvider
@@ -215,13 +218,20 @@ fun ChatScreen(
         val input = currentInput()
         val text = if (input.isBlank()) steer.text else "${input.trimEnd()} ${steer.text}"
         // 多附件：排队行的图逐张解回缓存列；一张解不开就跳过它（丢一张图比丢整句话小）。
-        var restored = 0
-        for (base64 in steer.imagesBase64) {
-            val bitmap = decodeAttachment(base64) ?: continue
-            viewModel.addAttachment(state.conversationId, bitmapAttachment(bitmap, QUEUED_IMAGE_LABEL))
-            restored++
+        // 解码并行（顺序 decodeAttachment 会在多图时串行等待），且 **bitmapAttachment 必须
+        // 在 Default 上跑**：JPEG 压缩 + Base64 编码是主线程杀手（cameraLauncher 路径早就
+        // 包了 withContext(Default)，这里原来漏了 —— 点「修改」排队行会卡一拍）。
+        // addAttachment 回主线程后再逐个入列（它写 VM 状态）。
+        val restored = coroutineScope {
+            steer.imagesBase64.map { base64 ->
+                async {
+                    val bitmap = decodeAttachment(base64) ?: return@async null
+                    withContext(Dispatchers.Default) { bitmapAttachment(bitmap, QUEUED_IMAGE_LABEL) }
+                }
+            }.awaitAll().filterNotNull()
         }
-        setDraft(text = text, imageNames = draft.imageNames + List(restored) { QUEUED_IMAGE_LABEL })
+        restored.forEach { viewModel.addAttachment(state.conversationId, it) }
+        setDraft(text = text, imageNames = draft.imageNames + List(restored.size) { QUEUED_IMAGE_LABEL })
     }
     // **按会话重置**（评审 S4）：它持有的是某条消息对象，切会话后若还能被读到，
     // `editMessage(id, …)` 会把 A 的编辑改到 B 上。目前靠"编辑弹窗是模态"侥幸挡住，

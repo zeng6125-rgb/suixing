@@ -52,6 +52,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -77,6 +78,9 @@ import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SettingRow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -130,6 +134,35 @@ fun AssistantEditor(
     backEnabled: Boolean = true,
 ) {
     var draft by remember(initial) { mutableStateOf(initial) }
+    // ===== 三个文本字段的本地态（任务4 #4）：击键不再重组整个编辑页 =====
+    // 原来 name/description/systemPrompt 逐键 `onDraft(draft.copy(...))`：draft 引用一换，
+    // emoji FlowRow（19+ 枚）与工具 FilterChip 行逐键全量重跑。现在：本地态即时显示，
+    // 400ms 防抖推回 draft（collectLatest 合帧）；draft 被别处改写（「恢复默认提示词」、
+    // initial 重置）时回填本地 —— 用 lastPushed 区分"自己推的"与"外部改的"。
+    // 保存（:207）先合成最新值，防抖未落的部分不丢。
+    var nameText by remember(initial) { mutableStateOf(initial.name) }
+    var descriptionText by remember(initial) { mutableStateOf(initial.description) }
+    var promptText by remember(initial) { mutableStateOf(initial.systemPrompt) }
+    var lastPushed by remember(initial) {
+        mutableStateOf(Triple(initial.name, initial.description, initial.systemPrompt))
+    }
+    LaunchedEffect(Unit) {
+        snapshotFlow { Triple(nameText, descriptionText, promptText) }
+            .drop(1)
+            .collectLatest { (n, d, p) ->
+                delay(400)
+                lastPushed = Triple(n, d, p)
+                draft = draft.copy(name = n, description = d, systemPrompt = p)
+            }
+    }
+    LaunchedEffect(draft.name, draft.description, draft.systemPrompt) {
+        val current = Triple(draft.name, draft.description, draft.systemPrompt)
+        if (current != lastPushed) {
+            nameText = current.first
+            descriptionText = current.second
+            promptText = current.third
+        }
+    }
     val isNew = settings.assistant(initial.id) == null
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -204,7 +237,17 @@ fun AssistantEditor(
                                 )
                             },
                             actions = {
-                                TextButton(onClick = { onSave(draft) }) { Text("保存") }
+                                TextButton(onClick = {
+                                    // 文本字段的防抖可能还有没推完的部分：保存前合成最新值。
+                                    val latest = draft.copy(
+                                        name = nameText,
+                                        description = descriptionText,
+                                        systemPrompt = promptText,
+                                    )
+                                    lastPushed = Triple(nameText, descriptionText, promptText)
+                                    draft = latest
+                                    onSave(latest)
+                                }) { Text("保存") }
                             },
                         )
                     }
@@ -221,7 +264,10 @@ fun AssistantEditor(
                 ) {
                     IdentitySection(
                         draft = draft,
-                        onDraft = { draft = it },
+                        nameText = nameText,
+                        onNameChange = { nameText = it },
+                        descriptionText = descriptionText,
+                        onDescriptionChange = { descriptionText = it },
                         onPickPicture = {
                             pickPicture.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
@@ -246,7 +292,11 @@ fun AssistantEditor(
                             }
                         },
                     )
-                    PromptSection(draft = draft, onDraft = { draft = it })
+                    PromptSection(
+                        promptText = promptText,
+                        onPromptChange = { promptText = it },
+                        onRestoreDefault = { draft = draft.copy(systemPrompt = DEFAULT_SYSTEM_PROMPT) },
+                    )
                     ModelSection(draft = draft, settings = settings, onDraft = { draft = it })
                     ToolSection(draft = draft, toolNames = toolNames, onDraft = { draft = it })
                     notice?.let { message ->
@@ -346,7 +396,11 @@ fun AssistantEditor(
 @Composable
 private fun IdentitySection(
     draft: Assistant,
-    onDraft: (Assistant) -> Unit,
+    /** 名字与描述走本地态（任务4 #4）：击键只重组这两个输入框，不拖动 emoji/工具行。 */
+    nameText: String,
+    onNameChange: (String) -> Unit,
+    descriptionText: String,
+    onDescriptionChange: (String) -> Unit,
     onPickPicture: () -> Unit,
     onClearPicture: () -> Unit,
     onPickEmoji: (String) -> Unit,
@@ -440,8 +494,8 @@ private fun IdentitySection(
             // 反过来，写死 `height(48.dp)` 是**上限**：用户把「外观→字号」调大时字会被裁掉，工具页
             // 搜索框踩过这个坑（ToolsScreen.kt:521-524）。下限不裁：字大了框跟着长高。
             textStyle = SettingsStyle.fieldText,
-            value = draft.name,
-            onValueChange = { onDraft(draft.copy(name = it)) },
+            value = nameText,
+            onValueChange = onNameChange,
             // 下限，不是固定高度：内容需要时它自己长高，字号放大也不会裁字。
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             label = { Text("名字") },
@@ -451,8 +505,8 @@ private fun IdentitySection(
         OutlinedTextField(
             // 与「名字」同一个字号、同一个下限：三个框看起来必须是同一种控件。
             textStyle = SettingsStyle.fieldText,
-            value = draft.description,
-            onValueChange = { onDraft(draft.copy(description = it)) },
+            value = descriptionText,
+            onValueChange = onDescriptionChange,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             label = { Text("一句话说明") },
             placeholder = { Text("例如：只读代码、不改文件") },
@@ -462,23 +516,24 @@ private fun IdentitySection(
 }
 
 @Composable
-private fun PromptSection(draft: Assistant, onDraft: (Assistant) -> Unit) {
+private fun PromptSection(
+    promptText: String,
+    onPromptChange: (String) -> Unit,
+    /** 「用默认」：父级重置 draft.systemPrompt，本地文本经对账回填。 */
+    onRestoreDefault: () -> Unit,
+) {
     SectionCard(
         title = "系统提示词",
         icon = ImageVector.vectorResource(R.drawable.ic_sliders_horizontal),
         subtitle = "这个助手是谁、该怎么做事",
         trailing = {
-            TextButton(
-                onClick = { onDraft(draft.copy(systemPrompt = DEFAULT_SYSTEM_PROMPT)) },
-            ) {
-                Text("用默认")
-            }
+            TextButton(onClick = onRestoreDefault) { Text("用默认") }
         },
     ) {
         OutlinedTextField(
             textStyle = SettingsStyle.fieldText,
-            value = draft.systemPrompt,
-            onValueChange = { onDraft(draft.copy(systemPrompt = it)) },
+            value = promptText,
+            onValueChange = onPromptChange,
             // 150 → 120：提示词框也是"太高"被点名的之一，而这里同样用**下限**——写多长它长多高，
             // 永远不会因为框小而把字裁掉。
             modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp),

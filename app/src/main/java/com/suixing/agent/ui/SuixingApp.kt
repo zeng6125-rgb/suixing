@@ -506,24 +506,14 @@ fun SuixingApp() {
                 // 箭头，从屏幕左缘还能拉出抽屉是错的——用户原话「设置页到底是不是单独页？为什么在
                 // 设置页里面还能侧滑出侧边栏？」。只有 chat 那一层（route == "empty"）为 true。
                 gesturesEnabled = route == "empty",
-                // **推挤 + 浮起 + 缩放 + 层次 + 轻遮罩**（用户要的 DeepSeek 效果）。
-                //
-                // 为什么是 Modal 而不是 Dismissible：`DismissibleNavigationDrawer` 只做**纯平移**
-                // （`contentPlaceable.placeRelative(sheetWidth + offset)`），既没有遮罩也没有
-                // 缩放/圆角/层次。用户的要求（「主页面相当于浮起右移的，而且有点缩放，有层次」
-                // +「遮罩 deepseek 软件是有点呀」）它一个都做不到。
-                //
-                // 所以用 Modal 拿遮罩 + 手势，再在 content 外层自己叠一层变换：
-                //  · `drawerState.offset` 是**公开的** `State<Float>`（面板的 x 位置：
-                //    关闭 ≈ −面板宽，打开 = 0）⇒ 可算出 0→1 的进度；
-                //  · 进度驱动 `translationX / scale / 圆角 / 阴影`，就是"浮起"的层次感。
-                // 面板宽度 **300dp**（[DRAWER_SHEET_WIDTH]）：屏宽 385dp 时主页右侧露出 **85dp**。
-                // 用户：「不需要加阴影和遮罩」。留 0 透明度而不是删参数：`scrimColor` 是必填，
-                // 且库仍需要它来承接「点主页面区域关闭」（推挤式在 DeepSeek 里也是这么做）。
+                // **挤压式抽屉**（用户要的 DeepSeek 形态）：主页右移、缩放 0.95、屏幕圆角、
+                // 左缘阴影；侧边栏铺满打底。宿主是自建的 [com.suixing.agent.ui.drawer.SuixingDrawer]
+                //（M3 两代组件的布局/动画限制见它的 KDoc），拖动进度、松手回弹曲线全部自控。
+                // 面板 **300dp**（[DRAWER_SHEET_WIDTH]）：屏宽 385dp 时主页右侧露出 **85dp**；
+                // 抽屉开着时露出的主页被冻结层接管（轻点=关抽屉、横拖=开合、竖滑吞掉）。
+                // 主页那层的变换（位移/缩放/圆角/阴影）在 content 的 graphicsLayer 里，见下。
                 drawerContent = {
-                    // **侧边栏本体回到 drawerContent**：只有这一层会被库的 `offset` 驱动，
-                    // 才有进出场动画；而且 `DismissibleNavigationDrawer` 没有 Scrim，
-                    // 侧边栏才能正常响应点击。
+                    // 侧边栏本体：宿主按 progress 平移这一层，才有跟手/回弹动画。
                     val drawerConversations by chat.conversations.collectAsStateWithLifecycle()
                 Drawer(
                     open = drawerState.isOpen,

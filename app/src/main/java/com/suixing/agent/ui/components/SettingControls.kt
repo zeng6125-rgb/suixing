@@ -2,7 +2,6 @@ package com.suixing.agent.ui.components
 
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
@@ -10,6 +9,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.alpha
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -237,15 +237,28 @@ fun SegmentedPill(
     // 否则只有横向拖动、手指没离开的这一格，照样会画一圈点击涟漪（用户报的现象）。
     val interactions = remember(options.size) { List(options.size) { MutableInteractionSource() } }
     val presses = remember(options.size) { arrayOfNulls<androidx.compose.foundation.interaction.PressInteraction.Press>(options.size) }
-    val position = animateFloatAsState(
-        targetValue = dragPosition ?: selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat(),
-        // 与开关同一条弹簧参数：两个控件的"选中/切换"手感统一（用户要求样式动效统一），
-        // 拖动中仍然 snap（跟手，不插值）。
-        animationSpec = if (dragPosition != null) snap()
-        else spring(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow),
-        label = "segment selection",
-    )
-    val visibleIndex = dragPosition?.roundToInt() ?: selectedIndex
+    // **高亮块改走 Animatable + 绘制期读**（任务4 #5）：原来 animateFloatAsState 的 target
+    // 在组合域读 dragPosition ⇒ 拖动每一帧都重组整个控件（含全部 label）。现在：
+    //  · 拖动中 graphicsLayer 直接读 dragPosition（绘制期，零重组）；
+    //  · 「当前格」用 derivedStateOf —— 只在**跨格**那一帧重组 label；
+    //  · 选中变化（点选/外部）→ spring 到位（与开关同一条弹簧参数，手感统一不变）；
+    //  · 松手 → highlight 先 snap 到松手位置，dragPosition 才置空（避免 1 帧回跳）。
+    val scope = rememberCoroutineScope()
+    val highlight = remember(options.size) {
+        Animatable(selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat())
+    }
+    LaunchedEffect(selectedIndex, options.size) {
+        if (dragPosition == null) {
+            highlight.animateTo(
+                selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat(),
+                spring(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow),
+            )
+        }
+    }
+    val visibleIndex by remember(options, selectedIndex) {
+        derivedStateOf { dragPosition?.roundToInt() ?: selectedIndex }
+    }
+    val showHighlight by remember { derivedStateOf { dragPosition != null || selectedIndex >= 0 } }
     Box(
         modifier.fillMaxWidth().selectableGroup()
             .pointerInput(options, selectedIndex, rtl) {
@@ -264,11 +277,23 @@ fun SegmentedPill(
                             }
                             dragPosition = segmentPositionAt(offset.x, size.width.toFloat(), options.size, rtl)
                         },
-                        onDragCancel = { dragPosition = null },
+                        onDragCancel = {
+                            scope.launch {
+                                dragPosition?.let { highlight.snapTo(it) }
+                                dragPosition = null
+                            }
+                        },
                         onDragEnd = {
-                            val index = dragPosition?.roundToInt()
-                            dragPosition = null
-                            if (index != null && index != selectedIndex) selectNow(index)
+                            scope.launch {
+                                val index = dragPosition
+                                // 先 snap 到松手位置再清 dragPosition：graphicsLayer 在两态
+                                // 之间读的是同一个值，不闪 1 帧旧位置。
+                                index?.let { highlight.snapTo(it) }
+                                dragPosition = null
+                                if (index != null && index.roundToInt() != selectedIndex) {
+                                    selectNow(index.roundToInt())
+                                }
+                            }
                         },
                     ) { change, _ ->
                         change.consume()
@@ -287,10 +312,10 @@ fun SegmentedPill(
                 .clip(shape).background(lerp(colors.surface, colors.onSurface, trackTint))
                 .border(0.5.dp, colors.outlineVariant.copy(alpha = 0.5f), shape),
         ) {
-            if (options.isNotEmpty() && (dragPosition != null || selectedIndex >= 0)) Box(
+            if (options.isNotEmpty() && showHighlight) Box(
                 Modifier.align(Alignment.CenterStart).fillMaxHeight().fillMaxWidth(1f / options.size)
                     .graphicsLayer {
-                        translationX = position.value * size.width * if (rtl) -1f else 1f
+                        translationX = (dragPosition ?: highlight.value) * size.width * if (rtl) -1f else 1f
                     }
                     .padding(3.dp)
                     .shadow(1.dp, shape)

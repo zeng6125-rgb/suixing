@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.State
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -40,6 +41,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -395,9 +398,33 @@ private fun HorizontalRule() {
  * 动起来的，而不是页面已经换了、条子还在慢慢爬。起手值就是当前进度（animateFloatAsState
  * 的初值＝目标值），所以不会"先跳一下再归位"。
  */
+/**
+ * 进度条的填充段：宽度在 **layout 相位**读 [progress]（State 观察布局重算，不走重组），
+ * 动画期间只有这一层重排。
+ */
+@Composable
+private fun OnboardingProgressFill(progress: State<Float>) {
+    Box(
+        Modifier
+            .fillMaxHeight()
+            .fillMaxWidth()
+            .layout { measurable, constraints ->
+                val w = (constraints.maxWidth * progress.value).roundToInt().coerceAtLeast(0)
+                val placeable = measurable.measure(
+                    constraints.copy(minWidth = w, maxWidth = w),
+                )
+                layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+            }
+            .background(MaterialTheme.colorScheme.primary, CircleShape),
+    )
+}
+
 @Composable
 private fun OnboardingHeader(step: OnboardingStep, onSkip: (() -> Unit)?) {
-    val progress by animateFloatAsState(
+    // **不 `by` 解包**（任务4 #2）：progress 每帧都在变，解包到页头组合作用域 = 280ms 切页
+    // 动画期间「第X步」文字 + 跳过按钮整页头逐帧重组。把 State 传给进度条，在它的
+    // layout 相位读 —— 动画只重排那 3dp 的条，页头其余部分零重组。
+    val progress = animateFloatAsState(
         targetValue = (step.ordinal + 1f) / OnboardingStep.entries.size,
         animationSpec = tween(PAGE_MS, easing = REVEAL_EASING),
         label = "onboarding-progress",
@@ -426,12 +453,7 @@ private fun OnboardingHeader(step: OnboardingStep, onSkip: (() -> Unit)?) {
                 .height(3.dp)
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape),
         ) {
-            Box(
-                Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(progress)
-                    .background(MaterialTheme.colorScheme.primary, CircleShape),
-            )
+            OnboardingProgressFill(progress)
         }
     }
 }

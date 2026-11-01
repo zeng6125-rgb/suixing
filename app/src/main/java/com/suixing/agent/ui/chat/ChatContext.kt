@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
+import com.suixing.agent.ui.components.CircleIconAction
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
@@ -113,22 +114,16 @@ internal fun TopBarContextEntry(
         LocalConfiguration.current.screenWidthDp.dp.toPx()
     }
     val edgePx = with(density) { POPUP_EDGE_AIR.toPx() }
-    Box(
-        modifier = Modifier
-            .size(28.dp)
-            .clip(CircleShape)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = { open = true },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            painter = painterResource(R.drawable.ic_chart_column),
-            contentDescription = "上下文用量明细",
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    // 锚定 Box：MenuCard 的 Popup 以它为锚（原 28dp Box 的壳，壳里的按钮统一走
+    // [CircleIconAction]：28dp 圆、字形 16dp、有界圆形涟漪 —— 原参数原样收编）。
+    // enforceTouchTarget = false：嵌在头部行的既有热区里，不补 48dp（会撑高行）。
+    Box {
+        CircleIconAction(
+            icon = painterResource(R.drawable.ic_chart_column),
+            label = "上下文用量明细",
+            onClick = { open = true },
+            size = 28.dp,
+            enforceTouchTarget = false,
         )
         // **直接复用 MenuCard**（模型选择等七处同一个组件）：同一个 Popup、同一套卡片外框、
         // 同一套 110ms 进出场。这里需要显式定位，所以传 popupPositionProvider。

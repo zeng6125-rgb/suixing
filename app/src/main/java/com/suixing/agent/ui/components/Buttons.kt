@@ -87,6 +87,105 @@ fun Modifier.suixingClickable(
         onClick = onClick,
     )
 
+
+// ==== 内联图标动作与圆形图标动作：全库 icon 按钮的两个统一入口 ====
+//
+// 尺寸与反馈的规则（各处不得再自定参数，见各组件 KDoc）：
+//  · 文本行内的 26dp 小图标（复制/改写/重新回答…）→ [InlineIconAction]
+//  · 列表行/悬浮 chip 上的 40dp 圆形图标（队列动作、定时任务行动作、上下文 chip）
+//    → [CircleIconAction]
+//  · 独立工具条圆盘（40dp 带盘面和阴影）→ [FlatIconButton] / [FlatPainterButton]
+//  · 成行的可点条目（菜单项、设置行）→ [suixingClickable]（有界涟漪）
+
+/** [InlineIconAction] 的热区盒径。 */
+val INLINE_ICON_BOX = 26.dp
+
+/** [InlineIconAction] 的字形尺寸 —— 文本行小图标的既有约定（15dp）。 */
+val INLINE_ICON_GLYPH = 15.dp
+
+/** [InlineIconAction] 的无界涟漪半径：画出 32dp 的圆。 */
+val INLINE_ICON_RIPPLE = 16.dp
+
+/**
+ * 内联图标动作：文本行里 26dp 的小图标按钮。
+ *
+ * 形态：26dp 热区盒 + 15dp 字形，字形贴盒左（`CenterStart`，整排图标的对齐约定），
+ * 点击与涟漪都挂在**字形节点**上 —— 涟漪起点用"发事件节点"的坐标系，跨节点必偏
+ * 5.5dp（盒心 13dp vs 字形中心 7.5dp）；`bounded = false` + `radius = 16.dp` 画出
+ * 32dp 的圆且不被节点矩形裁成方块；不加 `clip`（15dp 圆会切掉方形字形四角）。
+ * 这三条是 0.8.600→0.8.609 逐版实测收敛的结果，动任何一条都会复发。
+ *
+ * 禁用态：字形降到 35% 透明度（与 [com.suixing.agent.ui.chat.BranchArrow] 原行为一致）。
+ */
+@Composable
+fun InlineIconAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    Box(
+        modifier = modifier.size(INLINE_ICON_BOX),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (enabled) tint else tint.copy(alpha = 0.35f),
+            modifier = Modifier
+                .size(INLINE_ICON_GLYPH)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = ripple(bounded = false, radius = INLINE_ICON_RIPPLE),
+                    enabled = enabled,
+                    onClick = onClick,
+                ),
+        )
+    }
+}
+
+/**
+ * 圆形图标动作：嵌在行里的 40dp 圆形涟漪图标按钮（排队行动作、定时任务行动作）。
+ *
+ * 与 [FlatIconButton] 的分工：那是有盘面、有阴影的独立圆钮（无界涟漪 radius=size/2）；
+ * 这里是嵌在行内的轻量动作，涟漪 clip 在圆形里、不画盘面。
+ *
+ * [size] 默认 40dp；[enforceTouchTarget] 补足 48dp 最小热区（视觉仍是 [size]），
+ * 只有嵌在已有更大热区的容器里时才关掉。
+ */
+@Composable
+fun CircleIconAction(
+    icon: Painter,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 40.dp,
+    glyphSize: Dp = 16.dp,
+    enforceTouchTarget: Boolean = true,
+) {
+    Box(
+        modifier = modifier
+            .let { if (enforceTouchTarget) it.minimumInteractiveComponentSize() else it }
+            .size(size)
+            .clip(CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            painter = icon,
+            contentDescription = label,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(glyphSize),
+        )
+    }
+}
+
 /**
  * The app's round action button: a filled circle that lifts when pressed.
  *
