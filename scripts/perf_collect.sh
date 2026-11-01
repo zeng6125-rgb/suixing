@@ -2,7 +2,8 @@
 # 按 perf-scenarios.md 的 6 组场景采集一帧数据，直接输出一行表格。
 #
 # 用法：
-#   scripts/perf_collect.sh <A|B|C|D|E|F> [秒数]
+#   scripts/perf_collect.sh <B|C|D|E|F> [秒数]
+#   PERF_GFXINFO_FILE=<dump 文件> scripts/perf_collect.sh <B|C|D|E|F>   # 离线解析
 #
 # 它不启动应用、不操作屏幕：
 #   · 应用没在跑 ⇒ 直接给可读错误（不用 adb 拉起，那是用户自己的决定）；
@@ -25,6 +26,38 @@ case "$SCENARIO" in
   *)  echo "未知场景「$SCENARIO」，可选 B/C/D/E/F（A 需单独授权）。" >&2; exit 2 ;;
 esac
 
+# ---- gfxinfo 解析 ----
+# 一份 dump 里有**多组同样标签**的直方图（main / gpu / …），所以一律取"第一次出现"；
+# 毫秒数在标签后面的字段里，不是标签本身 —— 早期版本取错了，会把 90/95/99 当成帧时间。
+# 输出：p50|p95|p99|janky%|总帧数
+parse_gfxinfo() {
+  printf '%s\n' "$1" | awk '
+    /^50th percentile/ && p50 == "" { p50 = $3 }
+    /^95th percentile/ && p95 == "" { p95 = $3 }
+    /^99th percentile/ && p99 == "" { p99 = $3 }
+    /^Janky frames: / && janky == "" { split($0, a, "("); split(a[2], b, ")"); janky = b[1] }
+    /^Total frames rendered:/ && total == "" { total = $4 }
+    END { printf "%s|%s|%s|%s|%s\n", (p50 == "" ? "-" : p50), (p95 == "" ? "-" : p95), (p99 == "" ? "-" : p99), (janky == "" ? "-" : janky), (total == "" ? "-" : total) }
+  '
+}
+
+emit_row() {
+  # $1=场景 $2=版本 $3=刷新率 $4=p50 $5=p95 $6=p99 $7=janky $8=rss $9=备注
+  printf '| %s | %s | %s | 1 | %s | %s | %s | %s | %s | %s |\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
+}
+
+# ---- 离线模式：解析一份已保存的 dump（无设备也能回归验证这套解析）----
+if [ -n "${PERF_GFXINFO_FILE:-}" ]; then
+  if [ ! -f "$PERF_GFXINFO_FILE" ]; then
+    echo "PERF_GFXINFO_FILE 指向的文件不存在：$PERF_GFXINFO_FILE" >&2
+    exit 5
+  fi
+  IFS='|' read -r P50 P95 P99 JANKY TOTAL < <(parse_gfxinfo "$(cat "$PERF_GFXINFO_FILE")")
+  emit_row "$SCENARIO" "-" "-" "$P50" "$P95" "$P99" "$JANKY" "-" "离线解析（总帧 ${TOTAL}）"
+  exit 0
+fi
+
 adb_pick || exit 1
 pid=$(app_pid)
 if [ -z "$pid" ]; then
@@ -33,28 +66,16 @@ if [ -z "$pid" ]; then
   exit 4
 fi
 
-VER=$("${ADB_CMD[@]}" shell dumpsys package "${PKG:-com.suixing.agent}" 2>/dev/null | awk -F= '/versionName=/{print $2; exit}' | tr -d '\r')
+VER=$("${ADB_CMD[@]}" shell dumpsys package "$PKG" 2>/dev/null | awk -F= '/versionName=/{print $2; exit}' | tr -d '\r')
 HZ=$("${ADB_CMD[@]}" shell dumpsys display 2>/dev/null | grep -o 'fps=[0-9.]*' | head -1 | cut -d= -f2)
 
-"${ADB_CMD[@]}" shell dumpsys gfxinfo "${PKG:-com.suixing.agent}" reset >/dev/null 2>&1
+"${ADB_CMD[@]}" shell dumpsys gfxinfo "$PKG" reset >/dev/null 2>&1
 say_err "采集中：请**现在**在手机上按场景 $SCENARIO 操作，${SECONDS_TO_SAMPLE} 秒后自动结束…"
 sleep "$SECONDS_TO_SAMPLE"
 
-RAW=$("${ADB_CMD[@]}" shell dumpsys gfxinfo "${PKG:-com.suixing.agent}" 2>/dev/null)
-RSS=$("${ADB_CMD[@]}" shell dumpsys meminfo "${PKG:-com.suixing.agent}" 2>/dev/null | awk '/TOTAL PSS|TOTAL:/{print $2; exit}')
+RAW=$("${ADB_CMD[@]}" shell dumpsys gfxinfo "$PKG" 2>/dev/null)
+RSS=$("${ADB_CMD[@]}" shell dumpsys meminfo "$PKG" 2>/dev/null | awk '/TOTAL PSS|TOTAL:/{print $2; exit}')
 
-# gfxinfo 的百分位段（Android 12+ 才有 Percentile 段；没有就退回直方图）
-PCTS=$(printf '%s\n' "$RAW" | awk '/90th percentile|95th percentile|99th percentile/{gsub(/[^0-9.]/,"",$1); printf "%s ", $1}')
-p50=$(printf '%s\n' "$PCTS" | awk '{print $1}')
-p95=$(printf '%s\n' "$PCTS" | awk '{print $2}')
-p99=$(printf '%s\n' "$PCTS" | awk '{print $3}')
-JANKY=$(printf '%s\n' "$RAW" | awk -F: '/Janky frames/{gsub(/[^0-9.]/,"",$2); print $2; exit}')
+IFS='|' read -r P50 P95 P99 JANKY TOTAL < <(parse_gfxinfo "$RAW")
 
-[ -z "${p50:-}" ] && p50="—"
-[ -z "${p95:-}" ] && p95="—"
-[ -z "${p99:-}" ] && p99="—"
-[ -z "${JANKY:-}" ] && JANKY="—"
-[ -z "${RSS:-}" ] && RSS="—"
-
-printf '| %s | %s | %s Hz | 1 | %s | %s | %s | %s | %s KB | 脚本计时 %ss，人手操作 |\n' \
-  "$SCENARIO" "${VER:-—}" "${HZ:-—}" "$p50" "$p95" "$p99" "$JANKY" "$RSS" "$SECONDS_TO_SAMPLE"
+emit_row "$SCENARIO" "${VER:--}" "${HZ:--} Hz" "$P50" "$P95" "$P99" "$JANKY" "${RSS:--} KB" "脚本计时 ${SECONDS_TO_SAMPLE}s，人手操作，总帧 ${TOTAL}"
