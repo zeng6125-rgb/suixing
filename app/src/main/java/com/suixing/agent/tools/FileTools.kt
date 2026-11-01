@@ -1,5 +1,6 @@
 package com.suixing.agent.tools
 
+import android.os.SystemClock
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -403,11 +404,39 @@ class FileTools(private val context: Context) : ToolGroup() {
             val kind = args.str("type")?.lowercase() ?: "file"
             val maxDepth = args.int("max_depth", 8).coerceIn(1, 30)
             val limit = args.int("limit", 60).coerceIn(1, 500)
+            // **遍历预算**（issue #59 D1）：只有命中上限和深度两道闸时，一棵几乎不命中的
+            // 大目录树（比如从 ~ 起搜一个不存在后缀）会一直走到底 —— 工具调用挂在那儿，
+            // 用户只看到"转圈"。这里补访问数与时间两道硬闸，并在结果里说清为什么短。
+            val maxVisited = args.int("max_visited", FIND_MAX_VISITS).coerceIn(100, 500_000)
+            val timeBudgetMs = args.int("time_budget_ms", FIND_TIME_BUDGET_MS)
+                .coerceIn(50, 60_000)
+            val startedAt = SystemClock.uptimeMillis()
+            val visited = intArrayOf(0)
+            var truncated: String? = null
             val hits = ArrayList<String>()
             val matches = pattern?.let { Glob.pathMatcher(it, root) }
             val descend = Glob.directoryMatcher(pattern, root)
-            walk(root, 0, maxDepth, { hits.size >= limit },
-                descend = { descend(it) && (exclude == null || !it.absolutePath.contains(exclude)) }) { file ->
+            walk(
+                root,
+                0,
+                maxDepth,
+                {
+                    when {
+                        hits.size >= limit -> { truncated = "已达 limit 上限"; true }
+                        visited[0] >= maxVisited -> {
+                            truncated = "已扫描 $maxVisited 个节点（max_visited）"
+                            true
+                        }
+                        SystemClock.uptimeMillis() - startedAt >= timeBudgetMs -> {
+                            truncated = "已超时 ${timeBudgetMs}ms（time_budget_ms）"
+                            true
+                        }
+                        else -> false
+                    }
+                },
+                descend = { descend(it) && (exclude == null || !it.absolutePath.contains(exclude)) },
+            ) { file ->
+                visited[0]++
                 if (hits.size >= limit || file == root) return@walk
                 val kindOk = when (kind) {
                     "dir" -> file.isDirectory
@@ -422,11 +451,16 @@ class FileTools(private val context: Context) : ToolGroup() {
                 if (matched) hits.add(file.absolutePath)
             }
             val label = pattern ?: name
+            val suffix = truncated?.let { "（$it，结果可能不完整；本次共扫描 ${visited[0]} 个节点）" }
+                ?: "（本次共扫描 ${visited[0]} 个节点）"
             if (hits.isEmpty()) {
-                ToolResult.success("没有找到匹配「" + label + "」的" + if (kind == "dir") "目录" else "文件")
+                ToolResult.success(
+                    "没有找到匹配「" + label + "」的" + if (kind == "dir") "目录" else "文件" + suffix,
+                )
             } else {
-                val more = if (hits.size >= limit) "（已达 limit 上限，可能还有更多）" else ""
-                ToolResult.success("找到 " + hits.size + " 个" + more + "：" + "\n" + hits.joinToString("\n"))
+                ToolResult.success(
+                    "找到 " + hits.size + " 个" + suffix + "：" + "\n" + hits.joinToString("\n"),
+                )
             }
         } catch (error: Exception) {
             ToolResult.failure("查找失败：" + (error.message ?: error.javaClass.simpleName))
@@ -541,6 +575,10 @@ class FileTools(private val context: Context) : ToolGroup() {
     }
 
     private companion object {
+        /** find_files 的默认遍历预算：正常查找（几千个节点）远用不到。 */
+        const val FIND_MAX_VISITS = 20_000
+        const val FIND_TIME_BUDGET_MS = 3_000
+
         /** read_file / edit_file 的文本上限。 */
         const val MAX_TEXT_BYTES = 4L * 1024 * 1024
 
