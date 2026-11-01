@@ -63,6 +63,17 @@ internal object TokenEstimateCache {
         return tokens
     }
 
+    /**
+     * 只查不算：命中返回估算值，未命中返回 null。
+     *
+     * 给"先把已知值显示出来、未命中的后台算"这种用法（issue #56 R39）——
+     * [tokensFor] 会在调用线程上做逐字符 CJK 估算，组合期调用就是主线程尖峰。
+     */
+    fun peek(message: StoredMessage, stamp: Long): Int? = synchronized(entries) {
+        val entry = entries[message.id]
+        if (entry != null && entry[0] == stamp) entry[1].toInt() else null
+    }
+
     /** 清空（仅测试用：让每个用例从干净表开始）。 */
     fun clear() = synchronized(entries) { entries.clear() }
 }

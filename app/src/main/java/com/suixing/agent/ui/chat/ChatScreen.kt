@@ -1,6 +1,7 @@
 
 package com.suixing.agent.ui.chat
 
+import androidx.compose.runtime.mutableIntStateOf
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -540,7 +541,11 @@ fun ChatScreen(
     // 原来是 `remember(state.conversationId)` ⇒ 每次切会话换一张**空表** ⇒ 整页正文被逐字符
     // 重估一遍（就发生在组合期、主线程）；切回来再估一遍。内容指纹（stamp）本来就在条目里，
     // 全局表不会串数据；LRU 上限防内存。纯函数与单测见 TokenEstimateCache。
-    val transcriptEstimate = remember(state.messagesRevision, state.checkpoints) {
+    // **估算移出组合期主线程**（issue #56 R39）：`estimateTokens` 对正文做逐字符 CJK 判定，
+    // 一页 12 轮可达 5~20 万字符。原来整段跑在 `remember` 里 ⇒ 组合期（主线程）一次几 ms。
+    // 现在：**已经缓存过的**值同步取出来当初值（切回来的会话基本都是全命中，看到的就是
+    // 上一次的数，不会闪 0），只有真正未命中的那条才在后台算，算完写回。
+    val estimateInput = remember(state.messagesRevision, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
         // issue #53 B-2：同一次建表里查 id（firstPositions 保留首个重复 id 的语义）。
         val positions = messagePositions
@@ -553,14 +558,40 @@ fun ChatScreen(
         } else {
             state.messages
         }
-        var sum = 0
-        kept.forEach { message ->
-            val stamp = message.text.hashCode().toLong() * 31 +
+        // 消息不可变 ⇒ 指纹按 id 缓存的既有做法不变（`String.hashCode` 自带缓存）。
+        val stamps = kept.map { message ->
+            message.text.hashCode().toLong() * 31 +
                 message.toolOutput.orEmpty().length +
                 message.toolArgs.orEmpty().length * 7
-            sum += TokenEstimateCache.tokensFor(message, stamp)
         }
-        sum + (last?.summary?.length ?: 0) / 3
+        Triple(kept.toList(), stamps, (last?.summary?.length ?: 0) / 3)
+    }
+    val (estimateMessages, estimateStamps, estimateSummaryChars) = estimateInput
+    var transcriptEstimate by remember {
+        mutableIntStateOf(
+            estimateMessages.indices.sumOf { i ->
+                TokenEstimateCache.peek(estimateMessages[i], estimateStamps[i]) ?: 0
+            } + estimateSummaryChars,
+        )
+    }
+    LaunchedEffect(estimateInput) {
+        val total = withContext(Dispatchers.Default) {
+            var sum = 0
+            var allHit = true
+            estimateMessages.forEachIndexed { i, message ->
+                val stamp = estimateStamps[i]
+                val known = TokenEstimateCache.peek(message, stamp)
+                if (known != null) {
+                    sum += known
+                } else {
+                    allHit = false
+                    sum += TokenEstimateCache.tokensFor(message, stamp)
+                }
+            }
+            // 全命中说明算出来的和初值相同，不必重设（省一次重组）。
+            if (allHit) null else sum + estimateSummaryChars
+        }
+        if (total != null) transcriptEstimate = total
     }
     // 圆环读数＝**真实数字**：当前会话的上下文大小 / 模型窗口（用户：「就是按照真实数字啊…
     // 当前会话上下文/上下文窗口的数字」）。分子只认实测口径：网关回报的本轮 prompt_tokens
