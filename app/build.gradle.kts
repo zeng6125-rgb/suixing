@@ -12,6 +12,7 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 37
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = 646
         versionName = "0.8.625"
         resourceConfigurations += listOf("zh", "en")
@@ -76,6 +77,11 @@ android {
         compose = true
     }
 
+    // #61 PR-0: native PTY only. No terminal UI, agent access, Root/Shizuku or Linux yet.
+    externalNativeBuild {
+        cmake { path = file("src/main/cpp/CMakeLists.txt") }
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -101,6 +107,9 @@ android {
 }
 
 dependencies {
+    // #61: device-only PTY tests; CI without an emulator still compiles the app.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("androidx.appcompat:appcompat:1.8.0")
     implementation("androidx.activity:activity-compose:1.13.0")
