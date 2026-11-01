@@ -354,8 +354,8 @@ internal fun CheckpointCard(
                     "${originals.size} 条消息 · ${formatTime(checkpoint.at)}",
                 style = checkpointMetaStyle(),
                 color = scheme.onSurfaceVariant,
-                // 右边距比左边多一点（用户：查看原文，右边距大一点点）
-                modifier = Modifier.padding(end = 6.dp),
+                // 右侧多留一点，文案整体左移（用户：右边距再大一点点，相当于把文案左移）
+                modifier = Modifier.padding(end = 14.dp),
             )
         }
         if (showOriginal) {
