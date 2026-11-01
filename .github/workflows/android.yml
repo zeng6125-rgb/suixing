@@ -35,6 +35,22 @@ jobs:
       - name: Unit tests
         run: ./gradlew :app:testReleaseUnitTest --no-daemon --stacktrace
 
+      - name: Perf script parsing (fixtures, no device)
+        run: |
+          set -eu
+          # 采集脚本的解析曾经三处取错字段（取到标签而不是标签后面的值），
+          # 这类错误在没有设备时也能被 fixture 拦住。
+          row=$(PERF_GFXINFO_FILE=scripts/fixtures/gfxinfo-sample.txt bash scripts/perf_collect.sh C)
+          echo "$row"
+          case "$row" in
+            *"| 8ms | 18ms | 25ms |"*) ;;
+            *) echo "gfxinfo 解析与 fixture 真值不符：$row" >&2; exit 1 ;;
+          esac
+          pss=$(awk '{ for (i=1;i<=NF;i++) if ($i=="PSS:") { print $(i+1); exit } }' scripts/fixtures/meminfo-sample.txt)
+          [ "$pss" = "829857" ] || { echo "PSS 解析错：$pss" >&2; exit 1; }
+          hz=$(grep -o 'renderFrameRate [0-9.]*' scripts/fixtures/display-sample.txt | head -1 | awk '{print $2}')
+          [ "$hz" = "120.00001" ] || { echo "刷新率解析错：$hz" >&2; exit 1; }
+
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v7
