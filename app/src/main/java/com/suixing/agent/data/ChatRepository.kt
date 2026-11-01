@@ -36,6 +36,15 @@ internal const val LIVE_SUFFIX = ".live.json"
  * existing chats are 54 MB of them — and [migratePending] moves each one over, renaming it to
  * 只有读回校验通过才认为写入成功（见 [save]）。
  */
+/**
+ * A cached payload may be reused only if its entire immutable message snapshot matches.
+ * No cached snapshot (GC/eviction) means the safe answer is to persist a new one.
+ */
+internal fun sameSavedDraftMessages(
+    saved: List<StoredMessage>?,
+    incoming: List<StoredMessage>,
+): Boolean = saved != null && saved == incoming
+
 class ChatRepository(
     private val context: Context,
     private val onDeleted: (String) -> Unit = {},
@@ -47,19 +56,16 @@ class ChatRepository(
         val runId: String,
         val messages: java.lang.ref.WeakReference<List<StoredMessage>>,
         val name: String,
-        // 内容指纹（issue #56 R20）：判「这次草稿和上次是不是同一份」不能靠 List 引用相等，
-        // 上游每拍都会重建 `live.messages`（内容一样）；WeakReference 被 GC 后 `get()` 变 null
-        // 也会 miss。条数 + 末条 id + 末条长度足以区分，且都是 O(1) 取值。
-        val count: Int,
-        val tailId: String?,
-        val tailChars: Int,
     )
-    /** 同一轮 run、且内容指纹一致 ⇒ 可复用上一次落盘的 payload，不重写整份。 */
+
+    /**
+     * 只能用精确内容相等决定是否复用已落盘的恢复副本（issue #56 R20）。
+     * 旧的「数量 + 尾 ID + 尾长度」会把同长度编辑或中间工具输出变化误判为相同，
+     * 结果是 manifest 继续指向旧 payload，进程重启后恢复出过时内容。
+     * WeakReference 已被 GC 时保守重写；不得用 hash-only 或引用相等代替。
+     */
     private fun DraftMessages.sameContentAs(runId: String, messages: List<StoredMessage>): Boolean =
-        this.runId == runId &&
-            count == messages.size &&
-            tailId == messages.lastOrNull()?.id &&
-            tailChars == (messages.lastOrNull()?.text?.length ?: 0)
+        this.runId == runId && sameSavedDraftMessages(this.messages.get(), messages)
 
     private val draftMessages = object : LinkedHashMap<String, DraftMessages>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DraftMessages>?): Boolean = size > 16
@@ -756,15 +762,17 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             }.getOrNull()
             val payload = if (draft.messages.isEmpty()) null else {
                 previous?.takeIf { it.sameContentAs(draft.runId, draft.messages) }
-                    ?: DraftMessages(draft.runId, java.lang.ref.WeakReference(draft.messages),
-                        "${draft.chatId}.live-${UUID.randomUUID()}.messages",
-                        draft.messages.size,
-                        draft.messages.lastOrNull()?.id,
-                        draft.messages.lastOrNull()?.text?.length ?: 0).also {
-                        // Immutable payload first, then the small manifest. A crash can only
-                        // leave an unused payload; it cannot invalidate the preceding draft.
-                        writeAtomically(File(dir, it.name), json.encodeToString(
-                            kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()), draft.messages))
+                    ?: run {
+                        // Snapshot list ownership before persisting: the same immutable values
+                        // are used for both the cache's equality check and the durable payload.
+                        val snapshot = draft.messages.toList()
+                        DraftMessages(draft.runId, java.lang.ref.WeakReference(snapshot),
+                            "${draft.chatId}.live-${UUID.randomUUID()}.messages").also {
+                            // Immutable payload first, then the small manifest. A crash can only
+                            // leave an unused payload; it cannot invalidate the preceding draft.
+                            writeAtomically(File(dir, it.name), json.encodeToString(
+                                kotlinx.serialization.builtins.ListSerializer(StoredMessage.serializer()), snapshot))
+                        }
                     }
             }
             val text = json.encodeToString(LiveDraft.serializer(),
