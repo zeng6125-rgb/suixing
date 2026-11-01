@@ -90,7 +90,13 @@ internal fun rememberTypedText(
             }
         }
     }
-    return remember(progress.revealed, text) { text.take(progress.revealed.coerceAtLeast(0)) }
+    // **追平后直接返回原串**（issue #59 A2）：`text.take(n)` 每次调用都分配一个新字符串，
+    // 而打字机在每块文本的绝大部分生命周期里 `revealed == text.length`（打完之后一直如此），
+    // 那段时间的复制纯属白做。只有真正在揭示中才做截取。
+    return remember(progress.revealed, text) {
+        val revealed = progress.revealed.coerceAtLeast(0)
+        if (revealed >= text.length) text else text.take(revealed)
+    }
 }
 
 /**

@@ -879,8 +879,27 @@ internal class LiveBlocks {
     private var prefixBlocks: List<MdBlock> = emptyList()
     private var result: List<MdBlock> = emptyList()
 
+    /**
+     * 上一次的文本里出现过 `\r` 吗。
+     *
+     * 流式文本只会**追加**，所以「有没有回车」只需要在**新来的那一段**里查（issue #59 A1）。
+     * 原来每次发布都对整段文本做一次全量扫描，50k 字时是每 16ms 一次。
+     * 一旦见过就记住，之后可能整段都有，必须走 replace 归一化。
+     * 文本被**改写变短**时下标从 0 重扫 —— 那种情况下"只追加"的前提不成立。
+     */
+    private var sawCarriageReturn = false
+
     fun blocksFor(next: String): List<MdBlock> {
-        val normalized = if ('\r' in next) next.replace("\r\n", "\n").replace('\r', '\n') else next
+        if (!sawCarriageReturn) {
+            val from = if (next.length >= text.length) text.length else 0
+            var i = from
+            while (i < next.length) {
+                if (next[i] == '\r') { sawCarriageReturn = true; break }
+                i++
+            }
+        }
+        val normalized =
+            if (sawCarriageReturn) next.replace("\r\n", "\n").replace('\r', '\n') else next
         if (normalized == text) return result
         result = parseWithPrefix(normalized)
         text = normalized
