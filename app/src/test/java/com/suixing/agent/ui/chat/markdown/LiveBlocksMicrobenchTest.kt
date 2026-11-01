@@ -32,29 +32,58 @@ class LiveBlocksMicrobenchTest {
         val frames = stream(chunks = 120, chunkChars = 300)
         val sourceId = 0x51D
 
-        val full = LiveBlocks()
-        val t0 = System.nanoTime()
-        var lastFull: List<MdBlock> = emptyList()
-        for (text in frames) lastFull = full.blocksFor(text)
-        val fullMs = (System.nanoTime() - t0) / 1_000_000.0
+        // **多轮取中位数**：单次测量受 JIT 分层、GC 影响，不能当结论。
+        fun runFull(): Double {
+            val lb = LiveBlocks()
+            val t = System.nanoTime()
+            var last: List<MdBlock> = emptyList()
+            for (text in frames) last = lb.blocksFor(text)
+            sink = sink xor last.size
+            return (System.nanoTime() - t) / 1_000_000.0
+        }
+        fun runTrusted(): Double {
+            val lb = LiveBlocks()
+            val t = System.nanoTime()
+            var last: List<MdBlock> = emptyList()
+            for ((i, text) in frames.withIndex()) {
+                last = lb.blocksFor(text, appendFrom = i, sourceId = sourceId)
+            }
+            sink = sink xor last.size
+            return (System.nanoTime() - t) / 1_000_000.0
+        }
 
-        val trusted = LiveBlocks()
-        val t1 = System.nanoTime()
+        // 正确性先断言一次（与耗时测量解耦）
+        val fullCheck = LiveBlocks()
+        var lastFull: List<MdBlock> = emptyList()
+        for (text in frames) lastFull = fullCheck.blocksFor(text)
+        val trustedCheck = LiveBlocks()
         var lastTrusted: List<MdBlock> = emptyList()
         for ((i, text) in frames.withIndex()) {
-            lastTrusted = trusted.blocksFor(text, appendFrom = i, sourceId = sourceId)
+            lastTrusted = trustedCheck.blocksFor(text, appendFrom = i, sourceId = sourceId)
         }
-        val trustedMs = (System.nanoTime() - t1) / 1_000_000.0
-
         assertEquals("两条路径的块结构必须完全一致", lastFull, lastTrusted)
         assertEquals("块数必须与整段解析一致", lastFull.size, parseMarkdown(frames.last()).size)
-        val ratio = if (trustedMs > 0) fullMs / trustedMs else Double.NaN
+
+        runFull(); runTrusted()                 // 预热
+        val rounds = 5
+        val fulls = DoubleArray(rounds)
+        val trusteds = DoubleArray(rounds)
+        repeat(rounds) { r ->
+            if (r % 2 == 0) { fulls[r] = runFull(); trusteds[r] = runTrusted() }
+            else { trusteds[r] = runTrusted(); fulls[r] = runFull() }
+        }
+        fun med(a: DoubleArray) = a.sorted()[a.size / 2]
         println(
             "A1 microbench: frames=" + frames.size + " finalChars=" + frames.last().length +
-                " full=" + "%.1f".format(fullMs) + "ms trusted=" + "%.1f".format(trustedMs) +
-                "ms speedup=" + "%.2f".format(ratio) + "x blocks=" + lastFull.size,
+                " rounds=" + rounds + " full_med=" + "%.1f".format(med(fulls)) + "ms" +
+                " trusted_med=" + "%.1f".format(med(trusteds)) + "ms" +
+                " speedup_med=" + "%.2f".format(med(fulls) / maxOf(med(trusteds), 0.001)) + "x" +
+                " full_minmax=" + "%.1f".format(fulls.min()) + "/" + "%.1f".format(fulls.max()) +
+                " trusted_minmax=" + "%.1f".format(trusteds.min()) + "/" + "%.1f".format(trusteds.max()),
         )
     }
+
+    @Volatile private var sink = 0
 
     private val N1 = 10.toChar().toString()
     private val N2 = run { val lf = 10.toChar().toString(); lf + lf }

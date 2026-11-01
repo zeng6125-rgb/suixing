@@ -45,14 +45,31 @@ class ChatHotPathMicrobenchTest {
         }
 
         runTake(); runFast()                    // 预热
-        val (takeMs, a) = runTake()
-        val (fastMs, b) = runFast()
-        assertEquals("两种写法必须给出相同长度序列", a, b)
-        sink = sink xor a xor b
+        // **多轮取中位数**：单次测量受 JIT 分层、GC、调度影响，不能当结论。
+        val rounds = 7
+        val takes = DoubleArray(rounds)
+        val fasts = DoubleArray(rounds)
+        var accA = 0
+        var accB = 0
+        repeat(rounds) { r ->
+            // 交替顺序，避免"谁先跑谁吃亏"
+            if (r % 2 == 0) {
+                val (t1, a1) = runTake(); val (t2, b1) = runFast()
+                takes[r] = t1; fasts[r] = t2; accA = a1; accB = b1
+            } else {
+                val (t2, b2) = runFast(); val (t1, a2) = runTake()
+                fasts[r] = t2; takes[r] = t1; accA = a2; accB = b2
+            }
+        }
+        assertEquals("两种写法必须给出相同长度序列", accA, accB)
+        sink = sink xor accA xor accB
+        fun med(a: DoubleArray) = a.sorted()[a.size / 2]
         println(
-            "A2 microbench: frames=" + frames + " chars=" + text.length +
-                " take=" + "%.1f".format(takeMs) + "ms fast=" + "%.1f".format(fastMs) +
-                "ms speedup=" + "%.2f".format(takeMs / maxOf(fastMs, 0.001)) + "x",
+            "A2 microbench: frames=" + frames + " chars=" + text.length + " rounds=" + rounds +
+                " take_med=" + "%.1f".format(med(takes)) + "ms fast_med=" + "%.1f".format(med(fasts)) +
+                "ms speedup_med=" + "%.2f".format(med(takes) / maxOf(med(fasts), 0.001)) + "x" +
+                " take_minmax=" + "%.1f".format(takes.min()) + "/" + "%.1f".format(takes.max()) +
+                " fast_minmax=" + "%.1f".format(fasts.min()) + "/" + "%.1f".format(fasts.max()),
         )
     }
 
