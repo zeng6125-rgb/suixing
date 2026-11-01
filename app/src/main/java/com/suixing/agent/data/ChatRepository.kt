@@ -47,7 +47,20 @@ class ChatRepository(
         val runId: String,
         val messages: java.lang.ref.WeakReference<List<StoredMessage>>,
         val name: String,
+        // 内容指纹（issue #56 R20）：判「这次草稿和上次是不是同一份」不能靠 List 引用相等，
+        // 上游每拍都会重建 `live.messages`（内容一样）；WeakReference 被 GC 后 `get()` 变 null
+        // 也会 miss。条数 + 末条 id + 末条长度足以区分，且都是 O(1) 取值。
+        val count: Int,
+        val tailId: String?,
+        val tailChars: Int,
     )
+    /** 同一轮 run、且内容指纹一致 ⇒ 可复用上一次落盘的 payload，不重写整份。 */
+    private fun DraftMessages.sameContentAs(runId: String, messages: List<StoredMessage>): Boolean =
+        this.runId == runId &&
+            count == messages.size &&
+            tailId == messages.lastOrNull()?.id &&
+            tailChars == (messages.lastOrNull()?.text?.length ?: 0)
+
     private val draftMessages = object : LinkedHashMap<String, DraftMessages>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DraftMessages>?): Boolean = size > 16
     } // guarded by lock; no decoded recovery payloads are retained here
@@ -742,9 +755,12 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
                     .messageSnapshot
             }.getOrNull()
             val payload = if (draft.messages.isEmpty()) null else {
-                previous?.takeIf { it.runId == draft.runId && it.messages.get() == draft.messages }
+                previous?.takeIf { it.sameContentAs(draft.runId, draft.messages) }
                     ?: DraftMessages(draft.runId, java.lang.ref.WeakReference(draft.messages),
-                        "${draft.chatId}.live-${UUID.randomUUID()}.messages").also {
+                        "${draft.chatId}.live-${UUID.randomUUID()}.messages",
+                        draft.messages.size,
+                        draft.messages.lastOrNull()?.id,
+                        draft.messages.lastOrNull()?.text?.length ?: 0).also {
                         // Immutable payload first, then the small manifest. A crash can only
                         // leave an unused payload; it cannot invalidate the preceding draft.
                         writeAtomically(File(dir, it.name), json.encodeToString(

@@ -97,6 +97,9 @@ internal object TurnMarks {
         // 原来这种情况循环跑完返回 `n - 1`（**最旧**那一行），于是导航条把最初一轮当成当前轮：
         // 高亮错位、条数错、点条跳错。单测 `TurnMarksRealListTest` 里
         // 「内容不满一屏时当前轮必须是最新那轮」原先失败（expected 2, was 1）就是它。
+        // 结论（issue #56 R23）：这里的两遍**不能合并** —— `total` 需要整列高度之和，
+        // 而倒序累加必须从头往前扫，两者方向相反；强行合并只能靠额外一次反向遍历换回来。
+        // 输入是可见行高度（十几到几十），两遍都是 L1 命中，实测收益低于噪声，保持原样。
         var total = 0
         for (i in 0 until n) {
             val h = heightsOldestFirst[i]

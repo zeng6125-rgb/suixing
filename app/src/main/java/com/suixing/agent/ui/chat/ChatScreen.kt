@@ -841,6 +841,9 @@ fun ChatScreen(
         for (row in rows) {
             val texts = row.parts.filterIsInstance<Part.Text>().map { it.text }
             val current = rowDocuments[row.message.id]
+            // issue #56 R22 的结论：这里**已经是 O(1)**，不需要 toSet()。
+            // `rowDocuments` 的值类型是 `Map<String, List<MdBlock>>`（键就是文本），
+            // 所以 `it !in current` 是哈希查键，不是 List 扫描。保持原样。
             if (current == null || texts.any { it.length >= SettledBlocks.MIN_CHARS && it !in current }) {
                 pending += row.message.id to texts
             }

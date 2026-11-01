@@ -35,8 +35,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -95,6 +93,7 @@ import com.suixing.agent.data.Tps
 import com.suixing.agent.ui.chat.markdown.MarkdownText
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import androidx.compose.ui.res.painterResource
 
 /**
  * 折叠块的展开箭头（过程卡 / 思考块 / 单个工具共用）。
@@ -510,7 +509,9 @@ internal fun TraceBlock(note: String, modifier: Modifier = Modifier) {
     ) {
         Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
             Icon(
-                imageVector = Icons.Rounded.Refresh,
+                // `material-icons-extended` 的最后一个非必要用途（issue #57 P1-b）：
+                // 仓库现成的 Lucide `ic_rotate_cw` 就是同一个图形，去掉那 36MB 依赖。
+                painter = painterResource(R.drawable.ic_rotate_cw),
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1476,10 +1477,23 @@ internal fun TurnSummary(
             reasoningExpansion.set(summarySlot(runId), expanded)
         }
     }
-    // **remember**（性能）：这两行在**参数变化时**才需要重算；记住后同一实例能让
-    // `AbstractList.equals` 首行 `o === this` 短路，省掉逐条 Part 深比较。
-    val thoughts = remember(IdentityKey(parts)) { parts.filterIsInstance<Part.Thinking>() }
-    val calls = remember(IdentityKey(parts)) { parts.filterIsInstance<Part.Tools>().flatMap { it.calls } }
+    // **只数数量，不建 List**（issue #56 R21）：下面只用到段数与调用数，
+    // 而 `filterIsInstance` + `flatMap` 每次各建一个集合；流式期 `parts` 每 16ms 换实例，
+    // 等于每秒 60 次纯分配。一次遍历数出两个数就够。
+    val partCounts = remember(IdentityKey(parts)) {
+        var thinking = 0
+        var toolCalls = 0
+        for (part in parts) {
+            when (part) {
+                is Part.Thinking -> thinking++
+                is Part.Tools -> toolCalls += part.calls.size
+                else -> Unit
+            }
+        }
+        thinking to toolCalls
+    }
+    val thoughtCount = partCounts.first
+    val callCount = partCounts.second
     val settled = usage?.takeIf { it.known }
     // The prompt size of the newest round is what is actually sitting in the window now.
     // While a run streams, the engine's copy of the endpoint's last report is fresher than
@@ -1489,11 +1503,11 @@ internal fun TurnSummary(
     val elapsedMs = if (streaming) runningElapsed?.value ?: 0L
         else runElapsedMs.takeIf { it > 0L } ?: live?.elapsedMs ?: settled?.elapsedMs ?: 0L
     // 标题串只在**影响它的四个量**变了才重算（每次重组都 buildList 一遍是纯浪费）。
-    val headline = remember(streaming, elapsedMs, thoughts.size, calls.size) {
+    val headline = remember(streaming, elapsedMs, thoughtCount, callCount) {
         buildList {
             if (streaming || elapsedMs > 0) add("用时 ${formatRunElapsed(elapsedMs)}")
-            if (thoughts.isNotEmpty()) add("思考 ${thoughts.size} 段")
-            if (calls.isNotEmpty()) add("工具 ${calls.size} 个")
+            if (thoughtCount > 0) add("思考 $thoughtCount 段")
+            if (callCount > 0) add("工具 $callCount 个")
         }
     }
     // While a run streams the header shows the numbers that move; a settled reply shows
@@ -1519,6 +1533,14 @@ internal fun TurnSummary(
         expanded = expanded,
         contentBottomPadding = 0.dp,
         onToggle = { reasoningExpansion.set(summarySlot(runId), !expanded) },
+        // **流式期恢复转圈**（issue #56 R6）：这张卡是本轮唯一的「正在回复」指示，
+        // 而 `trailing` 那一路随重构被删掉了（另一处 `trailing = status` 只覆盖思考块）。
+        // 标题里虽然有「正在回复」四个字，但没有运动信号时用户读不出「还在跑」。
+        trailing = if (streaming) {
+            { ProcessSpinner(MaterialTheme.colorScheme.primary) }
+        } else {
+            null
+        },
     ) {
         // Expanding means the run as it happened: every piece in arrival order —
         // thinking blocks (foldable, full text), tool rows, every stretch of prose

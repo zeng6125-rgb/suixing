@@ -2,6 +2,7 @@ package com.suixing.agent.ui.onboarding
 
 
 
+import com.suixing.agent.R
 import androidx.compose.foundation.BorderStroke
 
 import androidx.compose.foundation.ScrollState
@@ -34,15 +35,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 
 import androidx.compose.foundation.verticalScroll
 
-import androidx.compose.material.icons.Icons
 
-import androidx.compose.material.icons.filled.CheckCircle
 
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
 
-import androidx.compose.material.icons.filled.Visibility
 
-import androidx.compose.material.icons.filled.VisibilityOff
 
 import androidx.compose.material3.CircularProgressIndicator
 
@@ -102,6 +98,7 @@ import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.describeError
 
 import kotlinx.coroutines.launch
+import androidx.compose.ui.res.painterResource
 
 
 
@@ -383,15 +380,9 @@ fun ProviderPage(
 
                     Icon(
 
-                        imageVector = if (revealKey) {
-
-                            Icons.Filled.VisibilityOff
-
-                        } else {
-
-                            Icons.Filled.Visibility
-
-                        },
+                        painter = painterResource(
+                            if (revealKey) R.drawable.ic_eye_off else R.drawable.ic_eye,
+                        ),
 
                         contentDescription = if (revealKey) "隐藏 Key" else "显示 Key",
 
@@ -639,15 +630,9 @@ private fun PresetCard(
 
             Icon(
 
-                imageVector = if (selected) {
-
-                    Icons.Filled.CheckCircle
-
-                } else {
-
-                    Icons.Filled.RadioButtonUnchecked
-
-                },
+                painter = painterResource(
+                    if (selected) R.drawable.ic_circle_check else R.drawable.ic_circle,
+                ),
 
                 contentDescription = if (selected) "已选" else "未选",
 

@@ -114,11 +114,18 @@ internal fun MenuCard(
 ) {
     var keepMounted by remember { mutableStateOf(visible) }
     val motion = remember { PopupMotionState() }
-    var origin by remember { mutableStateOf(TransformOrigin(0.5f, 1f)) }
+    // **原点用 FloatArray，不用 State**（issue #56 R29）：它是在
+    // `ShadowPopupPositionProvider.calculatePosition`（布局/定位阶段）里算出来的，
+    // 写进 `mutableStateOf` 就是跨阶段回写 —— 键盘升降、内容变高都会触发一轮重组。
+    // 与 `TopBar.kt` 修掉的那处同类问题同解：存进普通数组，绘制期读。
+    val originXY = remember { FloatArray(2).also { it[0] = 0.5f; it[1] = 1f } }
     val shadowMarginDp = shadowMargin
     val shadowMarginPx = with(LocalDensity.current) { shadowMarginDp.roundToPx() }
     val shadowProvider = remember(popupPositionProvider, alignment, offset, shadowMarginPx) {
-        ShadowPopupPositionProvider(shadowMarginPx, popupPositionProvider, alignment, offset) { origin = it }
+        ShadowPopupPositionProvider(shadowMarginPx, popupPositionProvider, alignment, offset) { o ->
+            originXY[0] = o.pivotFractionX
+            originXY[1] = o.pivotFractionY
+        }
     }
     LaunchedEffect(visible) {
         if (visible) {
@@ -154,7 +161,7 @@ internal fun MenuCard(
         // the first frames of every fade.
         Box(
             Modifier
-                .popupMotion(motion) { origin }
+                .popupMotion(motion) { TransformOrigin(originXY[0], originXY[1]) }
                 // **点阴影余量也要能关闭**（用户：「点到阴影区域好像关不了浮层」）。
                 //
                 // 卡片窗口是「卡片 + 一圈 PopupShadowMargin（24dp）」，那一圈给阴影留空间、

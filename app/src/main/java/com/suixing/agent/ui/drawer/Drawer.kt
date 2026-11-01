@@ -431,9 +431,15 @@ internal fun Drawer(
             // 的内容 lambda 跟着换，可见行全部重组。键只放会变的入参；其余捕获项（listState /
             // draggingState / orderStore / persistOrder…）都是 remember 出来的稳定对象，在体内
             // 读取不会拿到过期值。
+            // 三个回调是调用方传进来的 **inline lambda**（`SuixingApp` 的 `Drawer(...)` 调用点
+            // 没有 remember），每次重组都是新实例 ⇒ 把它们放进 remember 的键，等于这个 remember
+            // 每次重组都失效，缓存形同虚设（issue #56 R28）。
+            // 改用 rememberUpdatedState 取最新值：键里只留真正会变的入参，回调始终是最新的。
+            val latestOpenConversation = rememberUpdatedState(onOpenConversation)
+            val latestTogglePin = rememberUpdatedState(onTogglePin)
+            val latestToggleArchive = rememberUpdatedState(onToggleArchive)
             val drawerRow: @Composable (Conversation, Modifier) -> Unit = remember(
-                activeId, runningId, context, exporter,
-                onOpenConversation, onTogglePin, onToggleArchive, exitSortMode,
+                activeId, runningId, context, exporter, exitSortMode,
             ) { { conversation, anim ->
                     // 把手的拖动手势建一次就固定住：手势进行中如果 block 换实例，Compose 会把
                     // 这次拖动取消，于是「拖到一半断了」。
@@ -510,7 +516,7 @@ internal fun Drawer(
                         onClick = {
                             // 埋点：抽屉里点会话到底发生了什么（用户：要点好几下）。
                             exitSortMode()
-                            onOpenConversation(conversation)
+                            latestOpenConversation.value(conversation)
                         },
                         onLongClick = {
                             exitSortMode()
@@ -537,12 +543,12 @@ internal fun Drawer(
                             // 摘掉，于是它按 updatedAt 回到普通区该在的位置。
                             orderState.value = pinToggled(orderState.value, conversation)
                             persistOrder()
-                            onTogglePin(conversation)
+                            latestTogglePin.value(conversation)
                         },
                         onToggleArchive = {
                             exitSortMode()
                             menuFor = null
-                            onToggleArchive(conversation)
+                            latestToggleArchive.value(conversation)
                         },
                         onCopyTitle = {
                             exitSortMode()

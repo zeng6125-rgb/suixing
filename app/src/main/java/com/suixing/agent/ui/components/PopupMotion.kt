@@ -53,14 +53,25 @@ internal class ShadowPopupPositionProvider(
                 alignment.align(IntSize.Zero, cardSize, layoutDirection) +
                 IntOffset(if (layoutDirection == LayoutDirection.Ltr) offset.x else -offset.x, offset.y))
         val boxPosition = position - IntOffset(margin, margin)
+        // **夹回窗口内**（issue #56 R30）：窗口是「卡片 + 每边 margin」，`clippingEnabled=false`
+        // 时超出屏幕的部分会被测量压扁。原来只有 `ModelSelectors` 自己算 margin 规避，
+        // 其余 7 个调用点都吃默认值。定位阶段已经同时拿到 `windowSize` 与 `popupContentSize`，
+        // 在这里统一夹一次，调用方不必各算各的。
+        // **只在装不下时才夹**（issue #57 R30 的落点）：定位结果允许为负、允许贴边 ——
+        // 那是弹窗相对屏幕的正常摆放（`PopupShadowPositionTest` 钉着居中的算法）。
+        // 真正会出问题的是**整块比窗口还大**：`clippingEnabled=false` 的窗口会被测量约束
+        // 压扁。这种情况把左上角贴到 0，让内容拿到最大可用空间。
+        val boxSize = IntSize(cardSize.width + margin * 2, cardSize.height + margin * 2)
+        val tooBig = boxSize.width > windowSize.width || boxSize.height > windowSize.height
+        val clampedPosition = if (tooBig) IntOffset(0, 0) else boxPosition
         // The animated layer is the padded box, so its pivot is measured against that box: the
         // anchor's centre relative to the box, not relative to the card inside it.
-        val boxWidth = cardSize.width + margin * 2
-        val boxHeight = cardSize.height + margin * 2
+        val boxWidth = boxSize.width
+        val boxHeight = boxSize.height
         onOrigin(TransformOrigin(
-            if (boxWidth == 0) 0.5f else ((anchorBounds.center.x - boxPosition.x).toFloat() / boxWidth).coerceIn(0f, 1f),
-            if (boxHeight == 0) 0.5f else ((anchorBounds.center.y - boxPosition.y).toFloat() / boxHeight).coerceIn(0f, 1f),
+            if (boxWidth == 0) 0.5f else ((anchorBounds.center.x - clampedPosition.x).toFloat() / boxWidth).coerceIn(0f, 1f),
+            if (boxHeight == 0) 0.5f else ((anchorBounds.center.y - clampedPosition.y).toFloat() / boxHeight).coerceIn(0f, 1f),
         ))
-        return boxPosition
+        return clampedPosition
     }
 }

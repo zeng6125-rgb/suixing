@@ -2571,7 +2571,9 @@ class ChatViewModel : ViewModel() {
                 // **不做前后台区分**（用户明确要求）：后台会话必须与前台**完全一致、依旧实时**。
                 // 之前这里有一句"后台会话不发布"，那是把行为按"是否在屏幕上"分叉了 —— 不允许。
                 // 真正要解决的是"发布这一下有多贵"，而不是"后台干脆不发"：
-                // `applyPending` 的 O(n) 拼接/复制仍在 Main 上，那是下一步要搬走的（issue #36 ④）。
+                // `applyPending` 实际跑在 IO 读流线程上（`LlmClient.complete` 整体在
+                // `withContext(Dispatchers.IO)` 内回调 `onReasoning`/`onDelta`），
+                // 所以这里的 O(n) 拼接是分配/GC 压力，不是主线程卡顿。
             }
             // Whatever has arrived so far, applied in one go. For a non-delta event this is the
             // flush; for a delta it is the publish that got through the interval above.
@@ -2840,6 +2842,12 @@ class ChatViewModel : ViewModel() {
         // 现在 `streaming` 由 `parts` 派生（见 `derivedStreaming`），写入路径只碰 `parts`。
         return live.copy(
             streaming = "",
+            // **这里必须继续产出新 String**（issue #57 §3.3，勿改成共享缓冲）：
+            // 思考流式之所以还能刷新，正是因为每拍 `reasoning` 是新实例 ⇒ `ChatUiState`
+            // 整体判不等 ⇒ 状态发射。换成 `GrowableText` 共享缓冲会让这条触发器失效
+            // （`LiveParts.kt` 的 KDoc 记着那次「整屏冻结」事故）；同时保存路径的
+            // `prior.reasoning === live.reasoning` 判等会恒真 ⇒ 草稿永远不会落盘。
+            // 代价是长思考期 62.5 次/秒的整串复制 —— 已知取舍，不再往缓冲方向改。
             reasoning = if (hasReasoning) live.reasoning + reasoning else live.reasoning,
             parts = parts,
             status = "",
