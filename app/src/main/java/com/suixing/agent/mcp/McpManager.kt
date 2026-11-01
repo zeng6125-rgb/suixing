@@ -88,7 +88,14 @@ class McpManager(
     private val _servers = MutableStateFlow<List<McpServerState>>(emptyList())
     val servers: StateFlow<List<McpServerState>> = _servers.asStateFlow()
 
-    /** Releases this manager without cancelling an injected application scope. */
+    /**
+ * 关闭管理器：取消心跳/重连协程，关掉所有连接，清空集合。
+ *
+ * **目前全仓没有调用点**（issue #56 R35 记录结论）：它只在进程退出时才有意义，而本应用
+ * 没有「优雅退出」路径 —— Android 进程被系统直接回收，`managerJob` 随进程一起消失。
+ * 保留它是因为作者场景（换配置重建 Core）将来会用到；真要接，接在 `Core` 重建处。
+ */
+/** Releases this manager without cancelling an injected application scope. */
     suspend fun close() {
         closed = true
         managerJob.cancel()

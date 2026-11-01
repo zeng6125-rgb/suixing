@@ -1,5 +1,7 @@
 package com.suixing.agent.service
 
+import android.os.SystemClock
+import android.util.Log
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityService.GestureResultCallback
 import android.accessibilityservice.GestureDescription
@@ -38,6 +40,17 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val MAX_SEARCH_NODES = 3000
+
+        /**
+         * `dumpScreen` 的整树遍历上限：访问节点数与时间预算。
+         *
+         * 与 [MAX_SEARCH_NODES] 分开 —— 那是「查找」的预算，这里是「遍历」的预算。
+         * 正常页面（几十到几百节点）远用不到；它只兜住装饰容器极多或 WebView 的极端树，
+         * 避免 `ui_dump` 出现秒级延迟。
+         */
+        private const val DUMP_MAX_VISITS = 3000
+        private const val DUMP_TIME_BUDGET_MS = 800L
+        private const val TAG = "SuixingA11y"
 
         @Volatile
         private var active: SuixingAccessibilityService? = null
@@ -289,7 +302,17 @@ class SuixingAccessibilityService : AccessibilityService() {
         try { clickNode(node) } finally { node.recycleIfLegacy() }
         delay(350L)
         // Clicking may replace the entire window. Query its current focused/editable node once.
-        return setText(text)
+        if (setText(text)) return true
+        // 兜底（issue #56 R10）：点击没把焦点落到可编辑框上（点在 label / 容器、WebView 内、
+        // 焦点异步到位）时，原本到此直接返回 false，能力比改动前更弱。现在在**重新取的树**里
+        // 找同 label 节点的可编辑子树 —— 不复用点击前的旧节点，免得重犯「用旧树」那类错误。
+        val fresh = findNodeByText(label, exact = false) ?: return false
+        try {
+            val editable = firstEditable(fresh, 0) ?: return false
+            try { return setTextOn(editable, text) } finally { editable.recycleIfLegacy() }
+        } finally {
+            fresh.recycleIfLegacy()
+        }
     }
 
     private fun setTextOn(node: AccessibilityNodeInfo, text: String): Boolean = runCatching {
@@ -331,10 +354,24 @@ class SuixingAccessibilityService : AccessibilityService() {
             .append(',').append(windowBounds.right).append(',').append(windowBounds.bottom).append(")；坐标为屏幕绝对坐标\n")
         builder.append("包名: ").append(root.packageName?.toString() ?: "未知").append('\n')
         val counter = intArrayOf(0)
-        try { walk(root, 0, maxDepth, maxNodes, builder, counter) }
+        // 访问计数与时间预算（issue #57 §2）：`counter` 只在 `describe` 返回非空时递增，
+        // 「有趣的少、总数多」的页面（装饰容器堆叠、WebView）会一路遍历到 maxDepth，
+        // 而每个没命中预取缓存的 `getChild` 可能是一次跨进程调用。这里给整棵树加硬闸。
+        val visits = intArrayOf(0)
+        val startedAt = SystemClock.uptimeMillis()
+        val deadline = startedAt + DUMP_TIME_BUDGET_MS
+        try { walk(root, 0, maxDepth, maxNodes, builder, counter, visits, deadline) }
         finally { root.recycleIfLegacy() }
         if (counter[0] == 0) builder.append("(界面上没有可交互元素)")
-        if (counter[0] >= maxNodes) builder.append("\n…（节点过多，已截断）")
+        val cost = SystemClock.uptimeMillis() - startedAt
+        val timedOut = SystemClock.uptimeMillis() >= deadline
+        val visitCapped = visits[0] >= DUMP_MAX_VISITS
+        when {
+            counter[0] >= maxNodes -> builder.append("\n…（节点过多，已截断）")
+            timedOut -> builder.append("\n…（超时，已截断）")
+            visitCapped -> builder.append("\n…（访问节点过多，已截断）")
+        }
+        Log.d(TAG, "dumpScreen pkg=${root.packageName} lines=${counter[0]} visits=${visits[0]} cost=${cost}ms timedOut=$timedOut visitCapped=$visitCapped")
         return builder.toString()
     }
 
@@ -345,17 +382,22 @@ class SuixingAccessibilityService : AccessibilityService() {
         maxNodes: Int,
         builder: StringBuilder,
         counter: IntArray,
+        visits: IntArray,
+        deadline: Long,
     ) {
         if (depth > maxDepth || counter[0] >= maxNodes) return
+        // 每个访问到的节点都计数并查时间预算 —— 这是原来唯一缺的闸（有没有输出都算访问）。
+        if (visits[0]++ >= DUMP_MAX_VISITS || SystemClock.uptimeMillis() >= deadline) return
         val line = describe(node, counter[0])
         if (line != null) {
             builder.append(line).append('\n')
             counter[0]++
         }
         for (index in 0 until node.childCount) {
-            if (counter[0] >= maxNodes) return
+            if (counter[0] >= maxNodes || visits[0] >= DUMP_MAX_VISITS) return
+            if (SystemClock.uptimeMillis() >= deadline) return
             val child = node.getChild(index) ?: continue
-            try { walk(child, depth + 1, maxDepth, maxNodes, builder, counter) }
+            try { walk(child, depth + 1, maxDepth, maxNodes, builder, counter, visits, deadline) }
             finally { child.recycleIfLegacy() }
         }
     }

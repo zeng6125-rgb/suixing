@@ -51,6 +51,14 @@ interface McpTransport {
 
 /** How long a killed MCP process gets to exit on its own before it is killed forcibly. */
 private const val PROCESS_GRACE_MS = 300L
+/**
+ * 「杀不死的子进程」的兜底收割器。
+ *
+ * 进程级单例、Job 永不 cancel：它只承载 `delay(PROCESS_GRACE_MS)` 之后的一次强杀，
+ * 每个协程最长存活 300ms 且不持有调用方状态，属于进程生命周期内可接受的长驻
+ * （issue #56 R40 记录结论，不改）。真要收敛，应该跟 `McpManager.close()` 一起停 ——
+ * 那条路径目前还没有调用点。
+ */
 private val PROCESS_REAPER = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 private const val MAX_MCP_MESSAGE_BYTES = 1_048_576L
 
