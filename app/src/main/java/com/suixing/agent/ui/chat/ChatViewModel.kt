@@ -2241,6 +2241,9 @@ class ChatViewModel : ViewModel() {
     // **并发结构**（#36 准备）：压缩协程写，事件线程判定。
     private val compressing: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
+    /** 本轮压缩摘要请求的起点：结束后要用它算出「已压缩上下文，用时 x.xs」。 */
+    private var compressStartedAt: Long = 0L
+
     /**
      * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）：按**当前**上下文算一次，不依赖 run。
      *
@@ -2763,11 +2766,25 @@ class ChatViewModel : ViewModel() {
                 reasoningRevision = 0,
             )
 
-            // 压缩摘要正在生成：状态行改说这件事（run 中也要有，用户要求）。结束就清空，
-            // 下一句状态由后续事件覆盖。
-            is AgentEvent.Compressing -> base.copy(
-                status = if (event.on) "正在压缩上下文" else "",
-            )
+            // 压缩摘要正在生成：状态行改说这件事（run 中也要有，用户要求）。
+            //
+            // **结束后不再立刻清空**（用户：「压缩完成后留一行『已压缩上下文，用时 3.2s』」）：
+            // 压缩要再发一次模型请求，几秒钟里什么都不写，状态行一消失就又像卡住了。
+            // 现在把这段耗时写进状态行，它会一直留到后续事件把它覆盖（或本轮结束）。
+            is AgentEvent.Compressing -> if (event.on) {
+                compressStartedAt = System.currentTimeMillis()
+                base.copy(status = "正在压缩上下文")
+            } else {
+                val elapsed = (System.currentTimeMillis() - compressStartedAt).coerceAtLeast(0L)
+                val seconds = elapsed / 1000.0
+                base.copy(
+                    status = if (elapsed > 0L) {
+                        "已压缩上下文，用时 " + "%.1f".format(seconds) + "s"
+                    } else {
+                        ""
+                    },
+                )
+            }
 
             // The model has the line now: it leaves the queue and becomes a message in the
             // same breath, so a queued line is never both. Marked `steer` so the transcript

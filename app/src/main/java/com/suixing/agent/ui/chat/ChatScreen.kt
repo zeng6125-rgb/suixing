@@ -1329,16 +1329,39 @@ fun ChatScreen(
                                             scroll.stickToBottom = false
                                             val chatId = state.conversationId
                                             val token = ++earlierRequestToken[0]
+                                            // **自己记住视口顶部那一项**（用户实测：点「加载更早」后位置跳到顶）。
+                                            // 之前这里只写了句「稳定 key 会保住位置」的注释，没有任何代码保证 ——
+                                            // LazyColumn 在**前置插入**时并不保证维持滚动位置，一旦没保住，
+                                            // 视口就停在新插入内容的开头，看起来正是"跳到顶"。
+                                            val before = listState.layoutInfo
+                                            val anchor = before.visibleItemsInfo.firstOrNull()
+                                            val anchorIndex = anchor?.index
+                                            val anchorInset = anchor?.let { it.offset - before.viewportStartOffset }
+                                            val beforeCount = before.totalItemsCount
                                             loadingEarlier = true
                                             fun finish(added: Boolean) {
                                                 if (viewModel.state.value.conversationId != chatId || earlierRequestToken[0] != token) return
                                                 if (added) {
                                                     shownTurnsByConversation = shownTurnsByConversation + (chatId to shownTurns + PAGE_TURNS)
+                                                    // 前置插入后，原锚点的下标整体右移「新增项数」；
+                                                    // 按这个位移把它放回原来的屏幕位置（视口内偏移不变）。
+                                                    if (anchorIndex != null && anchorInset != null) {
+                                                        scope.launch {
+                                                            val grown = withTimeoutOrNull(1_000) {
+                                                                snapshotFlow { listState.layoutInfo.totalItemsCount }
+                                                                    .first { it > beforeCount }
+                                                            }
+                                                            if (grown == null) return@launch
+                                                            val shifted = listState.layoutInfo.totalItemsCount - beforeCount
+                                                            listState.requestScrollToItem(
+                                                                anchorIndex + shifted,
+                                                                anchorInset,
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                                 loadingEarlier = false
                                             }
-                                            // Stable lazy keys preserve the current message and offset in
-                                            // the same layout as the page insertion; no visible correction.
                                             if (page.from > 0) finish(true)
                                             else if (!viewModel.loadEarlier(onComplete = ::finish)) finish(false)
                                         },
