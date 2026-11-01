@@ -3,6 +3,7 @@ package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -149,50 +150,67 @@ internal fun BranchArrow(
 internal val PROCESS_TITLE_MAX = 160.dp
 
 /**
- * 折叠块展开/收起的高度动画时长。
+ * 收起动画的基准时长，也保留给 TranscriptPosition 的手势保护兼容使用。
  *
  * 180 → 220（用户：「慢一点点，不要太生硬即可」）：180ms 对整块卡片来说收得太急，末尾像"啪"地
- * 停住；220ms 仍明显短于长按守护窗 [LONG_PRESS_SETTLE_MS]（400ms），所以短按点折叠条时
- * 整段动画依然落在「抬手即放行追底」之前（见 ChatScreen 的手势段注释）。
+ * 停住；220ms 仍明显短于长按守护窗 [LONG_PRESS_SETTLE_MS]（400ms）。展开时长单独按 dp 高度计算，
+ * 但不能改这个值，因为 [TranscriptPosition] 用它设置手势保护窗口。
  */
 internal const val PROCESS_EXPAND_MS = 220
 
 /**
- * 展开时长随内容高度增加，让长内容继续放慢（纯函数，便于单测）。
- *
- * 基准 [baseMs]（= [PROCESS_EXPAND_MS]）对应「矮内容」；每多 400px 加 110ms，最多加 680ms。
- * 矮块继续沿用原来的时长，大内容则会持续放慢，直到 900ms 的总时长上限。
- *
- * 额外时长上限控制为 +680ms，避免大卡片继续在短时长内刷过。
+ * 展开动画时长按 dp 高度分段线性变化，显示密度不会改变同一逻辑高度对应的时长。
  */
-internal fun scaledRevealDurationMs(baseMs: Int, heightPx: Int): Int {
-    if (heightPx <= 0) return baseMs
-    // 用 1/400 的斜率：120px ≈ +33ms，1200px ≈ +330ms；超过上限后不再增长。
-    val extra = (heightPx / 400f) * 110f
-    return baseMs + extra.coerceIn(0f, 680f).toInt()
+internal fun revealDurationMsForHeight(heightDp: Float): Int {
+    val height = heightDp.coerceAtLeast(0f)
+    return when {
+        height <= 160f -> interpolateDurationMs(150, 190, height / 160f)
+        height <= 480f -> interpolateDurationMs(190, 420, (height - 160f) / 320f)
+        height <= 1200f -> interpolateDurationMs(420, 680, (height - 480f) / 720f)
+        else -> 680
+    }
 }
 
+private fun interpolateDurationMs(startMs: Int, endMs: Int, fraction: Float): Int =
+    startMs + ((endMs - startMs) * fraction.coerceIn(0f, 1f)).roundToInt()
+
 /**
- * 收起时长：展开的**一半斜率**，额外时长上限 480ms（收起 = 让开视野，拖沓碍事）。
- * 矮块与原有时长一致；长内容收起最多 700ms，仍比展开短。
+ * 收起恢复原有的一半斜率与 130ms 额外上限（收起 = 让开视野，拖沓碍事）。
+ * 收起保持原有时长，长内容最多 350ms；它与新的展开时长独立计算。
  */
 internal fun scaledCollapseDurationMs(baseMs: Int, heightPx: Int): Int {
     if (heightPx <= 0) return baseMs
     val extra = (heightPx / 400f) * 55f
-    return baseMs + extra.coerceIn(0f, 480f).toInt()
+    return baseMs + extra.coerceIn(0f, 130f).toInt()
 }
 
 /**
- * 折叠块展开/收起的缓动曲线（0.8.297）。
+ * 短块展开与所有收起继续用这条曲线；曲线在首尾慢、中段快，长块展开则改用更均匀的曲线。
  *
- * 原来用 `LinearOutSlowInEasing`（= `CubicBezierEasing(0, 0, 0.2, 1)`）：它在 t=0 的斜率约 5，
- * 动画**第一帧**就已经走到 12% ⇒ 展开时下方内容一帧内被推开整块高度的 12%（540px 的块 = 65px
- * 一跳），收起时同理 —— 看起来就是「弹一下」。
- *
- * 换成 M3 的 standard 曲线（`CubicBezierEasing(0.2, 0, 0, 1)`）：起点斜率为 0，第一帧只走 1.2%
- * （540px 的块 = 6px），展开是「慢慢长出来」、收尾也是慢慢合上，中间快 —— 头尾都不再跳。
+ * 之前只根据首段斜率判断跳动感，忽略了整段进度分布。对大块，这条曲线的展开进度前置明显，
+ * 所以不能只凭起点平缓就认为它会“慢慢长出来”。
  */
 internal val REVEAL_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
+private val LONG_REVEAL_EASING = CubicBezierEasing(0.4f, 0f, 0.6f, 1f)
+private const val SHORT_REVEAL_EASING_MAX_DP = 160f
+private const val LONG_REVEAL_EASING_MIN_DP = 480f
+
+/**
+ * Keep the established curve for short blocks, then blend smoothly to a symmetric curve for long reveals.
+ * Both component curves are monotonic; interpolating their outputs preserves monotonic progress.
+ */
+internal fun revealEasingForHeight(heightDp: Float): Easing {
+    val blend = ((heightDp - SHORT_REVEAL_EASING_MAX_DP) /
+        (LONG_REVEAL_EASING_MIN_DP - SHORT_REVEAL_EASING_MAX_DP)).coerceIn(0f, 1f)
+    if (blend <= 0f) return REVEAL_EASING
+    if (blend >= 1f) return LONG_REVEAL_EASING
+    return Easing { fraction ->
+        val shortProgress = REVEAL_EASING.transform(fraction)
+        val longProgress = LONG_REVEAL_EASING.transform(fraction)
+        shortProgress + (longProgress - shortProgress) * blend
+    }
+}
 
 /**
  * 主转录的滚动状态：折叠块展开/收起时，若**不在底部**，要按高度增量反向补偿，
@@ -262,14 +280,16 @@ internal val LocalLiveRowLag = compositionLocalOf { false }
 @Composable
 private fun RevealHeight(
     visible: Boolean,
+    // Remains the collapse base and the established caller contract; expansion uses measured dp height.
     durationMs: Int,
     content: @Composable () -> Unit,
 ) {
     val fraction = remember { androidx.compose.animation.core.Animatable(if (visible) 1f else 0f) }
-    // 方向标记：展开与收起用不同的时长与透明度策略（见下）。只在动画启动时写，
+    // 方向标记：展开与收起用不同的时长、曲线与透明度策略（见下）。只在动画启动时写，
     // graphicsLayer lambda 里读 —— 不进组合，不产生逐帧重组。
     var expanding by remember { androidx.compose.runtime.mutableStateOf(visible) }
     val position = LocalTranscriptPosition.current
+    val density = LocalDensity.current
     // 高度在下面的 `Layout` 里才量得到，所以展开先等本次测量，再按该次 toggle 的高度启动动画。
     // durationHeight 用 -1 表示尚未测量，0 仍是合法的空内容高度；测量值只影响后续 toggle，
     // 不作为 LaunchedEffect key，因此流式内容长高时不会取消并重启当前动画。
@@ -288,10 +308,12 @@ private fun RevealHeight(
         try {
             if (visible) durationHeight = -1
             val heightForDuration = snapshotFlow { durationHeight }.first { it >= 0 }
-            val dur = if (visible) scaledRevealDurationMs(durationMs, heightForDuration)
+            val heightDp = with(density) { heightForDuration.toDp().value }
+            val dur = if (visible) revealDurationMsForHeight(heightDp)
                       else scaledCollapseDurationMs(durationMs, heightForDuration)
+            val easing = if (visible) revealEasingForHeight(heightDp) else REVEAL_EASING
             fraction.animateTo(if (visible) 1f else 0f,
-                androidx.compose.animation.core.tween(dur, easing = REVEAL_EASING))
+                androidx.compose.animation.core.tween(dur, easing = easing))
         } finally {
             if (tracked) position?.endRevealTransition()
         }

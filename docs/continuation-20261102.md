@@ -52,3 +52,77 @@
 - 新展开最长900ms、收起最长700ms；短块原有公式/曲线保持。展开先等当前实测高度，以-1区分未测和合法空高度0；每次toggle只确定一次时长，高度不再作为effect key。保留原begin/end定位保护与无回弹曲线。
 - Release验证：`:app:compileReleaseKotlin :app:testReleaseUnitTest --offline --console=plain` 成功45s，198类/1218项/0失败/0错误/0跳过；日志`verify-out/reveal-motion-release.log`。新增纯函数测试验证短块旧时长、长块继续增时、上限与收起不长于展开。
 - 无新APK或安装；手机0.8.627不含本节新动画。下一次打包须升0.8.628/vc649。无真机动画验收证据。
+
+
+## 动画版出包安装
+
+用户后续明确授权：0.8.628/vc649已覆盖安装，包含9a3a435新折叠动画。APK5,697,353B，SHA256 `7152F186ED187704732E87C803B632BB49B8BA3C17EEE2BDF36D0A5F52B31FCC`，本地=设备。assembleRelease成功2m11s，16KB对齐通过；未启动应用，待用户体验。此前“新动画未出包”属于开发轮历史。详见HANDOFF§127。
+
+
+## 128. 2026-11-02（Codex）：展开曲线补修，收起恢复原节奏（未出包）
+
+- 用户0.8.628体验反馈：收起不用改，长展开仍像一下出现。主代理规划/数值取证，gpt-6-luna/max子代理实施，主代理复核和验证。
+- 真实根因补充：旧Bezier(.2,0,0,1)在时间10/20/30/50%时，进度为15.63/50/68.81/87.78%；alpha约前17%时间即全不透明。前序只加总时长未解决展开进度前置。以上为曲线数值采样，非真机采帧。
+- 收起恢复原extra130ms上限（总350ms），保持旧曲线。展开总时长仍最多900ms，不继续加长。
+- 展开首测高度换算dp：<=160dp用旧曲线，>=480dp用(.4,0,.6,1)，中间连续混合两条单调曲线输出。长块20%时间进度约8.65%、中点50%，减少前段整块跳出感。曲线每次toggle固定，保留高度变化不重启和原定位保护；不改#17/自动折叠/布局间距。
+- 子代理复核：手动点击不会使remember的Animatable重建到1；顶层总结测自然内容高，内部思考/工具自己的视口上限不等于整个总结高度上限。未为首次恢复本来展开的历史条重播动画。
+- Release编译+单测BUILD SUCCESSFUL55s，24tasks（5executed/19up-to-date）。最终测试计数见本节末；日志verify-out/reveal-easing-release.log。测试验证短曲线保持、长曲线前段/中点、按高度混合后的单调有界、恢复收起350ms。
+- 仅ChatBlocks.kt与RevealDurationTest.kt有本轮产品/测试改动。现有0.8.628升版及文档修改保留。未Debug、出包、安装、提交或push本轮源码；手机仍0.8.628，下一包升0.8.629/vc650。
+
+- 最终XML统计：198类/1221项/0失败/0错误/0跳过。
+
+
+## 129. 2026-11-02（Codex）：0.8.629 Release 已安装
+
+- 用户当轮授权出包并安装，体验§128的新展开曲线和恢复的收起效果。版本0.8.629/vc650，README同步。
+- `:app:assembleRelease --offline --console=plain` BUILD SUCCESSFUL2m11s，55tasks（23executed/32up-to-date）；R8/资源收缩开启。日志verify-out/release-0.8.629-build.log。未重复单测，§128对应源码198类/1221项全绿。
+- APK5,697,413B，aapt/output-metadata确认com.suixing.agent / 650 / 0.8.629；16KB zipalign检查通过。
+- SHA256：2382170F8303AEA48E39BE6F86D3DAE936A819217870BD443E2829FD3A176EC5；设备base.apk完整哈希一致。
+- 无线调试端口40891→38075，mdns自动发现并连接。构建结束首次install时adb server已重启导致device not found，重新mdns确认地址、connect后覆盖安装Success。
+- 手机0.8.628/649→0.8.629/650；设备报告lastUpdateTime=2026-11-02 02:11:49。未自动打开App、操作屏幕或采手机日志/帧数据。
+- 本包包含：<=160dp原展开曲线、>=480dp对称新曲线、中间连续混合；展开上限900ms，收起恢复350ms和原曲线；内容增长不重启动画。自动折叠规则保持。
+- 本轮未Debug、提交或push；当前未提交内容含这两轮升版、§128曲线补丁/测试及文档。待用户真机体验，不把安装成功当动画验收。
+
+
+## 130. 2026-11-02（Codex）：展开整体提速、按dp定时（未出包）
+
+- 用户0.8.629反馈：短条太慢，长条还行但略慢，要求继续打磨。主代理规划、gpt-6-luna/max实施，主代理复核/统一验证。
+- 仅调整展开时长：0..160dp为150..190ms；160..480dp为190..420ms；480..1200dp为420..680ms；超过1200dp封顶680ms。按实测高度经LocalDensity转换为dp，避免不同显示密度令同逻辑大小时长不同。
+- 保留§128的新展开曲线/高度连续混合；首测高度同时决定一次toggle的曲线与时长，流式增长不重新启动。收起仍旧pixel公式/原曲线/350ms上限，没有连带提速。
+- PROCESS_EXPAND_MS保持220，因TranscriptPosition引用它作为手势保护基准；注释改正为收起基准/兼容值。不修改#17/自动折叠/布局间距。
+- 删除旧“收起总比展开短”的测试前提：用户现在明确要求短展开变快、收起保留，所以150..190ms展开可以短于220ms收起。测试分别约束展开分段/连续单调/cap、短条<=190、代表长条提速、收起旧值和既有曲线性质。
+- `:app:compileReleaseKotlin :app:testReleaseUnitTest --offline --console=plain` BUILD SUCCESSFUL1m28s，24tasks（5executed/19up-to-date），日志verify-out/reveal-tempo-release.log。
+- 本轮产品/测试修改仅ChatBlocks.kt和RevealDurationTest.kt，已保留此前0.8.629升版/曲线与文档未提交工作；未Debug/出包/安装/提交/push。手机仍0.8.629，不含本次提速，下一次包0.8.630/vc651。无真机体验通过结论。
+
+- 最终XML统计：198类/1223项/0失败/0错误/0跳过。
+
+
+## 131. 2026-11-02（Codex）：侧滑引起主页纵移——仅排查，用户额度不足要求收尾
+
+### 用户确认与当前结论
+
+- 用户：“侧滑手势进侧边栏的判定继续优化，有时候侧滑还导致主页细微上下移动”。异步澄清已明确答复：“聊天内容上下滚了一小段”。不是仅主页缩放时上下边缘的视觉变化。
+- 主代理规划，gpt-6-luna/max子代理drawer_gesture只读排查；尚未批准/实施手势补丁。用户随后明确“没额度了收尾吧”，因此停止推进并记录遗留。**本项未修，不要声称已经优化或通过验收。**
+
+### 已读源码证据
+
+1. `ui/chat/ChatScreen.kt` LazyColumn `.pointerInput(state.conversationId)`约1204–1262：在PointerEventPass.Initial观察指针，只有downY/dy；`abs(dy)>CANCEL_FOLLOW_PX`时修改allowBottomResume/stickToBottom，并将moved/pressMoved设true。`CANCEL_FOLLOW_PX`在ChatComposer.kt约146为固定4px。横向手势的一点y抖动也会提前被记为纵向阅读，且Initial发生在Main归属前。这个观察器不消费指针、不直接scrollBy，故只能确认状态误判路径，不能单凭这处认定实际纵滚已解决。
+2. 实际抽屉宿主是自建 `ui/drawer/SuixingDrawer.kt`，不是SuixingApp旧注释写的原生M3宿主。全屏父Box用`detectHorizontalDragGestures`，Main阶段子到父，子LazyColumn/Markdown横滚/选区先处理。没有比较累计abs(dx)/abs(dy)的显式方向优势锁；竞争按各轴先越slop与先消费决定，同帧dy过slop时子列表可能先取得纵向拖动。
+3. ChatScreen无显式nestedScroll；纵滚来自LazyColumn。Markdown表格/代码存在横滚；正文SelectionContainer、输入框、Drawer会话列表/排序把手也要保留自己的手势优先权。
+4. SuixingDrawer抽屉全开后的主页露出区有独立冻结层：故意全消费纵向、轻点关闭、横拖可关闭。不要误改此层；160ms先收后切、switchFromDrawer/token保护也不动。
+5. SuixingApp主页graphicsLayer有scaleY缩放，但用户已明确是内容实际滚位；不要只删缩放动画当作修复。
+
+### 接续要求与候选修复边界
+
+- 先把被动观察器的“发生移动/取消长按”与“纵向滚动意图/取消追底”区分，记录dx+dy。水平主导不应取消追底，移动状态也不能继续仅看dy。
+- 不要直接把4px改为touchSlop：历史用户要求轻微纵滑也能取消追底，阈值变大可能重现轻滑被拉回；应保留纵向敏感度并引入方向判定。早期小抖动的方向锁/后续转向如何处理需要设计清楚。
+- 仅改观察器不能保证真实纵向滚动竞争消失，仍须复核宿主与LazyColumn的方向所有权。Main尊重子组件消费能保留横滚，但并不能倒过来阻止已经发生的子纵滚；不能把“增加Main方向判断”直接当成完整修复。
+- 禁止简单在全页Initial抢先consume：会抢走Markdown表格/代码横滚和文本选区。也不要未经确认把现有全页横滑改成只左边缘。若需更早方向仲裁，先给出能保留子横滚/选区优先权的方案，再做最小修改。
+- 不改#17锚点与追底协议，不用事后scrollBy拉回掩盖微动，不全局吞纵向事件。需要时补纯方向分类回归；仅Release验证，不私自操作手机/采日志/帧数据。
+
+### 收尾状态
+
+- 本轮仅只读调查和落档，没有手势源码变更，没有运行新的Gradle/测试，没有出包安装/提交/push。
+- HEAD仍9a3a435（已push）；手机0.8.629/vc650，包含§128曲线，不包含§130展开提速。
+- 原有未提交保留：README、app/build.gradle.kts（0.8.629）、ChatBlocks.kt、RevealDurationTest.kt（§128曲线+§130提速）、docs/continuation-20261102.md；既有.icon_ref/、旧docs和tasks未跟踪资料保留。
+- 最新已验证待出包产品源码是§130：短展开150–190ms、长展开封顶680ms、收起350ms；Release编译+198类/1223项全绿。下一次出包须0.8.630/vc651，并须用户明确授权安装。
