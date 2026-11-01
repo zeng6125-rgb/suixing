@@ -42,14 +42,16 @@ jobs:
           # 这类错误在没有设备时也能被 fixture 拦住。
           row=$(PERF_GFXINFO_FILE=scripts/fixtures/gfxinfo-sample.txt bash scripts/perf_collect.sh C)
           echo "$row"
-          case "$row" in
-            *"| 8ms | 18ms | 25ms |"*) ;;
-            *) echo "gfxinfo 解析与 fixture 真值不符：$row" >&2; exit 1 ;;
-          esac
+          # 用 grep -F 比对：`case` 的模式串里 `|` 是分支分隔符，写成 "| 8ms | ..." 会被当成
+          # 多个分支，匹配不到就永远失败（上一版就是这么红的）。
+          printf '%s' "$row" | grep -qF '| 8ms | 18ms | 25ms |'             || { echo "gfxinfo 解析与 fixture 真值不符：$row" >&2; exit 1; }
           pss=$(awk '{ for (i=1;i<=NF;i++) if ($i=="PSS:") { print $(i+1); exit } }' scripts/fixtures/meminfo-sample.txt)
           [ "$pss" = "829857" ] || { echo "PSS 解析错：$pss" >&2; exit 1; }
           hz=$(grep -o 'renderFrameRate [0-9.]*' scripts/fixtures/display-sample.txt | head -1 | awk '{print $2}')
           [ "$hz" = "120.00001" ] || { echo "刷新率解析错：$hz" >&2; exit 1; }
+          # fixture 里 `fps=` 出现三次（120/90/60，每个支持的模式一次），且第一条恰好也是
+          # 120——单看数值发现不了"又退回取第一条 fps="。所以额外钉住取数来源。
+          grep -q 'renderFrameRate' scripts/perf_collect.sh             || { echo "刷新率必须取 renderFrameRate，不要退回 fps= 的第一条" >&2; exit 1; }
 
       - name: Upload test report
         if: always()
