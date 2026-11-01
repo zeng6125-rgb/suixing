@@ -122,10 +122,15 @@ fun AboutScreen(onBack: () -> Unit) {
         ) {
             SuixingCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    SoftIcon(ImageVector.vectorResource(R.drawable.ic_bot))
+                    // 与桌面图标同一张脸（圆形版）。
+                    androidx.compose.foundation.Image(
+                        painter = androidx.compose.ui.res.painterResource(R.mipmap.ic_launcher_round),
+                        contentDescription = null,
+                        modifier = Modifier.size(44.dp),
+                    )
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("随行", style = SettingsStyle.cardTitle)
+                        Text("JAgent", style = SettingsStyle.cardTitle)
                         Text(
                             text = "v$version",
                             style = SettingsStyle.description,

@@ -699,14 +699,14 @@ private const val CHANNEL_ID = "Suixing_console"
             }
             setOnTouchListener { view, event -> onBallTouch(view, event) }
         }
+        // **整个球就是圆形版应用图标**（用户：「改为圆形版本」）：不再自己画圆盘 + 亮眼睛，
+        // 直接铺 `ic_launcher_round` 位图，44dp 铺满 —— 与桌面、关于页、助手头像同一张图，
+        // 也就不会出现「矢量版和位图版比例不一样」这种漂移。
         ball.addView(
             ImageView(this).apply {
-                // 与桌面图标同一张脸（两只眼）。原来这里挂的是白羽，图标换成球体之后
-                // 悬浮球仍是羽毛，两套品牌并存。专用矢量而不是直接放图标位图：位图在这个
-                // 24dp 盒子里要重采样，边缘会软；矢量的胶囊在任何密度都是硬的。
-                setImageResource(R.drawable.ic_console_eyes)
-                setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
-                layoutParams = FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER)
+                setImageResource(R.mipmap.ic_launcher_round)
+                layoutParams = FrameLayout.LayoutParams(size, size)
+                scaleType = ImageView.ScaleType.FIT_XY
             },
         )
         statusDot = View(this).apply {

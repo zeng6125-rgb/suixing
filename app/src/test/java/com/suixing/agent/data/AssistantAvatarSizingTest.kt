@@ -191,7 +191,11 @@ class AssistantAvatarSizingTest {
         val old = """{"id":"default","name":"随行","avatar":"🪶","description":"全能手机智能体"}"""
         val assistant = json.decodeFromString(Assistant.serializer(), old)
         assertEquals("default", assistant.id)
-        assertEquals("🪶", assistant.face)
+        // 旧数据里的 `🪶` 是「当年没有品牌标记」的占位，不再算自定义形象：
+        // `face` 现在返回空串，头像据此画圆形版应用图标（见 Assistant.face 的说明）。
+        assertEquals("", assistant.face)
         assertEquals("", assistant.avatarPath)
+        // 存下来的原值不动 —— 只在读取侧解释，用户的数据不被改写。
+        assertEquals("🪶", assistant.avatar)
     }
 }

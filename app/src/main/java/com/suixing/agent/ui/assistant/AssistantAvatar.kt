@@ -1,5 +1,7 @@
 package com.suixing.agent.ui.assistant
 
+import androidx.compose.ui.res.painterResource
+import com.suixing.agent.R
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -80,9 +82,15 @@ fun AssistantAvatar(
                 fontSize = (size.value * 0.55f).sp,
                 maxLines = 1,
             )
-            // 没有自定义形象的助手画品牌标记：整个球体（= 桌面的圆形版图标）。
-            // 之前是一根白羽，换图标后改成同一张脸，避免「清单里是羽毛、桌面是球」。
-            else -> SuixingMark(size = size)
+            // 没有自定义形象的助手直接画**圆形版应用图标**（`ic_launcher_round` 位图），
+            // 而不是用代码再画一遍：矢量版与位图版在眼睛大小/球的比例上是两套数，
+            // 并排看会发现不一样。用同一张位图就没有这种漂移。
+            else -> Image(
+                painter = painterResource(R.mipmap.ic_launcher_round),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }

@@ -10,12 +10,15 @@ import kotlinx.serialization.Serializable
  * what keeps the concept additive: the app still has one active model, one
  * approval mode and one set of tools; an assistant merely bends them.
  */
+/** 旧版本写进每个助手的默认形象（羽毛）。读取时不算「自定义」——见 [Assistant.face]。 */
+internal const val LEGACY_FEATHER = "🪶"
+
 @Serializable
 data class Assistant(
     val id: String,
     val name: String = "新助手",
-    /** A single emoji; the card and the chat avatar both draw it. */
-    val avatar: String = "🪶",
+    /** A single emoji; blank draws the brand mark (the round launcher icon). */
+    val avatar: String = "",
     /**
      * A picture the user picked, as a path relative to the app's own files directory —
      * `assistants/<id>-<stamp>.png`, written by [AssistantAvatarStore]. Blank means "use
@@ -38,7 +41,14 @@ data class Assistant(
     val disabledTools: List<String> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
 ) {
-    val face: String get() = avatar.ifBlank { "🪶" }
+    /**
+     * 用户给助手选的 emoji；空 = 用品牌标记（圆形版应用图标）。
+     *
+     * `🪶` 是旧版本写进所有助手的默认值（那时品牌还是一根羽毛）。它现在**不算自定义形象** ——
+     * 否则 `AssistantAvatar` 永远走 emoji 分支、永远画那根羽毛，品牌标记那条路根本到不了。
+     * 这里在读取侧兼容，不动用户已存的数据。
+     */
+    val face: String get() = avatar.takeIf { it.isNotBlank() && it != LEGACY_FEATHER }.orEmpty()
 
     val label: String get() = name.ifBlank { "未命名助手" }
 
@@ -55,8 +65,8 @@ val ASSISTANT_AVATARS = listOf(
 /** The persona a fresh install starts with. */
 fun defaultAssistant(systemPrompt: String = DEFAULT_SYSTEM_PROMPT): Assistant = Assistant(
     id = "default",
-    name = "随行",
-    avatar = "🪶",
+    name = "JAgent",
+    avatar = "",
     description = "全能手机智能体",
     systemPrompt = systemPrompt,
 )
