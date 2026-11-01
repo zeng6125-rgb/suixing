@@ -28,6 +28,12 @@
         <exclude domain="file" path="voice-trace.log" />
         <exclude domain="file" path="scroll-diag.log" />
         <exclude domain="file" path="console-trace.log" />
+        <!-- issue #58 #2：插件凭据（env.json）、工具输出、错误转储此前会随云备份走 -->
+        <exclude domain="file" path="plugins" />
+        <exclude domain="file" path="toolout" />
+        <exclude domain="file" path="last-http-error.json" />
+        <exclude domain="file" path="retry-trace.log" />
+        <exclude domain="file" path="http-dump-full" />
     </cloud-backup>
     <device-transfer>
         <include domain="file" path="datastore" />
