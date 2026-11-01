@@ -628,6 +628,8 @@ fun ChatScreen(
         liveEstimate = liveStatsHere?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
         transcriptEstimate = transcriptEstimate,
         persistedContext = persistedContext,
+        // 有 checkpoint 就说明压过：估算已按折叠后的范围重算，比落盘实测新。
+        compressedEstimate = if (state.checkpoints.isNotEmpty()) transcriptEstimate else 0,
     )
     // 切会话时算一次兜底读数（网关没报过用量时那两行占比要有数）。
     LaunchedEffect(state.conversationId, viewport) {
@@ -1353,10 +1355,13 @@ fun ChatScreen(
                                                             }
                                                             if (grown == null) return@launch
                                                             val shifted = listState.layoutInfo.totalItemsCount - beforeCount
-                                                            listState.requestScrollToItem(
-                                                                anchorIndex + shifted,
-                                                                anchorInset,
-                                                            )
+                                                            // 插入后的第一帧布局还没稳定，`requestScrollToItem` 常被随后的
+                                                            // 排布覆盖（用户：不跳顶了，但位置不对）。这里先请求、
+                                                            // 等一帧、再按同一目标写一次，把落点钉住。
+                                                            val target = anchorIndex + shifted
+                                                            listState.requestScrollToItem(target, anchorInset)
+                                                            withFrameNanos { }
+                                                            listState.requestScrollToItem(target, anchorInset)
                                                         }
                                                     }
                                                 }
@@ -2137,6 +2142,9 @@ private fun CheckpointUnderRow(
         CheckpointCard(
             checkpoint = checkpoint,
             originals = originals,
+            // **与助手卡片同一左右留白**（用户：折叠条宽度和助手卡片的折叠块对不上）。
+            // 助手行是 26dp，压缩卡原来是铺满整行，所以看起来更宽。
+            modifier = Modifier.padding(horizontal = 26.dp),
         )
     }
 }

@@ -301,7 +301,11 @@ internal fun checkpointSpan(
 private fun checkpointMetaStyle() = MaterialTheme.typography.labelMedium
 
 @Composable
-internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<StoredMessage>) {
+internal fun CheckpointCard(
+    checkpoint: ContextCheckpoint,
+    originals: List<StoredMessage>,
+    modifier: Modifier = Modifier,
+) {
     val scheme = MaterialTheme.colorScheme
     var expanded by rememberSaveable { mutableStateOf(false) }
     var showOriginal by remember { mutableStateOf(false) }
@@ -312,6 +316,7 @@ internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Store
         expanded = expanded,
         onToggle = { expanded = !expanded },
         preview = "${originals.size} 条消息 → 摘要",
+        modifier = modifier,
     ) {
         Box(
             Modifier
@@ -349,6 +354,8 @@ internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Store
                     "${originals.size} 条消息 · ${formatTime(checkpoint.at)}",
                 style = checkpointMetaStyle(),
                 color = scheme.onSurfaceVariant,
+                // 右边距比左边多一点（用户：查看原文，右边距大一点点）
+                modifier = Modifier.padding(end = 6.dp),
             )
         }
         if (showOriginal) {

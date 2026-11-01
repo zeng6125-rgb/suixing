@@ -359,6 +359,8 @@ private fun RevealHeight(
 internal fun ProcessCard(
     icon: ImageVector,
     title: String,
+    /** 外层留白/宽度：压缩卡要按助手卡片的左右留白收进来，其余卡片用默认。 */
+    modifier: Modifier = Modifier,
     expanded: Boolean,
     onToggle: () -> Unit,
     trailing: (@Composable () -> Unit)? = null,
@@ -374,7 +376,7 @@ internal fun ProcessCard(
 ) {
     val scheme = MaterialTheme.colorScheme
     // *折叠条切换后视口不动** —— 不在这里做任何事：这一项变高变矮会把上方内容推走，而 ChatScreen
-    Column(Modifier.fillMaxWidth()) {
+    Column(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -442,7 +444,9 @@ internal fun ProcessCard(
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = preview,
-                        style = metaStyle(),
+                        // **与标题同字号**（用户：68 条消息 → 摘要 这个字体要和标题一致）。
+                        // metaStyle() 是 labelMedium×12/13，比标题小一档，看起来像放错了地方。
+                        style = MaterialTheme.typography.labelMedium,
                         color = scheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

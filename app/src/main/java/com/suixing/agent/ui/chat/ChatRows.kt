@@ -655,6 +655,13 @@ internal fun ringReading(
     transcriptEstimate: Int = 0,
     /** meta 里缓存的「最近一条报了用量的消息」的 prompt（issue #41 真问题 1）。 */
     persistedContext: Int = 0,
+    /**
+     * 压缩之后按折叠后上下文重算的估算（没有压缩时传 0）。
+     *
+     * 压缩完 `persistedContext` 还是压缩前那次请求的数，要等下一次请求才回落 —— 那段时间
+     * 圆环纹丝不动，看起来像"压了没用"。压完就是估算了，直接让估算接管。
+     */
+    compressedEstimate: Int = 0,
 ): RingReading = when {
     // 实测口径优先：网关回报（含按会话保持的最近一次）→ **会话级权威值** → UI 现找。
     liveReported > 0 -> RingReading(liveReported, estimated = false)
@@ -664,6 +671,9 @@ internal fun ringReading(
     // 不会让两者不同：两条链都会保留最近一次实测，不能把缺少新 usage 当作充分原因。
     // `meta.contextTokens` 由 `ChatStore.appendTail` 维护、语义是「最近一次报了用量的 prompt」，
     // 失败轮**不会把它变小**，而且跨会话切走再回来是 O(1) 读 meta。
+    // 压缩发生在本轮实测之后（估算比落盘实测小）⇒ 用折叠后的估算，圆环立刻变小。
+    compressedEstimate > 0 && (persistedContext <= 0 || compressedEstimate < persistedContext) ->
+        RingReading(compressedEstimate, estimated = true)
     persistedContext > 0 -> RingReading(persistedContext, estimated = false)
     newestStored > 0 -> RingReading(newestStored, estimated = false)
     // 从没实测过（网关不报用量）才用粗估兜底，并标「约」。
