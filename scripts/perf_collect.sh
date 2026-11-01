@@ -31,7 +31,10 @@ esac
 # 毫秒数在标签后面的字段里，不是标签本身 —— 早期版本取错了，会把 90/95/99 当成帧时间。
 # 输出：p50|p95|p99|janky%|总帧数
 parse_gfxinfo() {
-  printf '%s\n' "$1" | awk '
+  # 先去掉 CR：真机 dump 在 Windows 上常是 CRLF，带 CR 会让字段变成 "8ms\r"。
+  local clean
+  clean=$(printf '%s' "$1" | tr -d '\r')
+  printf '%s\n' "$clean" | awk '
     /^50th percentile/ && p50 == "" { p50 = $3 }
     /^95th percentile/ && p95 == "" { p95 = $3 }
     /^99th percentile/ && p99 == "" { p99 = $3 }
