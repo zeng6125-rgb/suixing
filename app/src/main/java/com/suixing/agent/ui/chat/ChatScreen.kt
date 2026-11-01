@@ -643,10 +643,10 @@ fun ChatScreen(
     // 初版用 `rowKeys` 是错的 —— 多轮行的 rowKey 只有 `rounds.first().id`（不含 message.id），
     // 于是"末轮换了个 id、首轮没变"这种形态会在键相同的情况下产出不同结果（评审给了反例）。
     // 现在的形状 = 每行的 (message.id, 全部轮次 id)；比较时全是同一批 String 实例，走引用短路。
-    val checkpointRowsShape = remember(visibleShape) {
-        visible.map { row -> row.message.id to row.rounds.map { it.id } }
-    }
-    val checkpointsByRow = remember(state.checkpoints, checkpointRowsShape) {
+    // 键直接用 [visible] 本身（issue #56 R25）：它是 `remember(visibleShape)` 的稳定实例，
+    // 引用比较即可；而原来那条 shape 每个形状变化都要分配 1 个 Pair + N 个 List，
+    // 只是为了省掉 `placeCheckpoints` 本身 O(rows + checkpoints) 的遍历 —— 净收益接近零。
+    val checkpointsByRow = remember(state.checkpoints, visible) {
         placeCheckpoints(visible, state.checkpoints)
     }
     // 压缩的告知就是过程区里那一块（[CompressionBlock]，位置就是它发生的地方），不再往气泡
@@ -2045,7 +2045,11 @@ private fun CheckpointUnderRow(
 ) {
     // O(messages) 的扫描放到 remember 里：每次重组跑一遍是纯浪费，
     // 键用 revision + checkpoint（两者任一变化才需要重算）。
-    val originals = remember(checkpoint, revision) {
+    // `positions` 也入键（issue #56 R7）：它和 `messages` 都由 `messagesRevision` 驱动重建，
+    // 之前只按 `revision` 记忆，等于依赖「换了 messages 必换 revision」这条没写下来的契约。
+    // `positions` 是 `remember(conversationId, messagesRevision)` 的稳定实例，入键不会抖动；
+    // `messages` 仍靠 revision 保证同步（它每次状态更新都是新实例，入键会导致每次都重算）。
+    val originals = remember(checkpoint, revision, positions) {
         checkpointSpan(messages, checkpoint, positions)
     }
     // A checkpoint whose span is not in this transcript (a branch switch, a trimmed

@@ -14,7 +14,11 @@ package com.suixing.agent.ui.chat
  * 失效**频率**基本不变：`parts` 本来就跟着 `visible` 一起重建（`ChatScreen` 里
  * `visible = remember(visibleShape) { groupRows(...) }`），所以旧写法在这些点上也是
  * 「实例不同 ⇒ 深比较失败 ⇒ 重算」。
- */
+  *
+ * **失效前提**（issue #56 R36）：被包对象的引用必须代表内容 —— 内容变必换实例，
+ * 绝不允许原位修改 list 或复用实例改字段。否则 `remember(IdentityKey(...))` 会永远命中，
+ * UI 停在旧值且**不报错**。这条是引用相等换掉深比较的代价，改动被包集合时先看这里。
+*/
 internal class IdentityKey(val value: Any) {
     override fun equals(other: Any?): Boolean = other is IdentityKey && other.value === value
 

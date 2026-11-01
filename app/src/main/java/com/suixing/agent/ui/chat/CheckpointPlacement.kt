@@ -47,7 +47,13 @@ internal fun placeCheckpoints(
     }
 
     val placed = LinkedHashMap<String, List<ContextCheckpoint>>(byIndex.size + 1)
-    byIndex.forEach { (index, list) -> placed[rows[index].message.id] = list }
+    // 追加而不是赋值（issue #56 R8）：两行同 id 时赋值会让后者的记录覆盖前者，
+    // 压缩卡静默消失。旧实现的 groupBy().mapKeys{} 也是覆盖语义，那是既有缺陷，
+    // 这里顺手按正确语义落。
+    byIndex.forEach { (index, list) ->
+        val key = rows[index].message.id
+        placed[key] = placed[key].orEmpty() + list
+    }
     if (orphans.isNotEmpty()) {
         val top = rows.first().message.id
         placed[top] = placed[top].orEmpty() + orphans
