@@ -1435,10 +1435,25 @@ private class FxView(
         }
         super.onDraw(canvas)
 
-        rings.removeAll { now - it.startAt > it.delayMs + it.holdMs + FX_RING_DURATION_MS }
+        // 倒序手工删，不用 `removeAll { … }`（issue #56 R32）：捕获 `now` 的 lambda 每帧各分配
+        // 一个 Function1 并装箱，而这里是 onDraw 热路径；同文件的 drawGlow 早已做过零分配优化，
+        // 这两处漏网。
+        var ringIndex = rings.size - 1
+        while (ringIndex >= 0) {
+            val ring = rings[ringIndex]
+            if (now - ring.startAt > ring.delayMs + ring.holdMs + FX_RING_DURATION_MS) {
+                rings.removeAt(ringIndex)
+            }
+            ringIndex--
+        }
         for (ring in rings) drawRing(canvas, ring, now)
 
-        trails.removeAll { now - it.startAt > FX_SWIPE_DURATION_MS }
+        var trailIndex = trails.size - 1
+        while (trailIndex >= 0) {
+            val trail = trails[trailIndex]
+            if (now - trail.startAt > FX_SWIPE_DURATION_MS) trails.removeAt(trailIndex)
+            trailIndex--
+        }
         for (trail in trails) drawTrail(canvas, trail, now)
 
         // 亮度是连续量：先算这一帧该到哪（目标 + 呼吸涟漪），再朝它走一步。两个硬状态换成"缓动逼近"
@@ -1542,10 +1557,20 @@ private class FxView(
         if (alpha <= 0.01f) return
         // Proportional to the short side, then capped: the fraction alone keeps growing with the
         // panel, and past [FX_HALO_MAX_WIDTH_DP] the light reads as a bar laid on the screen.
-        val fadeWidth = (minOf(edgeRect.width(), edgeRect.height()) * FX_HALO_WIDTH_FRACTION)
-            .coerceAtMost(dp(FX_HALO_MAX_WIDTH_DP))
-        glowPaint.style = Paint.Style.FILL
-        glowPaint.shader = rainbow(edgeRect, now)
+        // **缓存键拿「输入」比，不能拿被自己写的输出比**（issue #56 R3）。
+        // 原判据是 `haloKeyLeft != edgeRect.left` 这类 —— 而 `edgeRect` 的唯一写入点就是
+        // 缓存未命中分支里的 `edgeShape()`，等于拿自己的上一次结果比自己 ⇒ 首帧之后恒「命中」，
+        // `onSizeChanged` 改了 `screenBounds` 也不重建 ⇒ 旋转/分屏后边缘光仍按旧屏幕尺寸绘制
+        // （5.15 因此实际未修）。现在由 `screenBounds` 直接推目标矩形来比，并且**先刷新几何再取
+        // shader** —— 原来的顺序会让 `rainbow(edgeRect, …)` 在尺寸刚变的那一帧读到旧矩形。
+        val inset = FX_EDGE_INSET_PX
+        val edgeLeft = screenBounds.left + inset
+        val edgeTop = screenBounds.top + inset
+        val edgeRight = screenBounds.right - inset
+        val edgeBottom = screenBounds.bottom - inset
+        val fadeWidth =
+            (minOf(edgeRight - edgeLeft, edgeBottom - edgeTop) * FX_HALO_WIDTH_FRACTION)
+                .coerceAtMost(dp(FX_HALO_MAX_WIDTH_DP))
         // **band 形状与时间/透明度无关**（只依赖屏幕几何），所以缓存在几何变化前绝不重建。
         // 原来每帧 16 次「复制外轮廓 + 重建内轮廓 + Path.op」是要掉帧的主因（issue #26 原因二）；
         // 现在每帧只剩「设 alpha + drawPath」，画出来的东西逐像素不变。
@@ -1553,14 +1578,14 @@ private class FxView(
         // 两处每帧白付的代价（优化清单 tools-P1）已改掉：
         //  · `edgeShape()` 每帧重建外轮廓路径 —— 它只依赖几何，移进缓存分支；
         //  · 每帧用字符串插值拼 6 个数值做相等比较 —— 改为直接比较数字字段，零分配。
-        if (haloKeyLeft != edgeRect.left || haloKeyTop != edgeRect.top ||
-            haloKeyRight != edgeRect.right || haloKeyBottom != edgeRect.bottom ||
+        if (haloKeyLeft != edgeLeft || haloKeyTop != edgeTop ||
+            haloKeyRight != edgeRight || haloKeyBottom != edgeBottom ||
             haloKeyCorner != cornerPx || haloKeyFade != fadeWidth
         ) {
-            haloKeyLeft = edgeRect.left
-            haloKeyTop = edgeRect.top
-            haloKeyRight = edgeRect.right
-            haloKeyBottom = edgeRect.bottom
+            haloKeyLeft = edgeLeft
+            haloKeyTop = edgeTop
+            haloKeyRight = edgeRight
+            haloKeyBottom = edgeBottom
             haloKeyCorner = cornerPx
             haloKeyFade = fadeWidth
             val outer = edgeShape()
@@ -1572,6 +1597,9 @@ private class FxView(
                 path.op(haloInner, Path.Op.DIFFERENCE)
             }
         }
+        glowPaint.style = Paint.Style.FILL
+        // 几何已在上面刷新，这里读到的 `edgeRect` 一定是本次屏幕尺寸对应的那个。
+        glowPaint.shader = rainbow(edgeRect, now)
         for (band in 0 until FX_HALO_BANDS) {
             val startT = band / FX_HALO_BANDS.toFloat()
             val level = ((1f - startT).pow(FX_HALO_FALLOFF) * alpha * 255f).toInt().coerceIn(0, 255)

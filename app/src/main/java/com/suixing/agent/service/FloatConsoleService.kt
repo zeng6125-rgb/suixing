@@ -1,5 +1,7 @@
 package com.suixing.agent.service
 
+import android.os.Handler
+import android.os.Looper
 import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
@@ -84,7 +86,10 @@ import kotlin.math.roundToInt
 class FloatConsoleService : Service() {
 
     companion object {
-        private const val CHANNEL_ID = "Suixing_console"
+        /** 自停复核延迟：覆盖 AgentForegroundService 启动 FCS → startRun 注册之间的挂起点。 */
+private const val STOP_CHECK_MS = 1500L
+
+private const val CHANNEL_ID = "Suixing_console"
         private const val NOTIFICATION_ID = 1202
 
         /** The order the settings screen offers: follow the system, light, dark. */
@@ -260,6 +265,20 @@ class FloatConsoleService : Service() {
 
     private var consoleSettings = ConsoleSettings()
 
+    // **自停要延迟并复核**（issue #56 R2）。FCS 由 AgentForegroundService 在
+    // `engine.startRun()` **之前**启动，中间隔着 saveSession()/settings.current() 等挂起点；
+    // 服务起来后 settingsLoaded 一置真就会调 refreshVisibility()，此刻 runsFlow 还是空的
+    // ⇒ `running == false` 且默认 `resident == false` ⇒ 立刻 stopSelf()，而整轮 run
+    // 期间没有任何补启路径（MainActivity 那处要回前台才触发）⇒ 悬浮球整轮不出现。
+    // 这里改成「延迟 + 复核」：运行态在延迟内注册进来就撤销这次自停。
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var stopCheckPosted = false
+    private val stopCheck = Runnable {
+        stopCheckPosted = false
+        val stillIdle = Core.engine.runsFlow.value.isEmpty()
+        if (settingsLoaded && !consoleSettings.resident && stillIdle) stopSelf()
+    }
+
     /** The system's own threshold, so a drag feels the same here as anywhere else. */
     private val touchSlop: Float by lazy { ViewConfiguration.get(this).scaledTouchSlop.toFloat() }
 
@@ -322,6 +341,8 @@ class FloatConsoleService : Service() {
         markRunning(false)
         if (::root.isInitialized) ProcessLifecycleOwner.get().lifecycle.removeObserver(appLifecycle)
         dotPulse?.cancel()
+        mainHandler.removeCallbacks(stopCheck)
+        stopCheckPosted = false
         scope.cancel()
         detach()
         // 已经排队的日志照写（shutdown 不是 shutdownNow），之后这条线程自己退出：服务实例死了，
@@ -464,6 +485,15 @@ class FloatConsoleService : Service() {
         if (!attached) return
         runCatching { windowManager.removeView(root) }
         attached = false
+        // 脉冲动画必须一起停（issue #56 R31）：detach 后 View 已不在窗口树里，
+        // 而无限 ValueAnimator 仍会按刷新率跑、对不可见的 View invalidate。
+        // 原来只有 setStatusDot(false) 和 onDestroy 会 cancel，用户回前台（visible=false→detach）
+        // 这条路径漏掉了。重新 attach 时 setStatusDot 会自己再起一个。
+        dotPulse?.cancel()
+        dotPulse = null
+        // 同步清掉「当前动画状态」记录：setStatusDot 用 `dotRunning == running` 早退，
+        // 不清就会在重新 attach 后认为动画还在跑而不再启动。
+        dotRunning = null
         trace("detach")
     }
 
@@ -486,8 +516,19 @@ class FloatConsoleService : Service() {
                 "resident=${settings.resident} whileRunning=${settings.whileRunning} visible=$visible attached=$attached",
         )
         if (visible) attach() else detach()
-        // A transient console has no further work once its final run has ended.
-        if (settingsLoaded && !settings.resident && !running) stopSelf()
+        // A transient console has no further work once its final run has ended —— 但只能
+        // 延迟复核后再停（见 stopCheck 的注释：run 可能还没注册进来）。
+        if (settingsLoaded && !settings.resident && !running) {
+            if (!stopCheckPosted) {
+                stopCheckPosted = true
+                mainHandler.postDelayed(stopCheck, STOP_CHECK_MS)
+            }
+        } else {
+            if (stopCheckPosted) {
+                mainHandler.removeCallbacks(stopCheck)
+                stopCheckPosted = false
+            }
+        }
     }
 
     /**
@@ -1062,20 +1103,24 @@ class FloatConsoleService : Service() {
                     refreshVisibility()
                     val stateFlow = lastChatId?.let { Core.engine.stateOf(it) }
                     suspend fun renderState(state: RunState) {
-                    stateText.text = consoleStatus(state, handle)
+                    // **相同文本不重设**（issue #56 R26）：根布局与这些 TextView 都是
+                    // WRAP_CONTENT，`TextView.setText` 对相同字符串没有可靠短路，会走
+                    // checkForRelayout() ⇒ requestLayout()+invalidate()。状态流 8Hz 抖动时
+                    // 内容常常没变，却每秒 8 次整窗 measure/layout/draw。
+                    stateText.setTextIfChanged(consoleStatus(state, handle))
                     showStats(state.detail())
                     // The live line is re-read on every state, and the engine ticks its state
                     // while a run is in flight, so this stays current without a second stream.
                     // 空时整行收起：截图里「正在执行」与会话名之间那条空白带，就是空的 liveText
                     // 仍占着一行行高。有内容才显示。
                     val live = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
-                    liveText.text = live
+                    liveText.setTextIfChanged(live)
                     liveText.visibility = if (live.isBlank()) View.GONE else View.VISIBLE
                     // One button, two meanings, decided by the same question the label answers:
                     // while something is running a line typed here joins that run, and with
                     // nothing running it opens the conversation's next turn. The chat composer
                     // reads the same way, so the two never disagree about what a tap will do.
-                    sendButton.text = if (state is RunState.Running) "插话" else "发送"
+                    sendButton.setTextIfChanged(if (state is RunState.Running) "插话" else "发送")
                     setStatusDot(state is RunState.Running)
                     }
                     if (stateFlow == null) renderState(RunState.Idle)
@@ -1139,8 +1184,19 @@ class FloatConsoleService : Service() {
      * （已发送/已插话/发送失败）非空，照常显示。
      */
     private fun showStats(text: String) {
-        statsText.text = text
-        statsText.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+        statsText.setTextIfChanged(text)
+        val wanted = if (text.isBlank()) View.GONE else View.VISIBLE
+        if (statsText.visibility != wanted) statsText.visibility = wanted
+    }
+
+    /**
+     * 内容没变就不碰 TextView。
+     *
+     * 面板里的文本控件都是 `WRAP_CONTENT`，根 `params` 也是 —— `setText` 即使字符串相同
+     * 也没有可靠短路，会触发 `checkForRelayout()` 进而整窗 measure/layout（issue #56 R26）。
+     */
+    private fun TextView.setTextIfChanged(next: CharSequence) {
+        if (!text.contentEquals(next)) text = next
     }
 
     /**
