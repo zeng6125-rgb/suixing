@@ -1,5 +1,6 @@
 package com.suixing.agent.llm
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -12,11 +13,28 @@ internal suspend fun <T> Call.readCancellable(read: (Response) -> T): T =
         continuation.invokeOnCancellation { cancel() }
         enqueue(object : Callback {
             override fun onFailure(call: Call, error: IOException) {
-                continuation.resumeWith(Result.failure(error))
+                // 取消之后回调仍可能被投递：此时 continuation 已结束，再 resumeWith 会抛
+                // `IllegalStateException("Already resumed")`，而且是从 OkHttp 的 dispatcher
+                // 线程抛出、不在任何 runCatching 内 ⇒ 直接进 UEH。全仓既有约定（其余 5 个
+                // `suspendCancellableCoroutine` 文件共 17 处）都是先查 isActive。
+                if (continuation.isActive) continuation.resumeWith(Result.failure(error))
             }
 
             override fun onResponse(call: Call, response: Response) {
-                continuation.resumeWith(runCatching { response.use(read) })
+                if (!continuation.isActive) {
+                    // 取消后仍执行完整流读取没有任何消费者，直接丢弃响应体。
+                    response.close()
+                    return
+                }
+                try {
+                    continuation.resumeWith(Result.success(response.use(read)))
+                } catch (cancel: CancellationException) {
+                    // 取消不算失败：交给协程自己的取消语义收尾，不要把 CancellationException
+                    // 降级成 Result.failure（否则调用方按「请求失败」处理，还会继续跑）。
+                    continuation.cancel(cancel)
+                } catch (error: Throwable) {
+                    continuation.resumeWith(Result.failure(error))
+                }
             }
         })
     }

@@ -1,5 +1,8 @@
 package com.suixing.agent.llm
 
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CancellationException
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.SecretBox
 import com.suixing.agent.data.PROTOCOL_ANTHROPIC
@@ -9,8 +12,6 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.tools.ToolSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -500,7 +501,12 @@ class LlmClient(http: OkHttpClient? = null) {
                         acceptChunk(chunk)
                     }
                     while (true) {
-                        if (call.isCanceled()) throw java.io.IOException("请求已取消")
+                        // 用户点停止要**保持取消语义**（issue #56 R15）：原来抛的是
+                        // `IOException("请求已取消")`，会落进「传输失败」口径被当成可重试失败。
+                        // 这里改抛 CancellationException —— 本 lambda 是非挂起的（`(Response) -> T`），
+                        // 调不了 `ensureActive()`，但 `readCancellable` 里会把它转成
+                        // `continuation.cancel(...)`，到达调用方时就是真正的取消。
+                        if (call.isCanceled()) throw CancellationException("已停止")
                         val line = readSseLine(source) ?: break
                         if (line.isEmpty()) {
                             // 事件边界：把攒着的多行 data 拼成一条再解析。
@@ -518,7 +524,12 @@ class LlmClient(http: OkHttpClient? = null) {
                         // `[DONE]` ends the stream, so stop reading here. A gateway that keeps the
                         // connection open afterwards would otherwise leave this loop blocked until the
                         // read timeout — or the 10-minute call cap — with the answer already in hand.
-                        if (data == "[DONE]") {
+                        // 哨兵判定要容错（issue #56 R12）：有的网关发 `data:  [DONE]`（多一个
+                        // 空格），按 RFC 只剥一个之后还剩前导空白，`== "[DONE]"` 就失败 ⇒ 不置
+                        // `sawDone` ⇒ 正常结束的流被当成截断 ⇒ 重试 + onRestart 清屏重发 ⇒
+                        // 用户看到「答完了又重答」。解析器仍按规范只剥一个空格（SseFramesTest 守着），
+                        // 容错只放在这一个哨兵比较上。
+                        if (data.trim() == "[DONE]") {
                             sawDone = true
                             break
                         }
