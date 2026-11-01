@@ -73,6 +73,8 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
@@ -1122,6 +1124,8 @@ internal fun Composer(
                             .fillMaxWidth()
                             .heightIn(min = 48.dp)
                             .padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 4.dp)
+                            // Accessible label is independent of the changing placeholder.
+                            .semantics { contentDescription = "消息输入框" }
                             .onFocusChanged { focus ->
                                 if (focus.isFocused) onFocused()
                             },
