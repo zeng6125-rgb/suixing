@@ -295,6 +295,10 @@ internal fun checkpointSpan(
  * replaced. Those originals are still on disk, which is the whole point of keeping a record:
  * the conversation is never actually lost, only folded.
  */
+/** 压缩卡里所有次要文字的统一字号：标题、meta、按钮、原文表头都走它。 */
+@Composable
+private fun checkpointMetaStyle() = MaterialTheme.typography.labelMedium
+
 @Composable
 internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<StoredMessage>) {
     val scheme = MaterialTheme.colorScheme
@@ -321,21 +325,28 @@ internal fun CheckpointCard(checkpoint: ContextCheckpoint, originals: List<Store
                 color = scheme.onSurfaceVariant,
             )
         }
-        Text(
-            // 同表头口径：条数用转录计数（[originals]），与「查看原文」展开看到的一致；
-            // checkpoint.messages 是 wire 计数，不展示。
-            text = "压缩前约 ${shortTokens(checkpoint.promptTokens)} tokens · " +
-                "${originals.size} 条消息 · ${formatTime(checkpoint.at)}",
-            style = MaterialTheme.typography.labelSmall,
-            color = scheme.onSurfaceVariant,
-        )
-        TextButton(
-            onClick = { showOriginal = !showOriginal },
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-        ) {
+        // **一行**：按钮在文案前面，两者同一字号（用户：查看原文应与这些同一行、且在文案前，
+        // 按钮不要太高、涟漪用原生）。TextButton 的默认 indication 就是 M3 原生涟漪，
+        // 这里只压掉它自带的高度 —— `minHeight = 0` + 极小垂直 padding，点按区仍靠外边距保住。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(
+                onClick = { showOriginal = !showOriginal },
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                modifier = Modifier.heightIn(min = 0.dp),
+            ) {
+                Text(
+                    text = if (showOriginal) "收起原文" else "查看原文",
+                    style = checkpointMetaStyle(),
+                    color = scheme.primary,
+                )
+            }
             Text(
-                text = if (showOriginal) "收起原文" else "查看原文",
-                style = MaterialTheme.typography.labelMedium,
+                // 同表头口径：条数用转录计数（[originals]），与「查看原文」展开看到的一致；
+                // checkpoint.messages 是 wire 计数，不展示。
+                text = "压缩前约 ${shortTokens(checkpoint.promptTokens)} tokens · " +
+                    "${originals.size} 条消息 · ${formatTime(checkpoint.at)}",
+                style = checkpointMetaStyle(),
+                color = scheme.onSurfaceVariant,
             )
         }
         if (showOriginal) {
