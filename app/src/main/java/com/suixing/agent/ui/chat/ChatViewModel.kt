@@ -2229,9 +2229,12 @@ class ChatViewModel : ViewModel() {
         val shown = _state.value
         val chatId = shown.conversationId
         if (chatId.isEmpty()) return
-        // 已经有 run 在跑：交给引擎在轮次边界处理，不在这里并行再压一次。
-        if (jobs.containsKey(chatId)) return
-        if (compressing.contains(chatId)) return
+        // 判据抽成纯函数（issue #69 P2-C）：有 run 交给引擎、已在压则防连点。
+        if (!canStartCompression(
+                hasRunningJob = jobs.containsKey(chatId),
+                alreadyCompressing = compressing.contains(chatId),
+            )
+        ) return
         compressing += chatId
         // 状态行要立刻有反应：开始时刻进状态，ChatScreen 据此画「正在压缩上下文 · 用时 xx」。
         _state.update { it.copy(compressingSince = System.currentTimeMillis()) }
