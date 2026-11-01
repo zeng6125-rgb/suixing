@@ -59,3 +59,6 @@ docs/v0.8-contract.md
 docs/R3-markdown-prefix-incremental.patch
 docs/housekeeping.md
 docs/onboarding.md
+
+# 每个 release 单独生成并作为资产上传，不入库
+SHA256SUMS
