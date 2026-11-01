@@ -12,8 +12,8 @@ android {
         applicationId = "com.suixing.agent"
         minSdk = 26
         targetSdk = 37
-        versionCode = 634
-        versionName = "0.8.613"
+        versionCode = 635
+        versionName = "0.8.614"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -34,8 +34,13 @@ android {
             versionNameSuffix = "-debug"
         }
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // **开 R8**（issue #57 P1-a）。`material-icons-extended` 已从依赖去掉
+            // （36MB / 11,105 个 class 不再进 dex），但库代码与未使用的资源仍需收缩；
+            // `proguard-rules.pro` 里备着 `@Serializable` 的 -if 全套与 Shizuku 的 keep。
+            // 真机冒烟（流式聊天 / 工具调用 / MCP / 插件 / 语音 / 无障碍）仍是出货前必做，
+            // 单测跑的是未混淆类，拦不住运行期反射问题。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // A stable self-signed key is committed for sideload builds so that
             // successive CI artifacts can be installed over each other.
@@ -112,7 +117,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    // 不再需要 material-icons-extended（issue #57 P1-b）：全仓只用到 5 个图标，
+    // 已全部换成本仓 `res/drawable/ic_*.xml` 的 Lucide 图形（ic_rotate_cw / ic_eye /
+    // ic_eye_off / ic_circle_check / ic_circle）。那个 AAR 的 classes.jar 是 36MB / 11,105 个
+    // class，不开 R8 时会整体进 dex。
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
