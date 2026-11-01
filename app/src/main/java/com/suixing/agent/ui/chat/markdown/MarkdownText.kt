@@ -807,8 +807,17 @@ fun MarkdownText(
      * 调用点要显式传：`settled = !streaming`。
      */
     settled: Boolean = !cursor,
+    /**
+     * 产出这段文本的来源缓冲版本（`LivePart.Text.version`）。
+     *
+     * 传了它、且版本**单调递增**时，`LiveBlocks` 才能确定这次是"旧文本 + 新尾巴"，
+     * 从而跳过一次 O(稳定前缀) 的前缀比较（issue #59 A1）。不传 = 老行为。
+     */
+    appendFrom: Int = -1,
+    /** 来源缓冲的实例标识；与 [appendFrom] 一起构成可信游标（见 [LiveBlocks]）。 */
+    sourceId: Int = 0,
 ) {
-    val blocks = rememberGrowingMarkdown(text, settled)
+    val blocks = rememberGrowingMarkdown(text, settled, appendFrom, sourceId)
     MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
 }
 
@@ -826,7 +835,13 @@ fun MarkdownText(
  * blank line lands — a few times per answer, not a dozen times a second.
  */
 @Composable
-private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): List<MdBlock> {
+private fun rememberGrowingMarkdown(
+    text: String,
+    settled: Boolean = false,
+    /** 来源缓冲的版本号；>=0 且单调递增时，说明这次文本是**纯追加**（见 LiveBlocks）。 */
+    appendFrom: Int = -1,
+    sourceId: Int = 0,
+): List<MdBlock> {
     if (settled) LocalPreparedMarkdown.current[text]?.let { return it }
     // **流式走 [LiveBlocks] 的块级复用**（不是整段重解析，也不是旧的 [MarkdownCache]）。
     // 旧的 `MarkdownCache` 只在**空行**处合入尾部，同一段落里继续追加字符时不刷新，
@@ -841,7 +856,7 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
         // 只重解析最后一个未闭合的块，前面的直接复用上次结果 —— 长答案下每次发布的
         // 解析量从"整段"降到"尾段"，这是打字机 25~60Hz 下保住帧预算的关键。
         val live = remember { LiveBlocks() }
-        return remember(text) { live.blocksFor(text) }
+        return remember(text) { live.blocksFor(text, appendFrom, sourceId) }
     }
     // The live holder belongs only to the branch above. Settling forgets its source and
     // prefix bookkeeping; a final row needs only its last document and parsed result.
@@ -875,6 +890,21 @@ private fun rememberGrowingMarkdown(text: String, settled: Boolean = false): Lis
 internal class LiveBlocks {
     // One normalized source reference; the stable prefix is a range into it, never a copy.
     private var text = ""
+    /**
+     * 上一次见到的来源版本号（`LivePart.Text.version`）。
+     *
+     * **受信任游标**（issue #59 A1）：来源缓冲只追加、追加即版本 +1，所以当版本**严格递增**
+     * 时，`next` 一定是"旧文本 + 新尾巴"，前缀不可能被改过 —— 这次就不必再做
+     * `regionMatches(0, …, stableEnd)` 的 O(稳定前缀) 全量校验。
+     *
+     * 版本倒退、等于上次、或压根没有来源（历史消息 / 测试，传 -1）时，一律回落到原来的
+     * 全量校验 —— 中段重写、切会话换文本、typewriter 归零重播都走那条路，
+     * 绝不能靠"看起来像追加"就把稳定块冻结住。
+     */
+    private var lastVersion = -1
+
+    /** 上一次的来源实例；与 [lastVersion] 一起判"还是同一份文本在长"。 */
+    private var lastSourceId = 0
     private var stableEnd = 0
     private var prefixBlocks: List<MdBlock> = emptyList()
     private var result: List<MdBlock> = emptyList()
@@ -889,7 +919,7 @@ internal class LiveBlocks {
      */
     private var sawCarriageReturn = false
 
-    fun blocksFor(next: String): List<MdBlock> {
+    fun blocksFor(next: String, appendFrom: Int = -1, sourceId: Int = 0): List<MdBlock> {
         if (!sawCarriageReturn) {
             val from = if (next.length >= text.length) text.length else 0
             var i = from
@@ -900,15 +930,31 @@ internal class LiveBlocks {
         }
         val normalized =
             if (sawCarriageReturn) next.replace("\r\n", "\n").replace('\r', '\n') else next
-        if (normalized == text) return result
-        result = parseWithPrefix(normalized)
+        if (normalized == text) {
+            lastVersion = appendFrom
+            lastSourceId = sourceId
+            return result
+        }
+        // 可信游标的两种形态（都在"同一份来源"前提下）：
+        //  · 版本递增 —— 来源缓冲又追加了；
+        //  · 版本不变但文本变长 —— 打字机在揭示同一份文本的更长前缀。
+        // 换来源（实例不同 / 没有来源）一律回落全量校验。
+        val sameSource = sourceId != 0 && sourceId == lastSourceId
+        val trustedAppend = sameSource &&
+            (appendFrom > lastVersion || (appendFrom == lastVersion && next.length >= text.length))
+        result = parseWithPrefix(normalized, trustedAppend)
         text = normalized
+        lastVersion = appendFrom
+        lastSourceId = sourceId
         return result
     }
 
-    private fun parseWithPrefix(normalized: String): List<MdBlock> {
+    private fun parseWithPrefix(normalized: String, trustedAppend: Boolean = false): List<MdBlock> {
         // Verify the actual prefix, not only length/hash: both can collide after edits.
-        if (normalized.length < stableEnd || !normalized.regionMatches(0, text, 0, stableEnd)) {
+        // 例外：`trustedAppend` 为真时前缀由来源版本保证（见 [lastVersion]），跳过这次全量比较。
+        if (normalized.length < stableEnd ||
+            (!trustedAppend && !normalized.regionMatches(0, text, 0, stableEnd))
+        ) {
             stableEnd = 0
             prefixBlocks = emptyList()
         }

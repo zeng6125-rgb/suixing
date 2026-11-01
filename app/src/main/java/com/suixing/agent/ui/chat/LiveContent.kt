@@ -36,7 +36,13 @@ internal class LivePartProjection(private val runId: String) {
                     Part.Thinking(part.text, part.tokens, part.elapsedMs, runId)
                 } else null
                 is LivePart.Tools -> Part.Tools(part.calls.map(ToolLine::of))
-                is LivePart.Text -> Part.Text(part.text, part.bornAtMs)
+                is LivePart.Text -> Part.Text(
+                    text = part.text,
+                    bornAtMs = part.bornAtMs,
+                    sourceVersion = part.version,
+                    // 缓冲实例的身份：同版本、文本变长时靠它确认"还是同一份来源"。
+                    sourceId = System.identityHashCode(part.buffer),
+                )
                 is LivePart.Steer -> Part.Steer(part.message)
                 is LivePart.Trace -> Part.Trace(part.note)
                 is LivePart.Compress -> Part.Compress(part.checkpoint)

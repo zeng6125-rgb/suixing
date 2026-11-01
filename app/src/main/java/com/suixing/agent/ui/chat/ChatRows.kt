@@ -191,7 +191,18 @@ internal sealed interface Part {
      * [bornAtMs] 只有从流式块映射来的才有意义（issue #46）；历史消息一律 0 = 「很久以前」，
      * 打字机据此直接给全文，不重播。
      */
-    data class Text(val text: String, val bornAtMs: Long = 0L) : Part
+    /**
+     * @param sourceVersion 产出这段正文的 `LivePart.Text.version`；-1 表示"没有可信来源"
+     *   （历史消息、导出、测试）。它只用来给流式 Markdown 的**追加游标**提供依据，
+     *   不参与任何展示逻辑。
+     */
+    data class Text(
+        val text: String,
+        val bornAtMs: Long = 0L,
+        val sourceVersion: Int = -1,
+        /** 来源缓冲的实例标识；0 = 没有可信来源。换缓冲 ⇒ 游标作废。 */
+        val sourceId: Int = 0,
+    ) : Part
 
     /**
      * A line the user typed mid-answer.
@@ -1571,6 +1582,11 @@ internal fun AssistantProse(
             // prefixes on the incremental parser and out of the settled document cache.
             settled = !streaming && shown.length == part.text.length,
             cursor = false,
+            // 来源缓冲的版本：只有它单调递增时，增量解析才敢跳过前缀比较（issue #59 A1）。
+            // 打字机把 `shown` 截成前缀，来源没变 ⇒ 版本仍是同一个值，游标按"未推进"处理，
+            // 于是这里始终走全量校验 —— 正确性优先，靠的是版本而不是"看起来像追加"。
+            appendFrom = part.sourceVersion,
+            sourceId = part.sourceId,
         )
     } else {
         SelectableWhenArmed { MarkdownText(text = part.text) }

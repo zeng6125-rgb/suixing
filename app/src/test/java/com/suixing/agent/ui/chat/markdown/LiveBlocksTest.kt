@@ -12,6 +12,12 @@ import org.junit.Test
  */
 class LiveBlocksTest {
 
+    /** 两行 = 一个段落分隔，写成常量避免源码里出现转义序列。 */
+    private val N2 = run {
+        val lf = 10.toChar().toString()
+        lf + lf
+    }
+
     @Test fun `nonzero tail offsets keep final newlines and prior list snapshots stable`() {
         val live = LiveBlocks()
         val firstSource = "first\n\nsecond\n\nthird"
@@ -122,5 +128,64 @@ class LiveBlocksTest {
         val b = live.blocksFor(t)
         assertEquals(parseMarkdown(t), a)
         assertEquals(a, b)
+    }
+
+    // ---- issue #59 A1：受信任追加游标 ----
+
+    /** 同来源、版本递增 ⇒ 走信任分支，结果必须与整段解析一致（省掉的比较不能换来内容差异）。 */
+    @Test fun `trusted append cursor produces the same blocks as a full parse`() {
+        val live = LiveBlocks()
+        val sourceId = 0x5EED
+        val first = "first" + N2 + "second"
+        live.blocksFor(first, appendFrom = 1, sourceId = sourceId)
+        var source = first
+        for (version in 2..4) {
+            source = source + N2 + "para$version"
+            assertEquals(
+                "trusted append must match a full parse (v$version)",
+                parseMarkdown(source),
+                live.blocksFor(source, appendFrom = version, sourceId = sourceId),
+            )
+        }
+    }
+
+    /** 版本倒退（重试 / 清屏重放）必须回落全量校验，且把稳定块重新算对。 */
+    @Test fun `a version going backwards falls back to full verification`() {
+        val live = LiveBlocks()
+        val sourceId = 0x5EED
+        live.blocksFor("alpha" + N2 + "beta", appendFrom = 5, sourceId = sourceId)
+        val rewritten = "alpha" + N2 + "GAMMA"
+        assertEquals(parseMarkdown(rewritten), live.blocksFor(rewritten, appendFrom = 2, sourceId = sourceId))
+    }
+
+    /** 换来源（实例不同）⇒ 游标作废，即使版本相同也不能信任。 */
+    @Test fun `a different source id is never trusted`() {
+        val live = LiveBlocks()
+        live.blocksFor("one" + N2 + "two", appendFrom = 3, sourceId = 0xAAAA)
+        val other = "one" + N2 + "TWO"
+        assertEquals(parseMarkdown(other), live.blocksFor(other, appendFrom = 3, sourceId = 0xBBBB))
+    }
+
+    /** 没有来源（历史消息、默认参数）一律走全量校验，行为与改动前一致。 */
+    @Test fun `default cursor keeps the original verification`() {
+        val live = LiveBlocks()
+        live.blocksFor("x" + N2 + "y")
+        val changed = "x" + N2 + "Z"
+        assertEquals(parseMarkdown(changed), live.blocksFor(changed))
+    }
+
+    /** 打字机形态：同来源、同版本、文本变长（揭示更长前缀）⇒ 可信。 */
+    @Test fun `same version but a longer prefix from the same source is trusted`() {
+        val live = LiveBlocks()
+        val sourceId = 0x1234
+        val full = "para one" + N2 + "para two"
+        for (length in listOf(8, 9, 17, full.length)) {
+            val prefix = full.take(length)
+            assertEquals(
+                "prefix of length $length must match a full parse",
+                parseMarkdown(prefix),
+                live.blocksFor(prefix, appendFrom = 7, sourceId = sourceId),
+            )
+        }
     }
 }
