@@ -1117,6 +1117,7 @@ internal fun Composer(
                 Column {
                     // Row 1: the field itself, transparent on the capsule — no border,
                     // no container, just text with room to breathe above the controls.
+                    val primaryAction = primaryChatAction(running, input.isNotBlank(), attachments.isNotEmpty())
                     BasicTextField(
                         value = input,
                         onValueChange = onInput,
@@ -1151,8 +1152,8 @@ internal fun Composer(
                                 val text = input.trim()
                                 // A picture with no caption is still something to send: only an
                                 // entirely empty composer does nothing here.
-                                if (text.isEmpty() && attachments.isEmpty()) return@KeyboardActions
-                                if (running) {
+                                if (primaryAction == PrimaryChatAction.DISABLED || primaryAction == PrimaryChatAction.STOP) return@KeyboardActions
+                                if (primaryAction == PrimaryChatAction.STEER) {
                                     // The attachment rides along: 排队 mode turns this into the next
                                     // turn, 立即 mode into a steer, and either way a picture the user
                                     // attached belongs to the line.
@@ -1219,7 +1220,7 @@ internal fun Composer(
                     var plusWidth by remember { mutableStateOf(0) }
                     Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
                         IconButton(
-                            onClick = { menuOpen = true },
+                            onClick = { sheetOpen = false; approvalOpen = false; menuOpen = true },
                             // 36dp around the glyph's original 22dp. What the eye measures is the
                             // glyph's distance to the capsule's edge (the row's 10dp plus this box's
                             // 7dp) and to the glyph beside it (7 + 0 + 8 = 15dp), and both are set by
@@ -1326,7 +1327,7 @@ internal fun Composer(
                         },
                     ) {
                         IconButton(
-                            onClick = { approvalOpen = true },
+                            onClick = { menuOpen = false; sheetOpen = false; approvalOpen = true },
                             // Same 36dp box and the same glyph size as the 「+」 beside it: the two are
                             // one visual group on the row's left, so they are measured together.
                             modifier = Modifier.size(36.dp),
@@ -1442,6 +1443,8 @@ internal fun Composer(
                                 conversationModel = conversationModel,
                                 conversationReasoningEffort = conversationReasoningEffort,
                                 onClick = {
+                                    menuOpen = false
+                                    approvalOpen = false
                                     sheetOpen = true
                                     // The sheet is the one place models are looked at, so
                                     // this is where the endpoint's own window numbers are
@@ -1493,8 +1496,8 @@ internal fun Composer(
                     // turn the user wants to send, and judging by text alone left that case with no
                     // way out at all — the button stayed on 停止 and the attachment could not go
                     // anywhere until the run ended. 停止 is for an empty field, nothing else.
-                    val steers = running && hasSomething
-                    val sendable = running || hasSomething
+                    val steers = primaryAction == PrimaryChatAction.STEER
+                    val sendable = primaryAction != PrimaryChatAction.DISABLED
                     CircleActionButton(
                         icon = if (running && !steers) {
                             ImageVector.vectorResource(R.drawable.ic_stop_filled)
@@ -1507,17 +1510,18 @@ internal fun Composer(
                             else -> "发送"
                         },
                         onClick = {
-                            when {
+                            when (primaryAction) {
                                 // Cleared by the view model when it takes the line, not here — see the
                                 // note on the Enter path above. A refusal falls through to a normal
                                 // send, so the text cannot be stranded in the field.
-                                steers -> {
+                                PrimaryChatAction.STEER -> {
                                     withAttachment(attachments, input.trim())
                                         .let { (body, images) -> if (!onSteer(body, images)) onSend() }
                                     dismissKeyboard()
                                 }
-                                running -> onStop()
-                                else -> {
+                                PrimaryChatAction.STOP -> onStop()
+                                PrimaryChatAction.DISABLED -> Unit
+                                PrimaryChatAction.SEND -> {
                                     onSend()
                                     dismissKeyboard()
                                 }

@@ -177,6 +177,12 @@ fun SuixingApp() {
     // Owned here rather than inside the chat screen: the drawer lists and switches the
     // very conversations the screen is showing.
     val chat: ChatViewModel = viewModel()
+    LaunchedEffect(Unit) {
+        Core.settings.writeFailures.collect { message ->
+            android.widget.Toast.makeText(Core.appContext, message, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
     // **会话列表不在外壳根部订阅**（用户：侧边栏卡）。
     // 原来这一行订在这里，而它唯一的使用者是抽屉 ⇒ 会话列表每变一次（流式期间每次存盘
     // 都会刷新 updatedAt/messageCount，列表就换新实例）整个外壳就重组一遍 ——

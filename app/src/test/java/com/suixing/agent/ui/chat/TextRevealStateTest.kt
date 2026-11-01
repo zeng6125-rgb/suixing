@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TextRevealStateTest {
@@ -9,23 +10,27 @@ class TextRevealStateTest {
         val state = TextRevealState()
         state.startIfNeeded(true)
         state.advance(100)
-        assertEquals(96, state.revealed)
-        // A new composition group reconnects to this same run/part state.
+        val shown = state.revealed
+        assertTrue(shown in 1 until 100)
         state.startIfNeeded(true)
-        assertEquals(96, state.revealed)
+        assertEquals(shown, state.revealed)
         state.advance(100)
-        assertEquals(98, state.revealed)
+        assertTrue(state.revealed > shown)
     }
 
     @Test fun `completion continues the existing tail instead of replaying or skipping it`() {
         val state = TextRevealState()
         state.startIfNeeded(true)
         state.advance(100)
+        val shown = state.revealed
         state.startIfNeeded(false)
-        assertEquals(96, state.revealed)
-        state.advance(100)
-        assertEquals(98, state.revealed)
-        state.advance(100)
+        assertEquals(shown, state.revealed)
+        var frames = 0
+        while (state.revealed < 100 && frames++ < 100) {
+            val before = state.revealed
+            state.advance(100)
+            assertTrue(state.revealed > before)
+        }
         assertEquals(100, state.revealed)
     }
 

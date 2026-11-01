@@ -224,7 +224,7 @@ class PluginRuntimeTest {
     }
 
     @Test
-    fun `regex 编译失败就跳过这条 hook`() {
+    fun `invalid deny regex cannot silently allow a call`() {
         // 安装时校验器已经拦过（REGEX_INVALID），走到这里说明目录是手拷进去的：一条坏 pattern
         // 不该让整轮调用失败，也不该把后面合法的 hook 一起吃掉。
         val hooks = listOf(
@@ -232,8 +232,19 @@ class PluginRuntimeTest {
             spec("b", "y") to hook(action = "require_confirm"),
         )
         val verdict = PluginRuntime.preExecute(hooks, "github_x", "{}", null)
-        assertFalse(verdict.deny)
-        assertTrue(verdict.requireConfirm)
+        assertTrue(verdict.deny)
+    }
+
+    @Test fun `oversized arguments fail closed without truncating the guard target`() {
+        val hooks = listOf(spec("guard") to hook(action = "deny", regex = "protected-tail"))
+        val verdict = PluginRuntime.preExecute(hooks, "run_shell", "x".repeat(1_048_577), null)
+        assertTrue(verdict.deny)
+    }
+
+    @Test fun `backtracking budget exhaustion rejects the tool call`() {
+        val hooks = listOf(spec("guard") to hook(action = "deny", regex = "(a+)+b"))
+        val verdict = PluginRuntime.preExecute(hooks, "run_shell", "a".repeat(4000), null)
+        assertTrue(verdict.deny)
     }
 
     // ---------------------------------------------------------------- M3 模板求值

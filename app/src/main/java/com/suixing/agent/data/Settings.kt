@@ -635,6 +635,19 @@ const val DEFAULT_SYSTEM_PROMPT = """你是随行，运行在用户安卓手机�
 - 用简洁的中文回答，必要时用短列表。"""
 
 class SettingsRepository(private val context: Context) {
+    private val failures = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val writeFailures: kotlinx.coroutines.flow.SharedFlow<String> = failures
+
+    private suspend fun persist(action: suspend () -> Unit): Boolean = try {
+        action()
+        true
+    } catch (cancel: kotlinx.coroutines.CancellationException) {
+        throw cancel
+    } catch (error: Exception) {
+        failures.tryEmit("设置未保存，请稍后重试；原配置已保留")
+        false
+    }
+
     /**
      * `coerceInputValues` is what keeps one unknown value from costing the user everything:
      * an enum this build does not know (a file written by a newer version, or a hand-edited
@@ -660,38 +673,27 @@ class SettingsRepository(private val context: Context) {
     suspend fun current(): AppSettings = flow.first()
 
     /** Persist explicit supplier cleanup on model-page entry, without adding work to cold startup. */
-    suspend fun cleanupEmptyProviders() {
+    suspend fun cleanupEmptyProviders() = persist {
         context.settingsDataStore.edit { prefs ->
             val raw = prefs[key] ?: return@edit
             val parsed = runCatching { json.decodeFromString<AppSettings>(raw) }.getOrNull() ?: return@edit
             val clean = parsed.withoutEmptyProviders()
             if (clean !== parsed) {
-                prefs[key] = json.encodeToString(AppSettings.serializer(), clean.encrypted(parsed))
+                prefs[key] = json.encodeToString(AppSettings.serializer(), clean.encryptedForStorage())
             }
         }
     }
 
-    suspend fun save(settings: AppSettings) {
+    suspend fun save(settings: AppSettings): Boolean = persist {
         context.settingsDataStore.edit { prefs ->
-            // 盘上那份（字段仍是密文）作为加密失败时的回退，见 encrypted(stored) 的说明。
-            val stored = prefs[key]?.let { raw ->
-                runCatching { json.decodeFromString<AppSettings>(raw) }.getOrNull()
-            }
-            prefs[key] = json.encodeToString(AppSettings.serializer(), settings.encrypted(stored))
+            prefs[key] = json.encodeToString(AppSettings.serializer(), settings.encryptedForStorage())
         }
     }
 
-    suspend fun update(block: (AppSettings) -> AppSettings) {
-        // The read has to happen inside edit{}: DataStore runs these blocks one at a
-        // time, so two concurrent updates (a slider drag and a run writing its own
-        // field) can no longer both start from the same snapshot and have the later
-        // one drop the earlier one's change.
+    suspend fun update(block: (AppSettings) -> AppSettings): Boolean = persist {
         context.settingsDataStore.edit { prefs ->
             val stored = decode(prefs[key])
-            prefs[key] = json.encodeToString(
-                AppSettings.serializer(),
-                block(stored).encrypted(stored),
-            )
+            prefs[key] = json.encodeToString(AppSettings.serializer(), block(stored).encryptedForStorage())
         }
     }
 
@@ -723,18 +725,18 @@ class SettingsRepository(private val context: Context) {
      * 不做这一步的话：老用户的 `settings_json` 里一直躺着明文 Key，直到他碰巧改一次设置
      * 才会被重新加密。启动时跑一遍就干净了。
      */
-    suspend fun migrateSecrets() {
+    suspend fun migrateSecrets() = persist {
         // **先看有没有明文要迁**，没有就整段不做（用户：「之前会话好像是秒加载的呀」）。
         // 原来每次启动都走一遍 `edit`：① 要解密/加密 ⇒ 碰 Keystore（每次进程首次 ~150ms）；
         // ② `edit` 会**写**一次 DataStore ⇒ 设置流多发一次 ⇒ 聊天页整体重组一次
         // （每条消息的 Markdown 重新渲染）。老用户早就迁完了，却天天付这两笔。
-        val raw = context.settingsDataStore.data.first()[key] ?: return
-        if (!hasPlainSecret(raw)) return
+        val raw = context.settingsDataStore.data.first()[key] ?: return@persist
+        if (!hasPlainSecret(raw)) return@persist
         context.settingsDataStore.edit { prefs ->
             val current = prefs[key] ?: return@edit
             val encrypted = json.encodeToString(
                 AppSettings.serializer(),
-                decode(current).encrypted(),
+                decode(current).encryptedForStorage(),
             )
             if (encrypted != current) prefs[key] = encrypted
         }
@@ -747,49 +749,21 @@ class SettingsRepository(private val context: Context) {
  * 只看字符串，不解密、不碰 Keystore：迁移是一次性的准备工作，不该在每次冷启动的路径上。
  * 判定标准与 [SecretBox.isEncrypted] 一致：`apiKey` 的值非空且不以 `enc1:` 开头。
  */
-private fun hasPlainSecret(raw: String): Boolean =
-    Regex("""apiKey"\s*:\s*"([^"]*)""").findAll(raw)
-        .any { m -> m.groupValues[1].isNotEmpty() && !m.groupValues[1].startsWith("enc1:") }
+private val secretMigrationJson = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
-/**
- * 落盘前：把 Key 换成密文。**内存里始终是明文**，只有这一层是密文。
- *
- * 两处都要盖：顶层 [AppSettings.apiKey]（老格式迁移过来的）与每个 [ProviderConfig.apiKey]。
- */
-/**
- * 落盘形态。**加密失败时沿用 [stored] 里的旧密文，绝不写空**。
- *
- * 为什么要有 [stored]：上一版在加密不可用时直接写 `""`，那会**覆盖掉磁盘上原本有效的
- * 密文** —— Keystore 一次临时故障（锁屏改动、系统升级后首次解密）就把用户已保存的 Key
- * 永久抹掉，比「明文落盘」更糟：用户既没拿到保护，又丢了凭据。
- *
- * 现在的语义：能加密就用新的；不能加密就保持原样不动（[stored] 是解密前的那份，
- * 各字段仍是密文）。旧文件里的明文不带 `enc1:` 前缀，`decrypt` 原样返回，同样适用。
- */
-private fun AppSettings.encrypted(stored: AppSettings? = null): AppSettings = copy(
-    // `SecretBox.encrypt` 加密不可用时返回 null：这时**写空**而不是写明文
-    // （issue #58 #3）。内存里的明文不动，本次会话照常发请求；冷启动后该字段为空，
-    // 用户重填即可 —— 代价一次「重填」，换掉一个「明文落盘」。
-    apiKey = SecretBox.encrypt(apiKey) ?: stored?.apiKey ?: "",
-    providers = providers.mapIndexed { index, provider ->
-        val previous = stored?.providers?.getOrNull(index)
-        // 按**位置**回退：provider 列表的增删都以本页保存为单位，位置在同一份文件里是稳定的；
-        // 位置对不上（新增/删除过）才退回空串。
-        provider.copy(
-            apiKey = SecretBox.encrypt(provider.apiKey)
-                ?: previous?.takeIf { it.baseUrl == provider.baseUrl }?.apiKey
-                ?: "",
-        )
-    },
-    // **搜索 Key 与自定义请求头同样是凭据**（issue #58 #4）：`searchApiKey` 是第三方搜索
-    // 服务的 Key；`requestHeaders` 的 Value 常放 Bearer token。原来两者明文躺在
-    // `preferences_pb` 里，加密只盖了 `apiKey`。头名（Key）不加密 —— 它不是秘密，
-    // 而且加密后无法检索/显示。
-    // 同一条规矩：加密不可用就保持旧值，既不写明文也不抹掉已有密文。
-    searchApiKey = SecretBox.encrypt(searchApiKey) ?: stored?.searchApiKey ?: "",
-    requestHeaders = requestHeaders.mapValues { (name, value) ->
-        SecretBox.encrypt(value) ?: stored?.requestHeaders?.get(name) ?: ""
-    },
+internal fun hasPlainSecret(raw: String): Boolean {
+    val settings = runCatching { secretMigrationJson.decodeFromString<AppSettings>(raw) }.getOrNull() ?: return false
+    return (sequenceOf(settings.apiKey, settings.searchApiKey) +
+        settings.providers.asSequence().map { it.apiKey } + settings.requestHeaders.values.asSequence())
+        .any { it.isNotBlank() && !SecretBox.isEncrypted(it) }
+}
+
+/** Encrypt every credential before DataStore commits; one failure aborts the entire update. */
+internal fun AppSettings.encryptedForStorage(): AppSettings = copy(
+    apiKey = SecretBox.requireEncrypted(apiKey),
+    providers = providers.map { it.copy(apiKey = SecretBox.requireEncrypted(it.apiKey)) },
+    searchApiKey = SecretBox.requireEncrypted(searchApiKey),
+    requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.requireEncrypted(value) },
 )
 
 /**

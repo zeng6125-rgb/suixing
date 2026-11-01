@@ -1398,9 +1398,7 @@ internal fun AssistantRow(
                             // remain open by default until their whole run settles.
                             val thinkingLive = streaming && last
                             ReasoningBlock(
-                                // **直接渲染，不做打字机**（与正文、与 DSH 的流式一致）：
-                                // 改文本式的打字机每拍都要重解析 Markdown，而且一旦起点被算成
-                                // 全文就完全不逐字（表现随版本漂移）。光标直接贴真实末尾。
+                                // ReasoningBlock owns its reveal clock, isolating frame updates here.
                                 text = part.text,
                                 // A live block is the one still growing; a settled round's
                                 // thinking is complete even while the run continues.
@@ -1489,6 +1487,9 @@ internal fun AssistantRow(
                     // 新一轮会有个重新回答的话则加在其后面，用时和用量贴右」）。
                     // 顺序：复制 · 修改 · 重新回答（有才画）· 回答切换箭头 —— 箭头放在最后，
                     // 因为它是「这是第几个回答」的导航，跟在同组动作末尾比夹在中间稳。
+                    if (LocalConfiguration.current.screenWidthDp < 360 || LocalDensity.current.fontScale >= 1.3f) {
+                        ReplyActionsMenu(message, branch, onEdit, onRegenerate, onBranch)
+                    } else {
                     MessageActions(message = message, onEdit = onEdit)
                     // 盒间一律 1dp：图标贴盒左以后，盒右内部那 11dp + 这里 1dp = **图标间距 12dp**。
                     if (branch?.canRegenerate == true) {
@@ -1497,6 +1498,7 @@ internal fun AssistantRow(
                     }
                     Spacer(Modifier.width(1.dp))
                     ActionBar(branch = branch, onBranch = onBranch)
+                    }
                     Spacer(Modifier.weight(1f))
                     // The round's clock and cost, pinned to the right edge: they are two
                     // questions about the answer, read as one group.

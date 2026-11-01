@@ -1424,16 +1424,22 @@ class AgentEngine(
                         messages = pruneRequestImages(wire, MAX_REQUEST_IMAGE_CHARS),
                         tools = toolSpecs,
                         onDelta = { piece ->
-                            if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
-                            if (curTurnFirstChunkMs == 0L) curTurnFirstChunkMs = System.currentTimeMillis()
+                            if (firstChunkAt == 0L || curTurnFirstChunkMs == 0L) {
+                                val arrivedAt = System.currentTimeMillis()
+                                if (firstChunkAt == 0L) firstChunkAt = arrivedAt
+                                if (curTurnFirstChunkMs == 0L) curTurnFirstChunkMs = arrivedAt
+                            }
                             outChars.addAndGet(piece.length)
                             streamed.append(piece)
-                            liveLine = streamed.takeLast(LIVE_LINE_CHARS).toString()
+                            liveLine = streamed.substring((streamed.length - LIVE_LINE_CHARS).coerceAtLeast(0))
                             onEvent(AgentEvent.TextDelta(piece))
                         },
                         onReasoning = { piece ->
-                            if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
-                            if (curTurnFirstChunkMs == 0L) curTurnFirstChunkMs = System.currentTimeMillis()
+                            if (firstChunkAt == 0L || curTurnFirstChunkMs == 0L) {
+                                val arrivedAt = System.currentTimeMillis()
+                                if (firstChunkAt == 0L) firstChunkAt = arrivedAt
+                                if (curTurnFirstChunkMs == 0L) curTurnFirstChunkMs = arrivedAt
+                            }
                             thinkingChars.addAndGet(piece.length)
                             reasoning.append(piece)
                             liveLine = "思考中…"
@@ -2419,8 +2425,9 @@ class AgentEngine(
             }
         }
             .getOrElse { error ->
-                PluginRuntime.logPluginError("hook 裁决失败（已兜底放行）", error)
-                HookVerdict()
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                PluginRuntime.logPluginError("hook 裁决失败（拒绝本次调用）", error)
+                HookVerdict(deny = true, message = "插件规则检查失败，本次调用未执行。")
             }
         var toolMs = 0L
         val result = if (runner == null) {

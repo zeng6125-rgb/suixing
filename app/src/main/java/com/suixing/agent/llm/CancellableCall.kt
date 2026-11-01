@@ -26,15 +26,17 @@ internal suspend fun <T> Call.readCancellable(read: (Response) -> T): T =
                     response.close()
                     return
                 }
-                try {
-                    continuation.resumeWith(Result.success(response.use(read)))
+                // Reading and delivery are separate: a delivery exception must never trigger
+                // a second resume of the same continuation.
+                val result = try {
+                    Result.success(response.use(read))
                 } catch (cancel: CancellationException) {
-                    // 取消不算失败：交给协程自己的取消语义收尾，不要把 CancellationException
-                    // 降级成 Result.failure（否则调用方按「请求失败」处理，还会继续跑）。
                     continuation.cancel(cancel)
+                    return
                 } catch (error: Throwable) {
-                    continuation.resumeWith(Result.failure(error))
+                    Result.failure(error)
                 }
+                continuation.resumeWith(result)
             }
         })
     }

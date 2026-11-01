@@ -626,11 +626,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         if (endpointHandEdited(kept, stored, remaining) || kept.differsOutsideEndpoint(stored)) leavingWithDraft = true
         else onBack()
     }
-    suspend fun saveForm() {
+    suspend fun saveForm(): Boolean {
         flushEndpointFields()
         val snapshot = form
         val saved = snapshot.forSaving(stored)
-        Core.settings.save(saved)
+        if (!Core.settings.save(saved)) return false
         // Do not replace edits typed while persistence was running.
         if (form === snapshot) {
             form = saved
@@ -644,6 +644,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             endpointTouched = false
             selectedId = keptId
         }
+        return true
     }
     androidx.activity.compose.BackHandler(enabled = seeded) { leavePage() }
 
@@ -719,8 +720,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                             onClick = {
                                 scope.launch {
                                     saving = true
-                                    try { saveForm() } finally { saving = false }
-                                    snackbar.showSnackbar("已保存")
+                                    val saved = try { saveForm() } finally { saving = false }
+                                    if (saved) snackbar.showSnackbar("已保存")
                                 }
                             },
                         )
@@ -1197,8 +1198,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 TextButton(onClick = { dialog.closeThen {
                     leavingWithDraft = false
                     scope.launch {
-                        saveForm()
-                        onBack()
+                        if (saveForm()) onBack()
                     }
                 } }) { Text("保存并返回") }
             },

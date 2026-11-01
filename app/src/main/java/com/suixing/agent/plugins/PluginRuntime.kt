@@ -251,12 +251,10 @@ object PluginRuntime {
     ): HookVerdict = runCatching {
         preExecuteUnsafe(hooks, toolName, args, risk)
     }.getOrElse { error ->
-        // 0.8.100 真机教训：裁决本身抛异常（当时是门面类 <clinit> 失败变成的
-        // NoClassDefFoundError）会掀翻整轮 run —— 用户看到「对话自己停了」。裁决失败时**落到
-        // require_confirm** 而不是放行或炸轮：AUTO 档会变成「问一次」（人在环里，坏掉的守卫不会
-        // 静默失效），ASK/DENY 档行为不变；同时记一条日志说明为什么。
-        PluginLog.skip("hook 裁决（$toolName）", "${error::class.java.simpleName}: ${error.message}")
-        HookVerdict(requireConfirm = true)
+        // AUTO deliberately ignores require_confirm hints. A failed guard must therefore
+        // reject this call rather than returning a hint that would silently allow it.
+        PluginLog.skip("hook 裁决（$toolName）", error::class.java.simpleName)
+        HookVerdict(deny = true, message = "插件规则检查未完成，本次调用未执行。")
     }
 
     private fun preExecuteUnsafe(
@@ -266,6 +264,7 @@ object PluginRuntime {
         risk: String?,
     ): HookVerdict {
         var requireConfirm = false
+        val boundedArguments = HookMatchBudget().wrap(args)
         for ((spec, hook) in hooks) {
             if (hook.on != HOOK_EVENT) continue
             val condition = hook.`when`
@@ -277,6 +276,9 @@ object PluginRuntime {
             if (minRisk != null && (risk == null || riskRank(risk) < riskRank(minRisk))) continue
             val pattern = condition.regex
             if (pattern != null) {
+                if (pattern.length > 1024 || args.length > 1_048_576) {
+                    return HookVerdict(deny = true, message = "插件规则或参数超过检查上限，本次调用未执行。")
+                }
                 // 每条 pattern 只编译一次（仓库规矩：不在循环里 `Regex(...)`）。编译失败的
                 // pattern 装不进缓存，所以拿不到就再试一次、失败就跳过这条 hook 并说出来 ——
                 // 校验器在安装时已经拦过一遍（REGEX_INVALID），走到这里说明目录是手拷进去的。
@@ -284,9 +286,9 @@ object PluginRuntime {
                     ?: runCatching { Regex(pattern) }.getOrNull()?.also { HOOK_REGEX[pattern] = it }
                 if (regex == null) {
                     PluginLog.skip("${spec.id} hook", "regex 编译失败：$pattern")
-                    continue
+                    return HookVerdict(deny = true, message = "插件规则无效，本次调用未执行。")
                 }
-                if (!regex.containsMatchIn(args)) continue
+                if (!regex.containsMatchIn(boundedArguments)) continue
             }
             when (hook.action) {
                 "deny" -> return HookVerdict(
@@ -655,7 +657,8 @@ private const val MAX_RESPONSE_BYTES = 1024 * 1024
  * **必须 `by lazy`**（0.8.100 真机实测的教训）：顶层 val 会进本文件门面类 `PluginRuntimeKt` 的
  * `<clinit>`。触发点在引擎分发处：每条工具调用先过 [preExecute]，它碰顶层 [HOOK_REGEX]；[execute]
  * 里的 [render]/[http] 碰 [TEMPLATE_VAR]/[HTTP_CLIENT] —— 任一处都会触发门面类初始化。
- * `OkHttpClient.Builder().build()` / `toMediaType()` 在这台真机的 ART 上初始化失败 ⇒ 第一次
+ * `OkHttpClient.Builder()
+        .addNetworkInterceptor(com.suixing.agent.llm.PublicCredentialGuard()).build()` / `toMediaType()` 在这台真机的 ART 上初始化失败 ⇒ 第一次
  * `ExceptionInInitializerError`、之后每次引用都是 `NoClassDefFoundError: …PluginRuntimeKt`，
  * 而 [preExecute] 不在任何 `runCatching` 里 ⇒ **整轮 run 被掀翻**（用户看到「对话自己停了」+ 红字）。
  * lazy 把 okhttp 的初始化推迟到真正发 http 那一刻：那一步在引擎的 `runCatching` 里，失败只是一条
@@ -670,6 +673,7 @@ private val JSON_MEDIA_TYPE by lazy { "application/json; charset=utf-8".toMediaT
  */
 private val HTTP_CLIENT by lazy {
     OkHttpClient.Builder()
+        .addNetworkInterceptor(com.suixing.agent.llm.PublicCredentialGuard())
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .followRedirects(true)

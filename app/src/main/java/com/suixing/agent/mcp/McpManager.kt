@@ -77,6 +77,7 @@ class McpManager(
     private val managerJob = SupervisorJob(scope.coroutineContext[Job])
     private val scope = CoroutineScope(scope.coroutineContext + managerJob)
     private val mutex = Mutex()
+    private val configMutex = Mutex()
     private val stateLock = Any()
     private val jobLock = Any()
     private val clients = mutableMapOf<String, McpClient>()
@@ -128,31 +129,38 @@ class McpManager(
         }
     }
 
-    suspend fun upsert(config: McpServerConfig) {
-        synchronized(stateLock) {
-            val list = _servers.value.toMutableList()
-            val index = list.indexOfFirst { it.config.name == config.name }
-            if (index >= 0) list[index] = McpServerState(config) else list += McpServerState(config)
-            _servers.value = list
-        }
-        persist()
-    }
-
-    suspend fun remove(name: String) {
-        disconnect(name)
-        synchronized(stateLock) {
-            _servers.value = _servers.value.filterNot { it.config.name == name }
-        }
-        persist()
-    }
-
-    suspend fun setEnabled(name: String, enabled: Boolean) {
-        synchronized(stateLock) {
-            _servers.value = _servers.value.map {
-                if (it.config.name == name) it.copy(config = it.config.copy(enabled = enabled)) else it
+    suspend fun upsert(config: McpServerConfig) = configMutex.withLock {
+        val configs = _servers.value.map { it.config }.toMutableList()
+        val index = configs.indexOfFirst { it.name == config.name }
+        if (index >= 0) configs[index] = config else configs += config
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            store.save(configs)
+            synchronized(stateLock) {
+                val latest = _servers.value.toMutableList()
+                val at = latest.indexOfFirst { it.config.name == config.name }
+                if (at >= 0) latest[at] = McpServerState(config) else latest += McpServerState(config)
+                _servers.value = latest
             }
         }
-        persist()
+    }
+
+    suspend fun remove(name: String) = configMutex.withLock {
+        val configs = _servers.value.filterNot { it.config.name == name }.map { it.config }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            store.save(configs)
+            synchronized(stateLock) {
+                _servers.value = _servers.value.filterNot { it.config.name == name }
+            }
+        }
+        disconnect(name)
+    }
+
+    suspend fun setEnabled(name: String, enabled: Boolean) = configMutex.withLock {
+        val configs = _servers.value.map { if (it.config.name == name) it.config.copy(enabled = enabled) else it.config }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            store.save(configs)
+            update(name) { it.copy(config = it.config.copy(enabled = enabled)) }
+        }
         if (enabled) connect(name) else disconnect(name)
     }
 
@@ -354,10 +362,6 @@ class McpManager(
 
     private fun cancelReconnect(name: String) {
         synchronized(jobLock) { reconnectJobs.remove(name)?.cancel() }
-    }
-
-    private suspend fun persist() {
-        store.save(_servers.value.map { it.config })
     }
 
     private fun update(name: String, block: (McpServerState) -> McpServerState) {

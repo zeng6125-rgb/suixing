@@ -288,13 +288,13 @@ class LlmClient(http: OkHttpClient? = null) {
 
     // Core constructs the engine before the first Activity. TLS/provider setup belongs
     // to the IO request path, not that constructor; injected clients retain their identity.
-    private val defaultHttp: OkHttpClient by lazy { http ?: defaultClient() }
+    private val defaultHttp: OkHttpClient by lazy { (http ?: defaultClient()).newBuilder().addNetworkInterceptor(PublicCredentialGuard()).build() }
 
     /** Local setup only: no DNS lookup, connection, or credentials are used. */
     internal fun prepare() { defaultHttp }
 
     /** Built on first use: only endpoints that need it pay for the relaxed socket factory. */
-    private val relaxedHttp: OkHttpClient by lazy { insecureClient() }
+    private val relaxedHttp: OkHttpClient by lazy { insecureClient().newBuilder().addNetworkInterceptor(PublicCredentialGuard()).build() }
 
     /**
      * Endpoints on the LAN usually carry a self-signed certificate, which Android
@@ -322,18 +322,7 @@ class LlmClient(http: OkHttpClient? = null) {
      * 认不出来的（域名、公网 IP）一律按公网处理 —— 宁可让自签证书连不上、用户改回 http，
      * 也不要在公网地址上关闭证书校验。
      */
-    internal fun isLanHost(host: String): Boolean {
-        if (host.isBlank()) return false // URI 无有效主机名时绝不能启用 trust-all
-        val h = host.trim().lowercase().removePrefix("[").removeSuffix("]")
-        if (h == "localhost" || h.endsWith(".local") || h == "::1") return true
-        if (h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.")) return true
-        if (h.startsWith("169.254.")) return true
-        if (h.startsWith("172.")) {
-            val second = h.split('.').getOrNull(1)?.toIntOrNull() ?: return false
-            return second in 16..31
-        }
-        return false
-    }
+    internal fun isLanHost(host: String): Boolean = isPrivateEndpointHost(host)
 
     /**
      * Ask the endpoint which models it serves (`GET {base}/models`).
@@ -474,7 +463,9 @@ class LlmClient(http: OkHttpClient? = null) {
                         // 即打开完整转储（临时诊断用，排除在备份之外、可随时删除）。
                         runCatching {
                             val app = com.suixing.agent.core.Core.appContext
-                            val fullDump = java.io.File(app.filesDir, "http-dump-full").exists()
+                            val marker = java.io.File(app.filesDir, "http-dump-full")
+                            val fullDump = fullDiagnosticAllowed(marker.lastModified(), System.currentTimeMillis())
+                            if (!fullDump) marker.delete()
                             val dump = buildJsonObject {
                                 put("code", JsonPrimitive(response.code))
                                 put("at", JsonPrimitive(System.currentTimeMillis()))
@@ -634,6 +625,7 @@ class LlmClient(http: OkHttpClient? = null) {
             currentCoroutineContext().ensureActive()
             // Protocol/validation failures are real answers; only transport failures and
             // explicit HTTP retry statuses may resend an already billed request.
+            if (failure is EndpointPolicyException) throw failure
             if (failure !is java.io.IOException && failure !is CutFailure && failure !is AttemptFailure) throw failure
             val serverSeconds = (failure as? AttemptFailure)?.retryAfterSeconds
             val seconds = serverSeconds

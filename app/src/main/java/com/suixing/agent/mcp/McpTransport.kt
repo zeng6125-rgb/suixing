@@ -271,6 +271,7 @@ class HttpTransport(
     override val label: String = url
 
     private val client = OkHttpClient.Builder()
+        .addNetworkInterceptor(com.suixing.agent.llm.PublicCredentialGuard())
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
         .build()

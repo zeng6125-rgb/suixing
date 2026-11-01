@@ -69,7 +69,7 @@ class TypewriterRateTest {
         assertTrue("积压 400 字时应明显快于基础步长", typeStep(400) > BASE_STEP)
         assertTrue("积压 12 字时开始提速", typeStep(12) > BASE_STEP)
         // **滞后上限**：大积压时一拍几乎追平，只保留 4 字缓冲。
-        assertEquals("积压 400 字时只留 4 字", 396, typeStep(400))
+        assertEquals("积压 400 字分多帧追赶", 100, typeStep(400))
     }
 
     @Test

@@ -784,8 +784,14 @@ internal fun ReasoningBlock(
     val expanded = expansion.stored(blockId) ?: (streaming || (!runStreaming && expandReasoning))
     // **增量切行**（见 [IncrementalLines]）：文本是逐字变长的，`text.split('\n')` 每一拍都在
     // 全文上重做一次切分 + 分配一个新列表。切分器记住上一次的文本与结果，只切新增那一段。
+    val shown = rememberTypedText(
+        text = text,
+        enabled = streaming,
+        startAtZero = true,
+        retained = expansion.viewport(blockId).prose,
+    )
     val splitter = remember { IncrementalLines() }
-    val lines = remember(text) { splitter.linesFor(text) }
+    val lines = remember(shown) { splitter.linesFor(shown) }
     // **remember 真正的依赖**（原来每帧一个 buildList）：`meta` 只由这两个数决定。
     val meta = remember(reasoningTokens, elapsedMs) {
         buildList<String> {
@@ -803,7 +809,7 @@ internal fun ReasoningBlock(
     // the think streams.
     val chain: @Composable () -> Unit = {
         if (lines.none { it.isNotBlank() }) {
-            Text(
+            if (!streaming && text.isBlank()) Text(
                 text = "（本段无思考文本）",
                 style = thinkingStyle(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1553,14 +1559,7 @@ internal fun TurnSummary(
         expanded = expanded,
         contentBottomPadding = 0.dp,
         onToggle = { reasoningExpansion.set(summarySlot(runId), !expanded) },
-        // **流式期恢复转圈**（issue #56 R6）：这张卡是本轮唯一的「正在回复」指示，
-        // 而 `trailing` 那一路随重构被删掉了（另一处 `trailing = status` 只覆盖思考块）。
-        // 标题里虽然有「正在回复」四个字，但没有运动信号时用户读不出「还在跑」。
-        trailing = if (streaming) {
-            { ProcessSpinner(MaterialTheme.colorScheme.primary) }
-        } else {
-            null
-        },
+        // The elapsed title is the run indicator; no summary spinner (user preference).
     ) {
         // Expanding means the run as it happened: every piece in arrival order —
         // thinking blocks (foldable, full text), tool rows, every stretch of prose
