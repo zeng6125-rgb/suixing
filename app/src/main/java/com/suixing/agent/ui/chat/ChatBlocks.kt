@@ -85,6 +85,7 @@ import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.suixing.agent.ui.components.INLINE_ICON_BOX
 import com.suixing.agent.ui.components.InlineIconAction
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
@@ -129,11 +130,13 @@ internal fun BranchArrow(
     label: String,
     enabled: Boolean,
     onClick: () -> Unit,
+    boxWidth: Dp = INLINE_ICON_BOX,
 ) = InlineIconAction(
     icon = icon,
     label = label,
     onClick = onClick,
     enabled = enabled,
+    boxWidth = boxWidth,
 )
 
 /**

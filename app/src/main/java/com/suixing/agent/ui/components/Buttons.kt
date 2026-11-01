@@ -116,6 +116,10 @@ val INLINE_ICON_RIPPLE = 16.dp
  * 这三条是 0.8.600→0.8.609 逐版实测收敛的结果，动任何一条都会复发。
  *
  * 禁用态：字形降到 35% 透明度（与 [com.suixing.agent.ui.chat.BranchArrow] 原行为一致）。
+ *
+ * [boxWidth] 默认 26dp；传 [INLINE_ICON_GLYPH]（15dp）可让盒宽 **等于字形宽**——
+ * 此时盒右沿就是字形右沿，盒内那 11dp 白空消失。数字两侧要等距时用它
+ * （`ActionBar` 的「‹ 2/2 ›」：数字左 4dp、右 4dp）。
  */
 @Composable
 fun InlineIconAction(
@@ -125,9 +129,10 @@ fun InlineIconAction(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    boxWidth: Dp = INLINE_ICON_BOX,
 ) {
     Box(
-        modifier = modifier.size(INLINE_ICON_BOX),
+        modifier = modifier.size(boxWidth),
         contentAlignment = Alignment.CenterStart,
     ) {
         Icon(

@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.PopupPositionProvider
+import com.suixing.agent.ui.components.INLINE_ICON_GLYPH
 import com.suixing.agent.ui.components.InlineIconAction
 import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
@@ -1608,6 +1609,11 @@ internal fun ActionBar(
                 //  · 盒左沿不动 ⇒ 与左边「重新回答」仍是 12dp。
                 // 曾试过把它贴盒右（`CenterEnd`）：数字两侧确实变 4dp，但图标整体右移 11dp，
                 // 与「重新回答」拉开成 23dp —— 所以改成本方案。热区因此 15×26dp。
+                //
+                // 0.8.612 回归：上一轮把 `boxWidth` 参数从 InlineIconAction 里删掉了，
+                // 左箭头吃回 26dp 默认盒 ⇒ 数字左侧变 15dp、右侧仍是 4dp（用户：「< 2/2 >
+                // 数字的左右边距怎么又不一致了」）。现恢复该参数。
+                boxWidth = INLINE_ICON_GLYPH,
                 onClick = { onBranch(branch.turnId, branch.runs[branch.index - 1]) },
             )
             Text(
