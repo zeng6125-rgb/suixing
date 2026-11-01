@@ -1410,7 +1410,7 @@ internal fun AssistantRow(
                                 maxHeight = reasoningMaxHeight,
                                 followReasoning = followReasoning,
                             )
-                            if (!last) Spacer(Modifier.height(6.dp))
+                            if (!last) Spacer(Modifier.height(0.dp))
                         }
 
                         is Part.Tools -> {
@@ -1424,7 +1424,7 @@ internal fun AssistantRow(
                                 runningTool = runningTool.takeIf { streaming && last },
                                 startExpanded = expandTools,
                             )
-                            if (!last) Spacer(Modifier.height(6.dp))
+                            if (!last) Spacer(Modifier.height(0.dp))
                         }
 
                         is Part.Text -> {

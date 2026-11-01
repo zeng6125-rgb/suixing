@@ -1551,8 +1551,10 @@ internal fun TurnSummary(
         // 中间的空隙只剩 `spacedBy` 管的「子项之间」，而它对第一个不生效。
         // 原来这里是 `padding(top = if (tailStart > 0) 6.dp else 0.dp)` —— 给「新正文把旧尾段
         // 挪到这儿」的情况留一点空气；现在整块不加，那种情况自然也不会冒出来。
+        // **块之间不留空隙**（用户要求 0dp）：思考块与工具块自己带内边距，
+        // 再叠 6dp 会让展开后的过程区读成一串松散的分段。
         Column(
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
         ) {
             // The answer itself is already drawn by the bubble below this card (the settled
             // path keeps the last stretch of prose). Leaving a second copy in here is what
