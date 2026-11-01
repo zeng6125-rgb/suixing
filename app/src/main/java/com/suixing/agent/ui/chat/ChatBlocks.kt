@@ -80,6 +80,7 @@ import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -157,30 +158,28 @@ internal val PROCESS_TITLE_MAX = 160.dp
 internal const val PROCESS_EXPAND_MS = 220
 
 /**
- * 展开时长随内容高度缩放，**让视觉速度大致恒定**（纯函数，便于单测）。
+ * 展开时长随内容高度增加，让长内容继续放慢（纯函数，便于单测）。
  *
- * 基准 [baseMs]（= [PROCESS_EXPAND_MS]）对应「矮内容」；每多 400px 加 110ms，最多加 260ms。
- * 所以 36dp 表头那种矮块仍是 220ms，而 2000dp 的展开卡片约 480ms
- * —— 长内容不再「220ms 内刷过 2000dp」。
+ * 基准 [baseMs]（= [PROCESS_EXPAND_MS]）对应「矮内容」；每多 400px 加 110ms，最多加 680ms。
+ * 矮块继续沿用原来的时长，大内容则会持续放慢，直到 900ms 的总时长上限。
  *
- * 上限刻意压到 +260ms：再长会让人觉得"点了没反应"。若要更匀，可提高上限，
- * 代价是大卡片的展开等待变长。
+ * 额外时长上限控制为 +680ms，避免大卡片继续在短时长内刷过。
  */
 internal fun scaledRevealDurationMs(baseMs: Int, heightPx: Int): Int {
     if (heightPx <= 0) return baseMs
-    // 用 1/400 的斜率：120px ≈ +33ms，1200px ≈ +330ms（已被上限截断）。
+    // 用 1/400 的斜率：120px ≈ +33ms，1200px ≈ +330ms；超过上限后不再增长。
     val extra = (heightPx / 400f) * 110f
-    return baseMs + extra.coerceIn(0f, 260f).toInt()
+    return baseMs + extra.coerceIn(0f, 680f).toInt()
 }
 
 /**
- * 收起时长：展开的**一半斜率、一半上限**（收起 = 让开视野，拖沓碍事）。
- * 短块与展开同为 [PROCESS_EXPAND_MS]；2000px 的卡片收起约 350ms（展开 480ms）。
+ * 收起时长：展开的**一半斜率**，额外时长上限 480ms（收起 = 让开视野，拖沓碍事）。
+ * 矮块与原有时长一致；长内容收起最多 700ms，仍比展开短。
  */
 internal fun scaledCollapseDurationMs(baseMs: Int, heightPx: Int): Int {
     if (heightPx <= 0) return baseMs
     val extra = (heightPx / 400f) * 55f
-    return baseMs + extra.coerceIn(0f, 130f).toInt()
+    return baseMs + extra.coerceIn(0f, 480f).toInt()
 }
 
 /**
@@ -271,36 +270,26 @@ private fun RevealHeight(
     // graphicsLayer lambda 里读 —— 不进组合，不产生逐帧重组。
     var expanding by remember { androidx.compose.runtime.mutableStateOf(visible) }
     val position = LocalTranscriptPosition.current
-    // **时长按内容高度缩放**（用户反馈：「大长总结条展开效果和中等/短的区别明显」）。
-    //
-    // 原来三个折叠块都传固定的 `PROCESS_EXPAND_MS = 220`，而展开高度 = `child.height * fraction`
-    // ⇒ 时长固定、位移随高度增长 ⇒ **同一段 220ms 里走得越远越快**。
-    // 按 120Hz 采样 `CubicBezierEasing(0.2, 0, 0, 1)` 算出的峰值速度：
-    //   40dp → 702 px/s；120dp → 2106；800dp → 14038；2000dp → 35095。
-    // 短与长差 50 倍，肉眼就是「短的很糯、大长条刷地一下」。
-    //
-    // 现在：展开时长随高度增长（每 400px 加 110ms，封顶 +260ms），**收起只加一半**
-    //（收起 = 让开视野，拖沓会碍事）—— 长内容的收尾比展开快约 130ms，短块两者一致。
-    // 高度在下面的 `Layout` 里才量得到，所以先量、再启动动画：
-    // 用 `contentHeight` 记住实测高度，动画的 key 带上它 —— 高度变了才重算时长。
+    // 高度在下面的 `Layout` 里才量得到，所以展开先等本次测量，再按该次 toggle 的高度启动动画。
+    // durationHeight 用 -1 表示尚未测量，0 仍是合法的空内容高度；测量值只影响后续 toggle，
+    // 不作为 LaunchedEffect key，因此流式内容长高时不会取消并重启当前动画。
     var contentHeight by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     /**
-     * 用来算时长的**粗粒度**高度（issue #59 B1）。
+     * 用来算时长的**粗粒度**高度（issue #59 B1），-1 表示当前展开尚未测量。
      *
-     * 流式期间内容每帧都在长高，而 `contentHeight` 原来是 `LaunchedEffect` 的 key ⇒
-     * 每帧取消一次正在跑的 `animateTo` 再按新时长重启 —— 观感就是"展开到一半突然换速度"，
-     * 而且每次都跑一遍 `beginRevealTransition` / `endRevealTransition`。
-     * 现在只有**显著变化**（首次量到、或变化超过 max(48px, 1/8)）才更新时长，
-     * 让一次展开用同一条曲线走完。
+     * 高度仅在首次测量或变化超过 max(48px, 1/8) 时更新。它不再是动画 effect 的 key，
+     * 本次 toggle 启动时捕获一次时长，流式期间不会重启动画。
      */
-    var durationHeight by remember { androidx.compose.runtime.mutableIntStateOf(0) }
-    LaunchedEffect(visible, durationHeight, durationMs) {
+    var durationHeight by remember { androidx.compose.runtime.mutableIntStateOf(-1) }
+    LaunchedEffect(visible, durationMs) {
         if (!visible && fraction.value == 0f) return@LaunchedEffect
         expanding = visible
         val tracked = position?.beginRevealTransition() == true
         try {
-            val dur = if (visible) scaledRevealDurationMs(durationMs, durationHeight)
-                      else scaledCollapseDurationMs(durationMs, durationHeight)
+            if (visible) durationHeight = -1
+            val heightForDuration = snapshotFlow { durationHeight }.first { it >= 0 }
+            val dur = if (visible) scaledRevealDurationMs(durationMs, heightForDuration)
+                      else scaledCollapseDurationMs(durationMs, heightForDuration)
             fraction.animateTo(if (visible) 1f else 0f,
                 androidx.compose.animation.core.tween(dur, easing = REVEAL_EASING))
         } finally {
@@ -325,7 +314,7 @@ private fun RevealHeight(
         if (contentHeight != child.height) contentHeight = child.height
         // 时长用的那份只在显著变化时更新：差得少就沿用当前时长，别把动画重启成"换挡"。
         val delta = kotlin.math.abs(contentHeight - durationHeight)
-        if (durationHeight == 0 || delta > kotlin.math.max(48, durationHeight / 8)) {
+        if (durationHeight < 0 || delta > kotlin.math.max(48, durationHeight / 8)) {
             durationHeight = contentHeight
         }
         val height = (child.height * fraction.value).roundToInt().coerceIn(0, child.height)
