@@ -665,13 +665,19 @@ class SettingsRepository(private val context: Context) {
             val raw = prefs[key] ?: return@edit
             val parsed = runCatching { json.decodeFromString<AppSettings>(raw) }.getOrNull() ?: return@edit
             val clean = parsed.withoutEmptyProviders()
-            if (clean !== parsed) prefs[key] = json.encodeToString(AppSettings.serializer(), clean.encrypted())
+            if (clean !== parsed) {
+                prefs[key] = json.encodeToString(AppSettings.serializer(), clean.encrypted(parsed))
+            }
         }
     }
 
     suspend fun save(settings: AppSettings) {
         context.settingsDataStore.edit { prefs ->
-            prefs[key] = json.encodeToString(AppSettings.serializer(), settings.encrypted())
+            // 盘上那份（字段仍是密文）作为加密失败时的回退，见 encrypted(stored) 的说明。
+            val stored = prefs[key]?.let { raw ->
+                runCatching { json.decodeFromString<AppSettings>(raw) }.getOrNull()
+            }
+            prefs[key] = json.encodeToString(AppSettings.serializer(), settings.encrypted(stored))
         }
     }
 
@@ -681,9 +687,10 @@ class SettingsRepository(private val context: Context) {
         // field) can no longer both start from the same snapshot and have the later
         // one drop the earlier one's change.
         context.settingsDataStore.edit { prefs ->
+            val stored = decode(prefs[key])
             prefs[key] = json.encodeToString(
                 AppSettings.serializer(),
-                block(decode(prefs[key])).encrypted(),
+                block(stored).encrypted(stored),
             )
         }
     }
@@ -749,21 +756,40 @@ private fun hasPlainSecret(raw: String): Boolean =
  *
  * 两处都要盖：顶层 [AppSettings.apiKey]（老格式迁移过来的）与每个 [ProviderConfig.apiKey]。
  */
-private fun AppSettings.encrypted(): AppSettings = copy(
+/**
+ * 落盘形态。**加密失败时沿用 [stored] 里的旧密文，绝不写空**。
+ *
+ * 为什么要有 [stored]：上一版在加密不可用时直接写 `""`，那会**覆盖掉磁盘上原本有效的
+ * 密文** —— Keystore 一次临时故障（锁屏改动、系统升级后首次解密）就把用户已保存的 Key
+ * 永久抹掉，比「明文落盘」更糟：用户既没拿到保护，又丢了凭据。
+ *
+ * 现在的语义：能加密就用新的；不能加密就保持原样不动（[stored] 是解密前的那份，
+ * 各字段仍是密文）。旧文件里的明文不带 `enc1:` 前缀，`decrypt` 原样返回，同样适用。
+ */
+private fun AppSettings.encrypted(stored: AppSettings? = null): AppSettings = copy(
     // `SecretBox.encrypt` 加密不可用时返回 null：这时**写空**而不是写明文
     // （issue #58 #3）。内存里的明文不动，本次会话照常发请求；冷启动后该字段为空，
     // 用户重填即可 —— 代价一次「重填」，换掉一个「明文落盘」。
-    apiKey = SecretBox.encrypt(apiKey) ?: "",
-    providers = providers.map { provider ->
-        provider.copy(apiKey = SecretBox.encrypt(provider.apiKey) ?: "")
+    apiKey = SecretBox.encrypt(apiKey) ?: stored?.apiKey ?: "",
+    providers = providers.mapIndexed { index, provider ->
+        val previous = stored?.providers?.getOrNull(index)
+        // 按**位置**回退：provider 列表的增删都以本页保存为单位，位置在同一份文件里是稳定的；
+        // 位置对不上（新增/删除过）才退回空串。
+        provider.copy(
+            apiKey = SecretBox.encrypt(provider.apiKey)
+                ?: previous?.takeIf { it.baseUrl == provider.baseUrl }?.apiKey
+                ?: "",
+        )
     },
     // **搜索 Key 与自定义请求头同样是凭据**（issue #58 #4）：`searchApiKey` 是第三方搜索
     // 服务的 Key；`requestHeaders` 的 Value 常放 Bearer token。原来两者明文躺在
     // `preferences_pb` 里，加密只盖了 `apiKey`。头名（Key）不加密 —— 它不是秘密，
     // 而且加密后无法检索/显示。
-    // 与主 API Key 同一条规矩：加密不可用就写空，不落明文（issue #58 #3）。
-    searchApiKey = SecretBox.encrypt(searchApiKey) ?: "",
-    requestHeaders = requestHeaders.mapValues { (_, value) -> SecretBox.encrypt(value) ?: "" },
+    // 同一条规矩：加密不可用就保持旧值，既不写明文也不抹掉已有密文。
+    searchApiKey = SecretBox.encrypt(searchApiKey) ?: stored?.searchApiKey ?: "",
+    requestHeaders = requestHeaders.mapValues { (name, value) ->
+        SecretBox.encrypt(value) ?: stored?.requestHeaders?.get(name) ?: ""
+    },
 )
 
 /**
