@@ -1372,7 +1372,9 @@ class ChatViewModel : ViewModel() {
         //
         // 条件都是"这个会话还在屏幕上"：用户可能已经切走，那就别再写回状态去覆盖新会话。
         // 只有**没命中缓存**才读盘（#35：命中时上面已经带正文建好状态了）。
-        if (cached == null && live == null) openingJob = viewModelScope.launch {
+        // 判据抽成纯函数（issue #67 P1-3）：有缓存或 live 会话时**绝不读盘** ——
+        // 热 A→B→A 因此不会把同一份正文重新读一遍。
+        if (needsColdRead(hasLiveSession = live != null, cachedIsPresent = cached != null)) openingJob = viewModelScope.launch {
             val tail = Core.chats.readTailWindow(conversation.id)
             val opened = tail?.let { (conversationTail, _, _) -> conversationTail }
                 ?: Core.chats.readTail(conversation.id)
