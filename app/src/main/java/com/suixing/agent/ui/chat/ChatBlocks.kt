@@ -279,13 +279,23 @@ private fun RevealHeight(
     // 高度在下面的 `Layout` 里才量得到，所以先量、再启动动画：
     // 用 `contentHeight` 记住实测高度，动画的 key 带上它 —— 高度变了才重算时长。
     var contentHeight by remember { androidx.compose.runtime.mutableIntStateOf(0) }
-    LaunchedEffect(visible, contentHeight, durationMs) {
+    /**
+     * 用来算时长的**粗粒度**高度（issue #59 B1）。
+     *
+     * 流式期间内容每帧都在长高，而 `contentHeight` 原来是 `LaunchedEffect` 的 key ⇒
+     * 每帧取消一次正在跑的 `animateTo` 再按新时长重启 —— 观感就是"展开到一半突然换速度"，
+     * 而且每次都跑一遍 `beginRevealTransition` / `endRevealTransition`。
+     * 现在只有**显著变化**（首次量到、或变化超过 max(48px, 1/8)）才更新时长，
+     * 让一次展开用同一条曲线走完。
+     */
+    var durationHeight by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    LaunchedEffect(visible, durationHeight, durationMs) {
         if (!visible && fraction.value == 0f) return@LaunchedEffect
         expanding = visible
         val tracked = position?.beginRevealTransition() == true
         try {
-            val dur = if (visible) scaledRevealDurationMs(durationMs, contentHeight)
-                      else scaledCollapseDurationMs(durationMs, contentHeight)
+            val dur = if (visible) scaledRevealDurationMs(durationMs, durationHeight)
+                      else scaledCollapseDurationMs(durationMs, durationHeight)
             fraction.animateTo(if (visible) 1f else 0f,
                 androidx.compose.animation.core.tween(dur, easing = REVEAL_EASING))
         } finally {
@@ -306,8 +316,13 @@ private fun RevealHeight(
         modifier = Modifier.fillMaxWidth().clipToBounds(),
     ) { measurables, constraints ->
         val child = measurables.first().measure(constraints.copy(minHeight = 0))
-        // 实测高度写回（只在变化时写，避免每帧触发重组）。时长缩放靠它。
+        // 实测高度写回（只在变化时写，避免每帧触发重组）。
         if (contentHeight != child.height) contentHeight = child.height
+        // 时长用的那份只在显著变化时更新：差得少就沿用当前时长，别把动画重启成"换挡"。
+        val delta = kotlin.math.abs(contentHeight - durationHeight)
+        if (durationHeight == 0 || delta > kotlin.math.max(48, durationHeight / 8)) {
+            durationHeight = contentHeight
+        }
         val height = (child.height * fraction.value).roundToInt().coerceIn(0, child.height)
         layout(child.width, height) { child.place(0, 0) }
     }
