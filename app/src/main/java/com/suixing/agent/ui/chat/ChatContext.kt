@@ -335,7 +335,13 @@ internal fun CheckpointCard(
         // **一行**：按钮在文案前面，两者同一字号（用户：查看原文应与这些同一行、且在文案前，
         // 按钮不要太高、涟漪用原生）。TextButton 的默认 indication 就是 M3 原生涟漪，
         // 这里只压掉它自带的高度 —— `minHeight = 0` + 极小垂直 padding，点按区仍靠外边距保住。
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // **Row 必须撑满宽度**：它是包裹内容宽度的，给里面的 Text 加 `end` padding 只会把
+        // Row 本身撑宽，文案位置一点不动 —— 用户两次说「右边距再大一点点」都没变化的真因。
+        // 撑满之后，右侧留白才真的把文字边界往左推。
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(end = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TextButton(
                 onClick = { showOriginal = !showOriginal },
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
@@ -354,8 +360,7 @@ internal fun CheckpointCard(
                     "${originals.size} 条消息 · ${formatTime(checkpoint.at)}",
                 style = checkpointMetaStyle(),
                 color = scheme.onSurfaceVariant,
-                // 右侧多留一点，文案整体左移（用户：右边距再大一点点，相当于把文案左移）
-                modifier = Modifier.padding(end = 14.dp),
+                // 右侧留白交给上面的 Row（撑满后 padding 才会真的推动文字边界）
             )
         }
         if (showOriginal) {
