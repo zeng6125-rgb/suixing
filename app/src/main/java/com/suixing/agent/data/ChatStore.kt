@@ -377,7 +377,7 @@ internal class ChatStore(private val root: File) {
 
     /** Writes [tail] onto the end of the log and advances the meta. */
     private fun appendTail(committed: ConversationMeta, tail: List<StoredMessage>): ConversationMeta {
-        val bytes = encode(tail)
+        var bytesWritten = 0L
         val log = logFile(committed)
         log.parentFile?.mkdirs()
         RandomAccessFile(log, "rw").use { raf ->
@@ -411,7 +411,7 @@ internal class ChatStore(private val root: File) {
             if (raf.length() > committed.logBytes) raf.setLength(committed.logBytes)
             raf.seek(committed.logBytes)
             try {
-                raf.write(bytes)
+                bytesWritten = appendEncoded(raf, tail)
                 raf.fd.sync()
             } catch (e: Throwable) {
                 // Put the log back the way the meta describes it, so the next attempt starts
@@ -421,7 +421,7 @@ internal class ChatStore(private val root: File) {
             }
         }
         val next = committed.copy(
-            logBytes = committed.logBytes + bytes.size,
+            logBytes = committed.logBytes + bytesWritten,
             messageCount = committed.messageCount + tail.size,
             turnCount = committed.turnCount + tail.count { isTurnStart(it) },
             lastMessageId = tail.last().id,
@@ -791,6 +791,24 @@ internal class ChatStore(private val root: File) {
             out.write(newline)
         }
         return out.toByteArray()
+    }
+
+    /**
+     * Writes the same bytes as [encode] straight to the log and returns their count.
+     *
+     * The append path only needs the byte count and the bytes on disk. Encoding into a
+     * `ByteArrayOutputStream` and then calling `toByteArray()` held two full copies of a
+     * screenshot-heavy tail at once; this keeps one message's bytes at a time.
+     */
+    private fun appendEncoded(raf: RandomAccessFile, messages: List<StoredMessage>): Long {
+        var total = 0L
+        for (message in messages) {
+            val bytes = chatJson.encodeToString(StoredMessage.serializer(), message).toByteArray(Charsets.UTF_8)
+            raf.write(bytes)
+            raf.write(10)
+            total += bytes.size + 1L
+        }
+        return total
     }
 
     /** Deletes every generation of `id` but [keep]. */

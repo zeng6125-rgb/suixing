@@ -171,6 +171,9 @@ fun ChatScreen(
         if (positionStorageReady) Core.conversationViewports.get(state.conversationId) else null
     }
     val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(viewModel) {
+        viewModel.notices.collect { snackbarHostState.showSnackbar(it) }
+    }
     val scope = rememberCoroutineScope()
     // 顶层拿一次剪贴板：文件路径菜单的「复制」用（见 [PathActionSheet] 接线处）。
     val clipboard = LocalClipboardManager.current
@@ -463,7 +466,12 @@ fun ChatScreen(
     val listState = viewport.listState
 
     // Markdown preparation is cached by message; navigation reads LazyList's own layout.
-    val rowDocuments = remember(state.conversationId) { HashMap<String, Map<String, List<MdBlock>>>() }
+    // Snapshot state, not a plain HashMap: preparation finishes on Main after a
+// Dispatchers.Default hop, and a plain write would leave the row reading the old map
+// until some unrelated recomposition. This is what makes the preparse visible.
+    val rowDocuments = remember(state.conversationId) {
+        mutableStateMapOf<String, Map<String, List<MdBlock>>>()
+    }
     val visibleIds = remember(visibleShape) { visible.mapTo(HashSet()) { it.message.id } }
     SideEffect {
         rowDocuments.keys.retainAll(visibleIds)
@@ -654,10 +662,16 @@ fun ChatScreen(
     // several messages in one run — while the status line the user watched counted the whole
     // run. Showing the round's number under the card is what made the two disagree.
     val runElapsed = remember(rowsKey) {
-        state.messages.asSequence()
-            .filter { !it.runId.isNullOrEmpty() && it.elapsedMs > 0 }
-            .groupBy { it.runId }
-            .mapValues { (_, rows) -> rows.sumOf { it.elapsedMs } }
+        // One pass and one map. The old sequence/filter/groupBy/mapValues chain built a
+        // list per run and three intermediate collections for a value read per row.
+        buildMap<String, Long> {
+            state.messages.forEach { message ->
+                val run = message.runId
+                if (!run.isNullOrEmpty() && message.elapsedMs > 0) {
+                    put(run, (get(run) ?: 0L) + message.elapsedMs)
+                }
+            }
+        }
     }
     // The conversation's own clock, summed off the very rows [SessionStats] divides its speed
     // by — so 「会话总用时」 and 「会话输出速度」 are two readings of one measurement rather
@@ -1832,6 +1846,8 @@ fun ChatScreen(
                 Composer(
                     subagentChatId = state.conversationId,
                     input = input,
+                    goal = state.goal,
+                    onClearGoal = rememberStableCallback0 { viewModel.clearGoal() },
                     onInput = rememberStableCallback1<String> { setDraft(text = it) },
                     onRestoreSteer = rememberStableCallback1 { steer ->
                         scope.launch { restoreQueuedSteer(steer) }

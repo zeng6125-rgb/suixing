@@ -1,7 +1,6 @@
 package com.suixing.agent.ui.settings
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -149,14 +148,17 @@ internal fun EnabledModelCard(
     onTest: () -> Unit, onEdit: (String, Int, Int) -> Unit, onRemove: () -> Unit,
 ) {
     var editing by remember(id) { mutableStateOf(false) }
+    // 点击区就是整张可见卡片：原来 clickable 挂在内层文字列上，左侧与右侧都留出了
+    // 卡片内边距的空档；右侧编辑按钮仍是子节点，不会被整卡点击抢走。
     Surface(
+        onClick = onTest,
         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
         shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = if (testModel) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)) else null,
     ) {
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).clickable(onClick = onTest).padding(vertical = 4.dp),
+            Column(Modifier.weight(1f).padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (testModel) Icon(ImageVector.vectorResource(R.drawable.ic_circle_check), null, Modifier.size(15.dp),

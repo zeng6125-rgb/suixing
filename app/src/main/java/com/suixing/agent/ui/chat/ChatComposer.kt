@@ -51,6 +51,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -81,6 +83,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -757,8 +760,11 @@ internal fun RunStatusLine(
 
 @Composable
 internal fun TimeLabel(timestamp: Long) {
+    // The string only changes when the clock crosses the 24h boundary, not on every
+    // recomposition of a history row. The formatter's Date/buffer still allocates.
+    val text = remember(timestamp) { formatTime(timestamp) }
     Text(
-        text = formatTime(timestamp),
+        text = text,
         modifier = Modifier.fillMaxWidth(),
         // The label's distance from its bubble is decided by the caller (3dp inside the
         // item's Column); this only tightens the text's own line box, so the glyphs sit
@@ -772,6 +778,9 @@ internal fun TimeLabel(timestamp: Long) {
 @Composable
 internal fun Composer(
     input: String,
+    /** The app-wide objective, shown as a chip so `/goal` is not silent configuration. */
+    goal: String = "",
+    onClearGoal: () -> Unit = {},
     onInput: (String) -> Unit,
     /**
      * Takes a queued line back out of the queue and into the composer — its text **and its
@@ -874,6 +883,7 @@ internal fun Composer(
     // 不收（那一下没有发送任何文字，用户的手还在输入上）。
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val goalFocus = remember { FocusRequester() }
     val dismissKeyboard = {
         keyboardController?.hide()
         focusManager.clearFocus()
@@ -966,6 +976,19 @@ internal fun Composer(
             // where the answer is going to appear. Pinned above the pill it read as a
             // second, competing status area — and it carried no clock, so the wait looked
             // untimed while the user was staring at it.
+            // The goal is app-wide and outlives this chat: keep it visible above the field instead
+            // of burying it in settings. `/goal` can set it from here.
+            if (goal.isNotBlank()) {
+                GoalChip(
+                    text = goal,
+                    onClear = onClearGoal,
+                    modifier = Modifier.padding(
+                        start = STEER_QUEUE_INSET,
+                        end = STEER_QUEUE_INSET,
+                        bottom = 6.dp,
+                    ),
+                )
+            }
             // 多附件一排：每张 chip 可单独删（onRemoveAttachment 报下标），横向可滚 —— 不限张数时
             // 一排装不下也不能把 composer 撑高。
             if (attachments.isNotEmpty()) {
@@ -1124,6 +1147,7 @@ internal fun Composer(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 48.dp)
+                            .focusRequester(goalFocus)
                             .padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 4.dp)
                             // Accessible label is independent of the changing placeholder.
                             .semantics { contentDescription = "消息输入框" }
@@ -1367,7 +1391,29 @@ internal fun Composer(
                                 )
                             }
                         }
-                        subagentChatId?.let { SubagentStatusAction(it) }
+                        // `/` commands are typed, but the one that configures the run should not require
+                    // memorising the syntax. It prefixes the field (and focuses it); the existing
+                    // text is kept, so a half-written message becomes the goal verbatim.
+                    IconButton(
+                        onClick = {
+                            val trimmed = input.trim()
+                            if (trimmed.isEmpty()) {
+                                onInput("/goal ")
+                            } else if (!trimmed.startsWith("/goal")) {
+                                onInput("/goal " + trimmed)
+                            }
+                            goalFocus.requestFocus()
+                        },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            imageVector = ImageVector.vectorResource(R.drawable.ic_compass),
+                            contentDescription = "目标指令（/goal）",
+                            tint = scheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    subagentChatId?.let { SubagentStatusAction(it) }
                     }
                     val compactControls = windowWidth < 360.dp || density.fontScale >= 1.3f || settings.fontScale >= 3
                     if (compactControls) {
@@ -1559,4 +1605,46 @@ internal fun Composer(
         }
     }
             }
+}
+
+/** The persistent objective: one line, full width, with the one action that matters. */
+@Composable
+private fun GoalChip(
+    text: String,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = scheme.secondaryContainer.copy(alpha = 0.72f),
+        contentColor = scheme.onSecondaryContainer,
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = ImageVector.vectorResource(R.drawable.ic_compass),
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "目标 · $text",
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onClear, modifier = Modifier.size(26.dp)) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_x),
+                    contentDescription = "清除目标",
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
+    }
 }

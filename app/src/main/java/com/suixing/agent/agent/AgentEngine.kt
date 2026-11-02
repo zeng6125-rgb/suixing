@@ -6,6 +6,7 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.STEER_IMMEDIATE
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
+import com.suixing.agent.data.GoalStore
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.UserProfileStore
@@ -407,6 +408,8 @@ class AgentEngine(
     private val scope: CoroutineScope? = null,
     private val onCompleted: (String) -> Unit = {},
     private val approvalSourceTitle: String? = null,
+    /** App-wide objective; children inherit it so delegated work keeps the same aim. */
+    private val goals: GoalStore? = null,
 ) {
 
     private val runs = MutableStateFlow<Map<String, RunHandle>>(emptyMap())
@@ -1157,9 +1160,10 @@ class AgentEngine(
         // Asked through all() rather than find(): "skill_read is not in the visible set" is the
         // question, and it is the same list the prompt is about to summarise.
         val readable = registry.all().any { it.spec.name == "skill_read" }
+        val goalText = goals?.let { withContext(Dispatchers.IO) { it.read().text } }.orEmpty()
         val systemText = withContext(Dispatchers.Default) {
             val skillCatalog = if (readable) skills.catalog(skills.listHeaders()) else ""
-            systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value)
+            systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText)
         }
         breakSystem = systemText.length / 4
         wire += ChatMessage.system(systemText)
@@ -1301,7 +1305,11 @@ class AgentEngine(
                     parallelism = settings.subagentParallelism,
                     onChanged = { states -> childStates.update { it + (chatId to states) } }) { task ->
                     SUBAGENT_EXECUTION_SLOTS.withPermit {
-                        val child = AgentEngine(llm = llm, approvalSourceTitle = "$title · 子任务：${task.name}")
+                        val child = AgentEngine(
+                            llm = llm,
+                            approvalSourceTitle = "$title · 子任务：${task.name}",
+                            goals = goals,
+                        )
                         // A sibling cancellation relay can abort blocking HTTP/shell work as soon
                         // as a parent stop or timeout cancels this task, rather than waiting for IO.
                         val relay = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
@@ -2485,6 +2493,7 @@ class AgentEngine(
         skillCatalog: String,
         memory: Map<String, MemoryEntry>,
         profile: String,
+        goal: String,
     ): String = buildString {
         // 顺序是固定的，**按当前次序编号**（旧文档里的「1 人设」是移动前的号，别再按旧号找）：
         //   0 底座（一句话 + 工作规则）→ 1 工具表 → 2 插件 → 3 禁工具 → 4 技能
@@ -2494,6 +2503,13 @@ class AgentEngine(
         append(SYSTEM_PROMPT_BASE)
         append("\n\n## Available tools\n")
         append(registry.promptSummary())
+        // The user's own objective, not a generated task. It rides just after the tool table
+        // so a long run cannot lose sight of it when history is compacted.
+        if (goal.isNotBlank()) {
+            append("\n\n## Current goal\n")
+            append(goal)
+            append("\nKeep this objective in view; the user set it explicitly.")
+        }
         if (settings.subagentsEnabled && settings.approvalMode != ApprovalMode.DENY && !registry.isHidden("spawn_agent")) append(
             "\n\nFor substantial independent tasks, you may use spawn_agent to work in parallel. " +
                 "Keep simple work local. Pass only relevant context: children do not inherit this conversation. " +
@@ -2624,8 +2640,8 @@ const val COMPRESS_CONTEXT_TOOL = "compress_context"
  * 分开写只会在两段之间多一个空段落，读起来像两条互不相干的声明。
  *
  * 英文且固定：与人设用什么语言写无关；用户自己的文字（人设、记忆、画像）仍按原语言出现。
- * 规则内容是原「Tool calls / Planning / Writing files / Context」四段合成的 —— 怎么调工具、
- * 怎么规划、怎么写大文件、什么时候压缩上下文；拆成四段只是历史上一次一条加进来的结果。
+ * 规则内容是原「Tool calls / Planning / Writing files / Context」四段合并，再加目标一项 ——
+ * 怎么调工具、怎么规划、怎么写大文件、什么时候压缩上下文、目标与步骤如何分工。
  */
 private const val SYSTEM_PROMPT_BASE = "You are a helpful software engineer assistant.\n\n" +
     "## Working rules\n" +
@@ -2634,6 +2650,8 @@ private const val SYSTEM_PROMPT_BASE = "You are a helpful software engineer assi
     "When the work is done, answer the user in Chinese, briefly saying what you did and what happened.\n" +
     "- Planning: for multi-step work, call todo_write first and rewrite the complete list after each step " +
     "(rewrite, not append) — your context may be compacted, the board will not be.\n" +
+    "- Goals: when the user states a long-running objective, call goal once with one sentence " +
+        "(replace, do not append); use the task board for the steps that get there.\n" +
     "- Writing files: use write_file. For content over roughly 200 lines or 8KB, write it in parts — " +
     "the head first, then append with `append: true`; do not emit a whole large file in one call " +
     "(that hits the model's own output limit and the round gets truncated).\n" +

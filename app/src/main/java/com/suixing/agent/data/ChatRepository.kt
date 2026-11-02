@@ -771,7 +771,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             // 会把缓存项淘汰掉（issue #56 R34），此时 previous 为 null，下面那句
             // `previous != null && …` 永不成立 ⇒ 旧 payload 永远不删，长会话每次换 payload
             // 都留一个 MB 级孤儿文件。manifest 是磁盘上的真凭证，按它的名字删才准。
-            val storedPayloadName = runCatching {
+            val storedPayloadName = previous?.name ?: runCatching {
                 json.decodeFromString(LiveDraft.serializer(), liveFile(draft.chatId).readText())
                     .messageSnapshot
             }.getOrNull()

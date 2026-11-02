@@ -1519,7 +1519,8 @@ internal fun ToolDetail(line: ToolLine, maxHeight: Dp = 180.dp, listState: LazyL
         }
     }
     }
-    line.message?.allImages?.forEach { ImageBlock(it) }
+    val message = line.message
+    if (message != null && message.imageCount > 0) message.allImages.forEach { ImageBlock(it) }
 }
 
 /**
@@ -1555,6 +1556,9 @@ internal fun ToolRow(
     running: Boolean = false,
     listState: LazyListState? = null,
 ) {
+    // Lowercasing the tool name + four keyword lists is pure work; a scroll or a live
+    // state change must not redo it for the same row.
+    val icon = remember(line.name) { toolIconRes(line.name) }
     val tone = when {
         !line.done -> MaterialTheme.colorScheme.primary
         // **成功用中性灰**（用户：「工具卡 成功改成 灰的对齐上面两个」）：
@@ -1582,7 +1586,7 @@ internal fun ToolRow(
             Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                 if (line.done) {
                     Icon(
-                        imageVector = ImageVector.vectorResource(toolIconRes(line.name)),
+                        imageVector = ImageVector.vectorResource(icon),
                         contentDescription = null,
                         tint = tone,
                         modifier = Modifier.size(16.dp),
@@ -1599,7 +1603,7 @@ internal fun ToolRow(
                     // 历史遗留的 done=false（run 被杀后落盘）：静态类型图标，不再转。
                     // 不定式进度圈按屏幕刷新率重绘，常驻卡片挂着它 = 读历史一直烧帧。
                     Icon(
-                        imageVector = ImageVector.vectorResource(toolIconRes(line.name)),
+                        imageVector = ImageVector.vectorResource(icon),
                         contentDescription = null,
                         tint = tone,
                         modifier = Modifier.size(14.dp),

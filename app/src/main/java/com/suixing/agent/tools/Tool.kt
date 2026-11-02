@@ -3,6 +3,7 @@ package com.suixing.agent.tools
 import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.CapabilityTiers
+import com.suixing.agent.data.GoalStore
 import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.ScheduleStore
@@ -168,6 +169,7 @@ class ToolRegistry private constructor() {
         profile: UserProfileStore,
         jobs: JobStore,
         todos: TodoStore,
+        goals: GoalStore,
         schedules: ScheduleStore,
     ) : this() {
         add(SystemTools(context, memory, profile))
@@ -176,6 +178,7 @@ class ToolRegistry private constructor() {
         add(UiTools(context, capabilities))
         add(JobTools(jobs))
         add(TodoTools(todos))
+        add(GoalTools(goals))
         add(ScheduleTools(context, schedules))
         add(SkillTools(skills))
         add(WebTools(context, settings))

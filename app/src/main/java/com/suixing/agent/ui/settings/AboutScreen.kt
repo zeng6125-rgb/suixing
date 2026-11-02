@@ -7,6 +7,7 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -146,10 +147,19 @@ fun AboutScreen(onBack: () -> Unit) {
                 )
             }
 
-            SuixingCard {
-                SettingRow(title = "检查更新", subtitle = if (checking) "正在查询最新正式版本…" else "查看最新正式版本与更新说明",
+            // 横向内边距从卡片挪到行里：涟漪可铺满卡片宽度，文字仍在 16dp 缩进处。
+            SuixingCard(contentPadding = PaddingValues(vertical = SettingsStyle.CardPadding)) {
+                SettingRow(
+                    title = "检查更新",
+                    subtitle = if (checking) "正在查询最新正式版本…" else "查看最新正式版本与更新说明",
                     onClick = { checkUpdates() },
-                    control = { if (checking) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else RowChevron() })
+                    shape = MaterialTheme.shapes.large,
+                    contentPadding = PaddingValues(horizontal = SettingsStyle.CardPadding),
+                    control = {
+                        if (checking) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        else RowChevron()
+                    },
+                )
                 AboutLink("问题反馈", "填写复现步骤，提交前可自行检查内容", AppLinks.feedback(version))
                 AboutLink("源代码仓库", "源码、构建说明与项目文档", AppLinks.REPOSITORY)
             }
@@ -179,14 +189,20 @@ fun AboutScreen(onBack: () -> Unit) {
                 }
             }
 
-            SuixingCard {
-                Text("开源与致谢", style = SettingsStyle.cardTitle)
+            // 说明文字保留 16dp 缩进；下面的链接行铺满卡片，涟漪不再停在左右内边距里。
+            SuixingCard(contentPadding = PaddingValues(vertical = SettingsStyle.CardPadding)) {
+                Text(
+                    "开源与致谢",
+                    style = SettingsStyle.cardTitle,
+                    modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding),
+                )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     // Lucide 是 ISC 许可：它要求保留版权与许可声明，这一页是 App 唯一的出处说明。
                     text = "图标：Lucide（ISC License）",
                     style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding),
                 )
                 Spacer(Modifier.height(10.dp))
                 AboutLink(
@@ -210,10 +226,11 @@ fun AboutScreen(onBack: () -> Unit) {
             // 这一页就是那个"书面承诺"的落点：组件、版本、许可、以及**本应用的源码仓库**
             // （仓库里 app/src/main/jniLibs/arm64-v8a/ 下的两个文件就是这两个二进制的原样拷贝，
             // 上游源码与构建方式一并写在下面）。
-            SuixingCard {
+            SuixingCard(contentPadding = PaddingValues(vertical = SettingsStyle.CardPadding)) {
                 Text(
                     text = "随包分发的开源组件（GPL）",
                     style = SettingsStyle.cardTitle,
+                    modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding),
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -221,6 +238,7 @@ fun AboutScreen(onBack: () -> Unit) {
                         "（随 APK 分发，不是下载的）：",
                     style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding),
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -228,6 +246,7 @@ fun AboutScreen(onBack: () -> Unit) {
                         "· BusyBox 1.38.0 —— GPL-2.0-only（来自 Debian busybox-static）",
                     style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding),
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -237,6 +256,7 @@ fun AboutScreen(onBack: () -> Unit) {
                         "issue 或邮件索取即可。",
                     style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = SettingsStyle.CardPadding),
                 )
                 Spacer(Modifier.height(10.dp))
                 AboutLink(
@@ -285,6 +305,8 @@ private fun AboutLink(title: String, subtitle: String, url: String) {
         title = title,
         subtitle = subtitle,
         onClick = { openAboutUrl(context, url) },
+        shape = MaterialTheme.shapes.large,
+        contentPadding = PaddingValues(horizontal = SettingsStyle.CardPadding),
         control = { RowChevron() },
     )
 }

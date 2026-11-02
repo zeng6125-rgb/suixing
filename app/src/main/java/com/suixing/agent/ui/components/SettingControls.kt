@@ -91,8 +91,8 @@ import kotlin.math.roundToInt
  *  - 标题 `bodyLarge`、副标题 `bodySmall`、控件前 12dp。
  *  - **横向留白默认不加**（[contentPadding] 默认 0）：卡内的行由 SuixingCard 的 16dp 给，
  *    页面级的行由调用方用 [modifier] 传 16dp。默认值给 16 会让卡里的行变成 32dp 缩进。
- *    唯一的例外是 [SettingsGroup]：那里的行要**铺满卡片**（涟漪才碰得到卡片边缘），所以它
- *    自己把 16dp 从容器挪进 [contentPadding]、并把 [shape] 换成与卡片同形。
+ *    卡片里的可点行要**铺满卡片**（涟漪才碰得到卡片边缘）：由容器（如 [SettingsGroup]、关于页
+ *    的链接卡）把 16dp 从自己的内边距挪进 [contentPadding]，并把 [shape] 换成与卡片同形。
  */
 @Composable
 fun SettingRow(

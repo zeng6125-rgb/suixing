@@ -34,7 +34,12 @@ import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.service.AgentForegroundService
+import com.suixing.agent.tools.ToolResult
 import com.suixing.agent.ui.settings.withUpstreamDefaults
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -211,6 +216,8 @@ data class ChatUiState(
      */
     val compressingSince: Long = 0L,
     val status: String = "",
+    /** The persistent objective shared by every conversation, shown above the composer. */
+    val goal: String = "",
     /** The tool the run is inside right now; the tool card names it live. */
     val runningTool: String? = null,
     /**
@@ -452,6 +459,10 @@ class ChatViewModel : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _state = MutableStateFlow(ChatUiState())
+
+    /** One-shot command feedback; the screen owns how it is shown. */
+    private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val notices = _notices.asSharedFlow()
 
     /** The message list the revision below was stamped for; touched only by the collector. */
     private val revisionStamp = MessageRevisionStamp()
@@ -928,7 +939,23 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+    /** Clears the app-wide goal from the chip above the composer. */
+    fun clearGoal() {
+        viewModelScope.launch(Dispatchers.IO) {
+            Core.goals.clear()
+            _state.update { it.copy(goal = "") }
+            notice("目标已清除")
+        }
+    }
+
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val goal = Core.goals.read().text
+            _state.update { if (it.goal == goal) it else it.copy(goal = goal) }
+            Core.goals.changes.collect { written ->
+                if (written != null) _state.update { it.copy(goal = written) }
+            }
+        }
         // The engine keys its runs by conversation, so this screen subscribes to the
         // state of whichever conversation is on display: a run elsewhere neither
         // locks this screen nor narrates itself into its status line.
@@ -1715,6 +1742,9 @@ class ChatViewModel : ViewModel() {
         if (body.isEmpty() && imagesBase64.isEmpty()) return false
         val chatId = _state.value.conversationId
         if (chatId.isEmpty()) return false
+        parseSlashCommand(body)?.let { command ->
+            return runSlashCommand(chatId, command, imagesBase64)
+        }
         // No global lock: the engine refuses a second run in the same conversation
         // (two runs would interleave into one transcript), and every other
         // conversation is free to start its own run right now.
@@ -1793,6 +1823,88 @@ class ChatViewModel : ViewModel() {
         clearDraft(chatId)
         return true
     }
+
+    /**
+     * Composer slash commands. `/goal` is reserved for the persistent objective; every other
+     * name must be a real tool, and a tool call goes through the same approval gate the model
+     * uses. The command's output is a notice, not a transcript turn: it was invoked by the
+     * user, not by the model, so pretending it was a tool call would corrupt the history.
+     */
+    private fun runSlashCommand(
+        chatId: String,
+        command: SlashCommand,
+        images: List<String>,
+    ): Boolean {
+        if (images.isNotEmpty()) {
+            notice("斜杠指令不能带附件")
+            return false
+        }
+        if (command.name == "goal") {
+            clearDraft(chatId)
+            viewModelScope.launch {
+                val text = command.argument.trim()
+                if (text.isEmpty()) {
+                    val current = withContext(Dispatchers.IO) { Core.goals.read().text }
+                    _state.update { it.copy(goal = current) }
+                    notice(if (current.isBlank()) "当前没有设置目标" else "当前目标：$current")
+                    return@launch
+                }
+                val args = buildJsonObject {
+                    put("text", if (text.equals("clear", ignoreCase = true)) "" else text)
+                }
+                val result = withContext(Dispatchers.IO) {
+                    runCatching { Core.tools.find("goal")?.run(args) }
+                        .getOrElse { ToolResult.failure("执行失败：${it.message ?: it.javaClass.simpleName}") }
+                        ?: ToolResult.failure("目标工具未注册")
+                }
+                val current = withContext(Dispatchers.IO) { Core.goals.read().text }
+                _state.update { it.copy(goal = current) }
+                val summary = slashResult("goal", result)
+                notice(if (result.ok) "$summary（下一轮生效）" else summary)
+            }
+            return true
+        }
+        val tool = Core.tools.find(command.name)
+        if (tool == null) {
+            notice("未知指令或工具：/${command.name}")
+            return false
+        }
+        if (Core.engine.isRunning(chatId)) {
+            notice("这一轮任务还在跑，结束或停止后再调用 /${command.name}")
+            return false
+        }
+        val args = slashArguments(tool.spec, command.argument)
+        if (args == null) {
+            notice("参数格式不对：需要 JSON 对象，或用一句文本")
+            return false
+        }
+        clearDraft(chatId)
+        viewModelScope.launch {
+            val mode = settingsSnapshot.value?.approvalMode ?: AppSettings().approvalMode
+            if (!gate.request(chatId, tool.spec.name, args.toString(), mode, "对话框斜杠指令")) {
+                notice("已取消 /${command.name}")
+                return@launch
+            }
+            val result = withContext(Dispatchers.IO) {
+                runCatching { tool.run(args) }
+                    .getOrElse { ToolResult.failure("执行失败：${it.message ?: it.javaClass.simpleName}") }
+            }
+            if (tool.spec.name == "goal_read") {
+                val current = withContext(Dispatchers.IO) { Core.goals.read().text }
+                _state.update { it.copy(goal = current) }
+            }
+            notice(slashResult(tool.spec.name, result))
+        }
+        return true
+    }
+
+    private fun notice(text: String) {
+        val oneLine = text.replace('\n', ' ').trim().take(220)
+        if (oneLine.isNotEmpty()) _notices.tryEmit(oneLine)
+    }
+
+    private fun slashResult(name: String, result: ToolResult): String =
+        "${if (result.ok) "✓" else "✗"} /$name · ${result.output.ifBlank { "完成" }}"
 
     /** Answers the last question again, keeping the old reply as a branch. */
     fun regenerate() {

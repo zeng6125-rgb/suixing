@@ -312,7 +312,7 @@ internal data class Branch(
  * stray empty bubbles between tool chips.
  */
 internal fun StoredMessage.isVisible(): Boolean = when (role) {
-    Roles.USER -> text.isNotBlank() || allImages.isNotEmpty()
+    Roles.USER -> text.isNotBlank() || imageCount > 0
     Roles.ASSISTANT -> text.isNotBlank() || !reasoning.isNullOrBlank()
     Roles.TOOL -> true
     // 失败回执（VM 在 Failed 时写的一条 system 消息）：它存在的意义就是被看见，所以有字就画。
@@ -962,7 +962,7 @@ internal fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit)
                 }
                 Spacer(Modifier.height(5.dp))
             }
-            message.allImages.forEach { ImageBlock(it) }
+            if (message.imageCount > 0) message.allImages.forEach { ImageBlock(it) }
             if (message.text.isNotBlank()) {
                 // The user's own words are plain text, never parsed as Markdown — someone typing
                 // "1. do this" means the list item, not a heading. The style is still the

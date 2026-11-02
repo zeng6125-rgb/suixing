@@ -8,6 +8,7 @@ import com.suixing.agent.capability.Shell
 import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.ConversationReads
 import com.suixing.agent.data.ConversationViewports
+import com.suixing.agent.data.GoalStore
 import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.McpStore
 import com.suixing.agent.data.MemoryStore
@@ -88,6 +89,10 @@ object Core {
 
     /** The task board: `filesDir/todos.json`, shared with the UI. */
     lateinit var todos: TodoStore
+        private set
+
+    /** The persistent objective: `filesDir/goal.json`, shared with the UI and the prompt. */
+    lateinit var goals: GoalStore
         private set
 
     /** Shared latest-snapshot writer; a task save must outlive the screen that submitted it. */
@@ -174,6 +179,7 @@ object Core {
             speaker = Speaker(appContext)
             jobs = JobStore(File(appContext.filesDir, "jobs"), appScope)
             todos = TodoStore(File(appContext.filesDir, "todos.json"))
+            goals = GoalStore(File(appContext.filesDir, "goal.json"))
             schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))
             plugins = PluginStore(File(appContext.filesDir, "plugins"))
             usage = UsageStore(appContext)
@@ -183,11 +189,16 @@ object Core {
             }
             tools = ToolRegistry(
                 appContext, capabilities, skills, speaker, settings, memory, profile, jobs, todos,
-                schedules,
+                goals, schedules,
             )
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)
-            engine = AgentEngine(llm = llm, scope = appScope, onCompleted = conversationReads::completed)
+            engine = AgentEngine(
+                llm = llm,
+                scope = appScope,
+                onCompleted = conversationReads::completed,
+                goals = goals,
+            )
             appScope.launch(Dispatchers.IO) {
                 // Construct TLS in the background before the usual first send; no network request.
                 startup.maintenance { runCatching { llm.prepare() } }

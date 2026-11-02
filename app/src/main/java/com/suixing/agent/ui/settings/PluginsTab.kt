@@ -193,14 +193,17 @@ fun PluginsTab(onNotify: (String) -> Unit) {
     }
 
     detail?.let { spec ->
+        // One lookup for both fields: they describe the same loaded entry, and scanning the
+        // list twice on every recomposition also makes the two reads look independent.
+        val current = entries.firstOrNull { it.id == spec.id }
         PluginDetailDialog(
             spec = spec,
             // Read from the list that is already loaded rather than fetching again: the switch in the
             // row and the button in the dialog are the same state, and two reads could disagree.
-            enabled = entries.firstOrNull { it.id == spec.id }?.state?.enabled == true,
+            enabled = current?.state?.enabled == true,
             // The store's own directory for this plugin (filesDir/plugins/<id>), read from the same
             // loaded entry — not re-derived from a string, so what is shown is what is on disk.
-            dir = entries.firstOrNull { it.id == spec.id }?.dir?.absolutePath.orEmpty(),
+            dir = current?.dir?.absolutePath.orEmpty(),
             onDismiss = { detail = null },
             onFillEnv = { envFor = spec },
             onUninstall = {
