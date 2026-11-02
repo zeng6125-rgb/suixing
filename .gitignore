@@ -62,3 +62,7 @@ docs/onboarding.md
 
 # 每个 release 单独生成并作为资产上传，不入库
 SHA256SUMS
+
+# 内部工作笔记与技术笔记：只留本地，不进公开仓库
+docs/ui-motion-issues-*.md
+docs/benchmarks.md
