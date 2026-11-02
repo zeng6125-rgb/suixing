@@ -849,8 +849,15 @@ fun ChatScreen(
         transcriptPosition.reading = { readingPositionNow.value() }
     }
     LaunchedEffect(transcriptPosition) {
+        // **位掩码而不是 listOf**（性能静态审查②）：原来每次快照读取都新建一个 List，
+        // 而这五个状态在拖动/滚动时高频变化，分配次数与发射次数同阶；`collect` 又完全不看
+        // 内容，只用"变化"当触发器 ⇒ 打包成一个 Int 即可，零分配、语义不变。
         snapshotFlow {
-            listOf(scroll.stickToBottom, scroll.restoring, pressed, pressGuardOn, listState.isScrollInProgress)
+            (if (scroll.stickToBottom) 1 else 0) or
+                (if (scroll.restoring) 2 else 0) or
+                (if (pressed) 4 else 0) or
+                (if (pressGuardOn) 8 else 0) or
+                (if (listState.isScrollInProgress) 16 else 0)
         }.collect { transcriptPosition.interactionChanged() }
     }
 
@@ -929,12 +936,18 @@ fun ChatScreen(
     // 正常按合并和放置解除 restoring；异常准备等待有上限，异步失败由 onComplete 解锁。
     // 贴底时持续记住当前占位；离开底部（开始读历史）就冻住它 ——
     // 输入框高度在流式期间会变（状态行出现/消失），不冻住就会把整列内容推几 dp。
-    LaunchedEffect(stackFootprint, scroll.stickToBottom) {
+    // **key 里不要放 `stickToBottom`**（性能静态审查①）：那是 SnapshotStateMap 里的值，
+    // 放在 key 位等于组合期订阅 —— 它每变一次就整屏重组，而拖动过程中它会被反复写。
+    // 改成协程内订阅：语义等价（footprint 变或 stick 变都重算），但组合期零订阅。
+    LaunchedEffect(stackFootprint) {
         // 贴底时持续跟随；**另外**只要还没种过（0.dp）就种一次 —— 恢复位置进会话时
         // `stickToBottom` 一开始就是 false，条件永远不成立 ⇒ 整个阅读期间底边距是 0。
         // 贴底时持续跟随；没种过（null）也种一次 —— 恢复位置进会话时 `stickToBottom` 一开始就是
         // false，否则整个阅读期间都取不到值。
-        if (scroll.stickToBottom || heldFootprint == null) heldFootprint = stackFootprint
+        // 读放在协程里（snapshotFlow），组合期不再订阅这个高频变化的值。
+        snapshotFlow { scroll.stickToBottom }.collect { stick ->
+            if (stick || heldFootprint == null) heldFootprint = stackFootprint
+        }
     }
     // **#14 的根因（真机日志 2026-10-21 00:25 坐实，不是推断）**：
     // 长按建立选区后，框架会为「把选中的内容滚进视口」发起一次 bring-into-view，走的就是
