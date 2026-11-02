@@ -61,19 +61,10 @@ class TodoStore(private val file: File) {
             item.copy(id = item.id.ifBlank { "t${index + 1}" })
         }
         file.parentFile?.mkdirs()
-        // Temp file then rename, as in ChatRepository and ScheduleStore: a kill mid-write
-        // would otherwise leave a truncated board, and a truncated board reads back as
-        // "no tasks at all" rather than as a board that lost its last edit.
         val text = json.encodeToString(stored)
-        val temp = File(file.parentFile, "${file.name}.tmp")
-        temp.writeText(text)
-        if (!temp.renameTo(file)) {
-            try {
-                file.writeText(text)
-            } finally {
-                temp.delete()
-            }
-        }
+        // Keep the last valid board if replacement fails. The caller must see the failure so
+        // its latest-write queue can avoid marking this snapshot as persisted.
+        com.suixing.agent.core.AtomicFiles.writeText(file, text)
         stored
     }
 }

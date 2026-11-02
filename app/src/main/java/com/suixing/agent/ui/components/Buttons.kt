@@ -2,6 +2,7 @@ package com.suixing.agent.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -111,7 +112,8 @@ val INLINE_ICON_RIPPLE = 16.dp
  *
  * 形态：26dp 热区盒 + 15dp 字形，字形贴盒左（`CenterStart`，整排图标的对齐约定），
  * 点击语义与热区挂在外层 **26dp 盒**（旧代码只让 15dp 字形可点）；
- * 字形仍为 15dp，保持 CenterStart 对齐和 16dp 无界圆形反馈。
+ * 字形仍为 15dp，保持 CenterStart 对齐。无界涟漪挂在字形节点上，按字形中心起波，
+ * 而不是按更宽的热区盒中心起波。
  * 这种紧凑布局并不是 48dp 无障碍热区：相邻操作会重叠，应通过
  * 独立的大尺寸操作菜单处理（issue #60 后续 PR），不能冒充全部解决。
  *
@@ -131,12 +133,15 @@ fun InlineIconAction(
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
     boxWidth: Dp = INLINE_ICON_BOX,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Box(
         modifier = modifier
             .size(boxWidth)
             .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(bounded = false, radius = INLINE_ICON_RIPPLE),
+                interactionSource = interactionSource,
+                // The wider hit target stays 26dp; the indication below is attached to the
+                // left-aligned 15dp glyph so an unbounded ripple starts at the icon center.
+                indication = null,
                 enabled = enabled,
                 role = Role.Button,
                 onClickLabel = label,
@@ -148,7 +153,12 @@ fun InlineIconAction(
             imageVector = icon,
             contentDescription = null, // The parent supplies the single button semantics.
             tint = if (enabled) tint else tint.copy(alpha = 0.35f),
-            modifier = Modifier.size(INLINE_ICON_GLYPH),
+            modifier = Modifier
+                .size(INLINE_ICON_GLYPH)
+                .indication(
+                    interactionSource,
+                    ripple(bounded = false, radius = INLINE_ICON_RIPPLE),
+                ),
         )
     }
 }

@@ -22,15 +22,57 @@ internal class LatestWriteQueue<T>(
 
     fun revision(): Long = synchronized(lock) { latestRevision }
 
-    /** 返回 true 表示这次真的写了；false 表示有更新的内容在后面，这次被合并掉。 */
-    suspend fun enqueue(value: T): Boolean {
-        val token = synchronized(lock) { ++latestRevision }
+    /** Reserve order at the caller's event time, before dispatching asynchronous work. */
+    fun submit(value: T): LatestWriteRequest<T> = synchronized(lock) {
+        LatestWriteRequest(revision = ++latestRevision, value = value)
+    }
+
+    /** Whether this request still represents the newest submitted state. */
+    fun isCurrent(request: LatestWriteRequest<T>): Boolean = synchronized(lock) {
+        request.revision == latestRevision
+    }
+
+    /**
+     * Commit a previously submitted request. Returns false when a newer request superseded it
+     * before it reached the writer. A failed write leaves the request retryable.
+     */
+    suspend fun commit(request: LatestWriteRequest<T>): Boolean {
         return mutex.withLock {
-            val isLatest = synchronized(lock) { token == latestRevision && token > writtenRevision }
+            val isLatest = synchronized(lock) {
+                request.revision == latestRevision && request.revision > writtenRevision
+            }
             if (!isLatest) return@withLock false
-            write(value)
-            synchronized(lock) { if (token > writtenRevision) writtenRevision = token }
+            write(request.value)
+            synchronized(lock) {
+                if (request.revision > writtenRevision) writtenRevision = request.revision
+            }
             true
         }
     }
+
+    /** Run recovery under the same writer lock, but only while its failed request is current. */
+    suspend fun recoverIfCurrent(
+        request: LatestWriteRequest<T>,
+        recover: suspend () -> Unit,
+    ): Boolean = mutex.withLock {
+        val canRecover = synchronized(lock) {
+            request.revision == latestRevision && request.revision > writtenRevision
+        }
+        if (!canRecover) return@withLock false
+        recover()
+        true
+    }
+
+    /** Convenience for callers whose submission and commit are already in the same coroutine. */
+    suspend fun enqueue(value: T): Boolean = commit(submit(value))
+
+    /** Wait for a currently active commit to finish before reading the backing store. */
+    suspend fun awaitIdle() {
+        mutex.withLock { }
+    }
 }
+
+internal data class LatestWriteRequest<T>(
+    val revision: Long,
+    val value: T,
+)

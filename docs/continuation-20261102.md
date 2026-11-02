@@ -126,3 +126,124 @@
 - HEAD仍9a3a435（已push）；手机0.8.629/vc650，包含§128曲线，不包含§130展开提速。
 - 原有未提交保留：README、app/build.gradle.kts（0.8.629）、ChatBlocks.kt、RevealDurationTest.kt（§128曲线+§130提速）、docs/continuation-20261102.md；既有.icon_ref/、旧docs和tasks未跟踪资料保留。
 - 最新已验证待出包产品源码是§130：短展开150–190ms、长展开封顶680ms、收起350ms；Release编译+198类/1223项全绿。下一次出包须0.8.630/vc651，并须用户明确授权安装。
+
+## 2026-11-02 新接续：以HANDOFF §144为准
+
+其它agent已提交并发布至9aca6f2 / 0.8.640/vc661；此前本文§131收尾状态是历史记录。
+用户已确认侧滑修好，本轮仅修底部操作图标涟漪偏心及加载更早的位置跳变。
+
+- Buttons.kt：26dp点击盒共享InteractionSource，涟漪移到左对齐的15dp图标节点，
+  消除盒中心与字形中心5.5dp差，保留尺寸/间距/半径。
+- ChatScreen.kt + EarlierPagePosition.kt：排除加载按钮，按存活消息key解析新下标，
+  使用-item.offset；等更大窗口与磁盘新head就绪，在新测量前仅请求一次。
+  不再等待总项数增长/按数量差定位，也不跨两帧重复拉回。提交时读取当前视口，
+  不把读盘期间手动滑动拉回点击时位置。新页先等当前按下/拖动/惯性结束才扩大显示，
+  等待期间切会话则退出；不以定位请求打断在途滑动。加载时禁短尾部自动恢复追底。
+- EarlierPagePositionTest新增8例。最终Release编译+全量通过（55s）：221类/1293项/
+  0失败/0错误/0跳过；日志verify-out/earlier-page-idle-release.log，git diff --check通过。
+- 没有真机UI验证、Debug、出包安装、提交push；手机版本保持0.8.640。
+
+## 0.8.641 Release已安装（2026-11-02，HANDOFF §145）
+
+- 用户授权，版本0.8.641/vc662，§144两处修复首次进包。Release构建4m1s成功，R8/资源收缩保留。
+- APK5,699,385B，aapt/metadata、16KB zipalign检查通过。
+- SHA256 0CD6D8117772BAFB17F80334E229FB1061710093005A3A2E7A7CDF9765E1224C，手机base.apk哈希一致。
+- mdns自动发现38539端口，覆盖安装成功，设备确认0.8.641/662。
+- 未自动启动或操作手机UI；待用户体验涟漪中心与连续/最后一页历史加载定位。
+- 未Debug、重复单测、提交或push。下包0.8.642/vc663。
+
+## 导航继续打磨与独立压缩文案（2026-11-02，HANDOFF§146）
+
+用户确认0.8.641“点击加载历史不跳了”。本轮保留此结果，继续修导航：
+长按期间pin窗口避免pendingTurn重居中后二次误跳；释放同步使用最终pull；手势finally清理。
+导航按key在等待/预处理后重新查index，目标消失则退出；目标正文提前准备。
+主动导航继续刻度补间，会话恢复仍直接取最终高亮、不下扫。近距滚动按距离180–440ms，
+零距离略过；远距保留库内animateScrollToItem，不声称已重写远距动效。
+独立无run压缩卡元信息只留压缩前约xx tokens，查看原文按钮不变。
+窗口规则没有改：超过12个已加载轮次，中段第7根；两端钳位，少于12不补空位。
+新增NavigationTargetTest5例，最终Release编译+全量单测1m18s通过：222类/1298项/零失败错误跳过，
+日志verify-out/navigation-refine-full-release.log。未做UI自动化或实机验收，本轮未出包安装/升版/提交push。
+
+## 0.8.642已安装（2026-11-02，HANDOFF§147）
+
+用户授权出Release并安装，导航定位/动效与无run压缩文案改动首次进包。
+版本0.8.642/vc663，Release构建2m31s成功，R8/资源收缩开启。
+APK5,702,453B，aapt/metadata/16KB zipalign检查通过；SHA256
+B8CA95ACBC49F44121AB7F9B2441E0B2810DD7820303A5DD7BD1E0985DFAC46B，设备base.apk完整哈希一致。
+安装到192.168.0.102:38539成功，设备确认0.8.642/663。未自动启动或操作UI，待用户验收。
+源码222类/1298项全绿基线保持，未重复单测、Debug、提交push或发布。下包0.8.643/vc664。
+
+## 2026-11-02 新一轮导航/收展/抽屉与issue收尾
+
+以HANDOFF§148及docs/ui-motion-issues-20261102.md为准。导航改为显式锚点交接与测量滚动落位，
+晚测重新开始落位、底部sentinel按真实误差处理；仍有超远16阶段/名义3s预算限制，未实机验收。
+总结展开/收起改dp五档连续时长与剩余行程反向；抽屉绘制层平移、起步后并行准备会话、共享300ms/12dp入场。
+token文案左加8dp；补#60窄屏/大字Composer与可访问语义；#66/#68抓出未真正完成的任务队列/失败回滚/
+排序误报成功/失败恢复arm竞态并补修。预览有硬限与取消；原生PTY只修EINTR超时边界。
+GitHub已评论关闭#66/#67/#68/#69/#70/#71；#60/#61仍open，评论明确当前源码未push且不是手机版本已含。
+最终Release编译与224类/1311项全绿53s；四ABI原生Release编译23s通过。无APK/安装/Debug/提交push。
+手机0.8.642，下包0.8.643/vc664；新文件后续提交需纳入，详见明细文档。
+
+## 0.8.643已安装（2026-11-02，HANDOFF§149）
+
+按用户授权出Release并安装，0.8.643/vc664首次包含§148导航测量落位、五档总结收展、抽屉并行切会话和issue补漏。
+构建2m3s成功；APK5,726,417B，aapt/metadata/16KB zipalign通过，SHA256
+6A193C7B07CD70510C6572442C1FBA6D2CD11CAF6F113157C33D7AB1AB39513C与设备base.apk一致。
+38539端口覆盖安装Success，设备确认0.8.643/664；没有自动启动/操作UI或采手机数据。
+未重复1311项单测、Debug、提交push或发布。已知限制仍见明细文档，下包0.8.644/vc665。
+
+## 0.8.643反馈后：导航两段移动与总结反向打磨（HANDOFF§150）
+
+用户澄清停止/流式/键盘状态都会，最终正确但中途分两次；本轮只Release编译/测试。
+旧导航晚测取消tween再开阶段，现改持久逐帧控制器保留速度连续落位；无结束snap，
+零屏外估算按index方向推进，底部误差/系统动画倍率保留。旧16阶段/3s描述为历史，
+新32ms积分/12视口每秒速度上限/15s墙钟取消，极端距离或物理钳位仍可能中止。
+另确认Foundation placement-only更新layoutInfo可早于文字坐标；导航起止不再立即capture，
+改为最终child.place后建立阅读点，迟到interaction也不能抢先。真实owner回归3例RED2→GREEN0失败。
+总结保留普通五档时长/曲线，修复反向重复等测量、背向动量回弹、alpha突变，
+spring按0.25物理px阈值并调整刚度；真实Compose 5000px/双向/60和120Hz尾帧用例通过。
+最终Release编译+225类/1324项全绿，1m15s，verify-out/nav-fold-refine-release-final.log。
+首轮新增帧限额断言浮点误差已补0.001px容差并全量重跑，fake零估算早visible也已修正。
+完整说明见docs/ui-motion-issues-20261102.md末节。无UI/实机验收、无Debug/APK/安装/升版/提交push；
+手机0.8.643/vc664，下包0.8.644/vc665，新代码/测试/文档后续提交时别漏。
+
+## 0.8.644已安装（2026-11-02，HANDOFF§151）
+
+用户授权出Release安装，0.8.644/vc665首次含§150连续导航、最终放置锚点交接、总结反向与像素尾帧修正。
+构建2m43s成功，55tasks（23executed/32up-to-date），R8/资源收缩保留，未重复1324项全绿单测。
+APK5,726,425B；aapt/metadata/16KB zipalign通过，SHA256
+C51E1F52A4324CE12681464F6874404AACD02F97C64D293B4EFBEA3693E53B65，本地=手机base.apk。
+自动发现38539端口，覆盖安装Success，设备确认0.8.644/665，lastUpdateTime17:39:42。
+未启动App/操作屏幕/采设备数据，未Debug/提交push/发布；视觉效果待用户验收。下包0.8.645/vc666。
+
+## 向上定位末段急停（HANDOFF§152）
+
+用户0.8.644“暂时不会”二次移动，新增上行快到目标时突然停住。真实Foundation工厂+不等高行/-280offset
+新增3例RED2失败，向下对照过；上行旧尾段200→164→75px→0，物理顶端也会消费不足急停。
+NavigationMotion把携带速度限定到实际剩余误差的临界阻尼包络，积分后继续按剩余误差限幅；
+首项向上按可达-firstVisibleItemScrollOffset提前刹车，残余负offset不可达时返回ScrollClamped。
+原统一参数/放置交接/总结不变，无新动画阶段或越过后拉回。
+最终Release编译+226类/1327项全绿，1m5s，verify-out/navigation-braking-final-release.log；
+新3例在60/120Hz覆盖上下/顶端，末4帧≤3px、最后≤1px，旧交接3例也过。
+未出包安装/Debug/升版/提交push/采手机数据；手机0.8.644/vc665，下包0.8.645/vc666。
+详细依据与限制见docs/ui-motion-issues-20261102.md末节；新NavigationBrakingTest提交勿漏。
+
+## 0.8.645已安装（2026-11-02，HANDOFF§153）
+
+用户授权出Release安装，0.8.645/vc666首次含向上末段减速/物理顶端提前刹车。
+构建1m51s成功，55tasks（23executed/32up-to-date），R8/资源收缩开启；未重复226类/1327项全绿单测。
+APK5,726,313B；aapt/metadata/16KB zipalign通过，SHA256
+9E6A9260CBA3BC2C2A6247DB33B27C8ED70B7A0F6E6DDE7A881459BAF342F168，本地=设备base.apk。
+自动发现38539端口，覆盖安装Success，设备确认0.8.645/666，lastUpdateTime18:06:32。
+未启动/操作手机或采设备数据，未Debug/提交push/发布；实际手感待用户验收，下包0.8.646/vc667。
+
+## 大跨度导航提速（HANDOFF§154）
+
+用户0.8.645确认末段可以，要求大跨度稍快。剩余≤2屏保留12视口/s，2..10屏smoothstep升18，
+≥10屏18；步后速度cap同步，原omega14/末段误差包络/物理首端/放置交接不变，无新动画阶段。
+新TravelDurationTest5例RED仅远距预算失败→最终全绿；首轮基线2屏60Hz0.783预估值已按实测0.800更正后重跑RED。
+控制器60Hz模拟20屏2.267→1.850s、50屏4.767→3.517s；短0.6/2屏不变。120Hz远距约短18%/26%。
+最后2屏仍原cap、双向准确不越界/末帧≤1px，旧急停3例/放置交接3例都过。
+最终Release编译+227类/1332项全绿，1m52s，verify-out/navigation-travel-final-release.log。
+无Debug/APK/安装/升版/手机采集/提交push，手机0.8.645/vc666，下包0.8.646/vc667。
+逻辑帧模拟不等于实机耗时/FPS，新NavigationTravelDurationTest提交勿漏，详细对照见motion文档末节。

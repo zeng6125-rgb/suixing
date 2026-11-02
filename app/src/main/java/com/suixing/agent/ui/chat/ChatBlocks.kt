@@ -2,10 +2,13 @@
 package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ScrollState
@@ -94,8 +97,10 @@ import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Tps
 import com.suixing.agent.ui.chat.markdown.MarkdownText
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.roundToInt
 import androidx.compose.ui.res.painterResource
+import kotlinx.coroutines.flow.collectLatest
 
 /**
  * 折叠块的展开箭头（过程卡 / 思考块 / 单个工具共用）。
@@ -150,48 +155,196 @@ internal fun BranchArrow(
 internal val PROCESS_TITLE_MAX = 160.dp
 
 /**
- * 收起动画的基准时长，也保留给 TranscriptPosition 的手势保护兼容使用。
+ * TranscriptPosition 的手势保护基准；动画本身按内容高度选时长。
  *
  * 180 → 220（用户：「慢一点点，不要太生硬即可」）：180ms 对整块卡片来说收得太急，末尾像"啪"地
- * 停住；220ms 仍明显短于长按守护窗 [LONG_PRESS_SETTLE_MS]（400ms）。展开时长单独按 dp 高度计算，
- * 但不能改这个值，因为 [TranscriptPosition] 用它设置手势保护窗口。
+ * 停住；不能改这个值，因为 [TranscriptPosition] 用它设置手势保护窗口。RevealHeight 以它为收起
+ * 时长曲线的缩放基准，但每次动画仍按 dp 高度选时长，短收起可以短于 220ms。
  */
 internal const val PROCESS_EXPAND_MS = 220
 
+private val REVEAL_DURATION_STOPS = listOf(
+    0f to 130,
+    200f to 180,
+    480f to 360,
+    900f to 550,
+    1200f to 680,
+)
+private val COLLAPSE_DURATION_STOPS = listOf(
+    0f to 110,
+    200f to 150,
+    480f to 300,
+    900f to 470,
+    1200f to 580,
+)
+private const val COLLAPSE_BASE_SCALE_MS = 220f
+private const val MIN_REVEAL_TRANSITION_MS = 80
+
 /**
- * 展开动画时长按 dp 高度分段线性变化，显示密度不会改变同一逻辑高度对应的时长。
+ * Full-span duration is based on logical content height, so equal dp heights animate equally
+ * across display densities. The five stops keep the response continuous from tiny summaries to
+ * very tall ones, with a plateau for content beyond 1200dp.
  */
 internal fun revealDurationMsForHeight(heightDp: Float): Int {
-    val height = heightDp.coerceAtLeast(0f)
-    return when {
-        // 短块区间从 160dp 拉到 200dp：用户反馈"短的大总结条还是慢了一点点"，
-        // 而 240–320dp 正落在原来爬坡最陡的那一段。
-        height <= 200f -> interpolateDurationMs(150, 190, height / 200f)
-        // 中块终点 420 → 360ms：320dp 处 305 → 275ms，480dp 处 420 → 360ms。
-        height <= 480f -> interpolateDurationMs(190, 360, (height - 200f) / 280f)
-        height <= 1200f -> interpolateDurationMs(360, 680, (height - 480f) / 720f)
-        else -> 680
+    return durationMsForHeight(REVEAL_DURATION_STOPS, heightDp)
+}
+
+private fun durationMsForHeight(stops: List<Pair<Float, Int>>, heightDp: Float): Int {
+    if (heightDp == Float.POSITIVE_INFINITY) return stops.last().second
+    val height = if (heightDp.isNaN()) 0f else heightDp.coerceAtLeast(0f)
+    val first = stops.first()
+    if (height <= first.first) return first.second
+    for (index in 1 until stops.size) {
+        val (endHeight, endDuration) = stops[index]
+        if (height <= endHeight) {
+            val (startHeight, startDuration) = stops[index - 1]
+            val fraction = (height - startHeight) / (endHeight - startHeight)
+            return interpolateDurationMs(startDuration, endDuration, fraction)
+        }
     }
+    return stops.last().second
 }
 
 private fun interpolateDurationMs(startMs: Int, endMs: Int, fraction: Float): Int =
     startMs + ((endMs - startMs) * fraction.coerceIn(0f, 1f)).roundToInt()
 
+/** Convert the measured pixel height using the same density that will choose motion timing. */
+internal fun revealHeightDpForDuration(heightPx: Int, density: Float): Float =
+    if (density > 0f) heightPx / density else 0f
+
 /**
- * 收起恢复原有的一半斜率与 130ms 额外上限（收起 = 让开视野，拖沓碍事）。
- * 收起保持原有时长，长内容最多 350ms；它与新的展开时长独立计算。
+ * Scale the dp-based collapse schedule with the established 220ms compatibility baseline. The
+ * shortest close is intentionally below that guard value, while taller cards get more travel time.
  */
-internal fun scaledCollapseDurationMs(baseMs: Int, heightPx: Int): Int {
-    if (heightPx <= 0) return baseMs
-    val extra = (heightPx / 400f) * 55f
-    return baseMs + extra.coerceIn(0f, 130f).toInt()
+internal fun scaledCollapseDurationMs(baseMs: Int, heightDp: Float): Int {
+    if (baseMs <= 0) return 0
+    val scheduleScale = baseMs / COLLAPSE_BASE_SCALE_MS
+    return (durationMsForHeight(COLLAPSE_DURATION_STOPS, heightDp) * scheduleScale).roundToInt()
 }
 
 /**
- * 短块展开与所有收起继续用这条曲线；曲线在首尾慢、中段快，长块展开则改用更均匀的曲线。
- *
- * 之前只根据首段斜率判断跳动感，忽略了整段进度分布。对大块，这条曲线的展开进度前置明显，
- * 所以不能只凭起点平缓就认为它会“慢慢长出来”。
+ * A direction change continues from the current fraction. Scale the full-span duration to the
+ * remaining distance, with a small floor so a near-complete reversal does not flick shut.
+ */
+internal fun revealTransitionDurationMs(
+    fullDurationMs: Int,
+    currentFraction: Float,
+    targetFraction: Float,
+): Int {
+    if (fullDurationMs <= 0) return 0
+    val current = if (currentFraction.isNaN()) 0f else currentFraction.coerceIn(0f, 1f)
+    val target = if (targetFraction.isNaN()) current else targetFraction.coerceIn(0f, 1f)
+    val remaining = kotlin.math.abs(target - current)
+    if (remaining == 0f) return 0
+    return (fullDurationMs * remaining).roundToInt()
+        .coerceAtLeast(MIN_REVEAL_TRANSITION_MS)
+        .coerceAtMost(fullDurationMs)
+}
+
+/** Only an opening from a fully closed reveal needs to invalidate its cached measurement. */
+internal fun revealNeedsFreshMeasurement(
+    visible: Boolean,
+    wasExpanding: Boolean,
+    currentFraction: Float,
+): Boolean = visible && !wasExpanding && currentFraction <= 0f
+
+private const val REVEAL_ALPHA_RAMP = 2.5f
+
+/** The ramp rises with fraction, while the carried floor prevents a reverse from fading backward. */
+internal fun revealAlphaForFraction(
+    fraction: Float,
+    alphaFloor: Float,
+): Float {
+    val safeFraction = if (fraction.isNaN()) 0f else fraction.coerceIn(0f, 1f)
+    val safeFloor = if (alphaFloor.isNaN()) 0f else alphaFloor.coerceIn(0f, 1f)
+    val expansionAlpha = (safeFraction * REVEAL_ALPHA_RAMP).coerceIn(0f, 1f)
+    return maxOf(safeFloor, expansionAlpha)
+}
+
+/** The carried opacity is the actual alpha at the hand-off, except a fresh open starts its fade at 0. */
+internal fun revealAlphaFloorAfterDirectionChange(
+    wasExpanding: Boolean,
+    willExpand: Boolean,
+    currentFraction: Float,
+    alphaFloor: Float,
+): Float {
+    val currentAlpha = revealAlphaForFraction(currentFraction, alphaFloor)
+    return if (willExpand && !wasExpanding && currentFraction <= 0f) 0f else currentAlpha
+}
+
+private const val REVEAL_REVERSAL_VELOCITY_EPSILON = 0.001f
+private const val CRITICAL_SPRING_ONE_PERCENT_SETTLE_FACTOR = 6.6f
+
+/** Keep spring completion below a quarter physical pixel, with a safe threshold for empty content. */
+internal fun revealFractionVisibilityThreshold(heightPx: Int): Float =
+    if (heightPx > 0) minOf(0.01f, 0.25f / heightPx) else 0.01f
+
+/**
+ * Use a critically damped spring only when reversing active motion. Keep only velocity that points
+ * toward the new target, capped at omega * distance; this makes the critical trajectory monotonic
+ * and bounded by its start and target. The spring threshold is pixel based, and stiffness is
+ * adjusted for that threshold so the nominal settle time stays near the remaining-travel duration.
+ * Ordinary transitions retain their exact height-based tweens.
+ */
+internal data class RevealInterruptionPolicy(
+    val initialVelocity: Float,
+    val stiffness: Float,
+    val visibilityThreshold: Float,
+)
+
+internal fun revealInterruptionPolicy(
+    velocity: Float,
+    currentFraction: Float,
+    targetFraction: Float,
+    transitionDurationMs: Int,
+    heightPx: Int,
+): RevealInterruptionPolicy? {
+    if (
+        transitionDurationMs <= 0 ||
+        !velocity.isFinite() ||
+        abs(velocity) <= REVEAL_REVERSAL_VELOCITY_EPSILON
+    ) {
+        return null
+    }
+    val start = if (currentFraction.isNaN()) 0f else currentFraction.coerceIn(0f, 1f)
+    val target = if (targetFraction.isNaN()) start else targetFraction.coerceIn(0f, 1f)
+    val distance = abs(target - start)
+    if (distance == 0f) return null
+
+    val direction = if (target > start) 1f else -1f
+    val visibilityThreshold = revealFractionVisibilityThreshold(heightPx)
+    if (visibilityThreshold >= distance) return null
+    val relativeThreshold = visibilityThreshold / distance
+    val settleFactor = criticalSpringSettleFactor(relativeThreshold)
+    val angularFrequency = settleFactor /
+        (transitionDurationMs / 1000f)
+    val velocityTowardTarget = (velocity * direction)
+        .coerceAtLeast(0f)
+        .coerceAtMost(angularFrequency * distance)
+    return RevealInterruptionPolicy(
+        initialVelocity = direction * velocityTowardTarget,
+        stiffness = angularFrequency * angularFrequency,
+        visibilityThreshold = visibilityThreshold,
+    )
+}
+
+/** Solve `(1 + x) * exp(-x) = relativeThreshold` for the critically damped zero-velocity tail. */
+private fun criticalSpringSettleFactor(relativeThreshold: Float): Float {
+    if (relativeThreshold >= 1f) return CRITICAL_SPRING_ONE_PERCENT_SETTLE_FACTOR
+    val threshold = relativeThreshold.coerceAtLeast(1e-9f).toDouble()
+    var low = 0.0
+    var high = 32.0
+    repeat(28) {
+        val midpoint = (low + high) / 2.0
+        val remaining = (1.0 + midpoint) * exp(-midpoint)
+        if (remaining > threshold) low = midpoint else high = midpoint
+    }
+    return high.toFloat()
+}
+
+/**
+ * 短块保留原曲线，随高度平滑混合到大块的对称曲线；展开和收起都用它，避免高卡片在
+ * 收起时因进度前置而一下子消失。两条组成曲线单调且不越界，按高度混合后也不会回弹。
  */
 internal val REVEAL_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
@@ -204,7 +357,8 @@ private const val LONG_REVEAL_EASING_MIN_DP = 480f
  * Both component curves are monotonic; interpolating their outputs preserves monotonic progress.
  */
 internal fun revealEasingForHeight(heightDp: Float): Easing {
-    val blend = ((heightDp - SHORT_REVEAL_EASING_MAX_DP) /
+    val safeHeightDp = if (heightDp.isNaN()) 0f else heightDp
+    val blend = ((safeHeightDp - SHORT_REVEAL_EASING_MAX_DP) /
         (LONG_REVEAL_EASING_MIN_DP - SHORT_REVEAL_EASING_MAX_DP)).coerceIn(0f, 1f)
     if (blend <= 0f) return REVEAL_EASING
     if (blend >= 1f) return LONG_REVEAL_EASING
@@ -273,16 +427,23 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
 @Composable
 private fun RevealHeight(
     visible: Boolean,
-    // Remains the collapse base and the established caller contract; expansion uses measured dp height.
+    // Scales the dp-based collapse schedule and preserves the established caller contract.
     durationMs: Int,
     content: @Composable () -> Unit,
 ) {
     val fraction = remember { androidx.compose.animation.core.Animatable(if (visible) 1f else 0f) }
-    // 方向标记：展开与收起用不同的时长、曲线与透明度策略（见下）。只在动画启动时写，
-    // graphicsLayer lambda 里读 —— 不进组合，不产生逐帧重组。
+    // Direction and alpha floor are written only when the target changes. The animated fraction
+    // remains a draw-phase read, so frames do not recompose the content.
     var expanding by remember { androidx.compose.runtime.mutableStateOf(visible) }
+    var alphaFloor by remember { mutableFloatStateOf(0f) }
     val position = LocalTranscriptPosition.current
     val density = LocalDensity.current
+    val latestVisible = rememberUpdatedState(visible)
+    val latestPosition = rememberUpdatedState(position)
+    val latestDensity = rememberUpdatedState(density.density)
+    // Animatable resets its own velocity when its coroutine is cancelled. Keep the last sampled
+    // velocity outside snapshot state so the reversal policy can project it onto the new target.
+    val lastVelocity = remember { floatArrayOf(0f) }
     // 高度在下面的 `Layout` 里才量得到，所以展开先等本次测量，再按该次 toggle 的高度启动动画。
     // durationHeight 用 -1 表示尚未测量，0 仍是合法的空内容高度；测量值只影响后续 toggle，
     // 不作为 LaunchedEffect key，因此流式内容长高时不会取消并重启当前动画。
@@ -294,32 +455,79 @@ private fun RevealHeight(
      * 本次 toggle 启动时捕获一次时长，流式期间不会重启动画。
      */
     var durationHeight by remember { androidx.compose.runtime.mutableIntStateOf(-1) }
-    LaunchedEffect(visible, durationMs) {
-        if (!visible && fraction.value == 0f) return@LaunchedEffect
-        expanding = visible
-        val tracked = position?.beginRevealTransition() == true
-        try {
-            if (visible) durationHeight = -1
-            val heightForDuration = snapshotFlow { durationHeight }.first { it >= 0 }
-            val heightDp = with(density) { heightForDuration.toDp().value }
-            val dur = if (visible) revealDurationMsForHeight(heightDp)
-                      else scaledCollapseDurationMs(durationMs, heightForDuration)
-            val easing = if (visible) revealEasingForHeight(heightDp) else REVEAL_EASING
-            fraction.animateTo(if (visible) 1f else 0f,
-                androidx.compose.animation.core.tween(dur, easing = easing))
-        } finally {
-            if (tracked) position?.endRevealTransition()
+    LaunchedEffect(durationMs) {
+        snapshotFlow { latestVisible.value }.collectLatest { targetVisible ->
+            if (!targetVisible && fraction.value == 0f) return@collectLatest
+
+            val wasExpanding = expanding
+            val currentFraction = fraction.value
+            val startingVelocity = lastVelocity[0]
+            val needsFreshMeasurement = revealNeedsFreshMeasurement(
+                visible = targetVisible,
+                wasExpanding = wasExpanding,
+                currentFraction = currentFraction,
+            )
+            alphaFloor = revealAlphaFloorAfterDirectionChange(
+                wasExpanding = wasExpanding,
+                willExpand = targetVisible,
+                currentFraction = currentFraction,
+                alphaFloor = alphaFloor,
+            )
+            expanding = targetVisible
+            val currentPosition = latestPosition.value
+            val currentDensity = latestDensity.value
+            val tracked = currentPosition?.beginRevealTransition() == true
+            try {
+                if (needsFreshMeasurement) {
+                    durationHeight = -1
+                }
+                val heightForDuration = snapshotFlow { durationHeight }.first { it >= 0 }
+                val heightDp = revealHeightDpForDuration(heightForDuration, currentDensity)
+                val targetFraction = if (targetVisible) 1f else 0f
+                val fullDuration = if (targetVisible) revealDurationMsForHeight(heightDp)
+                                   else scaledCollapseDurationMs(durationMs, heightDp)
+                val transitionDuration = revealTransitionDurationMs(
+                    fullDurationMs = fullDuration,
+                    currentFraction = fraction.value,
+                    targetFraction = targetFraction,
+                )
+                val interruption = revealInterruptionPolicy(
+                    velocity = startingVelocity,
+                    currentFraction = fraction.value,
+                    targetFraction = targetFraction,
+                    transitionDurationMs = transitionDuration,
+                    heightPx = contentHeight,
+                )
+                val animationSpec: AnimationSpec<Float> = interruption?.let { policy ->
+                    spring<Float>(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = policy.stiffness,
+                        visibilityThreshold = policy.visibilityThreshold,
+                    )
+                } ?: tween(
+                    transitionDuration,
+                    easing = revealEasingForHeight(heightDp),
+                )
+                fraction.animateTo(
+                    targetValue = targetFraction,
+                    animationSpec = animationSpec,
+                    initialVelocity = interruption?.initialVelocity ?: 0f,
+                ) {
+                    lastVelocity[0] = velocity
+                }
+                lastVelocity[0] = 0f
+            } finally {
+                if (tracked) currentPosition.endRevealTransition()
+            }
         }
     }
     val mounted by remember(visible) { derivedStateOf { visible || fraction.value > 0f } }
     if (mounted) Layout(
-        // **展开时内容随进度淡入**（绘制期读 fraction，不逐帧重组）：纯高度裁剪的展开
-        // 读起来像「从刀口下滑出来」，最先露出的内容总是全透明度突然出现；
-        // 淡入（进度 40% 即满）让长内容的展开读成「浮现」，三态的过渡都更连续。
-        // 收起保持 1：淡出叠加裁剪是两套同向动画，只会糊。
+        // Fresh expansion fades in by 40%. A reversal carries its current alpha across the
+        // direction switch, so changing the target cannot jump between the ramp and full opacity.
         content = {
             Box(Modifier.graphicsLayer {
-                alpha = if (expanding) (fraction.value * 2.5f).coerceIn(0f, 1f) else 1f
+                alpha = revealAlphaForFraction(fraction.value, alphaFloor)
             }) { content() }
         },
         modifier = Modifier.fillMaxWidth().clipToBounds(),

@@ -502,9 +502,10 @@ fun ChatScreen(
     // 每次重组都要扫 provider×model（流式期 12.5 Hz），而这三个输入很少变 —— 记住它。
     // 同一个 remember 里把**生效的模型名**一并取出：圆环面板要用它说明"这个窗口属于谁"
     // （issue #49 修法 2：切 provider 后分母变了，用户需要看出变的是窗口）。
-    val activeModel = remember(IdentityKey(settings), state.providerId, state.model, assistant) {
-        settings.choiceFor(state.providerId, state.model, assistant).model
+    val activeChoice = remember(IdentityKey(settings), state.providerId, state.model, assistant) {
+        settings.choiceFor(state.providerId, state.model, assistant)
     }
+    val activeModel = activeChoice.model
     val contextWindow = remember(IdentityKey(settings), state.providerId, state.model, assistant) {
         settings.contextWindowFor(activeModel)
     }
@@ -778,11 +779,8 @@ fun ChatScreen(
     // 每跨一个 item 就变一次，一旦在这里读，整个 ChatScreen（1600 行、几十个 Composable 调用）
     // 就要重跑一遍。把读取推迟到 `TurnScrubber` 内部（见下面 `current = { … }`），
     // 跨边界时只有导航条自己重组。用 `remember` 持有 State 对象而不是 `by` —— `by` 一取就立刻读了。
-    // **单 item 化之后 `firstVisibleItemIndex` 恒为 0**，读数导航必须改口径：
-    // 用视口里已量到的行按像素反查「28% 读数线」落在哪一行（`TurnMarks.probeOffset`，
-    // 带单测）。仍然用 `remember` 持有 State、把 `.value` 的读取推迟到 `TurnScrubber`
-    // 内部（issue #26 原因一），滚动时只有导航条自己重组。
     // The list's measured visible rows determine the turn at the 28% reading probe.
+    // Keep the state read inside TurnScrubber so scrolling does not recompose the screen.
     val currentPhysicalRow = remember(listState) {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -860,6 +858,26 @@ fun ChatScreen(
     // same row count. Never release restoration merely because the read was accepted.
     var loadingEarlier by remember(state.conversationId) { mutableStateOf(false) }
     val earlierRequestToken = remember(state.conversationId) { intArrayOf(0) }
+    var earlierReveal by remember(state.conversationId) { mutableStateOf<EarlierPageReveal?>(null) }
+    SideEffect {
+        val reveal = earlierReveal
+        if (reveal != null && reveal.isReady(shownTurns, state.messages.firstOrNull())) {
+            // This is the incoming projection, but layoutInfo still describes the last
+            // displayed frame. Preserve its current message, even if the reader moved
+            // while disk I/O was pending. Apply once, before the new page is measured.
+            val incomingIndices = buildMap<Any, Int> {
+                rowKeyIndices.forEach { (key, index) -> put(key, rowOffset + index) }
+                if (live || state.runningHere) {
+                    put(liveRowKey(state.conversationId, state.liveRunId), itemCount - 1)
+                }
+            }
+            earlierPageTarget(listState.layoutInfo.visibleItemsInfo, incomingIndices)?.let { target ->
+                listState.requestScrollToItem(target.index, target.scrollOffset)
+            }
+            earlierReveal = null
+            loadingEarlier = false
+        }
+    }
     suspend fun prepareRows(rows: List<ChatRow>) {
         fun sourceIsCurrent(): Boolean {
             val current = viewModel.screenState.value
@@ -1153,7 +1171,11 @@ fun ChatScreen(
                             ),
                         contentAlignment = Alignment.Center,
                     ) {
-                        EmptyHero(onPick = { setDraft(text = it) }, assistant = assistant)
+                        EmptyHero(
+                            onPick = { setDraft(text = it) }, assistant = assistant,
+                            modelConfigured = activeChoice.model.isNotBlank() && activeChoice.baseUrl.isNotBlank(),
+                            onOpenSettings = onOpenSettings,
+                        )
                     }
                 } else {
                     CompositionLocalProvider(
@@ -1321,46 +1343,39 @@ fun ChatScreen(
                                     TextButton(
                                         enabled = !loadingEarlier && viewport.presented,
                                         onClick = {
+                                            // Loading history is an explicit reading action, like
+                                            // navigating to an older turn. A short tail must not
+                                            // re-arm latest-follow while its disk page is pending.
+                                            scroll.allowBottomResume = false
                                             scroll.stickToBottom = false
                                             val chatId = state.conversationId
                                             val token = ++earlierRequestToken[0]
-                                            // **自己记住视口顶部那一项**（用户实测：点「加载更早」后位置跳到顶）。
-                                            // 之前这里只写了句「稳定 key 会保住位置」的注释，没有任何代码保证 ——
-                                            // LazyColumn 在**前置插入**时并不保证维持滚动位置，一旦没保住，
-                                            // 视口就停在新插入内容的开头，看起来正是"跳到顶"。
-                                            val before = listState.layoutInfo
-                                            val anchor = before.visibleItemsInfo.firstOrNull()
-                                            val anchorIndex = anchor?.index
-                                            val anchorInset = anchor?.let { it.offset - before.viewportStartOffset }
-                                            val beforeCount = before.totalItemsCount
+                                            val needsDiskPage = page.from == 0
+                                            val previousHead = state.messages.firstOrNull().takeIf { needsDiskPage }
                                             loadingEarlier = true
                                             fun finish(added: Boolean) {
                                                 if (viewModel.state.value.conversationId != chatId || earlierRequestToken[0] != token) return
                                                 if (added) {
-                                                    shownTurnsByConversation = shownTurnsByConversation + (chatId to shownTurns + PAGE_TURNS)
-                                                    // 前置插入后，原锚点的下标整体右移「新增项数」；
-                                                    // 按这个位移把它放回原来的屏幕位置（视口内偏移不变）。
-                                                    if (anchorIndex != null && anchorInset != null) {
-                                                        scope.launch {
-                                                            val grown = withTimeoutOrNull(1_000) {
-                                                                snapshotFlow { listState.layoutInfo.totalItemsCount }
-                                                                    .first { it > beforeCount }
-                                                            }
-                                                            if (grown == null) return@launch
-                                                            val shifted = listState.layoutInfo.totalItemsCount - beforeCount
-                                                            // 插入后的第一帧布局还没稳定，`requestScrollToItem` 常被随后的
-                                                            // 排布覆盖（用户：不跳顶了，但位置不对）。这里先请求、
-                                                            // 等一帧、再按同一目标写一次，把落点钉住。
-                                                            val target = anchorIndex + shifted
-                                                            listState.requestScrollToItem(target, anchorInset)
-                                                            withFrameNanos { }
-                                                            listState.requestScrollToItem(target, anchorInset)
-                                                        }
+                                                    scope.launch {
+                                                        // requestScrollToItem cancels an active scroll.
+                                                        // Keep drawing the old suffix until the current
+                                                        // drag/fling ends, then insert the page in one pass.
+                                                        snapshotFlow {
+                                                            displayedChat.value != chatId ||
+                                                                (!pressed && !listState.isScrollInProgress)
+                                                        }.first { it }
+                                                        if (displayedChat.value != chatId ||
+                                                            viewModel.state.value.conversationId != chatId ||
+                                                            earlierRequestToken[0] != token) return@launch
+                                                        val nextShownTurns = shownTurns + PAGE_TURNS
+                                                        earlierReveal = EarlierPageReveal(nextShownTurns, previousHead)
+                                                        shownTurnsByConversation = shownTurnsByConversation + (chatId to nextShownTurns)
                                                     }
+                                                } else {
+                                                    loadingEarlier = false
                                                 }
-                                                loadingEarlier = false
                                             }
-                                            if (page.from > 0) finish(true)
+                                            if (!needsDiskPage) finish(true)
                                             else if (!viewModel.loadEarlier(onComplete = ::finish)) finish(false)
                                         },
                                     ) {
@@ -1658,13 +1673,23 @@ fun ChatScreen(
             // 起点偏一轮 ⇒ 标签念错一句、点最新那条还会越界（`getOrNull` 拿到 null，
             // 于是一下都不动 —— 用户说的「点不中 / 对应不上」）。全局轮号才是真坐标。
             val firstDrawnTurn = page.earlier + 1
-            // **点击后立刻高亮目标轮**：导航是动画（240–340ms），若等滚动经过再更新高亮，
+            // **点击后立刻高亮目标轮**：导航按距离播放动画，若等滚动经过再更新高亮，
             // 观感就是"点了没反应"。这里先乐观置位，导航结束时清掉（用户要求实时响应）。
             var pendingTurn by remember(state.conversationId) { mutableStateOf<Int?>(null) }
+            val navigationTargetNow = rememberUpdatedState { targetKey: String ->
+                navigationTargetIndex(
+                    targetKey, rowKeyIndices, rowOffset,
+                    if (live || state.runningHere) liveRowKey(state.conversationId, state.liveRunId) else null,
+                    itemCount - 1,
+                )?.let { index -> index to visible.getOrNull(index - rowOffset) }
+            }
+            val prepareForNavigation = rememberUpdatedState<suspend (List<ChatRow>) -> Unit>(::prepareRows)
             val scrubberSettling by remember(viewport, scroll) {
                 derivedStateOf {
                     scrubberHighlightSettling(
-                        restoring = scroll.restoring,
+                        // A rail jump pauses reading-anchor repair, but should retain
+                        // the tick's own animation. Only restoration/entrance snaps it.
+                        restoring = scroll.restoring && pendingTurn == null,
                         presented = viewport.presented,
                         entrance = viewport.entrance.value,
                     )
@@ -1722,15 +1747,16 @@ fun ChatScreen(
                             "第 $turn 轮 · ${opening.take(8)}"
                         }
                     },
-                    onJumpTo = { turn ->
-                        // `turn` 是**全局轮号** ⇒ 换成窗口内下标再查 `turnIndices`。
-                        // **最新那一轮在流式期间可能不在 `turnIndices` 里**（`groupRows` 把
-                        // `runId == liveRunId` 的行过滤掉了 ⇒ 它的开头行被滤走，列表尾部少一项）：
-                        // 原来 `getOrNull` 拿到 null 就**整段跳过** —— 点最新那根一下不动
-                        // （用户：「点条的也不对应」）。它没有行可指，但它就是"最新"，
-                        // 底锚下 feed index 0 即底部 ⇒ 明确滚到底，不吞这次点击。
+                    onJumpTo = jump@{ turn ->
+                        // Convert the global turn to a stable target identity. Only the
+                        // actual live newest turn may fall back to the trailing live card.
                         val inWindow = turn - firstDrawnTurn
                         val index = turnIndices.getOrNull(inWindow)
+                        val targetKey = index?.let { rowKeys.getOrNull(it - rowOffset) }
+                            ?: if (turn == page.turns && (live || state.runningHere)) {
+                                liveRowKey(state.conversationId, state.liveRunId)
+                            } else null
+                        if (targetKey == null) return@jump
                         pendingTurn = turn
                         val token = ++navigationToken[0]
                         val previousNavigation = navigationJob[0]
@@ -1750,18 +1776,31 @@ fun ChatScreen(
                                 scroll.allowBottomResume = false
                                 scroll.stickToBottom = false
                                 scroll.restoring = true
-                                val row = index?.let { visible.getOrNull(it - rowOffset) }
-                                if (row != null) {
+                                // Suspend eager capture until the final child placement. LazyList
+                                // may publish layoutInfo before text LayoutCoordinates have moved.
+                                transcriptPosition.rebaseAfterNavigation()
+                                var target = navigationTargetNow.value(targetKey) ?: return@launch
+                                target.second?.let { prepareForNavigation.value(listOf(it)) }
+                                if (token != navigationToken[0] || viewModel.state.value.conversationId != state.conversationId) return@launch
+                                // Preparation suspends; paging/settlement may move the row.
+                                // Re-resolve the identity instead of scrolling a stale index.
+                                target = navigationTargetNow.value(targetKey) ?: return@launch
+                                if (target.second != null) {
                                     val layout = listState.layoutInfo
                                     // Both nearby and distant targets arrive through scrolling.
-                                    viewport.navigation.navigate(listState, index,
+                                    viewport.navigation.navigate(listState, target.first,
                                         TurnMarks.navigationScrollOffset(layout.viewportStartOffset, layout.viewportEndOffset))
-                                } else if (inWindow >= turnIndices.size) {
-                                    viewport.navigation.navigate(listState, (itemCount - 1).coerceAtLeast(0), TRANSCRIPT_END_OFFSET)
+                                } else {
+                                    viewport.navigation.navigate(listState, target.first, TRANSCRIPT_END_OFFSET)
                                 }
                             } finally {
                                 if (token == navigationToken[0]) pendingTurn = null
-                                if (token == navigationToken[0] && scroll.conversationId == state.conversationId) scroll.restoring = false
+                                if (token == navigationToken[0] && scroll.conversationId == state.conversationId) {
+                                    scroll.restoring = false
+                                    // Request a placement handoff, not a capture of coordinates
+                                    // from the frame before the last scroll delta was placed.
+                                    transcriptPosition.rebaseAfterNavigation()
+                                }
                             }
                         }
                     },

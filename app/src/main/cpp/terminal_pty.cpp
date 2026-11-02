@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -105,9 +106,20 @@ Java_com_suixing_agent_terminal_TerminalNative_nativeRead(
         return nullptr;
     }
     struct pollfd pfd {fd, static_cast<short>(POLLIN | POLLHUP), 0};
+    // A fresh timeout on each EINTR can keep a read blocked indefinitely under a
+    // recurring signal. Keep the requested timeout as one monotonic deadline.
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeoutMs);
     int rc;
-    do { rc = poll(&pfd, 1, timeoutMs); } while (rc == -1 && errno == EINTR);
-    if (rc == 0) return nullptr;
+    do {
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        const int remainingMs = remaining > std::chrono::steady_clock::duration::zero()
+            ? static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(remaining).count())
+            : 0;
+        pfd.revents = 0;
+        rc = poll(&pfd, 1, remainingMs);
+    } while (rc == -1 && errno == EINTR && std::chrono::steady_clock::now() < deadline);
+    if (rc == 0 || (rc == -1 && errno == EINTR)) return nullptr;
     if (rc == -1) {
         throwIo(env, "poll", errno);
         return nullptr;

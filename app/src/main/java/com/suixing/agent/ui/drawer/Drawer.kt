@@ -299,7 +299,9 @@ internal fun Drawer(
     val persistOrder: () -> Unit = remember {
         {
             val snapshot = orderState.value.prunedTo(conversationsNow.value.map { it.id }.toSet())
-            scope.launch { orderStore.save(snapshot) }
+            scope.launch {
+                if (!orderStore.save(snapshot)) orderDirty = true
+            }
         }
     }
 
@@ -324,11 +326,16 @@ internal fun Drawer(
 
     // 「新消息回顶」攒 1.5s 落一次盘：应用被杀最多丢这一次位置修正；用户拖出来的顺序是
     // 松手即写，不会丢。
-    LaunchedEffect(orderDirty) {
+    LaunchedEffect(orderDirty, orderState.value) {
         if (!orderDirty) return@LaunchedEffect
         delay(1500)
-        orderStore.save(orderState.value.prunedTo(conversationsNow.value.map { it.id }.toSet()))
-        orderDirty = false
+        val snapshot = orderState.value.prunedTo(conversationsNow.value.map { it.id }.toSet())
+        // Failure keeps the pending marker. A newer order restarts this effect, so an
+        // obsolete completion must not clear the latest unsaved state.
+        if (orderStore.save(snapshot) &&
+            snapshot == orderState.value.prunedTo(conversationsNow.value.map { it.id }.toSet())) {
+            orderDirty = false
+        }
     }
 
     // 「排序模式是一次性模式」：任何非拖动的交互都从这一个口子关掉它，
@@ -343,7 +350,7 @@ internal fun Drawer(
         }
     }
 
-    // 面板：库负责拖动/回弹/位移，视觉参数逐条覆盖回自绘那版——
+    // 面板内容使用 ModalDrawerSheet；拖动、回弹和位移由 SuixingDrawer 宿主管理。
     // 宽度 **300dp**（[DRAWER_SHEET_WIDTH]，本版恢复原值）、圆角只有右侧两角 30dp
     // （库默认四角 16dp）、底色 surfaceContainerHigh（库默认 surfaceContainerLow）、
     // elevation 0（库默认 16dp 的 tonal elevation，那会把底色再调亮一档）。

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.runtime.Immutable
 import com.suixing.agent.data.Conversation
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -71,8 +72,8 @@ internal fun drawerSections(
 /**
  * `filesDir/drawer-order` 的读写。
  *
- * 读失败就当没有（退回时间序），写失败也就当没写成：一个排序偏好不值得让用户看见一条报错，
- * 更不能因为它写不进去就不显示会话列表。
+ * 读失败就当没有（退回时间序），写失败由 [save] 返回 `false`：一个排序偏好不值得让用户看见
+ * 一条报错，更不能因为它写不进去就不显示会话列表。
  */
 internal class DrawerOrderStore(context: Context) {
 
@@ -85,36 +86,43 @@ internal class DrawerOrderStore(context: Context) {
     private val writer = OrderWriteQueue { order -> persist(order) }
 
     suspend fun load(): DrawerOrder = withContext(Dispatchers.IO) {
-        runCatching {
-            // 主文件缺失或损坏时退回 `.tmp`（issue #66 P0-2）：上次写到一半被杀，
-            // 临时文件里往往就是完整的最后一份顺序，比直接丢掉偏好更好。
-            val source = when {
-                file.exists() -> file
-                tempFile.exists() -> tempFile
-                else -> return@runCatching DrawerOrder()
-            }
-            // **不用 org.json**：它在 JVM 单测里是 Android 桩（方法一律 not mocked），
-            // 于是这条路在 CI 上永远走 catch 分支、偏好静默丢失——换成项目已在用的
-            // kotlinx.serialization 之后，这套读写才真正能被单测覆盖（issue #66 P0-2）。
-            val dto = json.decodeFromString(DrawerOrderDto.serializer(), source.readText())
-            DrawerOrder(pinned = dto.pinned, normal = dto.normal)
-        }.getOrDefault(DrawerOrder())
+        // Prefer a valid main file, then recover from a leftover atomic-write temp file. A
+        // corrupt main must not hide a complete temp snapshot from the previous interrupted write.
+        readOrder(file) ?: readOrder(tempFile) ?: DrawerOrder()
     }
 
     /** 提交一次保存：走单写者队列，过期内容会被合并掉。 */
-    suspend fun save(order: DrawerOrder): Boolean = writer.enqueue(order)
+    suspend fun save(order: DrawerOrder): Boolean = try {
+        writer.enqueue(order)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        false
+    }
 
     /** 真正写盘（在队列的锁内调用）。 */
     private suspend fun persist(order: DrawerOrder) = withContext(Dispatchers.IO) {
-        runCatching {
-            val payload = json.encodeToString(
-                DrawerOrderDto.serializer(),
-                DrawerOrderDto(pinned = order.pinned, normal = order.normal),
-            )
-            // 公共原子写（issue #69 P1-B）：中途被杀不会留下半行 JSON。
-            com.suixing.agent.core.AtomicFiles.writeText(file, payload)
+        val payload = json.encodeToString(
+            DrawerOrderDto.serializer(),
+            DrawerOrderDto(pinned = order.pinned, normal = order.normal),
+        )
+        // 公共原子写（issue #69 P1-B）：中途被杀不会留下半行 JSON。Failures bubble up so
+        // LatestWriteQueue does not advance its written revision on a failed replacement.
+        com.suixing.agent.core.AtomicFiles.writeText(file, payload)
+    }
+
+    private fun readOrder(source: File): DrawerOrder? {
+        if (!source.isFile) return null
+        return try {
+            // **不用 org.json**：它在 JVM 单测里是 Android 桩（方法一律 not mocked），
+            // kotlinx.serialization keeps the actual file format testable on the JVM.
+            val dto = json.decodeFromString(DrawerOrderDto.serializer(), source.readText())
+            DrawerOrder(pinned = dto.pinned, normal = dto.normal)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
         }
-        Unit
     }
 
     private val tempFile: File get() = File(file.parentFile, "${file.name}.tmp")

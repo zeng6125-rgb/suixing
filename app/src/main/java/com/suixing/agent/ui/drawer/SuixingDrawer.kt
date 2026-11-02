@@ -9,10 +9,11 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
@@ -28,14 +29,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import kotlin.math.abs
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /**
  * 自建抽屉状态。
@@ -105,8 +105,7 @@ internal fun rememberSuixingDrawerState(
  *  · 冻结层 = `awaitEachGesture` 全消费：抽屉开着时竖滑也必须吞掉（挡列表滚动），
  *    轻点算"点遮罩"。消费语义相反，合并必然破坏其中一边。
  *
- * 位移不用调用方再算：[offset] 由本组件写进 `offset{}`（布局期），主页那一层自己读
- * `state.offset` 做缩放/圆角/阴影。
+ * 抽屉面板在绘制层平移；主页自己读 `state.offset` 做变换。
  */
 @Composable
 internal fun SuixingDrawer(
@@ -204,11 +203,15 @@ internal fun SuixingDrawer(
                 )
             },
     ) {
-        // 侧边栏：布局期平移到面板位置（不重组）。
+        // Move the whole panel as a layer. The progress read stays in the draw phase, so
+        // opening/closing does not re-place the drawer's LazyColumn on every animation frame.
         Box(
             Modifier
-                .fillMaxSize()
-                .offset { IntOffset((-panelPx * (1f - state.progress.value)).roundToInt(), 0) },
+                .width(DRAWER_SHEET_WIDTH.dp)
+                .fillMaxHeight()
+                .graphicsLayer {
+                    translationX = -panelPx * (1f - state.progress.value)
+                },
         ) {
             drawerContent()
         }

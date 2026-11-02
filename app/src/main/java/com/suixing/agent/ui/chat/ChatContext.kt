@@ -354,12 +354,10 @@ internal fun CheckpointCard(
                 )
             }
             Text(
-                // 同表头口径：条数用转录计数（[originals]），与「查看原文」展开看到的一致；
-                // checkpoint.messages 是 wire 计数，不展示。
-                text = "压缩前约 ${shortTokens(checkpoint.promptTokens)} tokens · " +
-                    "${originals.size} 条消息 · ${formatTime(checkpoint.at)}",
+                text = "压缩前约 ${shortTokens(checkpoint.promptTokens)} tokens",
                 style = checkpointMetaStyle(),
                 color = scheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp),
                 // 右侧留白交给上面的 Row（撑满后 padding 才会真的推动文字边界）
             )
         }

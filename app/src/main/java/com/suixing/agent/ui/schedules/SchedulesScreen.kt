@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.schedules
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,11 +27,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,9 +51,12 @@ import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SuixingDialog
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 定时任务：到点自己跑的那些提醒。
@@ -69,31 +73,69 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SchedulesScreen(onBack: () -> Unit) {
     val context = LocalContext.current.applicationContext
-    val scope = rememberCoroutineScope()
     var schedules by remember { mutableStateOf<List<Schedule>>(emptyList()) }
     // 空态要等读完再画，否则冷启动那一帧会先说「还没有定时任务」再冒出列表。
     var loaded by remember { mutableStateOf(false) }
+    val writer = Core.scheduleWriteQueue
+    val screenActive = remember { AtomicBoolean(true) }
+    DisposableEffect(Unit) {
+        onDispose { screenActive.set(false) }
+    }
     // 待确认的删除：点垃圾桶只记下目标，真正写回要等用户在弹窗里再点一次。id 是随机 UUID，
     // 删掉就再也重建不出同一条，而垃圾桶紧贴开关——单击即删的代价不对等。
     var pendingDelete by remember { mutableStateOf<Schedule?>(null) }
     LaunchedEffect(Unit) {
+        writer.awaitIdle()
         schedules = withContext(Dispatchers.IO) { Core.schedules.read() }
         loaded = true
     }
     // **单写者 + 最新快照**（issue #68 P1-B）：连点两个开关时，两个整表快照会并发落盘，
     // 先发起的那次可能后完成 ⇒ 把新状态覆盖回旧值。队列保证"最新的那份最后落盘"，
     // 并且 `arm` 紧跟在**真正写成功**的那次之后（提醒永远对应最后落盘的快照）。
-    val writer = remember {
-        com.suixing.agent.core.LatestWriteQueue<List<Schedule>> { items ->
-            withContext(Dispatchers.IO) {
-                Core.schedules.write(items)
-                SchedulerService.arm(context)
-            }
-        }
-    }
     val apply: (List<Schedule>) -> Unit = { next ->
         schedules = next
-        scope.launch { writer.enqueue(next) }
+        val request = writer.submit(next)
+        Core.appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                writer.commit(request)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (!screenActive.get() || !writer.isCurrent(request)) return@launch
+                var persisted: List<Schedule>? = null
+                val recovered = writer.recoverIfCurrent(request) {
+                    try {
+                        persisted = withContext(Dispatchers.IO) {
+                            val stored = Core.schedules.read()
+                            // The failed write may have reached disk before arming failed. Re-arm
+                            // the stored snapshot under the queue lock; a newer write then arms last.
+                            try {
+                                SchedulerService.arm(context)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                // Keep the readable snapshot; the original failure is reported below.
+                            }
+                            stored
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // Still report the original failure; the persisted snapshot was unreadable.
+                    }
+                }
+                if (!recovered) return@launch
+                withContext(Dispatchers.Main.immediate) {
+                    if (!screenActive.get() || !writer.isCurrent(request)) return@withContext
+                    if (persisted != null) schedules = persisted
+                    Toast.makeText(
+                        context,
+                        "保存定时任务失败：${failure.message ?: "未知错误"}",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }
     }
     val scheme = MaterialTheme.colorScheme
     Scaffold(

@@ -70,6 +70,7 @@ import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.FileTypeColors
 import com.suixing.agent.ui.theme.MonoStyle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -144,6 +145,12 @@ fun FilesScreen(onBack: () -> Unit) {
     // Directory listing and per-entry sizes are disk IO, so they run off the main
     // thread and land in state; doing it inside composition stutters the list.
     LaunchedEffect(current, reload) {
+        // Includes breadcrumbs/root tabs/back navigation, not just directory rows.
+        previewRequest++
+        previewJob?.cancel()
+        previewJob = null
+        preview = null
+        loading = false
         listing = true
         val listed = withContext(Dispatchers.IO) {
             // 插件根是应用私有目录，首次进入时创建；文件操作也留在 IO 线程。
@@ -554,12 +561,17 @@ private fun copyToClipboard(context: Context, text: String): Boolean =
         clipboard.setPrimaryClip(ClipData.newPlainText("Suixing", text))
     }.isSuccess
 
-private fun readPreview(file: File): String {
+private suspend fun readPreview(file: File): String {
     if (file.length() > MAX_PREVIEW_BYTES) return "（文件超过 ${humanSize(MAX_PREVIEW_BYTES)}，不在预览范围内）"
-    return runCatching {
-        val bytes = file.readBytes()
+    return try {
+        val bytes = file.inputStream().use { boundedPreviewBytes(it, MAX_PREVIEW_BYTES.toInt()) }
+            ?: return "（文件超过 ${humanSize(MAX_PREVIEW_BYTES)}，不在预览范围内）"
         if ((0 until minOf(bytes.size, 4096)).any { bytes[it] == 0.toByte() }) "（二进制文件）" else String(bytes, Charsets.UTF_8)
-    }.getOrElse { "（读取失败：${it.message ?: it::class.java.simpleName}）" }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        "（读取失败：${failure.message ?: failure::class.java.simpleName}）"
+    }
 }
 
 /** Kept small: every byte ends up in a single Text, and a big blob freezes layout. */

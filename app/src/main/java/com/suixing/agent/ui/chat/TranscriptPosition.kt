@@ -39,6 +39,7 @@ internal class TranscriptPosition(private val list: LazyListState) {
     private var lastRepair: Triple<Int, Int, Int>? = null
     private var userChangeUntil = 0L
     private var userTransitions = 0
+    private var captureAfterPlacement = false
 
     fun pauseForUserChange() {
         userChangeUntil = android.os.SystemClock.uptimeMillis() + PROCESS_EXPAND_MS + 48L
@@ -63,7 +64,13 @@ internal class TranscriptPosition(private val list: LazyListState) {
         android.os.SystemClock.uptimeMillis() >= userChangeUntil
 
     fun attach(invalidate: () -> Unit) { this.invalidate = invalidate }
-    fun detach() { invalidate = null; regions.clear(); visibleRows.clear(); anchor = null }
+    fun detach() {
+        invalidate = null
+        regions.clear()
+        visibleRows.clear()
+        anchor = null
+        captureAfterPlacement = false
+    }
 
     fun viewportPlaced(coordinates: LayoutCoordinates) {
         val layout = list.layoutInfo
@@ -85,7 +92,18 @@ internal class TranscriptPosition(private val list: LazyListState) {
     fun interactionChanged() {
         anchor = null
         lastRepair = null
-        if (canRead()) capture()
+        if (canRead() && !captureAfterPlacement) capture()
+        invalidate?.invoke()
+    }
+
+    /** Navigation handoff; coordinates must belong to the final child placement. */
+    fun rebaseAfterNavigation() {
+        anchor = null
+        lastRepair = null
+        // LazyList's placement-only scroll fast path updates layoutInfo before text
+        // LayoutCoordinates move. Neither this callback nor a delayed interaction
+        // observer may capture that mixed-generation geometry as a reading point.
+        captureAfterPlacement = true
         invalidate?.invoke()
     }
 
@@ -134,6 +152,15 @@ internal class TranscriptPosition(private val list: LazyListState) {
     /** Resolve a single anchor only after every descendant has its final position. */
     fun contentPlaced() {
         if (!canRead()) return
+        if (captureAfterPlacement) {
+            // The owner calls here only after child.place() has placed all descendants.
+            // Establish the new point without repairing against a pre-navigation Y.
+            captureAfterPlacement = false
+            anchor = null
+            lastRepair = null
+            capture()
+            return
+        }
         if (anchor == null) capture()
         val point = anchor ?: return
         val region = regions[point.key] ?: return

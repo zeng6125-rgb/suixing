@@ -53,6 +53,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -285,14 +293,18 @@ internal fun TurnScrubber(
     // this conversation. Kept for as long as the chat is open, dropped the moment another is
     // opened: a deep conversation unlocked in one chat must not decide what the next one shows.
     var unlocked by remember(conversationId) { mutableIntStateOf(0) }
+    // A hold jumps immediately, which can change currentTurn while this pointer gesture is still
+    // active. Keep its window centred on the turn it started from; unlocked still slides it up.
+    var pinnedCurrentTurn by remember(conversationId) { mutableStateOf<Int?>(null) }
     // Keep consecutive real turns around the current one; every enabled line has one target.
     //
     // **current() 现在返回全局轮号**（1 基），与 [scrubberWindow] 的坐标一致。
     val currentTurn = current()
-    val window = remember(totalTurns, drawnTurns, currentTurn, unlocked) {
+    val windowCurrentTurn = pinnedCurrentTurn ?: currentTurn
+    val window = remember(totalTurns, drawnTurns, windowCurrentTurn, unlocked) {
         scrubberWindow(
             totalTurns = totalTurns,
-            currentTurn = currentTurn,
+            currentTurn = windowCurrentTurn,
             drawnTurns = drawnTurns,
             unlocked = unlocked,
         )
@@ -304,6 +316,17 @@ internal fun TurnScrubber(
     // jump through these instead of closing over values a new message has replaced.
     val latestRows by rememberUpdatedState(rows)
     val latestJump by rememberUpdatedState(onJumpTo)
+    val latestCurrentTurn by rememberUpdatedState(currentTurn)
+    val latestRowsForPull by rememberUpdatedState<(Int) -> List<Int>> { pull ->
+        scrubberSlots(
+            scrubberWindow(
+                totalTurns = totalTurns,
+                currentTurn = windowCurrentTurn,
+                drawnTurns = drawnTurns,
+                unlocked = pull,
+            )
+        )
+    }
     // Which row the finger is on, which row the label names, and whether the label is out.
     // All three are cleared when the finger lifts, so no frame can leave the rail stuck open.
     var pressRow by remember(conversationId, rowCount) { mutableIntStateOf(-1) }
@@ -356,6 +379,29 @@ internal fun TurnScrubber(
                 // line drawn, and the height of the rows plus their gaps.
                 .width(SCRUBBER_RAIL)
                 .align(Alignment.CenterEnd)
+                .semantics {
+                    val oldestLoaded = (totalTurns - drawnTurns + 1).coerceAtLeast(1)
+                    contentDescription = "对话轮次导航"
+                    stateDescription = "第 $currentTurn 轮，共 $totalTurns 轮"
+                    progressBarRangeInfo = ProgressBarRangeInfo(
+                        currentTurn.coerceIn(oldestLoaded, totalTurns).toFloat(),
+                        oldestLoaded.toFloat()..totalTurns.toFloat(),
+                    )
+                    setProgress("跳转轮次") { requested ->
+                        if (!requested.isFinite()) false else {
+                            latestJump(requested.roundToInt().coerceIn(oldestLoaded, totalTurns))
+                            true
+                        }
+                    }
+                    customActions = listOf(
+                        CustomAccessibilityAction("上一轮") {
+                            if (currentTurn <= oldestLoaded) false else { latestJump(currentTurn - 1); true }
+                        },
+                        CustomAccessibilityAction("下一轮") {
+                            if (currentTurn >= totalTurns) false else { latestJump(currentTurn + 1); true }
+                        },
+                    )
+                }
                 // One handler for the whole rail instead of a clickable per row: the finger
                 // is matched to the nearest line, so a press between two lines still lands
                 // on one of them and a drag can cross rows without dropping the gesture.
@@ -374,118 +420,125 @@ internal fun TurnScrubber(
                             scrubberRowFor(down.position.y, hitRowPx, hitPitchPx, railRows.size)
                         if (railRows[startRow] <= 0) return@awaitEachGesture
                         down.consume()
-                        pressRow = startRow
-                        selectionRow = startRow
-                        shown = false
-                        var travel = 0f
-                        // Only a gesture that really moved is eligible for the off-rail cancel
-                        // below; a tap and a still hold always jump.
-                        var dragged = false
-                        var pointer = down.position
-                        // True only until the hold has run out; after that the pointer is
-                        // awaited without a deadline, so a slow drag is never cut short.
-                        var waiting = true
-                        var pressed = true
-                        // 长按已经跳过的轮次：抬手时若目标没变就不再跳第二次（避免滚动被重置）。
-                        var holdJumped: Int? = null
-                        while (pressed) {
-                            val event = if (waiting) {
-                                withTimeoutOrNull(SCRUBBER_LONG_PRESS_MS) { awaitPointerEvent() }
-                            } else {
-                                awaitPointerEvent()
-                            }
-                            if (event == null) {
-                                // 长按到底：标签亮起，并且**当场定位**到手指所在的这一轮
-                                // （用户要求"长按导航条时显示高亮并定位到对应位置"；
-                                // 原来只亮标签、非要等抬手才跳，长按像没反应）。
-                                waiting = false
-                                shown = true
-                                val target = latestRows.getOrNull(selectionRow)?.takeIf { it > 0 }
-                                if (target != null) {
-                                    holdJumped = target
-                                    latestJump(target)
+                        try {
+                            pinnedCurrentTurn = latestCurrentTurn
+                            pressRow = startRow
+                            selectionRow = startRow
+                            shown = false
+                            var travel = 0f
+                            // Only a gesture that really moved is eligible for the off-rail cancel
+                            // below; a tap and a still hold always jump.
+                            var dragged = false
+                            var pointer = down.position
+                            // True only until the hold has run out; after that the pointer is
+                            // awaited without a deadline, so a slow drag is never cut short.
+                            var waiting = true
+                            var pressed = true
+                            // 长按已经跳过的轮次：抬手时若目标没变就不再跳第二次（避免滚动被重置）。
+                            var holdJumped: Int? = null
+                            while (pressed) {
+                                val event = if (waiting) {
+                                    withTimeoutOrNull(SCRUBBER_LONG_PRESS_MS) { awaitPointerEvent() }
+                                } else {
+                                    awaitPointerEvent()
                                 }
-                                continue
-                            }
-                            val change = event.changes.firstOrNull { it.id == down.id }
-                            if (change == null) {
-                                pressed = false
-                                continue
-                            }
-                            // Both axes, but only the dominant one per event: summing them
-                            // doubled the jitter during a still hold and could pop the label
-                            // before the 220ms hold, while counting Y alone let a purely
-                            // horizontal drag off the rail slip through as a jump.
-                            travel += max(
-                                abs(change.position.y - pointer.y),
-                                abs(change.position.x - pointer.x),
-                            )
-                            pointer = change.position
-                            if (travel >= dragPx) {
-                                // Dragging is an answer in itself, so it skips the rest of the
-                                // hold and starts previewing turns at once.
-                                waiting = false
-                                dragged = true
-                                shown = true
-                                selectionRow = scrubberRowFor(
-                                    change.position.y,
-                                    hitRowPx,
-                                    hitPitchPx,
-                                    railRows.size,
-                                ).coerceAtLeast(railRows.indexOfFirst { it > 0 }.coerceAtLeast(0))
-                                // On the top line the strip gives ground: a finger that keeps
-                                // pushing up unlocks the turns above the window, one row of
-                                // travel at a time, so the whole conversation is reachable in
-                                // one drag. The window slides rather than grows, so the rows
-                                // never move under the hand and the line the finger is on stays
-                                // the line it is on.
-                                unlocked = scrubberPull(
-                                    y = change.position.y,
-                                    rowPx = hitRowPx,
-                                    pitchPx = hitPitchPx,
-                                    pull = unlocked,
+                                if (event == null) {
+                                    // 长按到底：标签亮起，并且**当场定位**到手指所在的这一轮
+                                    // （用户要求"长按导航条时显示高亮并定位到对应位置"；
+                                    // 原来只亮标签、非要等抬手才跳，长按像没反应）。
+                                    waiting = false
+                                    shown = true
+                                    val target = latestRows.getOrNull(selectionRow)?.takeIf { it > 0 }
+                                    if (target != null) {
+                                        holdJumped = target
+                                        latestJump(target)
+                                    }
+                                    continue
+                                }
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change == null) {
+                                    pressed = false
+                                    continue
+                                }
+                                // Both axes, but only the dominant one per event: summing them
+                                // doubled the jitter during a still hold and could pop the label
+                                // before the 220ms hold, while counting Y alone let a purely
+                                // horizontal drag off the rail slip through as a jump.
+                                travel += max(
+                                    abs(change.position.y - pointer.y),
+                                    abs(change.position.x - pointer.x),
                                 )
+                                pointer = change.position
+                                if (travel >= dragPx) {
+                                    // Dragging is an answer in itself, so it skips the rest of the
+                                    // hold and starts previewing turns at once.
+                                    waiting = false
+                                    dragged = true
+                                    shown = true
+                                    selectionRow = scrubberRowFor(
+                                        change.position.y,
+                                        hitRowPx,
+                                        hitPitchPx,
+                                        railRows.size,
+                                    ).coerceAtLeast(railRows.indexOfFirst { it > 0 }.coerceAtLeast(0))
+                                    // On the top line the strip gives ground: a finger that keeps
+                                    // pushing up unlocks the turns above the window, one row of
+                                    // travel at a time, so the whole conversation is reachable in
+                                    // one drag. The window slides rather than grows, so the rows
+                                    // never move under the hand and the line the finger is on stays
+                                    // the line it is on.
+                                    unlocked = scrubberPull(
+                                        y = change.position.y,
+                                        rowPx = hitRowPx,
+                                        pitchPx = hitPitchPx,
+                                        pull = unlocked,
+                                    )
+                                }
+                                pressed = change.pressed
+                                // Consumed here so the transcript under the rail never scrolls
+                                // along: dragging the strip previews turns, it does not move the
+                                // conversation. The jump happens once, on the lift.
+                                change.consume()
                             }
-                            pressed = change.pressed
-                            // Consumed here so the transcript under the rail never scrolls
-                            // along: dragging the strip previews turns, it does not move the
-                            // conversation. The jump happens once, on the lift.
-                            change.consume()
-                        }
-                        val destination = selectionRow
-                        // A finger that has really dragged and then wanders off the strip was
-                        // after the transcript rather than a turn, so the jump is dropped and the
-                        // strip springs back. Tested on the two sides and the bottom of the rail —
-                        // not the top. Pushing up past the first line is precisely how the turns
-                        // above the window are unlocked (see [scrubberPull]), and cancelling there
-                        // made the user's own gesture work against itself: one turn of unlock is
-                        // about 17dp of travel, and this tolerance killed the whole gesture at
-                        // 28dp — so the harder they pulled for more history, the more certainly
-                        // the lift did nothing at all. Which is what "导航条条数没增加" is: the
-                        // strip had unlocked a line or two and then thrown the jump away.
-                        //
-                        // The handler restarts if the slot count changes; a sliding full window
-                        // keeps its gesture. Exit bounds use the same rows as the initial hit test.
-                        val railBottomPx =
-                            hitRowPx * railRows.size + hitGapPx * (railRows.size - 1)
-                        val cancelled = dragged && (
-                            pointer.x < -exitPx ||
-                                pointer.x > railWidthPx + exitPx ||
-                                pointer.y > railBottomPx + exitPx
-                            )
-                        pressRow = -1
-                        shown = false
-                        // The strip recentres on wherever the jump lands: the unlocked turns
-                        // were the ones this drag could reach, and the window goes back to
-                        // naming the turn being read instead of staying slid up over turns the
-                        // reader has not left yet.
-                        unlocked = 0
-                        // [latestRows], not the snapshot the hit test was matched against: a
-                        // drag that unlocked its way up the conversation is aimed at a turn
-                        // that snapshot never held.
-                        if (!cancelled) {
-                            val target = latestRows.getOrNull(destination)?.takeIf { it > 0 }
-                            if (target != null && target != holdJumped) latestJump(target)
+                            val destinationRow = selectionRow
+                            // A finger that has really dragged and then wanders off the strip was
+                            // after the transcript rather than a turn, so the jump is dropped and the
+                            // strip springs back. Tested on the two sides and the bottom of the rail —
+                            // not the top. Pushing up past the first line is precisely how the turns
+                            // above the window are unlocked (see [scrubberPull]), and cancelling there
+                            // made the user's own gesture work against itself: one turn of unlock is
+                            // about 17dp of travel, and this tolerance killed the whole gesture at
+                            // 28dp — so the harder they pulled for more history, the more certainly
+                            // the lift did nothing at all. Which is what "导航条条数没增加" is: the
+                            // strip had unlocked a line or two and then thrown the jump away.
+                            //
+                            // The handler restarts if the slot count changes; a sliding full window
+                            // keeps its gesture. Exit bounds use the same rows as the initial hit test.
+                            val railBottomPx =
+                                hitRowPx * railRows.size + hitGapPx * (railRows.size - 1)
+                            val cancelled = dragged && (
+                                pointer.x < -exitPx ||
+                                    pointer.x > railWidthPx + exitPx ||
+                                    pointer.y > railBottomPx + exitPx
+                                )
+                            // Resolve against the latest window inputs and this pointer's final
+                            // pull amount, even if the new rows have not reached composition yet.
+                            if (!cancelled) {
+                                // Resolve the actual turn before releasing the pin; comparing a
+                                // turn number also avoids a duplicate jump after a held preview.
+                                val target = latestRowsForPull(unlocked)
+                                    .getOrNull(destinationRow)
+                                    ?.takeIf { it > 0 }
+                                if (target != null && target != holdJumped) latestJump(target)
+                            }
+                        } finally {
+                            // Also runs when pointerInput is cancelled (including a slot-count
+                            // change), so a hold cannot leave its window pinned or rail highlighted.
+                            pressRow = -1
+                            shown = false
+                            // Recenter on the resulting current turn and forget this pull.
+                            unlocked = 0
+                            pinnedCurrentTurn = null
                         }
                     }
                 },

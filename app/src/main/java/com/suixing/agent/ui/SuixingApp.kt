@@ -38,6 +38,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
@@ -98,7 +99,9 @@ import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -308,41 +311,34 @@ fun SuixingApp() {
         showChat()
     }
     /**
-     * 点抽屉里的一行会话：**切换立刻发生，收起动画并行播完**（方案 C）。
-     *
-     * 历史沿革（两次反转，都记着，免得以后又改回去）：
-     *  · 最初是同一帧做（`openConversation` + 收起动画），换会话要整页换状态
-     *    （分组、解析、冷组合），主线程被占住、动画帧被吃掉 ⇒ 收起看着和别处不一样；
-     *  · 于是改成**串行**（用户原话「先有关闭侧边栏，再会话」）：动画播完再切。
-     *    但动画时长直接变成切换延迟的下限（当时 160ms），用户觉得「点了要等一会」；
-     *  · 现在改回**并行**（用户选 C）：`showChat()` / `openConversation()` 立刻执行，
-     *    收起动画自己跑。
-     *
-     * 实测依据（§73，文件探针，8 轮）：`tap -> state_set` 仅 2~3ms、
-     * `state_set -> content_ready` 12~37ms（冷读大会话也一样，只加载尾部窗口 24 行）。
-     * 所以"切换慢"不是数据加载，而是 **动画期间的点击死区**（见 `DRAWER_CLOSE_SPEC` 注释）。
-     *
-     * `drawerBusyState` 仍跟动画走：它管的是聊天页填充协程，不该在抽屉还在动时抢帧。
+     * Start closing immediately, then switch on the first visible closing frame. This keeps
+     * the current transcript under a stationary drawer, while target loading/restoration can
+     * overlap the remaining close motion. BindConversationViewport keeps the target hidden
+     * until its restored position is laid out.
      */
-    // **连点保护**：只有最后一次点击算数（第一次的协程会被第二次的动画取消，令牌随之失效）。
+    // Repeated taps remain latest-wins; a superseded close cannot release the latest busy flag.
     val drawerSwitchToken = remember { intArrayOf(0) }
     val switchFromDrawer: (Conversation) -> Unit = { conversation ->
         drawerOrigin[0] = null
         val token = ++drawerSwitchToken[0]
         drawerBusyState.value = true
-        // **方案 C：切换立刻发生，收起动画并行播完**（用户选 C）。
-        // 原来是串行 —— 先 `animateTo(Closed)` 播完再切，于是动画时长直接变成切换延迟的下限；
-        // `DRAWER_CLOSE_SPEC` 是 `tween(210)`。现在切换不再被动画挡住（实测见上面的 KDoc）。
-        // `drawerBusyState` 仍跟动画走（它管的是聊天页的填充协程，不该在抽屉还在动时抢帧）。
-        showChat()
-        chat.openConversation(conversation)
-        scope.launch {
+        val closeFinished = mutableStateOf(false)
+        // Start the state animation before publishing the new conversation. UNDISPATCHED
+        // runs it to its first frame wait, so the close and switch have no extra launch-turn gap.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
             } finally {
-                // 被后一次点击取消时不要清忙：那一次已经重新置 true 并在跑自己的动画。
+                closeFinished.value = true
                 if (drawerSwitchToken[0] == token) drawerBusyState.value = false
             }
+        }
+        scope.launch {
+            // Do not replace the transcript while the panel is still completely at rest.
+            snapshotFlow { drawerState.progress.value < 1f || closeFinished.value }.first { it }
+            if (drawerSwitchToken[0] != token) return@launch
+            showChat()
+            chat.openConversation(conversation)
         }
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
@@ -691,13 +687,8 @@ fun SuixingApp() {
                 }
             }
             }
-            // **现在没有遮罩层了**（改用 `DismissibleNavigationDrawer` 推挤式）：
-            //  · 推挤式本来就不画 scrim，所以「点遮罩关闭」这条路径**不存在**——
-            //    与用户的原话一致（「看聊天内容我不会自己关闭侧边栏吗」）；
-            //  · 历史上那层透明的 `DrawerDismissLayer`（接管遮罩点击/左滑）已按用户要求删除，
-            //    现在连它要接管的对象都没有了；
-            //  · 关抽屉的入口只剩两个：返回键（`DrawerBackHandler`）与抽屉内的动作
-            //    （点会话行 / 助手 / 新对话），它们仍走 `DRAWER_CLOSE_SPEC`。
+            // SuixingDrawer owns the transparent right-side input shield while open;
+            // tapping it closes the drawer. Back and drawer actions share DRAWER_CLOSE_SPEC.
             NavHost(
                             navController = navController,
                             // 覆盖层的栈底：什么都不画（透明），所以"当前是 empty"就等于"chat 露着"。

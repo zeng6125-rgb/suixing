@@ -89,46 +89,21 @@ internal class ConversationViewport(val conversationId: String, val bookmark: Vi
 }
 
 /**
- * 切会话入场：**转录与导航条共用这一个时钟**（两处都调用 [alpha] 与 [remainingTravel]）。
- *
- * ## 曲线只有一条
- *
- * 主时钟是 [EASING]（Material 的 LinearOutSlowIn：**起手零速度、落位零速度**）。透明度与位移都
- * 由**已经缓动过的进度**派生，不再各套一条曲线 —— 原来这里是「线性时钟 × 两条不同性格的曲线」：
- * 透明度套了一条 bezier 后在进度 1/3 处就走完（≈100ms），位移却用另一条手写的临界阻尼指数走满
- * 300ms，于是**后 200ms 是「已经全不透明的内容还在往上飘」**，读起来发硬。
- *
- * ## 三处手感参数
- *
- * - [DURATION_MS] 300 → 360：淡入与落位都需要一点时间，300ms 里塞不下「不突兀的起手」+「不撞停的收尾」。
- * - [TRAVEL_DP] 18 → 12：位移是「落位」的幅度，不是「从别处飞来」的幅度；小一点更沉。
- * - [alpha] 用 ×1.25 提前收尾（≈在进度的 80% 处到 1，即 360ms 里的 ~162ms），让内容**先看清**，
- *   剩下那段只做 2.4dp 的余量沉降（旧实现是 5.67dp）。
- *
- * ## 为什么不叠第二条曲线
- *
- * 淡入曲线与位移曲线如果是两条，起手与收尾的速度性格就会打架；现在两者都挂在同一条主曲线上，
- * 于是「起手慢」与「落位慢」是同一种慢，内容是**一整段连续的运动**，不是两段各自为政的动画。
+ * Shared conversation entrance clock for transcript rows and the navigation rail. Both opacity
+ * and travel derive from this one monotonic curve, keeping the rail and restored transcript in
+ * step. The short travel and non-overshooting settle keep the switch quiet and predictable.
  */
 internal object ConversationEntrance {
-    const val DURATION_MS = 450
-    const val TRAVEL_DP = 20f
+    const val DURATION_MS = 300
+    const val TRAVEL_DP = 12f
 
     /**
-     * 主曲线：**临界阻尼响应** `1 − (1+kt)·e^(−kt)`（归一化到 t=1 时为 1）。
-     *
-     * 为什么是它而不是 bezier：这是**旧版位移用的那条曲线**（手写指数式），它的起手比
-     * `CubicBezier(0,0,0.2,1)` 更慢 —— 走完 10% 的时间只挪了 19%（bezier 是 30%），
-     * 也就是「刚切过去时几乎没动，慢慢才起来」。上一版换成 bezier 之后起手变快了，
-     * 用户反馈「还是不够柔和」，所以换回这条更慢的形状，只是把它提为**唯一的**主曲线，
-     * 透明度与位移都挂在它上面。
-     *
-     * 临界阻尼还有两个好处：**不过冲**（内容不会越过目标再弹回来），且**末端速度为零**
-     * （落位而不是撞停）。
+     * Normalized critically damped response. It starts gently and does not overshoot; the
+     * remaining velocity near the end is small enough to read as a settle rather than a stop.
      */
     val EASING: Easing = Easing { fraction -> criticalDamped(fraction) }
 
-    /** 归一化的临界阻尼响应；k=8 是旧版那条曲线用的常数。 */
+    /** Critically damped response normalized to reach 1 at the end. */
     private fun criticalDamped(t: Float): Float {
         if (t <= 0f) return 0f
         if (t >= 1f) return 1f
@@ -138,20 +113,10 @@ internal object ConversationEntrance {
         return (value / end).coerceIn(0f, 1f)
     }
 
-    /**
-     * 透明度：主进度**提前一点**收尾（×1.15），但仍由同一条主曲线派生 —— 不再叠第二条曲线。
-     *
-     * **1.15 是逐点比过旧曲线（0.8.554 的 `fade(3p)`）算出来的**：新曲线在每个时刻的显现量
-     * 都 ≤ 旧曲线，显现收尾从 100ms 推到 **205ms**（450ms 里的 ~46%）。
-     */
+    /** Opacity finishes just before the spatial settle, leaving a small, readable tail. */
     fun alpha(progress: Float): Float = (progress * 1.15f).coerceIn(0f, 1f)
 
-    /**
-     * 剩余位移：1 − 主进度。
-     *
-     * 与主曲线同一条时间性格，且**到点时速度为零**（主曲线末端导数为 0）⇒ 内容是「落位」，
-     * 不是「撞到位再停」。
-     */
+    /** Remaining travel follows the same curve as opacity, with no second timing clock. */
     fun remainingTravel(progress: Float): Float = 1f - progress.coerceIn(0f, 1f)
 }
 

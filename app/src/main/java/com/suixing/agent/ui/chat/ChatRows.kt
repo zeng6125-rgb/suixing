@@ -33,6 +33,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
@@ -54,6 +55,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -727,7 +733,10 @@ internal fun needsTimeLabel(previous: StoredMessage?, current: StoredMessage): B
  */
 @Composable
 internal fun LoadingSkeleton() {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().semantics(mergeDescendants = true) {
+        liveRegion = LiveRegionMode.Polite
+        progressBarRangeInfo = ProgressBarRangeInfo.Indeterminate
+    }, contentAlignment = Alignment.Center) {
         Text(
             text = "加载会话中…",
             style = MaterialTheme.typography.bodyMedium,
@@ -742,7 +751,12 @@ internal fun LoadingSkeleton() {
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun EmptyHero(onPick: (String) -> Unit, assistant: Assistant? = null) {
+internal fun EmptyHero(
+    onPick: (String) -> Unit,
+    assistant: Assistant? = null,
+    modelConfigured: Boolean = true,
+    onOpenSettings: (() -> Unit)? = null,
+) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -799,10 +813,14 @@ internal fun EmptyHero(onPick: (String) -> Unit, assistant: Assistant? = null) {
         }
         Spacer(Modifier.height(16.dp))
         Text(
-            text = "首次使用请先到「能力」页打开权限。",
+            text = if (modelConfigured) "建议会先填入输入框，手机操作权限按需开启。"
+                else "先在设置中添加模型，即可开始聊天。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (!modelConfigured && onOpenSettings != null) {
+            TextButton(onClick = onOpenSettings) { Text("打开设置") }
+        }
     }
 }
 

@@ -30,11 +30,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,9 +48,12 @@ import com.suixing.agent.data.TODO_PENDING
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SuixingDialog
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The agent's task board: what was promised, what is moving, what landed.
@@ -61,26 +64,50 @@ import kotlinx.coroutines.withContext
  */
 @Composable
 fun TasksScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val context = LocalContext.current.applicationContext
     var items by remember { mutableStateOf<List<TodoItem>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
+    val writer = Core.todoWriteQueue
+    val screenActive = remember { AtomicBoolean(true) }
+    DisposableEffect(Unit) {
+        onDispose { screenActive.set(false) }
+    }
     // 长按不再直接删：先记下目标，确认弹窗点「删除」才真的写回。
     var pendingDelete by remember { mutableStateOf<TodoItem?>(null) }
     LaunchedEffect(Unit) {
+        writer.awaitIdle()
         items = withContext(Dispatchers.IO) { Core.todos.read() }
         loaded = true
     }
     val save: (List<TodoItem>) -> Unit = { next ->
-        val previous = items
         items = next
-        scope.launch {
-            runCatching { withContext(Dispatchers.IO) { Core.todos.write(next) } }
-                .onFailure {
-                    // 回滚 + 说出来：以前界面已经改成新样子、磁盘没改，用户以为存上了。
-                    items = previous
-                    Toast.makeText(context, "保存失败：${it.message ?: "未知错误"}", Toast.LENGTH_SHORT).show()
+        // Reserve the revision before dispatch. The shared app queue survives this screen, and
+        // failure recovery only touches this UI if no newer intent has replaced the request.
+        val request = writer.submit(next)
+        Core.appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                writer.commit(request)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (!screenActive.get() || !writer.isCurrent(request)) return@launch
+                val persisted = try {
+                    withContext(Dispatchers.IO) { Core.todos.read() }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
                 }
+                withContext(Dispatchers.Main.immediate) {
+                    if (!screenActive.get() || !writer.isCurrent(request)) return@withContext
+                    if (persisted != null) items = persisted
+                    Toast.makeText(
+                        context,
+                        "保存失败：${failure.message ?: "未知错误"}",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
         }
     }
     // 分组只算一次：todoGroup 是 LazyListScope 扩展，它的内容 lambda 不是 @Composable，

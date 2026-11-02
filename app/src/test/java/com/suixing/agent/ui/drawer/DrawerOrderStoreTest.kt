@@ -4,6 +4,7 @@ import android.content.Context
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -41,17 +42,32 @@ class DrawerOrderStoreTest {
         assertEquals(listOf("n1", "n2"), loaded.normal)
     }
 
-    @Test fun `a corrupt main file falls back to an empty order`() = runBlocking {
+    @Test fun `a corrupt main file falls back to a valid temp snapshot`() = runBlocking {
         val dir = tmp.newFolder("files3")
         File(dir, "drawer-order").writeText("{not json")
+        File(dir, "drawer-order.tmp").writeText("""{"pinned":["recovered"],"normal":["n1"]}""")
         val loaded = storeIn(dir).load()
-        assertTrue(loaded.pinned.isEmpty() && loaded.normal.isEmpty())
+        assertEquals(listOf("recovered"), loaded.pinned)
+        assertEquals(listOf("n1"), loaded.normal)
     }
 
     @Test fun `saving leaves no temp file behind`() = runBlocking {
         val dir = tmp.newFolder("files4")
         storeIn(dir).save(DrawerOrder(normal = listOf("x")))
         assertTrue("成功写入后不该留下 .tmp", !File(dir, "drawer-order.tmp").exists())
+    }
+
+    @Test fun `a failed atomic write is reported and can be retried`() = runBlocking {
+        val parent = tmp.newFolder("blocked-parent")
+        val notDirectory = File(parent, "not-a-directory").apply { writeText("block") }
+        val store = storeIn(notDirectory)
+        val order = DrawerOrder(pinned = listOf("p"), normal = listOf("n"))
+
+        assertFalse("failed replacement must not report success", store.save(order))
+        assertTrue(notDirectory.delete())
+        assertTrue(notDirectory.mkdir())
+        assertTrue("a failed revision must not poison later writes", store.save(order))
+        assertEquals(order, storeIn(notDirectory).load())
     }
 }
 

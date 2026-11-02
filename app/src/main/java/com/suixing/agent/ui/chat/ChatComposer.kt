@@ -1130,10 +1130,7 @@ internal fun Composer(
                             .onFocusChanged { focus ->
                                 if (focus.isFocused) onFocused()
                             },
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(
-                            fontSize = 16.sp,
-                            color = scheme.onSurface,
-                        ),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
                         cursorBrush = SolidColor(scheme.primary),
                         maxLines = 5,
                         // Enter sends — and while a run is live it sends the line to that
@@ -1188,7 +1185,7 @@ internal fun Composer(
                                             running -> "插一句话…"
                                             else -> "让随行做点什么…"
                                         },
-                                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
+                                        style = MaterialTheme.typography.bodyLarge,
                                         color = scheme.onSurfaceVariant,
                                     )
                                 }
@@ -1200,6 +1197,185 @@ internal fun Composer(
                     // live under the text now. 48dp of content, not 44: the buttons carry
                     // a 48dp minimum touch target, and a shorter row squeezed them into
                     // ellipses with the circle clipped to a 40x36 box.
+                    val leadingControls: @Composable () -> Unit = {
+                        var plusAnchorLeft by remember { mutableStateOf(0f) }
+                        var plusWidth by remember { mutableStateOf(0) }
+                        Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
+                            IconButton(
+                                onClick = { sheetOpen = false; approvalOpen = false; menuOpen = true },
+                                // 36dp around the glyph's original 22dp. What the eye measures is the
+                                // glyph's distance to the capsule's edge (the row's 10dp plus this box's
+                                // 7dp) and to the glyph beside it (7 + 0 + 8 = 15dp), and both are set by
+                                // this one number — so it is chosen once rather than tuned twice: at
+                                // 40dp the pair would sit 19dp apart, outside the 14–16dp asked for. The
+                                // 「不要浪费空间」 the user pointed at was the 11dp a side that the 44dp
+                                // box carried; this one carries 7dp.
+                                modifier = Modifier.size(36.dp),
+                            ) {
+                                Icon(
+                                    imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
+                                    contentDescription = "添加图片或文件",
+                                    tint = scheme.onSurfaceVariant,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                            // The same card as the model sheet: one popup style for the whole
+                            // screen, instead of a Material dropdown here and a card there.
+                            MenuCard(
+                                visible = menuOpen,
+                                scrim = false,
+                                onDismiss = { menuOpen = false },
+                                // Opens upward from the button it belongs to. BottomStart puts the
+                                // popup's bottom edge on the anchor's bottom edge, and the anchor is the
+                                // button's own 36dp box — so the offset clears that box plus the 8dp of
+                                // air the card is meant to leave above it (-8dp alone left the card
+                                // sitting on the button).
+                                alignment = Alignment.BottomStart,
+                                offset = with(density) {
+                                    IntOffset(
+                                        popupNudge(
+                                            anchorLeft = plusAnchorLeft,
+                                            width = plusWidth,
+                                            windowPx = screenWidthPx,
+                                            edgePx = popupEdgePx,
+                                        ).roundToInt(),
+                                        -44.dp.roundToPx(),
+                                    )
+                                },
+                                // Same reason as the model sheet: this card hangs off a button of
+                                // the composer too, and a focusable popup here would move the
+                                // composer out from under it.
+                                focusable = false,
+                                modifier = Modifier
+                                    .widthIn(max = popupCap(200.dp, windowWidth))
+                                    .onSizeChanged { plusWidth = it.width },
+                            ) {
+                                MenuItemRow(
+                                    icon = ImageVector.vectorResource(R.drawable.ic_image),
+                                    label = "图片",
+                                    onClick = {
+                                        menuOpen = false
+                                        onPickImage()
+                                    },
+                                )
+                                MenuItemRow(
+                                    icon = ImageVector.vectorResource(R.drawable.ic_camera),
+                                    label = "拍照",
+                                    onClick = {
+                                        menuOpen = false
+                                        onTakePhoto()
+                                    },
+                                )
+                                MenuItemRow(
+                                    icon = ImageVector.vectorResource(R.drawable.ic_file),
+                                    label = "文件",
+                                    onClick = {
+                                        menuOpen = false
+                                        onPickFile()
+                                    },
+                                )
+                                // Always listed: the entry disappearing between runs made users
+                                // think the feature was gone. With no run in flight the engine
+                                // refuses and the toast says why — a visible refusal beats a
+                                // missing menu item.
+                                MenuItemRow(
+                                    icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
+                                    label = "压缩上下文",
+                                    onClick = {
+                                        menuOpen = false
+                                        val asked = onRequestCompress()
+                                        if (asked) {
+                                            Toast.makeText(ctx, "已请求压缩，本轮结束后生效", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            // 没有 run：**真的压一次**，并且状态行会显示「正在压缩上下文」。
+                                            // 以前这里只弹一句 toast，什么也没压（用户：「点了没反应」）。
+                                            onCompressNow()
+                                            Toast.makeText(ctx, "正在压缩上下文…", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                        // 工具审批, right of the add button: the same choice the settings page
+                        // offers (自动运行 / 每次询问 / 禁止), one tap from the field it governs —
+                        // asking for approval is a decision about the question being typed, and
+                        // walking to 设置 mid-thought is how the setting stayed on whatever it was.
+                        // The icon is the mode itself, so the row says which one is in force without
+                        // being opened: a tick when it runs on its own, a shield while it asks, an
+                        // alert shield when it refuses.
+                        Box(
+                            Modifier.onGloballyPositioned {
+                                approvalAnchorLeft = it.boundsInWindow().left
+                            },
+                        ) {
+                            IconButton(
+                                onClick = { menuOpen = false; sheetOpen = false; approvalOpen = true },
+                                // Same 36dp box and the same glyph size as the 「+」 beside it: the two are
+                                // one visual group on the row's left, so they are measured together.
+                                modifier = Modifier.size(36.dp),
+                            ) {
+                                Icon(
+                                    imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
+                                    contentDescription = "工具审批：${approvalMode.label}",
+                                    tint = when (approvalMode) {
+                                        ApprovalMode.DENY -> scheme.error
+                                        ApprovalMode.AUTO -> scheme.primary
+                                        else -> scheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            MenuCard(
+                                visible = approvalOpen,
+                                scrim = false,
+                                onDismiss = { approvalOpen = false },
+                                alignment = Alignment.BottomStart,
+                                offset = with(density) {
+                                    IntOffset(
+                                        popupNudge(
+                                            anchorLeft = approvalAnchorLeft,
+                                            width = approvalWidth,
+                                            windowPx = screenWidthPx,
+                                            edgePx = popupEdgePx,
+                                        ).roundToInt(),
+                                        -44.dp.roundToPx(),
+                                    )
+                                },
+                                focusable = false,
+                                modifier = Modifier
+                                    .widthIn(max = popupCap(220.dp, windowWidth))
+                                    .onSizeChanged { approvalWidth = it.width },
+                            ) {
+                                ApprovalMode.entries.forEach { mode ->
+                                    MenuItemRow(
+                                        icon = ImageVector.vectorResource(approvalIcon(mode)),
+                                        label = mode.label,
+                                        selected = mode == approvalMode,
+                                        onClick = {
+                                            approvalOpen = false
+                                            onPickApproval(mode)
+                                        },
+                                    )
+                                }
+                                // The mode is read when a run starts (see ApprovalGate), so saying
+                                // so here is the difference between a setting and a surprise.
+                                Text(
+                                    text = "下一次任务生效",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
+                                )
+                            }
+                        }
+                        subagentChatId?.let { SubagentStatusAction(it) }
+                    }
+                    val compactControls = windowWidth < 360.dp || density.fontScale >= 1.3f || settings.fontScale >= 3
+                    if (compactControls) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 10.dp, end = 12.dp).height(48.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) { leadingControls() }
+                    }
                     Row(
                         modifier = Modifier
                             // 10dp, and the box beside it adds 7dp more (a 36dp box around a 22dp
@@ -1216,176 +1392,7 @@ internal fun Composer(
                     // The anchor's own left edge and the card's width, both measured: the card opens
                     // to the right of this button, and on a window narrower than the button plus
                     // the card it used to hang off the screen's right edge.
-                    var plusAnchorLeft by remember { mutableStateOf(0f) }
-                    var plusWidth by remember { mutableStateOf(0) }
-                    Box(Modifier.onGloballyPositioned { plusAnchorLeft = it.boundsInWindow().left }) {
-                        IconButton(
-                            onClick = { sheetOpen = false; approvalOpen = false; menuOpen = true },
-                            // 36dp around the glyph's original 22dp. What the eye measures is the
-                            // glyph's distance to the capsule's edge (the row's 10dp plus this box's
-                            // 7dp) and to the glyph beside it (7 + 0 + 8 = 15dp), and both are set by
-                            // this one number — so it is chosen once rather than tuned twice: at
-                            // 40dp the pair would sit 19dp apart, outside the 14–16dp asked for. The
-                            // 「不要浪费空间」 the user pointed at was the 11dp a side that the 44dp
-                            // box carried; this one carries 7dp.
-                            modifier = Modifier.size(36.dp),
-                        ) {
-                            Icon(
-                                imageVector = ImageVector.vectorResource(R.drawable.ic_plus),
-                                contentDescription = "添加图片或文件",
-                                tint = scheme.onSurfaceVariant,
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
-                        // The same card as the model sheet: one popup style for the whole
-                        // screen, instead of a Material dropdown here and a card there.
-                        MenuCard(
-                            visible = menuOpen,
-                            scrim = false,
-                            onDismiss = { menuOpen = false },
-                            // Opens upward from the button it belongs to. BottomStart puts the
-                            // popup's bottom edge on the anchor's bottom edge, and the anchor is the
-                            // button's own 36dp box — so the offset clears that box plus the 8dp of
-                            // air the card is meant to leave above it (-8dp alone left the card
-                            // sitting on the button).
-                            alignment = Alignment.BottomStart,
-                            offset = with(density) {
-                                IntOffset(
-                                    popupNudge(
-                                        anchorLeft = plusAnchorLeft,
-                                        width = plusWidth,
-                                        windowPx = screenWidthPx,
-                                        edgePx = popupEdgePx,
-                                    ).roundToInt(),
-                                    -44.dp.roundToPx(),
-                                )
-                            },
-                            // Same reason as the model sheet: this card hangs off a button of
-                            // the composer too, and a focusable popup here would move the
-                            // composer out from under it.
-                            focusable = false,
-                            modifier = Modifier
-                                .widthIn(max = popupCap(200.dp, windowWidth))
-                                .onSizeChanged { plusWidth = it.width },
-                        ) {
-                            MenuItemRow(
-                                icon = ImageVector.vectorResource(R.drawable.ic_image),
-                                label = "图片",
-                                onClick = {
-                                    menuOpen = false
-                                    onPickImage()
-                                },
-                            )
-                            MenuItemRow(
-                                icon = ImageVector.vectorResource(R.drawable.ic_camera),
-                                label = "拍照",
-                                onClick = {
-                                    menuOpen = false
-                                    onTakePhoto()
-                                },
-                            )
-                            MenuItemRow(
-                                icon = ImageVector.vectorResource(R.drawable.ic_file),
-                                label = "文件",
-                                onClick = {
-                                    menuOpen = false
-                                    onPickFile()
-                                },
-                            )
-                            // Always listed: the entry disappearing between runs made users
-                            // think the feature was gone. With no run in flight the engine
-                            // refuses and the toast says why — a visible refusal beats a
-                            // missing menu item.
-                            MenuItemRow(
-                                icon = ImageVector.vectorResource(R.drawable.ic_minimize_2),
-                                label = "压缩上下文",
-                                onClick = {
-                                    menuOpen = false
-                                    val asked = onRequestCompress()
-                                    if (asked) {
-                                        Toast.makeText(ctx, "已请求压缩，本轮结束后生效", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        // 没有 run：**真的压一次**，并且状态行会显示「正在压缩上下文」。
-                                        // 以前这里只弹一句 toast，什么也没压（用户：「点了没反应」）。
-                                        onCompressNow()
-                                        Toast.makeText(ctx, "正在压缩上下文…", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                            )
-                        }
-                    }
-                    // 工具审批, right of the add button: the same choice the settings page
-                    // offers (自动运行 / 每次询问 / 禁止), one tap from the field it governs —
-                    // asking for approval is a decision about the question being typed, and
-                    // walking to 设置 mid-thought is how the setting stayed on whatever it was.
-                    // The icon is the mode itself, so the row says which one is in force without
-                    // being opened: a tick when it runs on its own, a shield while it asks, an
-                    // alert shield when it refuses.
-                    Box(
-                        Modifier.onGloballyPositioned {
-                            approvalAnchorLeft = it.boundsInWindow().left
-                        },
-                    ) {
-                        IconButton(
-                            onClick = { menuOpen = false; sheetOpen = false; approvalOpen = true },
-                            // Same 36dp box and the same glyph size as the 「+」 beside it: the two are
-                            // one visual group on the row's left, so they are measured together.
-                            modifier = Modifier.size(36.dp),
-                        ) {
-                            Icon(
-                                imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
-                                contentDescription = "工具审批：${approvalMode.label}",
-                                tint = when (approvalMode) {
-                                    ApprovalMode.DENY -> scheme.error
-                                    ApprovalMode.AUTO -> scheme.primary
-                                    else -> scheme.onSurfaceVariant
-                                },
-                                modifier = Modifier.size(20.dp),
-                            )
-                        }
-                        MenuCard(
-                            visible = approvalOpen,
-                            scrim = false,
-                            onDismiss = { approvalOpen = false },
-                            alignment = Alignment.BottomStart,
-                            offset = with(density) {
-                                IntOffset(
-                                    popupNudge(
-                                        anchorLeft = approvalAnchorLeft,
-                                        width = approvalWidth,
-                                        windowPx = screenWidthPx,
-                                        edgePx = popupEdgePx,
-                                    ).roundToInt(),
-                                    -44.dp.roundToPx(),
-                                )
-                            },
-                            focusable = false,
-                            modifier = Modifier
-                                .widthIn(max = popupCap(220.dp, windowWidth))
-                                .onSizeChanged { approvalWidth = it.width },
-                        ) {
-                            ApprovalMode.entries.forEach { mode ->
-                                MenuItemRow(
-                                    icon = ImageVector.vectorResource(approvalIcon(mode)),
-                                    label = mode.label,
-                                    selected = mode == approvalMode,
-                                    onClick = {
-                                        approvalOpen = false
-                                        onPickApproval(mode)
-                                    },
-                                )
-                            }
-                            // The mode is read when a run starts (see ApprovalGate), so saying
-                            // so here is the difference between a setting and a surprise.
-                            Text(
-                                text = "下一次任务生效",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = scheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
-                            )
-                        }
-                    }
-                    subagentChatId?.let { SubagentStatusAction(it) }
+                    if (!compactControls) leadingControls()
                     // One selector for both decisions: the model and the reasoning
                     // level live together in the 生成设置 sheet, so the row keeps a
                     // single caption instead of two competing ones.
@@ -1480,7 +1487,7 @@ internal fun Composer(
                         ) {
                             Icon(
                                 ImageVector.vectorResource(R.drawable.ic_mic),
-                                contentDescription = "语音输入",
+                                contentDescription = if (running) "语音输入，正在生成时不可录音" else "语音输入",
                                 tint = scheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp),
                             )
