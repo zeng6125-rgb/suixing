@@ -22,6 +22,14 @@ import org.junit.Test
  * 唯一能拿到的信号。
  */
 class PluginRuntimeTest {
+    @Test fun `wire tool catalog is independent of plugin and declaration discovery order`() {
+        val first = listOf(spec("z", "read", "edit"), spec("a", "write", "list"))
+        val reordered = listOf(spec("a", "list", "write"), spec("z", "edit", "read"))
+        val expected = PluginRuntime.toolSpecs(first, emptySet())
+        assertEquals(listOf("a_list", "a_write", "z_edit", "z_read"), expected.map { it.name })
+        assertEquals(expected, PluginRuntime.toolSpecs(reordered, emptySet()))
+    }
+
     @Test fun `guard checks deny patterns beyond the UI preview boundary`() {
         val plugin = spec("guard", hooks = listOf(hook(action = "deny", regex = "protected-tail")))
         val verdict = PluginRuntime.preExecute(PluginRuntime.hooksFor(listOf(plugin)), "run_shell",
@@ -158,7 +166,7 @@ class PluginRuntimeTest {
             spec("plain", "y"),
         )
         assertEquals(
-            listOf("withdeps_x", "plain_y"),
+            listOf("plain_y", "withdeps_x"),
             PluginRuntime.toolSpecs(specs, emptySet()).map { it.name },
         )
     }

@@ -55,6 +55,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
@@ -678,12 +679,12 @@ fun ChatScreen(
     // 初版用 `rowKeys` 是错的 —— 多轮行的 rowKey 只有 `rounds.first().id`（不含 message.id），
     // 于是"末轮换了个 id、首轮没变"这种形态会在键相同的情况下产出不同结果（评审给了反例）。
     // 现在的形状 = 每行的 (message.id, 全部轮次 id)；比较时全是同一批 String 实例，走引用短路。
-    // 键直接用 [visible] 本身（issue #56 R25）：它是 `remember(visibleShape)` 的稳定实例，
-    // 引用比较即可；而原来那条 shape 每个形状变化都要分配 1 个 Pair + N 个 List，
-    // 只是为了省掉 `placeCheckpoints` 本身 O(rows + checkpoints) 的遍历 —— 净收益接近零。
-    val checkpointsByRow = remember(state.checkpoints, visible) {
-        placeCheckpoints(visible, state.checkpoints)
-    }
+    // [visible] 作为 `remember` 键会通过 equals 判断是否变化，非空时保持原有结果缓存路径。
+    // 空 checkpoint 的结果固定为空，因此直接返回，省去 `remember` 对 `visible` 的比较。
+    val checkpointsByRow =
+        if (state.checkpoints.isEmpty()) emptyMap() else remember(state.checkpoints, visible) {
+            placeCheckpoints(visible, state.checkpoints)
+        }
     // 压缩的告知就是过程区里那一块（[CompressionBlock]，位置就是它发生的地方），不再往气泡
     // 下面塞一行提示（用户：「不需要这种在卡片下的提示」）。
     val liveStatusText = state.status.ifBlank {
@@ -779,14 +780,19 @@ fun ChatScreen(
     // 每跨一个 item 就变一次，一旦在这里读，整个 ChatScreen（1600 行、几十个 Composable 调用）
     // 就要重跑一遍。把读取推迟到 `TurnScrubber` 内部（见下面 `current = { … }`），
     // 跨边界时只有导航条自己重组。用 `remember` 持有 State 对象而不是 `by` —— `by` 一取就立刻读了。
-    // The list's measured visible rows determine the turn at the 28% reading probe.
-    // Keep the state read inside TurnScrubber so scrolling does not recompose the screen.
-    val currentPhysicalRow = remember(listState) {
-        derivedStateOf {
+    // Derive the turn itself: crossing assistant/tool rows within a turn should not
+    // invalidate the rail. All changing window inputs are keys, never scroll values.
+    val currentReadingTurn = remember(
+        listState, turnIndices, rowOffset, visible.size, page.drawn, page.turns, live,
+    ) {
+        derivedStateOf(structuralEqualityPolicy()) {
             val layout = listState.layoutInfo
             val probe = TurnMarks.probeOffset(layout.viewportStartOffset, layout.viewportEndOffset)
-            layout.visibleItemsInfo.lastOrNull { it.offset <= probe }?.index
+            val physicalIndex = layout.visibleItemsInfo.lastOrNull { it.offset <= probe }?.index
                 ?: layout.visibleItemsInfo.firstOrNull()?.index ?: 0
+            if (live && physicalIndex >= rowOffset + visible.size) {
+                page.turns.coerceAtLeast(1)
+            } else TurnMarks.currentAtRow(physicalIndex, turnIndices, page.drawn, page.turns)
         }
     }
 
@@ -892,20 +898,13 @@ fun ChatScreen(
                 current.messagesRevision == state.messagesRevision && current.activeRuns == state.activeRuns &&
                 current.liveRunId == state.liveRunId && current.runningHere == state.runningHere
         }
-        // **整批一次**（性能审计 改动6）：原来每个邻近行各调一次 `prepareMarkdownTexts`
-        // —— 每次都是一次 `withContext(Dispatchers.Default)` 的线程跳转。滚动帧里
-        // `layoutInfo` 一变就跑一轮，于是**每个滚动帧**都有 O(邻近行数) 次线程跳转，
-        // 外加每行两个临时 List。现在收成一次跳转、一次分发。
+        // **整批一次**（性能审计 改动6）：附近准备窗口变化时，把所有行合为一次
+        // `prepareMarkdownTexts` 调用，避免逐行切到 `Dispatchers.Default`；缓存命中行只遍历
+        // parts，不再创建文本列表。
         val pending = mutableListOf<Pair<String, List<String>>>()
         for (row in rows) {
-            val texts = row.parts.filterIsInstance<Part.Text>().map { it.text }
-            val current = rowDocuments[row.message.id]
-            // issue #56 R22 的结论：这里**已经是 O(1)**，不需要 toSet()。
-            // `rowDocuments` 的值类型是 `Map<String, List<MdBlock>>`（键就是文本），
-            // 所以 `it !in current` 是哈希查键，不是 List 扫描。保持原样。
-            if (current == null || texts.any { it.length >= SettledBlocks.MIN_CHARS && it !in current }) {
-                pending += row.message.id to texts
-            }
+            val texts = markdownTextsToPrepare(row.parts, rowDocuments[row.message.id]) ?: continue
+            pending += row.message.id to texts
         }
         if (pending.isNotEmpty()) {
             // 短文本在 `prepareMarkdownTexts` 内部就被过滤掉（那里有 MIN_CHARS 短路），
@@ -1717,16 +1716,7 @@ fun ChatScreen(
                     // 已加载的轮数用 `page.drawn`（窗口的**定义**）：条数、窗口起点、
                     // 「已加载到第几轮」全按它算，与 `firstDrawnTurn` 同一口径。
                     drawnTurns = page.drawn,
-                    current = {
-                        pendingTurn ?: if (live && currentPhysicalRow.value >= rowOffset + visible.size) {
-                            page.turns.coerceAtLeast(1)
-                        } else TurnMarks.currentAtRow(
-                            physicalIndex = currentPhysicalRow.value,
-                            turnIndices = turnIndices,
-                            drawnTurns = page.drawn,
-                            totalTurns = page.turns,
-                        )
-                    },
+                    current = { pendingTurn ?: currentReadingTurn.value },
                     // 恢复位置及会话入场完成前不做补间，避免高亮从临时轮次向真实轮次下扫。
                     settling = scrubberSettling,
                     modifier = Modifier

@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -15,6 +16,21 @@ import org.junit.Test
  */
 class SettledBlocksTest {
     private fun text(tag: String) = "$tag " + "内容".repeat(300)   // 超过 MIN_CHARS
+
+    @Before fun resetCache() = SettledBlocks.clearForTest()
+
+    private class GuardedBlocks(private val delegate: List<MdBlock>) : AbstractList<MdBlock>() {
+        var rejectReads = false
+        override val size: Int
+            get() {
+                check(!rejectReads) { "cached block tree was traversed again" }
+                return delegate.size
+            }
+        override fun get(index: Int): MdBlock {
+            check(!rejectReads) { "cached block tree was traversed again" }
+            return delegate[index]
+        }
+    }
 
     @Test
     fun `round trips a long text`() {
@@ -87,5 +103,44 @@ class SettledBlocksTest {
     fun `short texts are not looked up either`() {
         // 与 put 对称（评审 S3）：短文本从不入缓存，查找纯属白做。
         assertNull(SettledBlocks.get("短"))
+    }
+
+    @Test
+    fun `cache accounts for source and parsed table contents in its byte budget`() {
+        val text = "| left | right |\n| --- | --- |\n" + "| cell | value |\n".repeat(2_000)
+        val blocks = parseMarkdown(text)
+        assertTrue("parsed table nodes and cells add retained strings", estimateMarkdownCacheBytes(text, blocks) > text.length * 2L)
+        SettledBlocks.put(text, blocks)
+        assertTrue(SettledBlocks.estimatedBytesForTest() <= SettledBlocks.MAX_ESTIMATED_BYTES)
+    }
+
+    @Test
+    fun `a single parsed document larger than the byte budget is returned but not retained`() {
+        val text = "x".repeat(SettledBlocks.MAX_CHARS)
+        val blocks = parseMarkdown(text)
+        assertTrue(estimateMarkdownCacheBytes(text, blocks) > SettledBlocks.MAX_ESTIMATED_BYTES)
+        SettledBlocks.put(text, blocks)
+        assertNull(SettledBlocks.get(text))
+    }
+
+    @Test
+    fun `putting the identical blocks only touches LRU without traversing the tree`() {
+        val texts = (0 until SettledBlocks.CAPACITY).map { text("same-$it") }
+        val firstBlocks = GuardedBlocks(parseMarkdown(texts.first()))
+        SettledBlocks.put(texts.first(), firstBlocks)
+        firstBlocks.rejectReads = true
+        texts.drop(1).forEach { SettledBlocks.put(it, parseMarkdown(it)) }
+
+        val sizeBeforeTouch = SettledBlocks.sizeForTest()
+        val bytesBeforeTouch = SettledBlocks.estimatedBytesForTest()
+        SettledBlocks.put(texts.first(), firstBlocks)
+        assertEquals(sizeBeforeTouch, SettledBlocks.sizeForTest())
+        assertEquals(bytesBeforeTouch, SettledBlocks.estimatedBytesForTest())
+        assertSame(firstBlocks, SettledBlocks.get(texts.first()))
+
+        val extra = text("same-extra")
+        SettledBlocks.put(extra, parseMarkdown(extra))
+        assertNull("the put should refresh the first entry's LRU position", SettledBlocks.get(texts[1]))
+        assertEquals(SettledBlocks.CAPACITY, SettledBlocks.sizeForTest())
     }
 }

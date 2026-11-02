@@ -152,15 +152,25 @@ internal data class ScrubberTickStyle(
     val color: Color,
 )
 
+/** Independent reads keep colour animation from invalidating the tick's transform. */
+internal class ScrubberTickAnimation(
+    val width: State<Float>,
+    val height: State<Float>,
+    val color: State<Color>,
+)
+
 /** Settling discards the old animations; normal reading starts from the current target. */
 @Composable
 internal fun scrubberTickStyle(
     conversationId: String,
     target: ScrubberTickStyle,
     settling: Boolean,
-): State<ScrubberTickStyle> = key(conversationId) {
+): ScrubberTickAnimation = key(conversationId) {
     if (settling) {
-        rememberUpdatedState(target)
+        val width = rememberUpdatedState(target.width)
+        val height = rememberUpdatedState(target.height)
+        val color = rememberUpdatedState(target.color)
+        remember(width, height, color) { ScrubberTickAnimation(width, height, color) }
     } else {
         val animatedWidth = animateFloatAsState(
             target.width, spring(dampingRatio = 0.86f, stiffness = 800f), label = "turn_width")
@@ -168,10 +178,10 @@ internal fun scrubberTickStyle(
             target.height, spring(dampingRatio = 0.9f, stiffness = 900f), label = "turn_height")
         val animatedColor = animateColorAsState(
             target.color, tween(120, easing = SCRUBBER_EASING), label = "turn_color")
-        // Do not subscribe the rail's composition to every tick of all twelve animations.
-        // The caller samples this state only from graphicsLayer/drawBehind.
-        remember {
-            derivedStateOf { ScrubberTickStyle(animatedWidth.value, animatedHeight.value, animatedColor.value) }
+        // Read only dimensions in graphicsLayer and colour in drawBehind. Avoid a
+        // combined derived value that allocates and invalidates both on every frame.
+        remember(animatedWidth, animatedHeight, animatedColor) {
+            ScrubberTickAnimation(animatedWidth, animatedHeight, animatedColor)
         }
     }
 }
@@ -579,14 +589,13 @@ internal fun TurnScrubber(
                             .width(20.dp)
                             .height(3.dp)
                             .graphicsLayer {
-                                val style = tickStyle.value
                                 val scale = rowScales.value(turn)
-                                scaleX = minOf(style.width * scale, SCRUBBER_RAIL.value) / 20f
-                                scaleY = style.height / 3f * scale
+                                scaleX = minOf(tickStyle.width.value * scale, SCRUBBER_RAIL.value) / 20f
+                                scaleY = tickStyle.height.value / 3f * scale
                                 transformOrigin = TransformOrigin.Center
                             }
                             .clip(ScrubTickShape)
-                            .drawBehind { drawRect(tickStyle.value.color) },
+                            .drawBehind { drawRect(tickStyle.color.value) },
                     )
                 }
             }

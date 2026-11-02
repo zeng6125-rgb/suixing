@@ -161,7 +161,8 @@ object PluginRuntime {
                 parameters = normalizeSchema(decl.parameters),
             )
         }
-        return out
+        // Preserve duplicate resolution above, but make the wire catalog independent of disk order.
+        return out.sortedBy { it.name }
     }
 
     /**

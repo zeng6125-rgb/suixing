@@ -149,6 +149,8 @@ fun JsonObject.bool(key: String, fallback: Boolean): Boolean =
 class ToolRegistry private constructor() {
     private val builtin = LinkedHashMap<String, Tool>()
     private val dynamic = LinkedHashMap<String, Tool>()
+    private var visibleSnapshot: List<Tool>? = null
+    private var summarySnapshot: String? = null
 
     /** 工具名 → 分组名，由 [add] 在注册时记下（见 [groupOf]）。 */
     private val groups = LinkedHashMap<String, String>()
@@ -184,6 +186,8 @@ class ToolRegistry private constructor() {
 
     @Synchronized
     fun add(group: ToolGroup) {
+        visibleSnapshot = null
+        summarySnapshot = null
         for (spec in group.specs) {
             check(!builtin.containsKey(spec.name)) { "工具名重复：${spec.name}" }
             builtin[spec.name] = object : Tool {
@@ -209,6 +213,8 @@ class ToolRegistry private constructor() {
      */
     @Synchronized
     fun replaceDynamic(prefix: String, tools: List<Tool>) {
+        visibleSnapshot = null
+        summarySnapshot = null
         dynamic.keys.removeAll { it.startsWith(prefix) }
         for (tool in tools) {
             check(!builtin.containsKey(tool.spec.name)) { "工具名与内置工具冲突：${tool.spec.name}" }
@@ -232,7 +238,8 @@ class ToolRegistry private constructor() {
 
     @Synchronized
     fun all(): List<Tool> =
-        (builtin.values + dynamic.values).filter { it.spec.name !in hidden }
+        visibleSnapshot ?: (builtin.values + dynamic.values.sortedBy { it.spec.name })
+            .filter { it.spec.name !in hidden }.also { visibleSnapshot = it }
 
     fun isHidden(name: String): Boolean = name in hidden
 
@@ -243,5 +250,8 @@ class ToolRegistry private constructor() {
     fun names(): List<String> = all().map { it.spec.name }
 
     /** One-line-per-tool summary injected into the system prompt. */
-    fun promptSummary(): String = all().joinToString("\n") { "- ${it.spec.name}: ${it.spec.description}" }
+    @Synchronized
+    fun promptSummary(): String = summarySnapshot ?: all()
+        .joinToString("\n") { "- ${it.spec.name}: ${it.spec.description}" }
+        .also { summarySnapshot = it }
 }

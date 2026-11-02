@@ -22,18 +22,19 @@ class NavigationLandingTest {
         assertTrue(negative.lastRequested >= -8f)
     }
 
-    @Test fun `large errors and slow frames stay within a screen speed budget`() {
+    @Test fun `large errors use the far speed cap and slow frames remain time capped`() {
         val huge = FakeNavigationScope(targetIndex = 20, targetVisible = true, exactDistance = 1_000_000)
         val hugeController = NavigationLandingController(targetIndex = 20, targetOffset = 0)
         assertEquals(NavigationFrameResult.Continue, hugeController.scrollFrame(huge, FRAME_60_HZ, 1_000))
         assertTrue(huge.lastRequested > 0f)
-        // Far travel uses the 18 viewport/s cap: 16_666_667 ns is slightly over 1/60 s.
-        assertEquals(300f, huge.lastRequested, 0.001f)
+        // Far travel uses the 72 viewport/s cap: 16_666_667 ns is slightly over 1/60 s.
+        assertEquals(1_200f, huge.lastRequested, 0.001f)
 
         val slow = FakeNavigationScope(targetIndex = 20, targetVisible = true, exactDistance = 1_000_000)
         val slowController = NavigationLandingController(targetIndex = 20, targetOffset = 0)
         assertEquals(NavigationFrameResult.Continue, slowController.scrollFrame(slow, 100_000_000L, 1_000))
-        assertEquals(576f, slow.lastRequested, 0.001f)
+        // Frame deltas are capped at 32ms, so 72,000px/s permits at most 2,304px here.
+        assertEquals(2_304f, slow.lastRequested, 0.001f)
         assertTrue(slow.lastRequested > huge.lastRequested)
     }
 

@@ -10,23 +10,22 @@ import org.junit.Test
 /** Measure controller time in simulated frames, keeping the lazy-list geometry fixed. */
 class NavigationTravelDurationTest {
     @Test fun `simulated baseline covers close and long distances at both refresh rates`() {
-        val measurements = listOf(60, 120).associateWith { refreshRate ->
-            DISTANCES_IN_VIEWPORTS.associateWith { distance ->
-                measureTravel(distance, refreshRate, direction = 1)
+        for (refreshRate in REFRESH_RATES) {
+            for (direction in listOf(-1, 1)) {
+                val byDistance = DISTANCES_IN_VIEWPORTS.associateWith { distance ->
+                    measureTravel(distance, refreshRate, direction)
+                }
+                println(
+                    "Navigation simulated durations at ${refreshRate}Hz direction=$direction: " +
+                        byDistance.entries.joinToString { (distance, result) ->
+                            "${distance}vp=${"%.3f".format(result.elapsedSeconds)}s"
+                        },
+                )
+                assertEquals(DISTANCES_IN_VIEWPORTS, byDistance.keys.toList())
+                assertTrue(byDistance.values.zipWithNext().all { (nearer, farther) ->
+                    farther.elapsedSeconds >= nearer.elapsedSeconds
+                })
             }
-        }
-
-        measurements.forEach { (refreshRate, byDistance) ->
-            println(
-                "Navigation simulated durations at ${refreshRate}Hz: " +
-                    byDistance.entries.joinToString { (distance, result) ->
-                        "${distance}vp=${"%.3f".format(result.elapsedSeconds)}s"
-                    },
-            )
-            assertEquals(DISTANCES_IN_VIEWPORTS, byDistance.keys.toList())
-            assertTrue(byDistance.values.zipWithNext().all { (nearer, farther) ->
-                farther.elapsedSeconds >= nearer.elapsedSeconds
-            })
         }
     }
 
@@ -43,27 +42,35 @@ class NavigationTravelDurationTest {
         }
     }
 
-    @Test fun `far travel shortens by at least fifteen percent without an extreme speedup`() {
+    @Test fun `far travel speeds up progressively without an extreme speedup`() {
         for (refreshRate in REFRESH_RATES) {
-            for (distance in listOf(20f, 50f)) {
+            val speedupRatios = mutableListOf<Float>()
+            for (distance in listOf(50f, 100f, 200f, 300f)) {
                 val measured = measureTravel(distance, refreshRate, direction = 1)
-                val baseline = baselineSeconds(refreshRate, distance)
+                val baseline = PREVIOUS_PROFILE_SECONDS.getValue(refreshRate).getValue(distance)
+                val ratio = measured.elapsedSeconds / baseline
+                speedupRatios += ratio
                 assertTrue(
-                    "${distance}vp at ${refreshRate}Hz took ${measured.elapsedSeconds}s; baseline=$baseline",
-                    measured.elapsedSeconds <= baseline * 0.85f,
+                    "${distance}vp at ${refreshRate}Hz took ${measured.elapsedSeconds}s; " +
+                        "previous profile=$baseline",
+                    ratio <= MAX_PROFILE_RATIO.getValue(distance),
                 )
                 assertTrue(
-                    "${distance}vp at ${refreshRate}Hz sped up beyond the intended range: " +
-                        "${measured.elapsedSeconds}s; baseline=$baseline",
-                    measured.elapsedSeconds >= baseline * 0.70f,
+                    "${distance}vp at ${refreshRate}Hz sped up too far: " +
+                        "${measured.elapsedSeconds}s; previous profile=$baseline",
+                    ratio >= MIN_PROFILE_RATIO,
                 )
             }
+            assertTrue(
+                "longer distances should use progressively more of the far-speed profile: $speedupRatios",
+                speedupRatios.zipWithNext().all { (nearer, farther) -> farther < nearer },
+            )
         }
     }
 
     @Test fun `travel stays directional and lands precisely at both refresh rates`() {
         for (refreshRate in REFRESH_RATES) {
-            for (distance in listOf(20f, 50f)) {
+            for (distance in listOf(50f, 100f, 200f, 300f)) {
                 for (direction in listOf(-1, 1)) {
                     val result = measureTravel(distance, refreshRate, direction)
                     assertEquals(NavigationFrameResult.Arrived, result.result)
@@ -72,6 +79,7 @@ class NavigationTravelDurationTest {
                     assertTrue(result.remainingDistances.all { it * direction >= 0 })
                     assertTrue(result.snapCalls == 0)
                     assertTrue(abs(result.requestedMoves.last()) <= 1f)
+                    assertTrue(result.requestedMoves.takeLast(4).all { abs(it) <= 3f })
                 }
             }
         }
@@ -79,7 +87,7 @@ class NavigationTravelDurationTest {
 
     @Test fun `the original twelve viewport speed cap remains for the final two viewports`() {
         for (refreshRate in REFRESH_RATES) {
-            for (distance in listOf(5f, 10f, 20f, 50f)) {
+            for (distance in listOf(5f, 10f, 20f, 50f, 100f, 200f, 300f)) {
                 val result = measureTravel(distance, refreshRate, direction = 1)
                 assertTrue(
                     "${distance}vp at ${refreshRate}Hz exceeded the close-range cap: " +
@@ -205,7 +213,28 @@ class NavigationTravelDurationTest {
         const val MAX_MEASUREMENT_SECONDS = 12
         const val NANOS_PER_SECOND = 1_000_000_000f
         val REFRESH_RATES = listOf(60, 120)
-        val DISTANCES_IN_VIEWPORTS = listOf(0.6f, 2f, 5f, 10f, 20f, 50f)
+        val DISTANCES_IN_VIEWPORTS = listOf(0.6f, 2f, 5f, 10f, 20f, 50f, 100f, 200f, 300f)
+        const val MIN_PROFILE_RATIO = 0.38f
+        val MAX_PROFILE_RATIO = mapOf(
+            50f to 0.84f,
+            100f to 0.70f,
+            200f to 0.52f,
+            300f to 0.45f,
+        )
+        val PREVIOUS_PROFILE_SECONDS = mapOf(
+            60 to mapOf(
+                50f to 3.517f,
+                100f to 6.300f,
+                200f to 11.850f,
+                300f to 17.400f,
+            ),
+            120 to mapOf(
+                50f to 3.525f,
+                100f to 6.300f,
+                200f to 11.867f,
+                300f to 17.417f,
+            ),
+        )
         val BASELINE_SECONDS = mapOf(
             60 to mapOf(
                 0.6f to 0.700f,

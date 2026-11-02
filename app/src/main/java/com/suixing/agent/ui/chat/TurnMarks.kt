@@ -26,7 +26,15 @@ internal object TurnMarks {
     ): Int {
         val newest = totalTurns.coerceAtLeast(1)
         if (turnIndices.isEmpty() || drawnTurns <= 0) return newest
-        val inWindow = turnIndices.indexOfLast { it <= physicalIndex }.coerceAtLeast(0)
+        // Starts are chronological. Upper-bound search avoids walking every loaded
+        // turn when the reader is near the oldest end of a long conversation.
+        var low = 0
+        var high = turnIndices.size
+        while (low < high) {
+            val middle = low + (high - low) / 2
+            if (turnIndices[middle] <= physicalIndex) low = middle + 1 else high = middle
+        }
+        val inWindow = (low - 1).coerceAtLeast(0)
         val oldest = (totalTurns - drawnTurns + 1).coerceAtLeast(1)
         return (oldest + inWindow).coerceIn(1, newest)
     }

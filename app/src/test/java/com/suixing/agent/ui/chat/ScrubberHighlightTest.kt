@@ -328,9 +328,11 @@ class ScrubberHighlightTest {
         var disposals = 0
             private set
 
-        private var styleState: androidx.compose.runtime.State<ScrubberTickStyle>? = null
-        // Production reads the returned state in graphicsLayer/drawBehind, outside composition.
-        val style: ScrubberTickStyle? get() = styleState?.value
+        private var styleState: ScrubberTickAnimation? = null
+        // Sample outside composition, as production does in graphicsLayer/drawBehind.
+        val style: ScrubberTickStyle? get() = styleState?.let {
+            ScrubberTickStyle(it.width.value, it.height.value, it.color.value)
+        }
         var compositions: Int = 0
             private set
 

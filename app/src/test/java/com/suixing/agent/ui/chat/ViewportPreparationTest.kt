@@ -1,5 +1,6 @@
 package com.suixing.agent.ui.chat
 
+import com.suixing.agent.ui.chat.markdown.SettledBlocks
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -68,6 +69,51 @@ class ViewportPreparationTest {
         assertTrue(nearbyViewportRows(emptyList<Int>(), 0, 0, 0).isEmpty())
         assertEquals(listOf(0, 1, 2, 3), openingViewportRows((0..9).toList(), -1))
         assertEquals(listOf(6, 7, 8, 9), openingViewportRows((0..9).toList(), 100))
+    }
+
+    @Test fun `a missing row cache submits every text part including short text`() {
+        val longText = "x".repeat(SettledBlocks.MIN_CHARS)
+        val parts = listOf(
+            Part.Thinking("thinking", 0, 0),
+            Part.Text("short"),
+            Part.Text(longText),
+            Part.Trace("retry"),
+        )
+
+        assertEquals(listOf("short", longText), markdownTextsToPrepare(parts, current = null))
+        assertEquals(emptyList<String>(), markdownTextsToPrepare(parts.filterNot { it is Part.Text }, current = null))
+    }
+
+    @Test fun `cached settled text avoids collection and short uncached text does not invalidate it`() {
+        val settledText = "x".repeat(SettledBlocks.MIN_CHARS)
+        val shortText = "short"
+        val parts = listOf(Part.Text(shortText), Part.Thinking("thinking", 0, 0), Part.Text(settledText))
+
+        assertEquals(null, markdownTextsToPrepare(parts, mapOf(settledText to Unit)))
+        assertEquals(
+            null,
+            markdownTextsToPrepare(
+                listOf(Part.Text("x".repeat(SettledBlocks.MIN_CHARS - 1))),
+                emptyMap<String, Unit>(),
+            ),
+        )
+    }
+
+    @Test fun `a cache miss collects all row text including cached and short parts`() {
+        val missingText = "x".repeat(SettledBlocks.MIN_CHARS)
+        val cachedText = "y".repeat(SettledBlocks.MIN_CHARS)
+        val shortText = "short"
+        val parts = listOf(
+            Part.Text(shortText),
+            Part.Text(cachedText),
+            Part.Trace("retry"),
+            Part.Text(missingText),
+        )
+
+        assertEquals(
+            listOf(shortText, cachedText, missingText),
+            markdownTextsToPrepare(parts, mapOf(cachedText to Unit)),
+        )
     }
 
     private class CountingRows(override val size: Int) : AbstractList<Int>() {

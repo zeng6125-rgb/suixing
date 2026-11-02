@@ -235,11 +235,32 @@ internal class NavigationLandingController(
     private fun maximumSpeed(distancePx: Float, viewportHeight: Int): Float {
         val viewport = viewportHeight.coerceAtLeast(1).toFloat()
         val distanceInViewports = abs(distancePx) / viewport
-        val progress = ((distanceInViewports - MIN_SPEED_PROFILE_VIEWPORTS) /
-            (MAX_SPEED_PROFILE_VIEWPORTS - MIN_SPEED_PROFILE_VIEWPORTS)).coerceIn(0f, 1f)
-        val smoothstep = progress * progress * (3f - 2f * progress)
-        val viewportsPerSecond = MIN_VIEWPORTS_PER_SECOND +
-            (MAX_VIEWPORTS_PER_SECOND - MIN_VIEWPORTS_PER_SECOND) * smoothstep
+        val viewportsPerSecond = when {
+            distanceInViewports <= MAX_SPEED_PROFILE_VIEWPORTS -> {
+                val progress = ((distanceInViewports - MIN_SPEED_PROFILE_VIEWPORTS) /
+                    (MAX_SPEED_PROFILE_VIEWPORTS - MIN_SPEED_PROFILE_VIEWPORTS)).coerceIn(0f, 1f)
+                val smoothstep = progress * progress * (3f - 2f * progress)
+                MIN_VIEWPORTS_PER_SECOND +
+                    (MAX_VIEWPORTS_PER_SECOND - MIN_VIEWPORTS_PER_SECOND) * smoothstep
+            }
+            distanceInViewports <= FAR_SPEED_PROFILE_START_VIEWPORTS -> {
+                val progress = ((distanceInViewports - MAX_SPEED_PROFILE_VIEWPORTS) /
+                    (FAR_SPEED_PROFILE_START_VIEWPORTS - MAX_SPEED_PROFILE_VIEWPORTS)).coerceIn(0f, 1f)
+                val smoothstep = progress * progress * (3f - 2f * progress)
+                MAX_VIEWPORTS_PER_SECOND +
+                    (FAR_SPEED_PROFILE_START_VPS - MAX_VIEWPORTS_PER_SECOND) * smoothstep
+            }
+            else -> {
+                // Keep the 12–18 viewport/s close profile untouched. Far jumps gain speed
+                // continuously as distance grows; the same landing controller retains velocity
+                // across this profile and the existing critically damped final approach.
+                val progress = ((distanceInViewports - FAR_SPEED_PROFILE_START_VIEWPORTS) /
+                    (FAR_SPEED_PROFILE_END_VIEWPORTS - FAR_SPEED_PROFILE_START_VIEWPORTS)).coerceIn(0f, 1f)
+                val smoothstep = progress * progress * (3f - 2f * progress)
+                FAR_SPEED_PROFILE_START_VPS +
+                    (MAX_FAR_VIEWPORTS_PER_SECOND - FAR_SPEED_PROFILE_START_VPS) * smoothstep
+            }
+        }
         return viewport * viewportsPerSecond
     }
 
@@ -250,7 +271,11 @@ internal class NavigationLandingController(
         const val MAX_VIEWPORTS_PER_SECOND = 18f
         const val MIN_SPEED_PROFILE_VIEWPORTS = 2f
         const val MAX_SPEED_PROFILE_VIEWPORTS = 10f
+        const val FAR_SPEED_PROFILE_START_VIEWPORTS = 50f
+        const val FAR_SPEED_PROFILE_END_VIEWPORTS = 200f
+        const val FAR_SPEED_PROFILE_START_VPS = 36f
         const val SPRING_ANGULAR_FREQUENCY = 14f
+        const val MAX_FAR_VIEWPORTS_PER_SECOND = 72f
         const val SCROLL_TOLERANCE_PX = 0.5f
     }
 }

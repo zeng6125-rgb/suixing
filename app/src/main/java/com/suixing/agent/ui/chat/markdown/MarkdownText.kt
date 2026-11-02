@@ -175,11 +175,14 @@ private fun parseMarkdownBlocks(
     source: String,
     checkpoint: (() -> Unit)?,
     fromIndex: Int = 0,
+    onAppendableTail: ((AppendableMarkdownTail) -> Unit)? = null,
+    sourceIsNormalized: Boolean = false,
     onStableBoundary: ((offset: Int, blockCount: Int) -> Unit)? = null,
 ): List<MdBlock> {
     checkpoint?.invoke()
     // **没有 CR 就不做两次全串 replace**：绝大多数文本只有 \n，原来无条件复制两遍整串。
-    val normalized = if (source.indexOf('\r') < 0) source else source.replace("\r\n", "\n").replace('\r', '\n')
+    val normalized = if (sourceIsNormalized || source.indexOf('\r') < 0) source
+        else source.replace("\r\n", "\n").replace('\r', '\n')
     require(fromIndex in 0..normalized.length)
     // Build only the tail's lines; don't first copy the complete suffix of an
     // ever-growing source. Each line is already the parser's owned String.
@@ -194,7 +197,7 @@ private fun parseMarkdownBlocks(
         lines += normalized.substring(lineStart, lineEnd)
         lineStart = lineEnd + 1
     }
-    val lineStarts = if (onStableBoundary != null) {
+    val lineStarts = if (onStableBoundary != null || onAppendableTail != null) {
         var offset = 0
         IntArray(lines.size) { index -> offset.also { offset += lines[index].length + 1 } }
     } else null
@@ -279,6 +282,7 @@ private fun parseMarkdownBlocks(
         when {
             trimmed.isEmpty() -> index++
             fence != null -> {
+                val openingIndex = index
                 val body = mutableListOf<String>()
                 index++
                 while (index < lines.size && !MD_FENCE_CLOSE.matches(lines[index].trim())) {
@@ -287,7 +291,8 @@ private fun parseMarkdownBlocks(
                     index++
                 }
                 // A missing closing fence means the answer is still streaming in.
-                if (index < lines.size) index++
+                val closed = index < lines.size
+                if (closed) index++
                 // An empty body never becomes a box: a stray fence line (or a pair of
                 // them) used to paint a grey slab with a copy button and nothing in it.
                 // A fence written on the same line as its content never reaches this
@@ -296,6 +301,15 @@ private fun parseMarkdownBlocks(
                 val code = body.joinToString("\n")
                 if (code.isNotBlank()) {
                     blocks += MdBlock.Code(fence.groupValues[1], code)
+                    if (!closed && onAppendableTail != null && lineStarts != null) {
+                        val last = lines.last().trim()
+                        onAppendableTail(AppendableMarkdownTail.Code(
+                            language = fence.groupValues[1],
+                            bodyStart = fromIndex + lineStarts[openingIndex] + line.length + 1,
+                            lastLineStart = fromIndex + lineStarts.last(),
+                            lastLineIsBody = last.any { it != '`' },
+                        ))
+                    }
                 }
             }
             heading != null -> {
@@ -327,6 +341,17 @@ private fun parseMarkdownBlocks(
                     index++
                 }
                 blocks += MdBlock.Table(header, rows)
+                if (index == lines.size && rows.isNotEmpty() && onAppendableTail != null && lineStarts != null) {
+                    onAppendableTail(AppendableMarkdownTail.Table(
+                        header, rows.dropLast(1), fromIndex + lineStarts.last(), rows.last(),
+                    ))
+                } else if (index == lines.lastIndex && lines[index].isBlank() &&
+                    onAppendableTail != null && lineStarts != null
+                ) {
+                    onAppendableTail(AppendableMarkdownTail.Table(
+                        header, rows, fromIndex + lineStarts.last(), null,
+                    ))
+                }
             }
             bullet != null -> {
                 blocks += listAtCurrentLine(indentDepth(bullet.groupValues[1]), isOrdered = false)
@@ -342,6 +367,15 @@ private fun parseMarkdownBlocks(
                     index++
                 }
                 blocks += MdBlock.Paragraph(paragraph.joinToString("\n"))
+                if (index == lines.size && onAppendableTail != null && lineStarts != null &&
+                    ordinaryParagraphLine(lines.last())
+                ) {
+                    val completedLines = if (paragraph.size <= 1) "" else
+                        paragraph.subList(0, paragraph.lastIndex).joinToString("\n", postfix = "\n")
+                    onAppendableTail(AppendableMarkdownTail.Paragraph(
+                        fromIndex + lineStarts.last(), completedLines,
+                    ))
+                }
             }
         }
     }
@@ -418,7 +452,7 @@ fun inlineMarkdown(
     codeColor: Color = Color.Unspecified,
     linkColor: Color = Color.Unspecified,
     baseWeight: FontWeight? = null,
-): AnnotatedString = InlineScanner(
+): AnnotatedString = if (baseWeight == null && literalInlineSource(text)) AnnotatedString(text) else InlineScanner(
     text = text,
     codeBackground = codeBackground,
     codeColor = codeColor,
@@ -427,53 +461,51 @@ fun inlineMarkdown(
     onUrlClick = null,
 ).scan()
 
-private data class LinkTarget(val labelStart: Int, val labelEnd: Int, val url: String, val end: Int)
-
-/**
- * Searches made by one inline scan. An unmatched opener must not rescan the whole remaining
- * paragraph for every later opener: repeated unsupported double-backtick runs otherwise turn
- * a single parse quadratic, including every new streaming prefix of that paragraph.
- *
- * A failed search proves that the same marker/width has no closer later in that exact range.
- * Keep one such range for each of the six supported marker/width pairs, not text-sized indexes.
- * Callers start immediately after an opener, so a later search cannot begin inside a backslash
- * escape skipped by the previous search. Nested spans may have a different end; those rescan.
- */
-internal class InlineDelimiterSearch(private val text: String) {
-    private val failedRanges = IntArray(12) { -1 }
-
-    fun findClosing(marker: Char, len: Int, from: Int, to: Int): Int {
-        val slot = when (marker) {
-            '`' -> 0
-            '*' -> if (len == 1) 2 else 4
-            '_' -> if (len == 1) 6 else 8
-            '~' -> 10
-            else -> error("Unsupported inline delimiter")
-        }
-        if (failedRanges[slot + 1] == to && from >= failedRanges[slot]) return -1
-        var i = from
-        while (i < to) {
-            val c = text[i]
-            if (c == '\\' && i + 1 < to) {
-                i += 2
-                continue
-            }
-            if (c == marker) {
-                var runEnd = i + 1
-                while (runEnd < to && text[runEnd] == marker) runEnd++
-                val runStartsHere = i == 0 || text[i - 1] != marker
-                val available = runEnd - i
-                if (runStartsHere && (if (len == 1) available == 1 else available >= len)) return i
-                i = runEnd
-                continue
-            }
-            i++
-        }
-        failedRanges[slot] = from
-        failedRanges[slot + 1] = to
-        return -1
-    }
+/** Construct the complete inline result for row caches and streaming tests. */
+internal fun scanInlineMarkdown(
+    text: String,
+    codeBackground: Color = Color.Unspecified,
+    codeColor: Color = Color.Unspecified,
+    linkColor: Color = Color.Unspecified,
+    baseWeight: FontWeight? = null,
+    onUrlClick: ((String) -> Unit)? = null,
+    onPathClick: ((String) -> Unit)? = null,
+    codeFontSize: TextUnit = TextUnit.Unspecified,
+    appendCaret: Boolean = false,
+    searchState: InlineSearchState? = null,
+    appendOnly: Boolean = false,
+): AnnotatedString {
+    searchState?.update(text, appendOnly)
+    return InlineScanner(
+        text = text,
+        codeBackground = codeBackground,
+        codeColor = codeColor,
+        linkColor = linkColor,
+        baseWeight = baseWeight,
+        onUrlClick = onUrlClick,
+        onPathClick = onPathClick,
+        codeFontSize = codeFontSize,
+        searchState = searchState,
+    ).scan(appendCaret)
 }
+
+/** Pure entry for checking that scanned text and annotations survive the final caret append. */
+internal fun inlineMarkdownWithCaret(
+    text: String,
+    codeBackground: Color = Color.Unspecified,
+    codeColor: Color = Color.Unspecified,
+    linkColor: Color = Color.Unspecified,
+    baseWeight: FontWeight? = null,
+): AnnotatedString = scanInlineMarkdown(
+    text = text,
+    codeBackground = codeBackground,
+    codeColor = codeColor,
+    linkColor = linkColor,
+    baseWeight = baseWeight,
+    appendCaret = true,
+)
+
+private data class LinkTarget(val labelStart: Int, val labelEnd: Int, val url: String, val end: Int)
 
 private class InlineScanner(
     private val text: String,
@@ -491,9 +523,12 @@ private class InlineScanner(
     // The weight of **bold**. MarkdownTest pins the pure entry point to Bold, and the
     // renderer draws the app's own ruling (semibold), so the two travel as a parameter
     // rather than one of them silently winning.
+    // One current streaming tail retains only failure frontiers between adjacent prefixes.
+    private val searchState: InlineSearchState? = null,
 ) {
     private val out = AnnotatedString.Builder()
-    private val delimiters = InlineDelimiterSearch(text)
+    private val delimiters = searchState?.delimiters ?: InlineDelimiterSearch(text)
+    private val links = searchState?.links ?: InlineLinkSearch(text)
     private val linkStyle = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
     // 文件路径：主色但**无下划线**（LINK-CLICK-SPEC §2.1）——与 URL 区分，符合「链接才带下划线」的直觉。
     private val pathStyle = SpanStyle(color = linkColor)
@@ -504,41 +539,51 @@ private class InlineScanner(
         fontSize = codeFontSize,
     )
 
-    fun scan(): AnnotatedString {
+    fun scan(appendCaret: Boolean = false): AnnotatedString {
         val base = if (baseWeight == null) EMPTY_SPAN else SpanStyle(fontWeight = baseWeight)
         emit(0, text.length, base, null)
+        if (appendCaret) out.append(CARET_PLACEHOLDER)
         return out.toAnnotatedString()
     }
 
     private fun emit(from: Int, to: Int, style: SpanStyle, link: String?) {
-        val buffer = StringBuilder()
-        fun flush() {
-            if (buffer.isNotEmpty()) {
-                addRun(buffer.toString(), style, link)
-                buffer.setLength(0)
+        var escapedBuffer: StringBuilder? = null
+        var literalStart = from
+        fun flush(end: Int) {
+            val buffer = escapedBuffer
+            if (buffer == null) {
+                addRun(text, literalStart, end, style, link)
+            } else {
+                buffer.append(text, literalStart, end)
+                addRun(buffer, 0, buffer.length, style, link)
+                escapedBuffer = null
             }
+            literalStart = end
         }
         var i = from
         while (i < to) {
             val c = text[i]
             when {
                 c == '\\' && i + 1 < to && ESCAPABLE.indexOf(text[i + 1]) >= 0 -> {
+                    val buffer = escapedBuffer ?: StringBuilder().also { escapedBuffer = it }
+                    buffer.append(text, literalStart, i)
                     buffer.append(text[i + 1])
                     i += 2
+                    literalStart = i
                 }
                 c == '`' -> {
                     val close = delimiters.findClosing('`', 1, i + 1, to)
                     if (close < 0) {
-                        buffer.append(c)
                         i++
                     } else {
-                        flush()
+                        flush(i)
                         // Thin spaces either side of the code. A SpanStyle background has no
                         // padding and no corner radius — Compose inline spans cannot express
                         // either — so the breathing room has to be characters. They are real
                         // characters in the output, which the tests assert.
                         addRun(THIN + text.substring(i + 1, close) + THIN, style.merge(codeStyle), link)
                         i = close + 1
+                        literalStart = i
                     }
                 }
                 c == '*' || c == '_' -> {
@@ -547,33 +592,32 @@ private class InlineScanner(
                     val len = if (i + 1 < to && text[i + 1] == c) 2 else 1
                     val close = delimiters.findClosing(c, len, i + len, to)
                     if (close < 0) {
-                        repeat(len) { buffer.append(c) }
                         i += len
                     } else {
-                        flush()
+                        flush(i)
                         val inner = style.merge(if (len == 2) BOLD_SPAN else ITALIC_SPAN)
                         emit(i + len, close, inner, link)
                         i = close + len
+                        literalStart = i
                     }
                 }
                 c == '~' && i + 1 < to && text[i + 1] == '~' -> {
                     val close = delimiters.findClosing('~', 2, i + 2, to)
                     if (close < 0) {
-                        buffer.append("~~")
                         i += 2
                     } else {
-                        flush()
+                        flush(i)
                         emit(i + 2, close, style.merge(STRIKE_SPAN), link)
                         i = close + 2
+                        literalStart = i
                     }
                 }
                 c == '[' -> {
                     val target = parseLink(i, to)
                     if (target == null) {
-                        buffer.append(c)
                         i++
                     } else {
-                        flush()
+                        flush(i)
                         // 目标可能是 URL 或文件路径（spec §1.1 两种都允许）。路径用 pathStyle（无
                         // 下划线）并加 `file:` 前缀，addRun 据此挂 Clickable 而非 Url。
                         val isPath = isFilePath(target.url)
@@ -583,15 +627,17 @@ private class InlineScanner(
                             if (isPath) "file:${target.url}" else target.url,
                         )
                         i = target.end
+                        literalStart = i
                     }
                 }
                 // Bare urls are only auto-linked outside a label, so a link never nests.
                 link == null && c == 'h' && startsUrl(i, to) -> {
                     val end = urlEnd(i, to)
-                    flush()
+                    flush(i)
                     val url = text.substring(i, end)
                     addRun(url, style.merge(linkStyle), url)
                     i = end
+                    literalStart = i
                 }
                 // 裸文件路径（spec §1.3）：绝对路径根开头才认，走到路径末尾、剥掉句末标点与尾斜杠。
                 // 只在回调存在时才真正可点（addRun 里把关），没回调时它就是一段普通主色文本 —— 但
@@ -599,30 +645,33 @@ private class InlineScanner(
                 link == null && c == '/' && startsPath(i, to) -> {
                     val end = pathEnd(i, to)
                     if (end <= i) {
-                        buffer.append(c)
                         i++
                     } else {
-                        flush()
+                        flush(i)
                         val path = text.substring(i, end)
                         addRun(path, style.merge(pathStyle), "file:$path")
                         i = end
+                        literalStart = i
                     }
                 }
                 else -> {
-                    buffer.append(c)
                     i++
                 }
             }
         }
-        flush()
+        flush(to)
     }
 
     private fun addRun(run: String, style: SpanStyle, link: String?) {
-        if (run.isEmpty()) return
-        val start = out.length
-        out.append(run)
-        val end = out.length
-        if (style != EMPTY_SPAN) out.addStyle(style, start, end)
+        addRun(run, 0, run.length, style, link)
+    }
+
+    private fun addRun(run: CharSequence, runStart: Int, runEnd: Int, style: SpanStyle, link: String?) {
+        if (runStart == runEnd) return
+        val outputStart = out.length
+        out.append(run, runStart, runEnd)
+        val outputEnd = out.length
+        if (style != EMPTY_SPAN) out.addStyle(style, outputStart, outputEnd)
         // LinkAnnotation.Url is stable in ui-text 1.7.x and Text itself wires the
         // click handling, so no ClickableText and no pointerInput hit testing.
         if (link == null) return
@@ -638,8 +687,8 @@ private class InlineScanner(
                         tag = link,
                         linkInteractionListener = LinkInteractionListener { pathClick(path) },
                     ),
-                    start,
-                    end,
+                    outputStart,
+                    outputEnd,
                 )
             }
         } else {
@@ -651,8 +700,8 @@ private class InlineScanner(
                     url = link,
                     linkInteractionListener = onUrlClick?.let { cb -> LinkInteractionListener { cb(link) } },
                 ),
-                start,
-                end,
+                outputStart,
+                outputEnd,
             )
         }
     }
@@ -720,25 +769,12 @@ private class InlineScanner(
     }
 
     private fun parseLink(start: Int, to: Int): LinkTarget? {
-        var cursor = start + 1
-        while (cursor < to) {
-            val c = text[cursor]
-            if (c == '\\' && cursor + 1 < to) {
-                cursor += 2
-                continue
-            }
-            if (c == '[') return null
-            if (c == ']') break
-            cursor++
-        }
-        if (cursor >= to || cursor == start + 1) return null
+        val cursor = links.findLabelClose(start, to)
+        if (cursor < 0 || cursor == start + 1) return null
         if (cursor + 1 >= to || text[cursor + 1] != '(') return null
-        var urlEnd = cursor + 2
-        while (urlEnd < to && text[urlEnd] != ')') {
-            if (text[urlEnd] == '\\' && urlEnd + 1 < to) urlEnd++
-            urlEnd++
-        }
+        val urlEnd = links.findUrlClose(start, cursor + 2, to)
         if (urlEnd >= to) return null
+        if (urlEnd < 0) return null
         val url = text.substring(cursor + 2, urlEnd).trim()
         if (url.isEmpty()) return null
         return LinkTarget(start + 1, cursor, url, urlEnd + 1)
@@ -835,26 +871,24 @@ fun MarkdownText(
  * blank line lands — a few times per answer, not a dozen times a second.
  */
 @Composable
-private fun rememberGrowingMarkdown(
+internal fun rememberGrowingMarkdown(
     text: String,
     settled: Boolean = false,
     /** 来源缓冲的版本号；>=0 且单调递增时，说明这次文本是**纯追加**（见 LiveBlocks）。 */
     appendFrom: Int = -1,
     sourceId: Int = 0,
 ): List<MdBlock> {
-    if (settled) LocalPreparedMarkdown.current[text]?.let { return it }
-    // **流式走 [LiveBlocks] 的块级复用**（不是整段重解析，也不是旧的 [MarkdownCache]）。
-    // 旧的 `MarkdownCache` 只在**空行**处合入尾部，同一段落里继续追加字符时不刷新，
-    // 屏幕上要等下一个换行才看到新字（用户："整段整段地出"）；它因此被停用。
-    // 现在：每次发布按当前文本重新解析**最后一个未闭合块**，空行以上的块是终值直接复用
-    // ⇒ 既保证"到多少显示多少"，又把每次发布的解析量从"整段"降到"尾段"
-    // （打字机 25~60Hz 下保住帧预算的关键，issue #44）。
-    // 仍留在主线程的剩余成本是**最后一个未闭合块的文字测量**（排版而非解析），
-    // 长未闭合代码块尤其明显；没有帧数据前不动它。
+    if (settled) LocalPreparedMarkdown.current[text]?.let { prepared ->
+        // Preparing offscreen is not a settled-cache insertion. Once mounted, this
+        // exact parse should survive leaving the local window and coming back.
+        SideEffect { SettledBlocks.putIfSettled(true, text, prepared) }
+        return prepared
+    }
+    // Parser-confirmed completed blocks are shared. An ordinary paragraph line,
+    // open code body or current table row can continue without parsing old lines;
+    // ambiguous block transitions fall back to the normal parser. Text measurement
+    // and inline syntax in a formatted tail still have a growing-input cost.
     if (!settled) {
-        // **块级复用**（issue #44）：流式文本只有末尾在长，空行以上的块是终值。
-        // 只重解析最后一个未闭合的块，前面的直接复用上次结果 —— 长答案下每次发布的
-        // 解析量从"整段"降到"尾段"，这是打字机 25~60Hz 下保住帧预算的关键。
         val live = remember { LiveBlocks() }
         return remember(text) { live.blocksFor(text, appendFrom, sourceId) }
     }
@@ -874,18 +908,16 @@ private fun rememberGrowingMarkdown(
 /**
  * 流式文本的**块级复用**解析器（issue #44）。
  *
- * 流式答案只有末尾在长，而 Markdown 的块边界由空行决定 ⇒ 最后一个空行以上的内容早已是
- * 终值。每次发布都 `parseMarkdown(整段)` 是浪费：长答案 2~10ms/次，打字机 25~60Hz 下
- * 这就是掉帧的主要来源（[MarkdownText] 的注释里也记着这条）。
+ * The parser identifies completed boundaries outside fences/tables/lists. Those blocks
+ * retain their identities; the unfinished tail is either extended or parsed again.
  *
  * 策略：
  *  · 记住上一次的文本、它的"稳定前缀"（最后一个空行之前的部分）以及该前缀的解析结果；
- *  · 新文本以旧稳定前缀开头 ⇒ 前缀块直接复用，只 `parseMarkdown(尾段)`；
+ *  · 新文本以旧稳定前缀开头 ⇒ 前缀块直接复用；可续接尾块只处理变化行；
  *  · 新出现了空行 ⇒ 只解析新完成的部分，复用此前前缀的块；
  *  · 不是前缀（换块、重放、变短）⇒ 整体重建。
  *
- * 与 `text.split` 式的"按行增量"不同，这里只关心**块**，实现更简单且与
- * `parseMarkdown` 的语义完全一致（前缀 + 尾段解析 == 整段解析，因为块边界就是空行）。
+ * Uncertain transitions use the regular parser, with per-prefix equivalence tests.
  */
 internal class LiveBlocks {
     // One normalized source reference; the stable prefix is a range into it, never a copy.
@@ -908,6 +940,8 @@ internal class LiveBlocks {
     private var stableEnd = 0
     private var prefixBlocks: List<MdBlock> = emptyList()
     private var result: List<MdBlock> = emptyList()
+    private var appendableTail: AppendableMarkdownTail? = null
+    private var appendPrefix: List<MdBlock> = emptyList()
 
     /**
      * 上一次的文本里出现过 `\r` 吗。
@@ -919,9 +953,21 @@ internal class LiveBlocks {
      */
     private var sawCarriageReturn = false
 
-    fun blocksFor(next: String, appendFrom: Int = -1, sourceId: Int = 0): List<MdBlock> {
+    fun blocksFor(
+        next: String,
+        appendFrom: Int = -1,
+        sourceId: Int = 0,
+        checkpoint: (() -> Unit)? = null,
+    ): List<MdBlock> {
+        checkpoint?.invoke()
+        val sameSource = sourceId != 0 && sourceId == lastSourceId
+        val trustedAppend = sameSource && appendFrom >= 0 && next.length >= text.length &&
+            (appendFrom > lastVersion || (appendFrom == lastVersion && next.length >= text.length))
+        val keepsPrefix = next.length >= text.length && (trustedAppend || next.startsWith(text))
         if (!sawCarriageReturn) {
-            val from = if (next.length >= text.length) text.length else 0
+            // A rewrite of the same/larger length may introduce CR in the old range.
+            // Only an actual append is allowed to skip scanning that range.
+            val from = if (keepsPrefix) text.length else 0
             var i = from
             while (i < next.length) {
                 if (next[i] == '\r') { sawCarriageReturn = true; break }
@@ -939,17 +985,23 @@ internal class LiveBlocks {
         //  · 版本递增 —— 来源缓冲又追加了；
         //  · 版本不变但文本变长 —— 打字机在揭示同一份文本的更长前缀。
         // 换来源（实例不同 / 没有来源）一律回落全量校验。
-        val sameSource = sourceId != 0 && sourceId == lastSourceId
-        val trustedAppend = sameSource &&
-            (appendFrom > lastVersion || (appendFrom == lastVersion && next.length >= text.length))
-        result = parseWithPrefix(normalized, trustedAppend)
+        val tail = appendableTail
+        val extended = if (tail != null && normalized.length > text.length &&
+            (trustedAppend || normalized.startsWith(text))
+        ) tail.append(normalized, text.length, checkpoint) else null
+        result = if (extended != null) JoinedMarkdownBlocks(appendPrefix, listOf(extended)) else
+            parseWithPrefix(normalized, trustedAppend, checkpoint)
         text = normalized
         lastVersion = appendFrom
         lastSourceId = sourceId
         return result
     }
 
-    private fun parseWithPrefix(normalized: String, trustedAppend: Boolean = false): List<MdBlock> {
+    private fun parseWithPrefix(
+        normalized: String,
+        trustedAppend: Boolean = false,
+        checkpoint: (() -> Unit)? = null,
+    ): List<MdBlock> {
         // Verify the actual prefix, not only length/hash: both can collide after edits.
         // 例外：`trustedAppend` 为真时前缀由来源版本保证（见 [lastVersion]），跳过这次全量比较。
         if (normalized.length < stableEnd ||
@@ -960,10 +1012,15 @@ internal class LiveBlocks {
         }
         // The parser itself reports completed blocks, so fence-looking table rows
         // and blank lines inside code cannot incorrectly freeze a partial result.
+        appendableTail = null
+        appendPrefix = emptyList()
         if (stableEnd == normalized.length) return prefixBlocks
         var completed = 0
         var completedBlocks = 0
-        val parsed = parseMarkdownBlocks(normalized, null, stableEnd) { offset, count ->
+        val parsed = parseMarkdownBlocks(
+            normalized, checkpoint, stableEnd,
+            onAppendableTail = { appendableTail = it }, sourceIsNormalized = true,
+        ) { offset, count ->
             completed = offset
             completedBlocks = count
         }
@@ -972,6 +1029,7 @@ internal class LiveBlocks {
             if (completedBlocks > 0) prefixBlocks = prefixBlocks + parsed.take(completedBlocks)
             stableEnd += completed
         }
+        if (appendableTail != null) appendPrefix = result.dropLast(1)
         return result
     }
 }
@@ -999,15 +1057,64 @@ private class JoinedMarkdownBlocks(
  *
  * 同时限制条目数和原文字符总量，避免少量超长消息让缓存常驻数十 MB。
  */
+/** Approximate retained size, including the exact source key and owned strings/collections in the parsed tree. */
+internal fun estimateMarkdownCacheBytes(text: String, blocks: List<MdBlock>): Long {
+    var bytes = 48L + text.length * 2L // source String and its map entry
+
+    fun addString(value: String) {
+        bytes += 24L + value.length * 2L
+    }
+
+    fun addBullet(bullet: MdBlock.Bullet) {
+        bytes += 72L // node, item list, and child map
+        bytes += bullet.items.size * 8L
+        bullet.items.forEach(::addString)
+        bullet.children.forEach { (_, nested) ->
+            bytes += 32L + nested.size * 8L // map entry and nested list
+            nested.forEach(::addBullet)
+        }
+    }
+
+    bytes += 24L + blocks.size * 8L // top-level list
+    blocks.forEach { block ->
+        bytes += 56L
+        when (block) {
+            is MdBlock.Heading -> addString(block.text)
+            is MdBlock.Paragraph -> addString(block.text)
+            is MdBlock.Bullet -> addBullet(block)
+            is MdBlock.Code -> {
+                addString(block.language)
+                addString(block.code)
+            }
+            is MdBlock.Quote -> addString(block.text)
+            MdBlock.Rule -> Unit
+            is MdBlock.Table -> {
+                bytes += 24L + block.header.size * 8L
+                block.header.forEach(::addString)
+                bytes += 24L + block.rows.size * 8L
+                block.rows.forEach { row ->
+                    bytes += 24L + row.size * 8L
+                    row.forEach(::addString)
+                }
+            }
+        }
+    }
+    return bytes
+}
+
 internal object SettledBlocks {
     // **64**（原 16，真机实测卡顿的根因）：一张重卡（思考链逐行 + 正文 + 工具参数，
     // 每行一个 MarkdownText）就占 20+ 条 —— 16 条连一张卡都装不下，滚过
     // 「助手→用户→助手」区即冲爆逐出，每遍回来都重解析（每行 2~10ms）= 每一遍都卡。
     private const val MAX_ENTRIES = 64
 
-    private val map = LinkedHashMap<String, List<MdBlock>>(16, 0.75f, true)
+    private data class Entry(val blocks: List<MdBlock>, val estimatedBytes: Long)
+
+    private val map = LinkedHashMap<String, Entry>(16, 0.75f, true)
     internal const val MAX_CHARS = 512 * 1024
+    internal const val MAX_ESTIMATED_BYTES = 2L * 1024 * 1024
     private var cachedChars = 0
+    private var cachedBytes = 0L
 
     /** 只对**足够长**的文本生效：短文本本身解析就很快，缓存它只是多占内存。 */
     internal const val MIN_CHARS = 400
@@ -1016,11 +1123,19 @@ internal object SettledBlocks {
     internal fun get(text: String): List<MdBlock>? {
         // 与 `put` 对称：短文本从不入缓存，所以查找纯属白做（思考链每行都短）。
         if (text.length < MIN_CHARS || text.length > MAX_CHARS) return null
-        return synchronized(map) { map[text] }
+        return synchronized(map) { map[text]?.blocks }
     }
 
     /** 仅供单测断言上界（生产路径不需要读容量）。 */
     internal fun sizeForTest(): Int = synchronized(map) { map.size }
+
+    internal fun estimatedBytesForTest(): Long = synchronized(map) { cachedBytes }
+
+    internal fun clearForTest() = synchronized(map) {
+        map.clear()
+        cachedChars = 0
+        cachedBytes = 0L
+    }
 
     /**
      * 调用侧契约：**只有定稿文本**可以进缓存。
@@ -1036,12 +1151,28 @@ internal object SettledBlocks {
 
     internal fun put(text: String, blocks: List<MdBlock>) {
         if (text.length < MIN_CHARS || text.length > MAX_CHARS) return
+        // A prepared row can commit the same result on every successful recomposition. Touch its
+        // LRU position without walking the block tree again; the second check handles a concurrent
+        // insert while the size estimate below is being calculated outside the lock.
         synchronized(map) {
-            if (!map.containsKey(text)) cachedChars += text.length
-            map[text] = blocks
-            while (map.size > MAX_ENTRIES || cachedChars > MAX_CHARS) {
+            if (map[text]?.blocks === blocks) return
+        }
+        val estimatedBytes = estimateMarkdownCacheBytes(text, blocks)
+        if (estimatedBytes > MAX_ESTIMATED_BYTES) return
+        synchronized(map) {
+            if (map[text]?.blocks === blocks) return@synchronized
+            map.remove(text)?.let { previous ->
+                cachedChars -= text.length
+                cachedBytes -= previous.estimatedBytes
+            }
+            map[text] = Entry(blocks, estimatedBytes)
+            cachedChars += text.length
+            cachedBytes += estimatedBytes
+            while (map.size > MAX_ENTRIES || cachedChars > MAX_CHARS || cachedBytes > MAX_ESTIMATED_BYTES) {
                 val oldest = map.entries.iterator()
-                cachedChars -= oldest.next().key.length
+                val entry = oldest.next()
+                cachedChars -= entry.key.length
+                cachedBytes -= entry.value.estimatedBytes
                 oldest.remove()
             }
         }
@@ -1280,18 +1411,28 @@ private fun InlineText(
 ) {
     // 路径回调从 CompositionLocal 就地读（叶子层），调用点与中间层零改动。URL 仍走 onUrlClick。
     val pathClick = LocalPathClick.current
-    val annotated = remember(text, palette, onUrlClick, pathClick) {
-        InlineScanner(
-            text = text,
-            codeBackground = palette.codeBackground,
-            codeColor = palette.codeColor,
-            linkColor = palette.linkColor,
-            // The block style already carries the base weight; spans only add to it.
-            baseWeight = null,
-            onUrlClick = onUrlClick,
-            onPathClick = pathClick,
-            codeFontSize = palette.codeFontSize,
-        ).scan()
+    val literalSource = remember { InlineLiteralSource() }
+    val searchState = remember { InlineSearchState(text) }
+    val annotated = remember(text, palette, onUrlClick, pathClick, cursor) {
+        val literal = literalSource.accepts(text)
+        if (literal) {
+            searchState.update(text, literalSource.lastWasAppend)
+            codeBlockAnnotatedText(text, cursor)
+        } else {
+            scanInlineMarkdown(
+                text = text,
+                codeBackground = palette.codeBackground,
+                codeColor = palette.codeColor,
+                linkColor = palette.linkColor,
+                // The block style already carries the base weight; spans only add to it.
+                onUrlClick = onUrlClick,
+                onPathClick = pathClick,
+                codeFontSize = palette.codeFontSize,
+                appendCaret = cursor,
+                searchState = searchState,
+                appendOnly = literalSource.lastWasAppend,
+            )
+        }
     }
     CaretText(annotated, style, color, palette.linkColor, modifier, cursor)
 }
@@ -1305,38 +1446,15 @@ private fun CaretText(
     modifier: Modifier = Modifier,
     cursor: Boolean = false,
 ) {
-    // 光标：**不再拼进 AnnotatedString**（性能）。
-    //
-    // 原来是 `remember(annotated, alpha) { buildAnnotatedString { … } }`，而 `alpha` 在**组合期**
-    // 读（闪烁动画的 State）⇒ 每帧重建整个 AnnotatedString + 该行文本重新排版（60 次/秒）。
-    // 思考链在打字机 25 Hz 下每行都带光标，这一条就是「流式时滑动发涩」里稳定的一部分。
-    //
-    // 现在 AnnotatedString 只随文本变化；光标用 `drawBehind` 在**绘制阶段**画，
-    // 读 alpha 不触发重组、也不触发重新排版（本仓 `ChatBlocks.kt` 的 `RevealHeight`
-    // 与 `ChatScreen` 的 `switchAlpha` 都是同一个写法）。
+    // 带光标的调用方已在扫描器/代码文本的最终 builder 里追加零宽占位符；这里仅
+    // 在绘制阶段读取闪烁状态并按占位符坐标画竖线，不再复制整段 AnnotatedString。
     val caret = remember { arrayOfNulls<TextLayoutResult>(1) }
     val readingModifier = modifier.readingText { caret[0] }
     val caretAlpha = if (cursor) blinkingCursorAlphaState() else null
-    // **光标直接接在文字末尾**（用户：「直接往文字最后加不就行了吗」）：
-    // 在文本末尾追加一个**带背景色的窄字符段**（▏），排版器会为它留出位置并把它算作
-    // 最后一行的一部分 —— 于是光标的位置由排版给出，精确贴着最后一个字，不会因为
-    // 折行数变化而跳（原来画在 `getLineRight(最后一行)` 上，那只是"折行后末行的右端"，
-    // 与"正在增长的那个字"不是一回事，所以显得跟不上）。
-    // 闪烁的透明度在**绘制期**叠加，不进 AnnotatedString ⇒ 不触发重组与重新排版。
-    val textWithCaret = remember(annotated, cursor) {
-        if (!cursor) {
-            annotated
-        } else {
-            buildAnnotatedString {
-                append(annotated)
-                // **零宽空格**：它不占宽度、不可能被渲染成豆腐块，但它的位置就是
-                // "最后一个字后面" —— 绘制时用 getBoundingBox 取它的 x，精确到像素。
-                append(CARET_PLACEHOLDER)
-            }
-        }
-    }
+    // 零宽占位符参与末行排版，光标的位置由其字符坐标给出。
+    // 闪烁的透明度只在绘制期叠加，不触发重组与重新排版。
     Text(
-        text = textWithCaret,
+        text = annotated,
         modifier = if (caretAlpha == null) {
             readingModifier
         } else {
@@ -1374,8 +1492,17 @@ private const val CURSOR_WIDTH_PX = 4f
 /** 换行符常量（LiveBlocks 里要判空行，直接写转义容易被工具链截断）。 */
 private val NL: String = System.lineSeparator()
 
-/** 光标占位符：接在文本末尾，让排版器为它留出位置（宽度接近一个细竖条）。 */
+/** 零宽占位符：接在文本末尾，让排版器提供绘制光标的坐标。 */
 private const val CARET_PLACEHOLDER = "​"
+
+/** Build the code text and optional zero-width caret in one pass. */
+internal fun codeBlockAnnotatedText(code: String, appendCaret: Boolean): AnnotatedString {
+    if (!appendCaret) return AnnotatedString(code)
+    return AnnotatedString.Builder(code.length + CARET_PLACEHOLDER.length).apply {
+        append(code)
+        append(CARET_PLACEHOLDER)
+    }.toAnnotatedString()
+}
 
 /** 诊断用换行（避免字符串模板里的转义被工具截断）。 */
 private val CHR_NL = System.lineSeparator()
@@ -1577,7 +1704,7 @@ private fun CodeBlock(block: MdBlock.Code, palette: MarkdownPalette, cursor: Boo
             }
             Spacer(Modifier.height(6.dp))
             CaretText(
-                annotated = remember(block.code) { AnnotatedString(block.code) },
+                annotated = remember(block.code, cursor) { codeBlockAnnotatedText(block.code, cursor) },
                 caretColor = palette.linkColor,
                 cursor = cursor,
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -1639,6 +1766,13 @@ private fun TableBlock(
     cursor: Boolean = false,
 ) {
     val readingKey = LocalReadingTextKey.current
+    // Keep one current row snapshot for this keyed table block. Live parsers may publish a new
+    // outer snapshot while most row cell lists are unchanged; reusing those exact references lets
+    // Strong Skipping skip the unchanged TableCells calls. SideEffect commits only a composition
+    // that was actually applied, and the holder retains no chain of earlier table versions.
+    val rowSnapshot = remember { arrayOfNulls<ReusableTableRows>(1) }
+    val reusableRows = reuseTableRows(rowSnapshot[0], block.header, block.rows)
+    SideEffect { rowSnapshot[0] = reusableRows }
     val cellStyle = MaterialTheme.typography.bodySmall
     // 12sp semibold, scaled off bodySmall so the header still follows the 字号 setting.
     val headerStyle = cellStyle.copy(
@@ -1646,88 +1780,130 @@ private fun TableBlock(
         lineHeight = cellStyle.lineHeight * (12f / 13f),
         fontWeight = FontWeight.SemiBold,
     )
-    Column(
-        Modifier
+    val pathClick = LocalPathClick.current
+    // Annotations can contain callbacks. A changed palette or handler gets a fresh local cache.
+    val inlineCache = remember(palette, onUrlClick, pathClick) { TableInlineCache() }
+    val tableRows = remember(IdentityKey(reusableRows.header), IdentityKey(reusableRows.rows)) {
+        object : AbstractList<List<String>>() {
+            override val size: Int get() = reusableRows.rows.size + 1
+            override fun get(index: Int): List<String> =
+                if (index == 0) reusableRows.header else reusableRows.rows[index - 1]
+        }
+    }
+    // Capture only the cursor row, not the changing outer table snapshot. Updating the last
+    // cell can then keep the row-content callback stable for all unchanged row wrappers.
+    val cursorRow = if (cursor) tableRows.lastIndex else -1
+    MeasuredTable(
+        rows = tableRows,
+        headerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        dividerColor = MaterialTheme.colorScheme.outlineVariant,
+        modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp)),
-    ) {
-        TableRow(
-            cells = block.header,
-            style = headerStyle,
+    ) { row, cells ->
+        TableCells(
+            cells = cells,
+            style = if (row == 0) headerStyle else cellStyle,
             color = color,
             palette = palette,
             onUrlClick = onUrlClick,
-            header = true,
-            cursor = cursor && block.rows.isEmpty(),
-            readingKey = readingKey?.let { "$it:header" },
+            onPathClick = pathClick,
+            inlineCache = inlineCache,
+            cursor = row == cursorRow,
+            readingKey = readingKey?.let { if (row == 0) "$it:header" else "$it:row:${row - 1}" },
         )
-        // Vertical gestures belong to the transcript, including fling velocity.
-        // An inner capped list split one reading gesture into two scroll ranges.
-        block.rows.forEachIndexed { index, row ->
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 1.dp)
-            TableRow(
-                cells = row,
-                style = cellStyle,
-                color = color,
-                palette = palette,
-                onUrlClick = onUrlClick,
-                header = false,
-                cursor = cursor && index == block.rows.lastIndex,
-                readingKey = readingKey?.let { "$it:row:$index" },
-            )
-        }
     }
 }
 
+/** The current rendered cell lists and the parser snapshot they came from. */
+internal class ReusableTableRows internal constructor(
+    val header: List<String>,
+    val rows: List<List<String>>,
+    internal val sourceHeader: List<String>,
+    internal val sourceRows: List<List<String>>,
+)
+
+/**
+ * Reuse immutable row cell lists at the same ordinal when their contents are unchanged.
+ * Reference checks come first so append-only parser snapshots do not deep-compare old cells.
+ * Duplicate rows are deliberately matched by ordinal, never by a content-keyed lookup.
+ */
+internal fun reuseTableRows(
+    previous: ReusableTableRows?,
+    header: List<String>,
+    rows: List<List<String>>,
+): ReusableTableRows {
+    if (previous != null && previous.sourceHeader === header && previous.sourceRows === rows) {
+        return previous
+    }
+
+    val stableHeader = previous?.header?.takeIf { it === header || it == header } ?: header
+    val previousInputRows = previous?.sourceRows
+    val previousStableRows = previous?.rows
+    var stableRows: MutableList<List<String>>? = null
+
+    rows.forEachIndexed { index, incoming ->
+        val oldCells = previousStableRows?.getOrNull(index)
+        val oldInputCells = previousInputRows?.getOrNull(index)
+        val stableCells = when {
+            oldCells == null -> incoming
+            // This row's parser input is the same immutable list as last time. It may already
+            // have been canonicalized to an older equal list, which remains the best UI input.
+            oldInputCells === incoming -> oldCells
+            oldCells === incoming -> oldCells
+            oldCells == incoming -> oldCells
+            else -> incoming
+        }
+
+        if (stableCells !== incoming && stableRows == null) {
+            stableRows = ArrayList(rows.size)
+            // Every earlier row matched the incoming reference, so only copy the outer list;
+            // those cell lists are already shared with the parser snapshot.
+            for (prefix in 0 until index) stableRows.add(rows[prefix])
+        }
+        stableRows?.add(stableCells)
+    }
+
+    return ReusableTableRows(
+        header = stableHeader,
+        rows = stableRows ?: rows,
+        sourceHeader = header,
+        sourceRows = rows,
+    )
+}
+
 @Composable
-private fun TableRow(
+private fun TableCells(
     cells: List<String>,
     style: TextStyle,
     color: Color,
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
-    header: Boolean,
+    onPathClick: ((String) -> Unit)?,
+    inlineCache: TableInlineCache,
     cursor: Boolean = false,
     readingKey: String? = null,
 ) {
-    val separators = remember(cells.size) { FloatArray((cells.size - 1).coerceAtLeast(0)) { Float.NaN } }
-    val dividerColor = MaterialTheme.colorScheme.outlineVariant
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                if (header) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
-            )
-            .drawBehind {
-                // Row measures each cell once. Divider positions come from its own placement,
-                // so weight rounding and RTL remain identical without an intrinsic text pass.
-                for (x in separators) if (!x.isNaN()) {
-                    drawRect(dividerColor, Offset(x, 0f), Size(1.dp.roundToPx().toFloat(), size.height))
-                }
-            },
-    ) {
-        cells.forEachIndexed { index, cell ->
-            if (index > 0) {
-                Spacer(
-                    Modifier
-                        .width(1.dp)
-                        .onPlaced { separators[index - 1] = it.positionInParent().x },
-                )
+    cells.forEachIndexed { index, cell ->
+        val caret = cursor && index == cells.lastIndex
+        val annotated = remember(cell, caret, inlineCache) {
+            inlineCache.getOrParse(cell, caret) {
+                if (literalInlineSource(cell)) codeBlockAnnotatedText(cell, caret) else InlineScanner(
+                    text = cell,
+                    codeBackground = palette.codeBackground,
+                    codeColor = palette.codeColor,
+                    linkColor = palette.linkColor,
+                    baseWeight = null,
+                    onUrlClick = onUrlClick,
+                    onPathClick = onPathClick,
+                    codeFontSize = palette.codeFontSize,
+                ).scan(appendCaret = caret)
             }
-            CompositionLocalProvider(LocalReadingTextKey provides readingKey?.let { "$it:cell:$index" }) {
-            InlineText(
-                text = cell,
-                cursor = cursor && index == cells.lastIndex,
-                style = style,
-                color = color,
-                palette = palette,
-                onUrlClick = onUrlClick,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-            )
-            }
+        }
+        CompositionLocalProvider(LocalReadingTextKey provides readingKey?.let { "$it:cell:$index" }) {
+            CaretText(annotated, style, color, palette.linkColor,
+                Modifier.padding(horizontal = 10.dp, vertical = 6.dp), caret)
         }
     }
 }

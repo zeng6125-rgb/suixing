@@ -49,6 +49,22 @@ class InlineDelimiterSearchTest {
         }
     }
 
+    @Test fun `a shorter range keeps its own truncated delimiter run semantics`() {
+        val search = InlineDelimiterSearch("a**")
+        assertEquals(-1, search.findClosing('*', 1, 1, 3))
+        assertEquals(1, search.findClosing('*', 1, 1, 2))
+        assertEquals(
+            previousSearch("a**", '*', 1, 1, 2),
+            search.findClosing('*', 1, 1, 2),
+        )
+    }
+
+    @Test fun `a later range can begin at a marker skipped by an earlier escape`() {
+        val search = InlineDelimiterSearch("\\*")
+        assertEquals(-1, search.findClosing('*', 1, 0, 2))
+        assertEquals(1, search.findClosing('*', 1, 1, 2))
+    }
+
     @Test fun `failed ranges do not leak between nesting ends widths or marker kinds`() {
         val text = "`code` *italic* **bold** _other_ __strong__ ~~gone~~"
         val search = InlineDelimiterSearch(text)
