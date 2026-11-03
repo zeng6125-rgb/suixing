@@ -49,6 +49,7 @@ import androidx.compose.runtime.DisposableEffect
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.CompositionLocalProvider
@@ -183,7 +184,10 @@ fun ChatScreen(
     val draft = state.draft
     // What `/` can run here: the same persona filter the agent run uses, plus the goal
     // command, which is a user setting rather than a model tool call.
-    val slashTools = remember(state.assistantId, settings.assistants) {
+    // MCP connects and drops tools after this screen composed; the registry's revision is
+    // what makes the slash list follow it (issue #76 F-05).
+    val catalogRevision by Core.tools.catalogRevision.collectAsStateWithLifecycle()
+    val slashTools = remember(state.assistantId, settings.assistants, catalogRevision) {
         val disabled = settings.assistant(state.assistantId)?.disabledTools?.toSet().orEmpty()
         slashCommands(
             Core.tools.all()
@@ -231,25 +235,37 @@ fun ChatScreen(
      *
      * A decode that fails still returns the text: losing the picture is a smaller loss than losing
      * the sentence the user typed.
+     *
+     * Returns the number of pictures that could not be decoded, or null when the user left the
+     * conversation while the decode was running (the queued row is deliberately left alone in
+     * both cases). The caller retracts the queue entry only when this returns a number.
      */
-    suspend fun restoreQueuedSteer(steer: PendingSteer) {
-        val input = currentInput()
-        val text = if (input.isBlank()) steer.text else "${input.trimEnd()} ${steer.text}"
+    suspend fun restoreQueuedSteer(steer: PendingSteer): Int? {
+        // Captured before decoding: the write below must land in the conversation the user
+        // tapped in, never in whatever happens to be on screen when the decode finishes.
+        val chatId = state.conversationId
         // 多附件：排队行的图逐张解回缓存列；一张解不开就跳过它（丢一张图比丢整句话小）。
         // 解码并行（顺序 decodeAttachment 会在多图时串行等待），且 **bitmapAttachment 必须
         // 在 Default 上跑**：JPEG 压缩 + Base64 编码是主线程杀手（cameraLauncher 路径早就
         // 包了 withContext(Default)，这里原来漏了 —— 点「修改」排队行会卡一拍）。
-        // addAttachment 回主线程后再逐个入列（它写 VM 状态）。
-        val restored = coroutineScope {
+        val decoded = coroutineScope {
             steer.imagesBase64.map { base64 ->
                 async {
                     val bitmap = decodeAttachment(base64) ?: return@async null
                     withContext(Dispatchers.Default) { bitmapAttachment(bitmap, QUEUED_IMAGE_LABEL) }
                 }
-            }.awaitAll().filterNotNull()
+            }.awaitAll()
         }
-        restored.forEach { viewModel.addAttachment(state.conversationId, it) }
-        setDraft(text = text, imageNames = draft.imageNames + List(restored.size) { QUEUED_IMAGE_LABEL })
+        val restored = decoded.filterNotNull()
+        // A switch during the decode: keep the queue row and touch nothing here. The caller
+        // reports that instead of silently dropping the line.
+        if (viewModel.screenState.value.conversationId != chatId) return null
+        restored.forEach { viewModel.addAttachment(chatId, it) }
+        // **读最新草稿**（issue #76 F-01）：解码期间用户可能又打了字；用点击时那份会把它
+        // 覆盖掉。附件字段取最新那份，恢复排队行不能顺带换掉用户刚选的附件。
+        val latest = viewModel.draftFor(chatId)
+        viewModel.onDraftChange(chatId, mergeRestoredDraft(latest, steer, restored.size))
+        return steer.imagesBase64.size - restored.size
     }
     // **按会话重置**（评审 S4）：它持有的是某条消息对象，切会话后若还能被读到，
     // `editMessage(id, …)` 会把 A 的编辑改到 B 上。目前靠"编辑弹窗是模态"侥幸挡住，
@@ -1853,8 +1869,32 @@ fun ChatScreen(
                     goal = state.goal,
                     onClearGoal = rememberStableCallback0 { viewModel.clearGoal() },
                     onInput = rememberStableCallback1<String> { setDraft(text = it) },
-                    onRestoreSteer = rememberStableCallback1 { steer ->
-                        scope.launch { restoreQueuedSteer(steer) }
+                    onRestoreSteer = rememberStableCallback2<PendingSteer, Boolean, Unit> { steer, nextTurn ->
+                        scope.launch {
+                            val missing = try {
+                                restoreQueuedSteer(steer)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (failure: Exception) {
+                                // The row stays in its queue: the user can try again.
+                                snackbarHostState.showSnackbar(
+                                    "恢复失败，队列里的这条还在：${failure.message ?: "未知错误"}",
+                                )
+                                return@launch
+                            }
+                            if (missing == null) {
+                                snackbarHostState.showSnackbar("会话已切换，这条仍留在队列里")
+                                return@launch
+                            }
+                            // Commit first, retract second (issue #76 F-01): the queue entry is
+                            // what the user falls back to when the restore did not land.
+                            if (nextTurn) viewModel.retractTurn(state.conversationId, steer.id) else viewModel.retractSteer(steer.id)
+                            if (missing > 0) {
+                                snackbarHostState.showSnackbar(
+                                    "有 $missing 张图片未能恢复，文字已放回输入框",
+                                )
+                            }
+                        }
                     },
                     running = state.runningHere,
                     settings = settings,
@@ -1905,11 +1945,15 @@ fun ChatScreen(
                         // The view model clears this conversation's draft on success;
                         // a refused send keeps the text where the user left it.
                         val (body, images) = withAttachment(attachments, input)
-                        viewModel.send(body, images)
-                        // 发送 = 明确要回到最新：先放行追底再跳，并清掉阅读位置记忆。
-                        scroll.allowBottomResume = true
-                        scroll.stickToBottom = true
-                        jumpToLatest()
+                        val accepted = viewModel.send(body, images)
+                        // 只有真正被接受的新聊天轮次才动阅读位置（issue #76 F-02）。斜杠
+                        // 指令即使返回 true 也不创建轮次，不能把正在读的历史拽到底部。
+                        if (shouldJumpToLatest(accepted, body)) {
+                            // 发送 = 明确要回到最新：先放行追底再跳，并清掉阅读位置记忆。
+                            scroll.allowBottomResume = true
+                            scroll.stickToBottom = true
+                            jumpToLatest()
+                        }
                     },
                     onStop = rememberStableCallback0 { viewModel.stop() },
                     onSteer = rememberStableCallback2 { text, images -> viewModel.steer(text, images) },
@@ -2001,7 +2045,19 @@ fun ChatScreen(
             },
             onAskModel = {
                 pathMenuPath = null
-                viewModel.send("读取这个文件并总结：$path")
+                val text = "读取这个文件并总结：$path"
+                val accepted = viewModel.send(text)
+                if (!accepted) {
+                    // 运行中被 send 拒绝时按既有语义走插话；再不成功也要给一句回执，
+                    // 不能只让菜单消失（issue #76 F-07）。
+                    val queued = state.runningHere && viewModel.steer(text)
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            if (queued) "已放进当前任务的排队"
+                            else "没有发送：当前无法开始新的一轮，请稍后再试",
+                        )
+                    }
+                }
             },
         )
     }

@@ -822,8 +822,13 @@ internal fun Composer(
      * Takes a queued line back out of the queue and into the composer — its text **and its
      * picture**. A callback of its own rather than `onInput(text)`: the attachment lives in the
      * view model's cache, not in this composable, so only the caller can put both halves back.
+     *
+     * [nextTurn] says which queue owns [PendingSteer]: a waiting turn or a steer for the run
+     * in flight. The caller retracts the matching queue entry **only after** the restore has
+     * committed; doing it here in the same click would drop the row if the decode failed
+     * (issue #76 F-01).
      */
-    onRestoreSteer: (PendingSteer) -> Unit,
+    onRestoreSteer: (PendingSteer, Boolean) -> Unit,
     running: Boolean,
     settings: AppSettings,
     /** The persona this conversation runs with, not the app-wide active one. */
@@ -1141,8 +1146,10 @@ internal fun Composer(
                             nextTurn = true,
                             onPromote = { onPromoteTurn(queued.id) },
                             onEdit = {
-                                onRestoreSteer(PendingSteer(queued.id, queued.text, queued.imagesBase64))
-                                onRetractTurn(queued.id)
+                                onRestoreSteer(
+                                    PendingSteer(queued.id, queued.text, queued.imagesBase64),
+                                    true,
+                                )
                             },
                             onDelete = { onRetractTurn(queued.id) },
                         )
@@ -1177,9 +1184,9 @@ internal fun Composer(
                             onPromote = { onPromoteSteer(queued.id) },
                             onEdit = {
                                 // Both halves go back, text and picture — see restoreQueuedSteer.
-                                // The line is then retracted, so nothing is sent twice.
-                                onRestoreSteer(queued)
-                                onRetractSteer(queued.id)
+                                // The caller retracts only after the restore lands, so a failed
+                                // decode leaves this row in place.
+                                onRestoreSteer(queued, false)
                             },
                             onDelete = { onRetractSteer(queued.id) },
                         )

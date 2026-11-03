@@ -13,6 +13,10 @@ import com.suixing.agent.data.TodoStore
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.voice.Speaker
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -160,6 +164,18 @@ class ToolRegistry private constructor() {
     /** Tool names this view hides; empty for the registry the app builds at startup. */
     private var hidden: Set<String> = emptySet()
 
+    /**
+     * Bumped whenever the catalog changes (issue #76 F-05). The composer's slash list is a
+     * `remember` over this value: MCP publishes tools after the screen composed, and before
+     * this counter the list kept showing the catalog from app start.
+     */
+    private val _catalogRevision = MutableStateFlow(0L)
+    val catalogRevision: StateFlow<Long> = _catalogRevision.asStateFlow()
+
+    private fun bumpCatalogRevision() {
+        _catalogRevision.update { it + 1 }
+    }
+
     constructor(
         context: Context,
         capabilities: CapabilityHub,
@@ -193,6 +209,7 @@ class ToolRegistry private constructor() {
     fun add(group: ToolGroup) {
         visibleSnapshot = null
         summarySnapshot = null
+        bumpCatalogRevision()
         for (spec in group.specs) {
             check(!builtin.containsKey(spec.name)) { "工具名重复：${spec.name}" }
             builtin[spec.name] = object : Tool {
@@ -220,6 +237,7 @@ class ToolRegistry private constructor() {
     fun replaceDynamic(prefix: String, tools: List<Tool>) {
         visibleSnapshot = null
         summarySnapshot = null
+        bumpCatalogRevision()
         dynamic.keys.removeAll { it.startsWith(prefix) }
         for (tool in tools) {
             check(!builtin.containsKey(tool.spec.name)) { "工具名与内置工具冲突：${tool.spec.name}" }

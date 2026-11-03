@@ -874,6 +874,12 @@ class ChatViewModel : ViewModel() {
     // **并发结构**（#36 准备）：用户操作写，事件线程 `containsKey` 读。
     private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
+    /**
+     * Closes the gap between accepting a message and the engine reporting Running
+     * (issue #76 F-06). Main-thread only, like the other UI-side maps here.
+     */
+    private val sendGate = SendPreparationGate()
+
     private val _drafts = MutableStateFlow<Map<String, Draft>>(emptyMap())
     internal val drafts: StateFlow<Map<String, Draft>> = _drafts.asStateFlow()
     internal fun draftFor(chatId: String): Draft = _drafts.value[chatId] ?: Draft()
@@ -1756,12 +1762,29 @@ class ChatViewModel : ViewModel() {
         val appContext = runCatching { Core.appContext }.getOrNull()
         val settingsNow = settingsSnapshot.value
         if (appContext != null && settingsNow != null &&
-            LocalNetworkAccess.blockedByMissingPermission(appContext, settingsNow.baseUrl)
+            LocalNetworkAccess.blockedByMissingPermission(
+                appContext,
+                effectiveBaseUrl(settingsNow, _state.value),
+            )
         ) {
             _state.update {
                 it.copy(error = "Android 17 起访问局域网模型需要「局域网访问」权限：到「设置 → 模型」点一次" +
                     "「测试连接」会弹出系统授权，允许后再发送。")
             }
+            return false
+        }
+
+        // **Preparation is a window of its own** (issue #76 F-06): a long conversation
+        // reads its full wire before `start()` runs, and during that read the engine is
+        // not Running yet. Without this guard a second tap starts a second chain from a
+        // different window snapshot. The gate is per chat; A preparing never blocks B.
+        // A session that is still winding down also owns the slot: engine.isRunning may
+        // already be false while `start()` is finishing its save.
+        if (!sendGate.tryBegin(
+                chatId = chatId,
+                busy = Core.engine.isRunning(chatId) || sessions.containsKey(chatId),
+            )
+        ) {
             return false
         }
 
@@ -1772,52 +1795,86 @@ class ChatViewModel : ViewModel() {
             imagesBase64 = imagesBase64,
         )
         val fresh = UUID.randomUUID().toString()
-        _state.update {
-            it.copy(
-                messages = it.messages + user,
-                activeRuns = it.activeRuns + (user.id to fresh),
-                streaming = "",
-                reasoningRevision = 0,
-                status = "正在思考中",
-                error = null,
-            )
-        }
+        // Captured before the optimistic update so a synchronous start failure can put the
+        // whole screen back, not just drop the message (issue #76: a refused send keeps the
+        // text the user left in the field).
+        val before = _state.value
+        _state.value = before.acceptSend(user, fresh)
+        // The state this accepted line belongs to. The read below may outlive a switch to
+        // another conversation, so the run has to be started for this snapshot and this
+        // chat id — not for whatever `_state` happens to show when the read returns.
+        val snapshot = _state.value
         // **喂给模型的历史必须是完整 wire，不是屏幕上那个窗口**（#30 最要紧的一条）。
         // 打开会话只读最近 OPEN_TURNS 轮，`_state.value.messages` 就是那个窗口；
         // 直接拿它当历史 ⇒ 模型看不到更早的对话，**不报错、只是变笨**，比崩溃难查得多。
         //
         // `send()` 不是挂起函数（它是输入框的回调），所以：屏幕上的历史已经是完整的
         // （`messageCount == messages.size`，短会话）就直接发；否则先进协程把完整 wire 读出来再发。
-        val shownMessages = _state.value.messages
-        if (_state.value.messageCount <= shownMessages.size) {
-            start(fresh, shownMessages)
+        val shownMessages = snapshot.messages
+        if (snapshot.messageCount <= shownMessages.size) {
+            try {
+                start(chatId, fresh, shownMessages, snapshot)
+            } catch (cancelled: CancellationException) {
+                _state.update { it.rollbackSend(before, user.id, fresh) }
+                throw cancelled
+            } catch (failure: Throwable) {
+                // `start` can refuse synchronously (scope gone, engine bookkeeping). The
+                // line never reached a run, so it must not stay on screen as a ghost or keep
+                // the caller from restoring the draft.
+                _state.update { it.rollbackSend(before, user.id, fresh) }
+                // `start` may have installed the run's live copy before it threw; that copy
+                // has no job behind it and would make `sessions.containsKey` block every
+                // later send. The board it cleared comes back with the same snapshot.
+                sessions.remove(chatId)
+                jobs.remove(chatId)
+                setTodos(chatId, before.todos)
+                Log.w(TAG, "send start failed for $chatId", failure)
+                _state.update {
+                    if (it.conversationId != chatId) it
+                    else it.copy(error = "发送失败：${failure.message ?: failure.javaClass.simpleName}")
+                }
+                return false
+            } finally {
+                sendGate.finish(chatId)
+            }
         } else {
             viewModelScope.launch {
-                // 读盘失败不能让发送带崩（`viewModelScope` 里未捕获的异常会打到主线程）。
-                //
-                // 降级方式：用屏幕上的历史继续发。**这里刻意不写 `_state.error`** ——
-                // `start()` 开头就会 `error = null`（它要清掉上一轮的红条），
-                // 在这里写等于白写；而下一次 `start` 之后用户已经看到消息发出去了，
-                // 再补一条红条只会让人以为这一轮失败了。上下文不完整是次要的，
-                // 而且坏数据本身已经在 `ChatStore` 层被记下（`LogDamaged`/`LogMismatch`）。
-                val wire = runCatching { Core.chats.readWire(chatId) }.getOrNull()
-                if (_state.value.conversationId != chatId) return@launch
-                // 空结果与异常走同一条兜底：用屏幕上这一段。
-                // **刚发的这条必须自己拼上去**（P0：用户实测「我发的新对话，助手回的是上一轮
-                // 我说的那句」）。
-                // 依据（读代码）：`ChatRepository.readWire` 只读盘上的日志（`store.readMeta`
-                // → `store.all` / `store.from`），不看内存 `_state`；而这一条此刻还没落盘
-                // （落盘在这一轮跑完之后）⇒ history 的最后一条是**上一轮**的用户消息，
-                // 模型就去回答它。
-                // 兜底用 `shownMessages`（它是在 `_state.update` 之后取的，已含这条）。
-                // 防重：万一将来 wire 也带上了它，末条相等就不再拼。
-                val filled = wire.orEmpty()
-                val history = when {
-                    filled.isEmpty() -> shownMessages
-                    filled.lastOrNull()?.id == user.id -> filled
-                    else -> filled + user
+                try {
+                    // **先落盘再读**（issue #76 F-03）：切会话只决定屏幕上画哪一份，
+                    // 不撤销一条已经接受的消息。进程在读盘期间被杀时，这一行是磁盘上
+                    // 唯一的那条；读盘完成后 `start()` 会从同一份 wire 接着跑。
+                    runCatching {
+                        save(
+                            chatId = chatId,
+                            title = snapshot.title,
+                            messages = snapshot.messages,
+                            assistantId = snapshot.assistantId,
+                            activeRuns = snapshot.activeRuns,
+                            providerId = snapshot.providerId,
+                            model = snapshot.model,
+                            reasoningEffort = snapshot.reasoningEffort,
+                            checkpoints = snapshot.checkpoints,
+                        )
+                    }.onFailure { failure ->
+                        if (failure is CancellationException) throw failure
+                        Log.w(TAG, "pre-send save failed for $chatId", failure)
+                    }
+                    // 读盘失败不能让发送带崩（`viewModelScope` 里未捕获的异常会打到主线程）。
+                    //
+                    // 降级方式：用屏幕上的历史继续发。**这里刻意不写 `_state.error`** ——
+                    // `start()` 开头就会 `error = null`（它要清掉上一轮的红条），
+                    // 在这里写等于白写；而下一次 `start` 之后用户已经看到消息发出去了，
+                    // 再补一条红条只会让人以为这一轮失败了。上下文不完整是次要的，
+                    // 而且坏数据本身已经在 `ChatStore` 层被记下（`LogDamaged`/`LogMismatch`）。
+                    val wire = runCatching { Core.chats.readWire(chatId) }.getOrNull()
+                    // **不要因为用户切走就丢掉这一条**（issue #76 F-03）：run 属于原会话，
+                    // `start()` 只在当前显示的仍是它时才画到屏幕上；后台会话的流式内容
+                    // 会进 `sessions`，跑完后由 `endSession` 落盘。
+                    val history = sendHistory(wire, shownMessages, user)
+                    start(chatId, fresh, history, snapshot)
+                } finally {
+                    sendGate.finish(chatId)
                 }
-                start(fresh, history)
             }
         }
         clearDraft(chatId)
@@ -2470,9 +2527,26 @@ class ChatViewModel : ViewModel() {
         _state.update { it.copy(error = null) }
     }
 
+    /**
+     * Starts a run for the conversation currently on screen. Callers that accepted a
+     * message before an asynchronous read must use the four-argument overload with the
+     * snapshot that message belongs to; otherwise a switch during the read starts the run
+     * against the wrong chat (issue #76 F-03).
+     */
     private fun start(runId: String, history: List<StoredMessage>) {
-        val shown = _state.value
-        val chatId = shown.conversationId
+        start(_state.value.conversationId, runId, history, _state.value)
+    }
+
+    private fun start(
+        chatId: String,
+        runId: String,
+        history: List<StoredMessage>,
+        snapshot: ChatUiState,
+    ) {
+        // The snapshot can lag behind the display (the user switched while the wire was
+        // being read); only its conversation identity is wrong, and the run must use the
+        // id the message was accepted for.
+        val shown = if (snapshot.conversationId == chatId) snapshot else snapshot.copy(conversationId = chatId)
         // Lines left queued by the run that just ended, taken before this one starts: the
         // queue outlives a run, and a line queued from here on is already on its way to the
         // new run, so handing that one over again would deliver it twice.
@@ -2498,9 +2572,12 @@ class ChatViewModel : ViewModel() {
         // The first `todo_write` of this run puts it back. 只清这个会话自己那一格。
         setTodos(chatId, emptyList())
         // 新一轮开始：清掉上一轮留下的红色提示，并把"用户停止"标记复位（否则这一轮真失败会被
-        // 当成用户中断而不再报出来）。
+        // 当成用户中断而不再报出来）。只在它仍是屏幕上的会话时动 UI：后台会话的 run 不能
+        // 把当前会话的红条/待办清掉（issue #76 F-03）。
         userStopped -= chatId
-        _state.update { it.copy(todos = emptyList(), error = null) }
+        _state.update {
+            if (it.conversationId == chatId) it.copy(todos = emptyList(), error = null) else it
+        }
         val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             AgentForegroundService.start(Core.appContext, "随行正在执行任务")
             // The draft writer rides inside the run's own coroutine, so it stops the moment
