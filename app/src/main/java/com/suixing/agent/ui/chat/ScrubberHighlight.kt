@@ -16,17 +16,19 @@ internal fun ScrubberPresentation(
     conversationId: String,
     presented: () -> Boolean,
     entrance: () -> Float,
+    travelDp: () -> Float = { ConversationEntrance.TRAVEL_DP },
     content: @Composable (Modifier) -> Unit,
 ) = key(conversationId) {
     val latestPresented by rememberUpdatedState(presented)
     val latestEntrance by rememberUpdatedState(entrance)
+    val latestTravelDp by rememberUpdatedState(travelDp)
     // Position restoration is complete before presented flips. Waiting for entrance=1 would
     // leave the already-visible transcript without its rail for the rest of the animation.
     val ready by remember { derivedStateOf { latestPresented() } }
     if (ready) content(Modifier.graphicsLayer {
         val progress = latestEntrance()
         alpha = ConversationEntrance.alpha(progress)
-        translationY = ConversationEntrance.remainingTravel(progress) * ConversationEntrance.TRAVEL_DP.dp.toPx()
+        translationY = ConversationEntrance.remainingTravel(progress) * latestTravelDp().dp.toPx()
     })
 }
 

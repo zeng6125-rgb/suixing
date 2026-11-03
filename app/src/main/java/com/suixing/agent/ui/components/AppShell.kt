@@ -34,12 +34,9 @@ const val NAV_SHIFT_DIVISOR = 12
 val LocalOpenSidebar = staticCompositionLocalOf<(() -> Unit)?> { null }
 
 /**
- * 抽屉是否正在播放收起/打开动画（外壳写，屏幕读）。
- *
- * 为什么需要它：切会话时**抽屉动画和整页重组在抢同一份主线程**。用户的原话是
- * 「切会话这个抽屉的动画都被吞掉和不流畅」，而"内容出不出来是一回事" ——
- * 所以正确的顺序是：**先让抽屉的动画把帧用掉，再把转录的分批填充压上去**。
- * 屏幕只在 `LaunchedEffect` 里等它变回 false，不在组合期读，不让它引起重组。
+ * Whether a conversation switch is still closing the drawer. Preparation may run in parallel;
+ * the restored viewport uses an in-place fade during the close, and a cold loading placeholder
+ * waits until the drawer stops. The shell publishes the holder without reading its value.
  */
 val LocalDrawerBusy = compositionLocalOf<androidx.compose.runtime.State<Boolean>> {
     androidx.compose.runtime.mutableStateOf(false)

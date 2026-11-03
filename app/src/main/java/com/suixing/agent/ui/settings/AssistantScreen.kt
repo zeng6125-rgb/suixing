@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +54,8 @@ fun AssistantScreen(
     val editing = editingId?.let { id ->
         assistants.firstOrNull { it.id == id } ?: Assistant(id = id, avatar = "🧭")
     }
+    var lastEditing by remember { mutableStateOf<Assistant?>(null) }
+    SideEffect { if (editing != null) lastEditing = editing }
     Box(Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
@@ -79,20 +82,27 @@ fun AssistantScreen(
                 bottomPadding = navBarContentPadding().calculateBottomPadding(),
             )
         }
-        editing?.let { target ->
-            FullScreenOverlay(visible = true) {
+        // Keep the host mounted across dismiss. Removing editing?.let used to dispose the
+        // entire overlay immediately, so its exit transition never had a chance to run.
+        FullScreenOverlay(visible = editing != null) {
+            (editing ?: lastEditing)?.let { target ->
                 AssistantEditor(
                     initial = target,
                     settings = settings,
                     toolNames = toolNames,
+                    backEnabled = editing != null,
                     onSave = {
-                        onSave(it)
-                        editingId = null
+                        if (editingId != null) {
+                            onSave(it)
+                            editingId = null
+                        }
                     },
                     onDelete = if (assistants.size > 1) {
                         {
-                            onDelete(target)
-                            editingId = null
+                            if (editingId != null) {
+                                onDelete(target)
+                                editingId = null
+                            }
                         }
                     } else {
                         null

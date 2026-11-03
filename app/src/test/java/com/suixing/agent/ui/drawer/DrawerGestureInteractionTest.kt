@@ -5,6 +5,10 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.SupervisorJob
@@ -29,6 +33,72 @@ private const val FRAME_NANOS = 16_000_000L
  * they never suspend inside Animatable or cancel a live pointer Job.
  */
 class DrawerGestureInteractionTest {
+
+    @Test
+    fun `a slow deliberate swipe settles away from either anchor without springing back`() = withHarness {
+        for (initial in listOf(DrawerValue.Open, DrawerValue.Closed)) {
+            state.snapTo(initial)
+            val wasOpen = state.isOpen
+            val progress = if (wasOpen) 0.6f else 0.4f
+            val session = state.beginGesture()
+            state.applyGestureFrame(session, progress)
+            assertTrue(state.finishGesture(session))
+
+            val target = drawerDragTarget(wasOpen, progress, 0f)
+            val settle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                state.settleGesture(session, target, DRAWER_SPEC, releaseProgress = progress)
+            }
+            pumpFrames(90)
+
+            assertTrue(settle.isCompleted)
+            assertFalse(settle.isCancelled)
+            assertEquals(!wasOpen, state.isOpen)
+            assertEquals(if (wasOpen) 0f else 1f, state.progress.value, 0.0001f)
+            assertEquals(!wasOpen, state.homeShieldActive)
+        }
+    }
+
+    @Test
+    fun `a short fast swipe on the moving shield settles closed`() = withHarness {
+        state.snapTo(DrawerValue.Open)
+        val session = state.beginGesture()
+        val accumulator = DrawerDragAccumulator()
+        val generation = accumulator.begin(progress = 1f, widthPx = 1_000f)
+        val tracker = VelocityTracker()
+        for (sample in 0..5) {
+            val position = Offset(50f, 0f)
+            tracker.trackDrawerPointer(PointerInputChange(
+                id = PointerId(1L),
+                uptimeMillis = sample * 16L,
+                position = position,
+                pressed = true,
+                previousUptimeMillis = ((sample - 1) * 16L).coerceAtLeast(0),
+                previousPosition = if (sample == 0) position else position + Offset(20f, 0f),
+                previousPressed = sample != 0,
+                isInitiallyConsumed = true,
+            ).withDrawerOriginalPosition(Offset(1_050f - 20f * sample, 0f)))
+            if (sample > 0) accumulator.dragBy(generation, -20f)
+        }
+        val release = accumulator.finish(generation)!!
+        state.applyGestureFrame(session, release.progress)
+        assertTrue(state.finishGesture(session))
+        // Just 10% travel: distance alone would stay open, so this must use the actual fling.
+        assertEquals(0.9f, release.progress, 0.0001f)
+        val velocity = tracker.calculateVelocity().x
+        assertTrue("the shield must preserve leftward fling velocity", velocity < -800f)
+        val target = drawerDragTarget(state.isOpen, release.progress, velocity)
+        val settle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.settleGesture(session, target, DRAWER_SPEC,
+                initialVelocity = velocity / 1_000f, releaseProgress = release.progress)
+        }
+        pumpFrames(90)
+
+        assertTrue(settle.isCompleted)
+        assertFalse(settle.isCancelled)
+        assertFalse(state.isOpen)
+        assertFalse(state.homeShieldActive)
+        assertEquals(0f, state.progress.value, 0.0001f)
+    }
 
     @Test
     fun `the shield spans the whole opening and closing animation`() = withHarness {

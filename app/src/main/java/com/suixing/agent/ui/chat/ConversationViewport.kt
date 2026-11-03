@@ -11,6 +11,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -24,6 +25,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.ViewportBookmark
+import com.suixing.agent.ui.components.LocalDrawerBusy
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlinx.coroutines.flow.conflate
@@ -82,6 +84,7 @@ internal class ConversationViewport(val conversationId: String, val bookmark: Vi
     // One target transcript, with opacity finishing before its small spatial settle. Reads
     // stay in graphicsLayer; changing this clock never recomposes or remeasures the rows.
     val entrance = Animatable(0f)
+    var entranceTravelDp by mutableFloatStateOf(ConversationEntrance.TRAVEL_DP)
     val navigation = NavigationMotion()
     var prepared by mutableStateOf(false)
     var presented by mutableStateOf(false)
@@ -94,8 +97,9 @@ internal class ConversationViewport(val conversationId: String, val bookmark: Vi
  * step. The short travel and non-overshooting settle keep the switch quiet and predictable.
  */
 internal object ConversationEntrance {
-    const val DURATION_MS = 300
-    const val TRAVEL_DP = 12f
+    const val DURATION_MS = 240
+    const val CONCURRENT_DURATION_MS = 180
+    const val TRAVEL_DP = 6f
 
     /**
      * Normalized critically damped response. It starts gently and does not overshoot; the
@@ -166,6 +170,7 @@ internal fun BindConversationViewport(
     val revisionNow = rememberUpdatedState(messagesRevision)
     val expectedWidth = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
     val owner = LocalLifecycleOwner.current
+    val drawerBusy = LocalDrawerBusy.current
 
     val capture = remember(viewport, scroll) {
         {
@@ -300,10 +305,17 @@ internal fun BindConversationViewport(
                 }
             }
         }
+        // Preparation can overlap drawer close, but two simultaneous spatial directions feel
+        // disconnected. While it is still closing, fade the restored content in place; otherwise
+        // use the small settle. The rail reads this same travel and the same entrance clock.
+        val concurrentClose = drawerBusy.value
+        viewport.entranceTravelDp = if (concurrentClose) 0f else ConversationEntrance.TRAVEL_DP
         scroll.restoring = false
         viewport.presented = true
         var acknowledged = false
-        viewport.entrance.animateTo(1f, tween(ConversationEntrance.DURATION_MS, easing = ConversationEntrance.EASING)) {
+        val duration = if (concurrentClose) ConversationEntrance.CONCURRENT_DURATION_MS
+            else ConversationEntrance.DURATION_MS
+        viewport.entrance.animateTo(1f, tween(duration, easing = ConversationEntrance.EASING)) {
             if (!acknowledged && value > 0f) {
                 viewModel.presentViewport(viewport.conversationId)
                 acknowledged = true

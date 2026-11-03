@@ -432,7 +432,7 @@ internal fun SuixingDrawer(
                         onHorizontalDrag = { change, dragAmount ->
                             change.consume()
                             ownedGeneration?.let { dragAccumulator.dragBy(it, dragAmount) }
-                            tracker.addPosition(change.uptimeMillis, change.position)
+                            tracker.trackDrawerPointer(change)
                         },
                         onDragEnd = {
                             val session = ownedSession ?: return@detectHorizontalDragGestures
@@ -441,7 +441,8 @@ internal fun SuixingDrawer(
                             ownedSession = null
                             ownedGeneration = null
                             // **带速度判断**（用户：「手势很大程度都滑不动，得滑很久」）。
-                            // 快速滑动（|v| > 800px/s）按方向吸附；否则看 25% 位置。
+                            // 快速滑动（|v| > 800px/s）按方向吸附；否则离开原开/关端点
+                            // 超过 25% 行程即可换端，不能让收起必须拖过 75%。
                             val v = tracker.calculateVelocity().x
                             // 最终指针位置必须在帧泵关闸后单独交接。代际不符的旧 finish
                             // 不能停掉另一只手已开始的新拖动。
@@ -450,11 +451,9 @@ internal fun SuixingDrawer(
                             if (releaseProgress == null || !stillOwned) {
                                 return@detectHorizontalDragGestures
                             }
-                            val open = if (abs(v) > 800f) v > 0f
-                            else releaseProgress.progress > 0.25f
                             settle(
                                 session,
-                                if (open) DrawerValue.Open else DrawerValue.Closed,
+                                drawerDragTarget(state.isOpen, releaseProgress.progress, v),
                                 v,
                                 releaseProgress,
                             )
@@ -472,8 +471,7 @@ internal fun SuixingDrawer(
                             }
                             settle(
                                 session,
-                                if (releaseProgress.progress > 0.25f) DrawerValue.Open
-                                else DrawerValue.Closed,
+                                drawerDragTarget(state.isOpen, releaseProgress.progress, 0f),
                                 0f,
                                 releaseProgress,
                             )
@@ -536,7 +534,7 @@ internal fun SuixingDrawer(
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
                             val tracker = VelocityTracker()
-                            tracker.addPosition(down.uptimeMillis, down.position)
+                            tracker.trackDrawerPointer(down)
                             var horizontal = 0f
                             var isDrag = false
                             var appliedHorizontal = 0f
@@ -565,11 +563,9 @@ internal fun SuixingDrawer(
                                                 state.finishGesture(session)
                                             if (releaseProgress != null && stillOwned) {
                                                 val v = tracker.calculateVelocity().x
-                                                val open = if (abs(v) > 800f) v > 0f
-                                                else releaseProgress.progress > 0.25f
                                                 settle(
                                                     session,
-                                                    if (open) DrawerValue.Open else DrawerValue.Closed,
+                                                    drawerDragTarget(state.isOpen, releaseProgress.progress, v),
                                                     v,
                                                     releaseProgress,
                                                 )
@@ -578,7 +574,7 @@ internal fun SuixingDrawer(
                                         break
                                     }
                                     val dx = change.positionChange().x
-                                    tracker.addPosition(change.uptimeMillis, change.position)
+                                    tracker.trackDrawerPointer(change)
                                     horizontal += dx
                                     change.consume()   // 纵向拖动也吃掉 ⇒ 露出的主页不能滚动
                                     if (!isDrag && abs(horizontal) > viewConfiguration.touchSlop) {

@@ -1175,7 +1175,7 @@ fun ChatScreen(
                     // Nothing of the conversation is known yet, so none of it is drawn —
                     // least of all the empty state, which is what made a cold start look
                     // like it had opened a new chat and then jumped to the real one.
-                    LoadingSkeleton()
+                    ConversationLoading()
                 } else if (visible.isEmpty() && !live && !state.runningHere) {
                     // Outside the list on purpose: an empty conversation recentres in
                     // whatever space the keyboard leaves, instead of the list's top
@@ -1199,7 +1199,7 @@ fun ChatScreen(
                                 val progress = switchEntrance.value
                                 alpha = ConversationEntrance.alpha(progress)
                                 translationY = ConversationEntrance.remainingTravel(progress) *
-                                    ConversationEntrance.TRAVEL_DP.dp.toPx()
+                                    viewport.entranceTravelDp.dp.toPx()
                             }
                             .padding(
                                 top = with(LocalDensity.current) {
@@ -1253,7 +1253,7 @@ fun ChatScreen(
                              .graphicsLayer {
                                  val progress = switchEntrance.value
                                  alpha = ConversationEntrance.alpha(progress)
-                                 translationY = ConversationEntrance.remainingTravel(progress) * ConversationEntrance.TRAVEL_DP.dp.toPx()
+                                 translationY = ConversationEntrance.remainingTravel(progress) * viewport.entranceTravelDp.dp.toPx()
                              }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(state.conversationId) {
@@ -1726,7 +1726,8 @@ fun ChatScreen(
             }
             ScrubberPresentation(state.conversationId,
                 presented = { viewport.presented },
-                entrance = { switchEntrance.value }) { entranceModifier ->
+                entrance = { switchEntrance.value },
+                travelDp = { viewport.entranceTravelDp }) { entranceModifier ->
                 TurnScrubber(
                     conversationId = state.conversationId,
                     totalTurns = page.turns,

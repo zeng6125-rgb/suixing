@@ -2,9 +2,20 @@ package com.suixing.agent.ui.chat
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -44,7 +55,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -80,6 +90,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
@@ -109,8 +120,6 @@ import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.chat.GenerationSheet
 import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.PopupMotionState
-import com.suixing.agent.ui.components.popupMotion
 import com.suixing.agent.ui.components.MENU_EXIT_MS
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.data.AppSettings
@@ -926,7 +935,13 @@ internal fun Composer(
     // 每 120ms 重组的只有这一个环（含时间读数），不拖别人。
     val scheme = MaterialTheme.colorScheme
     // 输入正文与占位字共用这一份：字体、行高、字重全部一致，只有颜色不同。
-    val fieldTextStyle = MaterialTheme.typography.bodyLarge
+    val baseFieldTextStyle = MaterialTheme.typography.bodyLarge
+    // 16/17 reduces the default 17sp body to 16sp and 28sp leading to about 26sp.
+    // Scale the current theme values proportionally so app font tiers and system fontScale remain active.
+    val fieldTextStyle = baseFieldTextStyle.copy(
+        fontSize = baseFieldTextStyle.fontSize * (16f / 17f),
+        lineHeight = baseFieldTextStyle.lineHeight * (26f / 28f),
+    )
     // 发送后键盘退避（用户：「抬起输入法发送时，对话框也会挡住」）：不收键盘的话 composer 悬在
     // 键盘上方、把列表尾的状态行盖在后面。发送＝这句话说完了，收键盘让整条栈落回去；「停止」
     // 不收（那一下没有发送任何文字，用户的手还在输入上）。
@@ -1781,15 +1796,10 @@ private fun GoalChip(
 }
 
 /**
- * The candidate card as a popup window, with the same entrance/exit motion the other
- * composer cards use.
- *
- * The geometry is untouched: the card still hangs 6dp above the pill and is still positioned
- * by [popupPositionProvider]. What moves is the popup motion layer: opacity, a 6% scale and an
- * 8dp rise (`PopupStyle.kt`'s `popupMotion`). Entrance runs opacity on a 100ms tween and the
- * scale/rise on a spring; exit is a 110ms tween on both, not a reverse spring. [lastItems] is
- * kept for the exit animation: the caller empties the list the moment the query stops matching,
- * and an empty card shrinking away would look like a flicker rather than a dismissal.
+ * The candidate card as a popup window, with a motion curve local to this small, frequently
+ * retargeted list. Other popups keep their shared motion. The geometry is unchanged: the card
+ * still hangs 6dp above the pill and uses [popupPositionProvider]. [lastItems] stays visible
+ * while the exit finishes, with its actions disabled during that period.
  */
 @Composable
 private fun SlashSuggestionPopup(
@@ -1799,38 +1809,51 @@ private fun SlashSuggestionPopup(
     popupPositionProvider: PopupPositionProvider,
     width: Dp,
 ) {
-    var keepMounted by remember { mutableStateOf(visible) }
+    // Keep the transition state across rapid query changes. AnimatedVisibility retargets from its
+    // current values when the user clears and retypes, then removes the popup after exit completes.
+    val visibility = remember { MutableTransitionState(false) }
+    visibility.targetState = visible
     var lastItems by remember { mutableStateOf(items) }
-    val motion = remember { PopupMotionState() }
     LaunchedEffect(items) {
         if (items.isNotEmpty()) lastItems = items
     }
-    LaunchedEffect(visible) {
-        if (visible) {
-            keepMounted = true
-            // Let the popup measure the first frame before the entrance starts; starting from
-            // an unmeasured window makes the card jump once as it gets its real size.
-            withFrameNanos { }
-            motion.show()
-        } else if (keepMounted) {
-            motion.hide()
-            keepMounted = false
-        }
-    }
-    if (!visible && !keepMounted) return
+    // During an interrupted entrance, currentState can still be false while the transition is
+    // running toward (or back toward) its target. Keep the popup attached until it settles hidden.
+    if (visibility.isIdle && !visibility.currentState && !visibility.targetState) return
+
+    val transformOrigin = TransformOrigin(0.5f, 1f)
+    val gentleFloatSpring = spring<Float>(
+        dampingRatio = Spring.DampingRatioNoBouncy,
+        stiffness = Spring.StiffnessMediumLow,
+    )
     Popup(
         popupPositionProvider = popupPositionProvider,
         properties = PopupProperties(focusable = false),
     ) {
-        SlashSuggestionList(
-            items = if (visible) items else lastItems,
-            onPick = onPick,
-            modifier = Modifier
-                .width(width)
-                // Grow out of the field's top edge: scaling from the bottom keeps the 6dp
-                // gap fixed, so the card does not slide away from the pill while it animates.
-                .popupMotion(motion) { TransformOrigin(0.5f, 1f) },
-        )
+        AnimatedVisibility(
+            visibleState = visibility,
+            enter = fadeIn(
+                animationSpec = tween(durationMillis = 140, easing = LinearOutSlowInEasing),
+            ) + scaleIn(
+                initialScale = 0.985f,
+                transformOrigin = transformOrigin,
+                animationSpec = gentleFloatSpring,
+            ),
+            exit = fadeOut(
+                animationSpec = tween(durationMillis = 110, easing = FastOutLinearInEasing),
+            ) + scaleOut(
+                targetScale = 0.995f,
+                transformOrigin = transformOrigin,
+                animationSpec = tween(durationMillis = 110, easing = FastOutSlowInEasing),
+            ),
+        ) {
+            SlashSuggestionList(
+                items = if (visible) items else lastItems,
+                onPick = onPick,
+                interactive = visible,
+                modifier = Modifier.width(width),
+            )
+        }
     }
 }
 
@@ -1844,13 +1867,19 @@ private fun SlashSuggestionPopup(
 private fun SlashSuggestionList(
     items: List<Pair<String, String>>,
     onPick: (String) -> Unit,
+    interactive: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
         // 前缀过滤会让行数在 1..5 之间变；底边始终锚在 pill 上方 6dp，高度变化时把上沿
         // 平滑收起/展开，卡片不会整块跳到新位置（Popup 会跟着每帧的新尺寸重新定位）。
-        modifier = modifier.animateContentSize(tween(durationMillis = 120)),
+        modifier = modifier
+            .then(if (interactive) Modifier else Modifier.clearAndSetSemantics { })
+            .animateContentSize(
+                alignment = Alignment.BottomStart,
+                animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+            ),
         shape = RoundedCornerShape(14.dp),
         color = scheme.surfaceContainer,
         border = BorderStroke(1.dp, scheme.outlineVariant),
@@ -1860,7 +1889,7 @@ private fun SlashSuggestionList(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onPick(name) }
+                        .clickable(enabled = interactive) { onPick(name) }
                         .padding(horizontal = 12.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

@@ -103,29 +103,6 @@ import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 /**
- * 全站唯一的转场规格：旧页**当帧消失**，新页整幅滑入（纯位移、无淡化 —— 淡化必然有
- * "两页同时可见"的中间帧，那正是历次被否掉的残影）。抽屉不随导航关闭，新页压着它滑入。
- */
-
-/** 0.8.91 原样：新页滑入的时长。全站统一数字在 [com.suixing.agent.ui.components.NAV_ENTER_MS]。 */
-private const val NAV_SLIDE_MS = NAV_ENTER_MS
-
-/** 新页滑入的幅度：屏宽 ÷ 这个数（12 ⇒ 约 8% 屏宽）。同 [NAV_SHIFT_DIVISOR]。 */
-private const val NAV_SHIFT = NAV_SHIFT_DIVISOR
-
-/**
- * 推入式的时长：整幅位移比 1/12 的小滑入需要更长一点，才读成"推进"而不是"闪一下"。
- * 旧页同时往左退 1/4 屏（见 NavHost 的 exitTransition），两段位移是同一段时间。
- */
-private const val NAV_PUSH_MS = 280
-
-/**
- * **只有返回**用这一条（用户要的「极轻的蒙版由深到没有」）：被关掉的那页淡出，下面那页不动。
- * 进页**不用**它 —— 进页是 0.8.91 的滑入（用户：「点进去的动画可以」）。
- */
-private const val NAV_FADE_MS = NAV_EXIT_MS
-
-/**
  * 主页四角的圆角半径 —— **对齐屏幕自身的物理圆角**。
  *
  * 用户要的是「四角从一开始就是屏幕边缘模样，屏幕边缘圆角」：
@@ -169,7 +146,7 @@ fun SuixingApp() {
     // 抽屉内容、聊天页都跟着重跑）。保留 State 引用，值在下面 `graphicsLayer` 里（绘制期）读。
     val baseShiftState = animateFloatAsState(
         targetValue = if (route == "empty") 0f else 1f,
-        animationSpec = tween(NAV_PUSH_MS, easing = FastOutSlowInEasing),
+        animationSpec = PageMotion.spec(entering = route != "empty"),
         label = "baseShift",
     )
 
@@ -248,24 +225,10 @@ fun SuixingApp() {
         }
     }
 
-    // Top-level destinations replace each other: the drawer is a switch, not a stack.
-    //
-    // 点抽屉里的一行：抽屉**瞬间消失**，不播滑出（用户原话：「GPT 的抽屉根本就不动」——他要的是
-    // "它不在那儿了"，不是"它滑走了"），页面上只发生一次淡入（见文件顶部那组 NAV_FADE_*）。
-    // snapTo 而不是 close()：close 会播库那条 `FastEffects`（约 130ms）的左滑；UNDISPATCHED 让这次状态写入不排到
-    // 下一个主线程消息，与导航同一帧落地，否则会先看见抽屉还盖着、页面已经在后面淡入。
-    // 点**当前页那一行**同样只收抽屉、不导航：`popUpTo` 会把这一页弹掉再建一份，等于整页重建。
-    //
-    // 同时记下"从哪一页走的、去了哪一页"：用户要**保留离开时的状态**——从抽屉点走的那一页，
-    // 返回落到它时抽屉要**还是开着的**（见下面的结算块）。用户对这件事改口过很多次，最终两句
-    // 合起来才是完整规格：点行时抽屉不动地消失（这句）、返回时它又在那儿（那句）。
-    // 抽屉里点走的那一页：标记只在「还停在这一页」的期间有效。没有它，一个陈旧的名字会留到
-    // 下一次无关的导航上——从覆盖层页开抽屉去别页、返回落到 chat 之后，再从聊天页顶栏点设置，
-    // route 恰好等于那个陈旧名字，返回动画的判据就会错判。
-    val drawerOrigin = remember { arrayOfNulls<String>(1) }
-    // 抽屉是否正在播动画：状态对象本身下发（不在这里解包，避免外壳重组），
-    // 读它的是 ChatScreen 的填充协程 —— 见 `LocalDrawerBusy`。
-    val drawerBusyState = remember { mutableStateOf(false) }
+    // Opening a destination preserves the drawer underneath. Only conversation switches close it.
+    // Publish the busy holder without subscribing the shell to every animation frame.
+    val switchIntents = remember { ConversationSwitchIntents() }
+    val drawerBusyState = switchIntents.busy
 
     val routeNow by androidx.compose.runtime.rememberUpdatedState(route)
     val open: (String) -> Unit = remember(navController) { { target ->
@@ -273,9 +236,7 @@ fun SuixingApp() {
         // 覆盖层现在画在自建抽屉宿主之上（见下面 Scaffold/Box 那段），所以新页是
         // 压着抽屉滑进来的，抽屉保持打开、原样留在下面 —— 返回时揭开的就是它，状态天然保留。
         if (target != routeNow) {
-            // drawerOrigin[0] 只用来决定"返回时要不要播动画"（见 popExitTransition）：从抽屉点进的
-            // 那一页，返回要瞬时揭开出发页。
-            drawerOrigin[0] = target
+            switchIntents.invalidate()
             navController.navigate(target) {
                 popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
@@ -284,24 +245,23 @@ fun SuixingApp() {
         }
     } }
     // A row inside the settings page pushes, so back returns to the list it came from.
-    val push: (String) -> Unit = { target -> navController.navigate(target) }
+    val push: (String) -> Unit = { target ->
+        switchIntents.invalidate()
+        navController.navigate(target)
+    }
     // chat 常驻（见下面 NavHost 那段），所以"回聊天"不是导航到某个目的地，而是**把覆盖层收掉**：
     // pop 到透明的 "empty" 就等于"什么都没有在盖着 chat"。
     val showChat: () -> Unit = { navController.popBackStack("empty", inclusive = false) }
 
-    // 收起抽屉（返回键、抽屉内动作、左缘拖动）：用户自己的动作，走库的动画。同时清掉
-    // 出发页标记——用户手动把抽屉收了，返回时就不该再自己弹出来（"状态"是他刚亲手关掉的这个）。
+    // Back and explicit drawer actions share the same close motion.
     val closeDrawer: () -> Unit = {
-        // 收起用 [DRAWER_CLOSE_SPEC] = tween(210, FastOutLinearIn)。
-        // **点遮罩关闭这条路径已经没有了**：换成 `DismissibleNavigationDrawer`（推挤式）后
-        // 不再画 scrim（见下面 ModalDrawerSheet 之前那段）。
+        switchIntents.invalidate()
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
-        drawerOrigin[0] = null
     }
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
-    // 用户直接落在会话里（ChatGPT 的抽屉在这里同样会关）。这里一并清掉出发页标记。
+    // 用户直接落在会话里。
     val chatFromDrawer: () -> Unit = {
-        drawerOrigin[0] = null
+        switchIntents.invalidate()
         // **与 `closeDrawer()`（助手 / 返回键）逐字相同**：只启动同一条
         // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
@@ -314,38 +274,33 @@ fun SuixingApp() {
      * until its restored position is laid out.
      */
     // Repeated taps remain latest-wins; a superseded close cannot release the latest busy flag.
-    val drawerSwitchToken = remember { intArrayOf(0) }
     val switchFromDrawer: (Conversation) -> Unit = { conversation ->
-        drawerOrigin[0] = null
-        val token = ++drawerSwitchToken[0]
-        drawerBusyState.value = true
-        val closeFinished = mutableStateOf(false)
+        val token = switchIntents.begin()
+        val handoff = ConversationSwitchHandoff()
         // Start the state animation before publishing the new conversation. UNDISPATCHED
         // runs it to its first frame wait, so the close and switch have no extra launch-turn gap.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+                handoff.close { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
             } finally {
-                closeFinished.value = true
-                if (drawerSwitchToken[0] == token) drawerBusyState.value = false
+                switchIntents.finish(token)
             }
         }
         scope.launch {
             // Do not replace the transcript while the panel is still completely at rest.
-            snapshotFlow { drawerState.progress.value < 1f || closeFinished.value }.first { it }
-            if (drawerSwitchToken[0] != token) return@launch
+            if (!handoff.awaitClosingFrame(isCurrent = { switchIntents.isCurrent(token) }) {
+                    drawerState.progress.value
+                }) return@launch
             showChat()
             chat.openConversation(conversation)
         }
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
-    val goBack: () -> Unit = { navController.popBackStack() }
-
-    // 结算：离开抽屉点走的那一页时清标记。抽屉不再需要"摆回开着"——它从头到尾没关过
-    // （见 open()），返回时揭开的就是原来那份。
-    if (drawerOrigin[0] != null && route != drawerOrigin[0]) {
-        SideEffect { drawerOrigin[0] = null }
+    val goBack: () -> Unit = {
+        switchIntents.invalidate()
+        navController.popBackStack()
     }
+
 
     // The keyboard is a layout change, not a scroll, and the platform already animates the
     // IME inset frame by frame. The shell lays itself out by a *clamped* copy of that inset:
@@ -377,11 +332,14 @@ fun SuixingApp() {
             )
         }
     }
-    val openSidebar: () -> Unit = remember(scope, drawerState) { {
-        if (routeNow == "empty") scope.launch {
+    val openSidebar: () -> Unit = remember(scope, drawerState, switchIntents) { {
+        if (routeNow == "empty") {
+            switchIntents.invalidate()
+            scope.launch {
             // 打开用 [DRAWER_OPEN_SPEC]：**同样 210ms**，但曲线是减速的，末端缓停不"生硬"
             // （用户：「那个汉堡键动画改回去有点太生硬了」）。死区时长不变。
             drawerState.animateTo(DrawerValue.Open, DRAWER_OPEN_SPEC)
+            }
         }
     } }
     val setSelectionActive: (Boolean) -> Unit = remember { { selectionActive = it } }
@@ -489,12 +447,12 @@ fun SuixingApp() {
                         drawRect(color = bg, size = androidx.compose.ui.geometry.Size(size.width, h))
                     },
             )
-            // 推进时下面那层（抽屉 + 聊天）跟着往左让 10%：**两层一起动**才读成"推上来"，
-            // 只让新页动会像贴上去。只用位移、不做透明度 —— 淡化会露出下面一层，就是残影。
+            // Match the route underneath a nested page: same depth, duration and easing. Layers
+            // remain opaque so text from two different pages never crossfades together.
             Box(
                 Modifier
                     .fillMaxSize()
-                    .graphicsLayer { translationX = -size.width * 0.10f * baseShiftState.value },
+                    .graphicsLayer { translationX = -size.width * PageMotion.DEPTH_FRACTION * baseShiftState.value },
             ) {
             SuixingDrawer(
                 state = drawerState,
@@ -520,6 +478,7 @@ fun SuixingApp() {
                     activeId = activeConversationId,
                     runningId = runningIds,
                     onNew = {
+                        switchIntents.invalidate()
                         chat.newConversation()
                         chatFromDrawer()
                     },
@@ -715,58 +674,29 @@ fun SuixingApp() {
                                     },
                                 ),
                             // 进页**不播动画**（按最小、最保守的形态落地）：
-                            // · 抽屉路线（点抽屉进页面）= 0.8.91 原样，从右侧滑入 —— 用户认可的版本，
-                            // 进页 = **淡入、无位移**（用户逐帧看录屏：点抽屉一行时要「抽屉滑出 + 页面
-                            // 淡进」同时进行，加位移会变成两段动作）。旧页当帧让位，露出来的先是那层
-                            // 不透明底（route != "empty" ⇒ 底色在），所以淡入期间不会透出聊天页。
-                            // **推入式**（用户：「想要旧页跟着一起动（推入式）」）：新页从右边
-                            // 整幅滑进来，同时下面那一页往左退 1/4 屏 —— 两页一起动，才读成"推进"。
-                            // 淡入淡出不用：任何 alpha 过渡都会有"两页同时可见"的中间帧（残影，
-                            // 用户明确否过）。位移没有中间态：新页一出现就是满的，只是还没到位。
+                            // Foreground and background routes share one depth/timing policy.
                             enterTransition = {
                                 slideInHorizontally(
-                                    animationSpec = tween(
-                                        durationMillis = NAV_PUSH_MS,
-                                        easing = FastOutSlowInEasing,
-                                    ),
+                                    animationSpec = PageMotion.spec(entering = true),
                                 ) { fullWidth -> fullWidth }
                             },
                             exitTransition = {
                                 slideOutHorizontally(
-                                    animationSpec = tween(
-                                        durationMillis = NAV_PUSH_MS,
-                                        easing = FastOutSlowInEasing,
-                                    ),
-                                ) { fullWidth -> -fullWidth / 4 }
+                                    animationSpec = PageMotion.spec(entering = true),
+                                ) { fullWidth -> -(fullWidth * PageMotion.DEPTH_FRACTION).toInt() }
                             },
-                            // 返回是同一件事倒过来：退出的页滑回右边，下面那页从左侧 1/4 处归位。
+                            // Pop reveals the source page at the same depth as a forward push.
                             popEnterTransition = {
                                 slideInHorizontally(
-                                    animationSpec = tween(
-                                        durationMillis = NAV_PUSH_MS,
-                                        easing = FastOutSlowInEasing,
-                                    ),
-                                ) { fullWidth -> -fullWidth / 4 }
+                                    animationSpec = PageMotion.spec(entering = false),
+                                ) { fullWidth -> -(fullWidth * PageMotion.DEPTH_FRACTION).toInt() }
                             },
                             popExitTransition = {
-                                // 用户再三强调的规则（0.8.98 立过、0.8.106 统一动画时被我一并盖掉，
-                                // 这轮恢复）：**从侧边栏点进的那一页，返回不要动画**（瞬时揭开出发页）；
-                                // 设置里的子页（push 进的）返回走推入的反向。判据用 drawerOrigin[0]：
-                                // open() 置位、结算块在 route 离开它时清掉，所以 pop 那一刻它仍指向被退的页。
-                                // 这条 lambda 是接收者形式（AnimatedContentTransitionScope），被退的
-                                // 目的地在 initialState 上，不是 lambda 参数。
-                                if (drawerOrigin[0] != null &&
-                                    initialState.destination.route == drawerOrigin[0]
-                                ) {
-                                    ExitTransition.None
-                                } else {
-                                    slideOutHorizontally(
-                                        animationSpec = tween(
-                                            durationMillis = NAV_PUSH_MS,
-                                            easing = FastOutSlowInEasing,
-                                        ),
-                                    ) { fullWidth -> fullWidth }
-                                }
+                                // Top-level and nested pages reveal their source with the same
+                                // continuous motion; an opaque page never vanishes in one frame.
+                                slideOutHorizontally(
+                                    animationSpec = PageMotion.spec(entering = false),
+                                ) { fullWidth -> fullWidth }
                             },
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
