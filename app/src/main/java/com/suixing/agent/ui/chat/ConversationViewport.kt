@@ -97,9 +97,9 @@ internal class ConversationViewport(val conversationId: String, val bookmark: Vi
  * step. The short travel and non-overshooting settle keep the switch quiet and predictable.
  */
 internal object ConversationEntrance {
-    const val DURATION_MS = 240
-    const val CONCURRENT_DURATION_MS = 180
-    const val TRAVEL_DP = 6f
+    const val DURATION_MS = 260
+    const val CONCURRENT_DURATION_MS = 200
+    const val TRAVEL_DP = 4f
 
     /**
      * Normalized critically damped response. It starts gently and does not overshoot; the
@@ -111,7 +111,7 @@ internal object ConversationEntrance {
     private fun criticalDamped(t: Float): Float {
         if (t <= 0f) return 0f
         if (t >= 1f) return 1f
-        val k = 8f
+        val k = 6.6f
         val end = 1f - (1f + k) * exp(-k)
         val value = 1f - (1f + k * t) * exp(-k * t)
         return (value / end).coerceIn(0f, 1f)

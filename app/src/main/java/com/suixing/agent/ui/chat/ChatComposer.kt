@@ -1825,6 +1825,8 @@ private fun SlashSuggestionPopup(
     val gentleFloatSpring = spring<Float>(
         dampingRatio = Spring.DampingRatioNoBouncy,
         stiffness = Spring.StiffnessMediumLow,
+        // Scale travels less than 1%; the default threshold would end that motion too early.
+        visibilityThreshold = 0.0005f,
     )
     Popup(
         popupPositionProvider = popupPositionProvider,
@@ -1833,18 +1835,18 @@ private fun SlashSuggestionPopup(
         AnimatedVisibility(
             visibleState = visibility,
             enter = fadeIn(
-                animationSpec = tween(durationMillis = 140, easing = LinearOutSlowInEasing),
+                animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
             ) + scaleIn(
-                initialScale = 0.985f,
+                initialScale = 0.992f,
                 transformOrigin = transformOrigin,
                 animationSpec = gentleFloatSpring,
             ),
             exit = fadeOut(
-                animationSpec = tween(durationMillis = 110, easing = FastOutLinearInEasing),
+                animationSpec = tween(durationMillis = 130, easing = FastOutSlowInEasing),
             ) + scaleOut(
-                targetScale = 0.995f,
+                targetScale = 0.997f,
                 transformOrigin = transformOrigin,
-                animationSpec = tween(durationMillis = 110, easing = FastOutSlowInEasing),
+                animationSpec = tween(durationMillis = 130, easing = FastOutSlowInEasing),
             ),
         ) {
             SlashSuggestionList(
@@ -1878,7 +1880,7 @@ private fun SlashSuggestionList(
             .then(if (interactive) Modifier else Modifier.clearAndSetSemantics { })
             .animateContentSize(
                 alignment = Alignment.BottomStart,
-                animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
             ),
         shape = RoundedCornerShape(14.dp),
         color = scheme.surfaceContainer,
