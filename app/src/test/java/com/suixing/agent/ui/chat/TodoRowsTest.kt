@@ -69,6 +69,23 @@ class TodoRowsTest {
     }
 
     /** A strip with no room in it draws nothing rather than everything. */
+
+    @Test
+    fun `the board scan returns the same tally and rows in one pass`() {
+        val board = listOf(
+            item("t1", TODO_COMPLETED),
+            item("t2", TODO_PENDING),
+            item("t3", TODO_COMPLETED),
+            item("t4", TODO_IN_PROGRESS),
+            item("t5", TODO_PENDING),
+        )
+
+        val (rows, done) = todoBoard(board)
+
+        assertEquals(listOf("t2", "t4", "t5"), rows.map { it.id })
+        assertEquals(2, done)
+    }
+
     @Test
     fun `a zero limit draws nothing`() {
         assertEquals(emptyList<TodoItem>(), todoRows(listOf(item("t1", TODO_PENDING)), limit = 0))

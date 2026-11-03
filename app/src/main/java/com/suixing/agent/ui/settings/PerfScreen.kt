@@ -47,7 +47,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
-import kotlin.math.roundToInt
 
 /**
  * 设置 → 性能：三段。

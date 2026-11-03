@@ -67,6 +67,7 @@ import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.extension.SkillViewDialog
 import com.suixing.agent.ui.extension.SkillsSection
 import com.suixing.agent.ui.theme.Tone
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 /** The tab strip's three faces, in the order the pills are drawn. */
 /**
@@ -139,6 +140,7 @@ fun ToolsScreen(onBack: () -> Unit) {
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
             val count = runCatching { Core.skills.importTree(uri) }.getOrElse { error ->
+                if (error is CancellationException) throw error
                 snackbar.showSnackbar("导入失败：${error.message ?: error::class.java.simpleName}")
                 return@launch
             }
@@ -163,6 +165,7 @@ fun ToolsScreen(onBack: () -> Unit) {
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
             val skill = runCatching { Core.skills.importFile(uri) }.getOrElse { error ->
+                if (error is CancellationException) throw error
                 snackbar.showSnackbar("导入失败：${error.message ?: error::class.java.simpleName}")
                 return@launch
             }
@@ -320,6 +323,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                         Core.mcp.upsert(config)
                         if (config.enabled) Core.mcp.connect(config.name)
                     }
+                        .onFailure { if (it is CancellationException) throw it }
                         .onSuccess { notify("已保存 ${config.name}") }
                         .onFailure { notify("保存失败：${it.message ?: "未知错误"}") }
                 }
@@ -338,6 +342,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                         mcpDeleting = null
                         scope.launch {
                             runCatching { Core.mcp.remove(target.name) }
+                                .onFailure { if (it is CancellationException) throw it }
                                 .onSuccess { notify("已删除 ${target.name}") }
                                 .onFailure { notify("删除失败：${it.message ?: "未知错误"}") }
                         }
@@ -367,6 +372,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                             // delete 写 state 文件时会抛 IOException：不接住就是协程炸掉 + 没有提示，
                             // 用户以为删掉了（列表也刷新了），其实磁盘上还在。
                             runCatching { Core.skills.delete(target.id) }
+                                .onFailure { if (it is CancellationException) throw it }
                                 .onSuccess {
                                     skillRefresh++
                                     notify("已删除 ${target.name}")
@@ -389,6 +395,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                 skillUrlImport = false
                 scope.launch {
                     val skill = runCatching { Core.skills.importUrl(url) }.getOrElse { error ->
+                        if (error is CancellationException) throw error
                         snackbar.showSnackbar("导入失败：${error.message ?: error::class.java.simpleName}")
                         return@launch
                     }

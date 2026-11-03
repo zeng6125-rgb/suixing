@@ -1,6 +1,7 @@
 package com.suixing.agent.tools
 
 import com.suixing.agent.skills.SkillStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -140,6 +141,7 @@ class SkillTools(private val skills: SkillStore) : ToolGroup() {
         val url = args.str("url")?.trim().orEmpty()
         if (url.isEmpty()) return ToolResult.failure("Missing argument: url")
         val skill = runCatching { skills.importUrl(url) }.getOrElse { error ->
+            if (error is CancellationException) throw error
             return ToolResult.failure("Skill download failed: ${error.message ?: error::class.java.simpleName}")
         }
         return ToolResult.success(savedPending(skill.name, skill.path, "downloaded from $url"))

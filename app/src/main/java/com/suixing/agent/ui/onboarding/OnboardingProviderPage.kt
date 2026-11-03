@@ -93,10 +93,10 @@ import com.suixing.agent.data.PROTOCOL_RESPONSES
 
 import com.suixing.agent.llm.ChatMessage
 
-import com.suixing.agent.llm.LlmClient
 
 import com.suixing.agent.llm.describeError
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.ui.res.painterResource
 
@@ -474,7 +474,10 @@ fun ProviderPage(
 
                         onSuccess = { "连上了，模型回了：${it.text.trim().take(40)}" },
 
-                        onFailure = { describeError(it) },
+                        onFailure = {
+                            if (it is CancellationException) throw it
+                            describeError(it)
+                        },
 
                     )
 

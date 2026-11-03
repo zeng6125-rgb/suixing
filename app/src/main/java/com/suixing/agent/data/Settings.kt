@@ -552,8 +552,12 @@ data class AppSettings(
     fun assistant(id: String): Assistant? = assistants.firstOrNull { it.id == id }
 
     /** The provider the active triple points at, matched on address. */
-    fun activeProvider(): ProviderConfig? =
-        providers.firstOrNull { it.baseUrl.trim().trimEnd('/') == baseUrl.trim().trimEnd('/') }
+    fun activeProvider(): ProviderConfig? {
+        // Hoist the active address out of the predicate: it used to be trimmed once per
+        // provider even though it cannot change during the scan.
+        val target = baseUrl.trim().trimEnd('/')
+        return providers.firstOrNull { it.baseUrl.trim().trimEnd('/') == target }
+    }
 
     /** Every (provider, model) pair the user ticked anywhere, for the switcher. */
     fun enabledModels(): List<Pair<ProviderConfig, String>> =

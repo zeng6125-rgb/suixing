@@ -30,19 +30,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.groupModels
-import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.ProviderModel
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.components.SuixingDialog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /**
@@ -119,7 +118,10 @@ fun ModelPage(
                                 pickerOpen = true
                             }
                         },
-                        onFailure = { notice = describeError(it) },
+                        onFailure = {
+                            if (it is CancellationException) throw it
+                            notice = describeError(it)
+                        },
                     )
                     loading = false
                 }

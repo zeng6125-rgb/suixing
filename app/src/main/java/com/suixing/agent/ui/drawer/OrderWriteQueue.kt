@@ -1,7 +1,6 @@
 package com.suixing.agent.ui.drawer
 
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /**
  * 排序偏好的**单写者**（issue #66 P0-1）。

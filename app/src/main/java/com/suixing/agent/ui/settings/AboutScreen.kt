@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -50,7 +49,6 @@ import com.suixing.agent.R
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SettingRow
-import com.suixing.agent.ui.components.SoftIcon
 import com.suixing.agent.ui.components.SuixingCard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

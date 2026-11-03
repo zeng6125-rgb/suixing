@@ -8,7 +8,6 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.suixing.agent.core.Core
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.map
 
 internal fun ChatUiState.readableConversationId(): String? =
     conversationId.takeIf { it.isNotBlank() && !loading && messages.isNotEmpty() }

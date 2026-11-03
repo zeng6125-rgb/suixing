@@ -11,6 +11,7 @@ import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
+import kotlinx.coroutines.CancellationException
 
 /** 一次画像整理的结果。自动触发的那条路不读它；手动「重新总结」用它说话。 */
 sealed interface ProfileSummary {
@@ -69,7 +70,10 @@ class ProfileSummarizer(private val llm: LlmClient) {
                 ),
                 tools = emptyList(),
             )
-        }.getOrElse { return ProfileSummary.Failed(it.message ?: "请求失败") }
+        }.getOrElse {
+            if (it is CancellationException) throw it
+            return ProfileSummary.Failed(it.message ?: "请求失败")
+        }
         val next = turn.text.trim()
         if (next.isEmpty()) return ProfileSummary.Failed("模型没有返回内容")
         // 模型只交回变更行（见 ProfileOps）：旧条目不在它手里，所以「增补」是代码保证的，

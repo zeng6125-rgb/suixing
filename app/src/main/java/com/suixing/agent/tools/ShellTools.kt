@@ -398,6 +398,8 @@ class ShellTools(
     private suspend fun runSetting(command: String, channel: ShellTier): String? = runCatching {
         val r = if (channel == ShellTier.ROOT) Shell.root(command) else Shell.shizuku(command)
         r.render().trim().trim('"').trim()
+    }.onFailure {
+        if (it is kotlinx.coroutines.CancellationException) throw it
     }.getOrNull()
 
     private fun privilegeNeeded(): ToolResult = ToolResult.failure(

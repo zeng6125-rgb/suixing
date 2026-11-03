@@ -606,7 +606,16 @@ internal fun scrubberWindow(
 }
 
 /** Every visible slot represents an existing loaded turn, in chronological order. */
-internal fun scrubberSlots(window: IntRange): List<Int> = window.toList().takeLast(SCRUBBER_VISIBLE_MAX)
+internal fun scrubberSlots(window: IntRange): List<Int> {
+    if (window.isEmpty()) return emptyList()
+    // The rail is capped at twelve, so a long window needs only its tail. Building the full
+    // list first allocated one Int per loaded turn on every window change (the scrubber
+    // remembers the result, but the allocation still lands during a drag's re-windowing).
+    val size = window.last.toLong() - window.first + 1
+    if (size <= SCRUBBER_VISIBLE_MAX) return window.toList()
+    val start = window.last - SCRUBBER_VISIBLE_MAX + 1
+    return List(SCRUBBER_VISIBLE_MAX) { start + it }
+}
 
 /**
  * How far the strip has been unlocked by a finger at [y], given how far it already was: the top
@@ -629,10 +638,28 @@ internal const val SCRUBBER_VISIBLE_MAX = 12
 /** 看板上画几行。 */
 internal const val TODO_ROWS_SHOWN = 3
 
-internal fun todoRows(todos: List<TodoItem>, limit: Int = TODO_ROWS_SHOWN): List<TodoItem> {
-    if (limit <= 0) return emptyList()
-    val open = todos.filterNot { it.status == TODO_COMPLETED }
-    return if (open.isEmpty()) todos.takeLast(limit) else open.take(limit)
+internal fun todoRows(todos: List<TodoItem>, limit: Int = TODO_ROWS_SHOWN): List<TodoItem> =
+    todoBoard(todos, limit).first
+
+/**
+ * The strip's rows and the completed tally in one scan.
+ *
+ * The composer used to call [todoRows] and then `todos.count { completed }` separately: the
+ * first stopped at three rows, but the second walked the whole board again. A long plan is
+ * exactly when the strip is visible, so the extra pass was on the hot path.
+ */
+internal fun todoBoard(todos: List<TodoItem>, limit: Int = TODO_ROWS_SHOWN): Pair<List<TodoItem>, Int> {
+    val cap = limit.coerceAtLeast(0)
+    val open = ArrayList<TodoItem>(minOf(cap, todos.size))
+    var done = 0
+    for (todo in todos) {
+        if (todo.status == TODO_COMPLETED) {
+            done++
+            continue
+        }
+        if (open.size < cap) open += todo
+    }
+    return (if (open.isEmpty()) todos.takeLast(cap) else open) to done
 }
 
 /** 失败回执的固定前缀：写入方（ChatViewModel）与去重方（ChatScreen）共用，免得两处各写一遍。 */

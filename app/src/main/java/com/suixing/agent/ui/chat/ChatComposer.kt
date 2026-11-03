@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,6 +60,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -107,6 +109,8 @@ import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.chat.GenerationSheet
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.PopupMotionState
+import com.suixing.agent.ui.components.popupMotion
 import com.suixing.agent.ui.components.MENU_EXIT_MS
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.data.AppSettings
@@ -1100,10 +1104,10 @@ internal fun Composer(
             // board itself is emptied when a run starts (see ChatViewModel.start), so a run that
             // never touches the todo tools cannot inherit the last one's list.
             if (running && todos.isNotEmpty()) {
-                // **remember**：`todoRows` 内部会 `filterNot` 出一个新 List，而 Composer
-                // 每次按键都重组 ⇒ 原来每次按键都白跑一次全表 filter + 一次全表 count。
+                // **remember**：`todoBoard` 每按一次键都会被重建，所以只按看板本身重算。
+                // 它现在一次扫描同时给出三行和完成数（原来是 filterNot 一遍 + count 一遍）。
                 // `TodoItem` 字段全是 String/枚举 ⇒ stable，键比较很便宜。
-                val board = remember(todos) { todoRows(todos) to todos.count { it.status == TODO_COMPLETED } }
+                val board = remember(todos) { todoBoard(todos) }
                 val rows = board.first
                 val done = board.second
                 // 一行，只一行：进行中的那条（没有就取第一条待办），右边是完成数/总数。用户的话：
@@ -1257,21 +1261,16 @@ internal fun Composer(
             ) {
             // 候选浮层：独立窗口，画在会话上面，不占布局 —— 敲 `/` 时输入框和转录都不动。
             // focus-less 与这里其它浮层一致：可获焦的窗口会把键盘从输入框手里抢走。
-            if (suggestions.isNotEmpty()) {
-                Popup(
-                    popupPositionProvider = slashPopup,
-                    properties = PopupProperties(focusable = false),
-                ) {
-                    SlashSuggestionList(
-                        items = suggestions,
-                        onPick = { name ->
-                            onInput("/$name ")
-                            goalFocus.requestFocus()
-                        },
-                        modifier = Modifier.width(slashWidth),
-                    )
-                }
-            }
+            SlashSuggestionPopup(
+                visible = suggestions.isNotEmpty(),
+                items = suggestions,
+                onPick = { name ->
+                    onInput("/$name ")
+                    goalFocus.requestFocus()
+                },
+                popupPositionProvider = slashPopup,
+                width = slashWidth,
+            )
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(24.dp),
@@ -1778,6 +1777,60 @@ private fun GoalChip(
                 )
             }
         }
+    }
+}
+
+/**
+ * The candidate card as a popup window, with the same entrance/exit motion the other
+ * composer cards use.
+ *
+ * The geometry is untouched: the card still hangs 6dp above the pill and is still positioned
+ * by [popupPositionProvider]. What moves is the popup motion layer: opacity, a 6% scale and an
+ * 8dp rise (`PopupStyle.kt`'s `popupMotion`). Entrance runs opacity on a 100ms tween and the
+ * scale/rise on a spring; exit is a 110ms tween on both, not a reverse spring. [lastItems] is
+ * kept for the exit animation: the caller empties the list the moment the query stops matching,
+ * and an empty card shrinking away would look like a flicker rather than a dismissal.
+ */
+@Composable
+private fun SlashSuggestionPopup(
+    visible: Boolean,
+    items: List<Pair<String, String>>,
+    onPick: (String) -> Unit,
+    popupPositionProvider: PopupPositionProvider,
+    width: Dp,
+) {
+    var keepMounted by remember { mutableStateOf(visible) }
+    var lastItems by remember { mutableStateOf(items) }
+    val motion = remember { PopupMotionState() }
+    LaunchedEffect(items) {
+        if (items.isNotEmpty()) lastItems = items
+    }
+    LaunchedEffect(visible) {
+        if (visible) {
+            keepMounted = true
+            // Let the popup measure the first frame before the entrance starts; starting from
+            // an unmeasured window makes the card jump once as it gets its real size.
+            withFrameNanos { }
+            motion.show()
+        } else if (keepMounted) {
+            motion.hide()
+            keepMounted = false
+        }
+    }
+    if (!visible && !keepMounted) return
+    Popup(
+        popupPositionProvider = popupPositionProvider,
+        properties = PopupProperties(focusable = false),
+    ) {
+        SlashSuggestionList(
+            items = if (visible) items else lastItems,
+            onPick = onPick,
+            modifier = Modifier
+                .width(width)
+                // Grow out of the field's top edge: scaling from the bottom keeps the 6dp
+                // gap fixed, so the card does not slide away from the pill while it animates.
+                .popupMotion(motion) { TransformOrigin(0.5f, 1f) },
+        )
     }
 }
 

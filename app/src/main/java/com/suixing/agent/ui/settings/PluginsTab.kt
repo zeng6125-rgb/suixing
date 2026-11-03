@@ -56,6 +56,7 @@ import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.Tone
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,7 +94,9 @@ fun PluginsTab(onNotify: (String) -> Unit) {
     var envFor by remember { mutableStateOf<PluginSpec?>(null) }
 
     LaunchedEffect(refresh) {
-        entries = runCatching { Core.plugins.list() }.getOrDefault(emptyList())
+        entries = runCatching { Core.plugins.list() }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrDefault(emptyList())
         loaded = true
     }
 
@@ -117,6 +120,7 @@ fun PluginsTab(onNotify: (String) -> Unit) {
             }
             // install() runs the validator and stops at the white-box gate: nothing is in place yet.
             val result = runCatching { Core.plugins.install(staged) }.getOrElse { error ->
+                if (error is CancellationException) throw error
                 // 失败也要清暂存 zip，否则越积越多（issue #54 D-4）。
                 withContext(Dispatchers.IO) { runCatching { staged.delete() } }
                 onNotify("导入失败：${error.message ?: error.javaClass.simpleName}")
@@ -258,6 +262,7 @@ fun PluginsTab(onNotify: (String) -> Unit) {
             onSave = { values ->
                 scope.launch {
                     val outcome = runCatching { Core.plugins.setEnvValues(spec.id, values) }
+                        .onFailure { if (it is CancellationException) throw it }
                     if (outcome.isSuccess) {
                         envFor = null
                         refresh++
@@ -359,7 +364,9 @@ private fun PluginDetailDialog(
 ) {
     var env by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     LaunchedEffect(spec.id) {
-        env = runCatching { Core.plugins.env(spec.id) }.getOrDefault(emptyMap())
+        env = runCatching { Core.plugins.env(spec.id) }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrDefault(emptyMap())
     }
     SuixingDialog(
         onDismissRequest = onDismiss,

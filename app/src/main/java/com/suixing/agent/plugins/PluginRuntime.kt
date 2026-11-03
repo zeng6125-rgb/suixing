@@ -126,6 +126,8 @@ object PluginRuntime {
         enabledCache = fresh
         enabledCachedAt = now
         fresh
+    }.onFailure {
+        if (it is CancellationException) throw it
     }.getOrDefault(emptyList())
 
     /** `(插件, 工具声明)` 的平铺列表 —— 注册名由调用方拼成 `<id>.<tool>`。 */

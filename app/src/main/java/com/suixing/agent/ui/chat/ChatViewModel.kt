@@ -568,7 +568,7 @@ class ChatViewModel : ViewModel() {
             if (request.chat.isEmpty()) return@mapLatest null
             // 整个会话的统计：读 meta（O(1)）；旧会话第一次读时补算一次。
             val totals = withContext(Dispatchers.IO) {
-                runCatching { Core.chats.sessionTotals(request.chat) }.getOrNull()
+                runCatchingCancellable { Core.chats.sessionTotals(request.chat) }.getOrNull()
             } ?: return@mapLatest null
             SessionStats.of(totals, request.window, request.chat)
         }
@@ -1221,7 +1221,7 @@ class ChatViewModel : ViewModel() {
             val hasDraft = Core.chats.hasLiveDraft(chatId) ||
                 !_drafts.value[chatId]?.text.isNullOrBlank() || attachmentsFor(chatId).isNotEmpty()
             if (!shouldDiscardEmptyChat(stored, inMemory, snapshotAtSwitch.runningHere, hasDraft)) return
-            runCatching { Core.chats.delete(chatId) }.onSuccess { forgetConversation(chatId) }
+            runCatchingCancellable { Core.chats.delete(chatId) }.onSuccess { forgetConversation(chatId) }
         } finally {
             discardInFlight.remove(chatId)
         }
@@ -1252,7 +1252,7 @@ class ChatViewModel : ViewModel() {
             // **建会话是挂起点**：期间用户可能已经点开别的会话（openConversation 会 begin 新号）。
             // 过期时只清掉自己刚建出来的空壳，绝不覆盖用户后来的选择。
             if (!navIntents.isCurrent(token)) {
-                runCatching { Core.chats.delete(created.id) }
+                runCatchingCancellable { Core.chats.delete(created.id) }
                 return@launch
             }
             leaveViewport()
@@ -1568,7 +1568,7 @@ class ChatViewModel : ViewModel() {
                     // the provider actually knows so the request shape stays valid.
                     model = provider.enabled.firstOrNull() ?: provider.models.firstOrNull().orEmpty(),
                 )
-                runCatching { llm.listModelDetails(endpoint) }
+                runCatchingCancellable { llm.listModelDetails(endpoint) }
                     .onSuccess { details ->
                         for (model in details) {
                             model.contextLength?.let { gathered[model.id] = it }
@@ -1866,7 +1866,7 @@ class ChatViewModel : ViewModel() {
                     // 在这里写等于白写；而下一次 `start` 之后用户已经看到消息发出去了，
                     // 再补一条红条只会让人以为这一轮失败了。上下文不完整是次要的，
                     // 而且坏数据本身已经在 `ChatStore` 层被记下（`LogDamaged`/`LogMismatch`）。
-                    val wire = runCatching { Core.chats.readWire(chatId) }.getOrNull()
+                    val wire = runCatchingCancellable { Core.chats.readWire(chatId) }.getOrNull()
                     // **不要因为用户切走就丢掉这一条**（issue #76 F-03）：run 属于原会话，
                     // `start()` 只在当前显示的仍是它时才画到屏幕上；后台会话的流式内容
                     // 会进 `sessions`，跑完后由 `endSession` 落盘。
@@ -1911,7 +1911,7 @@ class ChatViewModel : ViewModel() {
                     put("text", if (text.equals("clear", ignoreCase = true)) "" else text)
                 }
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { Core.tools.find("goal")?.run(args) }
+                    runCatchingCancellable { Core.tools.find("goal")?.run(args) }
                         .getOrElse { ToolResult.failure("执行失败：${it.message ?: it.javaClass.simpleName}") }
                         ?: ToolResult.failure("目标工具未注册")
                 }
@@ -1950,7 +1950,7 @@ class ChatViewModel : ViewModel() {
                 return@launch
             }
             val result = withContext(Dispatchers.IO) {
-                runCatching { tool.run(args) }
+                runCatchingCancellable { tool.run(args) }
                     .getOrElse { ToolResult.failure("执行失败：${it.message ?: it.javaClass.simpleName}") }
             }
             if (tool.spec.name == "goal_read") {
@@ -2007,7 +2007,7 @@ class ChatViewModel : ViewModel() {
             start(fresh, prompt)
         } else {
             viewModelScope.launch {
-                val wire = runCatching { Core.chats.readWire(snapshot.conversationId) }.getOrNull()
+                val wire = runCatchingCancellable { Core.chats.readWire(snapshot.conversationId) }.getOrNull()
                 if (_state.value.conversationId != snapshot.conversationId ||
                     Core.engine.isRunning(snapshot.conversationId)
                 ) return@launch
@@ -2081,7 +2081,7 @@ class ChatViewModel : ViewModel() {
         // 盘上那份的末尾还是**被丢掉的那条旧回答** ⇒ 对不上 ⇒ 护栏拒绝 ⇒ 界面挂一条"本次未写入"，
         // 而编辑其实已经写成功了；顺带模型拿到的还是窗口版。
         viewModelScope.launch {
-            val full = runCatching { Core.chats.readAll(snapshot.conversationId) }.getOrNull()
+            val full = runCatchingCancellable { Core.chats.readAll(snapshot.conversationId) }.getOrNull()
             val at = full?.indexOfFirst { it.id == id } ?: -1
             if (full == null || at < 0) {
                 Log.w(TAG, "edit not persisted: full history unavailable for ${snapshot.conversationId}")
@@ -3624,7 +3624,7 @@ class ChatViewModel : ViewModel() {
         //
         // 落盘失败是**用户能理解、也能恢复**的事（磁盘满、日志损坏、存储格式改过），
         // 不是"App 该死"的事。所以：接住，把原因写进气泡里的红条，用户看得见。
-        val outcome = runCatching {
+        val outcome = runCatchingCancellable {
             Core.chats.save(
                 allowShrink = allowShrink,
                 fullHistory = fullHistory,
@@ -3709,6 +3709,16 @@ class ChatViewModel : ViewModel() {
         super.onCleared()
     }
 }
+
+/** [runCatching] for suspend/flow boundaries: cancellation is never a recoverable failure. */
+private inline fun <T> runCatchingCancellable(block: () -> T): Result<T> =
+    try {
+        Result.success(block())
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        Result.failure(error)
+    }
 
 /** How many compressions of one conversation are kept; older ones are dropped. */
 private const val MAX_CHECKPOINTS = 10

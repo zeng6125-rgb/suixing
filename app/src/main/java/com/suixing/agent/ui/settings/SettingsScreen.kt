@@ -13,7 +13,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,15 +36,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,7 +54,6 @@ import com.suixing.agent.ui.components.SettingsSwitch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableFloatStateOf
@@ -89,7 +82,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
-import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ChatRepository
@@ -105,11 +97,7 @@ import com.suixing.agent.llm.MAX_RETRY_DELAY_SECONDS
 import com.suixing.agent.llm.MIN_RETRY_DELAY_SECONDS
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.PROTOCOL_ANTHROPIC
-import com.suixing.agent.data.PROTOCOL_OPENAI
-import com.suixing.agent.data.PROTOCOL_RESPONSES
-import com.suixing.agent.data.groupModels
 import com.suixing.agent.llm.ChatMessage
-import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LocalNetworkAccess
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.ui.drawer.DrawerOrder
@@ -129,6 +117,7 @@ import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -708,7 +697,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                                 tools = emptyList())
                                         }.fold(
                                             onSuccess = { TestOutcome(true, "连接成功，模型回了：${it.text.trim().take(60)}") },
-                                            onFailure = { TestOutcome(false, describeError(it)) },
+                                            onFailure = {
+                                                if (it is CancellationException) throw it
+                                                TestOutcome(false, describeError(it))
+                                            },
                                         )
                                     } finally { testing = false }
                                 }
@@ -921,7 +913,10 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                             outcome = TestOutcome(true, "已获取 ${merged.size} 个模型。")
                                         }
                                     },
-                                    onFailure = { outcome = TestOutcome(false, describeError(it)) },
+                                    onFailure = {
+                                        if (it is CancellationException) throw it
+                                        outcome = TestOutcome(false, describeError(it))
+                                    },
                                 )
                                 loadingModels = false
                             }
@@ -2170,6 +2165,8 @@ internal fun ConversationManagerScreen(
                     context.contentResolver.openOutputStream(uri)?.use { out ->
                         out.write(text.toByteArray(Charsets.UTF_8))
                     } ?: error("打不开目标文件")
+                }.onFailure {
+                    if (it is CancellationException) throw it
                 }.isSuccess
             }
             snackbar.showSnackbar(if (ok) "已导出「${chat.title}」" else "导出失败，换个位置再试")
