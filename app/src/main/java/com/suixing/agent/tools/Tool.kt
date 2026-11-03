@@ -7,6 +7,7 @@ import com.suixing.agent.data.GoalStore
 import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.ScheduleStore
+import com.suixing.agent.data.ScheduleWriter
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.TodoStore
 import com.suixing.agent.data.UserProfileStore
@@ -171,6 +172,7 @@ class ToolRegistry private constructor() {
         todos: TodoStore,
         goals: GoalStore,
         schedules: ScheduleStore,
+        scheduleWriter: ScheduleWriter,
     ) : this() {
         add(SystemTools(context, memory, profile))
         add(FileTools(context))
@@ -179,7 +181,7 @@ class ToolRegistry private constructor() {
         add(JobTools(jobs))
         add(TodoTools(todos))
         add(GoalTools(goals))
-        add(ScheduleTools(context, schedules))
+        add(ScheduleTools(schedules, scheduleWriter))
         add(SkillTools(skills))
         add(WebTools(context, settings))
         add(VoiceTools(speaker))

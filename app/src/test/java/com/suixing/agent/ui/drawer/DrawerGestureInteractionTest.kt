@@ -31,6 +31,80 @@ private const val FRAME_NANOS = 16_000_000L
 class DrawerGestureInteractionTest {
 
     @Test
+    fun `the shield spans the whole opening and closing animation`() = withHarness {
+        state.snapTo(DrawerValue.Closed)
+        assertFalse(state.homeShieldActive)
+
+        val opening = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.animateTo(DrawerValue.Open, DRAWER_OPEN_SPEC)
+        }
+        assertTrue("shield must mount before the first opening frame", state.homeShieldActive)
+        assertFalse("settled is still closed during opening", state.isOpen)
+        pumpFrames(90)
+        assertTrue(opening.isCompleted)
+        assertTrue(state.isOpen)
+        assertTrue(state.homeShieldActive)
+
+        // System Back and route actions both close through animateTo.
+        val closing = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+        }
+        assertTrue("shield must stay mounted for the closing transition", state.homeShieldActive)
+        pumpFrames(90)
+        assertTrue(closing.isCompleted)
+        assertFalse(state.isOpen)
+        assertFalse(state.homeShieldActive)
+    }
+
+    @Test
+    fun `a half drag released open keeps the shield through the rebound`() = withHarness {
+        state.snapTo(DrawerValue.Closed)
+        val session = state.beginGesture()
+        state.applyGestureFrame(session, 0.5f)
+
+        assertTrue(state.finishGesture(session))
+        val settle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.settleGesture(
+                session,
+                DrawerValue.Open,
+                DRAWER_OPEN_SPEC,
+                releaseProgress = 0.5f,
+            )
+        }
+        assertTrue("the rebound is part of the transition", state.homeShieldActive)
+        pumpFrames(90)
+        assertTrue(settle.isCompleted)
+        assertTrue(state.isOpen)
+        assertTrue(state.homeShieldActive)
+    }
+
+    @Test
+    fun `a cancelled half drag keeps the shield until the panel closes`() = withHarness {
+        state.snapTo(DrawerValue.Closed)
+        val session = state.beginGesture()
+        state.applyGestureFrame(session, 0.4f)
+        assertTrue(state.homeShieldActive)
+
+        assertTrue(state.cancelGesture(session))
+        assertTrue("a cancelled half-open panel is still exposed", state.homeShieldActive)
+        assertFalse(state.isOpen)
+
+        val closing = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+        }
+        assertTrue(state.homeShieldActive)
+        pumpFrames(90)
+        assertTrue(closing.isCompleted)
+        assertFalse(state.homeShieldActive)
+
+        val atZero = state.beginGesture()
+        assertTrue("a fresh owned drag mounts the shield", state.homeShieldActive)
+        state.applyGestureFrame(atZero, 0f)
+        assertTrue(state.cancelGesture(atZero))
+        assertFalse("zero progress after cancel exposes nothing", state.homeShieldActive)
+    }
+
+    @Test
     fun `a pointer-input restart releases only its own drag and never starts a stale settle`() =
         withHarness {
             state.progress.snapTo(0.5f)
@@ -105,6 +179,7 @@ class DrawerGestureInteractionTest {
             }
             assertFalse(state.isGestureActive(session))
             assertNull(state.gestureSession)
+            assertTrue("system Back keeps the shield through its close", state.homeShieldActive)
 
             val staleSettle = scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 state.settleGesture(
@@ -121,6 +196,7 @@ class DrawerGestureInteractionTest {
 
             assertTrue("the external close must finish", close.isCompleted)
             assertFalse("an old release must not reopen the drawer", state.isOpen)
+            assertFalse("the shield drops after the close settles", state.homeShieldActive)
             assertEquals(0f, state.progress.value, 0.0001f)
         }
 
@@ -128,6 +204,7 @@ class DrawerGestureInteractionTest {
     fun `a new reverse drag cancels a release queued inside Animatable's mutator`() = withHarness {
         state.progress.snapTo(0.2f)
         val first = state.beginGesture()
+        assertTrue("the first owner shields home", state.homeShieldActive)
         val firstAccumulator = DrawerDragAccumulator()
         val firstGeneration = firstAccumulator.begin(progress = 0.2f, widthPx = 200f)
         firstAccumulator.dragBy(firstGeneration, 100f)
@@ -151,6 +228,7 @@ class DrawerGestureInteractionTest {
         yield()
 
         val second = state.beginGesture()
+        assertTrue("the reverse owner keeps the shield mounted", state.homeShieldActive)
         val secondAccumulator = DrawerDragAccumulator()
         val secondGeneration = secondAccumulator.begin(progress = 0.7f, widthPx = 200f)
         val reverseProgress = secondAccumulator.dragBy(secondGeneration, -100f)!!
@@ -168,6 +246,7 @@ class DrawerGestureInteractionTest {
         assertTrue(state.isGestureActive(second))
         assertEquals("the new drag owns the panel", reverseProgress, state.progress.value, 0.0001f)
         assertFalse(state.isOpen)
+        assertTrue("an owned reverse drag leaves home shielded", state.homeShieldActive)
     }
 
     @Test

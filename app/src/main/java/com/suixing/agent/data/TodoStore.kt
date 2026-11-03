@@ -67,4 +67,13 @@ class TodoStore(private val file: File) {
         com.suixing.agent.core.AtomicFiles.writeText(file, text)
         stored
     }
+
+    /**
+     * Reads and rewrites under one lock, so a UI action based on a list loaded minutes ago
+     * cannot overwrite a task the agent added in the meantime. [block] receives the latest
+     * stored list, not the caller's snapshot.
+     */
+    fun mutate(block: (List<TodoItem>) -> List<TodoItem>): List<TodoItem> = synchronized(lock) {
+        write(block(read()))
+    }
 }

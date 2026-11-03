@@ -52,7 +52,7 @@ import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -76,7 +76,6 @@ fun SchedulesScreen(onBack: () -> Unit) {
     var schedules by remember { mutableStateOf<List<Schedule>>(emptyList()) }
     // 空态要等读完再画，否则冷启动那一帧会先说「还没有定时任务」再冒出列表。
     var loaded by remember { mutableStateOf(false) }
-    val writer = Core.scheduleWriteQueue
     val screenActive = remember { AtomicBoolean(true) }
     DisposableEffect(Unit) {
         onDispose { screenActive.set(false) }
@@ -85,48 +84,26 @@ fun SchedulesScreen(onBack: () -> Unit) {
     // 删掉就再也重建不出同一条，而垃圾桶紧贴开关——单击即删的代价不对等。
     var pendingDelete by remember { mutableStateOf<Schedule?>(null) }
     LaunchedEffect(Unit) {
-        writer.awaitIdle()
         schedules = withContext(Dispatchers.IO) { Core.schedules.read() }
         loaded = true
     }
-    // **单写者 + 最新快照**（issue #68 P1-B）：连点两个开关时，两个整表快照会并发落盘，
-    // 先发起的那次可能后完成 ⇒ 把新状态覆盖回旧值。队列保证"最新的那份最后落盘"，
-    // 并且 `arm` 紧跟在**真正写成功**的那次之后（提醒永远对应最后落盘的快照）。
-    val apply: (List<Schedule>) -> Unit = { next ->
-        schedules = next
-        val request = writer.submit(next)
-        Core.appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+    // Mutate the latest stored board under the shared writer lock, then arm from the same
+    // commit. A toggle based on this page's old list therefore cannot erase a reminder the
+    // agent created in the meantime.
+    val apply: ((List<Schedule>) -> List<Schedule>) -> Unit = { mutate ->
+        schedules = mutate(schedules) // optimistic local view
+        Core.appScope.launch(Dispatchers.IO) {
             try {
-                writer.commit(request)
+                val stored = Core.scheduleWriter.mutate(mutate)
+                withContext(Dispatchers.Main.immediate) {
+                    if (screenActive.get()) schedules = stored
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                if (!screenActive.get() || !writer.isCurrent(request)) return@launch
-                var persisted: List<Schedule>? = null
-                val recovered = writer.recoverIfCurrent(request) {
-                    try {
-                        persisted = withContext(Dispatchers.IO) {
-                            val stored = Core.schedules.read()
-                            // The failed write may have reached disk before arming failed. Re-arm
-                            // the stored snapshot under the queue lock; a newer write then arms last.
-                            try {
-                                SchedulerService.arm(context)
-                            } catch (cancelled: CancellationException) {
-                                throw cancelled
-                            } catch (_: Exception) {
-                                // Keep the readable snapshot; the original failure is reported below.
-                            }
-                            stored
-                        }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        // Still report the original failure; the persisted snapshot was unreadable.
-                    }
-                }
-                if (!recovered) return@launch
+                val persisted = try { Core.schedules.read() } catch (_: Exception) { null }
                 withContext(Dispatchers.Main.immediate) {
-                    if (!screenActive.get() || !writer.isCurrent(request)) return@withContext
+                    if (!screenActive.get()) return@withContext
                     if (persisted != null) schedules = persisted
                     Toast.makeText(
                         context,
@@ -169,7 +146,7 @@ fun SchedulesScreen(onBack: () -> Unit) {
                 ScheduleRow(
                     schedule = schedule,
                     onToggle = { on ->
-                        apply(schedules.map { if (it.id == schedule.id) it.copy(enabled = on) else it })
+                        apply { list -> list.map { if (it.id == schedule.id) it.copy(enabled = on) else it } }
                     },
                     onDelete = { pendingDelete = schedule },
                 )
@@ -185,7 +162,7 @@ fun SchedulesScreen(onBack: () -> Unit) {
                 TextButton(onClick = {
                     scope.closeThen {
                         pendingDelete = null
-                        apply(schedules.filterNot { it.id == target.id })
+                        apply { list -> list.filterNot { it.id == target.id } }
                     }
                 }) { Text("删除") }
             },

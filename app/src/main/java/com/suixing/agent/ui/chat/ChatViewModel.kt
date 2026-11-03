@@ -1743,7 +1743,7 @@ class ChatViewModel : ViewModel() {
         val chatId = _state.value.conversationId
         if (chatId.isEmpty()) return false
         parseSlashCommand(body)?.let { command ->
-            return runSlashCommand(chatId, command, imagesBase64)
+            return runSlashCommand(chatId, command, imagesBase64, body)
         }
         // No global lock: the engine refuses a second run in the same conversation
         // (two runs would interleave into one transcript), and every other
@@ -1834,19 +1834,20 @@ class ChatViewModel : ViewModel() {
         chatId: String,
         command: SlashCommand,
         images: List<String>,
+        submitted: String,
     ): Boolean {
         if (images.isNotEmpty()) {
             notice("斜杠指令不能带附件")
             return false
         }
         if (command.name == "goal") {
-            clearDraft(chatId)
             viewModelScope.launch {
                 val text = command.argument.trim()
                 if (text.isEmpty()) {
                     val current = withContext(Dispatchers.IO) { Core.goals.read().text }
                     _state.update { it.copy(goal = current) }
                     notice(if (current.isBlank()) "当前没有设置目标" else "当前目标：$current")
+                    clearIfUnchanged(chatId, submitted)
                     return@launch
                 }
                 val args = buildJsonObject {
@@ -1861,12 +1862,19 @@ class ChatViewModel : ViewModel() {
                 _state.update { it.copy(goal = current) }
                 val summary = slashResult("goal", result)
                 notice(if (result.ok) "$summary（下一轮生效）" else summary)
+                if (result.ok) clearIfUnchanged(chatId, submitted)
             }
             return true
         }
-        val tool = Core.tools.find(command.name)
+        val assistant = settingsSnapshot.value?.assistant(_state.value.assistantId)
+        val disabled = assistant?.disabledTools?.toSet().orEmpty()
+        val tool = Core.tools.excluding(disabled).find(command.name)
         if (tool == null) {
-            notice("未知指令或工具：/${command.name}")
+            if (!slashToolAllowed(command.name, disabled)) {
+                notice("当前助手禁用此工具：/${command.name}")
+            } else {
+                notice("未知指令或工具：/${command.name}")
+            }
             return false
         }
         if (Core.engine.isRunning(chatId)) {
@@ -1878,7 +1886,6 @@ class ChatViewModel : ViewModel() {
             notice("参数格式不对：需要 JSON 对象，或用一句文本")
             return false
         }
-        clearDraft(chatId)
         viewModelScope.launch {
             val mode = settingsSnapshot.value?.approvalMode ?: AppSettings().approvalMode
             if (!gate.request(chatId, tool.spec.name, args.toString(), mode, "对话框斜杠指令")) {
@@ -1894,8 +1901,18 @@ class ChatViewModel : ViewModel() {
                 _state.update { it.copy(goal = current) }
             }
             notice(slashResult(tool.spec.name, result))
+            if (result.ok) clearIfUnchanged(chatId, submitted)
         }
         return true
+    }
+
+    /** Do not erase text the user typed while a command was waiting for approval. */
+    private fun clearIfUnchanged(chatId: String, submitted: String) {
+        val draft = _drafts.value[chatId]
+        val hasAttachment = draft?.attachmentUri != null || attachmentsFor(chatId).isNotEmpty()
+        if (draft != null && submittedDraftStillMatches(draft.text, hasAttachment, submitted)) {
+            clearDraft(chatId)
+        }
     }
 
     private fun notice(text: String) {

@@ -6,6 +6,7 @@ import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.voice.Speaker
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.data.ScheduleStore
+import com.suixing.agent.data.ScheduleWriter
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.TodoStore
 import com.suixing.agent.skills.SkillStore
@@ -44,7 +45,10 @@ class ToolSchemaBudgetTest {
         "UiTools" to UiTools(context, mockk<CapabilityHub>(relaxed = true)),
         "JobTools" to JobTools(mockk(relaxed = true)),
         "TodoTools" to TodoTools(mockk<TodoStore>(relaxed = true)),
-        "ScheduleTools" to ScheduleTools(context, mockk<ScheduleStore>(relaxed = true)),
+        "ScheduleTools" to ScheduleTools(
+            mockk<ScheduleStore>(relaxed = true),
+            ScheduleWriter(mockk<ScheduleStore>(relaxed = true)) { },
+        ),
         "SkillTools" to SkillTools(mockk<SkillStore>(relaxed = true)),
         "WebTools" to WebTools(context, mockk<SettingsRepository>(relaxed = true)),
         "VoiceTools" to VoiceTools(mockk<Speaker>(relaxed = true)),

@@ -42,3 +42,30 @@ internal fun dragIntent(dx: Float, dy: Float, thresholdPx: Float = CANCEL_FOLLOW
     // 纵向主导才取消追底；等值（45°）也按纵向处理：宁可停跟，也别在斜着滑时跟丢内容。
     return if (ay > thresholdPx && ay >= ax) DragIntent.VerticalScroll else DragIntent.Moved
 }
+
+/**
+ * 一次手势内的两个 one-shot 标记（issue #73）。
+ *
+ * [moved] 管长按/点击与 reveal；取消追底另有标记 —— 先横向 [DragIntent.Moved]
+ * 不能吃掉后一帧才出现的 [DragIntent.VerticalScroll]。每次按下新建一个实例即重置。
+ */
+internal class DragGestureState {
+    var moved = false
+        private set
+    var followCancelled = false
+        private set
+
+    /** 首次非 [DragIntent.Idle] 且仍按下的判定返回 true。 */
+    fun markMoved(intent: DragIntent, pressed: Boolean): Boolean {
+        if (moved || !pressed || intent == DragIntent.Idle) return false
+        moved = true
+        return true
+    }
+
+    /** 首次纵向判定返回 true（哪怕此前已 [markMoved]）；每次手势最多一次。 */
+    fun markFollowCancelled(intent: DragIntent, pressed: Boolean): Boolean {
+        if (followCancelled || !pressed || intent != DragIntent.VerticalScroll) return false
+        followCancelled = true
+        return true
+    }
+}

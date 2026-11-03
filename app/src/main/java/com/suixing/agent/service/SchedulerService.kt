@@ -151,8 +151,18 @@ class SchedulerService : Service() {
             // finally is what keeps one failure from taking the whole board down with it. A
             // one-shot is deleted, a repeating one is due again from now.
             val next = schedule.nextTriggerAfter(System.currentTimeMillis())
-            if (next == null) Core.schedules.delete(schedule.id) else Core.schedules.upsert(schedule.copy(nextAt = next))
-            arm(this)
+            // Reschedule through the shared writer: it applies to the latest board, so a
+            // deletion/toggle made while this run was executing is not undone, and arming
+            // follows the bytes that were committed.
+            Core.scheduleWriter.mutate { board ->
+                if (board.none { it.id == schedule.id }) {
+                    board
+                } else if (next == null) {
+                    board.filterNot { it.id == schedule.id }
+                } else {
+                    board.map { if (it.id == schedule.id) it.copy(nextAt = next) else it }
+                }
+            }
             // The agent's foreground service is not tied to this one, so it has to be taken
             // down here as well — otherwise its ongoing notification would outlive the run.
             // It declines while another conversation is still running.

@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -81,7 +82,14 @@ import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -778,6 +786,8 @@ internal fun TimeLabel(timestamp: Long) {
 @Composable
 internal fun Composer(
     input: String,
+    /** Slash commands to suggest while the user is typing one: name to one-line description. */
+    slashTools: List<Pair<String, String>> = emptyList(),
     /** The app-wide objective, shown as a chip so `/goal` is not silent configuration. */
     goal: String = "",
     onClearGoal: () -> Unit = {},
@@ -884,6 +894,44 @@ internal fun Composer(
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val goalFocus = remember { FocusRequester() }
+    // The field keeps its own selection so an external write (the goal prefix, a restored
+    // queued line) can land the caret at the end instead of leaving it before the text.
+    var field by remember { mutableStateOf(TextFieldValue(input, TextRange(input.length))) }
+    LaunchedEffect(input) {
+        if (input != field.text) field = TextFieldValue(input, TextRange(input.length))
+    }
+    val commandEnd = remember(field.text) { slashTokenEnd(field.text) }
+    val commandTint = remember(commandEnd, scheme.primary) {
+        if (commandEnd == null) {
+            VisualTransformation.None
+        } else {
+            VisualTransformation { text ->
+                TransformedText(
+                    buildAnnotatedString {
+                        append(text.text)
+                        addStyle(
+                            SpanStyle(color = scheme.primary, fontWeight = FontWeight.Medium),
+                            0,
+                            commandEnd,
+                        )
+                    },
+                    OffsetMapping.Identity,
+                )
+            }
+        }
+    }
+    // The goal command lives in the add menu, not as a permanent icon: it is occasional
+    // configuration and the row's space belongs to typing and sending. Existing text becomes
+    // the goal verbatim; an empty field gets the prefix.
+    val startGoal: () -> Unit = {
+        val trimmed = input.trim()
+        if (trimmed.isEmpty()) {
+            onInput("/goal ")
+        } else if (!trimmed.startsWith("/goal")) {
+            onInput("/goal " + trimmed)
+        }
+        goalFocus.requestFocus()
+    }
     val dismissKeyboard = {
         keyboardController?.hide()
         focusManager.clearFocus()
@@ -1117,6 +1165,25 @@ internal fun Composer(
                 // and a gap here made it look like a floating card of its own.
                 Spacer(Modifier.height(3.dp))
             }
+            // Typing `/` names a command: show what can be run instead of expecting the
+            // user to remember tool names. Only while the name is still being typed.
+            val suggestions = remember(slashTools, field.text) {
+                slashSuggestions(slashTools, field.text)
+            }
+            if (suggestions.isNotEmpty()) {
+                SlashSuggestionList(
+                    items = suggestions,
+                    onPick = { name ->
+                        onInput("/$name ")
+                        goalFocus.requestFocus()
+                    },
+                    modifier = Modifier.padding(
+                        start = STEER_QUEUE_INSET,
+                        end = STEER_QUEUE_INSET,
+                        bottom = 6.dp,
+                    ),
+                )
+            }
             // Opaque surface with one real soft shadow: the drawn concentric rings read
             // as a halo, and 86% alpha let the transcript bleed through the pill.
             Box(
@@ -1142,8 +1209,12 @@ internal fun Composer(
                     // no container, just text with room to breathe above the controls.
                     val primaryAction = primaryChatAction(running, input.isNotBlank(), attachments.isNotEmpty())
                     BasicTextField(
-                        value = input,
-                        onValueChange = onInput,
+                        value = field,
+                        onValueChange = { next ->
+                            field = next
+                            if (next.text != input) onInput(next.text)
+                        },
+                        visualTransformation = commandTint,
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 48.dp)
@@ -1200,7 +1271,7 @@ internal fun Composer(
                         ),
                         decorationBox = { inner ->
                             Box {
-                                if (input.isEmpty()) {
+                                if (field.text.isEmpty()) {
                                     Text(
                                         text = when {
                                             pendingSteers.isNotEmpty() ->
@@ -1298,6 +1369,14 @@ internal fun Composer(
                                         onPickFile()
                                     },
                                 )
+                                MenuItemRow(
+                                    icon = ImageVector.vectorResource(R.drawable.ic_compass),
+                                    label = "目标指令",
+                                    onClick = {
+                                        menuOpen = false
+                                        startGoal()
+                                    },
+                                )
                                 // Always listed: the entry disappearing between runs made users
                                 // think the feature was gone. With no run in flight the engine
                                 // refuses and the toast says why — a visible refusal beats a
@@ -1391,29 +1470,7 @@ internal fun Composer(
                                 )
                             }
                         }
-                        // `/` commands are typed, but the one that configures the run should not require
-                    // memorising the syntax. It prefixes the field (and focuses it); the existing
-                    // text is kept, so a half-written message becomes the goal verbatim.
-                    IconButton(
-                        onClick = {
-                            val trimmed = input.trim()
-                            if (trimmed.isEmpty()) {
-                                onInput("/goal ")
-                            } else if (!trimmed.startsWith("/goal")) {
-                                onInput("/goal " + trimmed)
-                            }
-                            goalFocus.requestFocus()
-                        },
-                        modifier = Modifier.size(36.dp),
-                    ) {
-                        Icon(
-                            imageVector = ImageVector.vectorResource(R.drawable.ic_compass),
-                            contentDescription = "目标指令（/goal）",
-                            tint = scheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                    subagentChatId?.let { SubagentStatusAction(it) }
+                        subagentChatId?.let { SubagentStatusAction(it) }
                     }
                     val compactControls = windowWidth < 360.dp || density.fontScale >= 1.3f || settings.fontScale >= 3
                     if (compactControls) {
@@ -1644,6 +1701,48 @@ private fun GoalChip(
                     contentDescription = "清除目标",
                     modifier = Modifier.size(14.dp),
                 )
+            }
+        }
+    }
+}
+
+/** The commands matching what has been typed; tapping one fills in `/<name> `. */
+@Composable
+private fun SlashSuggestionList(
+    items: List<Pair<String, String>>,
+    onPick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = scheme.surfaceContainer,
+        border = BorderStroke(1.dp, scheme.outlineVariant),
+    ) {
+        Column(Modifier.padding(vertical = 4.dp)) {
+            items.forEach { (name, description) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(name) }
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "/$name",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = scheme.primary,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }

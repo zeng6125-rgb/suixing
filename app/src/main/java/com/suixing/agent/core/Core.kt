@@ -14,9 +14,8 @@ import com.suixing.agent.data.McpStore
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.PerfMonitor
 import com.suixing.agent.data.ScheduleStore
-import com.suixing.agent.data.Schedule
+import com.suixing.agent.data.ScheduleWriter
 import com.suixing.agent.data.SettingsRepository
-import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.TodoStore
 import com.suixing.agent.data.UsageStore
 import com.suixing.agent.plugins.PluginStore
@@ -95,25 +94,13 @@ object Core {
     lateinit var goals: GoalStore
         private set
 
-    /** Shared latest-snapshot writer; a task save must outlive the screen that submitted it. */
-    internal val todoWriteQueue: LatestWriteQueue<List<TodoItem>> by lazy {
-        LatestWriteQueue { snapshot ->
-            kotlinx.coroutines.withContext(Dispatchers.IO) { todos.write(snapshot) }
-        }
-    }
-
     /** Reminders: `filesDir/schedules.json`. */
     lateinit var schedules: ScheduleStore
         private set
 
-    /** Shared writer keeps stored reminders and the one armed alarm in submission order. */
-    internal val scheduleWriteQueue: LatestWriteQueue<List<Schedule>> by lazy {
-        LatestWriteQueue { snapshot ->
-            kotlinx.coroutines.withContext(Dispatchers.IO) {
-                schedules.write(snapshot)
-                SchedulerService.arm(appContext)
-            }
-        }
+    /** Serialized reminder mutation + arm, shared by UI, tools and SchedulerService. */
+    internal val scheduleWriter: ScheduleWriter by lazy {
+        ScheduleWriter(schedules) { SchedulerService.arm(appContext) }
     }
 
     /**
@@ -189,7 +176,7 @@ object Core {
             }
             tools = ToolRegistry(
                 appContext, capabilities, skills, speaker, settings, memory, profile, jobs, todos,
-                goals, schedules,
+                goals, schedules, scheduleWriter,
             )
             mcp = McpManager(McpStore(appContext), tools)
             gate = ApprovalGate(settings, appScope)

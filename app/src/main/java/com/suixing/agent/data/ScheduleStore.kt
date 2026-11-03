@@ -147,6 +147,15 @@ class ScheduleStore(private val file: File) {
     fun find(id: String): Schedule? = read().firstOrNull { it.id == id }
 
     /**
+     * Reads and rewrites under one lock. A reminder toggle or delete edits the memo the
+     * screen loaded earlier; applying it to the latest board keeps a reminder the agent
+     * added meanwhile from being erased.
+     */
+    fun mutate(block: (List<Schedule>) -> List<Schedule>): List<Schedule> = synchronized(lock) {
+        write(block(read()))
+    }
+
+    /**
      * Switches off one-shots whose moment passed while nobody was looking, stamping [Schedule.missedAt].
      *
      * They are the one case where `enabled = true` is a lie: the alarm never fired (the phone was

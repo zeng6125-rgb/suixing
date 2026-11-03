@@ -1,15 +1,14 @@
 package com.suixing.agent.tools
 
-import android.content.Context
 import com.suixing.agent.data.SCHEDULE_AT
 import com.suixing.agent.data.SCHEDULE_DAILY
 import com.suixing.agent.data.SCHEDULE_EVERY
 import com.suixing.agent.data.Schedule
 import com.suixing.agent.data.ScheduleStore
+import com.suixing.agent.data.ScheduleWriter
 import com.suixing.agent.data.nextTriggerAfter
 import com.suixing.agent.data.parseLocalMoment
 import com.suixing.agent.data.parseTime
-import com.suixing.agent.service.SchedulerService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -26,8 +25,8 @@ import java.util.UUID
  * schedule they cannot trust.
  */
 class ScheduleTools(
-    private val context: Context,
     private val schedules: ScheduleStore,
+    private val writer: ScheduleWriter,
 ) : ToolGroup() {
 
     private val zone: ZoneId get() = ZoneId.systemDefault()
@@ -114,8 +113,7 @@ class ScheduleTools(
         if (schedule.nextAt == 0L) {
             return@withContext ToolResult.failure("这个时间已经过去了：${args.str("at").orEmpty()}。请给一个将来的时刻。")
         }
-        schedules.upsert(schedule)
-        SchedulerService.arm(context)
+        writer.mutate { it + schedule }
         ToolResult.success(
             "已建提醒 ${schedule.id}「${schedule.title}」，下一次 ${format(schedule.nextAt)}（${describe(schedule)}）。",
         )
@@ -143,56 +141,73 @@ class ScheduleTools(
     private suspend fun update(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         val id = args.str("id")?.trim().orEmpty()
         if (id.isEmpty()) return@withContext ToolResult.failure("缺少参数 id")
-        val existing = schedules.find(id)
-            ?: return@withContext ToolResult.failure("没有这个提醒：$id。先用 schedule_list 看有哪些。")
-
-        val title = args.str("title")?.trim().orEmpty().ifBlank { existing.title }
-        val prompt = args.str("prompt")?.trim().orEmpty().ifBlank { existing.prompt }
         // "no timing given" means keep the old one; a timing that was given but is wrong is an
         // error, not a silent no-op — otherwise a typo'd time looks like a successful update.
-        // **一次算好传下去**（优化清单 tools-P2）：readTiming / timingError 内部原来各再算一遍。
         val given = TIMING_KEYS.filter { !args.str(it).isNullOrBlank() }
         val timing = readTiming(args, given)
         if (given.isNotEmpty() && timing == null) return@withContext timingError(args, given)
-        val updated = if (timing == null) {
-            existing.copy(title = title, prompt = prompt)
-        } else {
-            existing.copy(
-                title = title,
-                prompt = prompt,
-                kind = timing.kind,
-                atMillis = timing.atMillis,
-                everySeconds = timing.everySeconds,
-                timeOfDay = timing.timeOfDay,
-            )
+        var failure: String? = null
+        val stored = writer.mutate { board ->
+            val existing = board.firstOrNull { it.id == id }
+            if (existing == null) {
+                failure = "没有这个提醒：$id。先用 schedule_list 看有哪些。"
+                board
+            } else {
+                val title = args.str("title")?.trim().orEmpty().ifBlank { existing.title }
+                val prompt = args.str("prompt")?.trim().orEmpty().ifBlank { existing.prompt }
+                val updated = if (timing == null) {
+                    existing.copy(title = title, prompt = prompt)
+                } else {
+                    existing.copy(
+                        title = title,
+                        prompt = prompt,
+                        kind = timing.kind,
+                        atMillis = timing.atMillis,
+                        everySeconds = timing.everySeconds,
+                        timeOfDay = timing.timeOfDay,
+                    )
+                }
+                val now = System.currentTimeMillis()
+                val armed = updated.copy(
+                    nextAt = updated.nextTriggerAfter(now, zone) ?: 0L,
+                    // 给新时间 = 重新排上：一条因为错过触发时间而被关掉的提醒，改到未来某点后必须重新生效，
+                    // 否则回执里的「下一次」是句谎话——它算出了时间却仍然不会响。用户自己暂停的不动。
+                    enabled = if (timing != null && updated.missedAt > 0L) true else updated.enabled,
+                    missedAt = if (timing != null && updated.missedAt > 0L) 0L else updated.missedAt,
+                )
+                if (timing != null && armed.nextAt == 0L) {
+                    failure = "这个时间已经过去了，提醒没有改动。"
+                    board
+                } else {
+                    board.map { if (it.id == id) armed else it }
+                }
+            }
         }
-        val now = System.currentTimeMillis()
-        val armed = updated.copy(
-            nextAt = updated.nextTriggerAfter(now, zone) ?: 0L,
-            // 给新时间 = 重新排上：一条因为错过触发时间而被关掉的提醒，改到未来某点后必须重新生效，
-            // 否则回执里的「下一次」是句谎话——它算出了时间却仍然不会响。用户自己暂停的不动。
-            enabled = if (timing != null && updated.missedAt > 0L) true else updated.enabled,
-            missedAt = if (timing != null && updated.missedAt > 0L) 0L else updated.missedAt,
-        )
-        if (timing != null && armed.nextAt == 0L) {
-            return@withContext ToolResult.failure("这个时间已经过去了，提醒没有改动。")
-        }
-        schedules.upsert(armed)
-        SchedulerService.arm(context)
+        failure?.let { return@withContext ToolResult.failure(it) }
+        val saved = stored.firstOrNull { it.id == id }
+            ?: return@withContext ToolResult.failure("提醒更新后没有找到：$id")
         ToolResult.success(
-            "已更新 ${armed.id}「${armed.title}」，下一次 " +
-                (armed.nextAt.takeIf { it > 0L }?.let { format(it) } ?: "不会触发") + "。",
+            "已更新 ${saved.id}「${saved.title}」，下一次 " +
+                (saved.nextAt.takeIf { it > 0L }?.let { format(it) } ?: "不会触发") + "。",
         )
     }
 
     private suspend fun delete(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         val id = args.str("id")?.trim().orEmpty()
         if (id.isEmpty()) return@withContext ToolResult.failure("缺少参数 id")
-        val existing = schedules.find(id)
+        var title: String? = null
+        writer.mutate { board ->
+            val existing = board.firstOrNull { it.id == id }
+            if (existing == null) {
+                board
+            } else {
+                title = existing.title
+                board.filterNot { it.id == id }
+            }
+        }
+        val removed = title
             ?: return@withContext ToolResult.failure("没有这个提醒：$id。先用 schedule_list 看有哪些。")
-        schedules.delete(id)
-        SchedulerService.arm(context)
-        ToolResult.success("已删除提醒「${existing.title}」（$id）。")
+        ToolResult.success("已删除提醒「$removed」（$id）。")
     }
 
     private class Timing(

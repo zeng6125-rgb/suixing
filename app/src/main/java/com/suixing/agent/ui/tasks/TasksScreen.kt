@@ -49,7 +49,7 @@ import com.suixing.agent.data.TodoItem
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,15 +59,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The agent's task board: what was promised, what is moving, what landed.
  *
  * The board is the model's own list, so editing here is deliberately blunt — a tap walks
- * a line through the three states, a long press removes it. Both write the whole list
- * back, exactly as [com.suixing.agent.data.TodoStore] expects.
+ * a line through the three states, a long press removes it. Both apply a targeted mutation
+ * to the latest stored board, so an agent write between page load and tap is not erased.
  */
 @Composable
 fun TasksScreen(onBack: () -> Unit) {
     val context = LocalContext.current.applicationContext
     var items by remember { mutableStateOf<List<TodoItem>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
-    val writer = Core.todoWriteQueue
     val screenActive = remember { AtomicBoolean(true) }
     DisposableEffect(Unit) {
         onDispose { screenActive.set(false) }
@@ -75,31 +74,29 @@ fun TasksScreen(onBack: () -> Unit) {
     // 长按不再直接删：先记下目标，确认弹窗点「删除」才真的写回。
     var pendingDelete by remember { mutableStateOf<TodoItem?>(null) }
     LaunchedEffect(Unit) {
-        writer.awaitIdle()
         items = withContext(Dispatchers.IO) { Core.todos.read() }
         loaded = true
     }
-    val save: (List<TodoItem>) -> Unit = { next ->
-        items = next
-        // Reserve the revision before dispatch. The shared app queue survives this screen, and
-        // failure recovery only touches this UI if no newer intent has replaced the request.
-        val request = writer.submit(next)
-        Core.appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+    // Apply the change to the *latest stored list*, not to this screen's snapshot. The
+    // agent's todo_write may have added or changed rows since the page loaded.
+    val apply: ((List<TodoItem>) -> List<TodoItem>) -> Unit = { mutate ->
+        items = mutate(items) // optimistic local view
+        Core.appScope.launch(Dispatchers.IO) {
             try {
-                writer.commit(request)
+                val stored = Core.todos.mutate(mutate)
+                withContext(Dispatchers.Main.immediate) {
+                    if (screenActive.get()) items = stored
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                if (!screenActive.get() || !writer.isCurrent(request)) return@launch
                 val persisted = try {
-                    withContext(Dispatchers.IO) { Core.todos.read() }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
+                    Core.todos.read()
                 } catch (_: Exception) {
                     null
                 }
                 withContext(Dispatchers.Main.immediate) {
-                    if (!screenActive.get() || !writer.isCurrent(request)) return@withContext
+                    if (!screenActive.get()) return@withContext
                     if (persisted != null) items = persisted
                     Toast.makeText(
                         context,
@@ -120,7 +117,7 @@ fun TasksScreen(onBack: () -> Unit) {
             TODO_IN_PROGRESS -> TODO_COMPLETED
             else -> TODO_PENDING
         }
-        save(items.map { if (it.id == row.id) it.copy(status = next) else it })
+        apply { list -> list.map { if (it.id == row.id) it.copy(status = next) else it } }
     }
     val onAskDelete: (TodoItem) -> Unit = { pendingDelete = it }
     val scheme = MaterialTheme.colorScheme
@@ -164,7 +161,7 @@ fun TasksScreen(onBack: () -> Unit) {
                 TextButton(onClick = {
                     scope.closeThen {
                         pendingDelete = null
-                        save(items.filterNot { it.id == target.id })
+                        apply { list -> list.filterNot { it.id == target.id } }
                     }
                 }) { Text("删除") }
             },

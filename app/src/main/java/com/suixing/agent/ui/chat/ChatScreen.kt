@@ -181,6 +181,16 @@ fun ChatScreen(
     // another chat and coming back restores exactly what was left, and nothing leaks
     // across the switch.
     val draft = state.draft
+    // What `/` can run here: the same persona filter the agent run uses, plus the goal
+    // command, which is a user setting rather than a model tool call.
+    val slashTools = remember(state.assistantId, settings.assistants) {
+        val disabled = settings.assistant(state.assistantId)?.disabledTools?.toSet().orEmpty()
+        Core.tools.all()
+            .filter { slashToolAllowed(it.spec.name, disabled) }
+            .map { tool ->
+                tool.spec.name to tool.spec.description.lineSequence().firstOrNull().orEmpty()
+            }
+    }
     fun currentInput(): String = viewModel.draftFor(state.conversationId).text
     // The conversation is a key as well: the cache is per conversation, and two chats that both
     // hold a 「修改」-restored picture carry the *same* marker uri and label — without this, coming
@@ -1274,39 +1284,30 @@ fun ChatScreen(
                                             // 识别为滚动时立刻解除 —— 与那条教训不冲突。
                                             revealBlocked.value = true
                                             lastRevealRequestAt.longValue = SystemClock.uptimeMillis()
-                                            var moved = false
+                                            val gesture = DragGestureState()
                                             var released = false
                                             while (!released) {
                                                 val next = awaitPointerEvent(PointerEventPass.Initial)
                                                 val change = next.changes.firstOrNull()
-                                                // **任一方向**超过阈值就停跟。只认"手指上移"是错的：顶锚列表里
-                                                // 读上面的内容是**手指下移**（把内容拉下来），那个手势从不触发
-                                                // 取消 ⇒ 手指一松追底就重跑、内容被贴回底部（用户：「轻微滑动
-                                                // 一点点，就被锁下来了」）。
+                                                // **任一方向**越过 4px 都算拖动。只认"手指上移"是错的：顶锚列表里
+                                                // 读上面的内容是**手指下移**（把内容拉下来），纵向判定必须覆盖两个方向。
                                                 val pos = change?.position
                                                 val dy = (pos?.y ?: downY) - downY
                                                 val dx = (pos?.x ?: downX) - downX
                                                 // **两件事分开**（§131）：
                                                 //   · 任一方向越阈值 ⇒ 手指在拖，取消长按/点击并解除 reveal 拦截；
                                                 //   · 只有纵向主导才取消追底 —— 侧滑抽屉时的手指抖动不该让内容停跟。
-                                                // 原来只要 |dy|>4px 就同时做这两件事，于是侧滑会顺手把追底关掉。
+                                                // 两个 one-shot 标记彼此独立：先横后竖仍要在首次纵向时停跟（#73）。
                                                 val intent = dragIntent(dx, dy)
-                                                // `!moved`：`stickToBottom` 的 setter 是 `SnapshotStateMap.put`，
-                                                // 不做等值短路，而读它的地方就在 ChatScreen 自己的组合体里
-                                                // （底边距 / CompositionLocal）⇒ 每个 move 事件写一次 =
-                                                // 一次拖动写 60~120 次。只在本次手势首次越过阈值时写。
-                                                if (!moved && change != null && change.pressed &&
-                                                    intent != DragIntent.Idle
-                                                ) {
-                                                    moved = true
+                                                val isPressed = change?.pressed == true
+                                                if (gesture.markMoved(intent, isPressed)) {
                                                     pressMoved = true
-                                                    // 拖动都不是选字：解除 reveal 拦截
                                                     revealBlocked.value = false
-                                                    // 追底只在纵向主导时取消（$131）
-                                                    if (intent == DragIntent.VerticalScroll) {
-                                                        scroll.allowBottomResume = true
-                                                        scroll.stickToBottom = false
-                                                    }
+                                                }
+                                                // 每次手势只写一次：setter 不做等值短路，逐事件写会让本组合体反复失效。
+                                                if (gesture.markFollowCancelled(intent, isPressed)) {
+                                                    scroll.allowBottomResume = true
+                                                    scroll.stickToBottom = false
                                                 }
                                                 released = next.changes.none { it.pressed }
                                             }
@@ -1316,7 +1317,7 @@ fun ChatScreen(
                                             // Clearing focus after them prevents an old manager from
                                             // re-showing its toolbar after a blank tap closed it.
                                             awaitPointerEvent(PointerEventPass.Final)
-                                            if (selectionTracker.active && !moved && pressUpAt - downAt < viewConfig.longPressTimeoutMillis) {
+                                            if (selectionTracker.active && !gesture.moved && pressUpAt - downAt < viewConfig.longPressTimeoutMillis) {
                                                  selectionTracker.clear()
                                                 selectionFocus.clearFocus()
                                             }
@@ -1846,6 +1847,7 @@ fun ChatScreen(
                 Composer(
                     subagentChatId = state.conversationId,
                     input = input,
+                    slashTools = slashTools,
                     goal = state.goal,
                     onClearGoal = rememberStableCallback0 { viewModel.clearGoal() },
                     onInput = rememberStableCallback1<String> { setDraft(text = it) },

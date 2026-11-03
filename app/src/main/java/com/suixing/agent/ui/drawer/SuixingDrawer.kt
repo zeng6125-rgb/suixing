@@ -47,6 +47,35 @@ import kotlinx.coroutines.launch
 internal class DrawerGestureSession internal constructor(internal val generation: Long)
 
 /**
+ * Discrete input-shield lifecycle for the home page. Only [Closed] may drop the shield; every
+ * opening/closing frame, owned drag, and parked half-open drawer leaves home exposed.
+ */
+internal enum class DrawerHomeLifecycle {
+    Closed,
+    Opening,
+    Open,
+    Closing,
+    Dragging,
+    Exposed;
+
+    val shieldsHome: Boolean get() = this != Closed
+}
+
+internal fun drawerMotionLifecycle(target: DrawerValue): DrawerHomeLifecycle =
+    if (target == DrawerValue.Open) DrawerHomeLifecycle.Opening else DrawerHomeLifecycle.Closing
+
+internal fun drawerSettledLifecycle(target: DrawerValue): DrawerHomeLifecycle =
+    if (target == DrawerValue.Open) DrawerHomeLifecycle.Open else DrawerHomeLifecycle.Closed
+
+/** No owner left: keep the shield when the panel is not fully closed. */
+internal fun drawerIdleLifecycle(progress: Float): DrawerHomeLifecycle =
+    if (progress > 0f) DrawerHomeLifecycle.Exposed else DrawerHomeLifecycle.Closed
+
+/** The shield's hit region starts at the panel's right edge and must not cover drawer rows. */
+internal fun drawerHomeShieldContains(xPx: Float, panelWidthPx: Float): Boolean =
+    xPx >= panelWidthPx
+
+/**
  * 自建抽屉状态。
  *
  * **为什么要自建**：`material3 1.4.0` 的 `DrawerState` 内部控制松手回弹曲线的三个字段
@@ -84,6 +113,10 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     private var settled by mutableStateOf(initialValue)
     val isOpen: Boolean get() = settled == DrawerValue.Open
 
+    /** Discrete, so mounting the shield does not read [progress] during composition. */
+    private var homeLifecycle by mutableStateOf(drawerSettledLifecycle(initialValue))
+    val homeShieldActive: Boolean get() = homeLifecycle.shieldsHome
+
     // Gesture ownership. All mutations below happen on the UI thread (pointer callbacks,
     // rememberCoroutineScope launches, and Compose effects). Do not call these from a background
     // thread: the generation/job fields are intentionally not synchronized. A generation bump is
@@ -103,6 +136,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     fun beginGesture(): DrawerGestureSession {
         // A fresh touch owns the drawer. Drop the previous gesture's settle/frame before it can
         // cancel this drag from Animatable's mutator.
+        homeLifecycle = DrawerHomeLifecycle.Dragging
         cancelMotion()
         gestureGeneration++
         val session = DrawerGestureSession(gestureGeneration)
@@ -123,6 +157,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         activeGesture = null
         gestureSession = null
         cancelMotion()
+        homeLifecycle = drawerIdleLifecycle(progress.value)
         return true
     }
 
@@ -138,6 +173,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         gestureSession = null
         gestureGeneration++
         cancelMotion()
+        homeLifecycle = drawerIdleLifecycle(progress.value)
         return true
     }
 
@@ -154,11 +190,20 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         revokeGestures()
         val job = currentCoroutineContext()[Job]
         motionJob = job
+        homeLifecycle = drawerMotionLifecycle(target)
+        var reached = false
         try {
             progress.animateTo(if (target == DrawerValue.Open) 1f else 0f, spec, initialVelocity)
-            if (motionJob === job) settled = target
+            if (motionJob === job) {
+                settled = target
+                homeLifecycle = drawerSettledLifecycle(target)
+                reached = true
+            }
         } finally {
-            if (motionJob === job) motionJob = null
+            if (motionJob === job) {
+                motionJob = null
+                if (!reached) homeLifecycle = drawerIdleLifecycle(progress.value)
+            }
         }
     }
 
@@ -166,6 +211,7 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         revokeGestures()
         progress.snapTo(if (target == DrawerValue.Open) 1f else 0f)
         settled = target
+        homeLifecycle = drawerSettledLifecycle(target)
     }
 
     /**
@@ -197,6 +243,8 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
         if (!isGestureCurrent(session)) return
         val job = currentCoroutineContext()[Job]
         motionJob = job
+        homeLifecycle = drawerMotionLifecycle(target)
+        var reached = false
         try {
             if (!isGestureCurrent(session)) return
             currentCoroutineContext().ensureActive()
@@ -210,9 +258,16 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
                 spec,
                 initialVelocity,
             )
-            if (isGestureCurrent(session) && motionJob === job) settled = target
+            if (isGestureCurrent(session) && motionJob === job) {
+                settled = target
+                homeLifecycle = drawerSettledLifecycle(target)
+                reached = true
+            }
         } finally {
-            if (motionJob === job) motionJob = null
+            if (motionJob === job) {
+                motionJob = null
+                if (!reached) homeLifecycle = drawerIdleLifecycle(progress.value)
+            }
         }
     }
 
@@ -435,9 +490,9 @@ internal fun SuixingDrawer(
         }
         // 主页：后画 ⇒ 在上层。
         content()
-        // **抽屉打开时冻结露出的那一条主页**（用户需求）。
+        // **抽屉开合期间冻结可能露出的主页**。只在完全关闭时卸下，避免动画期间触控泄漏。
         //
-        // 为什么需要：主页被推到右边后，露出的那 85dp 仍然是**活的**——可以点按钮、
+        // 为什么需要：主页被推到右边后，露出的一条仍然是**活的**——可以点按钮、
         // 可以上下滚动列表。抽屉开着时这些操作都是误触。
         //
         // 做法：在这块区域上盖一个透明手势层（只有它在最上层，页面收不到任何事件）：
@@ -447,7 +502,7 @@ internal fun SuixingDrawer(
         //
         // 只覆盖 `x ≥ 面板宽` 那一片（`padding(start = …)`）：左侧 300dp 是侧边栏本体，
         // 盖上去会让抽屉里的按钮点不动。
-        if (state.isOpen) {
+        if (state.homeShieldActive) {
             Box(
                 Modifier
                     .fillMaxSize()
