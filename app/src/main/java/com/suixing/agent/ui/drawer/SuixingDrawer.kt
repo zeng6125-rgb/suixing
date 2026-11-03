@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
@@ -31,11 +31,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import kotlin.math.abs
-import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -72,8 +74,18 @@ internal fun drawerIdleLifecycle(progress: Float): DrawerHomeLifecycle =
     if (progress > 0f) DrawerHomeLifecycle.Exposed else DrawerHomeLifecycle.Closed
 
 /** The shield's hit region starts at the panel's right edge and must not cover drawer rows. */
-internal fun drawerHomeShieldContains(xPx: Float, panelWidthPx: Float): Boolean =
-    xPx >= panelWidthPx
+internal fun drawerHomeShieldContains(xPx: Float, shieldStartPx: Float): Boolean =
+    xPx >= shieldStartPx
+
+/**
+ * The panel's right edge while it moves: 0 when closed, the full width when open.
+ *
+ * The home layer is translated by the same amount, so this is exactly where the exposed
+ * home begins. A fixed [DRAWER_SHEET_WIDTH] inset leaves a strip of the still-moving home
+ * unshielded for the whole opening/closing animation (at half open: 150dp..300dp).
+ */
+internal fun drawerHomeShieldStartPx(panelWidthPx: Float, progress: Float): Float =
+    panelWidthPx * progress.coerceIn(0f, 1f)
 
 /**
  * 自建抽屉状态。
@@ -500,13 +512,21 @@ internal fun SuixingDrawer(
         //  · 横向拖动 → 仍然可以关/开（用户：「不要改变其滑动可关闭的形态」）；
         //  · 纵向滑动 → 被吃掉，不做任何事（挡住列表滚动）。
         //
-        // 只覆盖 `x ≥ 面板宽` 那一片（`padding(start = …)`）：左侧 300dp 是侧边栏本体，
-        // 盖上去会让抽屉里的按钮点不动。
+        // 只覆盖 `x ≥ 面板当前右沿` 那一片：左侧是侧边栏本体，盖上去会让抽屉里的按钮点不动。
+        // 右沿随进度移动（关闭 0，打开 300dp）。不能写成固定的 `padding(start = 300.dp)`：
+        // 开合动画中面板右沿在 0..300dp 之间，而主页也同步右移，固定 300dp 会把
+        // 面板右沿到 300dp 之间那段仍然活着的主页露出来（半开时整整 150dp 可点）。
+        // 进度在布局回调里读，避免每帧重组整棵宿主。
         if (state.homeShieldActive) {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .padding(start = DRAWER_SHEET_WIDTH.dp)
+                    .offset {
+                        IntOffset(
+                            drawerHomeShieldStartPx(panelPx, state.progress.value).roundToInt(),
+                            0,
+                        )
+                    }
                     // **一个手势处理器，不要拆成两个 detector**：
                     // `detectHorizontalDragGestures` 与 `detectTapGestures` 各自独立消费指针，
                     // 轻点很可能先被拖动那边吃掉 ⇒ "点一下关闭"不稳定。

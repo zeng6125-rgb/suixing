@@ -36,6 +36,18 @@ class SlashCommandPolicyTest {
     }
 
     @Test
+    fun `goal is offered first instead of being buried by registry order`() {
+        val registryOrder = (1..10).map { "tool$it" to "tool $it" } + ("goal" to "set the objective")
+
+        val commands = slashCommands(registryOrder)
+
+        assertEquals("goal", commands.first().first)
+        assertEquals(listOf("tool1", "tool2", "tool3", "tool4"), commands.drop(1).take(4).map { it.first })
+        assertEquals("goal", slashSuggestions(commands, "/").first().first)
+        assertEquals(listOf("goal", "tool1"), slashSuggestions(commands, "/", limit = 2).map { it.first })
+    }
+
+    @Test
     fun `suggestions appear only while the name is still being typed`() {
         val commands = listOf(
             "goal" to "set the objective",

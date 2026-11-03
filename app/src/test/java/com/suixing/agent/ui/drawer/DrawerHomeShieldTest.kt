@@ -73,6 +73,21 @@ class DrawerHomeShieldTest {
     }
 
     @Test
+    fun `the shield follows the panel edge while the drawer opens or closes`() {
+        val panelWidth = 300f
+        assertEquals(0f, drawerHomeShieldStartPx(panelWidth, 0f), 0f)
+        assertEquals(75f, drawerHomeShieldStartPx(panelWidth, 0.25f), 0f)
+        assertEquals(150f, drawerHomeShieldStartPx(panelWidth, 0.5f), 0f)
+        assertEquals(300f, drawerHomeShieldStartPx(panelWidth, 1f), 0f)
+
+        // The fixed-300dp version missed this whole strip at half open.
+        val half = drawerHomeShieldStartPx(panelWidth, 0.5f)
+        assertFalse(drawerHomeShieldContains(149.9f, half))
+        assertTrue(drawerHomeShieldContains(150f, half))
+        assertTrue(drawerHomeShieldContains(299.9f, half))
+    }
+
+    @Test
     fun `state keeps the shield through an owned drag and a cancelled half open`() = runBlocking {
         val state = SuixingDrawerState(DrawerValue.Closed)
         assertFalse(state.homeShieldActive)

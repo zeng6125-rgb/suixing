@@ -2,6 +2,7 @@ package com.suixing.agent.ui.chat
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
@@ -827,6 +828,8 @@ internal fun Composer(
     settings: AppSettings,
     /** The persona this conversation runs with, not the app-wide active one. */
     assistantId: String,
+    /** That persona's display name; the empty-field placeholder follows it. */
+    assistantName: String,
     /** The window the context ring divides by; 0 hides the ring (no denominator). */
     contextWindow: Int,
     /** Tokens the newest round filled of that window, and how many of them were cached. */
@@ -913,6 +916,8 @@ internal fun Composer(
 ) {
     // 每 120ms 重组的只有这一个环（含时间读数），不拖别人。
     val scheme = MaterialTheme.colorScheme
+    // 输入正文与占位字共用这一份：字体、行高、字重全部一致，只有颜色不同。
+    val fieldTextStyle = MaterialTheme.typography.bodyLarge
     // 发送后键盘退避（用户：「抬起输入法发送时，对话框也会挡住」）：不收键盘的话 composer 悬在
     // 键盘上方、把列表尾的状态行盖在后面。发送＝这句话说完了，收键盘让整条栈落回去；「停止」
     // 不收（那一下没有发送任何文字，用户的手还在输入上）。
@@ -935,7 +940,9 @@ internal fun Composer(
                     buildAnnotatedString {
                         append(text.text)
                         addStyle(
-                            SpanStyle(color = scheme.primary, fontWeight = FontWeight.Medium),
+                            // 只换颜色：Medium 会改字形宽度，敲下 / 时整行可能重新折行，
+                            // 输入框一高，贴在上面的候选卡片就跟着「浮起」。
+                            SpanStyle(color = scheme.primary),
                             0,
                             commandEnd,
                         )
@@ -1287,7 +1294,7 @@ internal fun Composer(
                             .onFocusChanged { focus ->
                                 if (focus.isFocused) onFocused()
                             },
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
+                        textStyle = fieldTextStyle.copy(color = scheme.onSurface),
                         cursorBrush = SolidColor(scheme.primary),
                         maxLines = 5,
                         // Enter sends — and while a run is live it sends the line to that
@@ -1340,10 +1347,9 @@ internal fun Composer(
                                                 "还有 ${pendingSteers.size} 条排队中…"
 
                                             running -> "插一句话…"
-                                            else -> "让随行做点什么…"
+                                            else -> "让${assistantName.ifBlank { "助手" }}做点什么…"
                                         },
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = scheme.onSurfaceVariant,
+                                        style = fieldTextStyle.copy(color = scheme.onSurfaceVariant),
                                     )
                                 }
                                 inner()
@@ -1782,7 +1788,9 @@ private fun SlashSuggestionList(
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
-        modifier = modifier,
+        // 前缀过滤会让行数在 1..5 之间变；底边始终锚在 pill 上方 6dp，高度变化时把上沿
+        // 平滑收起/展开，卡片不会整块跳到新位置（Popup 会跟着每帧的新尺寸重新定位）。
+        modifier = modifier.animateContentSize(tween(durationMillis = 120)),
         shape = RoundedCornerShape(14.dp),
         color = scheme.surfaceContainer,
         border = BorderStroke(1.dp, scheme.outlineVariant),

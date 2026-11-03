@@ -41,6 +41,16 @@ internal fun slashQuery(text: String): String? {
 }
 
 /**
+ * Put `/goal` ahead of the tool groups. The registry is ordered by package, and the card
+ * only shows five rows: without this, `goal` sits behind the ten system tools and a bare
+ * `/` never offers the one command that is a user setting rather than a model call.
+ */
+internal fun slashCommands(commands: List<Pair<String, String>>): List<Pair<String, String>> {
+    val goal = commands.firstOrNull { it.first == "goal" } ?: return commands
+    return listOf(goal) + commands.filterNot { it.first == "goal" }
+}
+
+/**
  * Commands worth offering for what has been typed. `/goal` is included even when a persona
  * disables the `goal` tool: it is a user setting, not a model call.
  */

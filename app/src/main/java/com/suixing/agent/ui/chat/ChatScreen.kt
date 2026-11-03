@@ -185,11 +185,13 @@ fun ChatScreen(
     // command, which is a user setting rather than a model tool call.
     val slashTools = remember(state.assistantId, settings.assistants) {
         val disabled = settings.assistant(state.assistantId)?.disabledTools?.toSet().orEmpty()
-        Core.tools.all()
-            .filter { slashToolAllowed(it.spec.name, disabled) }
-            .map { tool ->
-                tool.spec.name to tool.spec.description.lineSequence().firstOrNull().orEmpty()
-            }
+        slashCommands(
+            Core.tools.all()
+                .filter { slashToolAllowed(it.spec.name, disabled) }
+                .map { tool ->
+                    tool.spec.name to tool.spec.description.lineSequence().firstOrNull().orEmpty()
+                },
+        )
     }
     fun currentInput(): String = viewModel.draftFor(state.conversationId).text
     // The conversation is a key as well: the cache is per conversation, and two chats that both
@@ -1857,6 +1859,7 @@ fun ChatScreen(
                     running = state.runningHere,
                     settings = settings,
                     assistantId = state.assistantId,
+                    assistantName = assistant?.label ?: "随行",
                     contextWindow = contextWindow,
                     contextUsed = contextUsed,
                     contextEstimated = reading.estimated,
