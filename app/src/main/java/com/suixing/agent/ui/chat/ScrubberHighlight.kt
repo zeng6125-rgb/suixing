@@ -8,27 +8,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.unit.dp
 
-/** Mount at the restored position, then share the transcript's entrance clock and motion. */
+/** Mount at the restored position, then share the transcript's in-place fade. */
 @Composable
 internal fun ScrubberPresentation(
     conversationId: String,
     presented: () -> Boolean,
     entrance: () -> Float,
-    travelDp: () -> Float = { ConversationEntrance.TRAVEL_DP },
     content: @Composable (Modifier) -> Unit,
 ) = key(conversationId) {
     val latestPresented by rememberUpdatedState(presented)
     val latestEntrance by rememberUpdatedState(entrance)
-    val latestTravelDp by rememberUpdatedState(travelDp)
     // Position restoration is complete before presented flips. Waiting for entrance=1 would
     // leave the already-visible transcript without its rail for the rest of the animation.
     val ready by remember { derivedStateOf { latestPresented() } }
     if (ready) content(Modifier.graphicsLayer {
-        val progress = latestEntrance()
-        alpha = ConversationEntrance.alpha(progress)
-        translationY = ConversationEntrance.remainingTravel(progress) * latestTravelDp().dp.toPx()
+        alpha = ConversationEntrance.alpha(latestEntrance())
     })
 }
 

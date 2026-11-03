@@ -237,7 +237,7 @@ private const val CHANNEL_ID = "Suixing_console"
     private var touchStartY = 0f
     private var windowStartX = 0
     private var windowStartY = 0
-    private var dragging = false
+    private lateinit var ballTouchFeedback: FloatBallTouchFeedback
 
     /** The resize gesture: where the finger went down, and how wide the panel was then. */
     private var resizeStartX = 0f
@@ -373,6 +373,7 @@ private const val CHANNEL_ID = "Suixing_console"
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        resetBallTouchFeedback()
         if (!::root.isInitialized) return
         trace("config width=${newConfig.screenWidthDp}dp")
         applyPanelWidth()
@@ -485,6 +486,7 @@ private const val CHANNEL_ID = "Suixing_console"
     }
 
     private fun detach() {
+        resetBallTouchFeedback()
         if (!attached) return
         runCatching { windowManager.removeView(root) }
         attached = false
@@ -683,28 +685,23 @@ private const val CHANNEL_ID = "Suixing_console"
         params.y = boundedOverlayOffset(params.y, windowHeightPx(), height)
     }
 
-    /**
-     * A 44dp brand disc with the feather on it, and a dot that says whether a run is live. Drawn
-     * from views rather than Compose: this window lives outside any activity, so there is no
-     * composition to host it.
-     */
+    /** A 36dp brand disc inside the existing 44dp touch target, with the live-run badge. */
     private fun buildBall(): FrameLayout {
-        val size = dp(44)
+        resetBallTouchFeedback()
+        val size = dp(36)
         val ball = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(size, size)
-            // A flat disc: one solid colour, no gradient, no shadow, no ring around it. The
-            // verdict on the dressed-up version was 「就干净的小球就行了」 — the elevation and the
-            // outline that existed only to give that shadow a shape went with it.
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            setOnTouchListener { view, event -> onBallTouch(view, event) }
+        }
+        val visual = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
+            // Keep the flat brand disc and launcher artwork; only this child scales on touch.
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(BALL_COLOR)
             }
-            setOnTouchListener { view, event -> onBallTouch(view, event) }
         }
-        // **整个球就是圆形版应用图标**（用户：「改为圆形版本」）：不再自己画圆盘 + 亮眼睛，
-        // 直接铺 `ic_launcher_round` 位图，44dp 铺满 —— 与桌面、关于页、助手头像同一张图，
-        // 也就不会出现「矢量版和位图版比例不一样」这种漂移。
-        ball.addView(
+        visual.addView(
             ImageView(this).apply {
                 setImageResource(R.mipmap.ic_launcher_round)
                 layoutParams = FrameLayout.LayoutParams(size, size)
@@ -712,13 +709,24 @@ private const val CHANNEL_ID = "Suixing_console"
             },
         )
         statusDot = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(dp(8), dp(8), Gravity.BOTTOM or Gravity.END).apply {
-                rightMargin = dp(3)
-                bottomMargin = dp(3)
+            layoutParams = FrameLayout.LayoutParams(dp(7), dp(7), Gravity.BOTTOM or Gravity.END).apply {
+                rightMargin = dp(2)
+                bottomMargin = dp(2)
             }
         }
-        ball.addView(statusDot)
+        visual.addView(statusDot)
+        ball.addView(visual)
+        ballTouchFeedback = FloatBallTouchFeedback(visual).also { feedback ->
+            ball.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(view: View) = Unit
+                override fun onViewDetachedFromWindow(view: View) = feedback.reset()
+            })
+        }
         return ball
+    }
+
+    private fun resetBallTouchFeedback() {
+        if (::ballTouchFeedback.isInitialized) ballTouchFeedback.reset()
     }
 
     private fun buildPanel(): LinearLayout = LinearLayout(this).apply {
@@ -1013,33 +1021,43 @@ private const val CHANNEL_ID = "Suixing_console"
             touchStartY = event.rawY
             windowStartX = params.x
             windowStartY = params.y
-            dragging = false
+            ballTouchFeedback.press()
             true
         }
 
         MotionEvent.ACTION_MOVE -> {
-            val dx = event.rawX - touchStartX
-            val dy = event.rawY - touchStartY
-            if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) dragging = true
-            if (dragging) {
-                params.x = windowStartX + dx.toInt()
-                params.y = windowStartY + dy.toInt()
-                // 拖拽期两个方向都要夹（issue #56 R11）：原来只夹 Y，X 可以拖出屏幕，
-                // 松手（ACTION_UP）才跳回来。`clampX` 内部已经含 `clampY`。
-                clampX(if (panel.visibility == View.VISIBLE) panelWidth() else 0)
-                if (attached) runCatching { windowManager.updateViewLayout(root, params) }
+            if (ballTouchFeedback.active) {
+                val dx = event.rawX - touchStartX
+                val dy = event.rawY - touchStartY
+                if (!ballTouchFeedback.dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                    ballTouchFeedback.drag()
+                }
+                if (ballTouchFeedback.dragging) {
+                    params.x = windowStartX + dx.toInt()
+                    params.y = windowStartY + dy.toInt()
+                    // 拖拽期两个方向都要夹（issue #56 R11）：原来只夹 Y，X 可以拖出屏幕，
+                    // 松手（ACTION_UP）才跳回来。`clampX` 内部已经含 `clampY`。
+                    clampX(if (panel.visibility == View.VISIBLE) panelWidth() else 0)
+                    if (attached) runCatching { windowManager.updateViewLayout(root, params) }
+                }
             }
             true
         }
 
         MotionEvent.ACTION_UP -> {
-            if (!dragging) {
+            val wasDragging = ballTouchFeedback.dragging
+            if (ballTouchFeedback.release()) {
                 setExpanded(panel.visibility != View.VISIBLE)
-            } else {
+            } else if (wasDragging) {
                 // The ball may be dropped anywhere; the panel is what has to stay reachable.
                 clampX(if (panel.visibility == View.VISIBLE) panelWidth() else 0)
                 if (attached) runCatching { windowManager.updateViewLayout(root, params) }
             }
+            true
+        }
+
+        MotionEvent.ACTION_CANCEL -> {
+            ballTouchFeedback.cancel()
             true
         }
 

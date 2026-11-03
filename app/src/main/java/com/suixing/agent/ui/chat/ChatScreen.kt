@@ -1196,10 +1196,7 @@ fun ChatScreen(
                             .keyboardAwareImePad(navBarPx, imePxState)
                             .fillMaxSize()
                             .graphicsLayer {
-                                val progress = switchEntrance.value
-                                alpha = ConversationEntrance.alpha(progress)
-                                translationY = ConversationEntrance.remainingTravel(progress) *
-                                    viewport.entranceTravelDp.dp.toPx()
+                                alpha = ConversationEntrance.alpha(switchEntrance.value)
                             }
                             .padding(
                                 top = with(LocalDensity.current) {
@@ -1249,11 +1246,11 @@ fun ChatScreen(
                             // 条件挂载会让整条修饰符链在开关翻转时**重建** ⇒ 重新测量 + 重新挂
                             // 离屏层，那一下正是切换会话掉帧的来源之一。
                             // 常驻的代价是一个 RenderNode 参与合成；省掉它的做法是让层在恒等
-                            // 状态不改变任何像素（下面 p >= 1f 直接返回），而不是摘掉它。
+                            // 状态不改变任何像素（alpha 回到 1f），而不是摘掉它。
                              .graphicsLayer {
                                  val progress = switchEntrance.value
                                  alpha = ConversationEntrance.alpha(progress)
-                                 translationY = ConversationEntrance.remainingTravel(progress) * viewport.entranceTravelDp.dp.toPx()
+                                 // No vertical travel after restoring the reading position.
                              }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(state.conversationId) {
@@ -1726,8 +1723,7 @@ fun ChatScreen(
             }
             ScrubberPresentation(state.conversationId,
                 presented = { viewport.presented },
-                entrance = { switchEntrance.value },
-                travelDp = { viewport.entranceTravelDp }) { entranceModifier ->
+                entrance = { switchEntrance.value }) { entranceModifier ->
                 TurnScrubber(
                     conversationId = state.conversationId,
                     totalTurns = page.turns,

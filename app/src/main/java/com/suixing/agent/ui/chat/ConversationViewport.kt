@@ -1,7 +1,7 @@
 package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyListState
@@ -11,7 +11,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -25,9 +24,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.ViewportBookmark
-import com.suixing.agent.ui.components.LocalDrawerBusy
 import kotlin.math.abs
-import kotlin.math.exp
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -81,47 +78,20 @@ internal fun bookmarkRow(bookmark: ViewportBookmark?, keys: List<String>, rows: 
 internal class ConversationViewport(val conversationId: String, val bookmark: ViewportBookmark?) {
     // Two screens ahead, one behind: bounded reuse instead of retaining whole transcripts.
     val listState = LazyListState(cacheWindow = LazyLayoutCacheWindow(aheadFraction = 2f, behindFraction = 1f))
-    // One target transcript, with opacity finishing before its small spatial settle. Reads
-    // stay in graphicsLayer; changing this clock never recomposes or remeasures the rows.
+    // Fade the restored transcript in place; the rail reads the same draw-phase clock.
     val entrance = Animatable(0f)
-    var entranceTravelDp by mutableFloatStateOf(ConversationEntrance.TRAVEL_DP)
     val navigation = NavigationMotion()
     var prepared by mutableStateOf(false)
     var presented by mutableStateOf(false)
     var followOverride by mutableStateOf(false)
 }
 
-/**
- * Shared conversation entrance clock for transcript rows and the navigation rail. Both opacity
- * and travel derive from this one monotonic curve, keeping the rail and restored transcript in
- * step. The short travel and non-overshooting settle keep the switch quiet and predictable.
- */
+/** One short fade for both cached and cold switches; restored text never moves again. */
 internal object ConversationEntrance {
-    const val DURATION_MS = 260
-    const val CONCURRENT_DURATION_MS = 200
-    const val TRAVEL_DP = 4f
+    const val DURATION_MS = 180
+    val EASING = LinearOutSlowInEasing
 
-    /**
-     * Normalized critically damped response. It starts gently and does not overshoot; the
-     * remaining velocity near the end is small enough to read as a settle rather than a stop.
-     */
-    val EASING: Easing = Easing { fraction -> criticalDamped(fraction) }
-
-    /** Critically damped response normalized to reach 1 at the end. */
-    private fun criticalDamped(t: Float): Float {
-        if (t <= 0f) return 0f
-        if (t >= 1f) return 1f
-        val k = 6.6f
-        val end = 1f - (1f + k) * exp(-k)
-        val value = 1f - (1f + k * t) * exp(-k * t)
-        return (value / end).coerceIn(0f, 1f)
-    }
-
-    /** Opacity finishes just before the spatial settle, leaving a small, readable tail. */
-    fun alpha(progress: Float): Float = (progress * 1.15f).coerceIn(0f, 1f)
-
-    /** Remaining travel follows the same curve as opacity, with no second timing clock. */
-    fun remainingTravel(progress: Float): Float = 1f - progress.coerceIn(0f, 1f)
+    fun alpha(progress: Float): Float = progress.coerceIn(0f, 1f)
 }
 
 /** A new row projection matters even when a streamed/edited row keeps its list index. */
@@ -170,7 +140,6 @@ internal fun BindConversationViewport(
     val revisionNow = rememberUpdatedState(messagesRevision)
     val expectedWidth = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
     val owner = LocalLifecycleOwner.current
-    val drawerBusy = LocalDrawerBusy.current
 
     val capture = remember(viewport, scroll) {
         {
@@ -305,17 +274,12 @@ internal fun BindConversationViewport(
                 }
             }
         }
-        // Preparation can overlap drawer close, but two simultaneous spatial directions feel
-        // disconnected. While it is still closing, fade the restored content in place; otherwise
-        // use the small settle. The rail reads this same travel and the same entrance clock.
-        val concurrentClose = drawerBusy.value
-        viewport.entranceTravelDp = if (concurrentClose) 0f else ConversationEntrance.TRAVEL_DP
+        // Keep one entrance regardless of when loading finishes relative to drawer close.
+        // Only reveal after restoration and layout; no spatial motion can shift that reading point.
         scroll.restoring = false
         viewport.presented = true
         var acknowledged = false
-        val duration = if (concurrentClose) ConversationEntrance.CONCURRENT_DURATION_MS
-            else ConversationEntrance.DURATION_MS
-        viewport.entrance.animateTo(1f, tween(duration, easing = ConversationEntrance.EASING)) {
+        viewport.entrance.animateTo(1f, tween(ConversationEntrance.DURATION_MS, easing = ConversationEntrance.EASING)) {
             if (!acknowledged && value > 0f) {
                 viewModel.presentViewport(viewport.conversationId)
                 acknowledged = true

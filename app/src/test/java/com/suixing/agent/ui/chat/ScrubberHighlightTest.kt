@@ -4,6 +4,7 @@ import androidx.compose.runtime.AbstractApplier
 import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Recomposer
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -284,6 +285,25 @@ class ScrubberHighlightTest {
         }
     }
 
+    @Test
+    fun `entrance updates do not recompose root or presentation content or remount the rail`() = runBlocking {
+        withScrubber(initial = wide, settling = true, usePresentationGate = true) {
+            presented = true
+            pumpFrames(3)
+            val afterMount = compositions
+            val afterPresentation = presentationCompositions
+            for (frame in 1..24) {
+                entrance = frame / 24f
+                pumpFrame()
+                assertStyle(wide, style, "entrance frame $frame")
+            }
+            assertEquals("opacity ticks recomposed the root", afterMount, compositions)
+            assertEquals("opacity ticks recomposed presentation content", afterPresentation, presentationCompositions)
+            assertEquals(1, mounts)
+            assertEquals(0, disposals)
+        }
+    }
+
     private fun assertStyle(
         expected: ScrubberTickStyle,
         actual: ScrubberTickStyle?,
@@ -335,6 +355,8 @@ class ScrubberHighlightTest {
         }
         var compositions: Int = 0
             private set
+        var presentationCompositions: Int = 0
+            private set
 
         private lateinit var recomposer: Recomposer
         private lateinit var composition: androidx.compose.runtime.Composition
@@ -358,6 +380,7 @@ class ScrubberHighlightTest {
                 compositions++
                 if (usePresentationGate) {
                     ScrubberPresentation(conversationId, presented = { presented }, entrance = { entrance }) {
+                        SideEffect { presentationCompositions++ }
                         DisposableEffect(Unit) {
                             mounts++
                             onDispose { disposals++; styleState = null }

@@ -6,16 +6,12 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -53,6 +49,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,7 +67,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -1795,11 +1791,15 @@ private fun GoalChip(
     }
 }
 
+// Query changes should not restart a scale spring or rebuild these fixed specifications.
+private val SLASH_POPUP_ENTER = fadeIn(tween(160, easing = LinearOutSlowInEasing))
+private val SLASH_POPUP_EXIT = fadeOut(tween(110, easing = FastOutLinearInEasing))
+private val SLASH_POPUP_RESIZE = tween<IntSize>(120, easing = FastOutSlowInEasing)
+
 /**
- * The candidate card as a popup window, with a motion curve local to this small, frequently
- * retargeted list. Other popups keep their shared motion. The geometry is unchanged: the card
- * still hangs 6dp above the pill and uses [popupPositionProvider]. [lastItems] stays visible
- * while the exit finishes, with its actions disabled during that period.
+ * The candidate card fades in place in its own window. Filtering only changes its height;
+ * the card still hangs 6dp above the pill and uses [popupPositionProvider]. [lastItems] stays
+ * visible while the exit finishes, with its actions disabled during that period.
  */
 @Composable
 private fun SlashSuggestionPopup(
@@ -1814,40 +1814,21 @@ private fun SlashSuggestionPopup(
     val visibility = remember { MutableTransitionState(false) }
     visibility.targetState = visible
     var lastItems by remember { mutableStateOf(items) }
-    LaunchedEffect(items) {
+    SideEffect {
         if (items.isNotEmpty()) lastItems = items
     }
     // During an interrupted entrance, currentState can still be false while the transition is
     // running toward (or back toward) its target. Keep the popup attached until it settles hidden.
     if (visibility.isIdle && !visibility.currentState && !visibility.targetState) return
 
-    val transformOrigin = TransformOrigin(0.5f, 1f)
-    val gentleFloatSpring = spring<Float>(
-        dampingRatio = Spring.DampingRatioNoBouncy,
-        stiffness = Spring.StiffnessMediumLow,
-        // Scale travels less than 1%; the default threshold would end that motion too early.
-        visibilityThreshold = 0.0005f,
-    )
     Popup(
         popupPositionProvider = popupPositionProvider,
         properties = PopupProperties(focusable = false),
     ) {
         AnimatedVisibility(
             visibleState = visibility,
-            enter = fadeIn(
-                animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
-            ) + scaleIn(
-                initialScale = 0.992f,
-                transformOrigin = transformOrigin,
-                animationSpec = gentleFloatSpring,
-            ),
-            exit = fadeOut(
-                animationSpec = tween(durationMillis = 130, easing = FastOutSlowInEasing),
-            ) + scaleOut(
-                targetScale = 0.997f,
-                transformOrigin = transformOrigin,
-                animationSpec = tween(durationMillis = 130, easing = FastOutSlowInEasing),
-            ),
+            enter = SLASH_POPUP_ENTER,
+            exit = SLASH_POPUP_EXIT,
         ) {
             SlashSuggestionList(
                 items = if (visible) items else lastItems,
@@ -1880,7 +1861,7 @@ private fun SlashSuggestionList(
             .then(if (interactive) Modifier else Modifier.clearAndSetSemantics { })
             .animateContentSize(
                 alignment = Alignment.BottomStart,
-                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                animationSpec = SLASH_POPUP_RESIZE,
             ),
         shape = RoundedCornerShape(14.dp),
         color = scheme.surfaceContainer,
