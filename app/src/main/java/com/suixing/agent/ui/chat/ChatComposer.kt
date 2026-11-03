@@ -193,6 +193,31 @@ internal fun popupNudge(anchorLeft: Float, width: Int, windowPx: Float, edgePx: 
     return left - anchorLeft
 }
 
+/**
+ * Where the slash-command candidates hang, in window coordinates: [gapPx] above the field's own
+ * top edge, inset [insetPx] inside that field so the card reads as belonging to it (the same inset
+ * the queue rows use).
+ *
+ * The field is the anchor, so its width is already inside the window; the two clamps only matter
+ * for the vertical one — a tall field (five lines, attachments, queued rows) can leave less room
+ * above it than the card needs, and a card that runs off the top of the screen is a card whose
+ * first rows cannot be read. It then covers the field instead, which is still usable.
+ */
+internal fun slashPopupOffset(
+    anchor: IntRect,
+    windowWidth: Int,
+    popupSize: IntSize,
+    insetPx: Int,
+    gapPx: Int,
+): IntOffset {
+    val x = (anchor.left + insetPx).coerceIn(
+        insetPx,
+        (windowWidth - insetPx - popupSize.width).coerceAtLeast(insetPx),
+    )
+    val y = (anchor.top - popupSize.height - gapPx).coerceAtLeast(insetPx)
+    return IntOffset(x, y)
+}
+
 /** 附件与正文的合流（用户：「文件的注入不生效，随对话发出就消失了」）。 */
 internal fun withAttachment(attachments: List<Attachment>, text: String): Pair<String, List<String>> {
     val paths = attachments.mapNotNull { it.filePath }
@@ -1167,28 +1192,48 @@ internal fun Composer(
             }
             // Typing `/` names a command: show what can be run instead of expecting the
             // user to remember tool names. Only while the name is still being typed.
+            //
+            // **候选不在这条竖列里**（用户：「不用特地为它让一块区域，直接画顶层浮在会话上面」）：
+            // 排在 Column 里时，敲下 `/` 就把 composer 撑高一截 —— 转录底部让位随之变大，
+            // 整条列表跟着往上跳一格。改成 pill 上方的一个独立窗口（见下面 pill 里的 Popup），
+            // 输入框和转录都不动，候选只是浮在会话上面。
             val suggestions = remember(slashTools, field.text) {
                 slashSuggestions(slashTools, field.text)
             }
-            if (suggestions.isNotEmpty()) {
-                SlashSuggestionList(
-                    items = suggestions,
-                    onPick = { name ->
-                        onInput("/$name ")
-                        goalFocus.requestFocus()
-                    },
-                    modifier = Modifier.padding(
-                        start = STEER_QUEUE_INSET,
-                        end = STEER_QUEUE_INSET,
-                        bottom = 6.dp,
-                    ),
-                )
+            // 窗口里的内容没有父布局可量，卡片宽度只能取 pill 量到的宽度：左右各缩一个
+            // STEER_QUEUE_INSET，与排队行同一个内缩。
+            var pillWidthPx by remember { mutableStateOf(0) }
+            val slashInsetPx = with(density) { STEER_QUEUE_INSET.roundToPx() }
+            val slashGapPx = with(density) { 6.dp.roundToPx() }
+            val slashWidth = with(density) {
+                (pillWidthPx - slashInsetPx * 2).coerceAtLeast(0).toDp()
+            }
+            val slashPopup = remember(slashInsetPx, slashGapPx) {
+                object : PopupPositionProvider {
+                    override fun calculatePosition(
+                        anchorBounds: IntRect,
+                        windowSize: IntSize,
+                        layoutDirection: LayoutDirection,
+                        popupContentSize: IntSize,
+                    ): IntOffset {
+                        // 底边压在 pill 顶上 6dp：排在列里时的那道缝，位置不变。
+                        return slashPopupOffset(
+                            anchor = anchorBounds,
+                            windowWidth = windowSize.width,
+                            popupSize = popupContentSize,
+                            insetPx = slashInsetPx,
+                            gapPx = slashGapPx,
+                        )
+                    }
+                }
             }
             // Opaque surface with one real soft shadow: the drawn concentric rings read
             // as a halo, and 86% alpha let the transcript bleed through the pill.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // 候选卡片的宽度和锚点都来自这里：窗口量不到父布局，只能量 pill。
+                    .onSizeChanged { pillWidthPx = it.width }
                     .shadow(
                         elevation = 8.dp,
                         shape = RoundedCornerShape(24.dp),
@@ -1196,6 +1241,23 @@ internal fun Composer(
                         spotColor = Color.Black.copy(alpha = 0.25f),
                     ),
             ) {
+            // 候选浮层：独立窗口，画在会话上面，不占布局 —— 敲 `/` 时输入框和转录都不动。
+            // focus-less 与这里其它浮层一致：可获焦的窗口会把键盘从输入框手里抢走。
+            if (suggestions.isNotEmpty()) {
+                Popup(
+                    popupPositionProvider = slashPopup,
+                    properties = PopupProperties(focusable = false),
+                ) {
+                    SlashSuggestionList(
+                        items = suggestions,
+                        onPick = { name ->
+                            onInput("/$name ")
+                            goalFocus.requestFocus()
+                        },
+                        modifier = Modifier.width(slashWidth),
+                    )
+                }
+            }
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(24.dp),
@@ -1706,7 +1768,12 @@ private fun GoalChip(
     }
 }
 
-/** The commands matching what has been typed; tapping one fills in `/<name> `. */
+/**
+ * The commands matching what has been typed; tapping one fills in `/<name> `.
+ *
+ * Drawn in a popup window, so it cannot `fillMaxWidth()` — a popup's content measures against the
+ * window, not against the field. The caller passes the width it wants.
+ */
 @Composable
 private fun SlashSuggestionList(
     items: List<Pair<String, String>>,
@@ -1715,7 +1782,7 @@ private fun SlashSuggestionList(
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier,
         shape = RoundedCornerShape(14.dp),
         color = scheme.surfaceContainer,
         border = BorderStroke(1.dp, scheme.outlineVariant),
