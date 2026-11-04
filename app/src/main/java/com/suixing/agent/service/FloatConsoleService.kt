@@ -94,12 +94,10 @@ private const val CHANNEL_ID = "Suixing_console"
         private const val THEME_DARK = 2
 
         /**
-         * The ball's one colour: a flat brand green in both themes, because the icon on it is
-         * white in both. It used to be a two-stop gradient plus a 6dp elevation.
+         * The floating ball is the delivered icon artwork itself: the motion frames carry
+         * their own cream rounded-square tile, so no coloured disc is drawn behind them.
          */
-        /** 与启动图标同一颗球：深翡翠 `#126341`（原来用的是更浅的 `#1F6B4C`）。 */
-        private const val BALL_COLOR = 0xFF126341.toInt()
-        /** The eye loops play at this size inside the existing touch target. */
+        /** The face loops play at this size inside the existing touch target. */
         private const val BALL_SIZE_DP = 42
         private const val TOUCH_TARGET_DP = 48
 
@@ -692,11 +690,8 @@ private const val CHANNEL_ID = "Suixing_console"
         }
         val visual = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
-            // Only this child scales on touch; the flat brand disc stays behind the eye frames.
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(BALL_COLOR)
-            }
+            // No coloured disc: the motion frames are the whole icon, including its
+            // cream rounded-square tile (four transparent corners sit over the wallpaper).
         }
         ballMotionView = ImageView(this).apply {
             layoutParams = FrameLayout.LayoutParams(size, size)
@@ -1011,6 +1006,7 @@ private const val CHANNEL_ID = "Suixing_console"
             windowStartX = params.x
             windowStartY = params.y
             ballTouchFeedback.press()
+            if (::ballMotion.isInitialized) ballMotion.playTap()
             true
         }
 
@@ -1126,6 +1122,7 @@ private const val CHANNEL_ID = "Suixing_console"
                     renderConversation()
                     refreshVisibility()
                     val stateFlow = lastChatId?.let { Core.engine.stateOf(it) }
+                    var wasRunning = false
                     suspend fun renderState(state: RunState) {
                     // **相同文本不重设**（issue #56 R26）：根布局与这些 TextView 都是
                     // WRAP_CONTENT，`TextView.setText` 对相同字符串没有可靠短路，会走
@@ -1145,7 +1142,11 @@ private const val CHANNEL_ID = "Suixing_console"
                     // nothing running it opens the conversation's next turn. The chat composer
                     // reads the same way, so the two never disagree about what a tap will do.
                     sendButton.setTextIfChanged(if (state is RunState.Running) "插话" else "发送")
-                    ballMotion.setRunning(state is RunState.Running)
+                    val running = state is RunState.Running
+                    ballMotion.setRunning(running)
+                    // Sparks fly in once on the leading edge of a run, not on every 8Hz tick.
+                    if (running && !wasRunning) ballMotion.playRunStart()
+                    wasRunning = running
                     }
                     if (stateFlow == null) renderState(RunState.Idle)
                     else stateFlow.collect { renderState(it) }
