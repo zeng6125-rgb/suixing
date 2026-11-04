@@ -89,13 +89,13 @@ internal fun ChatUiState.rollbackSend(
  * The endpoint a send will actually reach (issue #76 F-04).
  *
  * `send()` used to gate on `settings.baseUrl` (the app-wide default) while `start()` sent to
- * `choiceFor(...).baseUrl` — the conversation's own pick, then the persona's pin, then that
- * default. A LAN-only permission check on the wrong endpoint either blocked a public chat or
+ * `choiceFor(...).baseUrl` — the conversation's own pick, then the global default. A LAN-only
+ * permission check on the wrong endpoint either blocked a public chat or
  * let a LAN chat run without the permission and time out. Both sides now ask this one chain.
  */
 internal fun effectiveBaseUrl(settings: AppSettings, state: ChatUiState): String {
     val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
-    return settings.choiceFor(state.providerId, state.model, assistant).baseUrl
+    return settings.choiceFor(state.providerId, state.model).baseUrl
 }
 
 

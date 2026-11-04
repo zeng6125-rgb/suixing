@@ -80,6 +80,7 @@ internal fun AddProviderDialog(onDismiss: () -> Unit, onAdd: (ProviderConfig) ->
     var address by remember { mutableStateOf("") }
     var key by remember { mutableStateOf("") }
     var protocol by remember { mutableStateOf(com.suixing.agent.data.PROTOCOL_OPENAI) }
+    var protocolMenuOpen by remember { mutableStateOf(false) }
     val candidate = ProviderConfig(id = "draft", name = name.trim(), baseUrl = address.trim(), apiKey = key, protocol = protocol)
     SuixingDialog(
         onDismissRequest = onDismiss,
@@ -117,7 +118,12 @@ internal fun AddProviderDialog(onDismiss: () -> Unit, onAdd: (ProviderConfig) ->
                 } else {
                     CompactOutlinedTextField(name, { name = it }, label = { Text("供应商名称") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth())
-                    CompactProtocolPicker(protocol, { protocol = it })
+                    CompactProtocolPicker(
+                        protocol = protocol,
+                        onPick = { protocol = it },
+                        expanded = protocolMenuOpen,
+                        onExpandedChange = { protocolMenuOpen = it },
+                    )
                     CompactOutlinedTextField(address, { address = it }, label = { Text("接口地址") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
                     CompactOutlinedTextField(key, { key = it }, label = { Text("API Key（可选）") }, singleLine = true,

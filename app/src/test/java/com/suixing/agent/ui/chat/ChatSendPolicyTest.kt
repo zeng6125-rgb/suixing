@@ -156,18 +156,21 @@ class ChatSendEndpointTest {
     }
 
     @Test
-    fun `a persona pin beats the global default but not the conversation pick`() {
+    fun `a legacy persona pin no longer moves the endpoint`() {
+        // 助手不再钉模型（用户：模型只靠用户选、按会话隔离）。老数据里可能还留着 providerId，
+        // 但它不再决定这一轮发去哪；只有会话自己的选择与全局默认两档。
         val pinned = Assistant(id = "a1", name = "LAN", providerId = "lan", model = "lan-model")
         val withPin = settings("https://api.example.com/v1", "http://192.168.1.5:8080/v1")
             .copy(assistants = listOf(pinned), activeAssistantId = "a1")
 
         assertEquals(
-            "http://192.168.1.5:8080/v1",
+            "https://api.example.com/v1",
             effectiveBaseUrl(withPin, ChatUiState(assistantId = "a1")),
         )
+        // The conversation's own pick still wins over the persona.
         assertEquals(
-            "https://api.example.com/v1",
-            effectiveBaseUrl(withPin, ChatUiState(assistantId = "a1", providerId = "web", model = "web-model")),
+            "http://192.168.1.5:8080/v1",
+            effectiveBaseUrl(withPin, ChatUiState(assistantId = "a1", providerId = "lan", model = "lan-model")),
         )
     }
 }

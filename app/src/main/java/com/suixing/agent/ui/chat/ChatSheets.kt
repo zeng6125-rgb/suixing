@@ -187,13 +187,13 @@ internal fun TodoSheetRow(item: TodoItem) {
 /**
  * One icon action of a queued row.
  *
- * Each action occupies one 36dp queue-height cell; glyphs remain 16dp. Do not reserve the
+ * Each action occupies one 32dp cell; glyphs remain 16dp. Do not reserve the
  * standalone control's 48dp layout slot inside this compact bar.
  * [label] is the accessibility name.
  */
 @Composable
 internal fun QueueAction(icon: Int, label: String, onClick: () -> Unit) =
-    CircleIconAction(painterResource(icon), label, onClick, size = 36.dp, enforceTouchTarget = false)
+    CircleIconAction(painterResource(icon), label, onClick, size = 32.dp, enforceTouchTarget = false)
 
 /**
  * Rewrites a message. A question can also be re-asked from the edited text, which

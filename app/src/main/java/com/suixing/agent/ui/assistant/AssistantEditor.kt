@@ -297,7 +297,7 @@ fun AssistantEditor(
                         onPromptChange = { promptText = it },
                         onRestoreDefault = { draft = draft.copy(systemPrompt = DEFAULT_SYSTEM_PROMPT) },
                     )
-                    ModelSection(draft = draft, settings = settings, onDraft = { draft = it })
+                    TemperatureSection(draft = draft, onDraft = { draft = it })
                     ToolSection(draft = draft, toolNames = toolNames, onDraft = { draft = it })
                     notice?.let { message ->
                         Text(
@@ -543,72 +543,13 @@ private fun PromptSection(
 }
 
 @Composable
-private fun ModelSection(
+private fun TemperatureSection(
     draft: Assistant,
-    settings: AppSettings,
     onDraft: (Assistant) -> Unit,
 ) {
-    var open by remember { mutableStateOf(false) }
-    // `enabledModels()` 只读 providers（data/Settings.kt:516）—— 记住它，别每次重组都
-    // flatMap 一遍（每击键分配 N×M 个 Pair）。
-    val pairs = remember(IdentityKey(settings.providers)) { settings.enabledModels() }
-    val follow = !draft.pinsModel
-    val label = when {
-        follow -> "跟随当前（${settings.shortModel.ifBlank { "未设置" }}）"
-        else -> draft.model.substringAfter('/')
-    }
-
-    SectionCard(title = "模型", icon = ImageVector.vectorResource(R.drawable.ic_cpu), subtitle = "可以让这个助手用另一个模型") {
-        Surface(
-            onClick = { open = true },
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.medium,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = label,
-                    style = SettingsStyle.body,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                DropdownMenuItem(
-                    text = { Text("跟随当前模型") },
-                    onClick = {
-                        onDraft(draft.copy(providerId = "", model = ""))
-                        open = false
-                    },
-                )
-                pairs.forEach { (provider, modelId) ->
-                    DropdownMenuItem(
-                        text = { Text(modelId, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = {
-                            onDraft(draft.copy(providerId = provider.id, model = modelId))
-                            open = false
-                        },
-                    )
-                }
-                if (pairs.isEmpty()) {
-                    DropdownMenuItem(
-                        text = { Text("还没启用模型，去「设置」里拉取") },
-                        onClick = { open = false },
-                    )
-                }
-            }
-        }
+    // **助手不再指定模型**（用户：「助手不要指定有模型这种东西，模型只靠用户选，
+    // 模型选中会话隔离」）：模型是会话级的选择，人设只管它自己的温度。
+    SectionCard(title = "生成参数", icon = ImageVector.vectorResource(R.drawable.ic_cpu), subtitle = "模型在对话里选，这里只定温度") {
         Spacer(Modifier.height(6.dp))
         SettingRow(
             title = "单独设置温度",

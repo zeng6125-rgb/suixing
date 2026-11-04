@@ -84,6 +84,8 @@ import com.suixing.agent.data.Transcript
 import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.chat.markdown.LocalPathClick
 import com.suixing.agent.ui.chat.markdown.MarkdownText
+import com.suixing.agent.ui.chat.markdown.MessageSegment
+import com.suixing.agent.ui.chat.markdown.splitImageSegments
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.chat.markdown.markdownBody
 import java.util.Locale
@@ -1638,22 +1640,63 @@ internal fun AssistantProse(
     )
     androidx.compose.runtime.CompositionLocalProvider(
         LocalReadingTextKey provides readingKey, LocalProseViewport provides viewport) {
+    // 助手回复里可以带图（用户：「助手的回复可以加上图片显示」）。只有真的出现图片语法时才
+    // 走分段渲染：纯文字的回复继续保持原来那一条 MarkdownText 路径，排版与增量解析都不变。
+    val hasImages = remember(part.text) {
+        splitImageSegments(part.text).any { it is MessageSegment.Image }
+    }
     if (streaming || !selectable || shown.length < part.text.length) {
-        MarkdownText(
-            text = shown,
-            // Generation can stop before the typewriter drains. Keep these changing
-            // prefixes on the incremental parser and out of the settled document cache.
-            settled = !streaming && shown.length == part.text.length,
-            cursor = false,
-            // 来源缓冲的版本：只有它单调递增时，增量解析才敢跳过前缀比较（issue #59 A1）。
-            // 打字机把 `shown` 截成前缀，来源没变 ⇒ 版本仍是同一个值，游标按"未推进"处理，
-            // 于是这里始终走全量校验 —— 正确性优先，靠的是版本而不是"看起来像追加"。
-            appendFrom = part.sourceVersion,
-            sourceId = part.sourceId,
-        )
+        if (hasImages) {
+            ProseWithImages(shown, streaming = true, part = part)
+        } else {
+            MarkdownText(
+                text = shown,
+                // Generation can stop before the typewriter drains. Keep these changing
+                // prefixes on the incremental parser and out of the settled document cache.
+                settled = !streaming && shown.length == part.text.length,
+                cursor = false,
+                // 来源缓冲的版本：只有它单调递增时，增量解析才敢跳过前缀比较（issue #59 A1）。
+                // 打字机把 `shown` 截成前缀，来源没变 ⇒ 版本仍是同一个值，游标按"未推进"处理，
+                // 于是这里始终走全量校验 —— 正确性优先，靠的是版本而不是"看起来像追加"。
+                appendFrom = part.sourceVersion,
+                sourceId = part.sourceId,
+            )
+        }
+    } else if (hasImages) {
+        SelectableWhenArmed { ProseWithImages(part.text, streaming = false, part = part) }
     } else {
         SelectableWhenArmed { MarkdownText(text = part.text) }
     }
+    }
+}
+
+/**
+ * 正文按「文字段 / 图片段」逐段画：文字仍交给 MarkdownText（保持原有排版），图片交给
+ * [MessageImage]。流式期间图片语法还没写完整时，`splitImageSegments` 会把它当普通文字，
+ * 写到 `)` 的那一刻才变成一个图块——不会出现半张图乱跳。
+ */
+@Composable
+private fun ProseWithImages(
+    text: String,
+    streaming: Boolean,
+    part: Part.Text,
+) {
+    val segments = remember(text) { splitImageSegments(text) }
+    Column(Modifier.fillMaxWidth()) {
+        segments.forEach { segment ->
+            when (segment) {
+                is MessageSegment.Text -> if (segment.text.isNotBlank()) {
+                    MarkdownText(
+                        text = segment.text,
+                        settled = !streaming,
+                        cursor = false,
+                        appendFrom = part.sourceVersion,
+                        sourceId = part.sourceId,
+                    )
+                }
+                is MessageSegment.Image -> MessageImage(segment.url, segment.alt)
+            }
+        }
     }
 }
 

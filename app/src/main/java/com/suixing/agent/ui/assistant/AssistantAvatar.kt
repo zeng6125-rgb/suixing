@@ -79,11 +79,11 @@ fun AssistantAvatar(
                 fontSize = (size.value * 0.55f).sp,
                 maxLines = 1,
             )
-            // 没有自定义形象的助手直接画**圆形版应用图标**（`ic_launcher_round` 位图），
-            // 而不是用代码再画一遍：矢量版与位图版在眼睛大小/球的比例上是两套数，
+            // 没有自定义形象的助手直接画**品牌位图**（`brand_mark`，与圆形版启动图标同一张脸），
+            // 而不是用代码再画一遍：几何版与位图版在眼睛形状/球的比例上是两套数，
             // 并排看会发现不一样。用同一张位图就没有这种漂移。
             else -> Image(
-                painter = painterResource(R.mipmap.ic_launcher_round),
+                painter = painterResource(R.drawable.brand_mark),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),

@@ -93,7 +93,7 @@ internal fun UnifiedSelector(
     onClick: () -> Unit,
 ) {
     val assistant = assistantId?.let { settings.assistant(it) } ?: settings.activeAssistant()
-    val choice = settings.choiceFor(conversationProviderId, conversationModel, assistant)
+    val choice = settings.choiceFor(conversationProviderId, conversationModel)
     val provider = settings.providers.firstOrNull { it.id == choice.providerId }
         ?: settings.providers.firstOrNull {
             it.baseUrl.trimEnd('/') == choice.baseUrl.trimEnd('/')
@@ -181,7 +181,7 @@ internal fun GenerationSheet(
     val assistant = assistantId?.let { settings.assistant(it) } ?: settings.activeAssistant()
     // One chain for the whole screen — this conversation's pick, then the persona's pins,
     // then the app-wide default — so the header, the tick and the request all agree.
-    val choice = settings.choiceFor(conversationProviderId, conversationModel, assistant)
+    val choice = settings.choiceFor(conversationProviderId, conversationModel)
     // The endpoint the choice lands on; a conversation that never picked falls through to
     // the base url the app is talking to, and a provider with anything enabled is the last
     // witness. Null only when there is genuinely nothing configured.

@@ -123,26 +123,16 @@ fun groupModels(ids: List<String>): List<Pair<String, List<String>>> =
  */
 fun modelOffers(
     providers: List<ProviderConfig>,
-    model: String,
-    active: ProviderConfig?,
-): List<Pair<ProviderConfig, List<String>>> {
-    val list = providers
+    @Suppress("UNUSED_PARAMETER") model: String,
+    @Suppress("UNUSED_PARAMETER") active: ProviderConfig?,
+): List<Pair<ProviderConfig, List<String>>> =
+    // **只列已启用的模型**（用户：「没在启用的模型的列表，为什么会在分组里面显示，而且还会
+    // 默认被选中」）。这里原来会把"当前模型"强行塞进某个分组——哪怕它并不在 `enabled` 里——
+    // 于是未启用的模型既出现在分组中、又因为就是当前值而显示为选中。
+    // 想用它，就去模型页把它勾上；切换器的列表与"已启用"这一个事实保持同源。
+    providers
         .filter { it.enabled.isNotEmpty() }
         .map { it to it.enabled }
-        .toMutableList()
-    if (model.isNotBlank() && list.none { (_, ids) -> model in ids }) {
-        // A stale reference (an endpoint that is no longer in the list) must not invent a
-        // group of its own: the first endpoint is the one that can actually be switched to.
-        val owner = active?.takeIf { a -> providers.any { it.id == a.id } } ?: providers.firstOrNull()
-        val at = list.indexOfFirst { (p, _) -> p.id == owner?.id }
-        if (at >= 0) {
-            list[at] = list[at].first to (list[at].second + model).distinct()
-        } else if (owner != null) {
-            list += owner to listOf(model)
-        }
-    }
-    return list
-}
 
 @Serializable
 /**
@@ -876,28 +866,21 @@ data class LlmChoice(
 )
 
 /**
- * The three places a model can be chosen, in the order that wins: the conversation's own
- * pick first, then the assistant's pin, and only then the global default. A conversation
- * that never picked anything therefore starts on the default, and a pick made in one
- * conversation cannot move another — which is what the picker shows, too.
+ * Which endpoint and model one turn goes to. Two sources, in this order: the conversation's own
+ * pick, then the global default.
+ *
+ * 助手**不再钉模型**（用户：「助手不要指定有模型这种东西，模型只靠用户选，模型选中会话隔离，
+ * 最新一次选的为 default 模型……跟 dsh 一样的逻辑」）：所以这里没有"人设固定模型"这一层，
+ * 会话没选过就用全局默认；一次选择只影响它所在的那条会话，而"最近一次选择"由选择处写回全局，
+ * 供新会话继承。
  */
 fun AppSettings.choiceFor(
     conversationProviderId: String?,
     conversationModel: String?,
-    assistant: Assistant?,
 ): LlmChoice {
     val own = conversationProviderId?.let { id -> providers.firstOrNull { it.id == id } }
     if (own != null && !conversationModel.isNullOrBlank()) {
         return LlmChoice(own.id, own.baseUrl, own.apiKey, conversationModel, own.protocol)
-    }
-    val pinned = assistant?.providerId?.takeIf { it.isNotBlank() }
-        ?.let { id -> providers.firstOrNull { it.id == id } }
-    val pinnedModel = assistant?.model?.takeIf { it.isNotBlank() }
-    if (pinned != null) {
-        return LlmChoice(pinned.id, pinned.baseUrl, pinned.apiKey, pinnedModel ?: model, pinned.protocol)
-    }
-    if (pinnedModel != null) {
-        return LlmChoice(activeProvider()?.id, baseUrl, apiKey, pinnedModel, activeProvider()?.protocol.orEmpty())
     }
     return LlmChoice(activeProvider()?.id, baseUrl, apiKey, model, activeProvider()?.protocol.orEmpty())
 }

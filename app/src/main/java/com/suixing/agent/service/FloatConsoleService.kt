@@ -1,8 +1,5 @@
 package com.suixing.agent.service
 
-import android.os.Handler
-import android.os.Looper
-import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -17,7 +14,9 @@ import android.graphics.Point
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.text.TextUtils
@@ -100,8 +99,9 @@ private const val CHANNEL_ID = "Suixing_console"
          */
         /** 与启动图标同一颗球：深翡翠 `#126341`（原来用的是更浅的 `#1F6B4C`）。 */
         private const val BALL_COLOR = 0xFF126341.toInt()
-        private const val STATUS_RUNNING = 0xFF5FD8A0.toInt()
-        private const val STATUS_IDLE = 0xFF9AA5A0.toInt()
+        /** The eye loops play at this size inside the existing touch target. */
+        private const val BALL_SIZE_DP = 42
+        private const val TOUCH_TARGET_DP = 48
 
         /** The panel's width: the default, and the range the resize handle may drag it through. */
         private const val PANEL_DEFAULT_DP = 268
@@ -204,7 +204,7 @@ private const val CHANNEL_ID = "Suixing_console"
     private var windowType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
     private lateinit var root: LinearLayout
     private lateinit var panel: LinearLayout
-    private lateinit var statusDot: View
+    private lateinit var ballMotionView: ImageView
     private lateinit var stateText: TextView
     private lateinit var liveText: TextView
     private lateinit var statsText: TextView
@@ -228,8 +228,7 @@ private const val CHANNEL_ID = "Suixing_console"
     private var initializing = false
     private var settingsLoaded = false
     private var attached = false
-    private var dotPulse: ValueAnimator? = null
-    private var dotRunning: Boolean? = null
+    private lateinit var ballMotion: BallMotion
     private var stopAreaKey: List<Triple<String, Long, String>>? = null
     private var conversationRenderRevision = 0L
 
@@ -343,7 +342,7 @@ private const val CHANNEL_ID = "Suixing_console"
         trace("service=stop")
         markRunning(false)
         if (::root.isInitialized) ProcessLifecycleOwner.get().lifecycle.removeObserver(appLifecycle)
-        dotPulse?.cancel()
+        if (::ballMotion.isInitialized) ballMotion.onDetach()
         mainHandler.removeCallbacks(stopCheck)
         stopCheckPosted = false
         scope.cancel()
@@ -392,7 +391,6 @@ private const val CHANNEL_ID = "Suixing_console"
      * accessibility service connects or goes away ([watchAccessibility]).
      */
     private fun buildConsole() {
-        dotRunning = null
         stopAreaKey = null
         root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         panel = buildPanel()
@@ -477,6 +475,7 @@ private const val CHANNEL_ID = "Suixing_console"
         // attached, or the console would stay invisible for the rest of the run.
         val added = runCatching { windowManager.addView(root, params) }
         attached = added.isSuccess
+        if (attached) ballMotion.onAttach()
         val error = added.exceptionOrNull()
         trace(
             "attach=${if (attached) "ok" else "failed"} " +
@@ -490,15 +489,9 @@ private const val CHANNEL_ID = "Suixing_console"
         if (!attached) return
         runCatching { windowManager.removeView(root) }
         attached = false
-        // 脉冲动画必须一起停（issue #56 R31）：detach 后 View 已不在窗口树里，
-        // 而无限 ValueAnimator 仍会按刷新率跑、对不可见的 View invalidate。
-        // 原来只有 setStatusDot(false) 和 onDestroy 会 cancel，用户回前台（visible=false→detach）
-        // 这条路径漏掉了。重新 attach 时 setStatusDot 会自己再起一个。
-        dotPulse?.cancel()
-        dotPulse = null
-        // 同步清掉「当前动画状态」记录：setStatusDot 用 `dotRunning == running` 早退，
-        // 不清就会在重新 attach 后认为动画还在跑而不再启动。
-        dotRunning = null
+        // Stop the eye loop with the window it draws into. A delayed frame callback against a
+        // detached view would keep invalidating an overlay that is no longer on screen.
+        if (::ballMotion.isInitialized) ballMotion.onDetach()
         trace("detach")
     }
 
@@ -674,47 +667,43 @@ private const val CHANNEL_ID = "Suixing_console"
      * the moment it becomes visible, when this window has not been measured with it yet.
      */
     private fun clampX(extraWidth: Int = 0) {
-        val width = maxOf(root.width, extraWidth, dp(44))
+        val width = maxOf(root.width, extraWidth, dp(TOUCH_TARGET_DP))
         params.x = boundedOverlayOffset(params.x, windowWidthPx(), width)
         clampY()
     }
 
     private fun clampY() {
         // Keep the ball and the expanded panel reachable after a drag or configuration change.
-        val height = if (panel.visibility == View.VISIBLE) maxOf(root.height, dp(44)) else dp(44)
+        val height = if (panel.visibility == View.VISIBLE) {
+            maxOf(root.height, dp(TOUCH_TARGET_DP))
+        } else {
+            dp(TOUCH_TARGET_DP)
+        }
         params.y = boundedOverlayOffset(params.y, windowHeightPx(), height)
     }
 
-    /** A 36dp brand disc inside the existing 44dp touch target, with the live-run badge. */
+    /** A 42dp eye-animated ball inside a 48dp touch target. Run state chooses the loop. */
     private fun buildBall(): FrameLayout {
         resetBallTouchFeedback()
-        val size = dp(36)
+        val size = dp(BALL_SIZE_DP)
         val ball = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            layoutParams = LinearLayout.LayoutParams(dp(TOUCH_TARGET_DP), dp(TOUCH_TARGET_DP))
             setOnTouchListener { view, event -> onBallTouch(view, event) }
         }
         val visual = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
-            // Keep the flat brand disc and launcher artwork; only this child scales on touch.
+            // Only this child scales on touch; the flat brand disc stays behind the eye frames.
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(BALL_COLOR)
             }
         }
-        visual.addView(
-            ImageView(this).apply {
-                setImageResource(R.mipmap.ic_launcher_round)
-                layoutParams = FrameLayout.LayoutParams(size, size)
-                scaleType = ImageView.ScaleType.FIT_XY
-            },
-        )
-        statusDot = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(dp(7), dp(7), Gravity.BOTTOM or Gravity.END).apply {
-                rightMargin = dp(2)
-                bottomMargin = dp(2)
-            }
+        ballMotionView = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(size, size)
+            scaleType = ImageView.ScaleType.FIT_XY
         }
-        visual.addView(statusDot)
+        visual.addView(ballMotionView)
+        ballMotion = BallMotion(this, ballMotionView, mainHandler)
         ball.addView(visual)
         ballTouchFeedback = FloatBallTouchFeedback(visual).also { feedback ->
             ball.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
@@ -1156,7 +1145,7 @@ private const val CHANNEL_ID = "Suixing_console"
                     // nothing running it opens the conversation's next turn. The chat composer
                     // reads the same way, so the two never disagree about what a tap will do.
                     sendButton.setTextIfChanged(if (state is RunState.Running) "插话" else "发送")
-                    setStatusDot(state is RunState.Running)
+                    ballMotion.setRunning(state is RunState.Running)
                     }
                     if (stateFlow == null) renderState(RunState.Idle)
                     else stateFlow.collect { renderState(it) }
@@ -1277,28 +1266,6 @@ private const val CHANNEL_ID = "Suixing_console"
                 val speaker = if (message.role == Roles.USER) "你：" else "随行："
                 speaker + message.text.replace('\n', ' ').trim().take(MESSAGE_PREVIEW_CHARS)
             }
-        }
-    }
-
-    private fun setStatusDot(running: Boolean) {
-        if (dotRunning == running) return
-        dotRunning = running
-        dotPulse?.cancel()
-        dotPulse = null
-        statusDot.alpha = 1f
-        statusDot.background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(if (running) STATUS_RUNNING else STATUS_IDLE)
-        }
-        if (!running) return
-        // A slow breath is the difference between "a run is live" and "this is just how the
-        // ball looks"; it is slow on purpose so it reads as a pulse, not as a warning.
-        dotPulse = ValueAnimator.ofFloat(1f, 0.35f).apply {
-            duration = 900L
-            repeatMode = ValueAnimator.REVERSE
-            repeatCount = ValueAnimator.INFINITE
-            addUpdateListener { statusDot.alpha = it.animatedValue as Float }
-            start()
         }
     }
 

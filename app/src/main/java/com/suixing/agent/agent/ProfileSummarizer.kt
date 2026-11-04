@@ -138,7 +138,7 @@ class ProfileSummarizer(private val llm: LlmClient) {
  */
 fun AppSettings.profileEndpoint(): AppSettings {
     val assistant = activeAssistant()
-    val choice = choiceFor(null, null, assistant)
+    val choice = choiceFor(null, null)
     return forAssistant(assistant).copy(
         baseUrl = choice.baseUrl,
         apiKey = choice.apiKey,

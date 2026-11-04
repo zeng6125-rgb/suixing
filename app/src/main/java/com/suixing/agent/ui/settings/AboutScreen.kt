@@ -121,9 +121,9 @@ fun AboutScreen(onBack: () -> Unit) {
         ) {
             SuixingCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 与桌面图标同一张脸（圆形版）。
+                    // 与桌面图标同一张脸（圆形版同一张品牌位图）。
                     androidx.compose.foundation.Image(
-                        painter = androidx.compose.ui.res.painterResource(R.mipmap.ic_launcher_round),
+                        painter = androidx.compose.ui.res.painterResource(R.drawable.brand_mark),
                         contentDescription = null,
                         modifier = Modifier.size(44.dp),
                     )

@@ -522,7 +522,7 @@ fun ChatScreen(
     // 同一个 remember 里把**生效的模型名**一并取出：圆环面板要用它说明"这个窗口属于谁"
     // （issue #49 修法 2：切 provider 后分母变了，用户需要看出变的是窗口）。
     val activeChoice = remember(IdentityKey(settings), state.providerId, state.model, assistant) {
-        settings.choiceFor(state.providerId, state.model, assistant)
+        settings.choiceFor(state.providerId, state.model)
     }
     val activeModel = activeChoice.model
     val contextWindow = remember(IdentityKey(settings), state.providerId, state.model, assistant) {

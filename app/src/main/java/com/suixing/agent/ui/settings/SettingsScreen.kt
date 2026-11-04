@@ -545,6 +545,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     var apiKeyText by remember { mutableStateOf("") }
     var testModelText by remember { mutableStateOf("") }
     var endpointTouched by remember { mutableStateOf(false) }
+    // 两个下拉的展开状态提到页面：BACK 时页面要先收起它们，否则会直接退页、
+    // 而浮层窗口在页面退场动画里还挂着（用户：「下拉框还会残留一会」）。
+    var testModelMenuOpen by remember { mutableStateOf(false) }
+    var providerMenuOpen by remember { mutableStateOf(false) }
+    var protocolMenuOpen by remember { mutableStateOf(false) }
     LaunchedEffect(selected?.id, seeded) {
         // 换 provider（chip/删除/初次装载）＝三个字段全部重新播种，触碰标记清零。
         endpointTouched = false
@@ -554,7 +559,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         testModelText = form.model   // 测试模型 ID 是顶层设置，不随 provider 切换重置
     }
     fun flushEndpointFields() {
-        form = form.copy(baseUrl = baseUrlText, apiKey = apiKeyText, model = testModelText)
+        form = form.copy(baseUrl = baseUrlText, apiKey = apiKeyText)
             .mapProvider(selectedId) {
                 it.copy(baseUrl = baseUrlText, name = nameText, apiKey = apiKeyText)
             }
@@ -588,7 +593,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             baseUrl = provider.baseUrl,
             apiKey = provider.apiKey,
             protocol = provider.protocol,
-            model = provider.enabled.firstOrNull() ?: form.model,
         )
     }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
@@ -602,7 +606,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             baseUrl = next?.baseUrl ?: stored.baseUrl,
             apiKey = next?.apiKey ?: stored.apiKey,
             protocol = next?.protocol ?: stored.protocol,
-            model = next?.enabled?.firstOrNull() ?: stored.model,
         )
     }
     fun leavePage() {
@@ -635,7 +638,15 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         }
         return true
     }
-    androidx.activity.compose.BackHandler(enabled = seeded) { leavePage() }
+    /** BACK 先收起开着的下拉，再考虑离开页面。 */
+    fun closeMenusFirst(): Boolean = when {
+        providerMenuOpen -> { providerMenuOpen = false; true }
+        protocolMenuOpen -> { protocolMenuOpen = false; true }
+        else -> false
+    }
+    androidx.activity.compose.BackHandler(enabled = seeded) {
+        if (!closeMenusFirst()) leavePage()
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -643,7 +654,13 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         topBar = {
             PageTopBar(
                 title = SettingsPage.MODEL.title,
-                onBack = { if (seeded) leavePage() else onBack() },
+                onBack = {
+                    if (seeded) {
+                        if (!closeMenusFirst()) leavePage()
+                    } else {
+                        onBack()
+                    }
+                },
                 // Draft status stays in the fixed action area, without shifting form rows.
             )
         },
@@ -692,7 +709,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                     try {
                                         // Test the draft without committing an unsaved supplier.
                                         outcome = runCatching {
-                                            client.complete(settings = form,
+                                            client.complete(settings = form.copy(model = testModelText),
                                                 messages = listOf(ChatMessage.user("你好，请只回复两个字：可用")),
                                                 tools = emptyList())
                                         }.fold(
@@ -733,6 +750,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             item {
                 ProviderDropdown(
                     providers = form.providers, selected = selected, enabled = seeded && !loadingModels && !testing && !saving,
+                    expanded = providerMenuOpen,
+                    onExpandedChange = { providerMenuOpen = it },
                     onSelect = { provider ->
                         if (provider.id != selected?.id) {
                             if (endpointEdited && stored.providers.any { it.id == selected?.id }) pendingSwitch = provider.id
@@ -758,6 +777,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                     onPick = { picked ->
                         form = form.copy(protocol = picked).mapProvider(selected?.id) { it.copy(protocol = picked) }
                     },
+                    expanded = protocolMenuOpen,
+                    onExpandedChange = { protocolMenuOpen = it },
                 )
                 // Anthropic 的提示只在这个协议下出现：默认地址栏那句「填到 /v1 即可」
                 // 对它的意义最具体 —— 路径由客户端补 /messages。
@@ -958,8 +979,8 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 EnabledModelCard(
                     id = id, alias = selected?.aliases?.get(id).orEmpty(),
                     contextWindow = form.modelContexts[id] ?: 0, maxTokens = form.modelMaxTokens[id] ?: 0,
-                    testModel = form.model == id,
-                    onTest = { form = form.copy(model = id) },
+                    testModel = testModelText == id,
+                    onTest = { testModelText = id },
                     onEdit = { alias, contextWindow, output ->
                         form = form.mapProvider(selected?.id) {
                             it.copy(aliases = if (alias.isBlank()) it.aliases - id else it.aliases + (id to alias))
@@ -978,10 +999,60 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 }
             }
             item {
-                OutlinedTextField(value = testModelText,
-                    onValueChange = { testModelText = it; endpointTouched = true },
-                    textStyle = settingsFieldText, label = { Text("测试连接使用的模型 ID") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
+                // **测试用的模型只属于测试**（用户：「下拉只给测试用，不动全局模型」）：
+                // 选项只列当前供应商已启用的模型；这里选什么都不会改写全局聊天模型。
+                val testable = selected?.enabled.orEmpty()
+                Box(Modifier.fillMaxWidth()) {
+                    Surface(
+                        onClick = { if (testable.isNotEmpty()) testModelMenuOpen = true },
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "测试连接使用的模型",
+                                    style = SettingsStyle.description,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    testModelText.ifBlank { "未选择" },
+                                    style = SettingsStyle.body,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Icon(
+                                imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = testModelMenuOpen,
+                        onDismissRequest = { testModelMenuOpen = false },
+                    ) {
+                        testable.forEach { id ->
+                            DropdownMenuItem(
+                                text = { Text(id, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                onClick = { testModelText = id; testModelMenuOpen = false },
+                            )
+                        }
+                        if (testable.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("还没有启用的模型") },
+                                onClick = { testModelMenuOpen = false },
+                            )
+                        }
+                    }
+                }
             }
             item {
                 SettingRow(

@@ -209,9 +209,11 @@ private fun SelectionCardButton(
 @Composable
 internal fun ProviderDropdown(
     providers: List<ProviderConfig>, selected: ProviderConfig?, enabled: Boolean,
+    /** 展开状态由页面持有：BACK 必须先收起它，而不是直接退页面（见模型页的 BackHandler）。 */
+    expanded: Boolean, onExpandedChange: (Boolean) -> Unit,
     onSelect: (ProviderConfig) -> Unit, onAdd: () -> Unit, onDelete: () -> Unit,
 ) {
-    var open by remember { mutableStateOf(false) }
+    val open = expanded
     var anchorWidth by remember { mutableIntStateOf(0) }
     val colors = MaterialTheme.colorScheme
     val endpoint = remember(selected?.baseUrl) { providerEndpointLabel(selected?.baseUrl.orEmpty()) }
@@ -223,15 +225,15 @@ internal fun ProviderDropdown(
             expanded = open,
             enabled = enabled,
             description = "供应商：${selected?.label ?: "添加供应商"}",
-            onClick = { if (providers.isEmpty()) onAdd() else open = true },
+            onClick = { if (providers.isEmpty()) onAdd() else onExpandedChange(true) },
         )
         ModelDropdownMenu(
-            expanded = open && enabled, onDismiss = { open = false }, anchorWidth = anchorWidth,
+            expanded = open && enabled, onDismiss = { onExpandedChange(false) }, anchorWidth = anchorWidth,
         ) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("切换供应商", style = SettingsStyle.metadata, color = colors.onSurfaceVariant, modifier = Modifier.weight(1f))
                 IconButton(enabled = selected != null && providers.size > 1,
-                    onClick = { open = false; onDelete() }) {
+                    onClick = { onExpandedChange(false); onDelete() }) {
                     Icon(ImageVector.vectorResource(R.drawable.ic_trash), "删除当前供应商", Modifier.size(16.dp),
                         tint = if (selected != null && providers.size > 1) colors.onSurfaceVariant else colors.onSurface.copy(alpha = 0.38f))
                 }
@@ -257,7 +259,7 @@ internal fun ProviderDropdown(
                             }
                         }
                     },
-                    onClick = { open = false; onSelect(provider) },
+                    onClick = { onExpandedChange(false); onSelect(provider) },
                     modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
                         .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
                         .semantics { this.selected = chosen },
@@ -267,7 +269,7 @@ internal fun ProviderDropdown(
             DropdownMenuItem(
                 text = { Text("添加供应商", style = SettingsStyle.controlLabel, color = colors.primary) },
                 leadingIcon = { Icon(ImageVector.vectorResource(R.drawable.ic_plus), null, Modifier.size(18.dp), tint = colors.primary) },
-                onClick = { open = false; onAdd() },
+                onClick = { onExpandedChange(false); onAdd() },
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
             )
         }
@@ -309,8 +311,14 @@ private fun protocolApiLabel(protocol: String): String = when (protocol) {
 }
 
 @Composable
-internal fun CompactProtocolPicker(protocol: String, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
+internal fun CompactProtocolPicker(
+    protocol: String,
+    onPick: (String) -> Unit,
+    /** 同 [ProviderDropdown]：展开状态归页面，BACK 才能先收起。 */
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+) {
+    val open = expanded
     var anchorWidth by remember { mutableIntStateOf(0) }
     val colors = MaterialTheme.colorScheme
     val options = remember { listOf(PROTOCOL_OPENAI to "OpenAI 兼容", PROTOCOL_ANTHROPIC to "Anthropic",
@@ -327,9 +335,9 @@ internal fun CompactProtocolPicker(protocol: String, onPick: (String) -> Unit) {
             expanded = open,
             enabled = true,
             description = "接口协议：${chosen.second}",
-            onClick = { open = true },
+            onClick = { onExpandedChange(true) },
         )
-        ModelDropdownMenu(expanded = open, onDismiss = { open = false }, anchorWidth = anchorWidth) {
+        ModelDropdownMenu(expanded = open, onDismiss = { onExpandedChange(false) }, anchorWidth = anchorWidth) {
             options.forEach { (value, label) ->
                 val isChosen = value == protocol || protocol.isBlank() && value == PROTOCOL_OPENAI
                 DropdownMenuItem(
@@ -345,7 +353,7 @@ internal fun CompactProtocolPicker(protocol: String, onPick: (String) -> Unit) {
                             if (isChosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前协议", tint = colors.primary)
                         }
                     },
-                    onClick = { open = false; onPick(value) },
+                    onClick = { onExpandedChange(false); onPick(value) },
                     modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
                         .background(if (isChosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
                         .semantics { this.selected = isChosen },

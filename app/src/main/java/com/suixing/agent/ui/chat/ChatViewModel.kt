@@ -549,7 +549,7 @@ class ChatViewModel : ViewModel() {
         // default's: a chat that picked a smaller-window endpoint must not read its own
         // usage against the wrong denominator.
         val assistant = settings.assistant(snapshot.assistantId) ?: settings.activeAssistant()
-        val model = settings.choiceFor(snapshot.providerId, snapshot.model, assistant).model
+        val model = settings.choiceFor(snapshot.providerId, snapshot.model).model
         val window = settings.contextWindowFor(model)
         // **缓存键用盘上的条数/更新时间，不用窗口的条数**：窗口会随「加载更早」变，
         // 而整个会话的总账不变。
@@ -1487,6 +1487,24 @@ class ChatViewModel : ViewModel() {
         // persona.
         val live = sessions[chatId]
         live?.let { putSession(it.copy(providerId = providerId, model = model)) }
+        // **最近一次选择 = 新会话的默认**（用户：「最新一次选的为 default 模型，也就是新会话
+        // 就用这个……跟 dsh 一样的逻辑」）。只写全局默认这一份；已经在别的会话里选过的模型
+        // 不受影响——它们的 `providerId/model` 是自己的那一份，谁都覆盖不了谁。
+        viewModelScope.launch {
+            val provider = Core.settings.current().providers.firstOrNull { it.id == providerId }
+            Core.settings.update { current ->
+                if (provider == null) {
+                    current.copy(model = model)
+                } else {
+                    current.copy(
+                        model = model,
+                        baseUrl = provider.baseUrl,
+                        apiKey = provider.apiKey,
+                        protocol = provider.protocol,
+                    )
+                }
+            }
+        }
         viewModelScope.launch {
             // The one save path, so the pick rides along with everything else: it keeps
             // createdAt, derives the title and falls back to what is already on disk.
@@ -1639,22 +1657,13 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             Core.chats.delete(conversation.id)
             if (conversation.id != _state.value.conversationId) return@launch
-            val settings = Core.settings.current()
+            // 删除后落到另一条会话（或一条都没有）必须走**和用户点击同一条**路径：
+            // 直接 `_state.value = next.toUiState(...)` 只换了 id 和标题，正文、viewport 恢复、
+            // 草稿合并、rememberOpened 全都没做 ⇒ 屏幕是空正文（看着像新会话），
+            // 而 conversationId 已经指到列表里那条会话，抽屉于是高亮一个屏幕上没有内容的会话。
+            // [Core.chats.delete] 返回前已把它移出 conversations 流，这里取到的不会是刚删的那条。
             val next = Core.chats.conversations.value.firstOrNull()
-            _state.value = if (next == null) {
-                val created = Core.chats.create()
-                ChatUiState(
-                    conversationId = created.id,
-                    title = created.title,
-                    assistantId = settings.activeAssistant()?.id.orEmpty(),
-                    loading = false,
-                )
-            } else {
-                next.toUiState(settings.activeAssistant()?.id.orEmpty())
-            }
-            // The deleted conversation may have been the marker's; the one now on screen is
-            // where the user is.
-            rememberOpened(_state.value.conversationId)
+            if (next == null) newConversation() else openConversation(next)
         }
     }
 
@@ -2365,7 +2374,7 @@ class ChatViewModel : ViewModel() {
                 val assistant = base.assistant(shown.assistantId) ?: base.activeAssistant()
                 // 与 start() 走同一条端点链：会话自己的选择 → 人设的固定 → 全局默认。
                 val persona = base.forAssistant(assistant)
-                val choice = base.choiceFor(shown.providerId, shown.model, assistant)
+                val choice = base.choiceFor(shown.providerId, shown.model)
                 val settings = persona.copy(
                     baseUrl = choice.baseUrl,
                     apiKey = choice.apiKey,
@@ -2417,7 +2426,7 @@ class ChatViewModel : ViewModel() {
             val settings = Core.settings.current()
             val assistant = settings.assistant(shown.assistantId)
             val persona = settings.forAssistant(assistant)
-            val choice = settings.choiceFor(shown.providerId, shown.model, assistant)
+            val choice = settings.choiceFor(shown.providerId, shown.model)
             val effective = persona.copy(
                 baseUrl = choice.baseUrl,
                 apiKey = choice.apiKey,
@@ -2569,7 +2578,7 @@ class ChatViewModel : ViewModel() {
                 // The wire comes from the one chain the picker also reads: this
                 // conversation's own pick, then the persona's pins, then the app-wide
                 // default. Everything else keeps the persona's overrides.
-                val choice = settings.choiceFor(shown.providerId, shown.model, assistant)
+                val choice = settings.choiceFor(shown.providerId, shown.model)
                 val effective = persona.copy(
                     baseUrl = choice.baseUrl,
                     apiKey = choice.apiKey,
