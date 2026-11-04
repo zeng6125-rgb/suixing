@@ -59,6 +59,14 @@ class ConversationEntranceTest {
     }
 
     @Test
+    fun `first display frame eases in instead of flashing a quarter of the text`() {
+        for (fps in listOf(60, 90, 120)) {
+            val firstFrame = 1000f / fps / ConversationEntrance.DURATION_MS
+            assertTrue("abrupt first frame at $fps Hz", ConversationEntrance.alpha(at(firstFrame)) < 0.15f)
+        }
+    }
+
+    @Test
     fun `halfway through the short fade text is already readable`() {
         assertTrue("text is too faint halfway through", ConversationEntrance.alpha(at(0.5f)) > 0.8f)
     }

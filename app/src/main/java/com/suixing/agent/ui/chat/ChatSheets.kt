@@ -187,13 +187,13 @@ internal fun TodoSheetRow(item: TodoItem) {
 /**
  * One icon action of a queued row.
  *
- * The touch target is the 40dp node the ripple and the click live on, with the glyph drawn
- * inside it: a 16dp icon with a 16dp hit area is a control the user misses half the time.
- * [label] is the accessibility name and the thing to grep for.
+ * Each action occupies one 36dp queue-height cell; glyphs remain 16dp. Do not reserve the
+ * standalone control's 48dp layout slot inside this compact bar.
+ * [label] is the accessibility name.
  */
 @Composable
 internal fun QueueAction(icon: Int, label: String, onClick: () -> Unit) =
-    CircleIconAction(painterResource(icon), label, onClick)
+    CircleIconAction(painterResource(icon), label, onClick, size = 36.dp, enforceTouchTarget = false)
 
 /**
  * Rewrites a message. A question can also be re-asked from the edited text, which

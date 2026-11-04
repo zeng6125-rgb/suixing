@@ -100,6 +100,26 @@ class SlashSuggestionTransitionTest {
         }
     }
 
+    @Test fun `hiding with retained results disables every mounted snapshot until reopened`() = runBlocking {
+        withTimeout(5000) {
+            val harness = Harness(this, five)
+            try {
+                harness.start()
+                harness.seek(one)
+                harness.interactive = false
+                // The real Popup retains its last nonempty items throughout departure.
+                harness.seek(one)
+                assertTrue(harness.mounted.isNotEmpty())
+                assertTrue(harness.mounted.values.none { it })
+                harness.interactive = true
+                harness.seek(five)
+                assertTrue(harness.mounted.all { (shown, enabled) -> !enabled || shown == five })
+                harness.settle()
+                assertEquals(mapOf(five to true), harness.mounted)
+            } finally { harness.close() }
+        }
+    }
+
     private class Harness(private val scope: CoroutineScope, initial: List<Pair<String, String>>) {
         private val state = SeekableTransitionState(initial)
         var interactive by mutableStateOf(true)

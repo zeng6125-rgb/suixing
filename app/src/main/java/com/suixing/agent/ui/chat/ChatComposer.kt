@@ -8,6 +8,8 @@ import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -1793,14 +1795,18 @@ private fun GoalChip(
     }
 }
 
-// Query changes should not restart a scale spring or rebuild these fixed specifications.
-private val SLASH_POPUP_ENTER = fadeIn(tween(160, easing = LinearOutSlowInEasing))
-private val SLASH_POPUP_EXIT = fadeOut(tween(110, easing = FastOutLinearInEasing))
-private val SLASH_POPUP_RESIZE = tween<IntSize>(120, easing = FastOutSlowInEasing)
+// The card opens from its bottom anchor without scaling text or moving the composer.
+private val SLASH_POPUP_ENTER = fadeIn(tween(180, easing = FastOutSlowInEasing)) +
+    expandVertically(tween(180, easing = FastOutSlowInEasing), expandFrom = Alignment.Bottom,
+        initialHeight = { it * 9 / 10 })
+private val SLASH_POPUP_EXIT = fadeOut(tween(90, easing = FastOutLinearInEasing)) +
+    shrinkVertically(tween(120, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Bottom,
+        targetHeight = { it * 9 / 10 })
+private val SLASH_POPUP_RESIZE = tween<IntSize>(180, easing = FastOutSlowInEasing)
 
 /**
- * The candidate card fades in place in its own window. Filtering fades each content snapshot
- * while the card's height follows the same transition; the window still uses [popupPositionProvider].
+ * The candidate card opens slightly upward from its bottom edge in its own window. Filtering
+ * clears the outgoing text early while height settles; the window uses [popupPositionProvider].
  * [lastItems] stays visible while the whole popup exits, with its actions disabled.
  */
 @Composable
@@ -1853,8 +1859,8 @@ internal fun AnimatedSlashSuggestions(
     transition.AnimatedContent(
         contentAlignment = Alignment.BottomStart,
         transitionSpec = {
-            (fadeIn(tween(120, easing = LinearOutSlowInEasing)) togetherWith
-                fadeOut(tween(120, easing = FastOutLinearInEasing))).using(
+            (fadeIn(tween(130, delayMillis = 40, easing = LinearOutSlowInEasing)) togetherWith
+                fadeOut(tween(60, easing = FastOutLinearInEasing))).using(
                 SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> SLASH_POPUP_RESIZE }),
             )
         },

@@ -267,12 +267,7 @@ fun SuixingApp() {
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         showChat()
     }
-    /**
-     * Start closing immediately, then switch on the first visible closing frame. This keeps
-     * the current transcript under a stationary drawer, while target loading/restoration can
-     * overlap the remaining close motion. BindConversationViewport keeps the target hidden
-     * until its restored position is laid out.
-     */
+    /** Fade the source while the drawer closes; restore and reveal only the latest target. */
     // Repeated taps remain latest-wins; a superseded close cannot release the latest busy flag.
     val switchFromDrawer: (Conversation) -> Unit = { conversation ->
         val token = switchIntents.begin()
@@ -287,12 +282,24 @@ fun SuixingApp() {
             }
         }
         scope.launch {
-            // Do not replace the transcript while the panel is still completely at rest.
-            if (!handoff.awaitClosingFrame(isCurrent = { switchIntents.isCurrent(token) }) {
-                    drawerState.progress.value
-                }) return@launch
-            showChat()
-            chat.openConversation(conversation)
+            var committed = false
+            try {
+                // Keep the source mounted until its short departure finishes. A newer tap or
+                // an interrupted drawer close must still be checked after that suspension.
+                if (!handoff.awaitClosingFrame(
+                        isCurrent = { switchIntents.isCurrent(token) },
+                        depart = {
+                            val source = chat.state.value.conversationId
+                            if (source != conversation.id) switchIntents.depart(token, source)
+                            else switchIntents.cancelDeparture(token)
+                        },
+                    ) { drawerState.progress.value }) return@launch
+                showChat()
+                chat.openConversation(conversation)
+                committed = true
+            } finally {
+                if (!committed) switchIntents.cancelDeparture(token)
+            }
         }
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
@@ -636,7 +643,11 @@ fun SuixingApp() {
                         val chatLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(chatVisible)
                         CompositionLocalProvider(androidx.lifecycle.compose.LocalLifecycleOwner provides chatLifecycle) {
                             ObserveConversationRead(chat, visible = chatVisible)
-                            ChatScreen(viewModel = chat, onOpenSettings = remember(open) { { open("settings") } })
+                            ChatScreen(
+                                viewModel = chat,
+                                onOpenSettings = remember(open) { { open("settings") } },
+                                conversationDeparture = remember(switchIntents) { switchIntents::departureAlpha },
+                            )
                         }
                     }
                 }

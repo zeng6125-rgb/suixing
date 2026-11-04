@@ -143,6 +143,8 @@ fun ChatScreen(
     viewModel: ChatViewModel = viewModel(),
     /** The generation popup's empty-list escape hatch into the model settings page. */
     onOpenSettings: () -> Unit = {},
+    /** The outgoing transcript's opacity; evaluated only in draw-phase layers. */
+    conversationDeparture: (String) -> Float = { 1f },
 ) {
     val state by viewModel.screenState.collectAsStateWithLifecycle()
     // **只认本页会读的字段**（见 [sameForChat]）：整份按值订阅意味着任何一处设置写入都会让这
@@ -1072,7 +1074,7 @@ fun ChatScreen(
         }
       }
     }
-    // Only the target list is animated, after its first valid viewport is ready.
+    // The target's entrance starts only after its first valid viewport is ready.
     val switchEntrance = viewport.entrance
     // **按 item key 锚定阅读位置**（issue #11，取代 #10 的「钉住高度」）。
     LaunchedEffect(viewModel) {
@@ -1192,7 +1194,8 @@ fun ChatScreen(
                             .keyboardAwareImePad(navBarPx, imePxState)
                             .fillMaxSize()
                             .graphicsLayer {
-                                alpha = ConversationEntrance.alpha(switchEntrance.value)
+                                alpha = ConversationEntrance.alpha(switchEntrance.value) *
+                                    conversationDeparture(state.conversationId)
                             }
                             .padding(
                                 top = with(LocalDensity.current) {
@@ -1245,7 +1248,8 @@ fun ChatScreen(
                             // 状态不改变任何像素（alpha 回到 1f），而不是摘掉它。
                              .graphicsLayer {
                                  val progress = switchEntrance.value
-                                 alpha = ConversationEntrance.alpha(progress)
+                                 alpha = ConversationEntrance.alpha(progress) *
+                                      conversationDeparture(state.conversationId)
                                  // No vertical travel after restoring the reading position.
                              }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
@@ -1719,7 +1723,7 @@ fun ChatScreen(
             }
             ScrubberPresentation(state.conversationId,
                 presented = { viewport.presented },
-                entrance = { switchEntrance.value }) { entranceModifier ->
+                entrance = { switchEntrance.value * conversationDeparture(state.conversationId) }) { entranceModifier ->
                 TurnScrubber(
                     conversationId = state.conversationId,
                     totalTurns = page.turns,

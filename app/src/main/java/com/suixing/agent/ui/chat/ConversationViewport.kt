@@ -1,7 +1,7 @@
 package com.suixing.agent.ui.chat
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyListState
@@ -89,7 +89,7 @@ internal class ConversationViewport(val conversationId: String, val bookmark: Vi
 /** One short fade for both cached and cold switches; restored text never moves again. */
 internal object ConversationEntrance {
     const val DURATION_MS = 180
-    val EASING = LinearOutSlowInEasing
+    val EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
     fun alpha(progress: Float): Float = progress.coerceIn(0f, 1f)
 }
