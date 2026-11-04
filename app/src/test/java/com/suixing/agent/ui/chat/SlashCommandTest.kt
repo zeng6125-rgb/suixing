@@ -2,6 +2,10 @@ package com.suixing.agent.ui.chat
 
 import com.suixing.agent.tools.Schema
 import com.suixing.agent.tools.ToolSpec
+import com.suixing.agent.data.Roles
+import com.suixing.agent.data.StoredMessage
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -45,6 +49,36 @@ class SlashCommandTest {
             "{\"query\":\"weather\",\"limit\":3}",
             slashArguments(search, "{\"query\":\"weather\",\"limit\":3}").toString(),
         )
+    }
+
+    @Test
+    fun `goal reads sets clears and JSON arguments resolve without guessing`() {
+        val goal = ToolSpec("goal", "", Schema.objectOf(
+            listOf("text" to Schema.string("")), required = listOf("text")))
+        val read = ToolSpec("goal_read", "", Schema.objectOf(emptyList()))
+        assertEquals("goal_read", SlashCommand("goal", "").toolName())
+        assertEquals("{}", SlashCommand("goal", "").toolArguments(read).toString())
+        assertEquals("goal", SlashCommand("goal", "finish").toolName())
+        assertEquals("{\"text\":\"finish\"}", SlashCommand("goal", "finish").toolArguments(goal).toString())
+        assertEquals("{\"text\":\"\"}", SlashCommand("goal", "CLEAR").toolArguments(goal).toString())
+        assertEquals("{\"text\":\"new goal\"}", SlashCommand("goal", "{\"text\":\"new goal\"}").toolArguments(goal).toString())
+        assertNull(SlashCommand("goal", "{\"other\":\"not a clear request\"}").toolArguments(goal))
+        assertNull(SlashCommand("goal", "{\"text\":42}").toolArguments(goal))
+        assertEquals("web_search", SlashCommand("web_search", "weather").toolName())
+        assertEquals("{\"query\":\"weather\"}", SlashCommand("web_search", "weather").toolArguments(search).toString())
+    }
+
+    @Test
+    fun `edit-only save masks a user command before it can derive a metadata title`() {
+        val message = StoredMessage("user", Roles.USER, "old text")
+        val edited = editedTranscriptMessage(message, "/ui_type hunter2")
+        assertEquals("user", edited.id)
+        assertTrue(edited.edited)
+        assertFalse(edited.text.contains("hunter2"))
+        assertFalse(edited.text.take(18).contains("hunter2"))
+        assertEquals("/goal new goal", editedTranscriptMessage(message, "/goal new goal").text)
+        assertEquals("/ui_type example", editedTranscriptMessage(
+            StoredMessage("assistant", Roles.ASSISTANT, "old"), "/ui_type example").text)
     }
 
     @Test

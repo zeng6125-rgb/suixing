@@ -1,6 +1,9 @@
 package com.suixing.agent.ui.chat
 
 import com.suixing.agent.tools.ToolSpec
+import com.suixing.agent.data.Roles
+import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.TranscriptRedaction
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -30,6 +33,27 @@ internal fun parseSlashCommand(text: String): SlashCommand? {
 }
 
 private val NAME = Regex("[A-Za-z][A-Za-z0-9_]*")
+
+/** `/goal` reads; `/goal clear` clears; every other tail follows the tool's JSON schema. */
+internal fun SlashCommand.toolName(): String =
+    if (name == "goal" && argument.isBlank()) "goal_read" else name
+
+internal fun SlashCommand.toolArguments(spec: ToolSpec): JsonObject? {
+    if (name == "goal" && argument.equals("clear", ignoreCase = true)) {
+        return buildJsonObject { put("text", "") }
+    }
+    val args = slashArguments(spec, argument) ?: return null
+    // An explicitly malformed goal object must not be interpreted as a request to clear it.
+    if (name == "goal" && argument.isNotBlank() && (args["text"] as? JsonPrimitive)?.isString != true) return null
+    return args
+}
+
+/** Editing alone never executes a command, but user command secrets still cannot enter disk/title. */
+internal fun editedTranscriptMessage(message: StoredMessage, text: String): StoredMessage {
+    val command = if (message.role == Roles.USER) parseSlashCommand(text) else null
+    val stored = command?.let { TranscriptRedaction.commandForTranscript(text, it.toolName(), "") } ?: text
+    return message.copy(text = stored, edited = true)
+}
 
 /**
  * Maps the typed tail to the tool's own JSON schema.

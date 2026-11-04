@@ -24,6 +24,7 @@ import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Tps
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
+import com.suixing.agent.data.TranscriptRedaction
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
 import com.suixing.agent.data.ChatRepository
@@ -32,12 +33,10 @@ import com.suixing.agent.data.MessageCache
 import com.suixing.agent.llm.LocalNetworkAccess
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.LlmException
+import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.service.AgentForegroundService
-import com.suixing.agent.tools.ToolResult
 import com.suixing.agent.ui.settings.withUpstreamDefaults
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.CancellationException
@@ -461,8 +460,6 @@ class ChatViewModel : ViewModel() {
     private val _state = MutableStateFlow(ChatUiState())
 
     /** One-shot command feedback; the screen owns how it is shown. */
-    private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 8)
-    val notices = _notices.asSharedFlow()
 
     /** The message list the revision below was stamped for; touched only by the collector. */
     private val revisionStamp = MessageRevisionStamp()
@@ -950,7 +947,6 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             Core.goals.clear()
             _state.update { it.copy(goal = "") }
-            notice("目标已清除")
         }
     }
 
@@ -1748,9 +1744,8 @@ class ChatViewModel : ViewModel() {
         if (body.isEmpty() && imagesBase64.isEmpty()) return false
         val chatId = _state.value.conversationId
         if (chatId.isEmpty()) return false
-        parseSlashCommand(body)?.let { command ->
-            return runSlashCommand(chatId, command, imagesBase64, body)
-        }
+        val command = parseSlashCommand(body)
+        val initialTool = command?.let { prepareSlashTool(chatId, it, imagesBase64) ?: return false }
         // No global lock: the engine refuses a second run in the same conversation
         // (two runs would interleave into one transcript), and every other
         // conversation is free to start its own run right now.
@@ -1791,7 +1786,7 @@ class ChatViewModel : ViewModel() {
         val user = StoredMessage(
             id = UUID.randomUUID().toString(),
             role = Roles.USER,
-            text = body,
+            text = initialTool?.let { TranscriptRedaction.commandForTranscript(body, it.name, it.arguments) } ?: body,
             imagesBase64 = imagesBase64,
         )
         val fresh = UUID.randomUUID().toString()
@@ -1813,7 +1808,7 @@ class ChatViewModel : ViewModel() {
         val shownMessages = snapshot.messages
         if (snapshot.messageCount <= shownMessages.size) {
             try {
-                start(chatId, fresh, shownMessages, snapshot)
+                start(chatId, fresh, shownMessages, snapshot, initialTool)
             } catch (cancelled: CancellationException) {
                 _state.update { it.rollbackSend(before, user.id, fresh) }
                 throw cancelled
@@ -1871,7 +1866,7 @@ class ChatViewModel : ViewModel() {
                     // `start()` 只在当前显示的仍是它时才画到屏幕上；后台会话的流式内容
                     // 会进 `sessions`，跑完后由 `endSession` 落盘。
                     val history = sendHistory(wire, shownMessages, user)
-                    start(chatId, fresh, history, snapshot)
+                    start(chatId, fresh, history, snapshot, initialTool)
                 } finally {
                     sendGate.finish(chatId)
                 }
@@ -1881,104 +1876,30 @@ class ChatViewModel : ViewModel() {
         return true
     }
 
-    /**
-     * Composer slash commands. `/goal` is reserved for the persistent objective; every other
-     * name must be a real tool, and a tool call goes through the same approval gate the model
-     * uses. The command's output is a notice, not a transcript turn: it was invoked by the
-     * user, not by the model, so pretending it was a tool call would corrupt the history.
-     */
-    private fun runSlashCommand(
+    /** Resolve a typed command without executing it; the accepted run owns its tool card. */
+    private fun prepareSlashTool(
         chatId: String,
         command: SlashCommand,
         images: List<String>,
-        submitted: String,
-    ): Boolean {
-        if (images.isNotEmpty()) {
-            notice("斜杠指令不能带附件")
-            return false
+    ): ToolCallRequest? {
+        fun reject(message: String): ToolCallRequest? {
+            _state.update { if (it.conversationId == chatId) it.copy(error = message) else it }
+            return null
         }
-        if (command.name == "goal") {
-            viewModelScope.launch {
-                val text = command.argument.trim()
-                if (text.isEmpty()) {
-                    val current = withContext(Dispatchers.IO) { Core.goals.read().text }
-                    _state.update { it.copy(goal = current) }
-                    notice(if (current.isBlank()) "当前没有设置目标" else "当前目标：$current")
-                    clearIfUnchanged(chatId, submitted)
-                    return@launch
-                }
-                val args = buildJsonObject {
-                    put("text", if (text.equals("clear", ignoreCase = true)) "" else text)
-                }
-                val result = withContext(Dispatchers.IO) {
-                    runCatchingCancellable { Core.tools.find("goal")?.run(args) }
-                        .getOrElse { ToolResult.failure("执行失败：${it.message ?: it.javaClass.simpleName}") }
-                        ?: ToolResult.failure("目标工具未注册")
-                }
-                val current = withContext(Dispatchers.IO) { Core.goals.read().text }
-                _state.update { it.copy(goal = current) }
-                val summary = slashResult("goal", result)
-                notice(if (result.ok) "$summary（下一轮生效）" else summary)
-                if (result.ok) clearIfUnchanged(chatId, submitted)
-            }
-            return true
-        }
-        val assistant = settingsSnapshot.value?.assistant(_state.value.assistantId)
+        if (images.isNotEmpty()) return reject("斜杠指令不能带附件")
+        val settings = settingsSnapshot.value
+        val assistantId = sessions[chatId]?.assistantId
+            ?: _state.value.takeIf { it.conversationId == chatId }?.assistantId.orEmpty()
+        val assistant = settings?.assistant(assistantId) ?: settings?.activeAssistant()
         val disabled = assistant?.disabledTools?.toSet().orEmpty()
-        val tool = Core.tools.excluding(disabled).find(command.name)
-        if (tool == null) {
-            if (!slashToolAllowed(command.name, disabled)) {
-                notice("当前助手禁用此工具：/${command.name}")
-            } else {
-                notice("未知指令或工具：/${command.name}")
-            }
-            return false
-        }
-        if (Core.engine.isRunning(chatId)) {
-            notice("这一轮任务还在跑，结束或停止后再调用 /${command.name}")
-            return false
-        }
-        val args = slashArguments(tool.spec, command.argument)
-        if (args == null) {
-            notice("参数格式不对：需要 JSON 对象，或用一句文本")
-            return false
-        }
-        viewModelScope.launch {
-            val mode = settingsSnapshot.value?.approvalMode ?: AppSettings().approvalMode
-            if (!gate.request(chatId, tool.spec.name, args.toString(), mode, "对话框斜杠指令")) {
-                notice("已取消 /${command.name}")
-                return@launch
-            }
-            val result = withContext(Dispatchers.IO) {
-                runCatchingCancellable { tool.run(args) }
-                    .getOrElse { ToolResult.failure("执行失败：${it.message ?: it.javaClass.simpleName}") }
-            }
-            if (tool.spec.name == "goal_read") {
-                val current = withContext(Dispatchers.IO) { Core.goals.read().text }
-                _state.update { it.copy(goal = current) }
-            }
-            notice(slashResult(tool.spec.name, result))
-            if (result.ok) clearIfUnchanged(chatId, submitted)
-        }
-        return true
+        val name = command.toolName()
+        val tool = Core.tools.excluding(disabled).find(name)
+            ?: return reject(if (!slashToolAllowed(name, disabled)) "当前助手禁用此工具：/${command.name}"
+                else "未知指令或工具：/${command.name}")
+        val args = command.toolArguments(tool.spec)
+            ?: return reject("参数格式不对：需要 JSON 对象，或用一句文本")
+        return ToolCallRequest(UUID.randomUUID().toString(), tool.spec.name, args.toString())
     }
-
-    /** Do not erase text the user typed while a command was waiting for approval. */
-    private fun clearIfUnchanged(chatId: String, submitted: String) {
-        val draft = _drafts.value[chatId]
-        val hasAttachment = draft?.attachmentUri != null || attachmentsFor(chatId).isNotEmpty()
-        if (draft != null && submittedDraftStillMatches(draft.text, hasAttachment, submitted)) {
-            clearDraft(chatId)
-        }
-    }
-
-    private fun notice(text: String) {
-        val oneLine = text.replace('\n', ' ').trim().take(220)
-        if (oneLine.isNotEmpty()) _notices.tryEmit(oneLine)
-    }
-
-    private fun slashResult(name: String, result: ToolResult): String =
-        "${if (result.ok) "✓" else "✗"} /$name · ${result.output.ifBlank { "完成" }}"
 
     /** Answers the last question again, keeping the old reply as a branch. */
     fun regenerate() {
@@ -2043,7 +1964,7 @@ class ChatViewModel : ViewModel() {
             val index = positions[id] ?: -1
             snapshot.copy(
                 messages = snapshot.messages.map { message ->
-                    if (message.id == id) message.copy(text = body, edited = true) else message
+                    if (message.id == id) editedTranscriptMessage(message, body) else message
                 },
                 // A summary that covers the edited message no longer describes what the model
                 // will read, and a stale one would quietly hand it the text from before the
@@ -2074,7 +1995,12 @@ class ChatViewModel : ViewModel() {
         val active = Transcript.active(snapshot.messages, snapshot.activeRuns)
         val index = active.indexOfFirst { it.id == id }
         if (index < 0) return
-        val kept = active.take(index) + active[index].copy(text = body, edited = true)
+        val command = parseSlashCommand(body)
+        val initialTool = command?.let {
+            prepareSlashTool(snapshot.conversationId, it, active[index].allImages) ?: return
+        }
+        val storedText = initialTool?.let { TranscriptRedaction.commandForTranscript(body, it.name, it.arguments) } ?: body
+        val kept = active.take(index) + active[index].copy(text = storedText, edited = true)
         val fresh = UUID.randomUUID().toString()
         // **顺序很重要**（评审 M-2/M-4）：先落盘、成功了再起这一轮。
         // 原来先改屏幕再 `start()`，而 `start` 的第一件事就是 `saveSession`（allowShrink=false）——
@@ -2093,7 +2019,7 @@ class ChatViewModel : ViewModel() {
                 }
                 return@launch
             }
-            val keptFull = full.take(at) + full[at].copy(text = body, edited = true)
+            val keptFull = full.take(at) + full[at].copy(text = storedText, edited = true)
             // **被改的那条若落在某个压缩区间里，那个摘要就已经在说谎**（评审 M-4）：
             // `readWire` 只从最后一个 checkpoint 之后开始发，模型会拿到旧摘要而不是改后的句子。
             // 所以丢掉"覆盖它"的那个 checkpoint 以及**之后的所有** checkpoint（历史改从更早处回放）。
@@ -2163,7 +2089,7 @@ class ChatViewModel : ViewModel() {
                     checkpoints = safeCheckpoints,
                 )
             }
-            start(fresh, keptFull)
+            start(snapshot.conversationId, fresh, keptFull, _state.value, initialTool)
         }
     }
     fun stop() {
@@ -2206,6 +2132,8 @@ class ChatViewModel : ViewModel() {
         val chatId = _state.value.conversationId
         if (body.isEmpty() && imagesBase64.isEmpty()) return false
         if (!Core.engine.isRunning(chatId)) return false
+        val command = parseSlashCommand(body)
+        val directTool = command?.let { prepareSlashTool(chatId, it, imagesBase64) ?: return false }
         if (!Core.engine.steersImmediately(chatId)) {
             // 排队: the line is the *next turn*, not an interruption. It waits here, is drawn above
             // the composer at once (see publishPendingTurns), and goes out through [send] when this
@@ -2227,7 +2155,7 @@ class ChatViewModel : ViewModel() {
             return true
         }
         val id = UUID.randomUUID().toString().take(8)
-        if (!Core.engine.steer(chatId, id, body, imagesBase64 = imagesBase64)) return false
+        if (!Core.engine.steer(chatId, id, body, imagesBase64 = imagesBase64, directTool = directTool)) return false
         // No TouchFx.noteActivity here on purpose. The edge light means "the agent is operating the
         // phone right now" — UI automation — and a line the user typed is not that. A steer that
         // kept the light alive would say the phone is being driven while nothing is driving it. The
@@ -2285,8 +2213,15 @@ class ChatViewModel : ViewModel() {
      */
     fun promoteTurn(chatId: String, id: String) {
         val queued = takePendingTurn(chatId, id) ?: return
+        val command = parseSlashCommand(queued.text)
+        val directTool = command?.let { prepareSlashTool(chatId, it, queued.imagesBase64) }
+        if (command != null && directTool == null) {
+            enqueuePendingTurn(chatId, queued)
+            publishPendingTurns(chatId)
+            return
+        }
         publishPendingTurns(chatId)
-        if (Core.engine.steer(chatId, id, queued.text, imagesBase64 = queued.imagesBase64)) {
+        if (Core.engine.steer(chatId, id, queued.text, imagesBase64 = queued.imagesBase64, directTool = directTool)) {
             // It is an interruption now, so it is drawn as one: the same bubble a steer gets.
             enqueueSteer(chatId, PendingSteer(id, queued.text, queued.imagesBase64))
             publishSteers(chatId)
@@ -2529,7 +2464,7 @@ class ChatViewModel : ViewModel() {
 
     /**
      * Starts a run for the conversation currently on screen. Callers that accepted a
-     * message before an asynchronous read must use the four-argument overload with the
+     * message before an asynchronous read must use the snapshot-taking overload with the
      * snapshot that message belongs to; otherwise a switch during the read starts the run
      * against the wrong chat (issue #76 F-03).
      */
@@ -2542,6 +2477,7 @@ class ChatViewModel : ViewModel() {
         runId: String,
         history: List<StoredMessage>,
         snapshot: ChatUiState,
+        initialTool: ToolCallRequest? = null,
     ) {
         // The snapshot can lag behind the display (the user switched while the wire was
         // being read); only its conversation identity is wrong, and the run must use the
@@ -2606,12 +2542,16 @@ class ChatViewModel : ViewModel() {
                         .forEach { queued ->
                             // The picture rides along: a steer carries text *and* image, and
                             // re-sending only the text dropped the screenshot without a word.
+                            val command = parseSlashCommand(queued.text)
+                            val directTool = command?.let { prepareSlashTool(chatId, it, queued.imagesBase64) }
+                            if (command != null && directTool == null) return@forEach
                             Core.engine.steer(
                                 chatId,
                                 queued.id,
                                 queued.text,
                                 immediate = false,
                                 imagesBase64 = queued.imagesBase64,
+                                directTool = directTool,
                             )
                         }
                 }
@@ -2647,6 +2587,7 @@ class ChatViewModel : ViewModel() {
                     chatId = chatId,
                     title = shown.title,
                     history = history,
+                    initialTool = initialTool,
                     settings = effective,
                     registry = registry,
                     capabilities = Core.capabilities,

@@ -82,6 +82,7 @@ import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.Transcript
 import com.suixing.agent.ui.assistant.AssistantAvatar
+import com.suixing.agent.ui.chat.markdown.LocalPathClick
 import com.suixing.agent.ui.chat.markdown.MarkdownText
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.chat.markdown.markdownBody
@@ -996,8 +997,13 @@ internal fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit)
                 // assistant body's, so the two bubbles agree on size and leading.
                 // Selectable: long-press is how a phone copies text, and the bubble used to
                 // spend that gesture on the edit dialog instead.
+                val highlightColor = MaterialTheme.colorScheme.primary
+                val pathClick = LocalPathClick.current
+                val annotated = remember(message.text, highlightColor, pathClick) {
+                    annotatedUserMessage(message.text, highlightColor, pathClick)
+                }
                 SelectableWhenArmed {
-                    Text(message.text, style = markdownBody())
+                    Text(annotated, style = markdownBody())
                 }
             }
             if (message.edited) {

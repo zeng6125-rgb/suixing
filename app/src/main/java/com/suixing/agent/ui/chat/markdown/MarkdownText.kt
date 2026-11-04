@@ -452,6 +452,22 @@ fun inlineMarkdown(
     onUrlClick = null,
 ).scan()
 
+/** Linkifies literal source with the same URL/path boundaries and click handling as Markdown. */
+internal fun plainTextLinks(
+    text: String,
+    linkColor: Color = Color.Unspecified,
+    onPathClick: ((String) -> Unit)? = null,
+): AnnotatedString = InlineScanner(
+    text = text,
+    codeBackground = Color.Unspecified,
+    codeColor = Color.Unspecified,
+    linkColor = linkColor,
+    baseWeight = null,
+    onUrlClick = null,
+    onPathClick = onPathClick,
+    parseMarkup = false,
+).scan()
+
 /** Construct the complete inline result for row caches and streaming tests. */
 internal fun scanInlineMarkdown(
     text: String,
@@ -516,6 +532,7 @@ private class InlineScanner(
     // rather than one of them silently winning.
     // One current streaming tail retains only failure frontiers between adjacent prefixes.
     private val searchState: InlineSearchState? = null,
+    private val parseMarkup: Boolean = true,
 ) {
     private val out = AnnotatedString.Builder()
     private val delimiters = searchState?.delimiters ?: InlineDelimiterSearch(text)
@@ -555,14 +572,14 @@ private class InlineScanner(
         while (i < to) {
             val c = text[i]
             when {
-                c == '\\' && i + 1 < to && ESCAPABLE.indexOf(text[i + 1]) >= 0 -> {
+                parseMarkup && c == '\\' && i + 1 < to && ESCAPABLE.indexOf(text[i + 1]) >= 0 -> {
                     val buffer = escapedBuffer ?: StringBuilder().also { escapedBuffer = it }
                     buffer.append(text, literalStart, i)
                     buffer.append(text[i + 1])
                     i += 2
                     literalStart = i
                 }
-                c == '`' -> {
+                parseMarkup && c == '`' -> {
                     val close = delimiters.findClosing('`', 1, i + 1, to)
                     if (close < 0) {
                         i++
@@ -577,7 +594,7 @@ private class InlineScanner(
                         literalStart = i
                     }
                 }
-                c == '*' || c == '_' -> {
+                parseMarkup && (c == '*' || c == '_') -> {
                     // Only single versus double matters; repeatedly counting the
                     // remainder of one unmatched run would itself be quadratic.
                     val len = if (i + 1 < to && text[i + 1] == c) 2 else 1
@@ -592,7 +609,7 @@ private class InlineScanner(
                         literalStart = i
                     }
                 }
-                c == '~' && i + 1 < to && text[i + 1] == '~' -> {
+                parseMarkup && c == '~' && i + 1 < to && text[i + 1] == '~' -> {
                     val close = delimiters.findClosing('~', 2, i + 2, to)
                     if (close < 0) {
                         i += 2
@@ -603,7 +620,7 @@ private class InlineScanner(
                         literalStart = i
                     }
                 }
-                c == '[' -> {
+                parseMarkup && c == '[' -> {
                     val target = parseLink(i, to)
                     if (target == null) {
                         i++
@@ -698,7 +715,10 @@ private class InlineScanner(
     }
 
     private fun startsUrl(index: Int, to: Int): Boolean {
-        if (index > 0 && text[index - 1].isLetterOrDigit()) return false
+        if (index > 0) {
+            val before = text[index - 1]
+            if (before in 'a'..'z' || before in 'A'..'Z' || before in '0'..'9' || before == '_') return false
+        }
         if (index + URL_HTTPS.length <= to && text.startsWith(URL_HTTPS, index)) return true
         return index + URL_HTTP.length <= to && text.startsWith(URL_HTTP, index)
     }
@@ -719,15 +739,24 @@ private class InlineScanner(
     // 但这里不识别目录，只保证不把 '.' 或 '，' 这种吃进路径）。与 urlEnd 同构，但用路径的停止集。
     private fun pathEnd(from: Int, to: Int): Int {
         var end = from
+        var opens = 0
+        var closes = 0
         while (end < to) {
             val c = text[end]
             if (c.isWhitespace() || c == '"' || c == '<' || c == '>' || c == '`' ||
                 c == '，' || c == '。' || c == '；' || c == '：' || c == '、' ||
                 c == '）' || c == '》' || c == '】' || c == '」'
             ) break
+            if (c == '(') opens++
+            if (c == ')') closes++
             end++
         }
-        while (end > from && (text[end - 1] in URL_TRAILING || text[end - 1] == '/')) end--
+        while (end > from) {
+            val c = text[end - 1]
+            if (c in URL_TRAILING || c == '/') { end--; continue }
+            if (c == ')' && closes > opens) { closes--; end--; continue }
+            break
+        }
         return end
     }
 

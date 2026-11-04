@@ -99,13 +99,5 @@ internal fun effectiveBaseUrl(settings: AppSettings, state: ChatUiState): String
 }
 
 
-/**
- * Whether a send should move the reading position to the newest line (issue #76 F-02).
- *
- * A refused send changes nothing, and a slash command is not a new turn even when it is
- * accepted — jumping for it would drag a reader away from where they were. The leading `/`
- * test is enough here because `send()` only treats a valid leading slash as a command; any
- * other text that starts with `/` is refused by the parser and never reaches this as true.
- */
-internal fun shouldJumpToLatest(accepted: Boolean, body: String): Boolean =
-    accepted && !body.trimStart().startsWith("/")
+/** Every accepted send, including a slash command, now creates a transcript turn. */
+internal fun shouldJumpToLatest(accepted: Boolean): Boolean = accepted

@@ -120,40 +120,11 @@ internal val DRAWER_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Fl
         visibilityThreshold = 0.001f,
     )
 
-/**
- * 抽屉**收起**规格：`tween(210, FastOutLinearInEasing)`（快起、线性收尾 —— 让开视野要利落）。
- *
- * 打开**不用**这条，见 [DRAWER_OPEN_SPEC]（同样 210ms，但减速缓停，观感柔和）。
- *
- * 历次取值：260 → 210 → 180 → 170 → **160（上一发布版）** →
- * `spring(0.9, 700)`（曾为「与拖动松手统一」改成这条，因死区翻倍已撤回）→ **210（本版）**。
- *
- * 为什么用 `FastOutLinearIn` 而不是 spring：`NavigationDrawerKt` 把 `anchoredDraggable`
- * 套在含 `content()` 的整个容器上，**动画期间按下事件会被当作「打断动画、开始拖动」消费掉**
- * ⇒ **动画时长 = 期间点不动的窗口**。`spring(0.9, 700)` 的包络衰减率 ζω=23.81/s，
- * 1156px 行程要 ~296ms(1px)~393ms(0.1px) 才收敛，会把死区拉长近一倍；210ms 的 tween 更短可控。
- *
- * **注**：换成 `DismissibleNavigationDrawer`（推挤式）后**已经没有任何遮罩**，
- * 下面的「点遮罩」条目只作为库内部事实记录（那条路径在本 App 里不再触发）。
- * （`spring(1.0, 3800)`），面板拖动松手走 `DefaultSpatial`（`spring(0.9, 700)`）。
- * `ModalNavigationDrawer` 的公开签名没有任何 spec 参数，`MaterialTheme` 的
- * `motionScheme` 也只有 getter ⇒ App 改不了它们。
- */
+/** Programmatic closing uses the shared critically damped spring; it has no fixed duration. */
 internal val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
     DRAWER_SPEC
 
-/**
- * **打开专用**的曲线：同样 210ms，但换成减速（`LinearOutSlowInEasing`）。
- *
- * 用户：「那个汉堡键动画改回去有点太生硬了」。统一成 [DRAWER_CLOSE_SPEC]
- * （`FastOutLinearIn`：起步就快、结尾线性）后，打开的第一帧速度最大、又没有缓停，
- * 观感是"啪"地弹出。
- *
- * 打开与收起的意图本就不同：
- *  · 打开 = 界面向你展开 ⇒ 末端要**缓停**（减速曲线），看起来柔和；
- *  · 收起 = 让开视野 ⇒ 快速消失更利落（保持 `FastOutLinearIn`）。
- * 时长两边都是 210ms，所以**点击死区不变**，只是曲线软硬不同。
- */
+/** Opening shares the same spring; gestures additionally carry their release velocity. */
 internal val DRAWER_OPEN_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
     DRAWER_SPEC
 /**

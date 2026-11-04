@@ -94,11 +94,9 @@ class ChatSendPolicyTest {
 
 
     @Test
-    fun `only an accepted ordinary turn moves the reading position`() {
-        assertTrue(shouldJumpToLatest(accepted = true, body = "普通消息"))
-        assertFalse(shouldJumpToLatest(accepted = false, body = "普通消息"))
-        assertFalse(shouldJumpToLatest(accepted = true, body = "/goal ship"))
-        assertFalse(shouldJumpToLatest(accepted = true, body = "   /web_search 天气"))
+    fun `only an accepted transcript turn moves the reading position`() {
+        assertTrue(shouldJumpToLatest(accepted = true))
+        assertFalse(shouldJumpToLatest(accepted = false))
     }
 
     @Test

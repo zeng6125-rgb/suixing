@@ -40,6 +40,22 @@ class TranscriptRedactionTest {
     }
 
     @Test
+    fun `sensitive slash arguments do not leak through their duplicate user command text`() {
+        for (tool in listOf("ui_type", "ui_type_into", "clipboard_write")) {
+            val text = "/$tool hunter2"
+            val arguments = """{"text":"hunter2"}"""
+            val stored = TranscriptRedaction.commandForTranscript(text, tool, arguments)
+            assertTrue(stored.startsWith("/$tool "))
+            assertFalse(stored.contains("hunter2"))
+            assertTrue(stored.contains(TranscriptRedaction.PLACEHOLDER))
+            assertEquals("""{"text":"hunter2"}""", arguments)
+        }
+        val goal = "/goal read https://example.com and /sdcard/a.txt"
+        assertEquals(goal, TranscriptRedaction.commandForTranscript(goal, "goal", "{}"))
+        assertEquals("/clipboard_read", TranscriptRedaction.commandForTranscript("/clipboard_read", "clipboard_read", "{}"))
+    }
+
+    @Test
     fun `判定覆盖三个参数类工具与一个结果类工具`() {
         listOf("ui_type", "ui_type_into", "clipboard_write", "clipboard_read").forEach {
             assertTrue("$it 应被屏蔽", TranscriptRedaction.isRedacted(it))

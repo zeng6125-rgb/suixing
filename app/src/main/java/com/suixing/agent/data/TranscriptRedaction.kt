@@ -33,6 +33,13 @@ internal object TranscriptRedaction {
     internal fun argumentsForTranscript(toolName: String, arguments: String): String =
         if (toolName in sensitiveArguments) """{"redacted":"$PLACEHOLDER"}""" else arguments
 
+    /** A user-issued tool command must not duplicate its sensitive arguments in user text. */
+    internal fun commandForTranscript(text: String, toolName: String, arguments: String): String {
+        if (toolName !in sensitiveArguments) return text
+        val end = text.indexOfFirst { it.isWhitespace() }.let { if (it < 0) text.length else it }
+        return text.take(end) + " " + argumentsForTranscript(toolName, arguments)
+    }
+
     /** 落盘前要替换的工具输出。当轮发给模型的仍然是原文。 */
     internal fun outputForTranscript(toolName: String, output: String): String =
         if (toolName in sensitiveResults) PLACEHOLDER else output

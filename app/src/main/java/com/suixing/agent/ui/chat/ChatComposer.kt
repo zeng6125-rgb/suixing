@@ -3,13 +3,17 @@ package com.suixing.agent.ui.chat
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
@@ -53,6 +57,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1081,13 +1086,14 @@ internal fun Composer(
             if (goal.isNotBlank()) {
                 GoalChip(
                     text = goal,
+                    onEdit = {
+                        onInput("/goal $goal")
+                        goalFocus.requestFocus()
+                    },
                     onClear = onClearGoal,
-                    modifier = Modifier.padding(
-                        start = STEER_QUEUE_INSET,
-                        end = STEER_QUEUE_INSET,
-                        bottom = 6.dp,
-                    ),
+                    modifier = Modifier.padding(horizontal = STEER_QUEUE_INSET),
                 )
+                Spacer(Modifier.height(3.dp))
             }
             // 多附件一排：每张 chip 可单独删（onRemoveAttachment 报下标），横向可滚 —— 不限张数时
             // 一排装不下也不能把 composer 撑高。
@@ -1749,30 +1755,31 @@ internal fun Composer(
             }
 }
 
-/** The persistent objective: one line, full width, with the one action that matters. */
+/** The persistent goal uses the same 36dp bar and actions as the adjacent queued lines. */
 @Composable
 private fun GoalChip(
     text: String,
+    onEdit: () -> Unit,
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = scheme.secondaryContainer.copy(alpha = 0.72f),
-        contentColor = scheme.onSecondaryContainer,
+        modifier = modifier.fillMaxWidth().height(36.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = scheme.surfaceContainerHigh,
+        contentColor = scheme.onSurfaceVariant,
     ) {
         Row(
-            modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+            modifier = Modifier.fillMaxSize().padding(start = 10.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 imageVector = ImageVector.vectorResource(R.drawable.ic_compass),
                 contentDescription = null,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(15.dp),
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(8.dp))
             Text(
                 text = "目标 · $text",
                 style = MaterialTheme.typography.labelMedium,
@@ -1780,13 +1787,8 @@ private fun GoalChip(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            IconButton(onClick = onClear, modifier = Modifier.size(26.dp)) {
-                Icon(
-                    imageVector = ImageVector.vectorResource(R.drawable.ic_x),
-                    contentDescription = "清除目标",
-                    modifier = Modifier.size(14.dp),
-                )
-            }
+            QueueAction(icon = R.drawable.ic_square_pen, label = "编辑目标", onClick = onEdit)
+            QueueAction(icon = R.drawable.ic_x, label = "清除目标", onClick = onClear)
         }
     }
 }
@@ -1797,9 +1799,9 @@ private val SLASH_POPUP_EXIT = fadeOut(tween(110, easing = FastOutLinearInEasing
 private val SLASH_POPUP_RESIZE = tween<IntSize>(120, easing = FastOutSlowInEasing)
 
 /**
- * The candidate card fades in place in its own window. Filtering only changes its height;
- * the card still hangs 6dp above the pill and uses [popupPositionProvider]. [lastItems] stays
- * visible while the exit finishes, with its actions disabled during that period.
+ * The candidate card fades in place in its own window. Filtering fades each content snapshot
+ * while the card's height follows the same transition; the window still uses [popupPositionProvider].
+ * [lastItems] stays visible while the whole popup exits, with its actions disabled.
  */
 @Composable
 private fun SlashSuggestionPopup(
@@ -1840,6 +1842,27 @@ private fun SlashSuggestionPopup(
     }
 }
 
+/** One content/size transition inside the Surface, so its border follows the animated height. */
+@Composable
+internal fun AnimatedSlashSuggestions(
+    transition: Transition<List<Pair<String, String>>>,
+    interactive: Boolean,
+    content: @Composable (List<Pair<String, String>>, Boolean) -> Unit,
+) {
+    val selectable = rememberUpdatedState(transition.targetState.takeIf { interactive })
+    transition.AnimatedContent(
+        contentAlignment = Alignment.BottomStart,
+        transitionSpec = {
+            (fadeIn(tween(120, easing = LinearOutSlowInEasing)) togetherWith
+                fadeOut(tween(120, easing = FastOutLinearInEasing))).using(
+                SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> SLASH_POPUP_RESIZE }),
+            )
+        },
+    ) { shown ->
+        content(shown, shown == selectable.value)
+    }
+}
+
 /**
  * The commands matching what has been typed; tapping one fills in `/<name> `.
  *
@@ -1855,40 +1878,39 @@ private fun SlashSuggestionList(
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
-        // 前缀过滤会让行数在 1..5 之间变；底边始终锚在 pill 上方 6dp，高度变化时把上沿
-        // 平滑收起/展开，卡片不会整块跳到新位置（Popup 会跟着每帧的新尺寸重新定位）。
         modifier = modifier
-            .then(if (interactive) Modifier else Modifier.clearAndSetSemantics { })
-            .animateContentSize(
-                alignment = Alignment.BottomStart,
-                animationSpec = SLASH_POPUP_RESIZE,
-            ),
+            .then(if (interactive) Modifier else Modifier.clearAndSetSemantics { }),
         shape = RoundedCornerShape(14.dp),
         color = scheme.surfaceContainer,
         border = BorderStroke(1.dp, scheme.outlineVariant),
     ) {
-        Column(Modifier.padding(vertical = 4.dp)) {
-            items.forEach { (name, description) ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = interactive) { onPick(name) }
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "/$name",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = scheme.primary,
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        text = description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = scheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+        val transition = updateTransition(items, label = "slash-suggestions")
+        AnimatedSlashSuggestions(transition, interactive) { shown, enabled ->
+            Column(Modifier
+                .then(if (enabled) Modifier else Modifier.clearAndSetSemantics { })
+                .padding(vertical = 4.dp)) {
+                shown.forEach { (name, description) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = enabled) { onPick(name) }
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "/$name",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = scheme.primary,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = scheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }

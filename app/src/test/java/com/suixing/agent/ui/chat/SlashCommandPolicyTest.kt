@@ -8,22 +8,13 @@ import org.junit.Test
 
 class SlashCommandPolicyTest {
     @Test
-    fun `a persona disabled tool stays unavailable except for goal`() {
+    fun `persona disabled tools are neither offered nor directly executed`() {
         val disabled = setOf("run_shell", "goal", "goal_read")
 
         assertFalse(slashToolAllowed("run_shell", disabled))
         assertFalse(slashToolAllowed("goal_read", disabled))
-        assertTrue("goal is a user setting, not a model call", slashToolAllowed("goal", disabled))
+        assertFalse(slashToolAllowed("goal", disabled))
         assertTrue(slashToolAllowed("web_search", disabled))
-    }
-
-    @Test
-    fun `a submitted draft is cleared only while it is still the command`() {
-        assertTrue(submittedDraftStillMatches("/web_search 天气", false, "/web_search 天气"))
-        assertTrue(submittedDraftStillMatches(" /web_search 天气 ", false, "/web_search 天气"))
-        assertFalse(submittedDraftStillMatches("/web_search 天气 明天", false, "/web_search 天气"))
-        assertFalse(submittedDraftStillMatches("/web_search 天气", true, "/web_search 天气"))
-        assertFalse(submittedDraftStillMatches("", false, "/goal ship"))
     }
 
     @Test

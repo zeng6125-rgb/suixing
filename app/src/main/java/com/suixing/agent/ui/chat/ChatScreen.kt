@@ -156,9 +156,6 @@ fun ChatScreen(
         if (positionStorageReady) Core.conversationViewports.get(state.conversationId) else null
     }
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(viewModel) {
-        viewModel.notices.collect { snackbarHostState.showSnackbar(it) }
-    }
     val scope = rememberCoroutineScope()
     // 顶层拿一次剪贴板：文件路径菜单的「复制」用（见 [PathActionSheet] 接线处）。
     val clipboard = LocalClipboardManager.current
@@ -166,16 +163,15 @@ fun ChatScreen(
     // another chat and coming back restores exactly what was left, and nothing leaks
     // across the switch.
     val draft = state.draft
-    // What `/` can run here: the same persona filter the agent run uses, plus the goal
-    // command, which is a user setting rather than a model tool call.
+    // What `/` can run here: the same persona filter the agent run uses, with the goal alias.
     // MCP connects and drops tools after this screen composed; the registry's revision is
     // what makes the slash list follow it (issue #76 F-05).
     val catalogRevision by Core.tools.catalogRevision.collectAsStateWithLifecycle()
-    val slashTools = remember(state.assistantId, settings.assistants, catalogRevision) {
-        val disabled = settings.assistant(state.assistantId)?.disabledTools?.toSet().orEmpty()
+    val slashTools = remember(state.assistantId, settings.assistants, settings.activeAssistantId, catalogRevision) {
+        val assistant = settings.assistant(state.assistantId) ?: settings.activeAssistant()
+        val disabled = assistant?.disabledTools?.toSet().orEmpty()
         slashCommands(
-            Core.tools.all()
-                .filter { slashToolAllowed(it.spec.name, disabled) }
+            Core.tools.excluding(disabled).all()
                 .map { tool ->
                     tool.spec.name to tool.spec.description.lineSequence().firstOrNull().orEmpty()
                 },
@@ -1927,9 +1923,8 @@ fun ChatScreen(
                         // a refused send keeps the text where the user left it.
                         val (body, images) = withAttachment(attachments, input)
                         val accepted = viewModel.send(body, images)
-                        // 只有真正被接受的新聊天轮次才动阅读位置（issue #76 F-02）。斜杠
-                        // 指令即使返回 true 也不创建轮次，不能把正在读的历史拽到底部。
-                        if (shouldJumpToLatest(accepted, body)) {
+                        // 斜杠指令也创建消息与工具卡；只有发送被接受才回到最新。
+                        if (shouldJumpToLatest(accepted)) {
                             // 发送 = 明确要回到最新：先放行追底再跳，并清掉阅读位置记忆。
                             scroll.allowBottomResume = true
                             scroll.stickToBottom = true

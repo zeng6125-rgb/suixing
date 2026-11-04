@@ -152,7 +152,14 @@ sealed interface AgentEvent {
  * inside an `inner class` (`'Class' is prohibited here`), and both this and [WireSpan] are only
  * names for the run's own bookkeeping.
  */
-private data class Steer(val id: String, val text: String, val imagesBase64: List<String> = emptyList())
+private data class Steer(
+    val id: String,
+    val text: String,
+    val imagesBase64: List<String> = emptyList(),
+    val directTool: ToolCallRequest? = null,
+)
+
+private data class QueuedDirectTool(val call: ToolCallRequest, val steer: Steer? = null)
 
 /**
  * Which stored message a stretch of the wire came from: [from] is where it starts and [to] is one
@@ -493,7 +500,8 @@ class AgentEngine(
         text: String,
         immediate: Boolean = runs.value[chatId]?.steerMode == STEER_IMMEDIATE,
         imagesBase64: List<String> = emptyList(),
-    ): Boolean = runs.value[chatId]?.steer(id, text, immediate, imagesBase64) ?: false
+        directTool: ToolCallRequest? = null,
+    ): Boolean = runs.value[chatId]?.steer(id, text, immediate, imagesBase64, directTool) ?: false
 
     /**
      * Whether the run in [chatId] takes a line as an interruption (立即) rather than as something
@@ -616,6 +624,7 @@ class AgentEngine(
         onEvent: (AgentEvent) -> Unit,
         checkpoints: List<ContextCheckpoint> = emptyList(),
         onCheckpoint: (ContextCheckpoint) -> Unit = {},
+        initialTool: ToolCallRequest? = null,
     ): List<StoredMessage> {
         // Check and register in one critical section: two coroutines starting the same
         // conversation (a double tap, or an isRunning check preempted before start) would
@@ -652,6 +661,7 @@ class AgentEngine(
                 gate = gate,
                 onEvent = onEvent,
                 onCheckpoint = onCheckpoint,
+                initialTool = initialTool,
             )
             return produced
         } finally {
@@ -811,6 +821,8 @@ class AgentEngine(
          * only possible if the waiting ones can be addressed.
          */
         private val steering = LinkedHashMap<String, Steer>()
+        // Only the run coroutine writes this queue, after a line reaches its safe boundary.
+        private val directTools = ArrayDeque<QueuedDirectTool>()
 
         /**
          * Lines the user pushed to the front with 「立即插话」, kept apart from [steering] because
@@ -954,11 +966,17 @@ class AgentEngine(
      *   blank. A line the user says twice keeps both, because each one has its own [id]. A line
      *   that is only a picture is taken too — that is still something the user sent.
      */
-    fun steer(id: String, text: String, immediate: Boolean, imagesBase64: List<String> = emptyList()): Boolean {
+    fun steer(
+        id: String,
+        text: String,
+        immediate: Boolean,
+        imagesBase64: List<String> = emptyList(),
+        directTool: ToolCallRequest? = null,
+    ): Boolean {
         if (!isLive()) return false
         val body = text.trim()
         if (body.isEmpty() && imagesBase64.isEmpty()) return false
-        val line = Steer(id, body, imagesBase64)
+        val line = Steer(id, body, imagesBase64, directTool)
         synchronized(steeringLock) {
             if (immediate) urgent[id] = line else steering[id] = line
         }
@@ -1071,6 +1089,7 @@ class AgentEngine(
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
         onCheckpoint: (ContextCheckpoint) -> Unit,
+        initialTool: ToolCallRequest? = null,
     ): List<StoredMessage> {
         // The run gets a job of its own, a child of the caller's rather than the caller's own.
         // Stopping the run has to reach whatever it is blocked on — a shell command only notices
@@ -1098,6 +1117,7 @@ class AgentEngine(
                     gate = gate,
                     onEvent = onEvent,
                     onCheckpoint = onCheckpoint,
+                    initialTool = initialTool,
                 )
             }
         } catch (cancellation: CancellationException) {
@@ -1134,6 +1154,7 @@ class AgentEngine(
         gate: ApprovalGate,
         onEvent: (AgentEvent) -> Unit,
         onCheckpoint: (ContextCheckpoint) -> Unit,
+        initialTool: ToolCallRequest? = null,
     ): List<StoredMessage> {
         // Published here rather than left to the ticker, so a caller sees Running the
         // moment the run starts even if no ticker was ever started.
@@ -1158,9 +1179,11 @@ class AgentEngine(
         // Asked through all() rather than find(): "skill_read is not in the visible set" is the
         // question, and it is the same list the prompt is about to summarise.
         val readable = registry.all().any { it.spec.name == "skill_read" }
-        val goalText = goals?.let { withContext(Dispatchers.IO) { it.read().text } }.orEmpty()
+        var goalText = goals?.let { withContext(Dispatchers.IO) { it.read().text } }.orEmpty()
+        val skillCatalog = withContext(Dispatchers.Default) {
+            if (readable) skills.catalog(skills.listHeaders()) else ""
+        }
         val systemText = withContext(Dispatchers.Default) {
-            val skillCatalog = if (readable) skills.catalog(skills.listHeaders()) else ""
             systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText)
         }
         breakSystem = systemText.length / 4
@@ -1350,6 +1373,7 @@ class AgentEngine(
                     } / 4,
                 )
             }
+            initialTool?.let { directTools.addLast(QueuedDirectTool(it)) }
             while (roundLimit <= 0 || round < roundLimit) {
                 round++
                 // Emptied at the top of the round rather than next to the call: by the time the
@@ -1362,7 +1386,52 @@ class AgentEngine(
                 // Steering lands here, on the boundary between two model turns: the
                 // model has finished the previous turn and has not been asked for the
                 // next one, which is the only moment the wire can be edited safely.
-                drainSteering(wire, spans, onEvent, settings)
+                if (directTools.isEmpty()) drainSteering(wire, spans, onEvent, settings)
+                // User-invoked tools use the same approval, execution and transcript path as
+                // model tools. They run before complete(), never as a lossy bottom notice.
+                while (directTools.isNotEmpty()) {
+                    if (cancelled.get()) {
+                        finishCancelled(onEvent, streamed, reasoning, openCalls)
+                        return produced
+                    }
+                    val queued = directTools.removeFirst()
+                    queued.steer?.let { appendSteer(it, wire, spans, onEvent, settings) }
+                    val call = queued.call
+                    val assistant = StoredMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = Roles.ASSISTANT,
+                        toolCalls = listOf(StoredToolCall(call.id, call.name,
+                            TranscriptRedaction.argumentsForTranscript(call.name, call.arguments))),
+                    )
+                    produced += assistant
+                    onEvent(AgentEvent.AssistantMessage(assistant))
+                    val from = wire.size
+                    wire += ChatMessage.assistant("", listOf(call))
+                    spans += WireSpan(assistant.id, from, wire.size)
+                    openCalls = assistant.toolCalls
+                    val outcome = executeOneTool(call, registry, frozenTable.plugins, frozenTable.hooks,
+                        capabilities, gate, settings, chatId, onEvent) ?: run {
+                        finishCancelled(onEvent, streamed, reasoning, openCalls)
+                        return produced
+                    }
+                    commitTool(outcome)
+                    if (!outcome.result.ok) {
+                        onEvent(AgentEvent.Finished(""))
+                        publish(RunState.Done(stats()))
+                        return produced
+                    }
+                    if (call.name == "goal" || call.name == "goal_read") {
+                        val updatedGoal = goals?.let { withContext(Dispatchers.IO) { it.read().text } }.orEmpty()
+                        if (updatedGoal != goalText) {
+                            goalText = updatedGoal
+                            val updatedSystem = withContext(Dispatchers.Default) {
+                                systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText)
+                            }
+                            wire[0] = ChatMessage.system(updatedSystem)
+                            breakSystem = updatedSystem.length / 4
+                        }
+                    }
+                }
                 // A manual 「压缩」 is spent here, on the boundary: the user asked for the oldest
                 // context to be folded away, not for the answer in flight to be cut short.
                 val asked = compressNow
@@ -1875,31 +1944,41 @@ class AgentEngine(
         // the boundary after this one. Draining everything here is what would turn one person's
         // urgency into every waiting line landing at once.
         val batch = synchronized(steeringLock) {
-            if (urgent.isEmpty()) {
-                steering.values.toList().also { steering.clear() }
-            } else {
-                urgent.values.toList().also { urgent.clear() }
-            }
+            val source = if (urgent.isEmpty()) steering else urgent
+            val lines = source.values.toList()
+            // Leave the tail retractable until its own command starts. One failed or cancelled
+            // command must not acknowledge every other line waiting behind it.
+            val firstCommand = lines.indexOfFirst { it.directTool != null }
+            val selected = if (firstCommand < 0) lines else lines.take(firstCommand + 1)
+            selected.forEach { source.remove(it.id) }
+            selected
         }
         batch.forEach { line ->
-            // The same construction an ordinary user message gets, picture included: a steer with
-            // an attachment is still a message the user sent, and the gate is the same one
-            // (`imageInput`), with the same sentence when the model cannot be shown the image.
-            // 多附件：整列过 imageInput 门；关着时一句说明，模型知道有图但看不到。
-            val images = line.imagesBase64.takeIf { settings.imageInput }.orEmpty()
-            val note = if (line.imagesBase64.isNotEmpty() && images.isEmpty()) {
-                "（图片已省略：当前未开启「模型支持图片输入」）"
-            } else {
-                ""
-            }
-            val from = wire.size
-            wire += ChatMessage.user("（用户在任务进行中说：${line.text}）$note", images)
-            spans += WireSpan(line.id, from, wire.size)
-            // Announced after the wire, never before: a caller told about a line and then shown a
-            // prompt without it would have written a bubble the model never saw.
-            onEvent(AgentEvent.Steered(line.id, line.text, line.imagesBase64))
+            val call = line.directTool
+            if (call == null) appendSteer(line, wire, spans, onEvent, settings)
+            else directTools.addLast(QueuedDirectTool(call, line))
         }
         return batch.size
+    }
+
+    private fun appendSteer(
+        line: Steer,
+        wire: MutableList<ChatMessage>,
+        spans: MutableList<WireSpan>,
+        onEvent: (AgentEvent) -> Unit,
+        settings: AppSettings,
+    ) {
+        val images = line.imagesBase64.takeIf { settings.imageInput }.orEmpty()
+        val note = if (line.imagesBase64.isNotEmpty() && images.isEmpty()) {
+            "（图片已省略：当前未开启「模型支持图片输入」）"
+        } else ""
+        val from = wire.size
+        wire += ChatMessage.user("（用户在任务进行中说：${line.text}）$note", images)
+        spans += WireSpan(line.id, from, wire.size)
+        val storedText = line.directTool?.let {
+            TranscriptRedaction.commandForTranscript(line.text, it.name, it.arguments)
+        } ?: line.text
+        onEvent(AgentEvent.Steered(line.id, storedText, line.imagesBase64))
     }
 
     /**
