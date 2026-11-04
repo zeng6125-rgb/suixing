@@ -91,6 +91,7 @@ import com.suixing.agent.ui.settings.AboutScreen
 import com.suixing.agent.ui.settings.AssistantScreen
 import com.suixing.agent.ui.settings.ProfileScreen
 import com.suixing.agent.ui.settings.SettingsPageRoute
+import com.suixing.agent.ui.settings.SUBAGENT_SETTINGS_ROUTE
 import com.suixing.agent.ui.settings.SettingsScreen
 import com.suixing.agent.ui.settings.ToolsScreen
 import com.suixing.agent.ui.tasks.TasksScreen
@@ -732,6 +733,7 @@ fun SuixingApp() {
                             listOf(
                                 "settings/model",
                                 "settings/conversation",
+                                SUBAGENT_SETTINGS_ROUTE,
                                 "settings/appearance",
                                 "settings/network",
                                 "settings/data",

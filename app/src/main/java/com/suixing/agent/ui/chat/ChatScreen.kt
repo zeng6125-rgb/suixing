@@ -310,7 +310,13 @@ fun ChatScreen(
     // 助手编辑器的开关（主窗口全屏覆盖层，结构路 0.8.105）：id 而非对象，转屏/重组不丢。
     var editorAssistantId by remember { mutableStateOf<String?>(null) }
     // 任务清单：输入框上方那一行点开就是它（完整清单，可滚动）。
-    var todoSheetOpen by remember { mutableStateOf(false) }
+    var todoSheetOpen by remember(state.conversationId) { mutableStateOf(false) }
+    LaunchedEffect(state.conversationId, state.todos.isEmpty()) {
+        if (state.todos.isEmpty()) todoSheetOpen = false
+    }
+    val latestUserAt = remember(state.conversationId, state.messagesRevision) {
+        state.messages.lastOrNull { it.role == Roles.USER }?.timestamp ?: 0L
+    }
     val context = LocalContext.current
 
     fun keepAttachment(chatId: String, attachment: Attachment) {
@@ -1802,12 +1808,14 @@ fun ChatScreen(
                     .offset { androidx.compose.ui.unit.IntOffset(0, -imePxState.value) },
             ) {
                 ComposerDraftText(viewModel, state.conversationId) { input ->
+                val goal by viewModel.goal.collectAsStateWithLifecycle()
                 Composer(
                     subagentChatId = state.conversationId,
                     input = input,
                     slashTools = slashTools,
-                    goal = state.goal,
+                    goal = goal?.takeIf { it.showInComposer(state.conversationId, latestUserAt) },
                     onClearGoal = rememberStableCallback0 { viewModel.clearGoal() },
+                    onResumeGoal = rememberStableCallback0 { viewModel.resumeGoal() },
                     onInput = rememberStableCallback1<String> { setDraft(text = it) },
                     onRestoreSteer = rememberStableCallback2<PendingSteer, Boolean, Unit> { steer, nextTurn ->
                         scope.launch {
@@ -1962,7 +1970,7 @@ fun ChatScreen(
         }
         // 任务清单的完整版：点输入框上方那一行打开。清单在跑完/清空时自己为空，所以这里不需要
         // 额外的开关——内容没了，表也就没什么可显示。
-        if (todoSheetOpen) {
+        if (todoSheetOpen && state.todos.isNotEmpty()) {
             // `state.todos`，不是 `todos`：那个名字是 Composer 的参数，在这一层不存在。
             TodoSheet(todos = state.todos, onDismiss = { todoSheetOpen = false })
         }

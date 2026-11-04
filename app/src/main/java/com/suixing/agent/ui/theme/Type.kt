@@ -127,24 +127,25 @@ private val BaseTypography = Typography(
  * The whole ramp for one 字号 tier. Scaling runs over every role, not just the body
  * styles: leaving the headings alone would flatten the hierarchy at 特大.
  */
-fun suixingTypography(fontScale: Int): Typography {
+fun suixingTypography(fontScale: Int, serif: Boolean = false): Typography {
     val scale = FONT_SCALES.getOrElse(fontScale) { 1f }
+    fun TextStyle.prose() = scaled(scale).let { if (serif) it.copy(fontFamily = FontFamily.Serif) else it }
     return Typography(
-        displayLarge = BaseTypography.displayLarge.scaled(scale),
-        displayMedium = BaseTypography.displayMedium.scaled(scale),
-        displaySmall = BaseTypography.displaySmall.scaled(scale),
-        headlineLarge = BaseTypography.headlineLarge.scaled(scale),
-        headlineMedium = BaseTypography.headlineMedium.scaled(scale),
-        headlineSmall = BaseTypography.headlineSmall.scaled(scale),
-        titleLarge = BaseTypography.titleLarge.scaled(scale),
-        titleMedium = BaseTypography.titleMedium.scaled(scale),
-        titleSmall = BaseTypography.titleSmall.scaled(scale),
-        bodyLarge = BaseTypography.bodyLarge.scaled(scale),
-        bodyMedium = BaseTypography.bodyMedium.scaled(scale),
-        bodySmall = BaseTypography.bodySmall.scaled(scale),
-        labelLarge = BaseTypography.labelLarge.scaled(scale),
-        labelMedium = BaseTypography.labelMedium.scaled(scale),
-        labelSmall = BaseTypography.labelSmall.scaled(scale),
+        displayLarge = BaseTypography.displayLarge.prose(),
+        displayMedium = BaseTypography.displayMedium.prose(),
+        displaySmall = BaseTypography.displaySmall.prose(),
+        headlineLarge = BaseTypography.headlineLarge.prose(),
+        headlineMedium = BaseTypography.headlineMedium.prose(),
+        headlineSmall = BaseTypography.headlineSmall.prose(),
+        titleLarge = BaseTypography.titleLarge.prose(),
+        titleMedium = BaseTypography.titleMedium.prose(),
+        titleSmall = BaseTypography.titleSmall.prose(),
+        bodyLarge = BaseTypography.bodyLarge.prose(),
+        bodyMedium = BaseTypography.bodyMedium.prose(),
+        bodySmall = BaseTypography.bodySmall.prose(),
+        labelLarge = BaseTypography.labelLarge.prose(),
+        labelMedium = BaseTypography.labelMedium.prose(),
+        labelSmall = BaseTypography.labelSmall.prose(),
     )
 }
 

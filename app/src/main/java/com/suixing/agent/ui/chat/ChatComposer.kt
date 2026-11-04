@@ -127,6 +127,8 @@ import com.suixing.agent.ui.components.MENU_EXIT_MS
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
+import com.suixing.agent.data.Goal
+import com.suixing.agent.data.GoalStatus
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Tps
 import com.suixing.agent.data.TODO_COMPLETED
@@ -828,9 +830,10 @@ internal fun Composer(
     input: String,
     /** Slash commands to suggest while the user is typing one: name to one-line description. */
     slashTools: List<Pair<String, String>> = emptyList(),
-    /** The app-wide objective, shown as a chip so `/goal` is not silent configuration. */
-    goal: String = "",
+    /** The goal and execution state owned by this conversation. */
+    goal: Goal? = null,
     onClearGoal: () -> Unit = {},
+    onResumeGoal: () -> Unit = {},
     onInput: (String) -> Unit,
     /**
      * Takes a queued line back out of the queue and into the composer — its text **and its
@@ -1081,14 +1084,16 @@ internal fun Composer(
             // where the answer is going to appear. Pinned above the pill it read as a
             // second, competing status area — and it carried no clock, so the wait looked
             // untimed while the user was staring at it.
-            // The goal is app-wide and outlives this chat: keep it visible above the field instead
-            // of burying it in settings. `/goal` can set it from here.
-            if (goal.isNotBlank()) {
+            if (goal != null) {
                 GoalChip(
-                    text = goal,
+                    goal = goal,
+                    running = running,
                     onEdit = {
-                        onInput("/goal $goal")
+                        onInput("/goal ${goal.text}")
                         goalFocus.requestFocus()
+                    },
+                    onResume = onResumeGoal.takeIf {
+                        !running && (goal.status == GoalStatus.PAUSED || goal.status == GoalStatus.BLOCKED)
                     },
                     onClear = onClearGoal,
                     modifier = Modifier.padding(horizontal = STEER_QUEUE_INSET),
@@ -1116,11 +1121,8 @@ internal fun Composer(
             // they answer the same question — "what is going on" — and a board in different
             // clothes would read as another app's card.
             //
-            // Drawn only while this conversation's run is going: the plan belongs to the run
-            // that made it, and once the answer has landed the transcript is the record. The
-            // board itself is emptied when a run starts (see ChatViewModel.start), so a run that
-            // never touches the todo tools cannot inherit the last one's list.
-            if (running && todos.isNotEmpty()) {
+            // Keep the last board available after the reply. Starting the next run clears it.
+            if (todos.isNotEmpty()) {
                 // **remember**：`todoBoard` 每按一次键都会被重建，所以只按看板本身重算。
                 // 它现在一次扫描同时给出三行和完成数（原来是 filterNot 一遍 + count 一遍）。
                 // `TodoItem` 字段全是 String/枚举 ⇒ stable，键比较很便宜。
@@ -1755,15 +1757,23 @@ internal fun Composer(
             }
 }
 
-/** The persistent goal uses the same 36dp bar and actions as the adjacent queued lines. */
+/** A compact control strip; the assistant reply carries the goal's outcome. */
 @Composable
 private fun GoalChip(
-    text: String,
+    goal: Goal,
+    running: Boolean,
     onEdit: () -> Unit,
+    onResume: (() -> Unit)?,
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val status = when (goal.status) {
+        GoalStatus.ACTIVE -> if (goal.wakeAt > 0L) "等待继续" else "进行中"
+        GoalStatus.PAUSED -> "已暂停"
+        GoalStatus.BLOCKED -> "待处理"
+        GoalStatus.COMPLETED -> if (running) "正在总结" else "已完成"
+    }
     Surface(
         modifier = modifier.fillMaxWidth().height(36.dp),
         shape = RoundedCornerShape(14.dp),
@@ -1781,12 +1791,17 @@ private fun GoalChip(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = "目标 · $text",
+                text = "$status · ${goal.text}",
                 style = MaterialTheme.typography.labelMedium,
+                color = if (goal.status == GoalStatus.ACTIVE) scheme.primary else scheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (onResume != null) {
+                Text("继续", color = scheme.primary, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable(onClick = onResume).padding(horizontal = 8.dp, vertical = 10.dp))
+            }
             QueueAction(icon = R.drawable.ic_square_pen, label = "编辑目标", onClick = onEdit)
             QueueAction(icon = R.drawable.ic_x, label = "清除目标", onClick = onClear)
         }

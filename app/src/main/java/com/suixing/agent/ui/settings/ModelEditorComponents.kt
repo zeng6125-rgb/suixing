@@ -36,6 +36,7 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
@@ -44,6 +45,34 @@ import com.suixing.agent.data.hasProviderDetails
 import com.suixing.agent.ui.components.CompactOutlinedTextField
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SuixingDialog
+
+@Composable
+internal fun ProviderApiKeyField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    providerId: String? = null,
+    optional: Boolean = false,
+) {
+    var revealed by remember(providerId) { mutableStateOf(false) }
+    CompactOutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(if (optional) "API Key（可选）" else "API Key") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(enabled = value.isNotEmpty(), onClick = { revealed = !revealed }) {
+                Icon(
+                    ImageVector.vectorResource(if (revealed) R.drawable.ic_eye_off else R.drawable.ic_eye),
+                    if (revealed) "隐藏 API Key" else "显示 API Key",
+                    Modifier.size(18.dp),
+                )
+            }
+        },
+    )
+}
 
 /** Compact native actions: a 40dp visual minimum, with Material's standard touch target. */
 @Composable
@@ -126,8 +155,7 @@ internal fun AddProviderDialog(onDismiss: () -> Unit, onAdd: (ProviderConfig) ->
                     )
                     CompactOutlinedTextField(address, { address = it }, label = { Text("接口地址") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
-                    CompactOutlinedTextField(key, { key = it }, label = { Text("API Key（可选）") }, singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                    ProviderApiKeyField(value = key, onValueChange = { key = it }, optional = true)
                     Text("添加后可获取并启用模型，最后在页面底部保存。", style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

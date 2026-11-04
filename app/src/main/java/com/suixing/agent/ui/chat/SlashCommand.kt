@@ -34,11 +34,16 @@ internal fun parseSlashCommand(text: String): SlashCommand? {
 
 private val NAME = Regex("[A-Za-z][A-Za-z0-9_]*")
 
-/** `/goal` reads; `/goal clear` clears; every other tail follows the tool's JSON schema. */
+/** `/goal` reads; `/goal resume` resumes; `/goal clear` clears. */
 internal fun SlashCommand.toolName(): String =
-    if (name == "goal" && argument.isBlank()) "goal_read" else name
+    when {
+        name == "goal" && argument.isBlank() -> "goal_read"
+        name == "goal" && argument.equals("resume", ignoreCase = true) -> "goal_resume"
+        else -> name
+    }
 
 internal fun SlashCommand.toolArguments(spec: ToolSpec): JsonObject? {
+    if (name == "goal" && toolName() == "goal_resume") return buildJsonObject { }
     if (name == "goal" && argument.equals("clear", ignoreCase = true)) {
         return buildJsonObject { put("text", "") }
     }

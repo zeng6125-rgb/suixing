@@ -43,7 +43,8 @@ fun SuixingTheme(
     }
     // Rebuilding the ramp is cheap but not free, and a tier only moves in settings,
     // so the two of them are keyed on the setting instead of running every recomposition.
-    val typography = remember(fontScale) { suixingTypography(fontScale) }
+    val useSerif = palette == AppearancePalette.CLAUDE
+    val typography = remember(fontScale, useSerif) { suixingTypography(fontScale, serif = useSerif) }
     val shapes = remember(cornerScale) { suixingShapes(cornerScale) }
     // **选中高亮必须自己给**（用户：「有些地方长按复制没有底色，看不出选了哪儿」）：
     // 全项目此前没有设置 `LocalTextSelectionColors`，用的是 Compose 默认值 ——

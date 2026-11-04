@@ -5,6 +5,7 @@ import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.GoalStore
+import com.suixing.agent.data.GoalStatus
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.Roles
@@ -80,7 +81,7 @@ class DirectToolRunTest {
         val engine = AgentEngine(llm = client, goals = goals)
         val produced = engine.startRun("chat", "title",
             listOf(StoredMessage("user", Roles.USER, "/goal finish the migration")),
-            AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, autoProfile = false, autoCompress = false),
+            AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, autoProfile = false, autoCompress = false, maxToolRounds = 1),
             registry, capabilities, skills, memory, profile, ApprovalGate(), { events += it },
             initialTool = ToolCallRequest("explicit-goal", "goal", """{"text":"finish the migration"}"""))
         assertEquals(listOf(Roles.ASSISTANT, Roles.TOOL, Roles.ASSISTANT), produced.map { it.role })
@@ -91,6 +92,104 @@ class DirectToolRunTest {
         assertTrue(events.any { it is AgentEvent.ToolFinished && it.name == "goal" && it.ok })
         assertFalse(engine.isRunning("chat"))
         coVerify(exactly = 1) { client.complete(any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test fun `goal completion writes an assistant reply before finishing and cannot execute more tools`() = runBlocking {
+        val goals = GoalStore(folder.newFile("managed-goal.json"))
+        var requests = 0
+        val events = mutableListOf<AgentEvent>()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                val wire = secondArg<List<ChatMessage>>()
+                when (++requests) {
+                    1 -> AssistantTurn("first result", emptyList(), "stop")
+                    2 -> {
+                        assertTrue(wire.last().text.contains("Continue the active goal"))
+                        AssistantTurn("", listOf(ToolCallRequest("verified", "goal_update",
+                            """{"status":"completed","note":"Verified the result"}""")), "tool_calls")
+                    }
+                    3 -> {
+                        assertTrue(thirdArg<List<ToolSpec>>().isEmpty())
+                        assertTrue(wire.last().text.contains("Verified the result"))
+                        AssistantTurn("已核对，结果正确。", listOf(ToolCallRequest("unexpected", "goal_update", "{}")), "stop")
+                    }
+                    else -> error("completed goals cannot wake again")
+                }
+            }
+        }
+        val produced = AgentEngine(llm = client, goals = goals).startRun(
+            "chat", "title", listOf(StoredMessage("u", Roles.USER, "/goal verify the result")),
+            AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, autoProfile = false, autoCompress = false),
+            registry(goals), capabilities, skills, memory, profile, ApprovalGate(), { events += it },
+            initialTool = ToolCallRequest("start", "goal", """{"text":"verify the result"}"""),
+        )
+        assertEquals(3, requests)
+        assertEquals(GoalStatus.COMPLETED, goals.read().status)
+        assertEquals("Verified the result", goals.read().progress)
+        assertEquals("verified", produced.last { it.role == Roles.TOOL }.toolCallId)
+        assertEquals("已核对，结果正确。", produced.last().text)
+        assertTrue(produced.last().toolCalls.isEmpty())
+        assertEquals("已核对，结果正确。", (events.last() as AgentEvent.Finished).text)
+        assertTrue(produced.none { it.role == Roles.USER && it.text.contains("Continue the active goal") })
+    }
+
+    @Test fun `stopping a sleeping goal prevents wakeup and preserves progress`() = runBlocking {
+        withTimeout(10_000) {
+            val goals = GoalStore(folder.newFile("sleeping-goal.json"))
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                    AssistantTurn("", listOf(ToolCallRequest("waiting", "goal_update",
+                        """{"status":"progress","note":"Started the checks","wait_seconds":60}""")), "tool_calls")
+            }
+            val engine = AgentEngine(llm = client, goals = goals)
+            val running = async {
+                engine.startRun("chat", "title", listOf(StoredMessage("u", Roles.USER, "/goal check results")),
+                    AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, autoProfile = false, autoCompress = false),
+                    registry(goals), capabilities, skills, memory, profile, ApprovalGate(), {},
+                    initialTool = ToolCallRequest("start", "goal", """{"text":"check results"}"""))
+            }
+            goals.changes.first { (it?.wakeAt ?: 0L) > 0L }
+            assertTrue(engine.cancel("chat"))
+            running.await()
+            assertEquals(GoalStatus.PAUSED, goals.read().status)
+            assertEquals("Started the checks", goals.read().progress)
+            assertEquals(0L, goals.read().wakeAt)
+            coVerify(exactly = 1) { client.complete(any(), any(), any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    @Test fun `a short goal wait wakes into the next model request once`() = runBlocking {
+        withTimeout(10_000) {
+            val goals = GoalStore(folder.newFile("wake-goal.json"))
+            var requests = 0
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    when (++requests) {
+                        1 -> AssistantTurn("", listOf(ToolCallRequest("wait", "goal_update",
+                            """{"status":"progress","note":"Started checks","wait_seconds":1}""")), "tool_calls")
+                        2 -> {
+                            assertEquals(0L, goals.read().wakeAt)
+                            assertEquals("Started checks", goals.read().progress)
+                            AssistantTurn("", listOf(ToolCallRequest("done", "goal_update",
+                                """{"status":"completed","note":"Checks passed"}""")), "tool_calls")
+                        }
+                        3 -> AssistantTurn("检查通过。", emptyList(), "stop")
+                        else -> error("goal continued after completion")
+                    }
+                }
+            }
+            val engine = AgentEngine(llm = client, goals = goals)
+            val running = async {
+                engine.startRun("chat", "title", listOf(StoredMessage("u", Roles.USER, "/goal check results")),
+                    AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, autoProfile = false, autoCompress = false),
+                    registry(goals), capabilities, skills, memory, profile, ApprovalGate(), {},
+                    initialTool = ToolCallRequest("start", "goal", """{"text":"check results"}"""))
+            }
+            goals.changes.first { (it?.wakeAt ?: 0L) > 0L }
+            running.await()
+            assertEquals(3, requests)
+            assertEquals(GoalStatus.COMPLETED, goals.read().status)
+        }
     }
 
     @Test fun `approval waits with a tool card before changing the goal or contacting the model`() = runBlocking {
@@ -108,7 +207,7 @@ class DirectToolRunTest {
             val events = mutableListOf<AgentEvent>()
             val running = async {
                 engine.startRun("chat", "title", listOf(StoredMessage("u", Roles.USER, "/goal approved goal")),
-                    AppSettings(approvalMode = ApprovalMode.ASK, subagentsEnabled = false, autoProfile = false, autoCompress = false),
+                    AppSettings(approvalMode = ApprovalMode.ASK, subagentsEnabled = false, autoProfile = false, autoCompress = false, maxToolRounds = 1),
                     registry(goals), capabilities, skills, memory, profile, gate, { events += it },
                     initialTool = ToolCallRequest("approve-goal", "goal", """{"text":"approved goal"}"""))
             }
@@ -149,7 +248,7 @@ class DirectToolRunTest {
             val events = mutableListOf<AgentEvent>()
             val running = async {
                 engine.startRun("chat", "title", listOf(StoredMessage("u", Roles.USER, "start")),
-                    AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, autoProfile = false, autoCompress = false),
+                    AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, autoProfile = false, autoCompress = false, maxToolRounds = 2),
                     registry(goals), capabilities, skills, memory, profile, ApprovalGate(), { events += it })
             }
             firstRequest.await()

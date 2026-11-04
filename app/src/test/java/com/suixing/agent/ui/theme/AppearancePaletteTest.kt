@@ -2,11 +2,23 @@ package com.suixing.agent.ui.theme
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.font.FontFamily
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppearancePaletteTest {
+    @Test
+    fun `Claude uses one typeface for body titles and UI labels while preserving the size setting`() {
+        val normal = suixingTypography(3)
+        val claude = suixingTypography(3, serif = true)
+        assertEquals(FontFamily.Serif, claude.bodyMedium.fontFamily)
+        assertEquals(FontFamily.Serif, claude.titleLarge.fontFamily)
+        assertEquals(normal.bodyMedium.fontSize, claude.bodyMedium.fontSize)
+        assertEquals(FontFamily.Serif, claude.labelLarge.fontFamily)
+        assertEquals(normal.labelLarge.fontSize, claude.labelLarge.fontSize)
+    }
+
     @Test
     fun `saved palette ids retain their meaning`() {
         assertEquals(AppearancePalette.SUIXING, AppearancePalette.fromId(0))

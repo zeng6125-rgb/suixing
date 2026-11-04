@@ -143,9 +143,12 @@ private data class TestOutcome(val ok: Boolean, val message: String)
  * in place inside one destination gets no enter/exit transition at all — the shell's
  * NavHost is the only thing that animates, and it only animates between destinations.
  */
+internal const val SUBAGENT_SETTINGS_ROUTE = "settings/subagent"
+
 private enum class SettingsPage(val title: String, val route: String) {
     MODEL("模型与生成", "settings/model"),
     CONVERSATION("对话配置", "settings/conversation"),
+    SUBAGENT("子任务（Subagent）", SUBAGENT_SETTINGS_ROUTE),
     APPEARANCE("外观", "settings/appearance"),
     NETWORK("网络与语音", "settings/network"),
     DATA("数据", "settings/data"),
@@ -197,6 +200,7 @@ internal fun SettingsPageRoute(
     when (SettingsPage.entries.firstOrNull { it.route == route }) {
         SettingsPage.MODEL -> ModelSettingsPage(onBack = onBack)
         SettingsPage.CONVERSATION -> ConversationSettingsPage(onBack = onBack)
+        SettingsPage.SUBAGENT -> SubagentSettingsPage(onBack = onBack)
         SettingsPage.APPEARANCE -> AppearanceSettingsPage(onBack = onBack)
         SettingsPage.NETWORK -> NetworkVoiceSettingsPage(onBack = onBack)
         SettingsPage.DATA -> DataSettingsPage(onBack = onBack, onOpen = onOpen)
@@ -236,6 +240,9 @@ private fun SettingsRoot(
             },
             SettingsGroupRow("对话配置", "输入、运行、失败重试与显示") {
                 openNow.value(SettingsPage.CONVERSATION.route)
+            },
+            SettingsGroupRow(SettingsPage.SUBAGENT.title, "任务委派与并行数") {
+                openNow.value(SettingsPage.SUBAGENT.route)
             },
             SettingsGroupRow("外观", "主题、配色与排版") {
                 openNow.value(SettingsPage.APPEARANCE.route)
@@ -544,11 +551,16 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     var baseUrlText by remember { mutableStateOf("") }
     var nameText by remember { mutableStateOf("") }
     var apiKeyText by remember { mutableStateOf("") }
-    var testModelText by remember { mutableStateOf("") }
+    var testModelText by remember(selected?.id, seeded) {
+        mutableStateOf(stored.model.takeIf {
+            selected?.id == stored.activeProvider()?.id && it in selected?.enabled.orEmpty()
+        }.orEmpty())
+    }
+    val testModel = testModelText.takeIf { it in selected?.enabled.orEmpty() }.orEmpty()
     var endpointTouched by remember { mutableStateOf(false) }
-    // 两个下拉的展开状态提到页面：BACK 时页面要先收起它们，否则会直接退页、
+    // 下拉的展开状态提到页面：BACK 时页面要先收起它们，否则会直接退页、
     // 而浮层窗口在页面退场动画里还挂着（用户：「下拉框还会残留一会」）。
-    var testModelMenuOpen by remember { mutableStateOf(false) }
+    var testModelMenuOpen by remember(selected?.id) { mutableStateOf(false) }
     var providerMenuOpen by remember { mutableStateOf(false) }
     var protocolMenuOpen by remember { mutableStateOf(false) }
     LaunchedEffect(selected?.id, seeded) {
@@ -557,7 +569,6 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         baseUrlText = selected?.baseUrl.orEmpty()
         nameText = selected?.name.orEmpty()
         apiKeyText = selected?.apiKey.orEmpty()
-        testModelText = form.model   // 测试模型 ID 是顶层设置，不随 provider 切换重置
     }
     fun flushEndpointFields() {
         form = form.copy(baseUrl = baseUrlText, apiKey = apiKeyText)
@@ -633,7 +644,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             baseUrlText = keptProvider?.baseUrl ?: saved.baseUrl
             nameText = keptProvider?.name.orEmpty()
             apiKeyText = keptProvider?.apiKey ?: saved.apiKey
-            testModelText = saved.model
+            testModelText = testModelText.takeIf { it in keptProvider?.enabled.orEmpty() }.orEmpty()
             endpointTouched = false
             selectedId = keptId
         }
@@ -641,6 +652,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     }
     /** BACK 先收起开着的下拉，再考虑离开页面。 */
     fun closeMenusFirst(): Boolean = when {
+        testModelMenuOpen -> { testModelMenuOpen = false; true }
         providerMenuOpen -> { providerMenuOpen = false; true }
         protocolMenuOpen -> { protocolMenuOpen = false; true }
         else -> false
@@ -699,7 +711,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                         }
                         ModelActionButton(
                             text = if (testing) "测试中" else "测试连接", busy = testing,
-                            enabled = seeded && !saving && !loadingModels,
+                            enabled = seeded && !saving && !loadingModels && testModel.isNotEmpty(),
                             icon = R.drawable.ic_rotate_cw,
                             onClick = {
                                 scope.launch {
@@ -710,7 +722,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                     try {
                                         // Test the draft without committing an unsaved supplier.
                                         outcome = runCatching {
-                                            client.complete(settings = form.copy(model = testModelText),
+                                            client.complete(settings = form.copy(model = testModel),
                                                 messages = listOf(ChatMessage.user("你好，请只回复两个字：可用")),
                                                 tools = emptyList())
                                         }.fold(
@@ -850,18 +862,13 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item {
-                OutlinedTextField(
-                    textStyle = settingsFieldText,
+                ProviderApiKeyField(
                     value = apiKeyText,
                     onValueChange = { value ->
                         endpointTouched = true
                         apiKeyText = value
                     },
-                    label = { Text("API Key") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.small,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = SettingsStyle.ControlHeight),
+                    providerId = selected?.id,
                 )
             }
             item {
@@ -980,7 +987,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 EnabledModelCard(
                     id = id, alias = selected?.aliases?.get(id).orEmpty(),
                     contextWindow = form.modelContexts[id] ?: 0, maxTokens = form.modelMaxTokens[id] ?: 0,
-                    testModel = testModelText == id,
+                    testModel = testModel == id,
                     onTest = { testModelText = id },
                     onEdit = { alias, contextWindow, output ->
                         form = form.mapProvider(selected?.id) {
@@ -1002,58 +1009,14 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             item {
                 // **测试用的模型只属于测试**（用户：「下拉只给测试用，不动全局模型」）：
                 // 选项只列当前供应商已启用的模型；这里选什么都不会改写全局聊天模型。
-                val testable = selected?.enabled.orEmpty()
-                Box(Modifier.fillMaxWidth()) {
-                    Surface(
-                        onClick = { if (testable.isNotEmpty()) testModelMenuOpen = true },
-                        shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    "测试连接使用的模型",
-                                    style = SettingsStyle.description,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Text(
-                                    testModelText.ifBlank { "未选择" },
-                                    style = SettingsStyle.body,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            Icon(
-                                imageVector = ImageVector.vectorResource(R.drawable.ic_chevron_down),
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                    }
-                    DropdownMenu(
-                        expanded = testModelMenuOpen,
-                        onDismissRequest = { testModelMenuOpen = false },
-                    ) {
-                        testable.forEach { id ->
-                            DropdownMenuItem(
-                                text = { Text(id, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                onClick = { testModelText = id; testModelMenuOpen = false },
-                            )
-                        }
-                        if (testable.isEmpty()) {
-                            DropdownMenuItem(
-                                text = { Text("还没有启用的模型") },
-                                onClick = { testModelMenuOpen = false },
-                            )
-                        }
-                    }
-                }
+                TestModelDropdown(
+                    provider = selected,
+                    selectedId = testModel,
+                    enabled = seeded && !testing && !saving && !loadingModels,
+                    expanded = testModelMenuOpen,
+                    onExpandedChange = { testModelMenuOpen = it },
+                    onPick = { testModelText = it },
+                )
             }
             item {
                 SettingRow(
@@ -1427,18 +1390,6 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
             // 「自动整理用户画像」与「画像整理间隔」搬到了用户画像页（ProfileScreen）：它们管的是
             // 那份画像本身怎么维护，与这一页的对话行为不是一回事，而「数据」页是纯入口列表、
             // 放开关会破坏它的形态。字段与存储没动。
-            item {
-                SettingRow(title = "并行子任务",
-                    subtitle = "复杂任务可拆分处理；共用当前模型与工具权限，可能增加模型调用。",
-                    control = { SettingsSwitch(checked = stored.subagentsEnabled,
-                        onCheckedChange = { on -> scope.persist { it.copy(subagentsEnabled = on) } }) })
-            }
-            if (stored.subagentsEnabled) item {
-                LabeledSlider(label = "子任务并行数 ${stored.subagentParallelism.coerceIn(1, 3)}",
-                    hint = "每轮最多创建6个子任务；父任务结束或停止时，未完成的子任务会一同取消。",
-                    value = stored.subagentParallelism.coerceIn(1, 3).toFloat(), range = 1f..3f, steps = 1,
-                    onValueChange = { value -> scope.persist { it.copy(subagentParallelism = value.toInt()) } })
-            }
             item { SectionHeader("审批与授权") }
             item {
                 LabeledBlock(label = "工具审批", hint = "模型每次动手前要不要问你。") {
@@ -1777,6 +1728,48 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
                             onCheckedChange = { on -> scope.persist { it.copy(expandTools = on) } },
                         )
                     },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubagentSettingsPage(onBack: () -> Unit) {
+    val stored by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val scope = rememberCoroutineScope()
+    val parallelism = stored.subagentParallelism.coerceIn(1, 3)
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = { PageTopBar(title = SettingsPage.SUBAGENT.title, onBack = onBack) },
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(padding),
+            contentPadding = settingsPagePadding(),
+            verticalArrangement = Arrangement.spacedBy(SettingsStyle.RowGap),
+        ) {
+            item { SectionHeader("任务委派", first = true) }
+            item {
+                SettingRow(
+                    title = "允许委派子任务",
+                    subtitle = "助手可将复杂任务拆开，子任务继承当前模型与工具权限，可能增加模型调用。",
+                    control = {
+                        SettingsSwitch(
+                            checked = stored.subagentsEnabled,
+                            onCheckedChange = { on -> scope.persist { it.copy(subagentsEnabled = on) } },
+                        )
+                    },
+                )
+            }
+            if (stored.subagentsEnabled) item {
+                LabeledSlider(
+                    label = "子任务并行数 $parallelism",
+                    hint = "每轮最多创建 6 个子任务。父任务结束或停止时，未完成的子任务会一同取消。",
+                    value = parallelism.toFloat(),
+                    range = 1f..3f,
+                    steps = 1,
+                    onValueChange = { value -> scope.persist { it.copy(subagentParallelism = value.toInt()) } },
                 )
             }
         }

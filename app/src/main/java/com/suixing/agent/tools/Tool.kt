@@ -9,6 +9,7 @@ import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.ScheduleStore
 import com.suixing.agent.data.ScheduleWriter
 import com.suixing.agent.data.SettingsRepository
+import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.TodoStore
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.skills.SkillStore
@@ -43,6 +44,8 @@ data class ToolResult(
     val ok: Boolean,
     val output: String,
     val imageBase64: String? = null,
+    /** In-process UI payload, kept separate from the model's textual result. */
+    val todoSnapshot: List<TodoItem>? = null,
 ) {
     companion object {
         fun success(output: String): ToolResult = ToolResult(true, output)

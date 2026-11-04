@@ -11,6 +11,7 @@ import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.GoalStatus
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
 import com.suixing.agent.data.ContextCheckpoint
@@ -216,7 +217,6 @@ data class ChatUiState(
     val compressingSince: Long = 0L,
     val status: String = "",
     /** The persistent objective shared by every conversation, shown above the composer. */
-    val goal: String = "",
     /** The tool the run is inside right now; the tool card names it live. */
     val runningTool: String? = null,
     /** Estimated system prompt and tool definitions, independent of the running request. */
@@ -243,15 +243,7 @@ data class ChatUiState(
      * vanished into a queue with nothing on screen to show for it.
      */
     val pendingTurns: List<PendingTurn> = emptyList(),
-    /**
-     * The agent's own task board, as the last `todo_write` left it — drawn above the composer
-     * while the run that wrote it is going.
-     *
-     * Read from `TodoStore` rather than carried in the event: the board is app-wide, its writes
-     * are the whole list, and the file is the only copy that cannot drift from what the model
-     * believes it has planned. Empty between runs (see [start]), so a plan cannot outlive the
-     * run that made it.
-     */
+    /** The last board from this conversation, kept on screen until the next run starts. */
     val todos: List<TodoItem> = emptyList(),
     /**
      * This conversation's compression record, oldest first.
@@ -807,18 +799,7 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /**
-     * 每个会话**自己**的板上快照：chatId → 该会话的 run 最近一次 todo 工具事件时文件里的清单。
-     *
-     * **文件（TodoStore）仍是唯一事实源**：这里只是事件之间的显示缓存，每次 todo 工具事件都从
-     * 文件重读、从不参与写（写只走 TodoTools）。按会话持有是因为用户报了反过来的病：A 会话的
-     * `todo_write` 事件到达时用户在 B 会话，旧的全局一份把 A 的板子画到了 B 屏幕上（「其它会话的
-     * 任务队列出现在另一个会话」）。缓存落后于别的会话的写入正是想要的隔离：一个会话只画自己
-     * 的 run 写的计划。开跑时清空自己那格（不继承上一轮的计划），与旧的全局版同一个不变量。
-     *
-     * 并发容器 + [todoBoardsLock]：这份缓存由事件线程写（[refreshTodos] 跟着 todo 工具事件
-     * 回来）、由界面线程读（[openConversation] 画板子），和 [sessions] 一样不能是普通 map。
-     */
+    /** Each conversation retains the exact board delivered by its last successful tool write. */
     private val todoBoards = ConcurrentHashMap<String, List<TodoItem>>()
 
     /**
@@ -925,22 +906,25 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /** Clears the app-wide goal from the chip above the composer. */
+    internal val goal = Core.goals.changes
+
+    fun resumeGoal() {
+        send("/goal resume")
+    }
+
+    /** Clears the visible objective; an active goal's own run is also cancelled. */
     fun clearGoal() {
+        val chatId = _state.value.conversationId
+        val shown = goal.value?.takeIf { it.visibleIn(chatId) } ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            Core.goals.clear()
-            _state.update { it.copy(goal = "") }
+            if (Core.goals.clearFor(chatId, expectedId = shown.id) != null &&
+                shown.status == GoalStatus.ACTIVE
+            ) Core.engine.cancel(chatId)
         }
     }
 
     init {
-        viewModelScope.launch(Dispatchers.IO) {
-            val goal = Core.goals.read().text
-            _state.update { if (it.goal == goal) it else it.copy(goal = goal) }
-            Core.goals.changes.collect { written ->
-                if (written != null) _state.update { it.copy(goal = written) }
-            }
-        }
+        viewModelScope.launch(Dispatchers.IO) { Core.goals.read() }
         // The engine keys its runs by conversation, so this screen subscribes to the
         // state of whichever conversation is on display: a run elsewhere neither
         // locks this screen nor narrates itself into its status line.
@@ -1338,9 +1322,6 @@ class ChatViewModel : ViewModel() {
                 // The queue belongs to the run, not to the screen: coming back to it must
                 // still show what is waiting.
                 pendingSteers = steersOf(conversation.id),
-                // And so does the board: it is read from disk on tool events, so a state built
-                // here would otherwise be the one place it is missing. 只取这个会话自己那一格。
-                todos = todosOf(conversation.id),
             )
         } else {
             // A conversation that never picked a persona keeps the one already on screen,
@@ -1378,7 +1359,10 @@ class ChatViewModel : ViewModel() {
         }
         // 排队输入属于会话。后台运行结束时只保留队列，重新打开必须把它放回屏幕；
         // 不能因为没有新 Running→terminal 事件就把用户输入永久留在不可见的表里。
-        _state.value = openedState.copy(pendingTurns = pendingTurnsOf(conversation.id))
+        _state.value = openedState.copy(
+            pendingTurns = pendingTurnsOf(conversation.id),
+            todos = todosOf(conversation.id),
+        )
         // **补读正文**（#30 + LRU 缓存）：上面只按 meta 建了状态，这里把最近 N 轮读进来。
         // 先查缓存：「切走再切回」在几个会话之间来回看是极常见的操作，不该每次都读盘。
         //
@@ -2304,25 +2288,6 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
-     * Re-reads the board and puts it on screen — **for the conversation the event belongs to**.
-     *
-     * There is no flow to collect: [TodoStore] writes the whole list under a lock and nothing
-     * else in the app touches it, so the two tool events are the clock. Off the main thread
-     * because the board is a file, and this runs on the reader thread that delivers events.
-     * 只发给 [chatId] 自己（在屏就同时上屏，不在屏就只进它的缓存）：事件带的是哪个会话的 run，
-     * 板子就属于哪个会话 —— 旧的「发给在屏会话」会把 A 的计划画到 B 屏幕上。
-     */
-    private fun refreshTodos(chatId: String) {
-        viewModelScope.launch {
-            val board = withContext(Dispatchers.IO) { Core.todos.read() }
-            setTodos(chatId, board)
-            if (_state.value.conversationId == chatId) {
-                _state.update { it.copy(todos = board) }
-            }
-        }
-    }
-
-    /**
      * Asks the run on screen to fold the conversation at its next turn boundary.
      *
      * Only a flag: the engine consumes it between rounds, so nothing in flight is cut and
@@ -2981,14 +2946,9 @@ class ChatViewModel : ViewModel() {
             }
         }
         putSession(next)
-        // The board above the composer: the only two events that can change it are the todo
-        // tool starting and finishing, and reading it back here is what makes the row appear,
-        // tick and go without anything polling a file. Both ends are read: the write is a
-        // finished call's result, and the model may also re-read the board mid-run.
-        if (event is AgentEvent.ToolStarted && event.name == TODO_TOOL ||
-            event is AgentEvent.ToolFinished && event.name == TODO_TOOL
-        ) {
-            refreshTodos(chatId)
+        if (event is AgentEvent.ToolFinished) event.todoSnapshot?.let { board ->
+            setTodos(chatId, board)
+            _state.update { if (it.conversationId == chatId) it.copy(todos = board) else it }
         }
         // Saved straight away: a handed-over line that only lived in memory would vanish the
         // moment the user switches conversations, which is when they go looking for it.
@@ -3722,14 +3682,3 @@ private fun RunSession.clearRetryStatus(): RunSession =
 private const val RETRY_TRACE_FILE = "retry-trace.log"
 private const val RETRY_TRACE_MAX_BYTES = 128 * 1024L
 private const val RETRY_TRACE_KEEP_CHARS = 64 * 1024
-
-
-/**
- * The one tool that writes the board (`tools/TodoTools.kt:26`), named here because this is the
- * only place the UI needs to recognise it.
- *
- * A literal rather than a reference: `TodoTools` declares its names inline in its specs and
- * exposes no constant, and a name shared across packages would mean changing a file that this
- * screen has no other business with — the tool's own spec is the source of truth either way.
- */
-private const val TODO_TOOL = "todo_write"

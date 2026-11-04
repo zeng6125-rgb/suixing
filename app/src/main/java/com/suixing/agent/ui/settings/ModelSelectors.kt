@@ -92,7 +92,7 @@ private class AnchorBelowProvider(private val gapPx: Int) :
 }
 
 /**
- * 模型页两个下拉的浮层容器。
+ * 模型页各个选择器共用的浮层容器。
  *
  * **原来用系统的 `DropdownMenu`**：12dp 圆角、系统 elevation 阴影（偏灰、有方向偏移）、
  * 系统自带的展开入场 —— 而全站其它浮层都是 [MenuCard]（20dp 圆角、10dp elevation、
@@ -111,7 +111,7 @@ private fun ModelDropdownMenu(
     val width = with(density) { anchorWidth.toDp() }
     val gapPx = with(density) { 4.dp.roundToPx() }
     // provider 必须 remember：否则每次重组都是新实例 ⇒ MenuCard 的参数恒变，开着时每帧重跑定位。
-    val provider = remember { AnchorBelowProvider(gapPx) }
+    val provider = remember(gapPx) { AnchorBelowProvider(gapPx) }
     /**
      * 阴影余量按可用空间收。
      *
@@ -358,6 +358,69 @@ internal fun CompactProtocolPicker(
                         .background(if (isChosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
                         .semantics { this.selected = isChosen },
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun TestModelDropdown(
+    provider: ProviderConfig?,
+    selectedId: String,
+    enabled: Boolean,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onPick: (String) -> Unit,
+) {
+    val models = provider?.enabled.orEmpty()
+    val canOpen = enabled && models.isNotEmpty()
+    var anchorWidth by remember { mutableIntStateOf(0) }
+    val colors = MaterialTheme.colorScheme
+    val title = selectedId.takeIf { it.isNotEmpty() }?.let { provider?.displayModel(it) } ?: "选择测试模型"
+    val identity: @Composable () -> Unit = {
+        Box(
+            Modifier.size(30.dp).clip(MaterialTheme.shapes.small).background(colors.surfaceContainerHighest),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(ImageVector.vectorResource(R.drawable.ic_cpu), null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+        }
+    }
+    Box(Modifier.fillMaxWidth().onSizeChanged { anchorWidth = it.width }) {
+        SelectionCardButton(
+            identity = identity,
+            title = title,
+            subtitle = if (models.isEmpty()) "先启用一个模型" else "仅用于测试连接",
+            expanded = expanded,
+            enabled = canOpen,
+            description = "测试连接使用的模型：$title",
+            onClick = { onExpandedChange(true) },
+        )
+        ModelDropdownMenu(expanded && canOpen, { onExpandedChange(false) }, anchorWidth) {
+            models.forEach { id ->
+                val chosen = id == selectedId
+                val label = provider?.displayModel(id) ?: id
+                DropdownMenuItem(
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(label, style = SettingsStyle.body,
+                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (label != id) Text(id, style = SettingsStyle.description,
+                                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    },
+                    leadingIcon = identity,
+                    trailingIcon = {
+                        Box(Modifier.size(18.dp)) {
+                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前测试模型", tint = colors.primary)
+                        }
+                    },
+                    onClick = { onExpandedChange(false); onPick(id) },
+                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
+                        .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
+                        .semantics { selected = chosen },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 )
             }
         }

@@ -90,7 +90,7 @@ class TodoTools(private val todos: TodoStore) : ToolGroup() {
             )
         }
         val stored = todos.write(items)
-        ToolResult.success("Task list written (${stored.size} rows):\n" + render(stored))
+        ToolResult(ok = true, output = "Task list written (${stored.size} rows):\n" + render(stored), todoSnapshot = stored)
     }
 
     private suspend fun read(): ToolResult = withContext(Dispatchers.IO) {

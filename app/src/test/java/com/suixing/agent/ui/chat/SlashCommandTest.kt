@@ -57,6 +57,8 @@ class SlashCommandTest {
             listOf("text" to Schema.string("")), required = listOf("text")))
         val read = ToolSpec("goal_read", "", Schema.objectOf(emptyList()))
         assertEquals("goal_read", SlashCommand("goal", "").toolName())
+        assertEquals("goal_resume", SlashCommand("goal", "resume").toolName())
+        assertEquals("{}", SlashCommand("goal", "resume").toolArguments(goal).toString())
         assertEquals("{}", SlashCommand("goal", "").toolArguments(read).toString())
         assertEquals("goal", SlashCommand("goal", "finish").toolName())
         assertEquals("{\"text\":\"finish\"}", SlashCommand("goal", "finish").toolArguments(goal).toString())

@@ -6,6 +6,8 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.STEER_IMMEDIATE
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
+import com.suixing.agent.data.Goal
+import com.suixing.agent.data.GoalStatus
 import com.suixing.agent.data.GoalStore
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
@@ -13,6 +15,7 @@ import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.SettingsRepository
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.TranscriptRedaction
 import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.data.Tps
@@ -33,6 +36,8 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.service.TouchFx
 import com.suixing.agent.tools.TIER_ACCESSIBILITY
+import com.suixing.agent.tools.GOAL_TOOL_NAMES
+import com.suixing.agent.tools.GoalTools
 import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
 import com.suixing.agent.tools.TIER_SHELL
@@ -60,6 +65,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.Call
 import java.io.File
 import java.io.IOException
@@ -84,7 +90,12 @@ sealed interface AgentEvent {
 
     data class ToolMessage(val message: StoredMessage) : AgentEvent
 
-    data class ToolFinished(val name: String, val ok: Boolean, val output: String) : AgentEvent
+    data class ToolFinished(
+        val name: String,
+        val ok: Boolean,
+        val output: String,
+        val todoSnapshot: List<TodoItem>? = null,
+    ) : AgentEvent
 
     data class Failed(val message: String) : AgentEvent
 
@@ -413,11 +424,12 @@ class AgentEngine(
     private val scope: CoroutineScope? = null,
     private val onCompleted: (String) -> Unit = {},
     private val approvalSourceTitle: String? = null,
-    /** App-wide objective; children inherit it so delegated work keeps the same aim. */
+    /** Durable objective shared with the chat UI. */
     private val goals: GoalStore? = null,
 ) {
 
     private val runs = MutableStateFlow<Map<String, RunHandle>>(emptyMap())
+    private val goalTools = goals?.let(::GoalTools)
 
     /** 画像整理器：收尾挂钩与「重新总结」共用一个，它自己无状态。 */
     private val summarizer = ProfileSummarizer(llm)
@@ -757,6 +769,7 @@ class AgentEngine(
         private val _state = MutableStateFlow<RunState>(RunState.Idle)
         private val completionReported = AtomicBoolean(false)
         @Volatile private var subagents: SubagentPool? = null
+        private val goalRun = goals?.let(::GoalRun)
         private val compactionRetry = CompactionRetryGate()
         internal fun cancelSubagent(id: String): Boolean = subagents?.cancel(id) ?: false
 
@@ -1179,7 +1192,26 @@ class AgentEngine(
         // Asked through all() rather than find(): "skill_read is not in the visible set" is the
         // question, and it is the same list the prompt is about to summarise.
         val readable = registry.all().any { it.spec.name == "skill_read" }
-        var goalText = goals?.let { withContext(Dispatchers.IO) { it.read().text } }.orEmpty()
+        val goalStore = goals
+        var goalText = goalStore?.let { withContext(Dispatchers.IO) { it.read().objectiveFor(chatId) } }.orEmpty()
+        var goalMode = false
+        var goalClosing = false
+        fun beginGoalSummary(goal: Goal?): Boolean {
+            if (goal?.status != GoalStatus.COMPLETED && goal?.status != GoalStatus.BLOCKED) return false
+            goalClosing = true
+            wire += ChatMessage.user(
+                "Write the final reply to the user in Chinese. The goal is ${goal.status.name.lowercase()}. " +
+                    "State the verified result, or explain the blocker and ask what is needed. " +
+                    "Use the recorded outcome as evidence. Do not start another task.\n" +
+                    "Objective: ${goal.text}\nOutcome: ${goal.detail.ifBlank { goal.progress }}",
+            )
+            return true
+        }
+        fun finishGoal(): List<StoredMessage> {
+            onEvent(AgentEvent.Finished(""))
+            publish(RunState.Done(stats()))
+            return produced
+        }
         val skillCatalog = withContext(Dispatchers.Default) {
             if (readable) skills.catalog(skills.listHeaders()) else ""
         }
@@ -1312,7 +1344,7 @@ class AgentEngine(
             } else {
                 "✗ ${call.name}"
             }
-            onEvent(AgentEvent.ToolFinished(call.name, result.ok, output))
+            onEvent(AgentEvent.ToolFinished(call.name, result.ok, output, result.todoSnapshot))
         }
 
         try {
@@ -1329,7 +1361,6 @@ class AgentEngine(
                         val child = AgentEngine(
                             llm = llm,
                             approvalSourceTitle = "$title · 子任务：${task.name}",
-                            goals = goals,
                         )
                         // A sibling cancellation relay can abort blocking HTTP/shell work as soon
                         // as a parent stop or timeout cancels this task, rather than waiting for IO.
@@ -1344,11 +1375,12 @@ class AgentEngine(
                             val input = buildString {
                                 append("Task:\n").append(task.task)
                                 if (task.context.isNotBlank()) append("\n\nRelevant context:\n").append(task.context)
+                                if (goalText.isNotBlank()) append("\n\nParent objective:\n").append(goalText)
                             }
                             val messages = child.startRun(chatId = task.id, title = task.name,
                                 history = listOf(StoredMessage(id = UUID.randomUUID().toString(), role = Roles.USER, text = input)),
                                 settings = childSettings,
-                                registry = registry.excluding(SUBAGENT_TOOL_NAMES + setOf("todo_read", "todo_write")),
+                                registry = registry.excluding(SUBAGENT_TOOL_NAMES + GOAL_TOOL_NAMES + setOf("todo_read", "todo_write")),
                                 capabilities = capabilities, skills = skills, memory = memory, profile = profile, gate = gate,
                                 onEvent = { event -> if (event is AgentEvent.Failed) failure = event.message })
                             failure?.let { error(it) }
@@ -1373,26 +1405,13 @@ class AgentEngine(
                     } / 4,
                 )
             }
-            initialTool?.let { directTools.addLast(QueuedDirectTool(it)) }
-            while (roundLimit <= 0 || round < roundLimit) {
-                round++
-                // Emptied at the top of the round rather than next to the call: by the time the
-                // loop comes back here the previous round's text is already an assistant message,
-                // and a stop anywhere in this round — even one thrown out of the compression
-                // below — must not hand the same paragraph to [finishCancelled] a second time.
-                streamed = StringBuilder()
-                reasoning = StringBuilder()
-                openCalls = emptyList()
-                // Steering lands here, on the boundary between two model turns: the
-                // model has finished the previous turn and has not been asked for the
-                // next one, which is the only moment the wire can be edited safely.
-                if (directTools.isEmpty()) drainSteering(wire, spans, onEvent, settings)
+            suspend fun executeDirectTools(): Boolean {
                 // User-invoked tools use the same approval, execution and transcript path as
                 // model tools. They run before complete(), never as a lossy bottom notice.
                 while (directTools.isNotEmpty()) {
                     if (cancelled.get()) {
                         finishCancelled(onEvent, streamed, reasoning, openCalls)
-                        return produced
+                        return false
                     }
                     val queued = directTools.removeFirst()
                     queued.steer?.let { appendSteer(it, wire, spans, onEvent, settings) }
@@ -1410,27 +1429,59 @@ class AgentEngine(
                     spans += WireSpan(assistant.id, from, wire.size)
                     openCalls = assistant.toolCalls
                     val outcome = executeOneTool(call, registry, frozenTable.plugins, frozenTable.hooks,
-                        capabilities, gate, settings, chatId, onEvent) ?: run {
+                        capabilities, gate, settings, chatId, onEvent, userInvoked = true) ?: run {
                         finishCancelled(onEvent, streamed, reasoning, openCalls)
-                        return produced
+                        return false
                     }
                     commitTool(outcome)
                     if (!outcome.result.ok) {
                         onEvent(AgentEvent.Finished(""))
                         publish(RunState.Done(stats()))
-                        return produced
+                        return false
                     }
-                    if (call.name == "goal" || call.name == "goal_read") {
-                        val updatedGoal = goals?.let { withContext(Dispatchers.IO) { it.read().text } }.orEmpty()
-                        if (updatedGoal != goalText) {
-                            goalText = updatedGoal
-                            val updatedSystem = withContext(Dispatchers.Default) {
-                                systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText)
-                            }
-                            wire[0] = ChatMessage.system(updatedSystem)
-                            breakSystem = updatedSystem.length / 4
-                        }
+                }
+                return true
+            }
+            initialTool?.let { directTools.addLast(QueuedDirectTool(it)) }
+            while (true) {
+                if (!goalClosing && roundLimit > 0 && round >= roundLimit) {
+                    if (goalRun != null && goalRun.id.isNotEmpty()) {
+                        goalRun.block("已达到设置中的最大工具轮数（$roundLimit），可以继续")
+                        return finishGoal()
                     }
+                    val message = "已达到最大工具轮数（$roundLimit），任务未完成。"
+                    onEvent(AgentEvent.Failed(message))
+                    publish(RunState.Failed(message))
+                    return produced
+                }
+                round++
+                // Emptied at the top of the round rather than next to the call: by the time the
+                // loop comes back here the previous round's text is already an assistant message,
+                // and a stop anywhere in this round — even one thrown out of the compression
+                // below — must not hand the same paragraph to [finishCancelled] a second time.
+                streamed = StringBuilder()
+                reasoning = StringBuilder()
+                openCalls = emptyList()
+                // Steering lands here, on the boundary between two model turns: the
+                // model has finished the previous turn and has not been asked for the
+                // next one, which is the only moment the wire can be edited safely.
+                if (!goalClosing && directTools.isEmpty()) drainSteering(wire, spans, onEvent, settings)
+                if (!goalClosing && !executeDirectTools()) return produced
+                val updatedGoalMode = !goalClosing && goalRun != null && goalRun.id.isNotEmpty()
+                val objective = if (updatedGoalMode) goalRun.beforeRequest() else goalStore?.read()
+                if (updatedGoalMode && objective?.status != GoalStatus.ACTIVE) {
+                    if (beginGoalSummary(objective)) continue
+                    return finishGoal()
+                }
+                val updatedGoal = objective?.objectiveFor(chatId).orEmpty()
+                if (updatedGoal != goalText || updatedGoalMode != goalMode) {
+                    goalText = updatedGoal
+                    goalMode = updatedGoalMode
+                    val updatedSystem = withContext(Dispatchers.Default) {
+                        systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText, goalMode)
+                    }
+                    wire[0] = ChatMessage.system(updatedSystem)
+                    breakSystem = updatedSystem.length / 4
                 }
                 // A manual 「压缩」 is spent here, on the boundary: the user asked for the oldest
                 // context to be folded away, not for the answer in flight to be cut short.
@@ -1466,13 +1517,13 @@ class AgentEngine(
                 // 代价：插件热插拔的粒度从"下一个请求"变成"下一次 run"—— 这是刻意的取舍，
                 // 缓存前缀的稳定性比"中途装个插件立刻能用"更值钱。
                 val pluginSpecs = frozenTable.plugins
-                val toolSpecs = frozenTable.specs
+                val toolSpecs = if (goalClosing) emptyList() else frozenTable.specs
                 // Hooks follow the same frozen plugin snapshot as the tool catalog. Flatten once
                 // on Default; each invocation still evaluates every applicable hook.
                 val hooks = frozenTable.hooks
                 // The frozen table's estimate is computed once on Default, including
                 // JSON serialization. No signature allocation or schema work per round.
-                breakTools = frozenTable.estimatedTokens
+                breakTools = if (goalClosing) 0 else frozenTable.estimatedTokens
                 // 三个数字都来自同一份 wire：一次遍历算完，别为每个数字各扫一遍
                 // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
                 // **这一遍扫描也放后台**（issue #36 同类）：几十万字符的遍历不该占着主线程，
@@ -1643,7 +1694,7 @@ class AgentEngine(
                     // 消息上的过程留痕（[StoredMessage.traceNote]），画成过程块。
                     cutNote = "连接中断，这一轮的回答可能不完整"
                 }
-                if (turn.toolCalls.isEmpty()) {
+                if (goalClosing || turn.toolCalls.isEmpty()) {
                     val assistant = StoredMessage(
                         id = UUID.randomUUID().toString(),
                         role = Roles.ASSISTANT,
@@ -1664,9 +1715,26 @@ class AgentEngine(
                     // the last one, so the run takes one more pass to read it. Finishing here
                     // instead would leave a steer bubble on screen that the model never saw, with
                     // nothing telling the user it went nowhere.
-                    if (drainSteering(wire, spans, onEvent, settings) > 0) continue
-                    onEvent(AgentEvent.Finished(turn.text))
-                    publish(RunState.Done(stats()))
+                    if (!goalClosing && drainSteering(wire, spans, onEvent, settings) > 0) continue
+                    if (!goalClosing && goalRun != null && goalRun.id.isNotEmpty()) {
+                        if (!goalRun.continueAfterPlainReply()) {
+                            if (beginGoalSummary(goalRun.snapshot())) continue
+                            return finishGoal()
+                        }
+                        wire += ChatMessage.user(
+                            "Continue the active goal. Take the next concrete action, then use goal_update " +
+                                "to report progress, verified completion, or a blocker.",
+                        )
+                        continue
+                    }
+                    if (goalClosing && turn.text.isBlank()) {
+                        val message = "目标运行已停止，但模型没有返回总结正文。"
+                        onEvent(AgentEvent.Failed(message))
+                        publish(RunState.Failed(message))
+                    } else {
+                        onEvent(AgentEvent.Finished(turn.text))
+                        publish(RunState.Done(stats()))
+                    }
                     return produced
                 }
                 val assistant = StoredMessage(
@@ -1703,7 +1771,9 @@ class AgentEngine(
                 // 端点对 tool 消息的顺序敏感，乱序会让下一轮读到错配的结果。
                 // **只在 AUTO 档生效**：ASK 档的授权弹窗每个会话只有一个待决位（ApprovalGate 的
                 // waiters 按 chatId 单槽），两条调用同时求授权会互相覆盖、死等；ASK 强制串行。
-                val parallel = if (settings.approvalMode == ApprovalMode.AUTO) {
+                val parallel = if (settings.approvalMode == ApprovalMode.AUTO &&
+                    turn.toolCalls.none { it.name in GOAL_TOOL_NAMES }
+                ) {
                     settings.toolParallel.coerceAtLeast(1)
                 } else {
                     1
@@ -1716,11 +1786,16 @@ class AgentEngine(
                             finishCancelled(onEvent, streamed, reasoning, openCalls)
                             return produced
                         }
-                        val outcome = executeOneTool(
-                            call, registry, pluginSpecs, hooks, capabilities, gate, settings, chatId, onEvent,
-                        ) ?: run {
-                            finishCancelled(onEvent, streamed, reasoning, openCalls)
-                            return produced
+                        val outcome = if (call.name == "goal_update" && turn.toolCalls.size > 1) {
+                            ToolOutcome(call, ToolResult.failure("Call goal_update by itself, after the other tools have returned."),
+                                0, call.arguments.take(600))
+                        } else {
+                            executeOneTool(
+                                call, registry, pluginSpecs, hooks, capabilities, gate, settings, chatId, onEvent,
+                            ) ?: run {
+                                finishCancelled(onEvent, streamed, reasoning, openCalls)
+                                return produced
+                            }
                         }
                         commitTool(outcome)
                     }
@@ -1761,11 +1836,14 @@ class AgentEngine(
                         }
                     }
                 }
+                if (goalRun != null && goalRun.id.isNotEmpty()) {
+                    val goal = goalRun.snapshot()
+                    if (goal?.status != GoalStatus.ACTIVE) {
+                        if (beginGoalSummary(goal)) continue
+                        return finishGoal()
+                    }
+                }
             }
-            // Only reachable with a ceiling: unlimited rounds end by returning above.
-            onEvent(AgentEvent.Failed("已达到最大工具轮数（$roundLimit），任务未完成。"))
-            publish(RunState.Failed("已达到最大工具轮数（$roundLimit），任务未完成。"))
-            return produced
         } catch (cancellation: CancellationException) {
             inFlight?.cancel()
             // Two different things land here. A stop the user asked for cancels this run's own
@@ -1802,6 +1880,11 @@ class AgentEngine(
             throw if (retriesThisRound > 0) LlmException(message, error) else error
         } finally {
             withContext(NonCancellable) { subagents?.close() }
+            if (goalRun != null && goalRun.id.isNotEmpty()) {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { goalRun.pauseOnExit(cancelled.get()) }
+                }
+            }
             subagents = null
             childStates.update { it - chatId }
             inFlight = null
@@ -2421,6 +2504,7 @@ class AgentEngine(
         settings: AppSettings,
         chatId: String,
         onEvent: (AgentEvent) -> Unit,
+        userInvoked: Boolean = false,
     ): ToolOutcome? {
         // Checked before the call, not after the batch: a stop means the tools the model
         // asked for in the same breath do not run either.
@@ -2433,6 +2517,11 @@ class AgentEngine(
         }
         if (registry.isHidden(call.name)) return ToolOutcome(call,
             ToolResult.failure("当前人设已禁用此工具"), 0, argsPreview)
+        val startsGoal = call.name == "goal_resume" ||
+            (call.name == "goal" && (args["text"] as? JsonPrimitive)?.content?.isNotBlank() == true)
+        if (userInvoked && startsGoal && registry.find("goal_update") == null) {
+            return ToolOutcome(call, ToolResult.failure("当前助手禁用了目标进度工具，无法启动目标"), 0, argsPreview)
+        }
         if (call.name in SUBAGENT_TOOL_NAMES) {
             val pool = subagents
             if (pool == null || registry.isHidden(call.name)) return ToolOutcome(call,
@@ -2473,6 +2562,9 @@ class AgentEngine(
         }
         // 谁真的跑这一条。null ＝ 两边都没有这个名字（模型编了个工具名）。
         val runner: (suspend (JsonObject) -> ToolResult)? = when {
+            tool != null && goalTools != null && goalRun != null && call.name in GOAL_TOOL_NAMES -> { args ->
+                goalTools.executeForRun(call.name, args, chatId, goalRun.id, userInvoked, goalRun::activate)
+            }
             tool != null -> { args -> tool.run(args) }
             pluginTool != null -> { args ->
                 PluginRuntime.execute(pluginTool.first, pluginTool.second, args)
@@ -2571,6 +2663,7 @@ class AgentEngine(
         memory: Map<String, MemoryEntry>,
         profile: String,
         goal: String,
+        goalMode: Boolean = false,
     ): String = buildString {
         // 顺序是固定的，**按当前次序编号**（旧文档里的「1 人设」是移动前的号，别再按旧号找）：
         //   0 底座（一句话 + 工作规则）→ 1 工具表 → 2 插件 → 3 禁工具 → 4 技能
@@ -2585,7 +2678,13 @@ class AgentEngine(
         if (goal.isNotBlank()) {
             append("\n\n## Current goal\n")
             append(goal)
-            append("\nKeep this objective in view; the user set it explicitly.")
+            if (goalMode) {
+                append("\nThis is an active objective. Act on it instead of only describing a plan. ")
+                append("Use todo_write for multi-step work and goal_update for concrete progress. ")
+                append("If the objective is ambiguous, ask what to verify and mark it blocked; do not infer a task from unrelated history. ")
+                append("Verify the outcome before marking completed. If user input or unavailable access blocks further work, ")
+                append("mark blocked and explain what is needed. Call goal_update by itself, after other tools return.")
+            }
         }
         if (settings.subagentsEnabled && settings.approvalMode != ApprovalMode.DENY && !registry.isHidden("spawn_agent")) append(
             "\n\nFor substantial independent tasks, you may use spawn_agent to work in parallel. " +
@@ -2727,8 +2826,7 @@ private const val SYSTEM_PROMPT_BASE = "You are a helpful software engineer assi
     "When the work is done, answer the user in Chinese, briefly saying what you did and what happened.\n" +
     "- Planning: for multi-step work, call todo_write first and rewrite the complete list after each step " +
     "(rewrite, not append) — your context may be compacted, the board will not be.\n" +
-    "- Goals: when the user states a long-running objective, call goal once with one sentence " +
-        "(replace, do not append); use the task board for the steps that get there.\n" +
+    "- Goals: the user starts or resumes goal mode. Report progress, verified completion or a blocker with goal_update.\n" +
     "- Writing files: use write_file. For content over roughly 200 lines or 8KB, write it in parts — " +
     "the head first, then append with `append: true`; do not emit a whole large file in one call " +
     "(that hits the model's own output limit and the round gets truncated).\n" +
