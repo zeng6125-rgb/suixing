@@ -86,12 +86,16 @@ internal class ConversationViewport(val conversationId: String, val bookmark: Vi
     var followOverride by mutableStateOf(false)
 }
 
-/** One short fade for both cached and cold switches; restored text never moves again. */
+/** A short fade + rise on every switch; the reading position is restored before it starts. */
 internal object ConversationEntrance {
-    const val DURATION_MS = 180
+    const val DURATION_MS = 280
     val EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    /** 入场起始的下沉量（dp）：progress 到达 1 时精确归零。 */
+    const val RISE_DP = 12f
 
     fun alpha(progress: Float): Float = progress.coerceIn(0f, 1f)
+    /** Draw-phase translationY in dp: start low, rise into the restored position. */
+    fun offsetYDp(progress: Float): Float = (1f - progress.coerceIn(0f, 1f)) * RISE_DP
 }
 
 /** A new row projection matters even when a streamed/edited row keeps its list index. */

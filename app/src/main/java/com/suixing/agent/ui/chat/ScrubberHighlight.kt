@@ -8,8 +8,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.dp
 
-/** Mount at the restored position, then share the transcript's in-place fade. */
+/** Mount at the restored position, then share the transcript's fade + rise. */
 @Composable
 internal fun ScrubberPresentation(
     conversationId: String,
@@ -23,7 +24,9 @@ internal fun ScrubberPresentation(
     // leave the already-visible transcript without its rail for the rest of the animation.
     val ready by remember { derivedStateOf { latestPresented() } }
     if (ready) content(Modifier.graphicsLayer {
-        alpha = ConversationEntrance.alpha(latestEntrance())
+        val progress = latestEntrance()
+        alpha = ConversationEntrance.alpha(progress)
+        translationY = ConversationEntrance.offsetYDp(progress).dp.toPx()
     })
 }
 

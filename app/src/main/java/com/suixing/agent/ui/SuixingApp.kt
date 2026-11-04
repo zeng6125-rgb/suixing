@@ -3,7 +3,10 @@
 package com.suixing.agent.ui
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -65,6 +68,7 @@ import com.suixing.agent.ui.capability.CapabilityScreen
 import com.suixing.agent.ui.chat.ChatScreen
 import com.suixing.agent.ui.chat.ChatViewModel
 import com.suixing.agent.ui.chat.ObserveConversationRead
+import com.suixing.agent.ui.terminal.TerminalScreen
 import com.suixing.agent.ui.components.FullScreenOverlay
 import com.suixing.agent.ui.components.LocalDrawerBusy
 import com.suixing.agent.ui.components.LocalHeldImePx
@@ -113,6 +117,9 @@ import androidx.compose.runtime.setValue
  * 换机型时用同一条命令读出 `radius` 与 `density`，`radius / (density/160)` 就是这里的值。
  */
 private const val SCREEN_CORNER_DP = 57.33f
+
+/** 顶栏「打开浏览器」的目的地；与关于页的源码入口一致。 */
+private const val BROWSER_HOME_URL = "https://github.com/zeng6125-rgb/suixing"
 
 
 
@@ -247,6 +254,20 @@ fun SuixingApp() {
     // pop 到透明的 "empty" 就等于"什么都没有在盖着 chat"。
     val showChat: () -> Unit = { navController.popBackStack("empty", inclusive = false) }
 
+    // 顶栏溢出菜单：浏览器交给系统默认浏览器（不内嵌 WebView）；终端走覆盖层路由。
+    // 关于页用同一个仓库地址，保持一致。
+    val openBrowser: () -> Unit = {
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(BROWSER_HOME_URL))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }.onFailure {
+            Toast.makeText(context, "打不开链接：设备上没有可用的浏览器", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val openTerminal: () -> Unit = { open("terminal") }
+
     // Back and explicit drawer actions share the same close motion.
     val closeDrawer: () -> Unit = {
         switchIntents.invalidate()
@@ -261,7 +282,7 @@ fun SuixingApp() {
         scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
         showChat()
     }
-    /** Fade the source while the drawer closes; restore and reveal only the latest target. */
+    /** Replace the source immediately; restore and reveal only the latest target. */
     // Repeated taps remain latest-wins; a superseded close cannot release the latest busy flag.
     val switchFromDrawer: (Conversation) -> Unit = { conversation ->
         val token = switchIntents.begin()
@@ -276,24 +297,13 @@ fun SuixingApp() {
             }
         }
         scope.launch {
-            var committed = false
-            try {
-                // Keep the source mounted until its short departure finishes. A newer tap or
-                // an interrupted drawer close must still be checked after that suspension.
-                if (!handoff.awaitClosingFrame(
-                        isCurrent = { switchIntents.isCurrent(token) },
-                        depart = {
-                            val source = chat.state.value.conversationId
-                            if (source != conversation.id) switchIntents.depart(token, source)
-                            else switchIntents.cancelDeparture(token)
-                        },
-                    ) { drawerState.progress.value }) return@launch
-                showChat()
-                chat.openConversation(conversation)
-                committed = true
-            } finally {
-                if (!committed) switchIntents.cancelDeparture(token)
-            }
+            // 旧正文不再淡出：等抽屉出现第一个真实关闭帧后直接发布目标会话。
+            // 挂起期间若来了更新的意图或抽屉关闭被打断，awaitClosingFrame 会拒绝交接。
+            if (!handoff.awaitClosingFrame(
+                    isCurrent = { switchIntents.isCurrent(token) },
+                ) { drawerState.progress.value }) return@launch
+            showChat()
+            chat.openConversation(conversation)
         }
     }
     // 返回上一页：顶栏按钮与系统返回都走这里。
@@ -640,7 +650,8 @@ fun SuixingApp() {
                             ChatScreen(
                                 viewModel = chat,
                                 onOpenSettings = remember(open) { { open("settings") } },
-                                conversationDeparture = remember(switchIntents) { switchIntents::departureAlpha },
+                                onOpenBrowser = openBrowser,
+                                onOpenTerminal = openTerminal,
                             )
                         }
                     }
@@ -756,6 +767,8 @@ fun SuixingApp() {
                             composable("capability") { CapabilityScreen(onBack = goBack) }
                             composable("tools") { ToolsScreen(onBack = goBack) }
                             composable("about") { AboutScreen(onBack = goBack) }
+                            // 内置终端：App UID 的交互式 PTY 会话（#61 PR-0 探针 + 最小会话管理）。
+                            composable("terminal") { TerminalScreen(onBack = goBack) }
                             // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
                             composable("extension") {
                                 ExtensionScreen(onBack = goBack)

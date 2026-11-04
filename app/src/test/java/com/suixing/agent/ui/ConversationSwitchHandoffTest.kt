@@ -81,57 +81,57 @@ class ConversationSwitchHandoffTest {
         assertFalse(handoff.awaitClosingFrame(isCurrent = { intents.isCurrent(token) }) { 0f })
     }
 
-    @Test fun `old content finishes its departure before the target can replace it`() = runBlocking {
+    @Test fun `target publication waits for the pre-publish hook to complete`() = runBlocking {
         val handoff = ConversationSwitchHandoff()
         val finishClose = CompletableDeferred<Unit>()
-        val finishDeparture = CompletableDeferred<Unit>()
+        val finishHook = CompletableDeferred<Unit>()
         val close = launch(start = CoroutineStart.UNDISPATCHED) { handoff.close { finishClose.await() } }
-        var departed = false
+        var hookRan = false
         val ready = async(start = CoroutineStart.UNDISPATCHED) {
-            handoff.awaitClosingFrame(depart = {
-                finishDeparture.await()
-                departed = true
+            handoff.awaitClosingFrame(beforePublish = {
+                finishHook.await()
+                hookRan = true
             }) { 0.9f }
         }
         try {
             yield()
-            assertFalse("the outgoing transcript was removed before fading", ready.isCompleted)
-            finishDeparture.complete(Unit)
+            assertFalse("target published before the pre-publish hook finished", ready.isCompleted)
+            finishHook.complete(Unit)
             assertTrue(withTimeout(5_000) { ready.await() })
-            assertTrue(departed)
-            assertFalse("departure must overlap drawer close, not run after it", close.isCompleted)
+            assertTrue(hookRan)
+            assertFalse("hook must overlap drawer close, not run after it", close.isCompleted)
         } finally {
             ready.cancelAndJoin()
             close.cancelAndJoin()
         }
     }
 
-    @Test fun `a newer intent during departure prevents the old target from appearing`() = runBlocking {
+    @Test fun `a newer intent during the pre-publish hook prevents the old target from appearing`() = runBlocking {
         val intents = ConversationSwitchIntents()
         val token = intents.begin()
         val handoff = ConversationSwitchHandoff()
         handoff.close { }
-        val finishDeparture = CompletableDeferred<Unit>()
+        val finishHook = CompletableDeferred<Unit>()
         val ready = async(start = CoroutineStart.UNDISPATCHED) {
             handoff.awaitClosingFrame(
                 isCurrent = { intents.isCurrent(token) },
-                depart = { finishDeparture.await() },
+                beforePublish = { finishHook.await() },
             ) { 0f }
         }
         intents.invalidate()
-        finishDeparture.complete(Unit)
+        finishHook.complete(Unit)
         assertFalse(withTimeout(5_000) { ready.await() })
     }
 
-    @Test fun `drawer interruption during departure prevents target publication`() = runBlocking {
+    @Test fun `drawer interruption during the pre-publish hook prevents target publication`() = runBlocking {
         val handoff = ConversationSwitchHandoff()
         val close = launch(start = CoroutineStart.UNDISPATCHED) { handoff.close { awaitCancellation() } }
-        val finishDeparture = CompletableDeferred<Unit>()
+        val finishHook = CompletableDeferred<Unit>()
         val ready = async(start = CoroutineStart.UNDISPATCHED) {
-            handoff.awaitClosingFrame(depart = { finishDeparture.await() }) { 0.9f }
+            handoff.awaitClosingFrame(beforePublish = { finishHook.await() }) { 0.9f }
         }
         close.cancelAndJoin()
-        finishDeparture.complete(Unit)
+        finishHook.complete(Unit)
         assertFalse(withTimeout(5_000) { ready.await() })
     }
 

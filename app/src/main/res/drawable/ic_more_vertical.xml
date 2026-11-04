@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vertical three-dot menu handle, same soft round-capped stroke as ic_menu_soft:
+     three 2.5dp dots on a 22dp viewport, 5.5dp apart, centred in the box. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="22dp"
+    android:height="22dp"
+    android:viewportWidth="22"
+    android:viewportHeight="22"
+    android:tint="#FF000000">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M11,5.5 L11,5.5"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M11,11 L11,11"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M11,16.5 L11,16.5"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FF000000"
+        android:strokeLineCap="round" />
+</vector>

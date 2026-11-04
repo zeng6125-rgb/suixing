@@ -142,8 +142,9 @@ fun ChatScreen(
     viewModel: ChatViewModel = viewModel(),
     /** The generation popup's empty-list escape hatch into the model settings page. */
     onOpenSettings: () -> Unit = {},
-    /** The outgoing transcript's opacity; evaluated only in draw-phase layers. */
-    conversationDeparture: (String) -> Float = { 1f },
+    /** 顶栏溢出菜单：拉起系统浏览器 / 打开内置终端页。 */
+    onOpenBrowser: () -> Unit = {},
+    onOpenTerminal: () -> Unit = {},
 ) {
     val state by viewModel.screenState.collectAsStateWithLifecycle()
     // **只认本页会读的字段**（见 [sameForChat]）：整份按值订阅意味着任何一处设置写入都会让这
@@ -1163,8 +1164,9 @@ fun ChatScreen(
                             .keyboardAwareImePad(navBarPx, imePxState)
                             .fillMaxSize()
                             .graphicsLayer {
-                                alpha = ConversationEntrance.alpha(switchEntrance.value) *
-                                    conversationDeparture(state.conversationId)
+                                val progress = switchEntrance.value
+                                alpha = ConversationEntrance.alpha(progress)
+                                translationY = ConversationEntrance.offsetYDp(progress).dp.toPx()
                             }
                             .padding(
                                 top = with(LocalDensity.current) {
@@ -1217,9 +1219,9 @@ fun ChatScreen(
                             // 状态不改变任何像素（alpha 回到 1f），而不是摘掉它。
                              .graphicsLayer {
                                  val progress = switchEntrance.value
-                                 alpha = ConversationEntrance.alpha(progress) *
-                                      conversationDeparture(state.conversationId)
-                                 // No vertical travel after restoring the reading position.
+                                 alpha = ConversationEntrance.alpha(progress)
+                                 // 阅读位置恢复完才淡入；位移只在绘制层，列表项布局不动。
+                                 translationY = ConversationEntrance.offsetYDp(progress).dp.toPx()
                              }
                             // 手指按下只干两件事：通知外壳冻结 IME clamp（选择期间键盘别收）；
                             .pointerInput(state.conversationId) {
@@ -1639,6 +1641,8 @@ fun ChatScreen(
             ChatTopBar(
                 title = state.title,
                 onNew = { viewModel.newConversation() },
+                onOpenBrowser = onOpenBrowser,
+                onOpenTerminal = onOpenTerminal,
                 contextEntry = {
                     TopBarContextEntry(
                         used = contextUsed,
@@ -1692,7 +1696,7 @@ fun ChatScreen(
             }
             ScrubberPresentation(state.conversationId,
                 presented = { viewport.presented },
-                entrance = { switchEntrance.value * conversationDeparture(state.conversationId) }) { entranceModifier ->
+                entrance = { switchEntrance.value }) { entranceModifier ->
                 TurnScrubber(
                     conversationId = state.conversationId,
                     totalTurns = page.turns,

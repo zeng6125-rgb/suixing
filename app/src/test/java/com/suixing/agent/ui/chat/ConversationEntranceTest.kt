@@ -12,8 +12,8 @@ class ConversationEntranceTest {
     private fun at(t: Float): Float = ConversationEntrance.EASING.transform(t.coerceIn(0f, 1f))
 
     @Test
-    fun `restored content does not spend over 200ms in an entrance transition`() {
-        assertTrue("The restored conversation should be ready to read promptly", ConversationEntrance.DURATION_MS in 1..200)
+    fun `restored content settles within the 280ms entrance clock`() {
+        assertTrue("The restored conversation should be ready to read promptly", ConversationEntrance.DURATION_MS in 1..280)
     }
 
     @Test
@@ -82,5 +82,23 @@ class ConversationEntranceTest {
     fun `out of range progress cannot make the layer invalid`() {
         assertEquals(0f, ConversationEntrance.alpha(-0.1f), 0f)
         assertEquals(1f, ConversationEntrance.alpha(1.1f), 0f)
+    }
+
+    @Test
+    fun `rise starts low and lands exactly at the restored position`() {
+        assertEquals(ConversationEntrance.RISE_DP, ConversationEntrance.offsetYDp(0f), 1e-4f)
+        assertEquals(0f, ConversationEntrance.offsetYDp(1f), 0f)
+        var previous = ConversationEntrance.RISE_DP
+        for (i in 0..100) {
+            val value = ConversationEntrance.offsetYDp(i / 100f)
+            assertTrue("rise reversed at $i%", value <= previous)
+            previous = value
+        }
+    }
+
+    @Test
+    fun `out of range progress cannot move the layer below or above its bounds`() {
+        assertEquals(ConversationEntrance.RISE_DP, ConversationEntrance.offsetYDp(-0.1f), 0f)
+        assertEquals(0f, ConversationEntrance.offsetYDp(1.1f), 0f)
     }
 }
