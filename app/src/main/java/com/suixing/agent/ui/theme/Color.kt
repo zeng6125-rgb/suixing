@@ -110,7 +110,154 @@ private val BrandLight = lightColorScheme(
     surfaceContainerHighest = Color(0xFFE1E8E3),
 )
 
-internal fun brandScheme(dark: Boolean) = if (dark) BrandDark else BrandLight
+internal enum class AppearancePalette(val id: Int, val label: String) {
+    SUIXING(0, "随行配色"),
+    WALLPAPER(1, "跟随壁纸"),
+    CLAUDE(2, "Claude"),
+    CODEX(3, "Codex");
+
+    fun scheme(dark: Boolean) = when (this) {
+        SUIXING, WALLPAPER -> if (dark) BrandDark else BrandLight
+        CLAUDE -> if (dark) ClaudeDark else ClaudeLight
+        CODEX -> if (dark) CodexDark else CodexLight
+    }
+
+    companion object {
+        val labels = entries.map { it.label }
+
+        fun fromId(id: Int): AppearancePalette = entries.firstOrNull { it.id == id } ?: SUIXING
+    }
+}
+
+private val ClaudeLight = BrandLight.copy(
+    primary = Color(0xFF9E492F),
+    primaryContainer = Color(0xFFF6D9CC),
+    onPrimaryContainer = Color(0xFF502216),
+    inversePrimary = Color(0xFFF0A98E),
+    secondary = Color(0xFF6F594D),
+    secondaryContainer = Color(0xFFF2E5DB),
+    onSecondaryContainer = Color(0xFF422F25),
+    tertiary = Color(0xFF586746),
+    tertiaryContainer = Color(0xFFE3E9D6),
+    onTertiaryContainer = Color(0xFF2B3820),
+    background = Color(0xFFFAF9F5),
+    onBackground = Color(0xFF28251F),
+    surface = Color(0xFFFAF9F5),
+    onSurface = Color(0xFF28251F),
+    surfaceTint = Color(0xFF9E492F),
+    surfaceVariant = Color(0xFFECE5DA),
+    onSurfaceVariant = Color(0xFF665C50),
+    inverseSurface = Color(0xFF352D25),
+    inverseOnSurface = Color(0xFFF6EFE6),
+    outline = Color(0xFF827669),
+    outlineVariant = Color(0xFFE3DBCF),
+    surfaceBright = Color(0xFFFAF9F5),
+    surfaceDim = Color(0xFFECE5DA),
+    surfaceContainerLowest = Color.White,
+    surfaceContainerLow = Color(0xFFF8F5EF),
+    surfaceContainer = Color(0xFFF4F0E8),
+    surfaceContainerHigh = Color(0xFFEFE9E0),
+    surfaceContainerHighest = Color(0xFFE8E1D6),
+)
+
+private val ClaudeDark = BrandDark.copy(
+    primary = Color(0xFFF0A98E),
+    onPrimary = Color(0xFF4D2317),
+    primaryContainer = Color(0xFF603828),
+    onPrimaryContainer = Color(0xFFFFDBC9),
+    inversePrimary = Color(0xFF9E492F),
+    secondary = Color(0xFFD5B9A6),
+    onSecondary = Color(0xFF392B23),
+    secondaryContainer = Color(0xFF48372C),
+    onSecondaryContainer = Color(0xFFF5E0D3),
+    tertiary = Color(0xFFBBC99D),
+    onTertiary = Color(0xFF29351F),
+    tertiaryContainer = Color(0xFF3A4730),
+    onTertiaryContainer = Color(0xFFE3ECCE),
+    background = Color(0xFF22211E),
+    onBackground = Color(0xFFF1EDE3),
+    surface = Color(0xFF22211E),
+    onSurface = Color(0xFFF1EDE3),
+    surfaceTint = Color(0xFFF0A98E),
+    surfaceVariant = Color(0xFF3A362F),
+    onSurfaceVariant = Color(0xFFC9BEAF),
+    inverseSurface = Color(0xFFF1EDE3),
+    inverseOnSurface = Color(0xFF28251F),
+    outline = Color(0xFF938678),
+    outlineVariant = Color(0xFF464037),
+    surfaceBright = Color(0xFF3D3932),
+    surfaceDim = Color(0xFF22211E),
+    surfaceContainerLowest = Color(0xFF1B1A18),
+    surfaceContainerLow = Color(0xFF272520),
+    surfaceContainer = Color(0xFF2D2A25),
+    surfaceContainerHigh = Color(0xFF35312B),
+    surfaceContainerHighest = Color(0xFF3D3932),
+)
+
+private val CodexLight = BrandLight.copy(
+    primary = Color(0xFF5046AD),
+    primaryContainer = Color(0xFFE6E2FF),
+    onPrimaryContainer = Color(0xFF271E70),
+    inversePrimary = Color(0xFFC2BAFF),
+    secondary = Color(0xFF525B7C),
+    secondaryContainer = Color(0xFFE5E9FA),
+    onSecondaryContainer = Color(0xFF28324E),
+    tertiary = Color(0xFF355E8E),
+    tertiaryContainer = Color(0xFFDCEBFF),
+    onTertiaryContainer = Color(0xFF1D3B61),
+    background = Color(0xFFFDFDFF),
+    onBackground = Color(0xFF20212B),
+    surface = Color(0xFFFDFDFF),
+    onSurface = Color(0xFF20212B),
+    surfaceTint = Color(0xFF5046AD),
+    surfaceVariant = Color(0xFFE6E7F0),
+    onSurfaceVariant = Color(0xFF565B6E),
+    inverseSurface = Color(0xFF292B3B),
+    inverseOnSurface = Color(0xFFF0EFF9),
+    outline = Color(0xFF797E91),
+    outlineVariant = Color(0xFFE0E2EF),
+    surfaceBright = Color(0xFFFDFDFF),
+    surfaceDim = Color(0xFFEAECF6),
+    surfaceContainerLowest = Color.White,
+    surfaceContainerLow = Color(0xFFF8F9FD),
+    surfaceContainer = Color(0xFFF2F3FA),
+    surfaceContainerHigh = Color(0xFFEAECF6),
+    surfaceContainerHighest = Color(0xFFE3E6F2),
+)
+
+private val CodexDark = BrandDark.copy(
+    primary = Color(0xFFC2BAFF),
+    onPrimary = Color(0xFF2B226D),
+    primaryContainer = Color(0xFF403587),
+    onPrimaryContainer = Color(0xFFE9E5FF),
+    inversePrimary = Color(0xFF5046AD),
+    secondary = Color(0xFFBEC7EA),
+    onSecondary = Color(0xFF282F49),
+    secondaryContainer = Color(0xFF363E5B),
+    onSecondaryContainer = Color(0xFFE3E8FC),
+    tertiary = Color(0xFFA8CDFB),
+    onTertiary = Color(0xFF203958),
+    tertiaryContainer = Color(0xFF304C70),
+    onTertiaryContainer = Color(0xFFD7E9FF),
+    background = Color(0xFF171820),
+    onBackground = Color(0xFFECECF5),
+    surface = Color(0xFF171820),
+    onSurface = Color(0xFFECECF5),
+    surfaceTint = Color(0xFFC2BAFF),
+    surfaceVariant = Color(0xFF303343),
+    onSurfaceVariant = Color(0xFFC0C2D5),
+    inverseSurface = Color(0xFFECECF5),
+    inverseOnSurface = Color(0xFF20212B),
+    outline = Color(0xFF8C90A6),
+    outlineVariant = Color(0xFF3C4053),
+    surfaceBright = Color(0xFF323546),
+    surfaceDim = Color(0xFF171820),
+    surfaceContainerLowest = Color(0xFF121319),
+    surfaceContainerLow = Color(0xFF1D1F29),
+    surfaceContainer = Color(0xFF232532),
+    surfaceContainerHigh = Color(0xFF2B2D3B),
+    surfaceContainerHighest = Color(0xFF323546),
+)
 
 /**
  * Status tones used by the pills across the capability, MCP and settings screens.

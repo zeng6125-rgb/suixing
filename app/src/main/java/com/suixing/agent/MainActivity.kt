@@ -115,7 +115,7 @@ class MainActivity : ComponentActivity() {
             }
             SuixingTheme(
                 darkTheme = dark,
-                dynamicColor = paletteMode == 1,
+                paletteMode = paletteMode,
                 fontScale = fontScale,
                 cornerScale = cornerScale,
             ) {

@@ -13,8 +13,8 @@ android {
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 683
-        versionName = "0.8.662"
+        versionCode = 685
+        versionName = "0.8.664"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -136,9 +136,9 @@ dependencies {
 
     // **图片加载换 Coil 3**（issue #44 第 10 项）：替代手写的 BitmapFactory 降采样 +
     // 容量 4 的 LRU。Coil 提供内存/磁盘双缓存、按目标尺寸自动采样、生命周期感知，
-    // 且解码在自己 Dispatcher 上（组合期零阻塞）。只装 compose 适配，不装网络层：
-    // 随行的图片都来自内存里的 base64，没有远程 URL。
+    // 且解码在自己 Dispatcher 上（组合期零阻塞）。助手正文的 HTTP(S) 图片由 OkHttp 取回。
     implementation("io.coil-kt.coil3:coil-compose:3.6.3")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
 
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")

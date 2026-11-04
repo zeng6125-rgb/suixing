@@ -34,7 +34,7 @@ internal fun base64PayloadOf(url: String): String? {
  * 围栏代码块（``` 或 ~~~）里的 `![x](y)` **不算图片**：那是用户/Al 想展示的源码，换成图就把
  * 例子吃掉了。行内代码里的同样不动（同一行里成对的反引号）。
  */
-internal fun splitImageSegments(text: String): List<MessageSegment> {
+internal fun splitImageSegments(text: String, streaming: Boolean = false): List<MessageSegment> {
     if (text.isEmpty()) return emptyList()
     if (!text.contains("![")) return listOf(MessageSegment.Text(text))
 
@@ -63,9 +63,35 @@ internal fun splitImageSegments(text: String): List<MessageSegment> {
                 fence = if (fence == null) marker else if (fence == marker) null else fence
             }
         }
+        if (fence == null && text[i] == '\\' && i + 1 < text.length &&
+            (text[i + 1] == '`' || text[i + 1] == '\\' || text[i + 1] == '!')
+        ) {
+            plain.append(text, i, i + 2)
+            i += 2
+            continue
+        }
+        if (fence == null && text[i] == '`') {
+            val openingEnd = backtickRunEnd(text, i)
+            val lineEnd = text.indexOf('\n', openingEnd).let { if (it < 0) text.length else it }
+            var closing = text.indexOf('`', openingEnd)
+            var spanEnd = openingEnd
+            while (closing in openingEnd until lineEnd) {
+                val closingEnd = backtickRunEnd(text, closing)
+                if (closingEnd - closing == openingEnd - i) {
+                    spanEnd = closingEnd
+                    break
+                }
+                closing = text.indexOf('`', closingEnd)
+            }
+            // A streamed example can contain a complete image before its closing backticks arrive.
+            if (spanEnd == openingEnd && streaming && lineEnd == text.length) spanEnd = lineEnd
+            plain.append(text, i, spanEnd)
+            i = spanEnd
+            continue
+        }
         if (fence == null && text.startsWith("![", i)) {
-            val m = IMAGE.find(text, i)
-            if (m != null && m.range.first == i && isRenderableImageUrl(m.groupValues[2])) {
+            val m = IMAGE.matchAt(text, i)
+            if (m != null && isRenderableImageUrl(m.groupValues[2])) {
                 flushPlain()
                 out += MessageSegment.Image(alt = m.groupValues[1], url = m.groupValues[2])
                 i = m.range.last + 1
@@ -77,4 +103,10 @@ internal fun splitImageSegments(text: String): List<MessageSegment> {
     }
     flushPlain()
     return out
+}
+
+private fun backtickRunEnd(text: String, start: Int): Int {
+    var end = start
+    while (end < text.length && text[end] == '`') end++
+    return end
 }

@@ -397,6 +397,17 @@ internal fun ImagePreviewDialog(
     keepKeyboard: Boolean = false,
     onDismiss: () -> Unit,
 ) {
+    ImagePreviewFrame(keepKeyboard = keepKeyboard, onDismiss = onDismiss) { modifier ->
+        Image(bitmap = bitmap, contentDescription = contentDescription, modifier = modifier)
+    }
+}
+
+@Composable
+internal fun ImagePreviewFrame(
+    keepKeyboard: Boolean = false,
+    onDismiss: () -> Unit,
+    image: @Composable (Modifier) -> Unit,
+) {
     // Reading a shot needs the whole screen and a pinch.
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
@@ -418,10 +429,8 @@ internal fun ImagePreviewDialog(
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            Image(
-                bitmap = bitmap,
-                contentDescription = contentDescription,
-                modifier = Modifier
+            image(
+                Modifier
                     .fillMaxSize()
                     .transformable(transformable)
                     .graphicsLayer(

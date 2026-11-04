@@ -80,6 +80,39 @@ class ImageMarkdownTest {
     }
 
     @Test
+    fun `inline examples keep the list item and its backticks together`() {
+        val text = "- `![图](https://...)` 或 `http://...` — 由 Coil 联网取图"
+        assertEquals(listOf(MessageSegment.Text(text)), splitImageSegments(text))
+    }
+
+    @Test
+    fun `an inline example does not suppress the actual image beside it`() {
+        val example = "``格式 `![x](https://...)` 如上``，实际图片："
+        assertEquals(
+            listOf(MessageSegment.Text(example), MessageSegment.Image("y", "https://e.com/b.png")),
+            splitImageSegments(example + "![y](https://e.com/b.png)"),
+        )
+    }
+
+    @Test
+    fun `an open inline example does not load its image while it is streaming`() {
+        val prefix = "- `![x](https://...)"
+        assertEquals(listOf(MessageSegment.Text(prefix)), splitImageSegments(prefix, streaming = true))
+        val nextLine = prefix + "`\n![y](https://e.com/b.png)"
+        val images = splitImageSegments(nextLine, streaming = true).filterIsInstance<MessageSegment.Image>()
+        assertEquals(listOf(MessageSegment.Image("y", "https://e.com/b.png")), images)
+    }
+
+    @Test
+    fun `an escaped backtick does not open a code span`() {
+        val text = "\\` ![x](https://e.com/a.png)"
+        assertEquals(
+            listOf(MessageSegment.Text("\\` "), MessageSegment.Image("x", "https://e.com/a.png")),
+            splitImageSegments(text, streaming = true),
+        )
+    }
+
+    @Test
     fun `only http https and data urls are renderable`() {
         assertTrue(isRenderableImageUrl("https://e.com/a.png"))
         assertTrue(isRenderableImageUrl("http://e.com/a.png"))

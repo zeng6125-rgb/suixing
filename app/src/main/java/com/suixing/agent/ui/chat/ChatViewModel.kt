@@ -219,17 +219,8 @@ data class ChatUiState(
     val goal: String = "",
     /** The tool the run is inside right now; the tool card names it live. */
     val runningTool: String? = null,
-    /**
-     * Speed of the run that is streaming, straight off the engine's `RunState`. Only the
-     * live bubble reads it; once the reply is stored, its own usage numbers are the
-     * frozen record and this is ignored.
-     */
-    /**
-     * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）的**当前窗口**读数，不依赖 run：打开面板时
-     * 按当前上下文算一次（[refreshContextBreakdown]），所以没有 run 也常驻显示。有 run 时面板优先
-     * 用 [stats] 里的实测三块。
-     */
-    val contextBreakdown: Triple<Int, Int, Int>? = null,
+    /** Estimated system prompt and tool definitions, independent of the running request. */
+    val contextOverhead: Pair<Int, Int>? = null,
     /** The live bubble's pieces; empty unless this conversation owns the running run. */
     val liveParts: List<LivePart> = emptyList(),
     /**
@@ -497,14 +488,6 @@ class ChatViewModel : ViewModel() {
      */
     private val _liveStats = MutableStateFlow<StreamStats?>(null)
     val liveStats: StateFlow<StreamStats?> = _liveStats.asStateFlow()
-
-    /**
-     * **请求级**统计：剥掉逐 tick 变化的 `elapsedMs` 后去重 —— 只在一次真实请求
-     * （promptTokens/breakXxx/tokensOut 变化）时发射。屏幕 body 的环读数收集这个，
-     * 不收 [liveStats]。
-     */
-    val requestStats: StateFlow<StreamStats?> = _liveStats
-        .projectState { it?.copy(tokensOut = 0, thinkingTokens = 0, elapsedMs = 0L, tokPerSec = 0f) }
 
     /**
      * 「有没有活内容」的布尔：流式气泡开关与 pin 信号都只认它。活内容增长期间
@@ -2409,48 +2392,20 @@ class ChatViewModel : ViewModel() {
     /** 本轮压缩摘要请求的起点：结束后要用它算出「已压缩上下文，用时 x.xs」。 */
     private var compressStartedAt: Long = 0L
 
-    /**
-     * 圆环面板三行（系统提示词 / 工具定义 / 对话消息）：按**当前**上下文算一次，不依赖 run。
-     *
-     * 面板打开时调用（用户：「系统提示词就是当前窗口的 tokens 和占比，不是单个 run 的」）—— 没有
-     * run 也能看到当前窗口的构成。**这是估算，不是引擎的实测口径**：除数（字符 ÷ 4）、工具表公式
-     * （名称 + 描述 + schema 的字符数）、对话消息范围（最后一个 checkpoint 之后 + 摘要本身）都与
-     * 引擎一致，但系统提示词只取「人设 + 工具摘要」两项，记忆/画像/技能目录等分量没有计入（引擎的
-     * systemPrompt 是 RunHandle 的私有成员，UI 侧够不到）。run 一开始，面板就改用 [ChatUiState.stats]
-     * 里引擎的实测三块，估算值被覆盖。计算走 Dispatchers.Default：要拼工具表并遍历历史。
-     */
-    fun refreshContextBreakdown() {
+    private var contextOverheadJob: Job? = null
+
+    /** Estimate persona and tool definitions without scanning the transcript again. */
+    fun refreshContextOverhead() {
         val shown = _state.value
         val chatId = shown.conversationId
-        viewModelScope.launch {
+        if (chatId.isEmpty()) return
+        contextOverheadJob?.cancel()
+        contextOverheadJob = viewModelScope.launch {
             val settings = Core.settings.current()
-            val assistant = settings.assistant(shown.assistantId)
+            val assistant = settings.assistant(shown.assistantId) ?: settings.activeAssistant()
             val persona = settings.forAssistant(assistant)
-            val choice = settings.choiceFor(shown.providerId, shown.model)
-            val effective = persona.copy(
-                baseUrl = choice.baseUrl,
-                apiKey = choice.apiKey,
-                model = choice.model,
-                protocol = choice.protocol,
-                reasoningEffort = shown.reasoningEffort ?: persona.reasoningEffort,
-            )
             val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
-            val split = withContext(Dispatchers.Default) {
-                val checkpoint = shown.checkpoints.lastOrNull()
-                val start = checkpoint?.let { cp ->
-                    val at = shown.messages.indexOfFirst { it.id == cp.toMessageId }
-                    if (at >= 0) at + 1 else 0
-                } ?: 0
-                val kept = if (start in 1..shown.messages.lastIndex) {
-                    shown.messages.subList(start, shown.messages.size)
-                } else {
-                    shown.messages
-                }
-                val historyChars = kept.sumOf { message ->
-                    message.text.length +
-                        message.toolOutput.orEmpty().length +
-                        message.toolArgs.orEmpty().length
-                } + (checkpoint?.summary?.length ?: 0)
+            val overhead = withContext(Dispatchers.Default) {
                 val builtinSpecs = registry.all().map { it.spec }
                 val pluginSpecs = PluginRuntime.enabledPlugins()
                 val toolSpecs = builtinSpecs +
@@ -2458,11 +2413,15 @@ class ChatViewModel : ViewModel() {
                 val tools = toolSpecs.sumOf {
                     it.name.length + it.description.length + it.parameters.toString().length
                 } / 4
-                val system = (effective.systemPrompt.length + registry.promptSummary().length) / 4
-                Triple(system, tools, historyChars / 4)
+                val system = (persona.systemPrompt.length + registry.promptSummary().length) / 4
+                system to tools
             }
             _state.update {
-                if (it.conversationId == chatId) it.copy(contextBreakdown = split) else it
+                if (it.conversationId == chatId && it.assistantId == shown.assistantId) {
+                    it.copy(contextOverhead = overhead)
+                } else {
+                    it
+                }
             }
         }
     }
@@ -3186,7 +3145,7 @@ class ChatViewModel : ViewModel() {
      * left exactly as it was.
      */
     private fun endSession(chatId: String, status: String, error: String? = null) {
-        _liveStats.value = null
+        if (_state.value.conversationId == chatId) _liveStats.value = null
         // **先把攒着的 delta 冲进去，再摘会话**（0.8.333 引入的风险）：后台会话的 delta 现在
         // 只缓冲不发布（屏幕上看不到它，发布只是白做 O(n) 拼接）。而一轮结束是
         // `sessions.remove(chatId)` —— 若此时缓冲里还有没应用的尾巴，那段文字既不会进

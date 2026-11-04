@@ -114,6 +114,7 @@ import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
 import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.components.SuixingDialog
+import com.suixing.agent.ui.theme.AppearancePalette
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import com.suixing.agent.ui.theme.Tone
 import com.suixing.agent.ui.theme.color
@@ -1817,9 +1818,12 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                     hint = "「跟随壁纸」需要安卓 12 以上，会改用系统动态取色。",
                 ) {
                     SegmentedPill(
-                        options = listOf("随行配色", "跟随壁纸"),
-                        selectedIndex = stored.paletteMode.coerceIn(0, 1),
-                        onSelect = { index -> scope.persist { it.copy(paletteMode = index) } },
+                        options = AppearancePalette.labels,
+                        selectedIndex = AppearancePalette.fromId(stored.paletteMode).ordinal,
+                        onSelect = { index ->
+                            val palette = AppearancePalette.entries[index]
+                            scope.persist { it.copy(paletteMode = palette.id) }
+                        },
                     )
                 }
             }

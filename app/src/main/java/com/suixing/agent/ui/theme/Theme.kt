@@ -22,7 +22,7 @@ val LocalDarkTheme = staticCompositionLocalOf { false }
 @Composable
 fun SuixingTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    paletteMode: Int = 1,
     fontScale: Int = 1,
     cornerScale: Int = 1,
     content: @Composable () -> Unit,
@@ -33,11 +33,12 @@ fun SuixingTheme(
     // 而外壳（MainActivity）每次写设置都会重组一次，等于每次改设置都重建整份配色。
     // 键里带 `LocalConfiguration`：动态取色跟着壁纸与深浅色走，换壁纸必须重新取一次。
     val configuration = LocalConfiguration.current
-    val scheme = remember(context, darkTheme, dynamicColor, configuration) {
-        if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    val palette = AppearancePalette.fromId(paletteMode)
+    val scheme = remember(context, darkTheme, palette, configuration) {
+        if (palette == AppearancePalette.WALLPAPER && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         } else {
-            brandScheme(darkTheme)
+            palette.scheme(darkTheme)
         }
     }
     // Rebuilding the ramp is cheap but not free, and a tier only moves in settings,

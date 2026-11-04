@@ -1,7 +1,6 @@
 
 package com.suixing.agent.ui.chat
 
-import androidx.compose.runtime.mutableIntStateOf
 import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -541,14 +540,12 @@ fun ChatScreen(
         }
         owners
     }
-    // What the ring left of the mic draws: the newest round's own count, or the live run's
-    // estimate while it streams — the same pair the summary card reads, so the two agree.
-    // The cache count is the newest round's too: context is cumulative, so an older round's
-    // cache figure says nothing about the window as it stands now.
-    // **包 remember**（性能优化，值不变）：这是对可见行的 O(n) 反查，原来每次 ChatScreen
-    // 重组都跑一遍 —— 滚动时每秒好几次、每次扫几百行。键用上面的形状 token（O(1) 引用比较），
-    // 不要拿 `visible` 本身当键：那等于每次重组都把整页正文深比较一遍。
-    val newestUsage = remember(visibleShape) { visible.lastOrNull { it.usage != null }?.usage }
+    // Read prompt counts from the loaded transcript. Visible bubbles can hide tool-only rounds
+    // and the active run, and depend on which part of the history is on screen.
+    val checkpoint = state.checkpoints.lastOrNull()
+    val newestStoredPrompt = remember(state.conversationId, state.messagesRevision, checkpoint?.id) {
+        latestContextPrompt(state.messages, checkpoint)
+    }
     // What the endpoint never priced, sized off the text: the ring's floor for a conversation
     // 键用 **messagesRevision**，不是 rowsKey：`rowsKey` 是（会话, 条数, 末条 id），
     // 编辑某条消息、或流式把文本追加进已落盘消息时，条数与末条 id 都不变 ⇒ 估算值不刷新，
@@ -564,9 +561,9 @@ fun ChatScreen(
     // 全局表不会串数据；LRU 上限防内存。纯函数与单测见 TokenEstimateCache。
     // **估算移出组合期主线程**（issue #56 R39）：`estimateTokens` 对正文做逐字符 CJK 判定，
     // 一页 12 轮可达 5~20 万字符。原来整段跑在 `remember` 里 ⇒ 组合期（主线程）一次几 ms。
-    // 现在：**已经缓存过的**值同步取出来当初值（切回来的会话基本都是全命中，看到的就是
-    // 上一次的数，不会闪 0），只有真正未命中的那条才在后台算，算完写回。
-    val estimateInput = remember(state.messagesRevision, state.checkpoints) {
+    // 切会话时只使用该会话的完整缓存；缓存不完整时等后台结果。发消息时保留本会话的
+    // 上次估算，等新结果一次替换。
+    val estimateInput = remember(state.conversationId, state.messagesRevision, state.checkpoints) {
         val last = state.checkpoints.lastOrNull()
         // issue #53 B-2：同一次建表里查 id（firstPositions 保留首个重复 id 的语义）。
         val positions = messagePositions
@@ -574,7 +571,7 @@ fun ChatScreen(
             val i = positions[cp.toMessageId] ?: -1
             if (i >= 0) i + 1 else 0
         } ?: 0
-        val kept = if (start in 1..state.messages.lastIndex) {
+        val kept = if (start > 0) {
             state.messages.subList(start, state.messages.size)
         } else {
             state.messages
@@ -588,85 +585,54 @@ fun ChatScreen(
         Triple(kept.toList(), stamps, (last?.summary?.length ?: 0) / 3)
     }
     val (estimateMessages, estimateStamps, estimateSummaryChars) = estimateInput
-    var transcriptEstimate by remember {
-        mutableIntStateOf(
-            estimateMessages.indices.sumOf { i ->
-                TokenEstimateCache.peek(estimateMessages[i], estimateStamps[i]) ?: 0
-            } + estimateSummaryChars,
-        )
-    }
-    LaunchedEffect(estimateInput) {
-        val total = withContext(Dispatchers.Default) {
-            var sum = 0
-            var allHit = true
-            estimateMessages.forEachIndexed { i, message ->
-                val stamp = estimateStamps[i]
-                val known = TokenEstimateCache.peek(message, stamp)
-                if (known != null) {
-                    sum += known
-                } else {
-                    allHit = false
-                    sum += TokenEstimateCache.tokensFor(message, stamp)
-                }
-            }
-            // 全命中说明算出来的和初值相同，不必重设（省一次重组）。
-            if (allHit) null else sum + estimateSummaryChars
+    var transcriptEstimate by remember(state.conversationId, checkpoint?.id) {
+        if (state.loading) return@remember mutableStateOf<Int?>(null)
+        var cached = estimateSummaryChars
+        for (i in estimateMessages.indices) {
+            val tokens = TokenEstimateCache.peek(estimateMessages[i], estimateStamps[i])
+                ?: return@remember mutableStateOf<Int?>(null)
+            cached += tokens
         }
-        if (total != null) transcriptEstimate = total
+        mutableStateOf<Int?>(cached)
     }
-    // 圆环读数＝**真实数字**：当前会话的上下文大小 / 模型窗口（用户：「就是按照真实数字啊…
-    // 当前会话上下文/上下文窗口的数字」）。分子只认实测口径：网关回报的本轮 prompt_tokens
-    // （含按会话保持的最近一次）→ 落盘回报；只有整个会话从没被网关报过用量时才用 /4 估算兜底
-    // 并标「约」。跳变的老根因是两个口径轮流上屏，所以估算值绝不与实测值并列成链。
-    // tokens 是上次请求的绝对用量，没有绑定窗口。切 provider 仍保留这个会话的最近实测，
-    // 分母单独按当前模型计算；下次请求上报后再更新，避免切模型即丢失唯一实测。
-    // **按会话保持**（审计 5.25）：`rememberSaveable(state.conversationId)` 在 inputs 变化时会
-    // 重新初始化（不是按 key 分槽保存）⇒ A→B→A 后归 0，圆环掉回估算档 —— 正是上面这段注释
-    // 要消除的口径轮换。改成进程内的 per-chat 表：切回某个会话沿用它上次的实测数。
-    // 代价是旋转/进程重建后不再恢复这一档（下面的落盘实测 persistedContext 照旧接住）。
-    val heldPrompts = remember { mutableStateMapOf<String, Int>() }
-    val heldPrompt = heldPrompts[state.conversationId] ?: 0
-    // 请求级快照（prompt/breaks 变才发射）——body 不再订阅 120ms 的 elapsedMs。
-    val runStatsNow by viewModel.requestStats.collectAsStateWithLifecycle()
-    // **实时统计属于"正在跑的那一次请求"**：它挂在 ViewModel 上全局共享，切会话/新建会话时
-    // 不会自己清空。原来直接拿它当圆环读数 ⇒ 新建的空会话会显示上一个会话的 40% / 409.5K
-    // （用户实测截图）。所以只在**这个会话自己正在跑**时才认它；其余场合交给下面三档
-    // （本会话的实测快照 heldPrompt / 落盘实测 persistedContext / 估算兜底）。
-    val liveStatsHere = runStatsNow.takeIf { state.runningHere }
-    val reported = liveStatsHere?.lastPromptTokens ?: 0
-    LaunchedEffect(state.conversationId, reported) {
-        if (reported > 0) heldPrompts[state.conversationId] = reported
+    LaunchedEffect(state.conversationId, state.messagesRevision, state.checkpoints, state.loading) {
+        if (state.loading) return@LaunchedEffect
+        transcriptEstimate = withContext(Dispatchers.Default) {
+            estimateMessages.indices.sumOf { i ->
+                TokenEstimateCache.tokensFor(estimateMessages[i], estimateStamps[i])
+            } + estimateSummaryChars
+        }
     }
-    // 落盘的实测上下文（issue #41 真问题 1）：run 结束瞬间前两级归零，这一档接住圆环。
-    // meta 里 O(1) 命中（totalsAt==messageCount 时），每轮落盘自动更新。
-    // 统计在 IO 线程重读，StateFlow 的旧值不一定属于本页；不能让别的会话抢占圆环读数。
+    val transcriptTokens = transcriptEstimate ?: 0
+    // The engine's provisional request stats change as it prepares each round. Use the report
+    // published with the assistant message, so starting or ending a run cannot change the source.
     val session = viewModel.sessionStats.collectAsStateWithLifecycle(initialValue = null).value
         ?.forConversation(state.conversationId)
-    val persistedContext = session?.contextTokens ?: 0
+    val overhead = state.contextOverhead
+    val estimate = transcriptEstimate?.let { history ->
+        if (history == 0) 0 else overhead?.let { (system, tools) -> system + tools + history }
+    }
     val reading = ringReading(
-        liveReported = if (reported > 0) reported else heldPrompt,
-        newestStored = newestUsage?.prompt ?: 0,
-        liveEstimate = liveStatsHere?.let { it.breakSystem + it.breakTools + it.breakHistory } ?: 0,
-        transcriptEstimate = transcriptEstimate,
-        persistedContext = persistedContext,
-        // 有 checkpoint 就说明压过：估算已按折叠后的范围重算，比落盘实测新。
-        compressedEstimate = if (state.checkpoints.isNotEmpty()) transcriptEstimate else 0,
+        newestStored = newestStoredPrompt,
+        persistedContext = session?.contextTokens ?: 0,
+        estimate = estimate,
+        compressed = checkpoint != null,
     )
-    // 切会话时算一次兜底读数（网关没报过用量时那两行占比要有数）。
-    LaunchedEffect(state.conversationId, viewport) {
+    // Tool and system estimates are independent of the transcript and refresh with their inputs.
+    LaunchedEffect(state.conversationId, viewport, assistant, catalogRevision) {
         if (state.conversationId.isEmpty()) return@LaunchedEffect
         // Tool/plugin estimation is not needed to display the transcript's first frame.
         snapshotFlow { viewport.presented && viewport.entrance.value >= 1f }.first { it }
-        viewModel.refreshContextBreakdown()
+        viewModel.refreshContextOverhead()
     }
-    val contextUsed = reading.tokens
+    val contextUsed = reading?.tokens ?: 0
     val sessionTokens = session?.tokens ?: 0
     val sessionTurns = session?.turns ?: 0
     // The cumulative row's own floor, for the same conversations as above: every turn re-sent the
     // context it had, so the transcript's size times the turns is the shape of the total. It is a
     // floor — a tool-heavy run re-sends more often than it has questions — which is why the card
     // writes 「约」 in front of it and nothing else about the split is invented.
-    val sessionEstimate = if (sessionTokens > 0) 0 else transcriptEstimate * sessionTurns.coerceAtLeast(0)
+    val sessionEstimate = if (sessionTokens > 0) 0 else transcriptTokens * sessionTurns.coerceAtLeast(0)
     // What each run actually took, summed over its own messages. A message's own `elapsedMs`
     // is one round's call — the model thinking, then calling a tool, then thinking again are
     // several messages in one run — while the status line the user watched counted the whole
@@ -1094,9 +1060,6 @@ fun ChatScreen(
                 shownTurnsByConversation = shownTurnsByConversation.filterKeys { it in retained }
                 reasoningExpanded.keys.removeAll { it.substringBefore(':') !in retained }
                 runStartedAt.keys.removeAll { it.substringBefore(':') !in retained }
-                // `heldPrompts` 原来**漏在这一处清理里**：它是唯一只增不减的会话级表
-                // （打开过的每个会话永久留一条），与本文件自己写的「a table that only ever grows」原则相违。
-                heldPrompts.keys.removeAll { it !in retained }
             }
     }
     // 流式行长高时的位置稳定由 **TranscriptPosition 在布局期锚定**实现（issue #17 已验收）；
@@ -1673,7 +1636,7 @@ fun ChatScreen(
                 contextEntry = {
                     TopBarContextEntry(
                         used = contextUsed,
-                        estimated = reading.estimated,
+                        estimated = reading?.estimated == true,
                         window = contextWindow,
                         sessionTokens = sessionTokens,
                         sessionEstimate = sessionEstimate,
@@ -1823,15 +1786,11 @@ fun ChatScreen(
                     },
                 )
             }
-            val composerContextBreak = remember(
-                liveStatsHere?.breakSystem,
-                liveStatsHere?.breakTools,
-                liveStatsHere?.breakHistory,
-                state.contextBreakdown,
-            ) {
-                liveStatsHere?.let {
-                    Triple(it.breakSystem, it.breakTools, it.breakHistory)
-                } ?: state.contextBreakdown
+            val composerContextBreak = remember(overhead, contextUsed) {
+                overhead?.let { (system, tools) ->
+                    val history = (contextUsed - system - tools).coerceAtLeast(0)
+                    if (contextUsed > 0) Triple(system, tools, history) else Triple(0, 0, 0)
+                }
             }
             Box(
                 Modifier
@@ -1882,11 +1841,10 @@ fun ChatScreen(
                     assistantId = state.assistantId,
                     assistantName = assistant?.label ?: "随行",
                     contextWindow = contextWindow,
-                    contextUsed = contextUsed,
-                    contextEstimated = reading.estimated,
-                    // 面板三行：run 中用实测三块，空闲用按当前上下文算出来的那份（打开面板时刷新）。
+                    contextUsed = reading?.tokens,
+                    contextEstimated = reading?.estimated == true,
                     contextBreak = composerContextBreak,
-                    onContextPanelOpen = rememberStableCallback0 { viewModel.refreshContextBreakdown() },
+                    onContextPanelOpen = rememberStableCallback0 { viewModel.refreshContextOverhead() },
                     conversationProviderId = state.providerId,
                     conversationModel = state.model,
                     conversationReasoningEffort = state.reasoningEffort,

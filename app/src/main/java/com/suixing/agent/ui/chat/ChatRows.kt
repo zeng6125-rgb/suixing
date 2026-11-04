@@ -684,38 +684,30 @@ internal fun isSameFailure(receipt: String, error: String): Boolean {
 
 internal data class RingReading(val tokens: Int, val estimated: Boolean)
 
+internal fun latestContextPrompt(messages: List<StoredMessage>, checkpoint: ContextCheckpoint? = null): Int {
+    // A report before the most recent compression belongs to the old prompt. Newer records
+    // have an exact transcript anchor, while legacy records only have the compression time.
+    val anchor = checkpoint?.anchorId?.takeIf { it.isNotEmpty() }
+    val afterAnchor = anchor?.let { id -> messages.indexOfLast { it.id == id } } ?: -1
+    for (index in messages.lastIndex downTo afterAnchor + 1) {
+        val message = messages[index]
+        if (checkpoint != null && afterAnchor < 0 && message.timestamp <= checkpoint.at) continue
+        if (message.promptTokens > 0) return message.promptTokens
+    }
+    return 0
+}
+
 internal fun ringReading(
-    liveReported: Int,
     newestStored: Int,
-    liveEstimate: Int,
-    transcriptEstimate: Int = 0,
-    /** meta 里缓存的「最近一条报了用量的消息」的 prompt（issue #41 真问题 1）。 */
-    persistedContext: Int = 0,
-    /**
-     * 压缩之后按折叠后上下文重算的估算（没有压缩时传 0）。
-     *
-     * 压缩完 `persistedContext` 还是压缩前那次请求的数，要等下一次请求才回落 —— 那段时间
-     * 圆环纹丝不动，看起来像"压了没用"。压完就是估算了，直接让估算接管。
-     */
-    compressedEstimate: Int = 0,
-): RingReading = when {
-    // 实测口径优先：网关回报（含按会话保持的最近一次）→ **会话级权威值** → UI 现找。
-    liveReported > 0 -> RingReading(liveReported, estimated = false)
-    // **`persistedContext` 必须排在 `newestStored` 前面**（issue #49）：
-    // 后者只查可见气泡，纯工具调用的无正文 assistant 轮不会进入气泡的 rounds；若这轮
-    // 已上报 usage、后续却失败，就可能只找到更早的可见回答。普通无 usage 的失败本身
-    // 不会让两者不同：两条链都会保留最近一次实测，不能把缺少新 usage 当作充分原因。
-    // `meta.contextTokens` 由 `ChatStore.appendTail` 维护、语义是「最近一次报了用量的 prompt」，
-    // 失败轮**不会把它变小**，而且跨会话切走再回来是 O(1) 读 meta。
-    // 压缩发生在本轮实测之后（估算比落盘实测小）⇒ 用折叠后的估算，圆环立刻变小。
-    compressedEstimate > 0 && (persistedContext <= 0 || compressedEstimate < persistedContext) ->
-        RingReading(compressedEstimate, estimated = true)
-    persistedContext > 0 -> RingReading(persistedContext, estimated = false)
+    persistedContext: Int,
+    estimate: Int?,
+    compressed: Boolean = false,
+): RingReading? = when {
+    // The loaded tail includes tool-only rounds and may be newer than the asynchronously read meta.
     newestStored > 0 -> RingReading(newestStored, estimated = false)
-    // 从没实测过（网关不报用量）才用粗估兜底，并标「约」。
-    liveEstimate > 0 -> RingReading(liveEstimate, estimated = true)
-    transcriptEstimate > 0 -> RingReading(transcriptEstimate, estimated = true)
-    else -> RingReading(0, estimated = false)
+    // Meta has a count but no request timestamp, so it cannot prove a report followed compression.
+    !compressed && persistedContext > 0 -> RingReading(persistedContext, estimated = false)
+    else -> estimate?.coerceAtLeast(0)?.let { RingReading(it, estimated = it > 0) }
 }
 
 /**
@@ -1642,8 +1634,8 @@ internal fun AssistantProse(
         LocalReadingTextKey provides readingKey, LocalProseViewport provides viewport) {
     // 助手回复里可以带图（用户：「助手的回复可以加上图片显示」）。只有真的出现图片语法时才
     // 走分段渲染：纯文字的回复继续保持原来那一条 MarkdownText 路径，排版与增量解析都不变。
-    val hasImages = remember(part.text) {
-        splitImageSegments(part.text).any { it is MessageSegment.Image }
+    val hasImages = remember(part.text, streaming) {
+        splitImageSegments(part.text, streaming).any { it is MessageSegment.Image }
     }
     if (streaming || !selectable || shown.length < part.text.length) {
         if (hasImages) {
@@ -1681,7 +1673,7 @@ private fun ProseWithImages(
     streaming: Boolean,
     part: Part.Text,
 ) {
-    val segments = remember(text) { splitImageSegments(text) }
+    val segments = remember(text, streaming) { splitImageSegments(text, streaming) }
     Column(Modifier.fillMaxWidth()) {
         segments.forEach { segment ->
             when (segment) {

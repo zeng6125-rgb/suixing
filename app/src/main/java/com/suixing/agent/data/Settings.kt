@@ -282,7 +282,7 @@ data class AppSettings(
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     /**
-     * 0 = the hand-tuned 随行 palette, 1 = follow the system wallpaper (Material You).
+     * 0 = 随行, 1 = system wallpaper (Material You), 2 = Claude, 3 = Codex.
      * The brand palette is the default because the whole UI is built around it.
      */
     val paletteMode: Int = 0,

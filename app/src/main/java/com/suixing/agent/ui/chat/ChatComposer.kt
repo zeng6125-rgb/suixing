@@ -268,21 +268,18 @@ internal fun withAttachment(attachments: List<Attachment>, text: String): Pair<S
  */
 @Composable
 internal fun ContextRing(
-    used: Int,
+    used: Int?,
     /** True when [used] is this app's own estimate; the card says 「约」 when it is. */
     estimated: Boolean = false,
     window: Int,
-    /**
-     * 面板三行（系统提示词 / 工具定义 / 对话消息）的**当前窗口**读数，不依赖 run：run 中优先用
-     * [live] 的实测三块，空闲用这个（打开面板时由 [onPanelOpen] 触发上层按当前上下文算）。
-     */
+    /** The current system, tool, and conversation estimates, independent of run status. */
     breakSplit: Triple<Int, Int, Int>? = null,
-    /** 打开面板时回调：让上层按当前上下文算一次三行（见 ChatViewModel.refreshContextBreakdown）。 */
+    /** Refresh system and tool estimates when the panel opens. */
     onPanelOpen: () -> Unit = {},
 ) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
-    val fraction = if (known) (used.toFloat() / window).coerceIn(0f, 1f) else 0f
+    val fraction = if (known && used != null) (used.toFloat() / window).coerceIn(0f, 1f) else 0f
     val tone = if (fraction >= 0.8f) scheme.error else scheme.primary
     val track = scheme.surfaceVariant
     var open by remember { mutableStateOf(false) }
@@ -292,9 +289,8 @@ internal fun ContextRing(
     val density = LocalDensity.current
     val ringPopupMarginPx = with(density) { RING_POPUP_EDGE.toPx() }
     // The number in the middle, as a whole percent: the arc is a shape and the number is the
-    // figure behind it. A window that was never set has no percentage to show (0 = unlimited,
-    // not 0%), and 0% is a ring with no arc to read it against.
-    val percent = if (known) (fraction * 100).roundToInt() else 0
+    // figure behind it. A known window still shows zero; an unfinished estimate shows an ellipsis.
+    val percent = (fraction * 100).roundToInt()
     Box(
         modifier = Modifier
             .size(26.dp)
@@ -342,9 +338,9 @@ internal fun ContextRing(
         // longest reading still fits. Bold, not Medium: at this size the user read the Medium
         // weight as thin, and the ring is the only place these digits appear — the extra weight
         // costs nothing elsewhere.
-        if (percent > 0) {
+        if (known) {
             Text(
-                text = percent.toString(),
+                text = if (used == null) "…" else percent.toString(),
                 fontSize = 9.sp,
                 lineHeight = 10.sp,
                 fontWeight = FontWeight.Bold,
@@ -402,6 +398,7 @@ internal fun ContextRing(
             ) {
                 ContextPanelCard(
                     used = used,
+                    estimated = estimated,
                     window = window,
                     split = breakSplit,
                 )
@@ -437,7 +434,7 @@ internal fun ContextRingCard(
 ) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
-    val percent = if (known) used * 100 / window else 0
+    val percent = if (known) (used * 100.0 / window).roundToInt().coerceIn(0, 100) else 0
     Column(
         modifier = Modifier
             // 264dp, not 240: the value on the 「上下文占用」 line is a sentence of its own
@@ -578,14 +575,14 @@ internal fun ContextRingCard(
  * capsule's entry ([TopBarContextEntry]); this panel is what the composer's ring opens now.
  */
 @Composable
-internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, Int>?) {
+internal fun ContextPanelCard(used: Int?, estimated: Boolean, window: Int, split: Triple<Int, Int, Int>?) {
     val scheme = MaterialTheme.colorScheme
     val known = window > 0
-    val percent = if (known) used * 100 / window else 0
+    val percent = if (known && used != null) (used * 100.0 / window).roundToInt().coerceIn(0, 100) else 0
     // **三条归一到顶部的总数**（用户：「三条的对应 token 数字对不上总 token 数」）：顶部是端点
     // 实测的 prompt tokens，三条是本地字符估算（÷4），两个口径不同。按比例缩放到实测总数上，
     // 最后一条吸收舍入误差 ⇒ 三条相加精确等于顶部那个数。
-    val parts = split?.let { (system, tools, history) ->
+    val parts = if (used == null) null else split?.let { (system, tools, history) ->
         val (s2, t2, h2) = normaliseContextSplit(system, tools, history, used)
         listOf(
             Triple("系统提示词", s2, scheme.primary),
@@ -601,7 +598,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = if (known) "上下文已用 $percent%" else "上下文用量",
+                text = if (known && used != null) "上下文已用 $percent%" else "上下文用量",
                 style = MaterialTheme.typography.labelMedium,
                 // 与数字同一个颜色（用户：「这几个字的颜色都改为和数字一样的颜色」）。
                 color = scheme.onSurfaceVariant,
@@ -609,10 +606,13 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = if (known) {
-                    "~${panelTokens(used)} / ${panelTokens(window)}"
-                } else {
-                    "~${panelTokens(used)}"
+                text = when {
+                    used == null -> "计算中…"
+                    else -> buildString {
+                        if (estimated) append('~')
+                        append(panelTokens(used))
+                        if (known) append(" / ${panelTokens(window)}")
+                    }
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = scheme.onSurfaceVariant,
@@ -620,7 +620,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
                 softWrap = false,
             )
         }
-        if (known) {
+        if (known && used != null) {
             // 标题与进度条之间留大一点的空（用户：「离下面那个进度条间距再大一点点」）。
             Spacer(Modifier.height(6.dp))
             LinearProgressIndicator(
@@ -628,9 +628,7 @@ internal fun ContextPanelCard(used: Int, window: Int, split: Triple<Int, Int, In
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        // 三行**常驻**（用户：「系统提示词就是当前窗口的 tokens 和占比，不是单个 run 的」）：
-        // 数值来自实测（run 中）或按当前上下文的估算（空闲，见 refreshContextBreakdown），
-        // 所以打开面板就有；进度条基准是**上下文窗口**（三行占比之和 = 顶部那条的比例）。
+        // 三行始终是估算分项，加起来等于顶部的总用量。
         parts?.let {
             Spacer(Modifier.height(4.dp))
             val denominator = if (window > 0) window else parts.sumOf { it.second }
@@ -854,7 +852,7 @@ internal fun Composer(
     /** The window the context ring divides by; 0 hides the ring (no denominator). */
     contextWindow: Int,
     /** Tokens the newest round filled of that window, and how many of them were cached. */
-    contextUsed: Int,
+    contextUsed: Int?,
     /** True when [contextUsed] is this app's own estimate rather than the endpoint's count. */
     contextEstimated: Boolean = false,
     /**
