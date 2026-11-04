@@ -6,10 +6,7 @@ import android.app.Activity
 import android.graphics.drawable.ColorDrawable
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
@@ -32,7 +29,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,9 +70,6 @@ import com.suixing.agent.ui.components.LocalDrawerBusy
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.LocalSetSelectionActive
-import com.suixing.agent.ui.components.NAV_ENTER_MS
-import com.suixing.agent.ui.components.NAV_EXIT_MS
-import com.suixing.agent.ui.components.NAV_SHIFT_DIVISOR
 import com.suixing.agent.ui.components.imePaddingBottom
 import com.suixing.agent.ui.drawer.DRAWER_SHEET_WIDTH
 import com.suixing.agent.ui.drawer.DRAWER_CLOSE_SPEC

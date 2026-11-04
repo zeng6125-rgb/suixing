@@ -122,6 +122,18 @@ internal enum class AppearancePalette(val id: Int, val label: String) {
         CODEX -> if (dark) CodexDark else CodexLight
     }
 
+    /**
+     * 用户气泡的专属底色；null = 沿用 `primaryContainer`。
+     *
+     * Claude 浅色的气泡按用户给的截图改成暖米色 `#EAE4D5`（在 `#FAF9F5` 纸底上），
+     * 不用 `primaryContainer` 那档偏粉陶土色 `#F6DED4`。深色不跟着换，保持原来
+     * 的深棕容器色，避免在近黑背景上出现一块突兀的浅色。
+     */
+    fun userBubbleColor(dark: Boolean): Color? = when (this) {
+        CLAUDE -> if (dark) null else Color(0xFFEAE4D5)
+        else -> null
+    }
+
     companion object {
         val labels = entries.map { it.label }
 

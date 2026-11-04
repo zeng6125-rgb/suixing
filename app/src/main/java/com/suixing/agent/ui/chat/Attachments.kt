@@ -166,28 +166,6 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
 }
 
 /**
- * What the ring draws, and whether the number is the endpoint's own or this app's estimate.
- *
- * Four sources, in one order, and the order is the whole point:
- *
- * 1. [liveReported] — the count the endpoint itself sent for the round in flight. The only
- *    honest measure of 「上下文用了多少」 (see `StreamStats.lastPromptTokens`).
- * 2. [newestStored] — the newest round in the transcript that carries a count. This is what the
- *    ring reads on a conversation that was just opened, and between the start of a round and
- *    the endpoint's usage block at its end.
- * 3. [liveEstimate] — the run's own character-based estimate of the wire, used while a round is
- *    going and before its usage block lands.
- * 4. [transcriptEstimate] — the transcript's own size, for a conversation that is *not* running
- *    and whose stored rounds carry no counts at all: a gateway that ignores
- *    `stream_options.include_usage` (see LlmClient's own note), or rows written before the counts
- *    existed. Without it the card was empty in exactly that case — every line zero, 「暂无数据」
- *    on a conversation with plenty of text in it — which is the report this answers.
- *
- * The last two are estimates, so [estimated] is set and the card writes 「约」: a proportion is not
- * a price, but a proportion that says 6% beats a blank.
- */
-
-/**
  * The draft's `attachmentUri` for a picture taken back out of the queue by 「修改」.
  *
  * A marker, not a uri: the picture lives in the view model's attachment cache and nowhere else, so

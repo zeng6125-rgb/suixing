@@ -420,8 +420,15 @@ internal fun Drawer(
             val latestOpenConversation = rememberUpdatedState(onOpenConversation)
             val latestTogglePin = rememberUpdatedState(onTogglePin)
             val latestToggleArchive = rememberUpdatedState(onToggleArchive)
+            // 同理转发 activeId / runningId。切会话必然改 activeId，原来它在 remember 的键里
+            // ⇒ 整个 drawerRow lambda 换实例 ⇒ 所有可见会话行连同各自的 pointerInput 拖动手势
+            // 一起重建，正好落在打开抽屉那一帧。改成 State 提供者后 lambda 与手势保持稳定，
+            // 行内读 .value 拿到的仍是原样的选中/运行布尔值（rememberUpdatedState 在组合期
+            // 同步写值，不晚一帧），ConversationRow 的签名与行为都不变。
+            val activeIdNow = rememberUpdatedState(activeId)
+            val runningIdNow = rememberUpdatedState(runningId)
             val drawerRow: @Composable (Conversation, Modifier) -> Unit = remember(
-                activeId, runningId, context, exporter, exitSortMode,
+                context, exporter, exitSortMode,
             ) { { conversation, anim ->
                     // 把手的拖动手势建一次就固定住：手势进行中如果 block 换实例，Compose 会把
                     // 这次拖动取消，于是「拖到一半断了」。
@@ -492,8 +499,8 @@ internal fun Drawer(
                     }
                     ConversationRow(
                         conversation = conversation,
-                        selected = conversation.id == activeId,
-                        running = conversation.id in runningId,
+                        selected = conversation.id == activeIdNow.value,
+                        running = conversation.id in runningIdNow.value,
                         completedUnread = conversation.id in unreadCompleted,
                         menuOpen = menuFor == conversation.id,
                         sortMode = sortMode,

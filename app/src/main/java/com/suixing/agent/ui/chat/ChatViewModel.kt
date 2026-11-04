@@ -38,7 +38,6 @@ import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.llm.describeError
 import com.suixing.agent.service.AgentForegroundService
 import com.suixing.agent.ui.settings.withUpstreamDefaults
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers

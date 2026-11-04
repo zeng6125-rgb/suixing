@@ -274,7 +274,7 @@ fun ChatScreen(
     // **按会话 key**（评审）：底边距是"读历史期间冻结的那一个"，不同会话的输入框/让位不同，
     // 不 key 的话切到另一个会话会沿用上一个会话冻结值。
     var heldFootprint by remember(state.conversationId) { mutableStateOf<Dp?>(null) }
-    // **不含手势条那一截**：它在布局期由列表/空状态自己让出来（[keyboardAwareBottomPad]），
+    // **不含手势条那一截**：它在布局期由列表/空状态自己让出来（[keyboardAwareImePad]），
     // 这样这一项不随键盘逐帧变 —— 否则它就是上面说过的「每帧整页重组」。
     // 几何上与旧写法等价：列表视口少了 navBarPad、正文底边距也少了 navBarPad，
     // 最后一张卡与输入框之间的距离一分不差（键盘全程恒定）。
@@ -1152,7 +1152,7 @@ fun ChatScreen(
                     // 聊天页的 `stackFootprint` 里带着 12/16dp 的"转录与输入框之间的空气"，
                     // 那是转录需要的，空状态不需要 —— 照搬它就会在输入框上方多出一段空白。
                     // 这里只保留输入框的**真实占位**：内容高度 + 它自己的下内边距（手势条那一截
-                    // 由下面的修饰符在布局期让出来，见 [keyboardAwareBottomPad]）。
+                    // 由下面的修饰符在布局期让出来，见 [keyboardAwareImePad]）。
                     val heroBottom = with(LocalDensity.current) {
                         composerH + COMPOSER_BOTTOM_PAD
                     }
@@ -2102,23 +2102,6 @@ private fun <A, B, R> rememberStableCallback2(block: (A, B) -> R): (A, B) -> R {
     val latest = rememberUpdatedState(block)
     return remember { { first: A, second: B -> latest.value(first, second) } }
 }
-
-/**
- * 把「手势条让位」从组合期搬到**布局期**：键盘盖住手势条时让位是 0，键盘收起时是完整的手势条高度。
- *
- * 为什么需要它（用户：「输入框被输入法抬起收回时掉帧」）：这一项原来算在 `stackFootprint` 里，
- * 而 `stackFootprint` 是 `LazyColumn` 的 `contentPadding` —— 组合期参数。键盘高度在动画的每一帧
- * 都变，于是整页 ChatScreen（含那个 60 参数的 Composer）每帧重组一次。放到布局期后，
- * 键盘动画只让这一个节点重新测量/放置，**零重组**，而且间距与输入框逐帧同步（输入框自己也是
- * 在布局期读同一个值，见 `TurnScrubber.kt` 的 `.layout{}` 与 `Common.kt:595`）。
- *
- * 形制照抄 `Common.kt` 的 `imePaddingBottom`：新 `maxHeight` 必须夹在 `[minHeight, maxHeight]`，
- * 否则 `Constraints` 会抛 "maxHeight(n) must be >= minHeight(m)"（0.8.434 那个闪退的同一类）。
- */
-private fun Modifier.keyboardAwareBottomPad(
-    navBarPx: Int,
-    ime: androidx.compose.runtime.State<Int>,
-): Modifier = bottomInsetPadding { (navBarPx - ime.value).coerceAtLeast(0) }
 
 /**
  * 聊天页整棵不再按 IME 缩高之后，列表要自己把键盘占的那一截让出来。

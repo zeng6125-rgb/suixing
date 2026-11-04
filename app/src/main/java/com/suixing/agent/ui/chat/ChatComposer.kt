@@ -131,7 +131,6 @@ import com.suixing.agent.data.Goal
 import com.suixing.agent.data.GoalStatus
 import com.suixing.agent.data.ProviderConfig
 import com.suixing.agent.data.Tps
-import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.data.label

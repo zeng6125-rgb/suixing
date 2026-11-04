@@ -227,16 +227,6 @@ private const val FX_BREATH_FRAME_MS = 40L
 private const val FX_BREATH_TICK_MS = 1000L
 
 /**
- * How long the light survives the last driving action.
- *
- * A run hands over to the next one across a boundary the ticker only notices on its next tick,
- * and the agent often thinks for a few seconds between actions — without this the light blinks
- * out in exactly the moments the user is watching it, which is what they reported. Five seconds
- * covers a tick plus the pause before the next action.
- */
-private const val FX_DRIVING_GRACE_MS = 5_000L
-
-/**
  * Effects are invisible when they fail: a window the system refused to add looks exactly like a
  * run that never asked for one, and which of the two it was decides where to look next. Nothing
  * else in the app can tell them apart, so every entry writes a line here. It is a diagnostic, not

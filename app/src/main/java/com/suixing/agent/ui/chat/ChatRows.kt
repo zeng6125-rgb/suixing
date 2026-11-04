@@ -88,6 +88,7 @@ import com.suixing.agent.ui.chat.markdown.MessageSegment
 import com.suixing.agent.ui.chat.markdown.splitImageSegments
 import com.suixing.agent.ui.components.SuixingMark
 import com.suixing.agent.ui.chat.markdown.markdownBody
+import com.suixing.agent.ui.theme.LocalUserBubbleColor
 import java.util.Locale
 
 // 模型层：气泡分组、分页、圆环读数、待办行、跳转轨窗口、附件。纯函数，单测覆盖。
@@ -964,7 +965,8 @@ internal fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit)
         modifier = Modifier
             .widthIn(max = 300.dp),
         shape = BubbleShape,
-        color = MaterialTheme.colorScheme.primaryContainer,
+        // Claude 浅色用截图里的暖米色；其余配色（含深色 Claude）仍走 primaryContainer。
+        color = LocalUserBubbleColor.current ?: MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {

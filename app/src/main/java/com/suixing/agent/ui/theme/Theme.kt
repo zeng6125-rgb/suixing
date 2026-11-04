@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 
@@ -18,6 +19,14 @@ import androidx.compose.ui.platform.LocalContext
  * directly would be wrong when the user forces light or dark in settings.
  */
 val LocalDarkTheme = staticCompositionLocalOf { false }
+
+/**
+ * 用户气泡的底色。默认 null ⇒ 用 Material 的 `primaryContainer`，也就是随行 / 壁纸 /
+ * Codex 与深色 Claude 的原样。只有 Claude 浅色单独给一个暖米色（用户给的截图色
+ * `#EAE4D5`），因为 `primaryContainer` 同时被模型 chip、助手选中态等 5 处复用，
+ * 改那个槽位会把它们一起带走。
+ */
+val LocalUserBubbleColor = staticCompositionLocalOf<Color?> { null }
 
 @Composable
 fun SuixingTheme(
@@ -58,6 +67,7 @@ fun SuixingTheme(
     }
     CompositionLocalProvider(
         LocalDarkTheme provides darkTheme,
+        LocalUserBubbleColor provides palette.userBubbleColor(darkTheme),
         androidx.compose.foundation.text.selection.LocalTextSelectionColors provides selectionColors,
     ) {
         MaterialTheme(

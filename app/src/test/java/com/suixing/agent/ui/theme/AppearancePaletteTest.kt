@@ -20,6 +20,23 @@ class AppearancePaletteTest {
     }
 
     @Test
+    fun `only light Claude uses the warm user bubble colour`() {
+        // 用户给的截图：Claude 纸底 #FAF9F5 上的气泡是 #EAE4D5。
+        // 其它配色与深色 Claude 不受影响，仍沿用 primaryContainer。
+        assertEquals(Color(0xFFEAE4D5), AppearancePalette.CLAUDE.userBubbleColor(dark = false))
+        assertEquals(null, AppearancePalette.CLAUDE.userBubbleColor(dark = true))
+        for (palette in listOf(
+            AppearancePalette.SUIXING,
+            AppearancePalette.WALLPAPER,
+            AppearancePalette.CODEX,
+        )) {
+            for (dark in listOf(false, true)) {
+                assertEquals("$palette dark=$dark", null, palette.userBubbleColor(dark))
+            }
+        }
+    }
+
+    @Test
     fun `saved palette ids retain their meaning`() {
         assertEquals(AppearancePalette.SUIXING, AppearancePalette.fromId(0))
         assertEquals(AppearancePalette.WALLPAPER, AppearancePalette.fromId(1))
