@@ -84,6 +84,8 @@ import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.SubagentModelSelection
+import com.suixing.agent.data.resolve
 import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.decrypted
 import com.suixing.agent.data.ApprovalMode
@@ -1009,9 +1011,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
             item {
                 // **测试用的模型只属于测试**（用户：「下拉只给测试用，不动全局模型」）：
                 // 选项只列当前供应商已启用的模型；这里选什么都不会改写全局聊天模型。
-                TestModelDropdown(
+                EnabledModelDropdown(
                     provider = selected,
                     selectedId = testModel,
+                    placeholder = "选择测试模型",
+                    subtitle = "仅用于测试连接",
                     enabled = seeded && !testing && !saving && !loadingModels,
                     expanded = testModelMenuOpen,
                     onExpandedChange = { testModelMenuOpen = it },
@@ -1739,10 +1743,26 @@ private fun SubagentSettingsPage(onBack: () -> Unit) {
     val stored by Core.settings.flow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val scope = rememberCoroutineScope()
     val parallelism = stored.subagentParallelism.coerceIn(1, 3)
+    val selection = stored.subagentModel
+    val providers = remember(stored.providers) {
+        stored.providers.filter { provider -> provider.baseUrl.isNotBlank() && provider.enabled.any { it.isNotBlank() } }
+    }
+    val effectiveProvider = remember(selection, providers) { selection?.resolve(providers) }
+    var choosingModel by rememberSaveable(selection != null) { mutableStateOf(selection != null) }
+    var providerId by rememberSaveable(selection?.providerId) { mutableStateOf(selection?.providerId.orEmpty()) }
+    val provider = providers.firstOrNull { it.id == providerId }
+    var providerMenuOpen by remember { mutableStateOf(false) }
+    var modelMenuOpen by remember(providerId) { mutableStateOf(false) }
+    fun dismissMenu(): Boolean = when {
+        modelMenuOpen -> { modelMenuOpen = false; true }
+        providerMenuOpen -> { providerMenuOpen = false; true }
+        else -> false
+    }
+    androidx.activity.compose.BackHandler(enabled = modelMenuOpen || providerMenuOpen) { dismissMenu() }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { PageTopBar(title = SettingsPage.SUBAGENT.title, onBack = onBack) },
+        topBar = { PageTopBar(title = SettingsPage.SUBAGENT.title, onBack = { if (!dismissMenu()) onBack() }) },
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),
@@ -1753,7 +1773,7 @@ private fun SubagentSettingsPage(onBack: () -> Unit) {
             item {
                 SettingRow(
                     title = "允许委派子任务",
-                    subtitle = "助手可将复杂任务拆开，子任务继承当前模型与工具权限，可能增加模型调用。",
+                    subtitle = "助手可将复杂任务拆开，子任务继承父任务的工具权限，可能增加模型调用。",
                     control = {
                         SettingsSwitch(
                             checked = stored.subagentsEnabled,
@@ -1771,6 +1791,63 @@ private fun SubagentSettingsPage(onBack: () -> Unit) {
                     steps = 1,
                     onValueChange = { value -> scope.persist { it.copy(subagentParallelism = value.toInt()) } },
                 )
+            }
+            item { SectionHeader("子任务模型") }
+            item {
+                LabeledBlock(
+                    label = "模型来源",
+                    hint = if (selection != null && effectiveProvider == null) {
+                        "原先指定的模型已不可用，子任务会跟随当前会话。"
+                    } else {
+                        "默认跟随当前会话的模型。选好供应商和模型后，从下一次运行起仅对子任务生效。"
+                    },
+                ) {
+                    SegmentedPill(
+                        options = listOf("跟随当前会话", "指定模型"),
+                        selectedIndex = if (choosingModel) 1 else 0,
+                        onSelect = { index ->
+                            choosingModel = index == 1
+                            dismissMenu()
+                            if (index == 0 && selection != null) {
+                                scope.persist { it.copy(subagentModel = null) }
+                            }
+                        },
+                    )
+                }
+            }
+            if (choosingModel) {
+                item {
+                    ProviderDropdown(
+                        providers = providers,
+                        selected = provider,
+                        enabled = true,
+                        expanded = providerMenuOpen,
+                        onExpandedChange = { providerMenuOpen = it },
+                        onSelect = { providerId = it.id },
+                    )
+                }
+                if (providers.isEmpty()) item {
+                    Text(
+                        "请先在「模型与生成」中启用至少一个模型。",
+                        style = SettingsStyle.description,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (provider != null) item {
+                    EnabledModelDropdown(
+                        provider = provider,
+                        selectedId = selection?.model?.takeIf { effectiveProvider?.id == provider.id }.orEmpty(),
+                        placeholder = "选择子任务模型",
+                        subtitle = "选定后保存，仅用于子任务",
+                        enabled = true,
+                        expanded = modelMenuOpen,
+                        onExpandedChange = { modelMenuOpen = it },
+                        onPick = { model ->
+                            val choice = SubagentModelSelection(provider.id, model)
+                            scope.persist { if (choice.resolve(it.providers) != null) it.copy(subagentModel = choice) else it }
+                        },
+                    )
+                }
             }
         }
     }

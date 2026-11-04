@@ -116,6 +116,9 @@ fun modelGroupOf(modelId: String): String =
 fun groupModels(ids: List<String>): List<Pair<String, List<String>>> =
     ids.groupBy(::modelGroupOf).toList()
 
+@Serializable
+data class SubagentModelSelection(val providerId: String, val model: String)
+
 /**
  * What the composer's model picker offers: every endpoint with ticked models, in the
  * order the user set them up, each with its own list. The model in use is always
@@ -231,6 +234,8 @@ data class AppSettings(
     /** Children inherit the current run's tools and approval policy. */
     val subagentsEnabled: Boolean = true,
     val subagentParallelism: Int = 2,
+    /** Absent means the child follows the parent run's already-resolved model. */
+    val subagentModel: SubagentModelSelection? = null,
     /**
      * 插话落在哪里。0 排队：等这一轮模型说完，在下一轮请求前注入，模型把它当成
      * 「用户在我干活时说的」；1 立即：掐断在途的流，让模型马上看到这句话——代价是
@@ -883,4 +888,27 @@ fun AppSettings.choiceFor(
         return LlmChoice(own.id, own.baseUrl, own.apiKey, conversationModel, own.protocol)
     }
     return LlmChoice(activeProvider()?.id, baseUrl, apiKey, model, activeProvider()?.protocol.orEmpty())
+}
+
+internal fun SubagentModelSelection.resolve(providers: List<ProviderConfig>): ProviderConfig? =
+    providers.firstOrNull { it.id == providerId && it.baseUrl.isNotBlank() && model.isNotBlank() && model in it.enabled }
+
+/** Apply the child endpoint to a parent run without carrying headers across credentials. */
+internal fun AppSettings.forSubagentModel(): AppSettings {
+    val selection = subagentModel ?: return this
+    val provider = selection.resolve(providers) ?: return this
+    val own = provider.takeIf { it.ownSampling }
+    val sameConnection = baseUrl.trimEnd('/') == provider.baseUrl.trimEnd('/') &&
+        apiKey == provider.apiKey && protocol == provider.protocol
+    return copy(
+        baseUrl = provider.baseUrl,
+        apiKey = provider.apiKey,
+        protocol = provider.protocol,
+        model = selection.model,
+        maxTokens = maxTokensFor(selection.model),
+        temperature = own?.temperature ?: temperature,
+        topP = own?.topP ?: topP,
+        reasoningEffort = own?.reasoningEffort ?: "",
+        requestHeaders = if (sameConnection) requestHeaders else emptyMap(),
+    )
 }

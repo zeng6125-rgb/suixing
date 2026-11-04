@@ -20,6 +20,7 @@ import com.suixing.agent.data.TranscriptRedaction
 import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.data.Tps
 import com.suixing.agent.data.WireSanitize
+import com.suixing.agent.data.forSubagentModel
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.FINISH_CUT
 import com.suixing.agent.llm.LlmClient
@@ -1369,7 +1370,7 @@ class AgentEngine(
                         }
                         try {
                             var failure: String? = null
-                            val childSettings = settings.copy(subagentsEnabled = false, autoProfile = false,
+                            val childSettings = settings.forSubagentModel().copy(subagentsEnabled = false, autoProfile = false,
                                 maxToolRounds = if (settings.maxToolRounds > 0) minOf(settings.maxToolRounds, 12) else 12,
                                 systemPrompt = settings.systemPrompt + "\n\n" + CHILD_AGENT_INSTRUCTIONS)
                             val input = buildString {

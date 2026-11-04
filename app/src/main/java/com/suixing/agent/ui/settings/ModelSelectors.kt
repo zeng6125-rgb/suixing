@@ -211,31 +211,40 @@ internal fun ProviderDropdown(
     providers: List<ProviderConfig>, selected: ProviderConfig?, enabled: Boolean,
     /** 展开状态由页面持有：BACK 必须先收起它，而不是直接退页面（见模型页的 BackHandler）。 */
     expanded: Boolean, onExpandedChange: (Boolean) -> Unit,
-    onSelect: (ProviderConfig) -> Unit, onAdd: () -> Unit, onDelete: () -> Unit,
+    onSelect: (ProviderConfig) -> Unit,
+    onAdd: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
 ) {
     val open = expanded
     var anchorWidth by remember { mutableIntStateOf(0) }
     val colors = MaterialTheme.colorScheme
     val endpoint = remember(selected?.baseUrl) { providerEndpointLabel(selected?.baseUrl.orEmpty()) }
+    val placeholder = if (onAdd != null) "添加供应商" else "选择供应商"
     Box(Modifier.fillMaxWidth().padding(top = 8.dp).onSizeChanged { anchorWidth = it.width }) {
         SelectionCardButton(
             identity = { ProviderIdentity(selected?.label.orEmpty()) },
-            title = selected?.label ?: "添加供应商",
-            subtitle = if (selected == null) "连接模型服务或自己的网关" else endpoint,
+            title = selected?.label ?: placeholder,
+            subtitle = when {
+                selected != null -> endpoint
+                onAdd != null -> "连接模型服务或自己的网关"
+                else -> "从已启用模型的供应商中选择"
+            },
             expanded = open,
-            enabled = enabled,
-            description = "供应商：${selected?.label ?: "添加供应商"}",
-            onClick = { if (providers.isEmpty()) onAdd() else onExpandedChange(true) },
+            enabled = enabled && (providers.isNotEmpty() || onAdd != null),
+            description = "供应商：${selected?.label ?: placeholder}",
+            onClick = { if (providers.isEmpty()) onAdd?.invoke() else onExpandedChange(true) },
         )
         ModelDropdownMenu(
             expanded = open && enabled, onDismiss = { onExpandedChange(false) }, anchorWidth = anchorWidth,
         ) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("切换供应商", style = SettingsStyle.metadata, color = colors.onSurfaceVariant, modifier = Modifier.weight(1f))
-                IconButton(enabled = selected != null && providers.size > 1,
-                    onClick = { onExpandedChange(false); onDelete() }) {
-                    Icon(ImageVector.vectorResource(R.drawable.ic_trash), "删除当前供应商", Modifier.size(16.dp),
-                        tint = if (selected != null && providers.size > 1) colors.onSurfaceVariant else colors.onSurface.copy(alpha = 0.38f))
+                if (onDelete != null) {
+                    IconButton(enabled = selected != null && providers.size > 1,
+                        onClick = { onExpandedChange(false); onDelete() }) {
+                        Icon(ImageVector.vectorResource(R.drawable.ic_trash), "删除当前供应商", Modifier.size(16.dp),
+                            tint = if (selected != null && providers.size > 1) colors.onSurfaceVariant else colors.onSurface.copy(alpha = 0.38f))
+                    }
                 }
             }
             providers.forEach { provider ->
@@ -266,12 +275,14 @@ internal fun ProviderDropdown(
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 )
             }
-            DropdownMenuItem(
-                text = { Text("添加供应商", style = SettingsStyle.controlLabel, color = colors.primary) },
-                leadingIcon = { Icon(ImageVector.vectorResource(R.drawable.ic_plus), null, Modifier.size(18.dp), tint = colors.primary) },
-                onClick = { onExpandedChange(false); onAdd() },
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-            )
+            if (onAdd != null) {
+                DropdownMenuItem(
+                    text = { Text("添加供应商", style = SettingsStyle.controlLabel, color = colors.primary) },
+                    leadingIcon = { Icon(ImageVector.vectorResource(R.drawable.ic_plus), null, Modifier.size(18.dp), tint = colors.primary) },
+                    onClick = { onExpandedChange(false); onAdd() },
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                )
+            }
         }
     }
 }
@@ -365,9 +376,11 @@ internal fun CompactProtocolPicker(
 }
 
 @Composable
-internal fun TestModelDropdown(
+internal fun EnabledModelDropdown(
     provider: ProviderConfig?,
     selectedId: String,
+    placeholder: String,
+    subtitle: String,
     enabled: Boolean,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
@@ -377,7 +390,7 @@ internal fun TestModelDropdown(
     val canOpen = enabled && models.isNotEmpty()
     var anchorWidth by remember { mutableIntStateOf(0) }
     val colors = MaterialTheme.colorScheme
-    val title = selectedId.takeIf { it.isNotEmpty() }?.let { provider?.displayModel(it) } ?: "选择测试模型"
+    val title = selectedId.takeIf { it.isNotEmpty() }?.let { provider?.displayModel(it) } ?: placeholder
     val identity: @Composable () -> Unit = {
         Box(
             Modifier.size(30.dp).clip(MaterialTheme.shapes.small).background(colors.surfaceContainerHighest),
@@ -390,10 +403,10 @@ internal fun TestModelDropdown(
         SelectionCardButton(
             identity = identity,
             title = title,
-            subtitle = if (models.isEmpty()) "先启用一个模型" else "仅用于测试连接",
+            subtitle = if (models.isEmpty()) "先启用一个模型" else subtitle,
             expanded = expanded,
             enabled = canOpen,
-            description = "测试连接使用的模型：$title",
+            description = "$placeholder：$title",
             onClick = { onExpandedChange(true) },
         )
         ModelDropdownMenu(expanded && canOpen, { onExpandedChange(false) }, anchorWidth) {
@@ -413,7 +426,7 @@ internal fun TestModelDropdown(
                     leadingIcon = identity,
                     trailingIcon = {
                         Box(Modifier.size(18.dp)) {
-                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前测试模型", tint = colors.primary)
+                            if (chosen) Icon(ImageVector.vectorResource(R.drawable.ic_check), "当前模型", tint = colors.primary)
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(id) },
