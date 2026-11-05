@@ -441,10 +441,15 @@ internal fun EnabledModelDropdown(
 }
 
 @Composable
-internal fun FetchedModelsDialog(provider: ProviderConfig, onToggle: (String, Boolean) -> Unit, onDismiss: () -> Unit) {
+internal fun FetchedModelsDialog(
+    provider: ProviderConfig,
+    candidates: List<String>,
+    onToggle: (String, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
     var query by remember(provider.id) { mutableStateOf("") }
-    val groups = remember(provider.models, query) {
-        groupModels(provider.models.distinct().filter { query.isBlank() || it.contains(query.trim(), true) })
+    val groups = remember(candidates, query) {
+        groupModels(candidates.distinct().filter { query.isBlank() || it.contains(query.trim(), true) })
     }
     SuixingDialog(
         onDismissRequest = onDismiss,
@@ -453,9 +458,9 @@ internal fun FetchedModelsDialog(provider: ProviderConfig, onToggle: (String, Bo
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 CompactOutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true,
                     label = { Text("搜索模型") }, modifier = Modifier.fillMaxWidth())
-                Text("已启用 ${provider.enabled.size} 个 · 修改后在页面底部保存", style = SettingsStyle.description,
+                Text("已启用 ${provider.enabled.size} 个 · 勾选后才需要保存", style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (groups.isEmpty()) Text(if (provider.models.isEmpty()) "尚无模型，请先获取或添加自定义模型。" else "没有匹配的模型。",
+                if (groups.isEmpty()) Text(if (candidates.isEmpty()) "尚无模型，请先获取或添加自定义模型。" else "没有匹配的模型。",
                     style = SettingsStyle.description)
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
                     groups.forEach { (group, ids) ->

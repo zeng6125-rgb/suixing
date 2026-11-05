@@ -40,6 +40,8 @@ internal class TranscriptPosition(private val list: LazyListState) {
     private var userChangeUntil = 0L
     private var userTransitions = 0
     private var captureAfterPlacement = false
+    /** List position at the moment reading became unavailable (press / fling). */
+    private var unreadableAt: Pair<Int, Int>? = null
 
     fun pauseForUserChange() {
         userChangeUntil = android.os.SystemClock.uptimeMillis() + PROCESS_EXPAND_MS + 48L
@@ -79,6 +81,7 @@ internal class TranscriptPosition(private val list: LazyListState) {
         bottom = viewportY + layout.viewportSize.height - layout.afterContentPadding
         if (following()) {
             anchor = null
+            lastRepair = null
             if (list.canScrollForward && layout.totalItemsCount > 0) {
                 list.requestScrollToItem(layout.totalItemsCount - 1, TRANSCRIPT_END_OFFSET)
                 // requestScrollToItem's snapshot notification alone may be delivered
@@ -86,13 +89,47 @@ internal class TranscriptPosition(private val list: LazyListState) {
                 // owner's measure/layout pass drains before drawing this frame.
                 invalidate?.invoke()
             }
-        } else if (!canRead()) anchor = null
+        }
+        // Do NOT drop the point merely because reading is temporarily unavailable
+        // (finger down / fling). A run may settle in that window; keeping the point
+        // is what lets contentPlaced() repair the live→settled height change once
+        // the reader is idle, instead of latching the jumped geometry.
     }
 
+    /**
+     * An interaction (press / scroll / follow switch) changed the readable state.
+     *
+     * Navigation deliberately clears the point ([rebaseAfterNavigation]) and a normal
+     * idle interaction re-captures it right away. But when reading becomes *unavailable*
+     * because a finger is down or a fling is in progress, a run can finish in exactly that
+     * window: the live card's height changes under the same item key, and clearing the point
+     * here would leave that delta uncompensated — the next idle pass would capture a fresh
+     * point from the already-jumped geometry, a permanent one-shot jump. So we freeze the
+     * point across that window, but only while the LIST POSITION IS UNCHANGED: if the user
+     * actually scrolled, the old point no longer describes what they are reading and must
+     * be dropped.
+     */
     fun interactionChanged() {
-        anchor = null
-        lastRepair = null
-        if (canRead() && !captureAfterPlacement) capture()
+        if (!canRead()) {
+            val at = list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset
+            if (unreadableAt == null) unreadableAt = at
+            else if (unreadableAt != at) {
+                // A real scroll during the unreadable window: the old anchor is stale.
+                anchor = null
+                lastRepair = null
+                unreadableAt = null
+            }
+            invalidate?.invoke()
+            return
+        }
+        // Reading resumed. Repair only if the list never moved; otherwise re-capture fresh.
+        val stationary = unreadableAt?.let { it == list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset }
+        unreadableAt = null
+        if (stationary == false) {
+            anchor = null
+            lastRepair = null
+        }
+        if (anchor == null && !captureAfterPlacement) capture()
         invalidate?.invoke()
     }
 

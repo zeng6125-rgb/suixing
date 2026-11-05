@@ -106,4 +106,21 @@ class NavigationAnchorHandoffTest {
         owner.contentPlaced()
         verify(exactly = 1) { list.requestScrollToItem(2, 120) }
     }
+
+    @Test fun `an unreadable press window keeps the point so a settled row is repaired`() {
+        // Finger down: reading becomes unavailable. The old behaviour dropped the point
+        // here, so a live→settled height change in that window went uncompensated.
+        reading = false
+        owner.interactionChanged()
+        // The run settles while the finger is still down: content grows above the reader.
+        textY = 170f
+        owner.contentPlaced()
+        verify(exactly = 0) { list.requestScrollToItem(any(), any()) }
+
+        // On release the SAME pre-settle point must repair the jump exactly once.
+        reading = true
+        owner.interactionChanged()
+        owner.contentPlaced()
+        verify(exactly = 1) { list.requestScrollToItem(2, 170) }
+    }
 }

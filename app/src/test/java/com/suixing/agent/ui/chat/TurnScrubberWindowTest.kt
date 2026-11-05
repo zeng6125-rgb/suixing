@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -88,6 +89,18 @@ class TurnScrubberWindowTest {
             assertEquals(0, scrubberRowFor(-50f, 8f, 11f, slots.size))
             assertEquals(count - 1, scrubberRowFor(1000f, 8f, 11f, slots.size))
         }
+    }
+
+    @Test fun `a window-slide nudge needs a real change and no rail gesture`() {
+        // First frame: baseline equals current, no nudge.
+        assertFalse(scrubberNudgeNeeded(14, 14, -1, false))
+        // Middle reading: the window actually slides.
+        assertTrue(scrubberNudgeNeeded(14, 15, -1, false))
+        // Clamped near top/bottom: the start does not move even if the turn does.
+        assertFalse(scrubberNudgeNeeded(1, 1, -1, false))
+        // A press/drag/long-press on the rail must never fire a competing nudge.
+        assertFalse(scrubberNudgeNeeded(14, 15, 3, false))
+        assertFalse(scrubberNudgeNeeded(14, 15, -1, true))
     }
 
     @Test fun `normal physical row mapping includes earlier prefix once`() {

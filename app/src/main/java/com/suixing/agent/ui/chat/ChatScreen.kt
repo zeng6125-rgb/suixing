@@ -1315,16 +1315,13 @@ fun ChatScreen(
                                 WindowInsets.statusBars.getTop(this).toDp()
                             } + 76.dp,
                             // Composer space belongs below the chronological transcript.
-                            // Keep it stable throughout reading, including run completion.
+                            // **始终用冻住的值**：原来贴底时用实时 stackFootprint、离底时用
+                            // heldFootprint，run 完成时 stickToBottom 一翻，afterContentPadding
+                            // 跟着变 ⇒ 阅读锚点的 Y 被推移一段，叠加 live→settled 的高度差
+                            // 就是「对话完成后位置跳变」。heldFootprint 在贴底时也会被种下
+                            // （见上面的 LaunchedEffect），所以贴底行为不变，只是不再切换。
                             // 没种过就退回当前值（**不要退回 0.dp**，那会让恢复位置被推移一次）。
-                            bottom = if (scroll.stickToBottom) {
-                                stackFootprint
-                            } else {
-                                // Finishing a run must not shorten the scroll range under
-                                // a reader near its end. Release this reservation when the
-                                // reader intentionally returns to latest, not on completion.
-                                heldFootprint ?: stackFootprint
-                            },
+                            bottom = heldFootprint ?: stackFootprint,
                         ),
                         // Short chats begin at the top. Growing text extends below existing
                         // text; only the explicit latest-follow policy scrolls toward the end.

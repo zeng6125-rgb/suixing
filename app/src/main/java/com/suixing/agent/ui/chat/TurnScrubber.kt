@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
@@ -91,6 +92,10 @@ internal val SCRUBBER_ROW = 8.dp
 
 /** Twelve slots occupy 129dp; spacing also drives drag selection and the floating label. */
 internal val SCRUBBER_GAP = 3.dp
+
+/** Whether a window-slide nudge should fire: a real change, and no rail gesture in flight. */
+internal fun scrubberNudgeNeeded(previous: Int, current: Int, pressRow: Int, shown: Boolean): Boolean =
+    previous != current && pressRow < 0 && !shown
 
 /** How far the finger travels before a press turns into a drag. Aether's own threshold. */
 internal val SCRUBBER_DRAG_THRESHOLD = 18.dp
@@ -318,6 +323,23 @@ internal fun TurnScrubber(
     val rows = remember(window) { scrubberSlots(window) }
     if (rows.isEmpty()) return
     val rowCount = rows.size
+    // >12 轮时窗口在中间滑动，条子本身始终居中 ⇒ 集合换了但视觉没动。
+    // 读到的轮次一变，就让整条 rail 在绘制期做一个「上移再回中」的小幅位移，
+    // 位置仍常驻中间，但能看出「读到别处了」。首帧不触发；手指在 rail 上时不触发，
+    // 免得和拖动手势打架。
+    val nudgePx = with(LocalDensity.current) { 10.dp.toPx() }
+    val nudge = remember(conversationId) { Animatable(0f) }
+    // 信号用「阅读窗口」的起点：同一个纯函数，但不带 unlocked / pinnedCurrentTurn。
+    //  · 中间滑动时它随 currentTurn 变 → 触发；
+    //  · 快到顶/到底窗口被夹住、起点不变 → 不触发（正是用户说「除非快到顶或者到底」）；
+    //  · ≤12 轮恒为 oldest → 不触发；
+    //  · 拖动内部的 unlocked/pin 完全不进这个式子 ⇒ 松手 recenter 不会补一次假动效，
+    //    取消的拖动也不会抖；currentTurn 也不必当信号（它还掺着 pendingTurn）。
+    val readingWindowStart = scrubberWindow(
+        totalTurns = totalTurns,
+        currentTurn = currentTurn,
+        drawnTurns = drawnTurns,
+    ).first
     // A gesture outlives the recomposition it started in, so it reads the turns and the
     // jump through these instead of closing over values a new message has replaced.
     val latestRows by rememberUpdatedState(rows)
@@ -339,6 +361,17 @@ internal fun TurnScrubber(
     var selectionRow by remember(conversationId, rowCount) { mutableIntStateOf(0) }
     var shown by remember(conversationId, rowCount) { mutableStateOf(false) }
     val selected = selectionRow.coerceIn(0, rowCount - 1)
+    // 首帧不触发；之后阅读窗口起点每变一次，就 snap 上移再 spring 回中。
+    // 手指按在 rail 上（拖动/长按）时既不触发、也不推进基线，松手后不会补偿一次假动效。
+    val lastReadingStart = remember(conversationId) { intArrayOf(readingWindowStart) }
+    LaunchedEffect(conversationId, readingWindowStart) {
+        if (pressRow >= 0 || shown) return@LaunchedEffect
+        val previous = lastReadingStart[0]
+        lastReadingStart[0] = readingWindowStart
+        if (!scrubberNudgeNeeded(previous, readingWindowStart, pressRow, shown)) return@LaunchedEffect
+        nudge.snapTo(-nudgePx)
+        nudge.animateTo(0f, spring(dampingRatio = 0.85f, stiffness = 420f))
+    }
     val animationScope = rememberCoroutineScope()
     val rowScales = remember(conversationId, animationScope) { ScrubberScales(animationScope) }
     DisposableEffect(rowScales) {
@@ -381,6 +414,8 @@ internal fun TurnScrubber(
     Box(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier
+                // 窗口滑动时的往返位移只在绘制期读，布局和命中盒都不参与。
+                .graphicsLayer { translationY = nudge.value }
                 // The touch area is the rail and nothing else: exactly the width of the longest
                 // line drawn, and the height of the rows plus their gaps.
                 .width(SCRUBBER_RAIL)

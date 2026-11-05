@@ -877,8 +877,6 @@ internal class ReasoningViewport {
     var follow by mutableStateOf(true)
 }
 
-internal val LocalProseViewport = compositionLocalOf<ReasoningViewport?> { null }
-
 internal fun summarySlot(runId: String): String = "$runId:summary"
 
 /** Last prose and anything that arrived after it stay in source order outside the process card. */

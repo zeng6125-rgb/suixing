@@ -116,7 +116,9 @@ internal fun ChatTopBar(
                         spotColor = Color.Black.copy(alpha = 0.12f),
                     ),
                 shape = capsuleShape,
-                color = MaterialTheme.colorScheme.surface,
+                // 与左侧抽屉按钮（FlatPainterButton → handleDisc）同一个色 token：
+                // surface 在浅色主题是纯白，会跟旁边两枚 surfaceContainerHigh 圆盘脱节。
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Plain clickable Boxes, not IconButton: M3's IconButton forces a 48dp

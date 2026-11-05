@@ -36,6 +36,16 @@ internal class BallMotion(
 
     private data class Frame(val drawable: BitmapDrawable, val durationMs: Long)
 
+    /**
+     * The delivered GIFs move on 40–140ms frames, which reads as a flicker at 42dp.
+     * Stretch the short motion frames but leave the long holds alone, so a blink still
+     * rests ~1.1s between blinks while the lid movement is actually visible.
+     */
+    private fun frameDuration(rawMs: Long): Long = when {
+        rawMs >= 300L -> rawMs          // idle / hold frames keep their pace
+        else -> (rawMs * 3L).coerceAtMost(240L)
+    }
+
     private val frames = mutableMapOf<Mode, List<Frame>>()
     private var mode: Mode = Mode.Blink
     /** The ambient loop a one-shot must return to when it finishes. */
@@ -122,7 +132,7 @@ internal class BallMotion(
             val bitmap = runCatching {
                 context.assets.open("$dir/$name").use { BitmapFactory.decodeStream(it) }
             }.getOrNull() ?: return@mapNotNull null
-            Frame(BitmapDrawable(context.resources, bitmap), duration)
+            Frame(BitmapDrawable(context.resources, bitmap), frameDuration(duration))
         }
     }
 }

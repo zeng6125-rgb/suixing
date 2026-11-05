@@ -534,6 +534,11 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
     }
     // Keep selection by identity while the supplier's editable draft changes.
     var selectedId by remember { mutableStateOf("") }
+    // 拉取结果只进候选，不进草稿：点「获取模型列表」不该把页面标成「未保存」。
+    // 只有勾选/取消勾选（启用）才写 form，那才是需要保存的改动。
+    // 按供应商 id 隔离，换 chip 自动清空，A 的候选不会串到 B。
+    var fetchedCandidates by remember(selectedId) { mutableStateOf<List<String>?>(null) }
+    var fetchedWindows by remember(selectedId) { mutableStateOf<Map<String, Int>>(emptyMap()) }
     LaunchedEffect(stored.providers.map { it.id }) {
         // Re-point only when the chip the user is on has gone away (migration, a deletion
         // elsewhere): the draft is what this page shows, so it stays where the user put it.
@@ -908,40 +913,19 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                                             return@fetchedModels
                                         }
                                         val fetched = details.map { it.id }.distinct()
-                                        // **上游说了算**（issue #3）：原来这里是
-                                        // `(fetched + selected?.models.orEmpty()).distinct()` —— 和上一次
-                                        // 保存的清单做并集，网关删掉的模型一个都不会消失（面板 103 个 vs
-                                        // 网关 46 个）。这个 App 没有手填模型的入口，`/models` 就是唯一
-                                        // 来源，并集没有任何东西需要保护，只会让上游的删除失效。
-                                        val merged = fetched
-                                        // 上游声明的窗口只在用户没设过时填入（withUpstreamDefaults：
-                                        // 键已存在就一个字都不动），并和清单在同一事务里落盘。
-                                        val windows = details.mapNotNull { model ->
+                                        // **上游说了算**（issue #3）：/models 是唯一来源，不做并集。
+                                        // 结果放进页面级候选，不写 form —— 拉取不是编辑，
+                                        // 不触发底部「未保存」；只有「启用」才改草稿。
+                                        fetchedCandidates = fetched
+                                        // 上游声明的窗口暂存，等用户真正启用某个模型时才并入草稿。
+                                        fetchedWindows = details.mapNotNull { model ->
                                             model.contextLength?.let { model.id to it }
                                         }.toMap()
-                                        val providers = form.mapProvider(selected?.id) {
-                                            it.copy(
-                                                models = merged,
-                                                // picker 读的是 `enabled` 而不是 `models`：不同步清掉的话，
-                                                // 从清单里消失的模型仍会留在选择器里（issue #3 第 3 条）。
-                                                enabled = it.enabled.filter { id -> id in merged },
-                                            )
-                                        }.providers
-                                        // 上下文窗口表是**全局**的（多 provider 共用一个 Map），所以只能按
-                                        // 「所有 provider 的并集」清 —— 按这一个 provider 的清单清，拉一次
-                                        // A 就会把 B 的窗口一起删掉。
-                                        val allModels = providers.flatMap { it.models }.toSet()
-                                        form = form.copy(
-                                            providers = providers,
-                                            modelContexts = form.modelContexts
-                                                .withUpstreamDefaults(windows)
-                                                .filterKeys { it in allModels },
-                                        )
                                         modelsOpen = true
-                                        if (merged.isEmpty()) {
+                                        if (fetched.isEmpty()) {
                                             outcome = TestOutcome(false, "接口没返回任何模型，直接手填吧。")
                                         } else {
-                                            outcome = TestOutcome(true, "已获取 ${merged.size} 个模型。")
+                                            outcome = TestOutcome(true, "已获取 ${fetched.size} 个模型，勾选即启用。")
                                         }
                                     },
                                     onFailure = {
@@ -974,14 +958,14 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "从接口获取后在弹窗选择模型，修改后点底部保存。",
+                    text = "从接口获取后在弹窗勾选启用模型；只有启用/停用需要点底部保存。",
                     style = SettingsStyle.description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             item { SectionHeader("已启用模型") }
             if (selected?.enabled.isNullOrEmpty()) {
-                item { Text("尚未启用模型。获取后在弹窗选择，或添加自定义模型。",
+                item { Text("尚未启用模型。获取模型列表后勾选，或添加自定义模型。",
                     style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
             items(selected?.enabled.orEmpty(), key = { "enabled:${selected?.id}:$it" },
@@ -1003,10 +987,7 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
                 )
             }
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(enabled = selected != null, onClick = { modelsOpen = true }) { Text("选择模型") }
-                    TextButton(onClick = { addingModel = true }) { Text("添加自定义模型") }
-                }
+                TextButton(onClick = { addingModel = true }) { Text("添加自定义模型") }
             }
             item {
                 // **测试用的模型只属于测试**（用户：「下拉只给测试用，不动全局模型」）：
@@ -1202,7 +1183,18 @@ private fun ModelSettingsPage(onBack: () -> Unit) {
         androidx.compose.runtime.key(selected.id) {
             FetchedModelsDialog(
                 provider = selected,
-                onToggle = { id, enabled -> form = form.mapProvider(selected.id) { it.withModelEnabled(id, enabled) } },
+                // 候选优先用本次拉取结果；没拉过就退回草稿里已有的清单（自定义模型也能勾）。
+                candidates = fetchedCandidates ?: selected.models,
+                onToggle = { id, enabled ->
+                    // 只有「启用/停用」写草稿，这才是需要保存的改动。
+                    form = form.mapProvider(selected.id) { it.withModelEnabled(id, enabled) }
+                        .let { updated ->
+                            // 上游窗口只在启用时按「不改用户已设值」补缺，随草稿一起保存。
+                            if (enabled && fetchedWindows.containsKey(id)) {
+                                updated.copy(modelContexts = updated.modelContexts.withUpstreamDefaults(fetchedWindows))
+                            } else updated
+                        }
+                },
                 onDismiss = { modelsOpen = false },
             )
         }

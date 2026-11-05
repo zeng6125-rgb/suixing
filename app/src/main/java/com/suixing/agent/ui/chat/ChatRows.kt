@@ -1632,8 +1632,10 @@ internal fun AssistantProse(
         startAtZero = typewriter && liveText,
         retained = viewport?.prose,
     )
+    // 只 provide 真正被读的 readingKey（MarkdownText 读它）；曾经还挂了一个
+    // 零读取点的 provider，流式每帧重组白付一层节点，已删。
     androidx.compose.runtime.CompositionLocalProvider(
-        LocalReadingTextKey provides readingKey, LocalProseViewport provides viewport) {
+        LocalReadingTextKey provides readingKey) {
     // 助手回复里可以带图（用户：「助手的回复可以加上图片显示」）。只有真的出现图片语法时才
     // 走分段渲染：纯文字的回复继续保持原来那一条 MarkdownText 路径，排版与增量解析都不变。
     val hasImages = remember(part.text, streaming) {

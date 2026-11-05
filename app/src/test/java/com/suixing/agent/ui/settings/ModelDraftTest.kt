@@ -143,6 +143,21 @@ class ModelDraftTest {
     }
 
     @Test
+    fun `fetching the model list is not an edit, but enabling one is`() {
+        val a = provider("a", enabled = listOf("a/one"))
+        val disk = stored(a)
+
+        // A fetch only fills page-level candidates; it never writes the draft, so the
+        // status stays "已保存" even when /models reports a different set.
+        val fetched = listOf("a/one", "a/two")
+        assertFalse("a fetch alone must not light the save button", disk.differsOutsideEndpoint(disk))
+
+        // Enabling is what writes the draft, and only then does the save state change.
+        val enabled = disk.mapProvider("a") { it.withModelEnabled(fetched[1], true) }
+        assertTrue("enabling a fetched model is a real edit", enabled.differsOutsideEndpoint(disk))
+    }
+
+    @Test
     fun `provider names and switches both require explicit saving`() {
         val a = provider("a")
         val disk = stored(a)
