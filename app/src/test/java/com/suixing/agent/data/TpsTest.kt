@@ -23,7 +23,7 @@ class TpsTest {
     @Test
     fun `decodeMs 在首字未知时退回整轮墙钟（官方 fallback）`() {
         // client.js:8273 firstTokenTime 缺失时用 completedTime - stepStartTime。
-        // 随行用 firstTokenMs==0 表达「没流式过 / 老转录未记录」，此时 decodeMs＝elapsedMs。
+        // JAgent用 firstTokenMs==0 表达「没流式过 / 老转录未记录」，此时 decodeMs＝elapsedMs。
         assertEquals(4594L, Tps.decodeMs(elapsedMs = 4594L, firstTokenMs = 0L))
     }
 

@@ -52,7 +52,7 @@ private const val FX_SWIPE_DURATION_MS = 320L
  *
  * 两条门：
  *  1. **总开关** [masterOn] —— 关掉就一律不显示（用户：「关了之后一律不显示」）。
- *  2. **前台开关** [showInForeground] —— 关掉时，随行自己在前台就不亮（后台照常亮）。
+ *  2. **前台开关** [showInForeground] —— 关掉时，JAgent自己在前台就不亮（后台照常亮）。
  *
  * 第二个开关**不独立**：总开关为 false 时，它无论怎么设都不亮。
  */
@@ -380,7 +380,7 @@ object TouchFx {
 
     /**
      * 边缘光在**前台是否显示**（`AppSettings.edgeLightInForeground`，默认开 = 保持 issue #6）。
-     * 关掉之后：随行在前台不亮，退到后台操作别的 app 照常亮。
+     * 关掉之后：JAgent在前台不亮，退到后台操作别的 app 照常亮。
      */
     @Volatile
     private var edgeLightInForeground = true
@@ -652,7 +652,7 @@ object TouchFx {
             watchForeground()
             val inForeground = foreground()
             lastForeground = inForeground
-            // 用户正盯着随行时不亮（spec v2 改动二）：回合照记（lastUiAt 已刷新），只是不显示。
+            // 用户正盯着JAgent时不亮（spec v2 改动二）：回合照记（lastUiAt 已刷新），只是不显示。
             episodeTraced = true
             traceEpisode(app, if (wasLive) "extend" else "start", source)
             main.removeCallbacks(episodeEnd)
@@ -789,7 +789,7 @@ object TouchFx {
         // 现在熄灭只有一条路：驱动过屏幕的 run 全部离场（ticker 把 drivingIds 与 running 取交集）。
         // 单一亮度，没有暗档 —— 暗档正是「看着像中断」的来源。
         val sessionAlive = drivingAlive
-        // **前台不再是熄灭条件**（issue #6，用户：「随行自己在前台时也要显示」）：
+        // **前台不再是熄灭条件**（issue #6，用户：「JAgent自己在前台时也要显示」）：
         // 亮不亮只看这一轮驱动过屏幕的 run 还活不活着，前台/后台一视同仁。
         // `inForeground` 仍然照常传给 [traceLight]，日志里的 `fg=self|other` 不丢。
         // 外观页的开关是最后一道门：关掉只是不显示，驱动判定与自动返回照旧。
@@ -858,10 +858,10 @@ object TouchFx {
     }
 
     /**
-     * 随行自己在前台吗 —— **只服务日志与自动返回**，不再是亮灯的门（issue #6 拆掉了那道门）。
+     * JAgent自己在前台吗 —— **只服务日志与自动返回**，不再是亮灯的门（issue #6 拆掉了那道门）。
      *
      * 进程级判定，所以无障碍服务和前台服务都不会让它保持 STARTED：STARTED 就是「用户正看着
-     * 随行」，而不是「随行在跑」。Main thread only.
+     * JAgent」，而不是「JAgent在跑」。Main thread only.
      */
     private fun foreground(): Boolean =
         ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
@@ -1306,13 +1306,7 @@ private class FxView(
     private val edgeRect = RectF()
     private val edgePath = Path()
 
-    /**
-     * Scratch paths for the halo, one band at a time.
-     *
-     * Reused rather than built per band: 16 bands at 25fps is 400 `Path.op` calls a second, and a
-     * fresh Path per band would be 400 allocations a second on top of that for no gain.
-     */
-    private val haloBand = Path()
+    /** 光晕内圈的复用 Path；外圈的各 band 形状走下面的 haloBandCache，几何不变就一直复用。 */
     private val haloInner = Path()
     /** 预计算好的 16 个 band 形状；几何不变就一直复用（issue #26）。 */
     private val haloBandCache = arrayOfNulls<Path>(FX_HALO_BANDS)

@@ -155,7 +155,7 @@ internal fun Drawer(
     onAssistants: () -> Unit,
 ) {
     val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
-    // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「随行」标。
+    // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「JAgent」标。
     //
     // **只订阅"当前助手"这一个值**（原来订阅整份 settings 流）：抽屉里只有左上角那枚标识
     // 需要它，而整份流一旦有任何设置变化（切 provider、改窗口大小…）都会让**整个抽屉重组** ——
@@ -355,13 +355,13 @@ internal fun Drawer(
                     AssistantAvatar(assistant = drawerAssistant, size = 30.dp)
                 }
                 Spacer(Modifier.width(11.dp))
-                // **品牌区改成「当前助手」**（用户：「随行改为使用的助手名字，去掉副标题，
-                // 名字和头像垂直居中」）：原来这里是固定「随行」+ 副标题两行，现在只留一行名字，
+                // **品牌区改成「当前助手」**（用户：「JAgent改为使用的助手名字，去掉副标题，
+                // 名字和头像垂直居中」）：原来这里是固定「JAgent」+ 副标题两行，现在只留一行名字，
                 // 取当前生效的助手名；助手还没加载出来时退回应用名，避免顶部突然空一块。
                 // 单行 Text 不再套 Column —— 行本身是 `CenterVertically`，头像与这行字自动共中线，
                 // 再包一层 Column 只会让「垂直居中」依赖 Column 的测量高度，多一层没意义。
                 Text(
-                    text = drawerAssistant?.name?.takeIf { it.isNotBlank() } ?: "随行",
+                    text = drawerAssistant?.name?.takeIf { it.isNotBlank() } ?: "JAgent",
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -404,7 +404,6 @@ internal fun Drawer(
             // 置顶区只在置顶表里挪；普通区「新会话/新消息在前 + 手动基线」；跨区拖动在
             // reorderWithinSection 里被直接拒掉，所以怎么拖都越不过置顶那条线。
             // 排序要 filter + associateBy + 两次 sortedBy：不该每次重组都重算。
-            // 埋点：抽屉每重组一次记一行（看打开抽屉时重组了多少次）。
 
             // 两个区块共用同一行（只差顺序，不差样子）：抽成局部 lambda，免得把二十来行
             // 回调抄两遍。animateItem 只在 item 作用域里拿得到，所以由调用处传进来。
@@ -510,7 +509,6 @@ internal fun Drawer(
                         // 点行、长按、以及菜单里的每一个动作都先退出排序模式：用户要的是
                         // 「做了别的事就别再停在拖动态」。
                         onClick = {
-                            // 埋点：抽屉里点会话到底发生了什么（用户：要点好几下）。
                             exitSortMode()
                             latestOpenConversation.value(conversation)
                         },

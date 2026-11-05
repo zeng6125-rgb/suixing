@@ -188,7 +188,7 @@ class AssistantAvatarSizingTest {
     @Test
     fun `an assistant without the avatar key still decodes`() {
         val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-        val old = """{"id":"default","name":"随行","avatar":"🪶","description":"全能手机智能体"}"""
+        val old = """{"id":"default","name":"JAgent","avatar":"🪶","description":"全能手机智能体"}"""
         val assistant = json.decodeFromString(Assistant.serializer(), old)
         assertEquals("default", assistant.id)
         // 旧数据里的 `🪶` 是「当年没有品牌标记」的占位，不再算自定义形象：

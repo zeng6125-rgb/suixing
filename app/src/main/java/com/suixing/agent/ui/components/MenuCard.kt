@@ -195,17 +195,6 @@ internal fun MenuCard(
     )
 }
 
-/**
- * [popupNudge] for a card centred on its anchor instead of left-aligned to it — the ring's own
- * detail card, which is centred on a ring that sits at the row's right end.
- */
-internal fun popupNudgeCentred(anchorCentre: Float, width: Int, windowPx: Float, edgePx: Float): Float {
-    if (width <= 0 || anchorCentre == 0f) return 0f
-    val desired = anchorCentre - width / 2f
-    val left = desired.coerceIn(edgePx, (windowPx - edgePx - width).coerceAtLeast(edgePx))
-    return left - desired
-}
-
 /** One row of a popup menu: icon, label, and the whole row as the target. */
 @Composable
 internal fun MenuItemRow(

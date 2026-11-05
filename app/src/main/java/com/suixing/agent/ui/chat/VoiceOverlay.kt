@@ -72,7 +72,7 @@ import kotlin.math.roundToInt
 // 语音浮层：录音、转写、波形、引擎选择。
 
 /**
- * 随行自己的听写：输入框上方一条细胶囊，屏幕上从头到尾只有它。
+ * JAgent自己的听写：输入框上方一条细胶囊，屏幕上从头到尾只有它。
  *
  * 录音走 [DictationRecorder]（`AudioRecord`，16k/mono/PCM16 → wav），转写走 [Dictation]：把 wav
  * 发给用户已经配置好的那个服务商。**这条路完全不碰 `SpeechRecognizer`** —— 之前两版都栽在它上面：

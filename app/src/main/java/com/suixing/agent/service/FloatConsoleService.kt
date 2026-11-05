@@ -69,7 +69,7 @@ import kotlin.math.roundToInt
  * something to it mid-task.
  *
  * It exists because the interesting part of an agent run happens on *other* apps'
- * screens. Watching it work means leaving 随行, and leaving means the stop button is
+ * screens. Watching it work means leaving JAgent, and leaving means the stop button is
  * two taps away — so the two controls that matter live here instead, over whatever
  * is on screen.
  *
@@ -285,7 +285,7 @@ private const val CHANNEL_ID = "Suixing_console"
     /**
      * The console's visibility, re-decided on every lifecycle change and every run change.
      *
-     * **In front of 随行 it is never shown**, whatever the switches say: the chat screen already
+     * **In front of JAgent it is never shown**, whatever the switches say: the chat screen already
      * has the same stop button and the same input box, so a ball over that screen is one more
      * thing covering the answer. Everything below applies only once the user has left.
      *
@@ -322,7 +322,7 @@ private const val CHANNEL_ID = "Suixing_console"
                 watchAccessibility()
                 ProcessLifecycleOwner.get().lifecycle.addObserver(appLifecycle)
                 trace("service=start")
-                // 常驻 shows the ball as soon as the console is up *and* the user has left 随行;
+                // 常驻 shows the ball as soon as the console is up *and* the user has left JAgent;
                 // in front of the app it is never shown. With only 「运行时显示」 ticked this
                 // first decision is "stay hidden", and the observer above catches the moment the
                 // user leaves — or a run starting while they are away.
@@ -352,7 +352,7 @@ private const val CHANNEL_ID = "Suixing_console"
     }
 
     /**
-     * 用户从最近任务里划掉了随行。
+     * 用户从最近任务里划掉了JAgent。
      *
      * 常驻时这不是结束：服务还在、球还在，只有这一行日志说明「刚才被划过一次」——把「球突然没了」
      * 与「用户自己划掉了任务」分开。
@@ -731,7 +731,7 @@ private const val CHANNEL_ID = "Suixing_console"
                 orientation = LinearLayout.HORIZONTAL
                 addView(
                     TextView(context).apply {
-                        text = "随行控制台"
+                        text = "JAgent控制台"
                         setTextColor(palette.accent)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -1242,7 +1242,7 @@ private const val CHANNEL_ID = "Suixing_console"
         }
         conversationText.text = conversation.title.ifBlank { "新会话" }
         // 只留有正文的行：工具消息（role=TOOL、text=""）与失败回执等以前会显示成一条空的
-        // 「随行：」，占位却没内容。内容区可滚后回显最近 6 条，拖高就能多看。
+        // 「JAgent：」，占位却没内容。内容区可滚后回显最近 6 条，拖高就能多看。
         // **正文要自己读**（#30）：列表只带 meta。用 runBlocking 拉全文会很糟，
         // 所以这里只在后台线程取；renderConversation 由 UI 线程调用，改为 post 一次。
         // 只取尾部几条就够回显；`readTail` 给的是「最近 N 轮」，比全文小一个数量级。
@@ -1264,7 +1264,7 @@ private const val CHANNEL_ID = "Suixing_console"
             "这个会话还没有消息"
         } else {
             recent.joinToString("\n\n") { message ->
-                val speaker = if (message.role == Roles.USER) "你：" else "随行："
+                val speaker = if (message.role == Roles.USER) "你：" else "JAgent："
                 speaker + message.text.replace('\n', ' ').trim().take(MESSAGE_PREVIEW_CHARS)
             }
         }
@@ -1515,7 +1515,7 @@ private const val CHANNEL_ID = "Suixing_console"
         val manager = getSystemService(NotificationManager::class.java) ?: return
         if (manager.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(CHANNEL_ID, "悬浮控制台", NotificationManager.IMPORTANCE_MIN).apply {
-            description = "随行悬浮控制台的常驻通知"
+            description = "JAgent悬浮控制台的常驻通知"
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
@@ -1534,7 +1534,7 @@ private const val CHANNEL_ID = "Suixing_console"
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_spark)
-            .setContentTitle("随行控制台")
+            .setContentTitle("JAgent控制台")
             .setContentText("悬浮球已就位：点开可停止或插话")
             .setContentIntent(open)
             .setOngoing(true)

@@ -15,14 +15,14 @@ import kotlin.math.roundToLong
  * ```
  *
  * 三条必须记住的官方语义（与 DSH 桌面端一致，别再"好心纠正"）：
- * 1. **分子是全部输出 token（含推理 token）**：随行的 `completionTokens` 本就把 reasoning 算在
+ * 1. **分子是全部输出 token（含推理 token）**：JAgent的 `completionTokens` 本就把 reasoning 算在
  *    里面（见 [com.suixing.agent.llm.Usage]），官方不减它。
  * 2. **分母是「首 token 之后 → 结束」**（decodeMs），**不含**首字之前那段 TTFT 等待 —— 这正是
- *    随行旧代码算错的地方：它拿整轮墙钟 `elapsedMs` 当分母，把 TTFT 也算进去，系统性低估 TPS。
+ *    JAgent旧代码算错的地方：它拿整轮墙钟 `elapsedMs` 当分母，把 TTFT 也算进去，系统性低估 TPS。
  * 3. **多轮聚合是 ΣdecodeTokens / ΣdecodeMs**（官方 client.js:8331-8333），不是各轮速率再平均。
  *
  * `firstTokenMs == 0` 的处理：官方 client.js:8273 在 firstTokenTime 缺失时**退回整轮墙钟**
- * （completedTime - stepStartTime）。随行沿用这条 fallback —— 老转录（firstTokenMs 未记录）与
+ * （completedTime - stepStartTime）。JAgent沿用这条 fallback —— 老转录（firstTokenMs 未记录）与
  * 极快响应都落到这里，宁可给一个略低的数，也不整项变「—」。
  */
 object Tps {

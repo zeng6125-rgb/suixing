@@ -114,13 +114,6 @@ internal const val SCRUBBER_LONG_PRESS_MS = 220L
 internal const val SCRUBBER_LABEL_IN_MS = 90
 internal const val SCRUBBER_LABEL_OUT_MS = 100
 
-/**
- * How long the label takes to glide to the line the finger has reached. Deliberately the same
- * 110ms as the line's own growth above, so the two land together and the label never outruns
- * the line it names.
- */
-internal const val SCRUBBER_SELECT_MS = 110
-
 /** Air between the rail and the label. */
 internal val SCRUBBER_LABEL_GAP = 6.dp
 

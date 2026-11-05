@@ -126,16 +126,7 @@ internal val SUGGESTIONS = listOf(
     "打开设置看看还剩多少存储空间",
 )
 
-/**
- * **A/B 实验开关**：读历史时要不要「钉住流式行的布局高度」（#17 的方案）。
- *
- * `true` = 现状（钉住，防止被推着走）；`false` = 关掉钉住（只测量、不冻结高度）。
- *
- * 用途：用户报「往上滑、再快速下滑会出现白色块」。白块是近期才高频出现的，而钉住正是
- * `dd4f998`（0.8.320）引入的 —— 出一版 `false` 的包做**单变量对照**：
- * 白块消失 ⇒ 与钉住这套有关；白块照旧 ⇒ 无关，回到基础列表找。
- * 对照做完把它改回 `true`（或删掉这个开关）。
- */
+/** 聊天页：常驻的会话正文、输入区与右侧回合导航条。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
@@ -1025,11 +1016,7 @@ fun ChatScreen(
                 withFrameNanos { }
             }
         } finally {
-            // **只测量，不改行为**：现在无法判断这段纠正在用户报的场景里到底有没有触发。
-            // `guard-off` 那行写在 `scrollToItem` 之后，而它是挂起函数 ⇒ 读到的 idx 可能是
-            // 纠正前也可能是纠正后，日志自己说不清（issue #14 要求"先定位再改"，正是这个意思）。
-            // 这里把决策本身写清楚：纠到了哪儿 / 为什么没纠。查完删。
-            // **行为保留、日志去掉**：按下到抬手后 400ms 内，如果列表位置被推走
+            // 按下到抬手后 400ms 内，如果列表位置被推走
             // （选区重排造成，手指没动），就关掉追底 —— 而不是把位置纠回去（0.8.242 的教训）。
             if (lockKey != null) {
                 val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == lockKey }
@@ -1093,7 +1080,7 @@ fun ChatScreen(
     }
 
     // 顶部提示条已移除，这里不再需要倒计时收起它的定时器（失败原因画在转录里的红色回执卡上）。
-    // 文件路径点击 → 弹菜单（复制 / 让随行读取），LINK-CLICK-SPEC §3.2 一期。回调经 LocalPathClick
+    // 文件路径点击 → 弹菜单（复制 / 让JAgent读取），LINK-CLICK-SPEC §3.2 一期。回调经 LocalPathClick
     // 下传，四个 MarkdownText 调用点与中间各层组件都不用加参数。lambda 用 remember 稳定引用：否则
     // 每次重组新建实例会让 InlineText 的 remember(pathClick) 失效、流式时每帧重排文本。
     // 内部 Scaffold 未重新缩进——重排 670 行是纯噪音 diff，Kotlin 不依赖缩进。
@@ -1463,7 +1450,7 @@ fun ChatScreen(
                                 ) {
                                 MessageRow(
                                     row = row,
-                                    assistantName = assistant?.label ?: "随行",
+                                    assistantName = assistant?.label ?: "JAgent",
                                     assistantFace = assistant?.face ?: "",
                                     assistantAvatarPath = assistant?.avatarPath ?: "",
                                     showReasoning = settings.showReasoning,
@@ -1564,7 +1551,7 @@ fun ChatScreen(
                                                 // without these two it fell back to the brand name
                                                 // and feather while every stored bubble showed the
                                                 // persona.
-                                                name = assistant?.label ?: "随行",
+                                                name = assistant?.label ?: "JAgent",
                                                 face = assistant?.face ?: "",
                                                 avatarPath = assistant?.avatarPath ?: "",
                                                 runningTool = state.runningTool,
@@ -1848,7 +1835,7 @@ fun ChatScreen(
                     running = state.runningHere,
                     settings = settings,
                     assistantId = state.assistantId,
-                    assistantName = assistant?.label ?: "随行",
+                    assistantName = assistant?.label ?: "JAgent",
                     contextWindow = contextWindow,
                     contextUsed = reading?.tokens,
                     contextEstimated = reading?.estimated == true,
@@ -1978,8 +1965,8 @@ fun ChatScreen(
     }
     }
 
-    // 文件路径菜单（LINK-CLICK-SPEC §3.2 一期）：复制路径、让随行读取。一期不碰 FileProvider
-    // （那是二期「文件管理器打开 / 分享」）。「让随行读取」＝往会话发一条带该路径的用户消息，
+    // 文件路径菜单（LINK-CLICK-SPEC §3.2 一期）：复制路径、让JAgent读取。一期不碰 FileProvider
+    // （那是二期「文件管理器打开 / 分享」）。「让JAgent读取」＝往会话发一条带该路径的用户消息，
     // agent 有 read_file/run_shell，能自己读；文件已在上一轮作为附件落进 inbox 的也照此办理。
     pathMenuPath?.let { path ->
         PathActionSheet(

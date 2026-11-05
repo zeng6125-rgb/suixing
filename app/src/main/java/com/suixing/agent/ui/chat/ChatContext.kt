@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,7 +29,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -79,7 +77,6 @@ import com.suixing.agent.data.TODO_COMPLETED
 import com.suixing.agent.data.TODO_IN_PROGRESS
 import com.suixing.agent.data.TodoItem
 import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.SuixingDialog
 import java.util.Locale
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -380,7 +377,7 @@ internal fun CheckpointCard(
                 items(originals, key = { it.id }, contentType = { "original-message" }) { original ->
                     Column {
                         Text(
-                            text = "${if (original.role == Roles.USER) "我" else "随行"} · " +
+                            text = "${if (original.role == Roles.USER) "我" else "JAgent"} · " +
                                 formatTime(original.timestamp),
                             style = MaterialTheme.typography.labelSmall,
                             color = scheme.onSurfaceVariant,
@@ -834,134 +831,9 @@ internal const val KEYBOARD_ANIM_MS = 220
 /** How many queued lines are drawn before the rest collapse into one count. */
 internal const val STEER_ROWS_SHOWN = 3
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /** How far a queued line is inset from the pill on each side, so it reads as narrower. */
 internal val STEER_QUEUE_INSET = 12.dp
 
-/**
- * Where the context went.
- *
- * The three shares come from the engine's own estimate for the run in flight; a stored
- * reply has no such numbers, so for it the dialog shows only the header — better a short
- * dialog than three invented rows.
- */
-@Composable
-internal fun ContextBreakdownDialog(
-    tokens: Int,
-    window: Int,
-    live: StreamStats?,
-    onDismiss: () -> Unit,
-) {
-    val percent = if (window > 0) tokens * 100 / window else 0
-    SuixingDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("知道了") } },
-        title = { Text(if (window > 0) "上下文已用 $percent%" else "上下文用量") },
-        text = {
-            Column {
-                Text(
-                    text = if (window > 0) {
-                        "~${tokens / 1000}k / ${window / 1000}k"
-                    } else {
-                        "~${tokens / 1000}k"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (window > 0) {
-                    Spacer(Modifier.height(10.dp))
-                    LinearProgressIndicator(
-                        progress = { (percent / 100f).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                live?.let { stats ->
-                    val parts = listOf(
-                        Triple("系统提示词", stats.breakSystem, MaterialTheme.colorScheme.primary),
-                        Triple("工具定义", stats.breakTools, MaterialTheme.colorScheme.secondary),
-                        Triple("对话消息", stats.breakHistory, MaterialTheme.colorScheme.tertiary),
-                    )
-                    // Shares are measured against their own sum, not against the endpoint's
-                    // prompt count: the engine's estimate covers messages and tools, and
-                    // forcing it onto that other total would invent a remainder.
-                    val total = parts.sumOf { it.second }
-                    Spacer(Modifier.height(14.dp))
-                    parts.forEach { (label, value, tone) ->
-                        ContextBreakdownRow(label, value, total, tone)
-                    }
-                }
-            }
-        },
-    )
-}
-
-@Composable
-internal fun ContextBreakdownRow(label: String, value: Int, total: Int, tone: Color) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(tone),
-        )
-        Spacer(Modifier.width(9.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = "~${value / 1000}k",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            softWrap = false,
-        )
-        Spacer(Modifier.width(10.dp))
-        // One bar per row, sized by its share of the three.
-        Box(
-            Modifier
-                .weight(1f)
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-        ) {
-            val fraction = if (total > 0) value.toFloat() / total else 0f
-            Box(
-                Modifier
-                    .fillMaxWidth(fraction.coerceIn(0f, 1f))
-                    .fillMaxHeight()
-                    .background(tone),
-            )
-        }
-    }
-}
 
 /**
  * 折叠类卡片（压缩卡）与助手卡对齐时需要的**左右内缩**。

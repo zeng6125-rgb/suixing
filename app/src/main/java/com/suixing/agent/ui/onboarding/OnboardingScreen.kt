@@ -477,7 +477,7 @@ private fun WelcomePage(scroll: ScrollState) {
         SuixingOrb(size = 148.dp)
         Spacer(Modifier.height(28.dp))
         Text(
-            text = "随行",
+            text = "JAgent",
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.SemiBold,
         )

@@ -1311,7 +1311,7 @@ internal fun AssistantRow(
     parts: List<Part>,
     streaming: Boolean,
     /** The assistant's name, for the card's own header line. */
-    name: String = "随行",
+    name: String = "JAgent",
     /** The persona's emoji face; blank falls back to the brand feather. */
     face: String = "",
     /** The picture the user uploaded for this persona; blank falls back to [face]. */

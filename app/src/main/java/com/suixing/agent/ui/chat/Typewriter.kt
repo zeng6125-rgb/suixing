@@ -80,10 +80,6 @@ internal fun rememberTypedText(
     }
 }
 
-@Composable
-internal fun rememberTypedTextFromBirth(text: String, enabled: Boolean): String =
-    rememberTypedText(text, enabled, startAtZero = true)
-
 internal fun initialRevealed(textLength: Int, ageMs: Long): Int =
     if (ageMs in 0L..500L) 0 else textLength
 

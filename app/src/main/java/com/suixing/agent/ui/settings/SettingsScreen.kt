@@ -1978,7 +1978,7 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                 LabeledBlock(
                     label = "前台显示",
                     hint = if (stored.edgeLight) {
-                        "关掉之后：随行自己在前台时不显示边缘光，退到后台操作别的 app 照常显示。"
+                        "关掉之后：JAgent自己在前台时不显示边缘光，退到后台操作别的 app 照常显示。"
                     } else {
                         "边缘光已关闭，这一项暂不生效。"
                     },
@@ -2135,7 +2135,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             if (stored.speakReplies) {
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = { Core.speaker.speak("你好，我是随行。") }) {
+                        OutlinedButton(onClick = { Core.speaker.speak("你好，我是 JAgent。") }) {
                             Text("试听")
                         }
                         OutlinedButton(onClick = { Core.speaker.stop() }) { Text("停止朗读") }
@@ -2146,7 +2146,7 @@ private fun NetworkVoiceSettingsPage(onBack: () -> Unit) {
             item {
                 SettingRow(
                     title = "语音输入",
-                    subtitle = "开＝输入框右侧显示麦克风，用随行自己的录音发给你配置的转写接口（不会再弹系统识别面板）；" +
+                    subtitle = "开＝输入框右侧显示麦克风，用JAgent自己的录音发给你配置的转写接口（不会再弹系统识别面板）；" +
                         "关＝完全不显示麦克风。",
                     control = {
                         SettingsSwitch(

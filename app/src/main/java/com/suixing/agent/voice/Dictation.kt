@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
 /**
- * 随行自己的听写：录音 + 转写，全程不经过 `SpeechRecognizer`。
+ * JAgent自己的听写：录音 + 转写，全程不经过 `SpeechRecognizer`。
  *
  * 存在的理由只有一个：系统/ROM 的识别面板不受我们控制。用户两次报「丑、还是走系统的」，而
  * `isOnDeviceRecognitionAvailable` 与 `EXTRA_PREFER_OFFLINE` 都没能拦住 MIUI 的面板 —— 只要还

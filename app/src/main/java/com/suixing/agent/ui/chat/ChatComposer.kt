@@ -16,8 +16,6 @@ import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.updateTransition
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -140,8 +138,6 @@ import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 import java.util.Locale
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.runtime.mutableFloatStateOf
 
 /** The composer's status line: plain 13sp text with no container of its own. */
@@ -690,36 +686,6 @@ internal fun panelTokens(v: Int): String {
     val (n, unit) = if (k >= 1000.0) k / 1000.0 to "M" else k to "K"
     val s = String.format(java.util.Locale.US, "%.1f", n)
     return (if (s.endsWith(".0")) s.dropLast(2) else s) + unit
-}
-
-@Composable
-internal fun TypingDots() {
-    val transition = rememberInfiniteTransition(label = "typing")
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        repeat(3) { index ->
-            // **不要 `by` 委托**（优化清单 chat-P1）：`by` 会在**组合期**读值 ⇒ 只要这三点
-            // 可见就按屏幕刷新率持续重组+重绘。同文件 `BlinkingCursor` 已因同款写法实测
-            // 213fps / 单核 42% 改掉，这里漏改了。改成拿 State、在 `graphicsLayer` 的
-            // **绘制期**读 —— 视觉逐帧相同，但不再触发重组。
-            val alphaState = transition.animateFloat(
-                initialValue = 0.25f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 520, delayMillis = index * 150),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "dot$index",
-            )
-            Box(
-                Modifier
-                    .padding(end = 5.dp)
-                    .size(7.dp)
-                    .graphicsLayer { alpha = alphaState.value }
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary),
-            )
-        }
-    }
 }
 
 @Composable

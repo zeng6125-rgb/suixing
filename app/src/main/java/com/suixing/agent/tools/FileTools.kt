@@ -353,15 +353,8 @@ class FileTools(private val context: Context) : ToolGroup() {
 
     // ─── 原生目录/查找/搜索（不 fork 子进程）──────────────────────────────────
     //
-    // 这三个留在应用内是有意的（v0.8.322 复盘）：`run_shell` 每调一次就
-    // `ProcessBuilder.start()` 起一个进程（Shell.kt:251），Android 上一次 20~100ms；
-    // 而日常"看看目录、找个文件、搜段文字"是最频繁的动作，靠 fork 去做纯属浪费。
-    // 功能边界写进各自的 description 了：花哨的 flag 交给 run_shell 的 grep/find。
-
-    // ─── 原生目录/查找/搜索（不 fork 子进程）──────────────────────────────────
-    //
     // 这三个留在应用内是有意的：`run_shell` 每调一次就 ProcessBuilder.start() 起一个进程
-    // （Shell.kt:251），Android 上一次 20~100ms；而「看看目录 / 找个文件 / 搜段文字」是最频繁
+    // （Shell.kt:267），Android 上一次 20~100ms；而「看看目录 / 找个文件 / 搜段文字」是最频繁
     // 的动作，靠 fork 去做纯属浪费。功能边界写进各自的 description 了：花哨的 flag
     //（正则上下文、排除 glob、按时间/大小筛选）交给 run_shell 的 grep/find。
 
@@ -582,8 +575,6 @@ class FileTools(private val context: Context) : ToolGroup() {
 
         /** 搜索时单个文件的上限：再大就不是"搜一段文字"，而是扫数据文件。 */
         const val MAX_SEARCH_BYTES = 2L * 1024 * 1024
-        // MAX_SEARCH_BYTES 与 PROTECTED_PATHS 随 searchInFiles / deletePath 一起删掉了
-        // （v0.8.322：那 7 个文件工具改用 run_shell 的 grep/find/stat/rm）。
     }
 }
 

@@ -55,9 +55,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 定时任务：到点自己跑的那些提醒。
  *
- * 这是 [com.suixing.agent.data.ScheduleStore] 的第一张脸。在此之前提醒只能由随行用
+ * 这是 [com.suixing.agent.data.ScheduleStore] 的第一张脸。在此之前提醒只能由JAgent用
  * `schedule_create` 建，用户既看不见也管不了（设置页里只有一行工具名）。这里只做三件事：
- * 看、暂停/恢复、删；**新建仍然交给随行**，因为一条提醒的核心是「到点做什么」那句 prompt，
+ * 看、暂停/恢复、删；**新建仍然交给JAgent**，因为一条提醒的核心是「到点做什么」那句 prompt，
  * 在对话框里说一句比在表单里填三段自然（空态里就写着怎么开口）。
  *
  * 每次改动都整表写回并重新上闹钟：系统里始终只留最近的那一个 alarm（见
@@ -126,7 +126,7 @@ fun SchedulesScreen(onBack: () -> Unit) {
                 item(key = "empty") {
                     EmptyState(
                         title = "还没有定时任务",
-                        subtitle = "让随行帮你建就行，例如「每天早上八点提醒我把今天的待办念一遍」——" +
+                        subtitle = "让JAgent帮你建就行，例如「每天早上八点提醒我把今天的待办念一遍」——" +
                             "到点它会在一个新会话里执行，并发一条通知。",
                         modifier = Modifier.padding(top = 56.dp),
                     )

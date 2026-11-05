@@ -310,7 +310,7 @@ fun CapabilityScreen(onBack: () -> Unit) {
                     val launched = requestIgnoreBatteryOptimizations(context)
                     batteryExempt = isIgnoringBatteryOptimizations(context)
                     if (!launched) {
-                        notice = "本机无法打开电池优化设置，请到系统设置里手动允许随行自启动。"
+                        notice = "本机无法打开电池优化设置，请到系统设置里手动允许JAgent自启动。"
                     }
                 },
             )
@@ -537,7 +537,7 @@ private fun CapabilityTierPicker(
     SuixingCard {
         Text("执行档次", style = SettingsStyle.cardTitle)
         Text(
-            text = "选择随行执行操作的权限档次。更高的档位能做的事更多，需要先开启。",
+            text = "选择JAgent执行操作的权限档次。更高的档位能做的事更多，需要先开启。",
             style = SettingsStyle.description,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -611,7 +611,7 @@ private fun tierLines(key: String, state: CapabilityState, rootCheckedAt: Long):
     TIER_SHELL -> listOf(
         if (state.shizukuInstalled) "Shizuku 已安装" else "未检测到 Shizuku",
         if (state.shizukuAlive) "服务正在运行" else "服务未运行，需先启动 Shizuku",
-        if (state.shizukuGranted) "随行已获授权" else "随行未获授权",
+        if (state.shizukuGranted) "JAgent已获授权" else "JAgent未获授权",
     )
     TIER_ROOT -> listOfNotNull(
         when {
@@ -645,7 +645,7 @@ private fun tierSummary(preferred: String, state: CapabilityState): String = whe
     TIER_ROOT -> if (state.rootReady) {
         "已选 Root：需要最高权限的操作走 su。"
     } else {
-        "Root 还没就绪：先在下面「Root」卡片点「检测」，用 KernelSU / Magisk 给随行授权。"
+        "Root 还没就绪：先在下面「Root」卡片点「检测」，用 KernelSU / Magisk 给JAgent授权。"
     }
     else -> "自动：按当前已开启的最高档执行。点下面任意一档可以固定它。"
 }

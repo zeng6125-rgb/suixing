@@ -111,7 +111,7 @@ private val BrandLight = lightColorScheme(
 )
 
 internal enum class AppearancePalette(val id: Int, val label: String) {
-    SUIXING(0, "随行配色"),
+    SUIXING(0, "JAgent 配色"),
     WALLPAPER(1, "跟随壁纸"),
     CLAUDE(2, "Claude"),
     CODEX(3, "Codex");

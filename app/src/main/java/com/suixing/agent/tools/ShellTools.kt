@@ -300,7 +300,7 @@ class ShellTools(
         val channel = capabilities.shellTier()
         if (channel == ShellTier.LOCAL) {
             return@withContext ToolResult.failure(
-                "该操作需要 Shizuku（shell 用户）或 root 权限。请到「能力」页开启 Shizuku 并授权随行。",
+                "该操作需要 Shizuku（shell 用户）或 root 权限。请到「能力」页开启 Shizuku 并授权JAgent。",
             )
         }
         // `action=start` runs `monkey`, which launches an app: the same handoff `open_app` draws.
@@ -403,7 +403,7 @@ class ShellTools(
     }.getOrNull()
 
     private fun privilegeNeeded(): ToolResult = ToolResult.failure(
-        "该操作需要 Shizuku（shell 用户）或 root 权限。请到「能力」页开启 Shizuku 并授权随行。",
+        "该操作需要 Shizuku（shell 用户）或 root 权限。请到「能力」页开启 Shizuku 并授权JAgent。",
     )
 
     /**
@@ -442,7 +442,7 @@ internal data class SettingWrite(val ns: String, val key: String, val value: Str
 /**
  * 识别 `settings put <namespace> <key> <value>`。
  *
- * 只认这一条写路径（随行最常用的），`settings delete` / `cmd` / `wm` / `pm` 不认 ——
+ * 只认这一条写路径（JAgent最常用的），`settings delete` / `cmd` / `wm` / `pm` 不认 ——
  * 不认识的命令不加核验，避免给读命令和普通命令添噪音。
  * 值两侧的引号要去掉：`settings put global adb_enabled "1"` 的期望值是 `1`。
  */

@@ -10,7 +10,7 @@ import org.junit.Test
  *   再加一个前台是否显示的开关，不独立，只在边缘光开启后才起作用」）。
  *
  * - **总开关关** ⇒ 一律不显示（不管第二个开关怎么设、不管前后台）。
- * - **总开关开 + 前台显示关** ⇒ 随行在前台不亮、后台照常亮。
+ * - **总开关开 + 前台显示关** ⇒ JAgent在前台不亮、后台照常亮。
  */
 class EdgeLightTest {
 
@@ -25,7 +25,7 @@ class EdgeLightTest {
 
     @Test
     fun `with the second switch on the glow shows in both states`() {
-        // 默认（保持 issue #6：随行自己在前台时也要显示）
+        // 默认（保持 issue #6：JAgent自己在前台时也要显示）
         assertTrue(edgeLightVisible(masterOn = true, showInForeground = true, inForeground = true))
         assertTrue(edgeLightVisible(masterOn = true, showInForeground = true, inForeground = false))
     }

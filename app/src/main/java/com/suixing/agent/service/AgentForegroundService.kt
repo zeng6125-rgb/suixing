@@ -145,7 +145,7 @@ class AgentForegroundService : Service() {
         val manager = getSystemService(NotificationManager::class.java) ?: return
         if (manager.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(CHANNEL_ID, "任务执行", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "随行执行任务时的常驻通知"
+            description = "JAgent执行任务时的常驻通知"
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
@@ -154,7 +154,7 @@ class AgentForegroundService : Service() {
     private fun buildNotification(text: String, open: PendingIntent? = null): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_spark)
-            .setContentTitle("随行")
+            .setContentTitle("JAgent")
             .setContentText(text)
             .apply { open?.let { setContentIntent(it) } }
             .setOngoing(true)

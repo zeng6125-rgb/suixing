@@ -138,7 +138,7 @@ private fun McpIntroCard() {
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "stdio：填一条启动命令，随行会把它当子进程跑，用管道收发 JSON-RPC。" +
+            text = "stdio：填一条启动命令，JAgent会把它当子进程跑，用管道收发 JSON-RPC。" +
                 "手机上的进程默认以应用身份运行，读不到 Termux 私有目录；" +
                 "装了 Magisk/KernelSU 的话可以用 su -c \"...\" 前缀借 root 跑。\n" +
                 "http：填服务器地址（如 http://127.0.0.1:3000/mcp），适合跑在 Termux、电脑或公网的服务。",

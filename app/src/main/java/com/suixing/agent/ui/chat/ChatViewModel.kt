@@ -2447,7 +2447,7 @@ class ChatViewModel : ViewModel() {
             if (it.conversationId == chatId) it.copy(todos = emptyList(), error = null) else it
         }
         val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
-            AgentForegroundService.start(Core.appContext, "随行正在执行任务")
+            AgentForegroundService.start(Core.appContext, "JAgent正在执行任务")
             // The draft writer rides inside the run's own coroutine, so it stops the moment
             // the run does — no separate job to cancel, and no writes after the answer has
             // landed in the transcript. It is cancelled by hand in the finally as well: a

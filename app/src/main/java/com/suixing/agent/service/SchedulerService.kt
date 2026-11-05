@@ -180,7 +180,7 @@ class SchedulerService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val text = "随行正在执行这条提醒"
+        val text = "JAgent正在执行这条提醒"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_spark)
             .setContentTitle(schedule?.title ?: "定时提醒")
@@ -195,7 +195,7 @@ class SchedulerService : Service() {
         val manager = getSystemService(NotificationManager::class.java) ?: return
         if (manager.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(CHANNEL_ID, "定时提醒", NotificationManager.IMPORTANCE_DEFAULT).apply {
-            description = "到点提醒，以及随行执行提醒内容时的进展"
+            description = "到点提醒，以及JAgent执行提醒内容时的进展"
         }
         manager.createNotificationChannel(channel)
     }

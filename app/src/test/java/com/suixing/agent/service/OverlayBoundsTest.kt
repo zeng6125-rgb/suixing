@@ -15,7 +15,7 @@ class OverlayBoundsTest {
     }
 
     @Test fun traceTrimsMultibyteTextByBytesWithoutSplittingCodePoints() {
-        val text = "启动🙂随行".repeat(60_000)
+        val text = "启动🙂JAgent".repeat(60_000)
         val bytes = text.toByteArray(Charsets.UTF_8)
         for (budget in listOf(0, 1, 2, 3, 4, 2048, 131072)) {
             val head = utf8Prefix(bytes, budget)

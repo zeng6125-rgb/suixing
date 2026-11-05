@@ -97,7 +97,7 @@ class ScheduleTools(
         val title = args.str("title")?.trim().orEmpty()
         if (title.isEmpty()) return@withContext ToolResult.failure("缺少参数 title")
         val prompt = args.str("prompt")?.trim().orEmpty()
-        if (prompt.isEmpty()) return@withContext ToolResult.failure("缺少参数 prompt（到点要让随行做什么）")
+        if (prompt.isEmpty()) return@withContext ToolResult.failure("缺少参数 prompt（到点要让JAgent做什么）")
 
         val timing = readTiming(args) ?: return@withContext timingError(args)
         val now = System.currentTimeMillis()

@@ -6,7 +6,7 @@ import kotlinx.serialization.Serializable
  * One persona: a name, a face, and the parts of the settings it overrides.
  *
  * Everything left blank inherits the live settings, so a fresh assistant behaves
- * exactly like 随行 itself and only diverges where the user asked it to. That is
+ * exactly like JAgent itself and only diverges where the user asked it to. That is
  * what keeps the concept additive: the app still has one active model, one
  * approval mode and one set of tools; an assistant merely bends them.
  */

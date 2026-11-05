@@ -84,7 +84,7 @@ internal fun TodoSheet(todos: List<TodoItem>, onDismiss: () -> Unit) {
 /**
  * 文件路径菜单（LINK-CLICK-SPEC §3.2 一期）：点消息里的文件路径弹出来。
  *
- * 一期只有两项，且都是「永远可用」的：复制路径、让随行读取。二期才加 FileProvider 的
+ * 一期只有两项，且都是「永远可用」的：复制路径、让JAgent读取。二期才加 FileProvider 的
  * 「文件管理器打开 / 分享」——spec 说得很明白，ACTION_VIEW 对 mime 与已装 app 依赖太大
  * （`.md` 多半没有对应 app），所以把复制与让模型读这两个不会断的放前面。
  */
@@ -123,7 +123,7 @@ internal fun PathActionSheet(
             )
             MenuItemRow(
                 icon = ImageVector.vectorResource(R.drawable.ic_bot),
-                label = "让随行读取并总结",
+                label = "让JAgent读取并总结",
                 onClick = onAskModel,
             )
         }

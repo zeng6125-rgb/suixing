@@ -581,22 +581,16 @@ fun SuixingApp() {
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            // **只做水平位移**（用户：「不需要加阴影和遮罩」「四角从一开始就要是
-                            // 屏幕边缘模样」「主页浮在侧边栏上面」）：
-                            // 不缩放、不圆角、不裁剪、不投影 —— 主页始终是满屏那一块，
-                            // 右移之后右侧露出的就是它自己的右边缘，四角天然是屏幕边缘。
+                            // 主页浮在侧边栏之上：右移 + 轻微缩放 + 恒定圆角裁剪 + 淡投影。
+                            // 全部在绘制期做，不改布局尺寸，也不在组合作用域里读进度。
                             val raw = offsetState.value
                             val progress = if (panelWidthPx <= 0f || raw.isNaN()) {
                                 0f
                             } else {
                                 (1f - (-raw / panelWidthPx)).coerceIn(0f, 1f)
                             }
-                            // **不要自己写 translationX**：`DismissibleNavigationDrawer` 已经把
-                            // content 放在 `sheetWidth + offset`（NavigationDrawer.kt:530-532），
-                            // 位移是库给的；再叠一次就是双倍位移（主页会被推出屏幕）。
-                            //
-                            // 主页位移：自建宿主不再替我们平移 content（库那个版本是
-                            // `placeRelative(sheetWidth + offset)`），所以这里补回来。
+                            // 自建宿主只平移侧边栏本体，主页这一层得自己跟上进度，否则会露出
+                            // 一块没动的内容。位移 = 面板宽 × 进度，与面板的 translationX 互补。
                             translationX = panelWidthPx * progress
                             // 缩放：关 1.0 → 开 0.95。端点必须写对，否则关着时整页常年缩小。
                             val s = 1f - 0.05f * progress
@@ -605,11 +599,9 @@ fun SuixingApp() {
                             // **阴影属于主页自己**（用户：「边缘阴影圆角都是主页的」）。
                             // 用 graphicsLayer 的 shadowElevation 得到真实柔和投影，
                             // 因为主页现在在侧边栏**之上**（侧边栏已移到 content 里），阴影能压上去。
-                            // **扩散更大、但更淡**（用户：「阴影淡是淡，你让他扩散大一点呀」）：
-                            // Compose 的 `shadowElevation` 同时决定"扩散范围"和"浓度"，
-                            // 单纯调大会一起变浓 ⇒ 配合把阴影色压到 10% 透明度，
-                            // 得到"范围宽、颜色浅"的效果（API 28+ 生效，以下机型自动忽略）。
-                            // 用户：「阴影扩散小一点点，深一点点就ok了」⇒ 22 → 16dp，10% → 18%。
+                            // 阴影跟着进度淡入：16dp 扩散、24% 浓度，得到"范围宽、颜色浅"的效果
+                            // （用户：「扩散小一点点，深一点点就 ok 了」⇒ 22 → 16dp、10% → 24%）。
+                            // API 28+ 生效，以下机型自动忽略。
                             shadowElevation = 16.dp.toPx() * progress
                             spotShadowColor = Color.Black.copy(alpha = 0.24f)
                             ambientShadowColor = Color.Black.copy(alpha = 0.24f)

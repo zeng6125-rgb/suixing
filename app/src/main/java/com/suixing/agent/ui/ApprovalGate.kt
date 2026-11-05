@@ -80,7 +80,7 @@ internal fun ApprovalDialog(
         },
         text = {
             Column {
-                Text("随行想调用工具：$toolName")
+                Text("JAgent想调用工具：$toolName")
                 Spacer(Modifier.height(10.dp))
                 Surface(
                     shape = MaterialTheme.shapes.small,

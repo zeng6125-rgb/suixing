@@ -620,7 +620,7 @@ private fun PluginsIntroCard() {
         }
         Spacer(Modifier.height(12.dp))
         Text(
-            text = "插件是可以装卸的扩展：随行的每一项能力，将来都以插件的形式提供——" +
+            text = "插件是可以装卸的扩展：JAgent的每一项能力，将来都以插件的形式提供——" +
                 "装一个就多一份本事，卸掉就干净地消失，不用等应用更新。",
             style = SettingsStyle.description,
         )

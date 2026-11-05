@@ -487,7 +487,7 @@ class UiTools(
         if (text.any { it.code > 127 }) {
             return ToolResult.failure(
                 "走 ${shellName()} 的按键注入打不出中文，只有无障碍服务能直接写入输入框。" +
-                    "请到「能力」页开启随行的无障碍服务后重试。",
+                    "请到「能力」页开启JAgent的无障碍服务后重试。",
             )
         }
         val escaped = text.replace("\\", "").replace("'", "").replace(" ", "%s")

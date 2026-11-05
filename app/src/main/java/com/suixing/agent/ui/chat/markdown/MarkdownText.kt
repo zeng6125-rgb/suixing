@@ -686,7 +686,7 @@ private class InlineScanner(
         if (link.startsWith("file:")) {
             // 文件路径（LINK-CLICK-SPEC §1.3/§3.2）：只在有 onPathClick 回调时才可点 —— 没有回调的
             // Clickable 会「看着能点、点了没反应」，比不加更糟。回调解掉 `file:` 前缀后拿到路径，
-            // 调用方弹菜单（复制 / 让随行读取）。URL 与路径分属两个回调：URL 恒走默认浏览器。
+            // 调用方弹菜单（复制 / 让JAgent读取）。URL 与路径分属两个回调：URL 恒走默认浏览器。
             val path = link.removePrefix("file:")
             val pathClick = onPathClick
             if (pathClick != null) {

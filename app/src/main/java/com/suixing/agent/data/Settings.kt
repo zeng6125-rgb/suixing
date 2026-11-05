@@ -287,10 +287,10 @@ data class AppSettings(
     val approvalMode: ApprovalMode = ApprovalMode.ASK,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     /**
-     * 0 = 随行, 1 = system wallpaper (Material You), 2 = Claude, 3 = Codex.
-     * The brand palette is the default because the whole UI is built around it.
+     * 0 = JAgent, 1 = system wallpaper (Material You), 2 = Claude, 3 = Codex.
+     * Claude 为默认配色；JAgent 墨绿保留为可选项。已保存的设置不受默认值变化影响。
      */
-    val paletteMode: Int = 0,
+    val paletteMode: Int = 2,
     val themeMode: Int = 0,
     /**
      * Off by default because most endpoints are text-only and reject any request
@@ -316,7 +316,7 @@ data class AppSettings(
     /** Read every finished reply out loud through the system TTS engine. */
     val speakReplies: Boolean = false,
     /**
-     * 语音输入：随行自己录音 + 走已配置的服务商转写。
+     * 语音输入：JAgent自己录音 + 走已配置的服务商转写。
      *
      * **默认关**，关掉时输入框那排里连麦克风按钮都不画。开着才用自己的录音链路 —— 它完全不碰
      * `SpeechRecognizer`，所以不会再把系统/ROM 的识别面板弹到屏幕上（那个面板被用户否了两次）。
@@ -372,9 +372,9 @@ data class AppSettings(
     /** 聊天：列表在底部时自动跟随新消息。 */
     val autoFollow: Boolean = true,
     /**
-     * 悬浮窗控制台：抽屉那行的开关，打开＝常驻——只要随行不在前台，不管是空闲还是正在跑，球都在。
+     * 悬浮窗控制台：抽屉那行的开关，打开＝常驻——只要JAgent不在前台，不管是空闲还是正在跑，球都在。
      *
-     * 前台一律不显示（聊天页已经有同一套停止与输入控件），所以这个开关只在离开随行之后生效。
+     * 前台一律不显示（聊天页已经有同一套停止与输入控件），所以这个开关只在离开JAgent之后生效。
      */
     val floatingConsole: Boolean = false,
     /**
@@ -428,8 +428,8 @@ data class AppSettings(
      * 边缘光**在前台是否显示**（用户 2026-10-23：「加一个前台是否显示的开关，不独立，
      * 只在边缘光开启后才起作用」）。
      *
-     * - 开（默认）：随行自己在前台时也显示 —— 这是 issue #6 定下的行为，保持兼容。
-     * - 关：随行在前台时**不显示**；退到后台操作别的 app 时照常显示。
+     * - 开（默认）：JAgent自己在前台时也显示 —— 这是 issue #6 定下的行为，保持兼容。
+     * - 关：JAgent在前台时**不显示**；退到后台操作别的 app 时照常显示。
      *
      * **不独立**：`edgeLight` 为 false 时这一项无效（一律不显示）。
      */
@@ -622,7 +622,7 @@ const val DEFAULT_PROFILE_EVERY_TURNS = 8
 const val STEER_QUEUE = 0
 const val STEER_IMMEDIATE = 1
 
-const val DEFAULT_SYSTEM_PROMPT = """你是随行，运行在用户安卓手机上的智能体。
+const val DEFAULT_SYSTEM_PROMPT = """你是 JAgent，运行在用户安卓手机上的智能体。
 
 你可以通过工具真实地操作这台手机：读取与写入文件、执行 shell 命令、查看屏幕、点击与滑动、打开应用。
 
