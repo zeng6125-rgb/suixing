@@ -47,7 +47,11 @@ internal fun appendBounded(current: String, chunk: String, limit: Int = TERMINAL
  */
 internal class TerminalSession private constructor(
     private val masterFd: Int,
-    private val pid: Int,
+    val pid: Int,
+    val shell: String,
+    val cwd: String,
+    val columns: Int,
+    val rows: Int,
     private val scope: CoroutineScope,
 ) {
     private val _output = MutableStateFlow("")
@@ -91,10 +95,23 @@ internal class TerminalSession private constructor(
     }
 
     /** Write raw bytes, not a shell-command parser. Runs off the main thread. */
-    suspend fun write(text: String) = withContext(Dispatchers.IO) {
+    suspend fun write(text: String) = writeBytes(text.toByteArray(Charsets.UTF_8))
+
+    /** Raw byte path for the key bar (ANSI escapes, control bytes). All native work on IO. */
+    suspend fun writeBytes(bytes: ByteArray) = withContext(Dispatchers.IO) {
         if (closed) return@withContext
-        runCatching { TerminalNative.nativeWrite(masterFd, text.toByteArray(Charsets.UTF_8)) }
+        runCatching { TerminalNative.nativeWrite(masterFd, bytes) }
             .onFailure { _ended.value = "写入失败：${it.message ?: it.javaClass.simpleName}" }
+    }
+
+    /** Clear only the displayed transcript; the PTY and its child are untouched. */
+    fun clearOutput() { _output.value = "" }
+
+    /** Notify the PTY of a new viewport size; the shell may redraw (e.g. stty size). */
+    suspend fun resize(columns: Int, rows: Int) = withContext(Dispatchers.IO) {
+        if (closed) return@withContext
+        runCatching { TerminalNative.nativeResize(masterFd, columns, rows) }
+            .onFailure { _ended.value = "resize 失败：${it.message ?: it.javaClass.simpleName}" }
     }
 
     /** Ctrl-C: signal the foreground process group, not Process.destroy(). */
@@ -148,12 +165,24 @@ internal class TerminalSession private constructor(
          * surfaced to the caller instead of being reported as a working terminal.
          */
         suspend fun open(context: Context): TerminalSession = withContext(Dispatchers.IO) {
-            val handle = TerminalNative.openAppShell(context, columns = 80, rows = 24)
+            val columns = 80
+            val rows = 24
+            val shell = TerminalNative.APP_SHELL
+            val cwd = TerminalNative.appShellCwd(context)
+            val handle = TerminalNative.nativeOpen(shell, cwd, columns, rows)
             require(handle.size == 2) { "PTY open returned an invalid handle" }
             val fd = handle[0].toInt()
             val pid = handle[1].toInt()
             require(fd >= 0 && pid > 1) { "PTY open returned an invalid fd/pid" }
-            TerminalSession(fd, pid, CoroutineScope(SupervisorJob() + Dispatchers.IO))
+            TerminalSession(
+                masterFd = fd,
+                pid = pid,
+                shell = shell,
+                cwd = cwd,
+                columns = columns,
+                rows = rows,
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            )
         }
     }
 }

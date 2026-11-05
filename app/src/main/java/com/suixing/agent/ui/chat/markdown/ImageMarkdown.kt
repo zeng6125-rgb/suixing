@@ -52,11 +52,12 @@ internal fun splitImageSegments(text: String, streaming: Boolean = false): List<
 
     while (i < text.length) {
         // 行首的围栏：切换代码块状态，本身当普通文字。
+        // 直接 startsWith 判定，不再每行 substring(3) 分配一个小 String —— 这段在流式
+        // 每帧都跑，长文一次就是几百次分配；剩余不足 3 字符时 startsWith 同样返回 false。
         if (i == 0 || text[i - 1] == '\n') {
-            val line = text.substring(i, minOf(text.length, i + 3))
             val marker = when {
-                line.startsWith("```") -> "```"
-                line.startsWith("~~~") -> "~~~"
+                text.startsWith("```", i) -> "```"
+                text.startsWith("~~~", i) -> "~~~"
                 else -> null
             }
             if (marker != null) {
@@ -91,11 +92,16 @@ internal fun splitImageSegments(text: String, streaming: Boolean = false): List<
         }
         if (fence == null && text.startsWith("![", i)) {
             val m = IMAGE.matchAt(text, i)
-            if (m != null && isRenderableImageUrl(m.groupValues[2])) {
-                flushPlain()
-                out += MessageSegment.Image(alt = m.groupValues[1], url = m.groupValues[2])
-                i = m.range.last + 1
-                continue
+            if (m != null) {
+                // groupValues 是 lazy 列表，每次 get() 都新建 String：url 取一次，
+                // 判定和建段共用；alt 只在真的要建 Image 段时取。
+                val url = m.groupValues[2]
+                if (isRenderableImageUrl(url)) {
+                    flushPlain()
+                    out += MessageSegment.Image(alt = m.groupValues[1], url = url)
+                    i = m.range.last + 1
+                    continue
+                }
             }
         }
         plain.append(text[i])

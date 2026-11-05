@@ -84,7 +84,7 @@ internal fun ChatTopBar(
         PressPill(
             modifier = Modifier
                 .weight(1f)
-                .height(44.dp),
+                .height(40.dp),
         ) {
             val style = titleBarStyle()
             Text(
@@ -108,7 +108,7 @@ internal fun ChatTopBar(
             val capsuleShape = RoundedCornerShape(50)
             Surface(
                 modifier = Modifier
-                    .height(44.dp)
+                    .height(40.dp)
                     .shadow(
                         elevation = 8.dp,
                         shape = capsuleShape,
@@ -122,7 +122,7 @@ internal fun ChatTopBar(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Plain clickable Boxes, not IconButton: M3's IconButton forces a 48dp
-                    // minimum touch target, which would overflow this 44dp capsule. The
+                    // minimum touch target, which would overflow this 40dp capsule. The
                     // drawables carry a black android:tint, so pass onSurface explicitly —
                     // the same ink FlatPainterButton uses on the header's other actions.
                     CapsuleAction(
@@ -198,7 +198,7 @@ internal fun titleBarStyle(): TextStyle {
     return title.copy(fontSize = title.fontSize * (15f / 17f))
 }
 
-/** One 44×44 slot inside the right-hand capsule; no M3 minimum-size inflation. */
+/** One 40×40 slot inside the right-hand capsule; no M3 minimum-size inflation. */
 @Composable
 private fun CapsuleAction(
     painter: Painter,
@@ -207,7 +207,7 @@ private fun CapsuleAction(
 ) {
     Box(
         modifier = Modifier
-            .size(44.dp)
+            .size(40.dp)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = ripple(bounded = false, radius = 20.dp),

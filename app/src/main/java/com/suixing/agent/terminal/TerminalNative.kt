@@ -21,10 +21,16 @@ internal object TerminalNative {
     external fun nativeWait(pid: Int): Int
     external fun nativeClose(masterFd: Int)
 
-    /** App UID only. Never inherits Root/Shizuku grants from ShellTools. */
-    fun openAppShell(context: Context, columns: Int = 80, rows: Int = 24): LongArray {
+    /** 会话头部展示的 shell 与 forkpty 实际启动的是同一个常量，不各写一份字面量。 */
+    const val APP_SHELL = "/system/bin/sh"
+
+    /** 会话头部展示的 CWD 与 forkpty 实际用的是同一个解析路径。 */
+    fun appShellCwd(context: Context): String {
         val workspace = context.getExternalFilesDir(null) ?: context.cacheDir
         require(workspace.isDirectory) { "Terminal workspace unavailable" }
-        return nativeOpen("/system/bin/sh", workspace.absolutePath, columns, rows)
+        return workspace.absolutePath
     }
+
+    fun openAppShell(context: Context, columns: Int = 80, rows: Int = 24): LongArray =
+        nativeOpen(APP_SHELL, appShellCwd(context), columns, rows)
 }

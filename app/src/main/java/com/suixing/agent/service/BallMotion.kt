@@ -1,7 +1,9 @@
 package com.suixing.agent.service
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.drawable.BitmapDrawable
 import android.os.Handler
 import android.widget.ImageView
@@ -27,6 +29,11 @@ internal class BallMotion(
     private val target: ImageView,
     private val handler: Handler,
 ) {
+    /** ~22 fps: short motion frames (and the blended frames between them) play at this cadence. */
+    private val motionFrameMs = 45L
+    /** At or above this, a frame is an idle/hold: keep its own duration and never tween it. */
+    private val holdFrameMs = 300L
+
     private enum class Mode(val dir: String, val loop: Boolean) {
         Blink("blink", true),
         Roll("roll", true),
@@ -37,13 +44,60 @@ internal class BallMotion(
     private data class Frame(val drawable: BitmapDrawable, val durationMs: Long)
 
     /**
-     * The delivered GIFs move on 40–140ms frames, which reads as a flicker at 42dp.
-     * Stretch the short motion frames but leave the long holds alone, so a blink still
-     * rests ~1.1s between blinks while the lid movement is actually visible.
+     * The delivered GIFs are only 9–14 distinct frames per motion. Playing those at their
+     * raw 40–70ms reads as a flicker, and stretching each to 120–240ms reads as a stutter
+     * (4–8 fps). So instead we synthesise one half-way frame between every pair of short
+     * motion frames and play the whole run at a steady [motionFrameMs] (~22 fps):
+     * the eye/head movement becomes continuous while one full motion keeps roughly its
+     * original duration. Long idle/hold frames are left untouched — interpolating a rest
+     * would only stretch the pause, not smooth it.
+     *
+     * The blend is a straight per-pixel ARGB lerp, not two stacked translucent drawables:
+     * fully transparent corners stay transparent and opaque pixels stay opaque (verified),
+     * so the cream tile never washes out.
      */
-    private fun frameDuration(rawMs: Long): Long = when {
-        rawMs >= 300L -> rawMs          // idle / hold frames keep their pace
-        else -> (rawMs * 3L).coerceAtMost(240L)
+    private fun frameDuration(rawMs: Long): Long =
+        if (rawMs >= holdFrameMs) rawMs else motionFrameMs
+
+    private fun blend(a: Bitmap, b: Bitmap): Bitmap {
+        val width = a.width
+        val height = a.height
+        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val rowA = IntArray(width)
+        val rowB = IntArray(width)
+        val rowOut = IntArray(width)
+        for (y in 0 until height) {
+            a.getPixels(rowA, 0, width, 0, y, width, 1)
+            b.getPixels(rowB, 0, width, 0, y, width, 1)
+            for (x in 0 until width) {
+                val ca = rowA[x]
+                val cb = rowB[x]
+                rowOut[x] = Color.argb(
+                    (Color.alpha(ca) + Color.alpha(cb)) / 2,
+                    (Color.red(ca) + Color.red(cb)) / 2,
+                    (Color.green(ca) + Color.green(cb)) / 2,
+                    (Color.blue(ca) + Color.blue(cb)) / 2,
+                )
+            }
+            out.setPixels(rowOut, 0, width, 0, y, width, 1)
+        }
+        return out
+    }
+
+    /** Build the played frame list: every short-frame transition gains one blended frame. */
+    private fun withInterpolatedFrames(raw: List<Pair<Bitmap, Long>>): List<Frame> {
+        val result = ArrayList<Frame>(raw.size * 2)
+        for (i in raw.indices) {
+            val (bitmap, durationMs) = raw[i]
+            result += Frame(BitmapDrawable(context.resources, bitmap), frameDuration(durationMs))
+            val next = raw.getOrNull(i + 1)
+            // Only insert a tween when BOTH sides are motion frames; a hold stays still.
+            if (next != null && durationMs < holdFrameMs && next.second < holdFrameMs) {
+                val middle = blend(bitmap, next.first)
+                result += Frame(BitmapDrawable(context.resources, middle), motionFrameMs)
+            }
+        }
+        return result
     }
 
     private val frames = mutableMapOf<Mode, List<Frame>>()
@@ -126,13 +180,15 @@ internal class BallMotion(
     private fun framesOf(mode: Mode): List<Frame> = frames.getOrPut(mode) {
         val dir = "ball_motion/${mode.dir}"
         val names = runCatching { context.assets.list(dir) }.getOrNull().orEmpty().sorted()
-        names.mapNotNull { name ->
+        val decoded = names.mapNotNull { name ->
             val duration = name.substringAfterLast('_').substringBefore('.').toLongOrNull()
                 ?: return@mapNotNull null
             val bitmap = runCatching {
                 context.assets.open("$dir/$name").use { BitmapFactory.decodeStream(it) }
             }.getOrNull() ?: return@mapNotNull null
-            Frame(BitmapDrawable(context.resources, bitmap), frameDuration(duration))
+            bitmap to duration
         }
+        // Decoding + blending happens once per mode, lazily, cached for the service's life.
+        withInterpolatedFrames(decoded)
     }
 }
