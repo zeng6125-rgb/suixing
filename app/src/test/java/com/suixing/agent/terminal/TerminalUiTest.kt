@@ -1,6 +1,8 @@
 package com.suixing.agent.terminal
 
 import java.io.File
+import androidx.compose.ui.text.AnnotatedString
+import com.suixing.agent.ui.terminal.TerminalInputTransformation
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -111,12 +113,55 @@ class TerminalUiTest {
     }
 
     @Test
-    fun `the prompt drops the system prefix and the dollar once the shell is gone`() {
-        assertEquals("sh", shellLabel("/system/bin/sh"))
-        assertEquals("bash", shellLabel("/system/bin/bash/"))
-        assertEquals("sh $ ", promptText("/system/bin/sh", input = "", running = true))
-        assertEquals("sh + ", promptText("/system/bin/sh", input = "echo '", running = true))
-        assertEquals("sh ", promptText("/system/bin/sh", input = "", running = false))
+    fun `the current prompt comes from the PTY instead of a second synthetic shell label`() {
+        assertEquals(TerminalTranscript(null, "$ "), splitTerminalOutput("$ "))
+        assertEquals(TerminalTranscript("$ echo '", "> "), splitTerminalOutput("$ echo '\r\n> "))
+        assertEquals(TerminalTranscript("$ exit", ""), splitTerminalOutput("$ exit\r\n"))
+    }
+
+    @Test
+    fun `successive commands and their output stay in top to bottom order`() {
+        var output = "$ "
+        output = appendBounded(output, "echo 中文\r\n中文\r\n$ ")
+        assertEquals(TerminalTranscript("$ echo 中文\n中文", "$ "), splitTerminalOutput(output))
+        output = appendBounded(output, "pwd\r\n/app-files\r\n$ ")
+        assertEquals(
+            TerminalTranscript("$ echo 中文\n中文\n$ pwd\n/app-files", "$ "),
+            splitTerminalOutput(output),
+        )
+    }
+
+    @Test
+    fun `blank output lines and incomplete reads retain their place`() {
+        assertEquals(TerminalTranscript(null, ""), splitTerminalOutput(""))
+        assertEquals(TerminalTranscript("", "$ "), splitTerminalOutput("\n$ "))
+        assertEquals(TerminalTranscript("first\n", "tail"), splitTerminalOutput("first\r\n\r\ntail"))
+        val output = appendBounded("first\r", "\nsecond\r\n$ ")
+        assertEquals(TerminalTranscript("first\nsecond", "$ "), splitTerminalOutput(output))
+    }
+
+    @Test
+    fun `terminal editing stays after the real prompt for English Chinese and emoji`() {
+        for (input in listOf("", "echo hello", "echo 中文", "echo 😀")) {
+            val transformed = TerminalInputTransformation("$ ").filter(AnnotatedString(input))
+            assertEquals("$ $input", transformed.text.text)
+            for (offset in 0..input.length) {
+                val rendered = transformed.offsetMapping.originalToTransformed(offset)
+                assertEquals(offset, transformed.offsetMapping.transformedToOriginal(rendered))
+            }
+            assertEquals(0, transformed.offsetMapping.transformedToOriginal(0))
+            assertEquals(0, transformed.offsetMapping.transformedToOriginal(1))
+        }
+    }
+
+    @Test
+    fun `a custom or multiline current prefix appears once without entering editable text`() {
+        val prefix = "> waiting: "
+        val transformed = TerminalInputTransformation(prefix).filter(AnnotatedString("answer"))
+        assertEquals("> waiting: answer", transformed.text.text)
+        assertEquals(prefix.length, transformed.offsetMapping.originalToTransformed(0))
+        assertEquals(0, transformed.offsetMapping.transformedToOriginal(prefix.length - 1))
+        assertEquals(6, transformed.offsetMapping.transformedToOriginal(prefix.length + 6))
     }
 
     @Test

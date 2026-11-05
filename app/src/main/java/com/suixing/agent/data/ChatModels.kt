@@ -214,6 +214,8 @@ data class Conversation(
      * chat must not silently re-time every other chat.
      */
     val reasoningEffort: String? = null,
+    /** 当前会话的工具审批；未单独选择时跟随设置页的全局默认。 */
+    val approvalMode: ApprovalMode? = null,
     /**
      * Every compression this conversation has been through, oldest first. The messages
      * themselves are never deleted — this is the record of which spans were folded into

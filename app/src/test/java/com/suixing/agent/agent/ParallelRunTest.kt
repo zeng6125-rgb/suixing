@@ -4,12 +4,14 @@ import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.CapabilityState
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.withConversationApproval
 import com.suixing.agent.data.MemoryEntry
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.llm.AssistantTurn
 import com.suixing.agent.llm.LlmClient
+import com.suixing.agent.llm.ToolCallRequest
 import com.suixing.agent.skills.Skill
 import com.suixing.agent.skills.SkillStore
 import com.suixing.agent.tools.TIER_NONE
@@ -27,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
@@ -36,6 +39,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The multi-run audit's holes, pinned on the JVM.
@@ -140,6 +144,57 @@ class ParallelRunTest {
 
     private fun autoSettings(model: String = "deepseek-chat") =
         AppSettings().copy(approvalMode = ApprovalMode.AUTO, model = model)
+
+    @Test
+    fun `conversation approval keeps waiting denied and automatic tool runs isolated`() = runBlocking {
+        withTimeout(10_000) {
+            val global = autoSettings().copy(subagentsEnabled = false, autoProfile = false, autoCompress = false)
+            val deps = quietDeps()
+            val calls = AtomicInteger()
+            val tool = object : Tool {
+                override val spec = ToolSpec("echo", "echoes", JsonObject(emptyMap()))
+                override val tier = TIER_NONE
+                override suspend fun run(args: JsonObject): ToolResult {
+                    calls.incrementAndGet()
+                    return ToolResult.success("ok")
+                }
+            }
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                    AssistantTurn("done", emptyList(), "stop")
+            }
+            val engine = AgentEngine(llm = client)
+            val gate = ApprovalGate()
+            suspend fun runChat(id: String, mode: ApprovalMode) = engine.startRun(
+                chatId = id,
+                title = id,
+                history = listOf(StoredMessage("user-$id", "user", "/echo")),
+                settings = global.withConversationApproval(mode),
+                registry = registryWith(tool),
+                capabilities = deps.capabilities,
+                skills = deps.skills,
+                memory = deps.memory,
+                profile = deps.profile,
+                gate = gate,
+                onEvent = {},
+                initialTool = ToolCallRequest("call-$id", "echo", "{}"),
+            )
+
+            val waiting = async { runChat("waiting", ApprovalMode.ASK) }
+            gate.pending.first { "waiting" in it }
+            val denied = runChat("denied", ApprovalMode.DENY)
+            assertEquals(false, denied.last().toolOk)
+            runChat("automatic", ApprovalMode.AUTO)
+
+            assertEquals("only the automatic conversation executes its tool", 1, calls.get())
+            assertEquals(setOf("waiting"), gate.pending.value.keys)
+            assertFalse(waiting.isCompleted)
+            assertEquals(ApprovalMode.AUTO, global.approvalMode)
+            gate.resolve("waiting", approved = false)
+            waiting.await()
+            assertTrue(gate.pending.value.isEmpty())
+        }
+    }
 
     /**
      * A wire that parks until its own hold completes, and whose fake [Call] completes that

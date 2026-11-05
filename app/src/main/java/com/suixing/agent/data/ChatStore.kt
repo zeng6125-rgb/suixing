@@ -134,6 +134,7 @@ internal class ChatStore(private val root: File) {
         val providerId: String? = null,
         val model: String? = null,
         val reasoningEffort: String? = null,
+        val approvalMode: ApprovalMode? = null,
         val checkpoints: List<ContextCheckpoint> = emptyList(),
         /** Which `<id>.<gen>.jsonl` this record describes. See rule 2 above. */
         val gen: Int = 0,
@@ -172,6 +173,7 @@ internal class ChatStore(private val root: File) {
             providerId = providerId,
             model = model,
             reasoningEffort = reasoningEffort,
+            approvalMode = approvalMode,
             checkpoints = checkpoints,
             // **列表页要知道条数，但不该为此把整份记录读进内存**（#30：10 个会话 54 MB，
             // 全量解析常驻后 RSS 413 MB）。meta 里本来就存着 messageCount，这里直接带上去。
@@ -765,6 +767,7 @@ internal class ChatStore(private val root: File) {
             providerId = conversation.providerId,
             model = conversation.model,
             reasoningEffort = conversation.reasoningEffort,
+            approvalMode = conversation.approvalMode,
             checkpoints = conversation.checkpoints,
             gen = gen,
             logBytes = logBytes,
@@ -970,6 +973,7 @@ internal fun ChatStore.ConversationMeta.withFieldsOf(
     providerId = conversation.providerId,
     model = conversation.model,
     reasoningEffort = conversation.reasoningEffort,
+    approvalMode = conversation.approvalMode,
     checkpoints = conversation.checkpoints,
 )
 

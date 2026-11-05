@@ -1,6 +1,7 @@
 package com.suixing.agent.ui.chat
 
 import com.suixing.agent.data.Conversation
+import com.suixing.agent.data.ApprovalMode
 
 /**
  * `Conversation` → `ChatUiState` 的映射（issue #69 P2-C：从 `ChatViewModel` 物理迁出）。
@@ -9,7 +10,10 @@ import com.suixing.agent.data.Conversation
  * 所以把可见性由 `private` 提到 `internal` 不影响任何外部使用方，但它现在可以被单测直接调用。
  */
 
-internal fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = ChatUiState(
+internal fun Conversation.toUiState(
+    fallbackAssistantId: String,
+    approvalOverride: ApprovalMode? = null,
+): ChatUiState = ChatUiState(
     conversationId = id,
     title = title,
     messages = messages,
@@ -22,6 +26,7 @@ internal fun Conversation.toUiState(fallbackAssistantId: String): ChatUiState = 
     providerId = providerId,
     model = model,
     reasoningEffort = reasoningEffort,
+    approvalMode = approvalOverride ?: approvalMode,
     checkpoints = checkpoints,
     // A conversation read from disk is not "still opening": this state is what the skeleton
     // is replaced by, so it must not leave the flag set.

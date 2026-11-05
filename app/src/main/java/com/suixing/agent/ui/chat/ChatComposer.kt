@@ -96,6 +96,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.ripple
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -106,6 +107,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -910,6 +912,13 @@ internal fun Composer(
     val fieldTextStyle = baseFieldTextStyle.copy(
         fontSize = baseFieldTextStyle.fontSize * (16f / 17f),
         lineHeight = baseFieldTextStyle.lineHeight * (26f / 28f),
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+        // 保留首尾行的完整行高，英文输入切到中文 fallback 时不再按字形盒撑高。
+        lineHeightStyle = LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.None,
+            mode = LineHeightStyle.Mode.Fixed,
+        ),
     )
     // 发送后键盘退避（用户：「抬起输入法发送时，对话框也会挡住」）：不收键盘的话 composer 悬在
     // 键盘上方、把列表尾的状态行盖在后面。发送＝这句话说完了，收键盘让整条栈落回去；「停止」
@@ -1477,7 +1486,7 @@ internal fun Composer(
                             ) {
                                 Icon(
                                     imageVector = ImageVector.vectorResource(approvalIcon(approvalMode)),
-                                    contentDescription = "工具审批：${approvalMode.label}",
+                                    contentDescription = "当前会话工具审批：${approvalMode.label}",
                                     tint = when (approvalMode) {
                                         ApprovalMode.DENY -> scheme.error
                                         ApprovalMode.AUTO -> scheme.primary
@@ -1521,7 +1530,7 @@ internal fun Composer(
                                 // The mode is read when a run starts (see ApprovalGate), so saying
                                 // so here is the difference between a setting and a surprise.
                                 Text(
-                                    text = "下一次任务生效",
+                                    text = "仅当前会话 · 下一次任务生效",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = scheme.onSurfaceVariant,
                                     modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),

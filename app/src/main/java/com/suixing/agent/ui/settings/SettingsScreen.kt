@@ -1388,7 +1388,7 @@ private fun ConversationSettingsPage(onBack: () -> Unit) {
             // 放开关会破坏它的形态。字段与存储没动。
             item { SectionHeader("审批与授权") }
             item {
-                LabeledBlock(label = "工具审批", hint = "模型每次动手前要不要问你。") {
+                LabeledBlock(label = "工具审批", hint = "全局默认；未单独设置审批的会话跟随此项。") {
                     SegmentedPill(
                         options = ApprovalMode.entries.map { it.label },
                         selectedIndex = ApprovalMode.entries.indexOf(stored.approvalMode),

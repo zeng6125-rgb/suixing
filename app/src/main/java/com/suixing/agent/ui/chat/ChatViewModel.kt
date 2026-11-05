@@ -11,6 +11,7 @@ import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.core.Core
 import com.suixing.agent.plugins.PluginRuntime
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.GoalStatus
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
@@ -28,6 +29,7 @@ import com.suixing.agent.data.Transcript
 import com.suixing.agent.data.TranscriptRedaction
 import com.suixing.agent.data.choiceFor
 import com.suixing.agent.data.forAssistant
+import com.suixing.agent.data.withConversationApproval
 import com.suixing.agent.data.ChatRepository
 import com.suixing.agent.data.ConversationLogShrunkException
 import com.suixing.agent.data.MessageCache
@@ -188,6 +190,8 @@ data class ChatUiState(
      * are chosen in the same sheet and belong to the same chat.
      */
     val reasoningEffort: String? = null,
+    /** null 跟随全局默认；聊天页的选择只属于当前会话。 */
+    val approvalMode: ApprovalMode? = null,
     val streaming: String = "",
     /**
      * 思考正文的**修订号**，不是正文本身（issue #57 §3）。
@@ -302,6 +306,7 @@ private data class RunSession(
     val model: String? = null,
     /** The conversation's own thinking level; carried so a save cannot drop it. */
     val reasoningEffort: String? = null,
+    val approvalMode: ApprovalMode? = null,
     /** The conversation's compression record; carried so a save cannot drop it. */
     val checkpoints: List<ContextCheckpoint> = emptyList(),
     val runId: String,
@@ -1305,6 +1310,7 @@ class ChatViewModel : ViewModel() {
                 providerId = live.providerId,
                 model = live.model,
                 reasoningEffort = live.reasoningEffort,
+                approvalMode = live.approvalMode,
                 checkpoints = live.checkpoints,
                 streaming = live.streaming,
                 reasoningRevision = live.reasoningRevision,
@@ -1330,7 +1336,7 @@ class ChatViewModel : ViewModel() {
             // 是空的。`openConversation` 不是挂起函数（它是点击回调），所以这里**先按 meta
             // 建状态、带上 loading**，正文由下面那段协程补读 —— 补读期间显示骨架，
             // 不会闪一个空白会话，也不会让 `save()` 把空列表当成"变短"。
-            conversation.toUiState(_state.value.assistantId).let { base ->
+            conversation.toUiState(_state.value.assistantId, conversationApprovalChoices[conversation.id]).let { base ->
                 // **命中 LRU 缓存就直接带正文**（#35）：原来缓存命中也要先 loading=true
                 // 再补读，「切走再切回」会闪一次骨架。
                 if (cached != null) {
@@ -1517,6 +1523,34 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+    private var approvalSaveJob: Job? = null
+    // 切走再立即切回时也使用最新选择，不能等待异步元数据写入后才隔离。
+    private val conversationApprovalChoices = ConcurrentHashMap<String, ApprovalMode>()
+
+    /** 当前会话单独保存，下一次任务读取；快速连选按点击顺序落盘。 */
+    fun chooseApproval(mode: ApprovalMode) {
+        val shown = _state.value
+        val chatId = shown.conversationId
+        if (chatId.isEmpty()) return
+        conversationApprovalChoices[chatId] = mode
+        _state.update { if (it.conversationId == chatId) it.copy(approvalMode = mode) else it }
+        sessions[chatId]?.let { putSession(it.copy(approvalMode = mode)) }
+        val previousWrite = approvalSaveJob
+        approvalSaveJob = viewModelScope.launch {
+            previousWrite?.join()
+            runCatchingCancellable {
+                checkNotNull(Core.chats.updateMeta(id = chatId, approvalMode = mode)) { "会话已不存在" }
+            }
+                .onFailure { failure ->
+                    _state.update {
+                        if (it.conversationId == chatId && it.approvalMode == mode) {
+                            it.copy(error = "会话审批设置未保存：${failure.message ?: failure.javaClass.simpleName}")
+                        } else it
+                    }
+                }
+        }
+    }
+
     /**
      * Fills in the context windows the endpoint advertises for its models.
      *
@@ -1592,6 +1626,7 @@ class ChatViewModel : ViewModel() {
      * 会话数量只增不减 ⇒ 这些残留会一直堆着。
      */
     private fun forgetConversation(chatId: String) {
+        conversationApprovalChoices.remove(chatId)
         clearSteers(chatId)
         _drafts.update { it - chatId }
         pendingTurns.forget(chatId)
@@ -2427,6 +2462,7 @@ class ChatViewModel : ViewModel() {
                 providerId = shown.providerId,
                 model = shown.model,
                 reasoningEffort = shown.reasoningEffort,
+                approvalMode = shown.approvalMode,
                 checkpoints = shown.checkpoints,
                 runId = runId,
                 messages = shown.messages,
@@ -2513,7 +2549,7 @@ class ChatViewModel : ViewModel() {
                     // wins, then whatever the persona's provider declared, then the
                     // app-wide default the persona already carries.
                     reasoningEffort = shown.reasoningEffort ?: persona.reasoningEffort,
-                )
+                ).withConversationApproval(shown.approvalMode)
                 val registry = Core.tools.excluding(assistant?.disabledTools?.toSet().orEmpty())
                 val produced = engine.startRun(
                     chatId = chatId,
@@ -3517,6 +3553,7 @@ class ChatViewModel : ViewModel() {
                 // model, so a save that carries none must inherit the one on disk rather
                 // than resetting the chat to the app-wide default.
                     reasoningEffort = reasoningEffort ?: previous?.reasoningEffort,
+                    approvalMode = previous?.approvalMode,
                 // Same trap as the model pick: a save that carries no checkpoints must
                 // inherit the ones on disk, or every message landing would wipe the record
                 // of what was compressed — and the next run would compress and pay again.

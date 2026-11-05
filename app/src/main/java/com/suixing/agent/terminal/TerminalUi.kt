@@ -105,22 +105,18 @@ internal fun keysEnabled(status: TerminalSession.SessionStatus?): Boolean =
 internal fun canSubmit(command: String, running: Boolean): Boolean =
     running && command.isNotEmpty()
 
-/** `/system/bin/sh` 在提示符里读作 `sh`；其它取末段。 */
-internal fun shellLabel(shell: String): String =
-    shell.trimEnd('/').substringAfterLast('/').ifEmpty { shell }
+/** 完整历史行与 shell 当前行共用一个滚动区域；null 表示尚无完整历史行。 */
+internal data class TerminalTranscript(val history: String?, val currentLine: String)
 
-/** 提示符：活着带 `$`，退出后只剩 shell 名。 */
-internal fun shellPrompt(shell: String, running: Boolean): String =
-    if (running) "${shellLabel(shell)} $ " else "${shellLabel(shell)} "
-
-/**
- * 一整行提示符。没有 VT/ANSI 仿真，提示符只能是输入行本身而不是会滚走的文本；
- * 未闭合的引号/反斜杠沿用 shell 的续行习惯画 `+`。
- */
-internal fun promptText(shell: String, input: String, running: Boolean): String {
-    if (input.isEmpty()) return shellPrompt(shell, running)
-    val open = input.endsWith("\\") || input.endsWith("'") || input.endsWith("\"")
-    return if (open) "${shellLabel(shell)} + " else shellPrompt(shell, running)
+/** 当前行直接来自 PTY（包含真实提示符），不再另造一个常驻的 sh $ 输入前缀。 */
+internal fun splitTerminalOutput(output: String): TerminalTranscript {
+    val text = output.replace("\r\n", "\n")
+    val lastBreak = text.lastIndexOf('\n')
+    return if (lastBreak < 0) {
+        TerminalTranscript(history = null, currentLine = text)
+    } else {
+        TerminalTranscript(history = text.substring(0, lastBreak), currentLine = text.substring(lastBreak + 1))
+    }
 }
 
 /** 工作目录相对应用私有目录展示，避免把一长串绝对路径糊在屏幕上。 */

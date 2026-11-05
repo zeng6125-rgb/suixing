@@ -13,6 +13,8 @@ import android.widget.ImageView
  *
  * Frames live in `assets/ball_motion/<mode>/` as `<index>_<duration-ms>.png`, one PNG per
  * distinct GIF frame (identical consecutive frames are collapsed by the build script).
+ * Each frame uses the delivered round icon's alpha mask; the subject pixels and timings
+ * stay unchanged, including the head-turn and run-start one-shots.
  * Decoded bitmaps are cached for the service's lifetime, so switching modes never decodes
  * a loop twice. All asset decoding happens lazily on first use of that mode.
  *

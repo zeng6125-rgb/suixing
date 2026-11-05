@@ -857,6 +857,10 @@ fun AppSettings.forAssistant(assistant: Assistant?): AppSettings {
     )
 }
 
+/** 会话审批仅覆盖本次运行的设置副本，全局默认仍由设置页管理。 */
+internal fun AppSettings.withConversationApproval(mode: ApprovalMode?): AppSettings =
+    if (mode == null || mode == approvalMode) this else copy(approvalMode = mode)
+
 /** Where one turn goes: the endpoint and the model id, already resolved. */
 data class LlmChoice(
     val providerId: String?,

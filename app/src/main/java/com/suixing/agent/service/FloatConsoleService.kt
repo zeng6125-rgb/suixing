@@ -48,6 +48,7 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.withConversationApproval
 import com.suixing.agent.ui.theme.AppearancePalette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -693,12 +694,12 @@ private const val CHANNEL_ID = "Suixing_console"
         }
         val visual = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
-            // No coloured disc: the motion frames are the whole icon, including its
-            // cream rounded-square tile (four transparent corners sit over the wallpaper).
+            // 静态与四组动效使用同一个圆盘轮廓，透明区域直接露出壁纸。
         }
         ballMotionView = ImageView(this).apply {
             layoutParams = FrameLayout.LayoutParams(size, size)
             scaleType = ImageView.ScaleType.FIT_XY
+            setImageResource(com.suixing.agent.R.drawable.brand_mark_round)
         }
         visual.addView(ballMotionView)
         ballMotion = BallMotion(this, ballMotionView, mainHandler)
@@ -1413,7 +1414,7 @@ private const val CHANNEL_ID = "Suixing_console"
                 chatId = conversation.id,
                 title = title,
                 history = history,
-                settings = Core.settings.current(),
+                settings = Core.settings.current().withConversationApproval(conversation.approvalMode),
                 registry = Core.tools,
                 capabilities = Core.capabilities,
                 skills = Core.skills,

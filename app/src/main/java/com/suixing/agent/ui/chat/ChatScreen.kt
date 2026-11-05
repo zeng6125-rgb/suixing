@@ -1916,11 +1916,11 @@ fun ChatScreen(
                         }
                     },
                     voiceInput = settings.voiceInput,
-                    approvalMode = settings.approvalMode,
+                    approvalMode = state.approvalMode ?: settings.approvalMode,
                     // Written through the same repository the settings page writes, so the two
                     // entries cannot drift: the page re-reads the flow this update feeds.
                     onPickApproval = rememberStableCallback1 { mode ->
-                        scope.launch { Core.settings.update { it.copy(approvalMode = mode) } }
+                        viewModel.chooseApproval(mode)
                     },
                     onOpenSettings = onOpenSettings,
                     jumpToLatest = rememberStableCallback0 { jumpToLatest() },

@@ -154,6 +154,7 @@ class ChatRepository(
         checkpoints: List<ContextCheckpoint>? = null,
         pinned: Boolean? = null,
         archived: Boolean? = null,
+        approvalMode: ApprovalMode? = null,
     ): Conversation? = withContext(Dispatchers.IO) {
         lock.withLock {
             val meta = store.readMeta(id) ?: return@withLock null
@@ -164,6 +165,7 @@ class ChatRepository(
                 providerId = providerId ?: meta.providerId,
                 model = model ?: meta.model,
                 reasoningEffort = reasoningEffort ?: meta.reasoningEffort,
+                approvalMode = approvalMode ?: meta.approvalMode,
                 checkpoints = checkpoints ?: meta.checkpoints,
                 pinned = pinned ?: meta.pinned,
                 archived = archived ?: meta.archived,
@@ -544,11 +546,18 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             // 「消息落盘」就会把用户刚置顶的会话取消置顶（那个构造里 providerId / model /
             // reasoningEffort / checkpoints 都为此写了同样的继承，这里是同一个坑的第五个）。
             val onDisk = _conversations.value.firstOrNull { it.id == conversation.id }
+            val unindexedMeta = if (onDisk == null) store.readMeta(conversation.id) else null
             val stamped = conversation.copy(
                 updatedAt = System.currentTimeMillis(),
                 pinned = onDisk?.pinned ?: conversation.pinned,
                 // 归档位同理（第六个）：不继承的话，归档过的会话只要再落一次盘就自己回到列表里。
                 archived = onDisk?.archived ?: conversation.archived,
+                // 审批只由元数据选择器修改，旧运行快照不能把用户刚选的模式写回去。
+                approvalMode = when {
+                    onDisk != null -> onDisk.approvalMode
+                    unindexedMeta != null -> unindexedMeta.approvalMode
+                    else -> conversation.approvalMode
+                },
             )
             // **护栏：历史只能变长**（#30）。`load()` 现在只读 meta，`_conversations` 里的
             // `messages` 是空的或只是尾部窗口；任何调用方如果拿它当全量回写，就会把聊天记录
@@ -951,6 +960,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
             providerId = conversation.providerId,
             model = conversation.model,
             reasoningEffort = conversation.reasoningEffort,
+            approvalMode = conversation.approvalMode,
             checkpoints = conversation.checkpoints,
         )
         val committed = if (newMessages.isEmpty()) {
@@ -1006,6 +1016,7 @@ private fun readTailText(file: java.io.File, maxChars: Int = TAIL_MAX_CHARS): St
                 providerId = conversation.providerId,
                 model = conversation.model,
                 reasoningEffort = conversation.reasoningEffort,
+                approvalMode = conversation.approvalMode,
                 checkpoints = conversation.checkpoints,
             )
         }
