@@ -1,0 +1,7 @@
+PRoot 5.1.107.102, Termux fork. GPL-2.0-or-later.
+Source: https://github.com/termux/proot/tree/v5.1.107.102
+Includes copyright (C) STMicroelectronics and upstream contributors.
+Official Termux package proot_5.1.107.102_aarch64.deb.
+Suixing renames executable files for Android APK extraction and replaces the
+libtalloc.so.2 DT_NEEDED string with libtalloc.so plus NUL padding.
+See tools/fetch-terminal-binaries.py and THIRD_PARTY_NOTICES.md for reproduction.

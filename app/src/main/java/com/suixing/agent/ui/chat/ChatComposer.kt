@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -98,14 +99,9 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.input.TransformedText
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -138,6 +134,8 @@ import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.LocalHeldImePx
 import com.suixing.agent.ui.theme.LocalDarkTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import java.util.Locale
 import androidx.compose.runtime.mutableFloatStateOf
@@ -934,25 +932,29 @@ internal fun Composer(
     }
     val commandEnd = remember(field.text) { slashTokenEnd(field.text) }
     val commandTint = remember(commandEnd, scheme.primary) {
-        if (commandEnd == null) {
-            VisualTransformation.None
-        } else {
-            VisualTransformation { text ->
-                TransformedText(
-                    buildAnnotatedString {
-                        append(text.text)
-                        addStyle(
-                            // 只换颜色：Medium 会改字形宽度，敲下 / 时整行可能重新折行，
-                            // 输入框一高，贴在上面的候选卡片就跟着「浮起」。
-                            SpanStyle(color = scheme.primary),
-                            0,
-                            commandEnd,
-                        )
-                    },
-                    OffsetMapping.Identity,
-                )
-            }
+        FileReferenceTransformation(scheme.primary, commandEnd)
+    }
+    val fieldLines = remember { androidx.compose.runtime.mutableIntStateOf(1) }
+    val fieldLineHeightPx = with(LocalDensity.current) { fieldTextStyle.lineHeight.toPx() }
+    val fieldTextMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
+    val fieldBaselinePx = remember(fieldTextMeasurer, fieldTextStyle) {
+        fieldTextMeasurer.measure("Ag国", style = fieldTextStyle, maxLines = 1).firstBaseline
+    }
+    val referenceQuery = remember(field.text, field.selection) {
+        if (field.selection.collapsed) activeFileReference(field.text, field.selection.start) else null
+    }
+    val ctx = LocalContext.current
+    var referenceResults by remember {
+        mutableStateOf<Pair<FileReferenceQuery, List<FileReferenceSuggestion>>?>(null)
+    }
+    val referenceSuggestions = referenceResults?.takeIf { it.first == referenceQuery }?.second.orEmpty()
+    LaunchedEffect(ctx, referenceQuery) {
+        referenceResults = null
+        val query = referenceQuery ?: return@LaunchedEffect
+        val suggestions = withContext(Dispatchers.IO) {
+            fileReferenceSuggestions(com.suixing.agent.tools.workspaceDir(ctx), query.query)
         }
+        referenceResults = query to suggestions
     }
     // The goal command lives in the add menu, not as a permanent icon: it is occasional
     // configuration and the row's space belongs to typing and sending. Existing text becomes
@@ -982,7 +984,6 @@ internal fun Composer(
     var approvalOpen by remember { mutableStateOf(false) }
     var approvalAnchorLeft by remember { mutableStateOf(0f) }
     var approvalWidth by remember { mutableStateOf(0) }
-    val ctx = LocalContext.current
     // The two cards this row opens are focus-less (see [MenuCard]'s focusable): a focusable
     // popup window takes the keyboard away from the field, the shell then lays the composer
     // out a keyboard lower, and the card stays anchored to where the composer was — 250dp
@@ -1264,6 +1265,31 @@ internal fun Composer(
                 popupPositionProvider = slashPopup,
                 width = slashWidth,
             )
+            val referenceItems = remember(referenceSuggestions) {
+                referenceSuggestions.map {
+                    (it.path + if (it.directory) "/" else "") to
+                        (if (it.directory) "文件夹 · 点击进入" else it.path)
+                }
+            }
+            SlashSuggestionPopup(
+                visible = referenceItems.isNotEmpty() && referenceQuery != null,
+                items = referenceItems,
+                onPick = { path ->
+                    val query = referenceQuery
+                    val suggestion = referenceSuggestions.firstOrNull {
+                        it.path + (if (it.directory) "/" else "") == path
+                    }
+                    if (query != null && suggestion != null) {
+                        val (text, cursor) = replaceFileReference(field.text, query, suggestion)
+                        field = TextFieldValue(text, TextRange(cursor))
+                        onInput(text)
+                        goalFocus.requestFocus()
+                    }
+                },
+                popupPositionProvider = slashPopup,
+                width = slashWidth,
+                labelForItem = { fileReferenceLabel(it) },
+            )
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(24.dp),
@@ -1288,12 +1314,14 @@ internal fun Composer(
                             .heightIn(min = 48.dp)
                             .focusRequester(goalFocus)
                             .padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 4.dp)
+                            .composerFieldHeight(fieldLineHeightPx, fieldBaselinePx) { fieldLines.intValue }
                             // Accessible label is independent of the changing placeholder.
                             .semantics { contentDescription = "消息输入框" }
                             .onFocusChanged { focus ->
                                 if (focus.isFocused) onFocused()
                             },
                         textStyle = fieldTextStyle.copy(color = scheme.onSurface),
+                        onTextLayout = { fieldLines.intValue = it.lineCount.coerceIn(1, 5) },
                         cursorBrush = SolidColor(scheme.primary),
                         maxLines = 5,
                         // Enter sends — and while a run is live it sends the line to that
@@ -1803,6 +1831,7 @@ private fun SlashSuggestionPopup(
     onPick: (String) -> Unit,
     popupPositionProvider: PopupPositionProvider,
     width: Dp,
+    labelForItem: (String) -> String = { "/" + it },
 ) {
     // Keep the transition state across rapid query changes. AnimatedVisibility retargets from its
     // current values when the user clears and retypes, then removes the popup after exit completes.
@@ -1830,6 +1859,7 @@ private fun SlashSuggestionPopup(
                 onPick = onPick,
                 interactive = visible,
                 modifier = Modifier.width(width),
+                labelForItem = labelForItem,
             )
         }
     }
@@ -1868,6 +1898,7 @@ private fun SlashSuggestionList(
     onPick: (String) -> Unit,
     interactive: Boolean,
     modifier: Modifier = Modifier,
+    labelForItem: (String) -> String = { "/" + it },
 ) {
     val scheme = MaterialTheme.colorScheme
     Surface(
@@ -1881,6 +1912,8 @@ private fun SlashSuggestionList(
         AnimatedSlashSuggestions(transition, interactive) { shown, enabled ->
             Column(Modifier
                 .then(if (enabled) Modifier else Modifier.clearAndSetSemantics { })
+                .heightIn(max = 280.dp)
+                .verticalScroll(rememberScrollState(), enabled = enabled)
                 .padding(vertical = 4.dp)) {
                 shown.forEach { (name, description) ->
                     Row(
@@ -1891,9 +1924,12 @@ private fun SlashSuggestionList(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = "/$name",
+                            text = labelForItem(name),
                             style = MaterialTheme.typography.labelLarge,
                             color = scheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 140.dp),
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(

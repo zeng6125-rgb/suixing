@@ -78,10 +78,10 @@ internal fun Modifier.popupMotion(state: PopupMotionState, origin: () -> Transfo
         // ModulateAlpha is not an option either — it would show the shadow through the card.
         clip = false
         alpha = state.opacity.value
-        scaleX = 0.94f + 0.06f * p
+        scaleX = 0.96f + 0.04f * p
         scaleY = scaleX
         transformOrigin = origin()
         // Grow out of the triggering control: a menu opening upward starts lower, one opening
         // downward starts higher, so the card reads as coming from the button that summoned it.
-        translationY = (1f - p) * 8.dp.toPx() * (transformOrigin.pivotFractionY * 2f - 1f)
+        translationY = (1f - p) * 6.dp.toPx() * (transformOrigin.pivotFractionY * 2f - 1f)
     }

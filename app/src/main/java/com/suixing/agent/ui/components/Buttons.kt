@@ -33,6 +33,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
@@ -137,6 +139,7 @@ fun InlineIconAction(
     Box(
         modifier = modifier
             .size(boxWidth)
+            .semantics { contentDescription = label }
             .clickable(
                 interactionSource = interactionSource,
                 // The wider hit target stays 26dp; the indication below is attached to the

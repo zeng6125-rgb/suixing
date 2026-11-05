@@ -165,6 +165,7 @@ internal fun ConversationRow(
     dragging: Boolean = false,
     dragHandleModifier: Modifier = Modifier,
     modifier: Modifier = Modifier,
+    runningAnimationActive: Boolean = true,
 ) {
     val scheme = MaterialTheme.colorScheme
     // 菜单贴哪边、朝上还是朝下，都要先知道这一行在窗口里的位置：
@@ -222,7 +223,7 @@ internal fun ConversationRow(
                     // 否则「谁在占着那个 run」只能靠猜。标记本身在转：静止的点看不出
                     // 「它正在动」，而这一行要回答的正是「现在有没有人在跑」。
                     // 14dp 的环比原来的 7dp 点宽，间距收窄到 2dp，标题的左缘不动。
-                    RunningSpinner(Modifier.size(14.dp))
+                    RunningSpinner(Modifier.size(14.dp), animated = runningAnimationActive)
                     Spacer(Modifier.width(2.dp))
                 } else if (completedUnread) {
                     CompletionDot()

@@ -39,6 +39,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -1017,6 +1018,10 @@ internal fun UserBubble(message: StoredMessage, onEdit: (StoredMessage) -> Unit)
 /** The small 复制 / 编辑 row under a bubble. */
 @Composable
 internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> Unit) {
+    if (LocalAccessibleChatActions.current || LocalConfiguration.current.screenWidthDp < 360 || LocalDensity.current.fontScale >= 1.3f) {
+        ReplyActionsMenu(message, null, onEdit, {}, { _, _ -> })
+        return
+    }
     // 复制走 [rememberCopyToClipboard]：写剪贴板 + Toast（用户：「复制后给个提示」）。
     val copy = rememberCopyToClipboard()
     Row(
@@ -1357,6 +1362,10 @@ internal fun AssistantRow(
     onEdit: (StoredMessage) -> Unit = {},
 ) {
     val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
+    if (streaming) reasoningExpansion.protectRun(processRun)
+    val deferredCompletion by remember(reasoningExpansion, processRun) {
+        derivedStateOf { reasoningExpansion.completionDeferred(processRun) }
+    }
     val foldSlots = remember(IdentityKey(parts), processRun) { processFoldSlots(parts, processRun) }
     // 内容先单独成块：卡片模式把它包进 Surface，扁平模式直接放下。
     //
@@ -1460,7 +1469,8 @@ internal fun AssistantRow(
                                 // A live block is the one still growing; a settled round's
                                 // thinking is complete even while the run continues.
                                 streaming = thinkingLive,
-                                runStreaming = streaming,
+                                runStreaming = streaming || deferredCompletion,
+                                preserveLiveExpansion = deferredCompletion && last,
                                 // A live block keeps its slot for the whole run, and the
                                 // stored copy of the same run answers to the same key.
                                 blockId = foldSlots[index]!!,
@@ -1544,7 +1554,7 @@ internal fun AssistantRow(
                     // 新一轮会有个重新回答的话则加在其后面，用时和用量贴右」）。
                     // 顺序：复制 · 修改 · 重新回答（有才画）· 回答切换箭头 —— 箭头放在最后，
                     // 因为它是「这是第几个回答」的导航，跟在同组动作末尾比夹在中间稳。
-                    if (LocalConfiguration.current.screenWidthDp < 360 || LocalDensity.current.fontScale >= 1.3f) {
+                    if (LocalAccessibleChatActions.current || LocalConfiguration.current.screenWidthDp < 360 || LocalDensity.current.fontScale >= 1.3f) {
                         ReplyActionsMenu(message, branch, onEdit, onRegenerate, onBranch)
                     } else {
                     MessageActions(message = message, onEdit = onEdit)

@@ -48,6 +48,57 @@ class FoldHandoverTest {
         assertFalse(state.summaryExpanded(parts, "run", streaming = false))
     }
 
+    @Test fun `visible live process completes during press drag or fling without collapsing until idle`() {
+        val state = ReasoningExpansion("chat", mutableMapOf())
+        var pressed = true
+        var scrolling = false
+        state.holdCompletion = { run -> run == "run" && (pressed || scrolling) }
+        state.protectRun("run")
+        assertTrue(state.summaryExpanded(parts, "run", streaming = true))
+
+        // The task really finished. Only its default presentation stays live-sized.
+        fun assertHeld() {
+            val held = state.completionDeferred("run")
+            val expanded = state.summaryExpanded(parts, "run", streaming = false)
+            assertTrue(held)
+            assertTrue(expanded)
+            state.settleSummary("run", expanded, held)
+            assertNull(state.stored(summarySlot("run")))
+        }
+        assertHeld() // The finger is down but has not moved yet.
+        scrolling = true
+        assertHeld() // Dragging still owns the viewport.
+        pressed = false
+        assertHeld() // The finger lifted, but the fling has not stopped.
+
+        scrolling = false
+        val settled = state.summaryExpanded(parts, "run", streaming = false)
+        assertFalse(settled)
+        state.settleSummary("run", settled, state.completionDeferred("run"))
+        assertEquals(false, state.stored(summarySlot("run")))
+        // A later touch must never reopen a run whose hand-over already completed.
+        pressed = true
+        assertFalse(state.completionDeferred("run"))
+        assertFalse(state.summaryExpanded(parts, "run", streaming = false))
+    }
+
+    @Test fun `completion hold preserves explicit choices and never postpones historical runs`() {
+        val state = ReasoningExpansion("chat", mutableMapOf())
+        var visibleRun = "run"
+        state.holdCompletion = { it == visibleRun }
+        state.protectRun("run")
+        state.set(summarySlot("run"), false)
+        assertFalse(state.summaryExpanded(parts, "run", streaming = false))
+        state.set(summarySlot("run"), true)
+        assertTrue(state.summaryExpanded(parts, "run", streaming = false))
+        assertFalse(state.summaryExpanded(parts, "old-run", streaming = false))
+
+        // While scrolling older content the newly completed row is offscreen.
+        visibleRun = "old-run"
+        assertFalse(state.completionDeferred("run"))
+        assertFalse(state.completionDeferred("old-run"))
+    }
+
     @Test fun `manually opened thinking keeps completed process open until explicitly reclosed`() {
         val state = ReasoningExpansion("chat", mutableMapOf())
         val slot = thinkSlot(parts, 0, "run")

@@ -13,8 +13,8 @@ android {
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 701
-        versionName = "0.8.680"
+        versionCode = 704
+        versionName = "0.8.683"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -133,6 +133,7 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
+    implementation("org.tukaani:xz:1.10")
 
     // **图片加载换 Coil 3**（issue #44 第 10 项）：替代手写的 BitmapFactory 降采样 +
     // 容量 4 的 LRU。Coil 提供内存/磁盘双缓存、按目标尺寸自动采样、生命周期感知，

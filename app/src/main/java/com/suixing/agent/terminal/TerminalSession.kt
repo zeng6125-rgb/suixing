@@ -1,188 +1,208 @@
 package com.suixing.agent.terminal
 
-import android.content.Context
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
+import com.termux.terminal.TerminalSession as TerminalDisplay
 
-/** Linux signal numbers; the JNI bridge only accepts SIGINT/SIGTERM/SIGKILL/SIGHUP. */
 internal const val SIGINT = 2
 internal const val SIGTERM = 15
 internal const val SIGKILL = 9
-
-/** Keep the transcript bounded: unlimited PTY output must not grow the UI buffer forever. */
 internal const val TERMINAL_OUTPUT_LIMIT = 64 * 1024
-
-/**
- * Append a chunk, retaining only the tail. Returns the new buffer, never longer than
- * [limit]. Terminal output is a byte stream; we decode to text for display but keep the
- * bound in characters so the UI cannot OOM on a runaway process.
- */
 internal fun appendBounded(current: String, chunk: String, limit: Int = TERMINAL_OUTPUT_LIMIT): String {
-    require(limit > 0) { "output limit must be positive" }
-    if (chunk.length >= limit) return chunk.takeLast(limit)
-    val merged = current + chunk
-    return if (merged.length <= limit) merged else merged.takeLast(limit)
+    require(limit > 0)
+    return (current + chunk).takeLast(limit)
 }
 
-/**
- * One App-UID interactive PTY session (#61 PR-0 bridge + the minimum ownership layer).
- *
- * The JNI bridge requires exactly one reader and one waitpid owner. This class owns both:
- * a single [Dispatchers.IO] reader drains the master fd, and [close] is the only place that
- * signals, waits and closes — all on IO, never the main thread.
- *
- * Deliberately a single-session owner, not the full TerminalSessionManager from #61 PR-1:
- * leaving this screen detaches the view and closes the session. It does not claim
- * background survival, multi-session tabs, VT/ANSI emulation or agent access.
- */
-internal class TerminalSession private constructor(
+/** One native reader, queued writer and reaper. Page navigation only detaches the view. */
+internal class TerminalSession(
+    val id: String,
     private val masterFd: Int,
     val pid: Int,
-    val shell: String,
-    val cwd: String,
-    val columns: Int,
-    val rows: Int,
+    val launch: TerminalLaunch,
+    val policy: TerminalPolicy,
     private val scope: CoroutineScope,
+    val log: TerminalLog,
+    private val onEnded: (Int, String?) -> Unit,
 ) {
-    private val _output = MutableStateFlow("")
-    val output: StateFlow<String> = _output.asStateFlow()
-
+    enum class SessionStatus { STARTING, RUNNING, EXITED, INTERRUPTED }
     private val _status = MutableStateFlow(SessionStatus.STARTING)
-    val status: StateFlow<SessionStatus> = _status.asStateFlow()
-    /** Non-null once the session has ended: exit code or the failure reason. */
+    val status = _status.asStateFlow()
     private val _ended = MutableStateFlow<String?>(null)
-    val ended: StateFlow<String?> = _ended.asStateFlow()
-
+    val ended = _ended.asStateFlow()
+    private val _revision = MutableStateFlow(0L)
+    val revision = _revision.asStateFlow()
+    private val _historyLimited = MutableStateFlow(false)
+    val historyLimited = _historyLimited.asStateFlow()
+    private val outputRing = TerminalOutputRing()
+    private val decoder = TerminalUtf8Decoder()
+    private val closing = AtomicBoolean(false)
+    private val finished = CompletableDeferred<Unit>()
+    private val nativeLock = Any()
+    private data class Input(val bytes: ByteArray, val caller: TerminalCaller?, val grantRevision: Long,
+        val written: CompletableDeferred<Unit>, val ownerJob: Job?)
+    private val writes = Channel<Input>(32)
+    private val chunks = Channel<ByteArray>(8)
     private var reader: Job? = null
-    /** Guards the single TERM→KILL→waitpid→close path; written on IO, read on any thread. */
-    @Volatile
-    private var closed = false
-    private val closeLock = Any()
+    private var processor: Job? = null
+    private var writer: Job? = null
+    private var dirty = false
+    private var lastPublished = 0L
+    private var frame: Job? = null
+    var onCopy: ((String) -> Unit)? = null
+    var onPaste: (() -> Unit)? = null
+    val shell: String get() = launch.label
+    val cwd: String get() = launch.cwd
+    val historyTruncated: Boolean get() = outputRing.truncated
 
-    enum class SessionStatus { STARTING, RUNNING, EXITED }
+    // The emulator and view share Main; all native calls run on IO.
+    val display = TerminalDisplay(object : TerminalDisplay.Host {
+        override fun input(bytes: ByteArray, fromUser: Boolean) {
+            if (fromUser) policy.takeOver()
+            scope.launch { runCatching { writeBytes(bytes) } }
+        }
+        override fun resize(columns: Int, rows: Int) {
+            scope.launch(Dispatchers.IO) {
+                synchronized(nativeLock) {
+                    if (!closing.get()) runCatching { TerminalNative.nativeResize(masterFd, columns, rows) }
+                }
+            }
+        }
+        override fun copy(text: String) { onCopy?.invoke(text) }
+        override fun paste() { onPaste?.invoke() }
+    }, 80, 24)
 
     fun start() {
+        check(_status.value == SessionStatus.STARTING)
         _status.value = SessionStatus.RUNNING
-        reader = scope.launch(Dispatchers.IO) {
-            try {
-                while (isActive && !closed) {
-                    // Bounded poll: null = timeout, empty = EOF (slave closed).
-                    val chunk = TerminalNative.nativeRead(masterFd, 16 * 1024, 200)
-                    if (chunk == null) continue
-                    if (chunk.isEmpty()) break
-                    val text = String(chunk, Charsets.UTF_8)
-                    _output.value = appendBounded(_output.value, text)
+        processor = scope.launch(Dispatchers.Main.immediate) {
+            for (bytes in chunks) {
+                display.emulator.append(bytes, bytes.size)
+                if (display.isHistoryFull) _historyLimited.value = true
+                dirty = true
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastPublished >= 32) publish(now)
+                else if (frame?.isActive != true) frame = scope.launch {
+                    delay(32 - (now - lastPublished))
+                    if (dirty) publish(android.os.SystemClock.uptimeMillis())
                 }
-            } catch (t: Throwable) {
-                _ended.value = "读取失败：${t.message ?: t.javaClass.simpleName}"
+            }
+            publish(android.os.SystemClock.uptimeMillis())
+        }
+        writer = scope.launch(Dispatchers.IO) {
+            for (request in writes) {
+                synchronized(nativeLock) {
+                    if (request.ownerJob?.isActive == false) {
+                        request.written.cancel()
+                        return@synchronized
+                    }
+                    if (closing.get() || request.caller?.let {
+                        !policy.allow(it) || request.grantRevision != policy.revision.value
+                    } == true) {
+                        request.written.completeExceptionally(IllegalStateException("输入已取消：会话停止或用户已接管"))
+                        return@synchronized
+                    }
+                    runCatching {
+                        check(TerminalNative.nativeWrite(masterFd, request.bytes) == request.bytes.size) { "终端输入未完整写入" }
+                    }.onSuccess { request.written.complete(Unit) }
+                        .onFailure {
+                            _ended.value = "写入失败：" + it.message
+                            request.written.completeExceptionally(it)
+                        }
+                }
+            }
+        }
+        reader = scope.launch(Dispatchers.IO) {
+            var failure: String? = null
+            try {
+                while (!closing.get() && isActive) {
+                    // close waits for this reader before releasing/reusing the fd.
+                    val bytes = TerminalNative.nativeRead(masterFd, 16 * 1024, 200) ?: continue
+                    if (bytes.isEmpty()) break
+                    outputRing.append(decoder.decode(bytes))
+                    log.append(bytes)
+                    chunks.send(bytes)
+                }
+            } catch (error: Exception) {
+                if (!closing.get()) failure = error.message ?: error.javaClass.simpleName
             } finally {
-                // EOF means the child already exited: reap without signalling it.
-                if (!closed) {
-                    scope.launch(Dispatchers.IO) { reap(force = false) }
+                outputRing.append(decoder.decode(ByteArray(0), end = true))
+                if (!closing.get()) {
+                    scope.launch { finish(force = failure != null, failure = failure) }
                 }
             }
         }
     }
 
-    /** Write raw bytes, not a shell-command parser. Runs off the main thread. */
-    suspend fun write(text: String) = writeBytes(text.toByteArray(Charsets.UTF_8))
-
-    /** Raw byte path for the key bar (ANSI escapes, control bytes). All native work on IO. */
-    suspend fun writeBytes(bytes: ByteArray) = withContext(Dispatchers.IO) {
-        if (closed) return@withContext
-        runCatching { TerminalNative.nativeWrite(masterFd, bytes) }
-            .onFailure { _ended.value = "写入失败：${it.message ?: it.javaClass.simpleName}" }
+    private fun publish(now: Long) {
+        dirty = false
+        lastPublished = now
+        _revision.value++
     }
 
-    /** Clear only the displayed transcript; the PTY and its child are untouched. */
-    fun clearOutput() { _output.value = "" }
-
-    /** Notify the PTY of a new viewport size; the shell may redraw (e.g. stty size). */
-    suspend fun resize(columns: Int, rows: Int) = withContext(Dispatchers.IO) {
-        if (closed) return@withContext
-        runCatching { TerminalNative.nativeResize(masterFd, columns, rows) }
-            .onFailure { _ended.value = "resize 失败：${it.message ?: it.javaClass.simpleName}" }
+    suspend fun writeBytes(bytes: ByteArray, caller: TerminalCaller? = null) {
+        check(!closing.get()) { "终端会话已结束" }
+        require(bytes.size <= 16 * 1024) { "每次输入最多 16 KiB" }
+        if (caller != null) check(policy.allow(caller)) { "该终端未授权当前任务，或已由用户接管" }
+        val written = CompletableDeferred<Unit>()
+        writes.send(Input(bytes.copyOf(), caller, policy.revision.value, written, currentCoroutineContext()[Job]))
+        written.await()
     }
-
-    /** Ctrl-C: signal the foreground process group, not Process.destroy(). */
-    suspend fun interrupt() = signal(SIGINT)
-
-    private suspend fun signal(sig: Int) = withContext(Dispatchers.IO) {
-        if (closed) return@withContext
-        runCatching { TerminalNative.nativeSignalGroup(pid, sig) }
-            .onFailure { _ended.value = "信号失败：${it.message ?: it.javaClass.simpleName}" }
+    suspend fun write(text: String, caller: TerminalCaller? = null) = writeBytes(text.toByteArray(Charsets.UTF_8), caller)
+    /** The line discipline delivers ^C to the actual foreground process group. */
+    suspend fun interrupt(caller: TerminalCaller? = null) = writeBytes(byteArrayOf(3), caller)
+    fun read(cursor: Long?, maxBytes: Int): TerminalRead = outputRing.read(cursor, maxBytes)
+    suspend fun transcript(): String = withContext(Dispatchers.Main.immediate) {
+        display.emulator.screen.transcriptText
     }
+    fun clearOutput() {
+        display.emulator.clearScreenAndHistory()
+        outputRing.clear()
+        _historyLimited.value = false
+        publish(android.os.SystemClock.uptimeMillis())
+    }
+    fun takeOver() { policy.takeOver() }
+    suspend fun stop(caller: TerminalCaller? = null) = finish(force = true, caller = caller)
 
-    /** Single owner: TERM, short grace, KILL, waitpid, close fd. All on IO.
-     * [force] is false when the child already exited (reader saw EOF): just reap. */
-    private suspend fun reap(force: Boolean) = withContext(Dispatchers.IO) {
-        val already = synchronized(closeLock) {
-            if (closed) true else { closed = true; false }
+    private suspend fun finish(force: Boolean, failure: String? = null, caller: TerminalCaller? = null) = withContext(NonCancellable + Dispatchers.IO) {
+        if (caller != null) check(policy.allow(caller)) { "终端已由用户接管" }
+        if (!closing.compareAndSet(false, true)) {
+            finished.await()
+            return@withContext
         }
-        if (already) return@withContext
-        reader?.cancel()
+        writes.close()
         try {
             if (force) {
-                runCatching { TerminalNative.nativeSignalGroup(pid, SIGTERM) }
-                delay(150)
-                runCatching { TerminalNative.nativeSignalGroup(pid, SIGKILL) }
+                synchronized(nativeLock) { runCatching { TerminalNative.nativeSignalGroup(pid, SIGTERM) } }
+                delay(200)
+                synchronized(nativeLock) { runCatching { TerminalNative.nativeSignalGroup(pid, SIGKILL) } }
             }
-            val code = runCatching { TerminalNative.nativeWait(pid) }.getOrDefault(-1)
-            _ended.value = "会话结束（退出码 $code）"
-        } catch (t: Throwable) {
-            _ended.value = "回收失败：${t.message ?: t.javaClass.simpleName}"
-        } finally {
-            runCatching { TerminalNative.nativeClose(masterFd) }
+            reader?.join()
+            chunks.close()
+            processor?.join()
+            frame?.cancelAndJoin()
+            writer?.cancelAndJoin()
+            while (true) {
+                val pending = writes.tryReceive().getOrNull() ?: break
+                pending.written.completeExceptionally(IllegalStateException("终端会话已停止"))
+            }
+            // EOF only means the slave descriptors closed. A process may close stdio and
+            // keep running; do not leave it in an uninterruptible natural-exit wait.
+            var code = runCatching { TerminalNative.nativeWaitForExit(pid, 300) }.getOrDefault(-1)
+            if (code == -2) {
+                runCatching { TerminalNative.nativeSignalGroup(pid, SIGTERM) }
+                delay(200)
+                runCatching { TerminalNative.nativeSignalGroup(pid, SIGKILL) }
+                code = runCatching { TerminalNative.nativeWait(pid) }.getOrDefault(-1)
+            }
+            _ended.value = failure?.let { "终端已断开：$it" } ?: "会话已结束（退出码 $code）"
             _status.value = SessionStatus.EXITED
-            // All owned work is done (reader cancelled, child reaped, fd closed); the
-            // scope can go now. Cancelling from inside its own last coroutine is safe.
-            scope.cancel()
-        }
-    }
-
-    /** Idempotent, non-blocking: detaching the view closes the session. */
-    fun close() {
-        if (closed) return
-        // reap() owns the whole TERM→KILL→waitpid→close chain and cancels the scope
-        // when it finishes; close() itself never touches native code on the main thread.
-        scope.launch(Dispatchers.IO) { reap(force = true) }
-    }
-
-    companion object {
-        /**
-         * Open a single interactive `/system/bin/sh -i` session in the app's external
-         * files dir. forkpty/JNI runs on IO, never the main thread. Any failure is
-         * surfaced to the caller instead of being reported as a working terminal.
-         */
-        suspend fun open(context: Context): TerminalSession = withContext(Dispatchers.IO) {
-            val columns = 80
-            val rows = 24
-            val shell = TerminalNative.APP_SHELL
-            val cwd = TerminalNative.appShellCwd(context)
-            val handle = TerminalNative.nativeOpen(shell, cwd, columns, rows)
-            require(handle.size == 2) { "PTY open returned an invalid handle" }
-            val fd = handle[0].toInt()
-            val pid = handle[1].toInt()
-            require(fd >= 0 && pid > 1) { "PTY open returned an invalid fd/pid" }
-            TerminalSession(
-                masterFd = fd,
-                pid = pid,
-                shell = shell,
-                cwd = cwd,
-                columns = columns,
-                rows = rows,
-                scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-            )
+            onEnded(code, failure)
+        } finally {
+            synchronized(nativeLock) { runCatching { TerminalNative.nativeClose(masterFd) } }
+            try { log.close() } finally { finished.complete(Unit) }
         }
     }
 }

@@ -44,6 +44,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
@@ -67,6 +68,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 
 /**
@@ -317,11 +319,14 @@ internal fun TurnScrubber(
     if (rows.isEmpty()) return
     val rowCount = rows.size
     // >12 轮时窗口在中间滑动，条子本身始终居中 ⇒ 集合换了但视觉没动。
-    // 读到的轮次一变，就让整条 rail 在绘制期做一个「上移再回中」的小幅位移，
+    // 读到的轮次一变，就让整条 rail 在绘制期做一个顺着阅读方向的小幅往返位移，
     // 位置仍常驻中间，但能看出「读到别处了」。首帧不触发；手指在 rail 上时不触发，
     // 免得和拖动手势打架。
-    val nudgePx = with(LocalDensity.current) { 10.dp.toPx() }
+    val nudgePx = with(LocalDensity.current) { 6.dp.toPx() }
     val nudge = remember(conversationId) { Animatable(0f) }
+    // Cancellation resets Animatable's velocity; retain the sampled velocity for a continuous
+    // handoff when another window change arrives before the previous pulse has settled.
+    val nudgeVelocity = remember(conversationId) { floatArrayOf(0f) }
     // 信号用「阅读窗口」的起点：同一个纯函数，但不带 unlocked / pinnedCurrentTurn。
     //  · 中间滑动时它随 currentTurn 变 → 触发；
     //  · 快到顶/到底窗口被夹住、起点不变 → 不触发（正是用户说「除非快到顶或者到底」）；
@@ -354,16 +359,35 @@ internal fun TurnScrubber(
     var selectionRow by remember(conversationId, rowCount) { mutableIntStateOf(0) }
     var shown by remember(conversationId, rowCount) { mutableStateOf(false) }
     val selected = selectionRow.coerceIn(0, rowCount - 1)
-    // 首帧不触发；之后阅读窗口起点每变一次，就 snap 上移再 spring 回中。
-    // 手指按在 rail 上（拖动/长按）时既不触发、也不推进基线，松手后不会补偿一次假动效。
+    // Follow the current displacement instead of snapping back to the pulse's starting point
+    // on every crossed turn. Gestures advance the baseline too, so releasing cannot replay a
+    // window change that already happened while the finger was down.
     val lastReadingStart = remember(conversationId) { intArrayOf(readingWindowStart) }
-    LaunchedEffect(conversationId, readingWindowStart) {
-        if (pressRow >= 0 || shown) return@LaunchedEffect
+    val railInteracting = pressRow >= 0 || shown
+    LaunchedEffect(conversationId, readingWindowStart, settling, railInteracting) {
         val previous = lastReadingStart[0]
         lastReadingStart[0] = readingWindowStart
-        if (!scrubberNudgeNeeded(previous, readingWindowStart, pressRow, shown)) return@LaunchedEffect
-        nudge.snapTo(-nudgePx)
-        nudge.animateTo(0f, spring(dampingRatio = 0.85f, stiffness = 420f))
+        if (settling || currentCoroutineContext()[MotionDurationScale]?.scaleFactor == 0f) {
+            nudge.snapTo(0f)
+            nudgeVelocity[0] = 0f
+            return@LaunchedEffect
+        }
+        if (scrubberNudgeNeeded(previous, readingWindowStart, pressRow, shown)) {
+            val direction = if (readingWindowStart > previous) -1f else 1f
+            nudge.animateTo(
+                direction * nudgePx,
+                spring(dampingRatio = 1f, stiffness = 1_500f),
+                initialVelocity = nudgeVelocity[0],
+            ) { nudgeVelocity[0] = velocity }
+        }
+        if (nudge.value != 0f) {
+            nudge.animateTo(
+                0f,
+                spring(dampingRatio = 1f, stiffness = 600f),
+                initialVelocity = nudgeVelocity[0],
+            ) { nudgeVelocity[0] = velocity }
+        }
+        nudgeVelocity[0] = 0f
     }
     val animationScope = rememberCoroutineScope()
     val rowScales = remember(conversationId, animationScope) { ScrubberScales(animationScope) }

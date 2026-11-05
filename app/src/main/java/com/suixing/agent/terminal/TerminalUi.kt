@@ -95,6 +95,7 @@ internal fun sessionStatusLabel(status: TerminalSession.SessionStatus): String =
     TerminalSession.SessionStatus.STARTING -> "启动中"
     TerminalSession.SessionStatus.RUNNING -> "运行中"
     TerminalSession.SessionStatus.EXITED -> "已结束"
+    TerminalSession.SessionStatus.INTERRUPTED -> "已断开"
 }
 
 /** 只有 RUNNING 接受按键与命令。 */

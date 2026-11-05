@@ -198,6 +198,7 @@ class ToolRegistry private constructor() {
         add(ShellTools(context, capabilities))
         add(UiTools(context, capabilities))
         add(JobTools(jobs))
+        add(TerminalTools { com.suixing.agent.core.Core.terminals })
         add(TodoTools(todos))
         add(GoalTools(goals))
         add(ScheduleTools(schedules, scheduleWriter))

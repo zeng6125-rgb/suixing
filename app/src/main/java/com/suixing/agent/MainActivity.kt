@@ -46,6 +46,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeTerminalIntent()
+    }
+
+    private fun consumeTerminalIntent() {
+        if (intent.getBooleanExtra(com.suixing.agent.service.TerminalForegroundService.OPEN_TERMINAL, false)) {
+            intent.removeExtra(com.suixing.agent.service.TerminalForegroundService.OPEN_TERMINAL)
+            Core.terminals.openRequested.value = true
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         Core.startup.uiStarting()
         // 启动窗口的底色来自主题，而主题里的 @color/window_background 是 uiMode 限定符
@@ -71,6 +84,7 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         transparentNavigationBar()
         super.onCreate(savedInstanceState)
+        consumeTerminalIntent()
         setContent {
             // **按字段订阅**（性能审计 P0.2）：整份 `AppSettings` 订阅 ⇒ 任何一次写设置都让
             // 根重组，而根一重组，下面那份 ColorScheme 也跟着重建（见 Theme 的 remember）。

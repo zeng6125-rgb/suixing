@@ -81,6 +81,15 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <service
+            android:name=".service.TerminalForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="user-started interactive PTY terminal sessions, with a visible notification and stop action" />
+        </service>
+
         <!-- An alarm delivers here, and the service goes foreground before it starts the
              agent's own run: since Android 12 a background app may not start a foreground
              service, and foreground → foreground is allowed. -->

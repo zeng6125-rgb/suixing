@@ -19,7 +19,6 @@ import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
-import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -125,7 +124,13 @@ class SlashSuggestionTransitionTest {
         var interactive by mutableStateOf(true)
         val mounted = linkedMapOf<List<Pair<String, String>>, Boolean>()
         var mounts = 0
-        private val viewConfiguration = mockk<ViewConfiguration>(relaxed = true)
+        // A real configuration avoids loading a mocking agent inside the animation deadline.
+        private val viewConfiguration = object : ViewConfiguration {
+            override val longPressTimeoutMillis = 500L
+            override val doubleTapTimeoutMillis = 300L
+            override val doubleTapMinTimeMillis = 40L
+            override val touchSlop = 8f
+        }
         private val clock = BroadcastFrameClock()
         private val recomposer = Recomposer(scope.coroutineContext)
         private val composition = Composition(uiApplier(), recomposer)

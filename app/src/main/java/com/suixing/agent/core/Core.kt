@@ -86,6 +86,11 @@ object Core {
     lateinit var jobs: JobStore
         private set
 
+    internal lateinit var linux: com.suixing.agent.terminal.LinuxInstaller
+        private set
+    internal lateinit var terminals: com.suixing.agent.terminal.TerminalSessionManager
+        private set
+
     /** The task board: `filesDir/todos.json`, shared with the UI. */
     lateinit var todos: TodoStore
         private set
@@ -165,6 +170,8 @@ object Core {
             skills = SkillStore(appContext)
             speaker = Speaker(appContext)
             jobs = JobStore(File(appContext.filesDir, "jobs"), appScope)
+            linux = com.suixing.agent.terminal.LinuxInstaller(appContext, appScope)
+            terminals = com.suixing.agent.terminal.TerminalSessionManager(appContext, appScope, linux)
             todos = TodoStore(File(appContext.filesDir, "todos.json"))
             goals = GoalStore(File(appContext.filesDir, "goal.json"))
             schedules = ScheduleStore(File(appContext.filesDir, "schedules.json"))

@@ -197,15 +197,18 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     suspend fun animateTo(
         target: DrawerValue,
         spec: AnimationSpec<Float>,
-        initialVelocity: Float = 0f,
+        initialVelocity: Float? = null,
     ) {
+        // Revoking the previous motion cancels Animatable and clears its velocity. Sample it
+        // first so a quick close/re-open continues from the moving panel without a dead stop.
+        val startingVelocity = initialVelocity ?: progress.velocity
         revokeGestures()
         val job = currentCoroutineContext()[Job]
         motionJob = job
         homeLifecycle = drawerMotionLifecycle(target)
         var reached = false
         try {
-            progress.animateTo(if (target == DrawerValue.Open) 1f else 0f, spec, initialVelocity)
+            progress.animateTo(if (target == DrawerValue.Open) 1f else 0f, spec, startingVelocity)
             if (motionJob === job) {
                 settled = target
                 homeLifecycle = drawerSettledLifecycle(target)

@@ -138,6 +138,7 @@ fun ChatScreen(
     onOpenTerminal: () -> Unit = {},
 ) {
     val state by viewModel.screenState.collectAsStateWithLifecycle()
+    val accessibleActions = rememberChatAccessibility(state.conversationId)
     // **只认本页会读的字段**（见 [sameForChat]）：整份按值订阅意味着任何一处设置写入都会让这
     // 1941 行重新跑一遍 —— 拖动/收起悬浮控制台、在设置页敲语音转写模型都会命中，而这四个字段
     // 本页一个都不读。判定等价时不向下游下发。
@@ -473,15 +474,11 @@ fun ChatScreen(
     val listState = viewport.listState
 
     // Markdown preparation is cached by message; navigation reads LazyList's own layout.
-    // Snapshot state, not a plain HashMap: preparation finishes on Main after a
-// Dispatchers.Default hop, and a plain write would leave the row reading the old map
-// until some unrelated recomposition. This is what makes the preparse visible.
-    val rowDocuments = remember(state.conversationId) {
-        mutableStateMapOf<String, Map<String, List<MdBlock>>>()
-    }
+    // Per-row state publishes preparation without invalidating unrelated messages.
+    val rowDocuments = remember(state.conversationId) { RowMarkdownCache() }
     val visibleIds = remember(visibleShape) { visible.mapTo(HashSet()) { it.message.id } }
     SideEffect {
-        rowDocuments.keys.retainAll(visibleIds)
+        rowDocuments.retainRows(visibleIds)
     }
     val navigationToken = remember(state.conversationId) { intArrayOf(0) }
     val navigationJob = remember(state.conversationId) { arrayOfNulls<Job>(1) }
@@ -842,6 +839,17 @@ fun ChatScreen(
         transcriptPosition.following = { followPositionNow.value() }
         transcriptPosition.reading = { readingPositionNow.value() }
     }
+    // Install before composing rows: a first derived read must observe these snapshot inputs,
+    // rather than caching the initial callback's constant false until an unrelated change.
+    reasoningExpansion.holdCompletion = { runId ->
+        // The task finishes immediately; only a visible live row's automatic geometry
+        // hand-over waits until character anchoring can run without fighting a gesture.
+        !scroll.stickToBottom && !scroll.restoring &&
+            (pressed || pressGuardOn || listState.isScrollInProgress) &&
+            listState.layoutInfo.visibleItemsInfo.any {
+                it.key == liveRowKey(state.conversationId, runId)
+            }
+    }
     LaunchedEffect(transcriptPosition) {
         // **位掩码而不是 listOf**（性能静态审查②）：原来每次快照读取都新建一个 List，
         // 而这五个状态在拖动/滚动时高频变化，分配次数与发射次数同阶；`collect` 又完全不看
@@ -891,7 +899,7 @@ fun ChatScreen(
         // parts，不再创建文本列表。
         val pending = mutableListOf<Pair<String, List<String>>>()
         for (row in rows) {
-            val texts = markdownTextsToPrepare(row.parts, rowDocuments[row.message.id]) ?: continue
+            val texts = markdownTextsToPrepare(row.parts, rowDocuments.peek(row.message.id)) ?: continue
             pending += row.message.id to texts
         }
         if (pending.isNotEmpty()) {
@@ -903,7 +911,7 @@ fun ChatScreen(
             if (!sourceIsCurrent()) return
             for ((id, texts) in pending) {
                 // 每行只拿自己那几个文本的解析结果（与原来逐行调用时的内容一致）。
-                rowDocuments[id] = prepared.filterKeys { it in texts }
+                rowDocuments.publish(id, prepared.filterKeys { it in texts })
             }
         }
         if (!sourceIsCurrent()) return
@@ -911,7 +919,7 @@ fun ChatScreen(
         listState.layoutInfo.visibleItemsInfo.forEach { item ->
             rowKeyIndices[item.key]?.let { retained.add(visible[it].message.id) }
         }
-        rowDocuments.keys.retainAll(retained)
+        rowDocuments.retainDocuments(retained)
     }
     key(state.conversationId) {
         BindConversationViewport(
@@ -1086,7 +1094,7 @@ fun ChatScreen(
     // 内部 Scaffold 未重新缩进——重排 670 行是纯噪音 diff，Kotlin 不依赖缩进。
     var pathMenuPath by remember { mutableStateOf<String?>(null) }
     val onPathMenu = remember { { path: String -> pathMenuPath = path } }
-    CompositionLocalProvider(LocalPathClick provides onPathMenu) {
+    CompositionLocalProvider(LocalPathClick provides onPathMenu, LocalAccessibleChatActions provides accessibleActions) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         // No topBar slot: the header floats over the transcript as three discs, so the
@@ -1445,7 +1453,7 @@ fun ChatScreen(
                                         ?: row.message.model
                                 }
                                 CompositionLocalProvider(
-                                    LocalPreparedMarkdown provides rowDocuments[row.message.id].orEmpty(),
+                                    LocalPreparedMarkdown provides rowDocuments.documentsFor(row.message.id).value,
                                     LocalReadingRowKey provides rowKeys[fed],
                                 ) {
                                 MessageRow(

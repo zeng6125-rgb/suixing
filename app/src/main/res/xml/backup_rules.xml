@@ -12,6 +12,7 @@
   exclude here without also giving up old-device transfer.
 -->
 <full-backup-content>
+    <exclude domain="file" path="linux" />
     <exclude domain="file" path="datastore" />
     <!-- issue #58 #2：API ≤30 只有这一份规则，且**云备份与换机迁移共用**。
          这里排除的是「凭据与诊断」，不动 `chats`：会话留在换机迁移里是刻意的

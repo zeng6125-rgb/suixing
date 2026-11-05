@@ -884,6 +884,17 @@ class ChatViewModel : ViewModel() {
         _drafts.update { it + (chatId to draft) }
     }
 
+    /** File-browser references append to this conversation's draft without replacing attachments. */
+    fun referenceFile(path: String): Boolean {
+        val chatId = _state.value.conversationId
+        if (chatId.isBlank()) return false
+        _drafts.update { drafts ->
+            val draft = drafts[chatId] ?: Draft()
+            drafts + (chatId to draft.withFileReference(path))
+        }
+        return true
+    }
+
     /**
      * 只把**正文**放回输入框，保留这个会话已有的附件等字段。
      *

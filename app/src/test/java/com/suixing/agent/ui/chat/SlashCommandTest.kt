@@ -4,6 +4,7 @@ import com.suixing.agent.tools.Schema
 import com.suixing.agent.tools.ToolSpec
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
@@ -19,6 +20,18 @@ class SlashCommandTest {
             required = listOf("query"),
         ),
     )
+
+    @Test fun selectedFileReferenceBecomesAPathWithoutRewritingOtherTextParameters() {
+        val read = ToolSpec("read_file", "", Schema.objectOf(
+            properties = listOf("path" to Schema.string("")),
+            required = listOf("path"),
+        ))
+        val path = "/workspace/报告 final.txt"
+        val token = fileReferenceToken(path)
+        val command = requireNotNull(parseSlashCommand("/read_file " + token))
+        assertEquals(path, command.toolArguments(read)?.get("path")?.jsonPrimitive?.content)
+        assertEquals(token, slashArguments(search, token)?.get("query")?.jsonPrimitive?.content)
+    }
 
     @Test
     fun `goal and tool commands split name from argument`() {

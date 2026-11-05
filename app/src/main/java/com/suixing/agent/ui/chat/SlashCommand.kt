@@ -84,7 +84,13 @@ internal fun slashArguments(spec: ToolSpec, argument: String): JsonObject? {
     } ?: properties.entries.firstOrNull { (_, value) ->
         (value as? JsonObject)?.stringType() == true
     }?.key ?: return null
-    return buildJsonObject { put(key, argument) }
+    // A selected reference supplies a path value to file tools, while other text stays verbatim.
+    val reference = if (key == "path" || key.endsWith("_path") || key.endsWith("Path")) {
+        fileReferences(argument).singleOrNull()?.takeIf {
+            it.start == 0 && it.end == argument.length
+        }
+    } else null
+    return buildJsonObject { put(key, reference?.path ?: argument) }
 }
 
 private fun JsonObject.stringType(): Boolean =

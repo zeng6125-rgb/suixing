@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.data.Roles
 import com.suixing.agent.ui.components.MenuCard
 
 /** A non-overlapping alternative to squeezing every reply action into a narrow row. */
@@ -39,8 +40,9 @@ internal fun ReplyActionsMenu(
                         Text(label)
                     }
                 }
-                Action("复制回复") { copy(message.text) }
-                Action("修改回复") { onEdit(message) }
+                val subject = if (message.role == Roles.USER) "消息" else "回复"
+                Action("复制" + subject) { copy(message.text) }
+                Action("修改" + subject) { onEdit(message) }
                 if (branch?.canRegenerate == true) Action("重新回答", onRegenerate)
                 if (branch != null && branch.index > 0) Action("上一个回答") {
                     onBranch(branch.turnId, branch.runs[branch.index - 1])

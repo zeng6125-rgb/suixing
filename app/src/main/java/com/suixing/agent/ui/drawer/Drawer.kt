@@ -153,6 +153,7 @@ internal fun Drawer(
     onToggleConsole: () -> Unit,
     onNavigate: (String) -> Unit,
     onAssistants: () -> Unit,
+    runningAnimationActive: Boolean = true,
 ) {
     val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
     // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「JAgent」标。
@@ -426,6 +427,7 @@ internal fun Drawer(
             // 同步写值，不晚一帧），ConversationRow 的签名与行为都不变。
             val activeIdNow = rememberUpdatedState(activeId)
             val runningIdNow = rememberUpdatedState(runningId)
+            val runningAnimationNow = rememberUpdatedState(runningAnimationActive)
             val drawerRow: @Composable (Conversation, Modifier) -> Unit = remember(
                 context, exporter, exitSortMode,
             ) { { conversation, anim ->
@@ -500,6 +502,7 @@ internal fun Drawer(
                         conversation = conversation,
                         selected = conversation.id == activeIdNow.value,
                         running = conversation.id in runningIdNow.value,
+                        runningAnimationActive = runningAnimationNow.value,
                         completedUnread = conversation.id in unreadCompleted,
                         menuOpen = menuFor == conversation.id,
                         sortMode = sortMode,
@@ -803,16 +806,17 @@ internal fun DrawerMenuAction(
  * 没有标记更糟。
  */
 @Composable
-internal fun RunningSpinner(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "running")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1100, easing = LinearEasing),
-        ),
-        label = "angle",
-    )
+internal fun RunningSpinner(modifier: Modifier = Modifier, animated: Boolean = true) {
+    val angle = if (animated) {
+        rememberInfiniteTransition(label = "running").animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1100, easing = LinearEasing),
+            ),
+            label = "angle",
+        )
+    } else null
     val arc = MaterialTheme.colorScheme.primary
     Canvas(
         modifier = modifier.semantics { contentDescription = "正在运行" },
@@ -822,7 +826,7 @@ internal fun RunningSpinner(modifier: Modifier = Modifier) {
         // 内缩半个线宽，圆头端点才不会在 14dp 的盒子里被切掉。
         drawArc(
             color = arc,
-            startAngle = angle,
+            startAngle = angle?.value ?: 0f,
             sweepAngle = 270f,
             useCenter = false,
             topLeft = Offset(stroke / 2f, stroke / 2f),

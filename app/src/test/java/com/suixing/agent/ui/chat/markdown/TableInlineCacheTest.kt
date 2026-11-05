@@ -8,7 +8,7 @@ import org.junit.Test
 
 class TableInlineCacheTest {
     @Test fun `repeated formatted cells share annotations but caret and exact source remain distinct`() {
-        val cache = TableInlineCache()
+        val cache = TableInlineCache(maxEntries = 4)
         var parses = 0
         fun parse(text: String, caret: Boolean = false) = cache.getOrParse(text, caret) {
             parses++
@@ -24,6 +24,10 @@ class TableInlineCacheTest {
         assertEquals("FB", parse("FB").text)
         assertEquals("Ea", parse("Ea").text)
         assertEquals(4, parses)
+        // Streamed cell prefixes must not evict already parsed stable cells.
+        repeat(5) { parse("**stream $it**", true) }
+        assertSame(result, parse("**ready**"))
+        assertEquals(9, parses)
     }
 
     @Test fun `entry source and estimated tree budgets all evict without changing output`() {

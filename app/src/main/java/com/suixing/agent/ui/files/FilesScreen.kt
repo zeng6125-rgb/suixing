@@ -9,6 +9,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -95,7 +96,7 @@ private class Entry(
 )
 
 @Composable
-fun FilesScreen(onBack: () -> Unit) {
+fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
     val context = LocalContext.current
     // Two roots, and the app's own working directory stays the default: it is where the model
     // reads and writes by relative path. /sdcard is the second one, and it only opens after the
@@ -141,6 +142,12 @@ fun FilesScreen(onBack: () -> Unit) {
     // **唯一预览 Job**（issue #68 P1-A）：新的预览先取消前一次，页面离开时一并取消。
     var previewJob by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
+
+    // The toolbar exits the page. System/edge back walks the selected root's hierarchy first.
+    val parentDirectory = remember(root, current) { parentFileDirectory(root, current) }
+    BackHandler(enabled = parentDirectory != null) {
+        parentDirectory?.let { current = it }
+    }
 
     // Directory listing and per-entry sizes are disk IO, so they run off the main
     // thread and land in state; doing it inside composition stutters the list.
@@ -274,9 +281,7 @@ fun FilesScreen(onBack: () -> Unit) {
                     // 不是一条祖先链了。
                     IconButton(
                         onClick = {
-                            current = current.parentFile
-                                ?.takeIf { it.absolutePath.startsWith(root.absolutePath) }
-                                ?: root
+                            current = parentDirectory ?: root
                         },
                     ) {
                         Icon(ImageVector.vectorResource(R.drawable.ic_arrow_up), contentDescription = "上一级", modifier = Modifier.size(20.dp))
@@ -404,6 +409,7 @@ fun FilesScreen(onBack: () -> Unit) {
                     Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                 }
             },
+            onReference = { onReference(entry.file) },
         )
     }
 }
@@ -495,6 +501,7 @@ private fun PreviewDialog(
     content: String,
     onDismiss: () -> Unit,
     onCopy: () -> Unit,
+    onReference: () -> Unit,
 ) {
     SuixingDialog(
         onDismissRequest = onDismiss,
@@ -525,10 +532,20 @@ private fun PreviewDialog(
         },
         confirmButton = { scope -> TextButton(onClick = { scope.closeThen(onDismiss) }) { Text("关闭") } },
         dismissButton = { scope ->
-            TextButton(onClick = onCopy) {
-                Icon(ImageVector.vectorResource(R.drawable.ic_copy), contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("复制")
+            Row {
+                TextButton(onClick = {
+                    scope.closeThen {
+                        onDismiss()
+                        onReference()
+                    }
+                }) {
+                    Text("引用")
+                }
+                TextButton(onClick = onCopy) {
+                    Icon(ImageVector.vectorResource(R.drawable.ic_copy), contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("复制")
+                }
             }
         },
     )

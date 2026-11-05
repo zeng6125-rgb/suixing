@@ -10,6 +10,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import kotlin.math.ceil
+import androidx.compose.ui.MotionDurationScale
+import kotlinx.coroutines.currentCoroutineContext
 
 /** Run/part identity retains progress through live-to-stored handoff. */
 internal class TextRevealState {
@@ -55,11 +57,20 @@ internal fun rememberTypedText(
     }
     val enabledNow = rememberUpdatedState(enabled)
     LaunchedEffect(progress) {
+        val motion = currentCoroutineContext()[MotionDurationScale]
         snapshotFlow { target.value.length to enabledNow.value }.collect {
+            if (motion?.scaleFactor == 0f) {
+                progress.revealed = target.value.length
+                return@collect
+            }
             progress.startIfNeeded(enabledNow.value)
             var previousFrame = withFrameNanos { it }
             var credit = 0.0
             while (progress.revealed < target.value.length) {
+                if (motion?.scaleFactor == 0f) {
+                    progress.revealed = target.value.length
+                    break
+                }
                 val frame = withFrameNanos { it }
                 // Preserve speed across 60/90/120 Hz; avoid a huge jump after a stalled frame.
                 val elapsed = ((frame - previousFrame) / 1_000_000.0).coerceIn(0.0, 32.0)

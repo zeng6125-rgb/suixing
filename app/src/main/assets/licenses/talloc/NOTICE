@@ -1,0 +1,8 @@
+talloc 2.5.0, LGPL-3.0-or-later.
+Copyright (C) Andrew Tridgell 2004-2005
+Copyright (C) Stefan Metzmacher 2006
+Source: https://download.samba.org/pub/talloc/talloc-2.5.0.tar.gz
+Official Termux package libtalloc_2.5.0_aarch64.deb.
+Suixing replaces the libtalloc.so.2 SONAME string with libtalloc.so plus NUL
+padding to preserve ELF offsets and support Android native-library extraction.
+No machine code is changed. See tools/fetch-terminal-binaries.py.

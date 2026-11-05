@@ -241,11 +241,14 @@ fun SegmentedPill(
     val highlight = remember(options.size) {
         Animatable(selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat())
     }
+    val settleSpec = remember {
+        spring<Float>(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow)
+    }
     LaunchedEffect(selectedIndex, options.size) {
         if (dragPosition == null) {
             highlight.animateTo(
                 selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat(),
-                spring(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow),
+                settleSpec,
             )
         }
     }
@@ -275,6 +278,10 @@ fun SegmentedPill(
                             scope.launch {
                                 dragPosition?.let { highlight.snapTo(it) }
                                 dragPosition = null
+                                highlight.animateTo(
+                                    selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat(),
+                                    settleSpec,
+                                )
                             }
                         },
                         onDragEnd = {
@@ -286,6 +293,13 @@ fun SegmentedPill(
                                 dragPosition = null
                                 if (index != null && index.roundToInt() != selectedIndex) {
                                     selectNow(index.roundToInt())
+                                } else {
+                                    // Returning to the same option does not change the effect key.
+                                    // Finish the remaining travel instead of leaving it between cells.
+                                    highlight.animateTo(
+                                        selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0)).toFloat(),
+                                        settleSpec,
+                                    )
                                 }
                             }
                         },
@@ -460,8 +474,14 @@ fun SettingsSwitch(
                     dragging = true
                 },
                 onDragCancel = {
-                    dragging = false
-                    scope.launch { anim.animateTo(if (checked) 1f else 0f, settleSpec) }
+                    val released = dragProgress
+                    scope.launch {
+                        // Hand the visible drag position to the animation before switching its
+                        // source, just as on release; cancellation must not jump to the old value.
+                        anim.snapTo(released)
+                        dragging = false
+                        anim.animateTo(if (checked) 1f else 0f, settleSpec)
+                    }
                 },
                 onDragEnd = {
                     val released = dragProgress

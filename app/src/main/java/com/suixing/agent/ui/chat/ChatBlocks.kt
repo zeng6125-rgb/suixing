@@ -73,6 +73,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -387,11 +389,14 @@ internal val LocalTypewriter = compositionLocalOf { true }
  * 「不要涟漪」的入口。
  */
 @Composable
-internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
+internal fun Modifier.blockPress(shape: Shape, expanded: Boolean? = null, label: String? = null, onClick: () -> Unit): Modifier {
     val position = LocalTranscriptPosition.current
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     return this
+        .semantics(mergeDescendants = true) {
+            if (expanded != null) stateDescription = if (expanded) "已展开" else "已折叠"
+        }
         .clip(shape)
         .background(
             if (pressed) {
@@ -404,11 +409,20 @@ internal fun Modifier.blockPress(shape: Shape, onClick: () -> Unit): Modifier {
             interactionSource = interaction,
             indication = null,
             role = androidx.compose.ui.semantics.Role.Button,
+            onClickLabel = label?.let { (if (expanded == true) "折叠" else "展开") + it },
             onClick = {
                 position?.pauseForUserChange()
                 onClick()
             },
         )
+}
+
+/** Keep the accepted 36dp row at normal sizes; grow only when scaled text needs it. */
+@Composable
+private fun processHeaderHeight(): Dp {
+    val style = MaterialTheme.typography.labelMedium
+    val required = with(LocalDensity.current) { style.lineHeight.toDp() } + 12.dp
+    return if (required <= 36.dp) 36.dp else maxOf(48.dp, required)
 }
 
 
@@ -571,13 +585,10 @@ internal fun ProcessCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                // Exactly 36dp folded: the fourth time the user has nailed this
-                // card's height down, so it is a fixed height, not a minimum —
-                // nothing in the row wraps (every text is maxLines 1).
-                .height(36.dp)
+                .height(processHeaderHeight())
                 // 整块按下反馈（见 blockPress）：这一行是折叠条的入口，涟漪是一颗小圆角矩形。
                 .then(
-                    if (expandable) Modifier.blockPress(ProcessHeaderShape) { onToggle() } else Modifier,
+                    if (expandable) Modifier.blockPress(ProcessHeaderShape, expanded, title) { onToggle() } else Modifier,
                 ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -733,7 +744,7 @@ internal fun TraceBlock(note: String, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(36.dp),
+            .height(processHeaderHeight()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
@@ -814,11 +825,15 @@ internal class ReasoningExpansion(
     private val viewports = LinkedHashMap<String, ReasoningViewport>(16, 0.75f, true)
     private var protectedPrefix: String? = null
     private var historicalViewports = 0
+    /** The screen supplies only interaction/visibility, never the engine's running state. */
+    var holdCompletion: (String) -> Boolean = { false }
+    private var settledPresentationRun: String? = null
 
     fun protectRun(runId: String) {
         val prefix = "$runId:"
         if (protectedPrefix == prefix) return
         protectedPrefix = prefix
+        settledPresentationRun = null
         historicalViewports = viewports.keys.count { !isProtected(it) }
         trimHistoricalViewports()
     }
@@ -852,6 +867,16 @@ internal class ReasoningExpansion(
         entries["$conversationId:$blockId"] = expanded
     }
 
+    fun completionDeferred(runId: String): Boolean =
+        protectedPrefix == "$runId:" && settledPresentationRun != runId && holdCompletion(runId)
+
+    /** Commit only the expansion actually presented, after the reader's gesture has ended. */
+    fun settleSummary(runId: String, expanded: Boolean, deferred: Boolean) {
+        if (deferred) return
+        if (protectedPrefix == "$runId:") settledPresentationRun = runId
+        if (stored(summarySlot(runId)) == null) set(summarySlot(runId), expanded)
+    }
+
     fun hasOpenFold(parts: List<Part>, runId: String,
                     slots: List<String?> = processFoldSlots(parts, runId)): Boolean = parts.indices.any { index ->
         val slot = slots[index] ?: return@any false
@@ -861,8 +886,9 @@ internal class ReasoningExpansion(
     }
 
     fun summaryExpanded(parts: List<Part>, runId: String, streaming: Boolean,
-                        slots: List<String?> = processFoldSlots(parts, runId)): Boolean =
-        stored(summarySlot(runId)) ?: (streaming || hasOpenFold(parts, runId, slots))
+                        slots: List<String?> = processFoldSlots(parts, runId),
+                        deferred: Boolean = completionDeferred(runId)): Boolean =
+        stored(summarySlot(runId)) ?: (streaming || deferred || hasOpenFold(parts, runId, slots))
 
 
 }
@@ -948,6 +974,8 @@ internal fun ReasoningBlock(
     streaming: Boolean,
     /** The run can still be live after this individual think stopped growing. */
     runStreaming: Boolean = streaming,
+    /** Preserve an untouched live block's shape while its completed run is being touched. */
+    preserveLiveExpansion: Boolean = false,
     /** This block's slot in the screen's table: see [thinkSlot]. */
     blockId: String,
     expansion: ReasoningExpansion,
@@ -989,7 +1017,7 @@ internal fun ReasoningBlock(
     // a think that is still arriving is open (watching it arrive is why the model was asked to
     // think), and one that has settled follows 历史思考块默认展开. Off, a finished think folds to
     // its header — the reader's tap is the way in, and the table remembers it per conversation.
-    val expanded = expansion.stored(blockId) ?: (streaming || (!runStreaming && expandReasoning))
+    val expanded = expansion.stored(blockId) ?: (streaming || preserveLiveExpansion || (!runStreaming && expandReasoning))
     // **增量切行**（见 [IncrementalLines]）：文本是逐字变长的，`text.split('\n')` 每一拍都在
     // 全文上重做一次切分 + 分配一个新列表。切分器记住上一次的文本与结果，只切新增那一段。
     val shown = rememberTypedText(
@@ -1169,11 +1197,9 @@ internal fun ReasoningBlock(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // 折叠块统一（与 ProcessCard 表头、ToolRow 同一套）：固定 36dp 行高 + 12dp
-                    // 水平内边距 + labelMedium 标题。折叠态每行都是 maxLines=1，固定高度不会裁字。
-                    .height(36.dp)
+                    .height(processHeaderHeight())
                     // 整块按下反馈（见 blockPress）：平铺后这一行就是折叠条本体，涟漪是小圆角矩形。
-                    .blockPress(MaterialTheme.shapes.small, onClick = toggle),
+                    .blockPress(MaterialTheme.shapes.small, expanded, "思考过程", onClick = toggle),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
@@ -1315,12 +1341,7 @@ internal fun ToolBundle(
         }
         // Folded, the header still says what the call is doing: the first argument line of
         // the newest call (a shell command, a path), which is the row's own content anyway.
-        val p = tools.lastOrNull()
-            ?.args
-            ?.lineSequence()
-            ?.firstOrNull { it.isNotBlank() }
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() && it != "{}" }
+        val p = tools.lastOrNull()?.let { toolArgumentPreview(it.name, it.args) }
         t to p
     }
     ProcessCard(
@@ -1560,12 +1581,12 @@ internal fun ToolRow(
             // 整块按下反馈（见 blockPress）：这一列**展开后包含整段参数与输出**，是有多高就多高
             // 的节点 —— 涟漪的半径按「到最远角的距离」算，于是画出来正是一个大圆，也就是用户
             // 截图里那个「为什么是个圆形」。
-            .blockPress(MaterialTheme.shapes.small, onClick = onToggle)
+            .blockPress(MaterialTheme.shapes.small, expanded, line.name, onClick = onToggle)
             // 折叠块统一：水平 12dp 内边距与另外两处表头一致；行高加在**表头那一行**上（这一列
             // 展开后还有内容，给 Column 定高会把详情裁掉）。
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().height(36.dp),
+            modifier = Modifier.fillMaxWidth().height(processHeaderHeight()),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Same 24dp slot the thinking rows use, so both icon columns share one
@@ -1631,9 +1652,8 @@ internal fun ToolRow(
             // says 「完成」 is exactly what the user called 「执行什么内容也没有」.
             // R4：`line.args` 是这一行唯一的相关输入；逐帧 lineSequence + firstOrNull 只为
             // 了拿它的第一行，remember 住（外层 ToolDetail 也是一个常驻分支）。
-            val firstArg = remember(line.args) {
-                line.args.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
-                    ?.takeIf { it.isNotEmpty() && it != "{}" }
+            val firstArg = remember(line.name, line.args) {
+                toolArgumentPreview(line.name, line.args)
             }
             if (firstArg != null) {
                 Spacer(Modifier.width(8.dp))
@@ -1707,12 +1727,16 @@ internal fun TurnSummary(
     // Keep it through completion; the next live run releases it into bounded history.
     if (streaming) reasoningExpansion.protectRun(runId)
     val slots = foldSlots ?: remember(IdentityKey(parts), runId) { processFoldSlots(parts, runId) }
-    val expanded = reasoningExpansion.summaryExpanded(parts, runId, streaming, slots)
+    val deferredCompletion by remember(reasoningExpansion, runId) {
+        derivedStateOf { reasoningExpansion.completionDeferred(runId) }
+    }
+    val expanded = reasoningExpansion.summaryExpanded(parts, runId, streaming, slots, deferredCompletion)
     SideEffect {
-        if (!streaming && reasoningExpansion.stored(summarySlot(runId)) == null) {
+        if (!streaming) {
             // Latch the hand-over once. Closing an inner block later must not close
-            // the whole process card around the reader as a side effect.
-            reasoningExpansion.set(summarySlot(runId), expanded)
+            // the whole process card around the reader as a side effect. A finger down or
+            // an active scroll postpones only this default layout hand-over, not completion.
+            reasoningExpansion.settleSummary(runId, expanded, deferredCompletion)
         }
     }
     // **只数数量，不建 List**（issue #56 R21）：下面只用到段数与调用数，
@@ -1804,7 +1828,8 @@ internal fun TurnSummary(
                         is Part.Thinking -> ReasoningBlock(
                             text = part.text,
                             streaming = streaming && index == parts.lastIndex,
-                            runStreaming = streaming,
+                            runStreaming = streaming || deferredCompletion,
+                            preserveLiveExpansion = deferredCompletion && index == parts.lastIndex,
                             // One message can hold several thinks (think → tool → think);
                             // the slot is the run plus the think's place inside it.
                             blockId = slots[index]!!,

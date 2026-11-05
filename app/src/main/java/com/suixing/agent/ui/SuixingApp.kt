@@ -267,6 +267,14 @@ fun SuixingApp() {
         }
     }
     val openTerminal: () -> Unit = { open("terminal") }
+    LaunchedEffect(Unit) {
+        Core.terminals.openRequested.collect { requested ->
+            if (requested) {
+                Core.terminals.openRequested.value = false
+                open("terminal")
+            }
+        }
+    }
 
     // Back and explicit drawer actions share the same close motion.
     val closeDrawer: () -> Unit = {
@@ -481,13 +489,19 @@ fun SuixingApp() {
                 // 主页那层的变换（位移/缩放/圆角/阴影）在 content 的 graphicsLayer 里，见下。
                 drawerContent = {
                     // 侧边栏本体：宿主按 progress 平移这一层，才有跟手/回弹动画。
-                    val drawerConversations by chat.conversations.collectAsStateWithLifecycle()
+                    val drawerVisible = drawerState.homeShieldActive && route == "empty"
+                    val drawerLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(drawerVisible)
+                    // Pause high-rate list updates, while retaining the header/avatar's normal preload.
+                    val drawerConversations by chat.conversations.collectAsStateWithLifecycle(
+                        lifecycleOwner = drawerLifecycle,
+                    )
                 Drawer(
                     open = drawerState.isOpen,
                     route = route,
                     conversations = drawerConversations,
                     activeId = activeConversationId,
                     runningId = runningIds,
+                    runningAnimationActive = drawerVisible,
                     onNew = {
                         switchIntents.invalidate()
                         chat.newConversation()
@@ -577,6 +591,7 @@ fun SuixingApp() {
                 // （dropbox 2026-11-01 01:03:25，v608 / 0.8.587）。
                 val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
                 val offsetState = drawerState.offset
+                val homeShape = remember { RoundedCornerShape(SCREEN_CORNER_DP.dp) }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -610,7 +625,7 @@ fun SuixingApp() {
                             // **恒定圆角**：与屏幕四角半径一致。关着时页面铺满屏幕，
                             // 这个圆角正好落在屏幕自身的圆角上 ⇒ 肉眼看不出；
                             // 右移之后才显形。`clip = true` 必须开，否则圆角只影响投影不影响内容。
-                            shape = RoundedCornerShape(SCREEN_CORNER_DP.dp)
+                            shape = homeShape
                             clip = true
                         },
                 ) {
@@ -709,7 +724,14 @@ fun SuixingApp() {
                         ) {
                             // 栈底那一层：透明，什么都不画（chat 就在它下面）。
                                 composable("empty") { }
-                                composable("files") { FilesScreen(onBack = goBack) }
+                                composable("files") {
+                                    FilesScreen(
+                                        onBack = goBack,
+                                        onReference = { file ->
+                                            if (chat.referenceFile(file.absolutePath)) chatFromDrawer()
+                                        },
+                                    )
+                                }
                             composable("tasks") { TasksScreen(onBack = goBack) }
                             // 定时任务是「到点自己跑」的那一份，与 agent 的 todo 看板（"tasks"）是两件
                             // 事：抽屉那行说的「任务」一直指的是后者，用户以为是摆设，才有了这一页。
@@ -760,7 +782,7 @@ fun SuixingApp() {
                             composable("tools") { ToolsScreen(onBack = goBack) }
                             composable("about") { AboutScreen(onBack = goBack) }
                             // 内置终端：App UID 的交互式 PTY 会话（#61 PR-0 探针 + 最小会话管理）。
-                            composable("terminal") { TerminalScreen(onBack = goBack) }
+                            composable("terminal") { TerminalScreen(onBack = goBack, chatId = activeConversationId) }
                             // 记忆：路由名仍是 extension，页面只剩记忆（MCP 与技能搬去了工具页）。
                             composable("extension") {
                                 ExtensionScreen(onBack = goBack)

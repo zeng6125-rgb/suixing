@@ -1,0 +1,7 @@
+Termux terminal-emulator and terminal-view, v0.118.3.
+Source: https://github.com/termux/termux-app/tree/5b657c6adf4304e5198951ce815fe0205dcac29c
+Apache-2.0 exception: https://github.com/termux/termux-app/blob/5b657c6adf4304e5198951ce815fe0205dcac29c/LICENSE.md
+Includes Terminal Emulator for Android by Jack Palevich and contributors.
+Suixing retains its own PTY/session owner; upstream JNI, process/session implementation and Termux app are not included.
+Modified by Suixing: resource package mapping and view/IME bridge; output-driven OSC 52 clipboard access disabled.
+Adds a toolbar clear-screen/history action that preserves terminal input modes.

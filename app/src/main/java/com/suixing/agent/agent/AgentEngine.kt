@@ -767,6 +767,7 @@ class AgentEngine(
         val title: String,
         settings: AppSettings,
     ) {
+        internal val terminalCaller = com.suixing.agent.terminal.TerminalCaller(chatId, UUID.randomUUID().toString())
         private val _state = MutableStateFlow<RunState>(RunState.Idle)
         private val completionReported = AtomicBoolean(false)
         @Volatile private var subagents: SubagentPool? = null
@@ -2510,7 +2511,7 @@ class AgentEngine(
         // Checked before the call, not after the batch: a stop means the tools the model
         // asked for in the same breath do not run either.
         if (cancelled.get()) return null
-        val argsPreview = call.arguments.take(600)
+        val argsPreview = call.arguments.take(if (call.name == "terminal_write") 64 * 1024 else 600)
         val args = try {
             parseToolArguments(call.arguments)
         } catch (failure: IllegalArgumentException) {
@@ -2630,7 +2631,8 @@ class AgentEngine(
                 // deny 仍拦（不弹窗，只让那次调用失败并说明原因）；ASK/DENY 档与
                 // 「总是允许」照旧。要守卫插件真拦人，把审批档设成「每次询问」。
                 val mode = settings.approvalMode
-                if (!gate.request(chatId, call.name, argsPreview, mode, approvalSourceTitle)) {
+                val approvalArgs = if (call.name == "terminal_write") call.arguments else argsPreview
+                if (!gate.request(chatId, call.name, approvalArgs, mode, approvalSourceTitle)) {
                     ToolResult.failure("用户拒绝了这次调用。")
                 } else {
                     val startedAt = System.currentTimeMillis()
@@ -2644,7 +2646,7 @@ class AgentEngine(
                     // （Main）继续发事件、写回写，所以 `ToolStarted` → `ToolFinished` 的次序、
                     // 以及 `onEvent` 的线程假设全部不变。
                     runCatching {
-                        withContext(Dispatchers.IO) {
+                        withContext(Dispatchers.IO + terminalCaller) {
                             SHARED_TOOL_EXECUTION.run(call.name) { runner(args) }
                         }
                     }.getOrElse { error ->

@@ -50,12 +50,18 @@ internal class NavigationMotion {
                 val scope = LazyLayoutScrollScope(list, this)
                 val landing = NavigationLandingController(index, targetOffset, measuredDistance)
                 var previousFrameNanos: Long? = null
+                var frameDeltaNanos = 0L
 
                 while (true) {
-                    // Check the current layout before waiting for another frame. This also makes
-                    // an already-aligned target return immediately without a trailing frame.
-                    val current = landing.scrollFrame(scope, frameDeltaNanos = 0L, viewportHeight = 1)
-                    when (current) {
+                    // A zero-delta first pass still returns an already-aligned target at once.
+                    // Later frames calculate geometry once, rather than repeating the same
+                    // estimate in a zero-delta preflight and again after the frame clock.
+                    val frame = landing.scrollFrame(
+                        scope,
+                        frameDeltaNanos = frameDeltaNanos,
+                        viewportHeight = list.layoutInfo.viewportSize.height.coerceAtLeast(1),
+                    )
+                    when (frame) {
                         NavigationFrameResult.Arrived -> {
                             terminalResult = NavigationMotionResult.Arrived
                             return@scroll
@@ -75,27 +81,7 @@ internal class NavigationMotion {
                     val rawDeltaNanos = previousFrameNanos?.let { frameNanos - it }
                         ?: DEFAULT_FRAME_DELTA_NANOS
                     previousFrameNanos = frameNanos
-                    val scaledDeltaNanos = navigationScaledFrameDelta(rawDeltaNanos, effectiveScale)
-                    val frame = landing.scrollFrame(
-                        scope,
-                        frameDeltaNanos = scaledDeltaNanos,
-                        viewportHeight = list.layoutInfo.viewportSize.height.coerceAtLeast(1),
-                    )
-                    when (frame) {
-                        NavigationFrameResult.Arrived -> {
-                            terminalResult = NavigationMotionResult.Arrived
-                            return@scroll
-                        }
-                        NavigationFrameResult.ScrollClamped -> {
-                            terminalResult = NavigationMotionResult.ScrollClamped
-                            return@scroll
-                        }
-                        NavigationFrameResult.TargetUnavailable -> {
-                            terminalResult = NavigationMotionResult.TargetUnavailable
-                            return@scroll
-                        }
-                        NavigationFrameResult.Continue -> Unit
-                    }
+                    frameDeltaNanos = navigationScaledFrameDelta(rawDeltaNanos, effectiveScale)
                 }
             }
             true

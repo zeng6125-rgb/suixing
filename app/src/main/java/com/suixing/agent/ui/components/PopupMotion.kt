@@ -20,10 +20,9 @@ internal class PopupMotionState {
     val opacity = Animatable(0f)
 
     suspend fun show() = coroutineScope {
-        // Opacity lands first so the card is readable immediately; the spatial settle keeps a
-        // short, slightly under-damped tail (≈300ms) so the card arrives with some life.
+        // Make text readable first, then settle with a short, restrained spatial tail.
         launch { opacity.animateTo(1f, tween(100)) }
-        progress.animateTo(1f, spring(dampingRatio = 0.8f, stiffness = 700f))
+        progress.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 850f))
     }
 
     suspend fun hide(durationMs: Int = POPUP_ANIM_MS) = coroutineScope {

@@ -48,6 +48,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -102,9 +106,12 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                     modifier = if (preview != null) {
                         Modifier
                             .clip(RoundedCornerShape(12.dp))
+                            .semantics { contentDescription = "预览图片：" + attachment.label }
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = ripple(),
+                                role = Role.Button,
+                                onClickLabel = "预览图片：" + attachment.label,
                                 onClick = { full = true },
                             )
                     } else {
@@ -114,7 +121,7 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                 if (preview != null) {
                     Image(
                         bitmap = preview,
-                        contentDescription = "查看图片",
+                        contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .size(26.dp)
@@ -135,7 +142,8 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                     color = scheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 190.dp),
+                    modifier = Modifier.widthIn(max = 190.dp).then(
+                        if (preview != null) Modifier.clearAndSetSemantics {} else Modifier),
                 )
                 }
                 if (full && preview != null) {
@@ -155,7 +163,7 @@ internal fun AttachmentChip(attachment: Attachment, onRemove: () -> Unit) {
                 IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
                     Icon(
                         imageVector = ImageVector.vectorResource(R.drawable.ic_x),
-                        contentDescription = "移除",
+                        contentDescription = "移除附件：" + attachment.label,
                         tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(15.dp),
                     )

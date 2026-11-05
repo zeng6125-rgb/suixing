@@ -17,13 +17,17 @@ package com.suixing.agent.ui.chat
 internal class IncrementalLines {
     private var text: String = ""
     private var lines: List<String> = emptyList()
+    // Completed entries are append-only. Each published list captures its prefix length and
+    // its own final line, so extending the stream never changes an older snapshot.
+    private var completed = ArrayList<String>()
+    private var tail = ""
     private var primed = false
 
     fun linesFor(next: String): List<String> {
         if (!primed) {
             primed = true
             text = next
-            lines = next.split('\n')
+            reset(next)
             return lines
         }
         val prev = text
@@ -32,18 +36,43 @@ internal class IncrementalLines {
         // 不是前缀（变短、换块、重放）：上一次的结果一条都用不上，整体重建。
         if (!next.startsWith(prev)) {
             text = next
-            lines = next.split('\n')
+            reset(next)
             return lines
         }
         // 纯追加。旧的最后一行可能还在长，所以是「去掉旧末行 + 旧末行拼新首段 + 新余段」。
         // 这不是近似：切分只由换行位置决定，而 prev|next 的接缝不在换行上，拼接与整切等价。
         val added = next.substring(prev.length).split('\n')
-        val merged = ArrayList<String>(lines.size - 1 + added.size)
-        for (i in 0 until lines.lastIndex) merged.add(lines[i])
-        merged.add(lines.last() + added[0])
-        for (i in 1 until added.size) merged.add(added[i])
+        if (added.size == 1) {
+            tail += added[0]
+        } else {
+            completed.add(tail + added[0])
+            for (i in 1 until added.lastIndex) completed.add(added[i])
+            tail = added.last()
+        }
         text = next
-        lines = merged
+        lines = LineSnapshot(completed, completed.size, tail)
         return lines
+    }
+
+    private fun reset(source: String) {
+        val split = source.split('\n')
+        completed = ArrayList(split.size - 1)
+        for (index in 0 until split.lastIndex) completed.add(split[index])
+        tail = split.last()
+        lines = LineSnapshot(completed, completed.size, tail)
+    }
+}
+
+/** Captures a fixed range of the append-only prefix without copying every completed line. */
+private class LineSnapshot(
+    private val completed: List<String>,
+    private val completedCount: Int,
+    private val tail: String,
+) : AbstractList<String>() {
+    override val size: Int get() = completedCount + 1
+
+    override fun get(index: Int): String {
+        if (index !in 0 until size) throw IndexOutOfBoundsException("index=$index, size=$size")
+        return if (index < completedCount) completed[index] else tail
     }
 }

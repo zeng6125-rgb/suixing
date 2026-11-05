@@ -25,9 +25,10 @@ class IncrementalLinesTest {
     @Test
     fun `末行继续增长时替换最后一个元素而不是追加`() {
         val splitter = IncrementalLines()
-        splitter.linesFor("hello")
+        val before = splitter.linesFor("hello")
         // 关键：这是「同一行在长」，不是「新的一行」
         assertEquals(listOf("hello world"), splitter.linesFor("hello world"))
+        assertEquals(listOf("hello"), before)
     }
 
     @Test
@@ -43,8 +44,14 @@ class IncrementalLinesTest {
     @Test
     fun `一次追加多行`() {
         val splitter = IncrementalLines()
-        splitter.linesFor("a")
-        assertEquals(listOf("a", "b", "c", "d"), splitter.linesFor("a\nb\nc\nd"))
+        val before = splitter.linesFor("a")
+        val completed = splitter.linesFor("a\nb\nc\nd")
+        assertEquals(listOf("a", "b", "c", "d"), completed)
+        assertEquals(listOf("a"), before)
+        splitter.linesFor("a\nb\nc\nd\ne")
+        assertEquals(listOf("a", "b", "c", "d"), completed)
+        splitter.linesFor("replacement")
+        assertEquals(listOf("a", "b", "c", "d"), completed)
     }
 
     @Test
