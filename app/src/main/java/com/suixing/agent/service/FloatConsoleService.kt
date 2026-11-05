@@ -33,6 +33,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
@@ -47,6 +48,7 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
+import com.suixing.agent.ui.theme.AppearancePalette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -316,7 +318,8 @@ private const val CHANNEL_ID = "Suixing_console"
                 try {
                 // Read once, as the console appears: the theme belongs to the user, and
                 // re-reading it mid-run would repaint a window they are looking at.
-                palette = paletteFor(Core.settings.current().themeMode)
+                val settings = Core.settings.current()
+                palette = paletteFor(settings.themeMode, settings.paletteMode)
                 buildConsole()
                 observeRun()
                 watchAccessibility()
@@ -1466,31 +1469,26 @@ private const val CHANNEL_ID = "Suixing_console"
         runCatching { manager.hideSoftInputFromWindow(steerInput.windowToken, 0) }
     }
 
-    private fun paletteFor(themeMode: Int): Palette {
+    /**
+     * 悬浮面板的颜色整份取自当前配色，不再写死一套墨绿：会话行、完成/运行标记和悬浮球
+     * 跟的是同一个 primary，切到 JAgent 配色（陶土橙）或 Codex 时一起变。
+     */
+    private fun paletteFor(themeMode: Int, paletteMode: Int): Palette {
         val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
         val dark = themeMode == THEME_DARK || (themeMode == THEME_SYSTEM && night)
-        return if (dark) {
-            Palette(
-                surface = 0xF2151619.toInt(),
-                field = 0xFF23252B.toInt(),
-                ink = 0xFFF3F1EC.toInt(),
-                muted = 0x8AF3F1EC.toInt(),
-                accent = 0xFF8FD6B6.toInt(),
-                onAccent = 0xFF10241B.toInt(),
-                stroke = 0x338FD6B6,
-            )
-        } else {
-            Palette(
-                surface = 0xF2FFFFFF.toInt(),
-                field = 0xFFF1F3F0.toInt(),
-                ink = 0xDE1A1C1E.toInt(),
-                muted = 0x8A1A1C1E.toInt(),
-                accent = 0xFF1F6B4C.toInt(),
-                onAccent = 0xFFFFFFFF.toInt(),
-                stroke = 0x1A1F6B4C,
-            )
-        }
+        val scheme = AppearancePalette.fromId(paletteMode).scheme(dark)
+        fun Int.withAlpha(alpha: Float): Int =
+            (this and 0x00FFFFFF) or ((alpha * 255).toInt() shl 24)
+        return Palette(
+            surface = scheme.background.toArgb().withAlpha(0.95f),
+            field = scheme.surfaceContainer.toArgb(),
+            ink = scheme.onSurface.toArgb(),
+            muted = scheme.onSurface.toArgb().withAlpha(0.55f),
+            accent = scheme.primary.toArgb(),
+            onAccent = scheme.onPrimary.toArgb(),
+            stroke = scheme.outline.toArgb().withAlpha(0.2f),
+        )
     }
 
     private fun dp(value: Int): Int = TypedValue.applyDimension(

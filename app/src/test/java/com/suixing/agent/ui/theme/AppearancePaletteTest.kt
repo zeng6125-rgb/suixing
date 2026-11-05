@@ -26,7 +26,6 @@ class AppearancePaletteTest {
         assertEquals(Color(0xFFEAE4D5), AppearancePalette.CLAUDE.userBubbleColor(dark = false))
         assertEquals(null, AppearancePalette.CLAUDE.userBubbleColor(dark = true))
         for (palette in listOf(
-            AppearancePalette.SUIXING,
             AppearancePalette.WALLPAPER,
             AppearancePalette.CODEX,
         )) {
@@ -37,12 +36,13 @@ class AppearancePaletteTest {
     }
 
     @Test
-    fun `saved palette ids retain their meaning`() {
-        assertEquals(AppearancePalette.SUIXING, AppearancePalette.fromId(0))
+    fun `saved palette ids retain their meaning and the retired green falls back to JAgent`() {
+        // id 0 是已移除的墨绿：老存档落到默认的 JAgent 配色，而不是崩或留白。
+        assertEquals(AppearancePalette.CLAUDE, AppearancePalette.fromId(0))
         assertEquals(AppearancePalette.WALLPAPER, AppearancePalette.fromId(1))
         assertEquals(AppearancePalette.CLAUDE, AppearancePalette.fromId(2))
         assertEquals(AppearancePalette.CODEX, AppearancePalette.fromId(3))
-        assertEquals(AppearancePalette.SUIXING, AppearancePalette.fromId(99))
+        assertEquals(AppearancePalette.CLAUDE, AppearancePalette.fromId(99))
     }
 
     @Test

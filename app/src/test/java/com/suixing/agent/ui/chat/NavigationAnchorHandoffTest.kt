@@ -28,22 +28,25 @@ import org.junit.Test
 /** Exercise the real position owner with measurement ahead of child coordinate placement. */
 class NavigationAnchorHandoffTest {
     private lateinit var list: LazyListState
+    private lateinit var layout: LazyListLayoutInfo
     private lateinit var owner: TranscriptPosition
     private var textY = 100f
     private var reading = true
+    private var following = false
 
     @Before fun setUp() {
         mockkStatic(SystemClock::class)
         every { SystemClock.uptimeMillis() } returns 1000L
         mockkStatic("androidx.compose.ui.layout.LayoutCoordinatesKt")
         list = mockk(relaxed = true)
-        val layout = mockk<LazyListLayoutInfo>()
+        layout = mockk<LazyListLayoutInfo>()
         val item = mockk<LazyListItemInfo>()
         every { item.key } returns "row"
         every { layout.visibleItemsInfo } returns listOf(item)
         every { layout.beforeContentPadding } returns 0
         every { layout.afterContentPadding } returns 0
         every { layout.viewportSize } returns IntSize(1000, 1000)
+        every { layout.totalItemsCount } returns 0
         every { list.layoutInfo } returns layout
         every { list.firstVisibleItemIndex } returns 2
         every { list.firstVisibleItemScrollOffset } returns 100
@@ -64,7 +67,10 @@ class NavigationAnchorHandoffTest {
         every { text.getLineStart(0) } returns 0
         every { text.getLineTop(0) } returns 0f
         every { text.getLineForOffset(any()) } returns 0
-        owner = TranscriptPosition(list).also { it.reading = { reading } }
+        owner = TranscriptPosition(list).also {
+            it.reading = { reading }
+            it.following = { following }
+        }
         owner.viewportPlaced(root)
         owner.textPlaced("text", "row", coordinates) { text }
         owner.interactionChanged()
@@ -122,5 +128,45 @@ class NavigationAnchorHandoffTest {
         owner.interactionChanged()
         owner.contentPlaced()
         verify(exactly = 1) { list.requestScrollToItem(2, 170) }
+    }
+
+    @Test fun `a real scroll during the unreadable window drops the stale point`() {
+        reading = false
+        owner.interactionChanged()
+        // The user genuinely scrolls: the old Y no longer describes what they read.
+        every { list.firstVisibleItemIndex } returns 5
+        every { list.firstVisibleItemScrollOffset } returns 40
+        textY = 170f
+        owner.contentPlaced()
+        verify(exactly = 0) { list.requestScrollToItem(any(), any()) }
+
+        reading = true
+        owner.interactionChanged()
+        owner.contentPlaced()
+        // A fresh point is captured from the post-scroll geometry; no pull-back repair.
+        verify(exactly = 0) { list.requestScrollToItem(any(), any()) }
+    }
+
+    @Test fun `following pins to the tail even when the reader is far from the last item`() {
+        // 流式输出把 firstVisibleItemIndex 推得离末尾很远；追底必须仍然发生，
+        // 不能被任何「末尾附近才 pin」的守卫挡掉（那会破坏流式追底）。
+        following = true
+        every { layout.totalItemsCount } returns 40
+        every { list.canScrollForward } returns true
+        every { list.firstVisibleItemIndex } returns 2
+        val root = mockk<LayoutCoordinates>()
+        every { root.positionInRoot() } returns Offset.Zero
+        owner.viewportPlaced(root)
+        verify(exactly = 1) { list.requestScrollToItem(39, TRANSCRIPT_END_OFFSET) }
+    }
+
+    @Test fun `following does not pin when the list cannot scroll forward`() {
+        following = true
+        every { layout.totalItemsCount } returns 40
+        every { list.canScrollForward } returns false
+        val root = mockk<LayoutCoordinates>()
+        every { root.positionInRoot() } returns Offset.Zero
+        owner.viewportPlaced(root)
+        verify(exactly = 0) { list.requestScrollToItem(any(), any()) }
     }
 }

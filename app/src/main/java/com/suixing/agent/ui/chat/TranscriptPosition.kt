@@ -107,7 +107,8 @@ internal class TranscriptPosition(private val list: LazyListState) {
      * point from the already-jumped geometry, a permanent one-shot jump. So we freeze the
      * point across that window, but only while the LIST POSITION IS UNCHANGED: if the user
      * actually scrolled, the old point no longer describes what they are reading and must
-     * be dropped.
+     * be dropped — compensating a still-visible region against a pre-scroll Y would pull
+     * the reader back against their own gesture.
      */
     fun interactionChanged() {
         if (!canRead()) {

@@ -65,8 +65,11 @@ Java_com_suixing_agent_terminal_TerminalNative_nativeOpen(
     char path[] = "PATH=/system/bin:/system/xbin";
     char term[] = "TERM=xterm-256color";
     char lang[] = "LANG=C.UTF-8";
+    // shell 自带的 PS1 会把整条 cwd 打进转录（那个超长 /storage/... 提示符），
+    // 一行就横着溢出屏幕。固定成最短的 `$ `，不再把工作目录糊进提示符。
+    char ps1[] = "PS1=$ ";
     const std::string home = "HOME=" + cwd;
-    char* const envp[] = {path, term, lang, const_cast<char*>(home.c_str()), nullptr};
+    char* const envp[] = {path, term, lang, ps1, const_cast<char*>(home.c_str()), nullptr};
 
     struct winsize size {};
     size.ws_col = static_cast<unsigned short>(cols);

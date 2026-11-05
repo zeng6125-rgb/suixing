@@ -5,7 +5,9 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
 /**
- * 品牌色是墨绿：一支白羽该配的底色是砚台和竹叶，不是柔紫。
+ * 底层色板是墨绿（JAgent 配色与 Codex 配色都从它 copy 覆盖而来，「跟随壁纸」也以它为底）：
+ * 一支白羽该配的底色是砚台和竹叶，不是柔紫。它已不是独立的配色选项，默认的「JAgent 配色」
+ * 是下面的 Claude 暖纸色 / 陶土橙覆盖版。
  *
  * 深色不是纯黑而是 #0F1412（带一点绿的黑），表面阶梯 #171E1A → #1E2621 → #262F29
  * 三层叠加，描边用 #333C36 这种「比表面亮一点点」的绿灰，所以整屏读起来是连续的
@@ -111,13 +113,13 @@ private val BrandLight = lightColorScheme(
 )
 
 internal enum class AppearancePalette(val id: Int, val label: String) {
-    SUIXING(0, "JAgent 配色"),
+    // id 0 是旧的墨绿主题，已降级移除；老设置里存着 0 的话由 fromId 落到 JAgent 配色。
     WALLPAPER(1, "跟随壁纸"),
-    CLAUDE(2, "Claude"),
+    CLAUDE(2, "JAgent 配色"),
     CODEX(3, "Codex");
 
     fun scheme(dark: Boolean) = when (this) {
-        SUIXING, WALLPAPER -> if (dark) BrandDark else BrandLight
+        WALLPAPER -> if (dark) BrandDark else BrandLight
         CLAUDE -> if (dark) ClaudeDark else ClaudeLight
         CODEX -> if (dark) CodexDark else CodexLight
     }
@@ -137,7 +139,8 @@ internal enum class AppearancePalette(val id: Int, val label: String) {
     companion object {
         val labels = entries.map { it.label }
 
-        fun fromId(id: Int): AppearancePalette = entries.firstOrNull { it.id == id } ?: SUIXING
+        /** 旧存档里的 0（已移除的墨绿）与任何未知值都落到默认的 JAgent 配色。 */
+        fun fromId(id: Int): AppearancePalette = entries.firstOrNull { it.id == id } ?: CLAUDE
     }
 }
 

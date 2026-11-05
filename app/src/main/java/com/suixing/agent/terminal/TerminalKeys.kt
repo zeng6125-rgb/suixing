@@ -4,6 +4,9 @@ package com.suixing.agent.terminal
  * Bytes a real terminal sends for the keys the on-screen bar exposes. This is NOT a VT/ANSI
  * emulator: we forward the exact bytes to the PTY and let `/system/bin/sh` (and whatever it
  * runs) interpret them. Kept as raw byte arrays so a JUnit test can pin every sequence.
+ *
+ * 这里是单个按键的裸字节；Ctrl/Alt 粘滞态如何组合它们由 `TerminalUi.keyBytes()` 负责，
+ * 字节表本身保持无状态。
  */
 internal object TerminalKeys {
     /** Horizontal tab. */

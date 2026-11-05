@@ -3132,6 +3132,10 @@ class ChatViewModel : ViewModel() {
                     runningTool = null,
                     liveParts = emptyList(),
                     liveRunId = "",
+                    // 与 liveRunId 同一次发射落下：否则 runningHere 由 RunState.Idle 的
+                    // watcher 晚一拍才清，中间会有一帧「runId 已空但仍在跑」，live item
+                    // 以空 parts 挂着先塌再弹 —— 就是新轮次收口时那一下高度跳变。
+                    runningHere = false,
                     error = failure ?: snapshot.error,
                 )
             } else {

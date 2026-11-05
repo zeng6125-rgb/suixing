@@ -20,12 +20,14 @@ import android.view.Display
 import android.view.RoundedCorner
 import android.view.View
 import android.view.WindowManager
+import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
+import com.suixing.agent.ui.theme.AppearancePalette
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -70,7 +72,11 @@ private const val FX_EDGE_DURATION_MS = 350L
  */
 private const val FX_EDGE_THROTTLE_MS = 800L
 
-private const val FX_COLOR_BRAND = 0xFF1F6B4C.toInt()
+// 边缘光的墨色不再写死旧墨绿：由 TouchFx 按当前配色刷新。文件级字段是因为绘制它的
+// FxView 是另一个类，读不到 object TouchFx 的私有成员。
+private const val FX_COLOR_BRAND_FALLBACK = 0xFF1F6B4C.toInt()
+@Volatile
+private var fxBrandColor = FX_COLOR_BRAND_FALLBACK
 private const val FX_RING_STROKE_DP = 2f
 private const val FX_TRAIL_STROKE_DP = 1.5f
 
@@ -402,6 +408,15 @@ object TouchFx {
      *
      * 关掉的那一刻要**立刻**熄灯，不能等下一次 tick（最长一秒）—— 所以收集到变化就重算一次。
      */
+    /** 当前配色的 primary 转 ARGB；themeMode: 0=跟随系统, 1=浅色, 2=深色。 */
+    private fun brandColorFor(themeMode: Int, paletteMode: Int): Int {
+        val night = (android.content.res.Resources.getSystem().configuration.uiMode and
+            android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        val dark = themeMode == 2 || (themeMode == 0 && night)
+        return AppearancePalette.fromId(paletteMode).scheme(dark).primary.toArgb()
+    }
+
     private fun watchSettings() {
         if (watchingSettings) return
         watchingSettings = true
@@ -411,6 +426,8 @@ object TouchFx {
             // 而且没有任何迹象。失败就写一行 trace，让人能从日志里看出来。
             runCatching {
                 Core.settings.flow.collect { s ->
+                    // 边缘光跟当前配色的 primary，不再留一套固定墨绿。
+                    fxBrandColor = brandColorFor(s.themeMode, s.paletteMode)
                     val changed = edgeLightOn != s.edgeLight ||
                         edgeLightInForeground != s.edgeLightInForeground
                     edgeLightOn = s.edgeLight
@@ -1486,13 +1503,13 @@ private class FxView(
         if (alpha <= 0.01f) return
 
         paint.style = Paint.Style.FILL
-        paint.color = FX_COLOR_BRAND
+        paint.color = fxBrandColor
         paint.alpha = (alpha * 0.2f * 255).toInt()
         canvas.drawCircle(ring.x, ring.y, radius, paint)
 
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(FX_RING_STROKE_DP)
-        paint.color = FX_COLOR_BRAND
+        paint.color = fxBrandColor
         paint.alpha = (alpha * 255).toInt()
         canvas.drawCircle(ring.x, ring.y, radius, paint)
     }
@@ -1501,7 +1518,7 @@ private class FxView(
         val progress = ((now - trail.startAt).toFloat() / FX_SWIPE_DURATION_MS).coerceIn(0f, 1f)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(FX_TRAIL_STROKE_DP)
-        paint.color = FX_COLOR_BRAND
+        paint.color = fxBrandColor
         paint.alpha = (0.4f * (1f - progress * 0.4f) * 255).toInt()
         canvas.drawLine(
             trail.x1,
