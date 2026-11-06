@@ -177,4 +177,50 @@ class SubagentEngineTest {
         assertTrue(readReleased.isCompleted)
         assertTrue(engine.subagentsFlow.value.isEmpty())
     }
+
+    /**
+     * issue #79：子任务必须继承父任务的步数上限。
+     *
+     * 原来写的是 `if (max > 0) minOf(max, 12) else 12`，三种输入里两种违背用户意图：
+     *  · 0（不限）⇒ 子任务被钉死在 12 轮，比父任务还弱；
+     *  · 50 ⇒ 被静默砍成 12。
+     * 这条用例把「子任务里看到的 `maxToolRounds` 就是父任务设的那个值」钉死：删掉修复，
+     * 两个断言都会红（0 会变成 12，50 也会变成 12）。
+     */
+    @Test fun `child inherits the parent step limit instead of being pinned to twelve`() = runBlocking {
+        // 0 = 不限，50 = 一个明显大于 12 的上限：两种都要原样传下去。
+        for (parentLimit in listOf(0, 50)) {
+            val seen = CompletableDeferred<Int>()
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    val settings = firstArg<AppSettings>()
+                    if (settings.subagentsEnabled) {
+                        // 父任务：派一个子任务，等它回来。
+                        val wire = secondArg<List<ChatMessage>>()
+                        if (wire.none { it.role == "tool" }) {
+                            AssistantTurn("", listOf(
+                                ToolCallRequest("spawn", "spawn_agent", """{"task":"inherit-check"}""")), "tool_calls")
+                        } else {
+                            AssistantTurn("done", emptyList(), "stop")
+                        }
+                    } else {
+                        // 子任务：把拿到的上限交回去，然后立刻收尾。
+                        seen.complete(settings.maxToolRounds)
+                        AssistantTurn("child-done", emptyList(), "stop")
+                    }
+                }
+            }
+            val engine = AgentEngine(llm = client)
+            withTimeout(10000) {
+                engine.startRun("parent", "title", emptyList(),
+                    AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true, maxToolRounds = parentLimit),
+                    registry(), capabilities, skills, memory, profile, ApprovalGate(), {})
+            }
+            assertEquals(
+                "子任务应当继承父任务的上限 $parentLimit，而不是被改成固定值",
+                parentLimit,
+                withTimeout(5000) { seen.await() },
+            )
+        }
+    }
 }
