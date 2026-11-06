@@ -191,17 +191,22 @@ class SubagentEngineTest {
         // 0 = 不限，50 = 一个明显大于 12 的上限：两种都要原样传下去。
         for (parentLimit in listOf(0, 50)) {
             val seen = CompletableDeferred<Int>()
+            val parentTurns = AtomicInteger()
             val client = mockk<LlmClient> {
                 coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                     val settings = firstArg<AppSettings>()
+                    val wire = secondArg<List<ChatMessage>>()
                     if (settings.subagentsEnabled) {
-                        // 父任务：派一个子任务，等它回来。
-                        val wire = secondArg<List<ChatMessage>>()
-                        if (wire.none { it.role == "tool" }) {
-                            AssistantTurn("", listOf(
+                        // 父任务三步：派子任务 → wait_agents 等它回来 → 收尾。
+                        // **必须有 wait_agents**：父任务一返回，runLoop 的 finally 就会
+                        // 关掉子任务池，子任务的 `seen.complete` 永远到不了（上一版就是
+                        // 这么超时的）。
+                        when (parentTurns.incrementAndGet()) {
+                            1 -> AssistantTurn("", listOf(
                                 ToolCallRequest("spawn", "spawn_agent", """{"task":"inherit-check"}""")), "tool_calls")
-                        } else {
-                            AssistantTurn("done", emptyList(), "stop")
+                            2 -> AssistantTurn("", listOf(
+                                ToolCallRequest("wait", "wait_agents", """{"timeout_seconds":10}""")), "tool_calls")
+                            else -> AssistantTurn("done", emptyList(), "stop")
                         }
                     } else {
                         // 子任务：把拿到的上限交回去，然后立刻收尾。
@@ -211,7 +216,7 @@ class SubagentEngineTest {
                 }
             }
             val engine = AgentEngine(llm = client)
-            withTimeout(10000) {
+            withTimeout(15000) {
                 engine.startRun("parent", "title", emptyList(),
                     AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true, maxToolRounds = parentLimit),
                     registry(), capabilities, skills, memory, profile, ApprovalGate(), {})
