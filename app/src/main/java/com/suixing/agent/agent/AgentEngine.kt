@@ -1372,7 +1372,20 @@ class AgentEngine(
                         try {
                             var failure: String? = null
                             val childSettings = settings.forSubagentModel().copy(subagentsEnabled = false, autoProfile = false,
-                                maxToolRounds = if (settings.maxToolRounds > 0) minOf(settings.maxToolRounds, 12) else 12,
+                                // **子任务继承父任务的步数上限，不再另设天花板**（issue #79）。
+                                //
+                                // 原来写的是 `if (max > 0) minOf(max, 12) else 12`：
+                                //  · 父任务「不限制」(0) ⇒ 子任务被钉死在 12 轮，**比父任务还弱**；
+                                //  · 父任务设 50 ⇒ minOf(50,12) = 12，用户的设置被静默砍掉；
+                                //  · 只有 ≤12 时用户的值才真的生效。
+                                // 三种输入里两种违背用户意图，而第一种最反直觉：用户明确关掉了
+                                // 上限，子任务却比开着上限时更容易半途失败。
+                                //
+                                // 也考虑过「另设一个子任务天花板」（比如 30 轮）避免子任务无限跑：
+                                // 但父任务的 `timeoutMs`（默认 180s、最长 600s）已经是时间上的兜底，
+                                // 再叠一个步数硬顶只会让「父任务跑得动、子任务跑不动」这个割裂继续存在。
+                                // 真要收敛资源，应该让父任务把预算显式传下来，而不是在这里写死一个数。
+                                maxToolRounds = settings.maxToolRounds,
                                 systemPrompt = settings.systemPrompt + "\n\n" + CHILD_AGENT_INSTRUCTIONS)
                             val input = buildString {
                                 append("Task:\n").append(task.task)
