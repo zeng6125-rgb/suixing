@@ -31,6 +31,16 @@ object VirtualScreenManager {
     /** 副屏按主屏比例缩小，避免整屏 RGBA 每帧 11MB。 */
     private const val SCALE = 0.45f
 
+    /**
+     * 副屏密度：与像素乘同一个 [SCALE]，让 dp 与主屏一致（issue #80）。
+     *
+     * `dp = px / (dpi / 160)`：像素除以 0.45、密度不缩 ⇒ dp 也除以了 0.45。
+     * 两个数一起缩，dp 才不变。下限 120dpi 是 `ldpi` 的档位，再低系统资源选择会退化到
+     * 只有 `drawable-ldpi`/`nodpi` 可用。
+     */
+    internal fun scaledDensity(sourceDpi: Int): Int =
+        (sourceDpi * SCALE).toInt().coerceAtLeast(120)
+
     data class State(
         val running: Boolean = false,
         val displayId: Int = -1,
@@ -59,7 +69,25 @@ object VirtualScreenManager {
     val frame: StateFlow<Bitmap?> = _frame
 
     /**
-     * 建屏。宽度/高度按主屏缩放，dpi 沿用主屏，这样屏上的应用按原来的 dp 排布。
+     * 建屏。宽度、高度、**密度三者一起按 [SCALE] 缩放**，这样屏上的应用按原来的 dp 排布。
+     *
+     * 密度必须跟着像素一起缩（issue #80）。原来只缩了像素、`densityDpi` 沿用主屏：
+     *
+     * ```
+     * 主屏   1156x2510 @ 480dpi  →  385 x 837 dp
+     * 副屏    520x1129  @ 480dpi  →  173 x 376 dp   ← 不是"缩小"，是换了一块小得多的屏
+     * ```
+     *
+     * 173dp 小于 `sw360dp` 这个几乎所有布局都在用的断点，系统会进极窄布局、应用的最小宽度
+     * 限制被触发，界面上挤成一团或被裁掉。乘上 SCALE 之后：
+     *
+     * ```
+     * 副屏    520x1129  @ 216dpi  →  385 x 837 dp   ← 与主屏一致
+     * ```
+     *
+     * dp 一致时资源选择会随密度降档（`xxhdpi` → `hdpi`），这是仿真一颗小屏无法避免的；
+     * 要连资源档位都一致，只能按原分辨率建屏（内存与每帧拷贝都是 5 倍），不划算。
+     *
      * 已经建过就直接返回原来的 displayId，重复点不会叠出第二块屏。
      */
     fun start(context: Context): State {
@@ -71,7 +99,8 @@ object VirtualScreenManager {
         val height = (metrics.heightPixels * SCALE).toInt().coerceAtLeast(320)
 
         val imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        val densityDpi = metrics.densityDpi
+        // 密度是 dp 换算的分母：只缩像素不缩它，屏上的 dp 会跟着缩，布局就变了。
+        val densityDpi = scaledDensity(metrics.densityDpi)
 
         val created = displayManager.createVirtualDisplay(
             "JAgentVirtualScreen",
