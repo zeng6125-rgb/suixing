@@ -5,7 +5,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -62,7 +61,6 @@ import com.suixing.agent.ui.chat.popupCap
 import com.suixing.agent.ui.chat.reasoningWire
 import com.suixing.agent.ui.components.LevelSlider
 import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.CompactMenuContentPadding
 import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import kotlinx.coroutines.delay
@@ -268,11 +266,9 @@ internal fun GenerationSheet(
         // be. See [MenuCard]'s focusable and the scrim in [Composer].
         focusable = false,
         // The first page caps at 300dp; the model list keeps 340dp for long provider/model names.
-        // Both retain the same anchor while using padding suited to their content.
+        // Both retain the same anchor and the original card padding.
         modifier = Modifier
             .widthIn(max = popupCap(if (picking) 340.dp else 300.dp, windowWidth)),
-        contentPadding = if (picking) CompactMenuContentPadding
-            else PaddingValues(horizontal = 12.dp, vertical = 10.dp),
         compactMotion = true,
     ) {
         if (!picking) {

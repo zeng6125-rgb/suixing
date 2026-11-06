@@ -82,6 +82,7 @@ public final class TerminalView extends View {
     private long mMouseStartDownTime = -1;
 
     final Scroller mScroller;
+    private FlingRunnable mFlingRunnable;
 
     /** What was left in from scrolling movement. */
     float mScrollRemainder;
@@ -204,30 +205,15 @@ public final class TerminalView extends View {
                     mScroller.fling(0, mTopRow, 0, -(int) (velocityY * SCALE), 0, 0, -mEmulator.getScreen().getActiveTranscriptRows(), 0);
                 }
 
-                post(new Runnable() {
-                    private int mLastY = 0;
-
-                    @Override
-                    public void run() {
-                        if (mouseTrackingAtStartOfFling != mEmulator.isMouseTrackingActive()) {
-                            mScroller.abortAnimation();
-                            return;
-                        }
-                        if (mScroller.isFinished()) return;
-                        boolean more = mScroller.computeScrollOffset();
-                        int newY = mScroller.getCurrY();
-                        int diff = mouseTrackingAtStartOfFling ? (newY - mLastY) : (newY - mTopRow);
-                        doScroll(e2, diff);
-                        mLastY = newY;
-                        if (more) post(this);
-                    }
-                });
+                mFlingRunnable = new FlingRunnable(e2, mouseTrackingAtStartOfFling);
+                postOnAnimation(mFlingRunnable);
 
                 return true;
             }
 
             @Override
             public boolean onDown(float x, float y) {
+                stopFling();
                 // Why is true not returned here?
                 // https://developer.android.com/training/gestures/detector.html#detect-a-subset-of-supported-gestures
                 // Although setting this to true still does not solve the following errors when long pressing in terminal view text area
@@ -258,6 +244,66 @@ public final class TerminalView extends View {
         mAccessibilityEnabled = am.isEnabled();
     }
 
+    private void stopFling() {
+        mScroller.abortAnimation();
+        FlingRunnable fling = mFlingRunnable;
+        mFlingRunnable = null;
+        if (fling != null) {
+            removeCallbacks(fling);
+            fling.recycle();
+        }
+    }
+
+    private final class FlingRunnable implements Runnable {
+        private final TerminalSession mSession = mTermSession;
+        private final boolean mMouseTracking;
+        private final boolean mAlternateBuffer = mEmulator.isAlternateBufferActive();
+        private MotionEvent mEvent;
+        private int mLastY;
+
+        FlingRunnable(MotionEvent event, boolean mouseTracking) {
+            // GestureDetector recycles its event after dispatch; delayed frames own a copy.
+            mEvent = MotionEvent.obtain(event);
+            mMouseTracking = mouseTracking;
+        }
+
+        @Override
+        public void run() {
+            if (mFlingRunnable != this) return;
+            boolean rescheduled = false;
+            try {
+                if (!isAttachedToWindow() || mSession != mTermSession || mEmulator == null ||
+                    mMouseTracking != mEmulator.isMouseTrackingActive() ||
+                    mAlternateBuffer != mEmulator.isAlternateBufferActive()) {
+                    mScroller.abortAnimation();
+                    return;
+                }
+                if (mScroller.isFinished()) return;
+                boolean more = mScroller.computeScrollOffset();
+                int newY = mScroller.getCurrY();
+                int diff = mMouseTracking ? (newY - mLastY) : (newY - mTopRow);
+                doScroll(mEvent, diff);
+                mLastY = newY;
+                if (more && mFlingRunnable == this) {
+                    postOnAnimation(this);
+                    rescheduled = true;
+                }
+            } finally {
+                if (!rescheduled) {
+                    if (mFlingRunnable == this) mFlingRunnable = null;
+                    recycle();
+                }
+            }
+        }
+
+        void recycle() {
+            if (mEvent != null) {
+                mEvent.recycle();
+                mEvent = null;
+            }
+        }
+    }
+
 
 
     /**
@@ -286,6 +332,7 @@ public final class TerminalView extends View {
      */
     public boolean attachSession(TerminalSession session) {
         if (session == mTermSession) return false;
+        stopFling();
         mTopRow = 0;
 
         mTermSession = session;
@@ -559,6 +606,13 @@ public final class TerminalView extends View {
 
     /** Perform a scroll, either from dragging the screen or by scrolling a mouse wheel. */
     void doScroll(MotionEvent event, int rowsDown) {
+        if (rowsDown == 0) return;
+        if (!mEmulator.isMouseTrackingActive() && !mEmulator.isAlternateBufferActive()) {
+            mTopRow = (int) Math.min(0L, Math.max(-mEmulator.getScreen().getActiveTranscriptRows(),
+                (long) mTopRow + rowsDown));
+            if (!awakenScrollBars()) invalidate();
+            return;
+        }
         boolean up = rowsDown < 0;
         int amount = Math.abs(rowsDown);
         for (int i = 0; i < amount; i++) {
@@ -973,6 +1027,7 @@ public final class TerminalView extends View {
         int newRows = Math.max(4, (viewHeight - mRenderer.mFontLineSpacingAndAscent) / mRenderer.mFontLineSpacing);
 
         if (mEmulator == null || (newColumns != mEmulator.mColumns || newRows != mEmulator.mRows)) {
+            stopFling();
             mTermSession.updateSize(newColumns, newRows, (int) mRenderer.getFontWidth(), mRenderer.getFontLineSpacing());
             mEmulator = mTermSession.getEmulator();
             mClient.onEmulatorSet();
@@ -1423,6 +1478,7 @@ public final class TerminalView extends View {
 
     @Override
     protected void onDetachedFromWindow() {
+        stopFling();
         super.onDetachedFromWindow();
 
         if (mTextSelectionCursorController != null) {

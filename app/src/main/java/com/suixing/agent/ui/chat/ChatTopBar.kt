@@ -48,7 +48,6 @@ import com.suixing.agent.R
 import com.suixing.agent.ui.components.FlatPainterButton
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.CompactMenuContentPadding
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.ui.components.PressPill
 
@@ -169,9 +168,8 @@ internal fun ChatTopBar(
                 popupPositionProvider = belowCapsule,
                 // Narrow, fixed width: MenuItemRow uses fillMaxWidth(), so without this the
                 // card stretches to the popup window's full width.
-                modifier = Modifier.width(168.dp),
+                modifier = Modifier.width(180.dp),
                 focusable = false,
-                contentPadding = CompactMenuContentPadding,
                 compactMotion = true,
             ) {
                 MenuItemRow(

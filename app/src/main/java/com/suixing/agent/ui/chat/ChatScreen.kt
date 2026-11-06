@@ -911,7 +911,11 @@ fun ChatScreen(
             if (!sourceIsCurrent()) return
             for ((id, texts) in pending) {
                 // 每行只拿自己那几个文本的解析结果（与原来逐行调用时的内容一致）。
-                rowDocuments.publish(id, prepared.filterKeys { it in texts })
+                // Look up this row's texts directly instead of scanning the whole batch for every row.
+                val documents = buildMap {
+                    for (text in texts) prepared[text]?.let { put(text, it) }
+                }
+                rowDocuments.publish(id, documents)
             }
         }
         if (!sourceIsCurrent()) return

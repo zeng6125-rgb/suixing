@@ -10,12 +10,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -55,9 +53,6 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
 import kotlin.math.roundToInt
-
-/** Compact action lists keep a little space around the button outlines. */
-internal val CompactMenuContentPadding = PaddingValues(6.dp)
 
 /**
  * The app's one popup card: rounded, shadowed, and animated in and out.
@@ -111,7 +106,7 @@ internal fun MenuCard(
     /**
      * 卡片内容的内边距。默认是「浮层卡片」那档（18/14）。
      *
-     * 动作列表显式使用CompactMenuContentPadding；满宽涟漪仍由外层独立绘制。
+     * 菜单使用原内容留白；满宽涟漪仍由外层独立绘制。
      */
     contentPadding: androidx.compose.foundation.layout.PaddingValues =
         androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 14.dp),
@@ -223,11 +218,10 @@ internal fun MenuItemRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 40.dp)
             .clip(MaterialTheme.shapes.small)
             .semantics { this.selected = selected }
             .menuRippleClickable(onClick = onClick)
-            .padding(vertical = 5.dp, horizontal = 8.dp),
+            .padding(vertical = 9.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(

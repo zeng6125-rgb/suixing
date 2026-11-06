@@ -120,7 +120,6 @@ import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.chat.GenerationSheet
 import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.CompactMenuContentPadding
 import com.suixing.agent.ui.components.MENU_EXIT_MS
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.ui.components.menuRippleClickable
@@ -910,17 +909,19 @@ internal fun Composer(
     val baseFieldTextStyle = MaterialTheme.typography.bodyLarge
     // 16/17 reduces the default 17sp body to 16sp and 28sp leading to about 26sp.
     // Scale the current theme values proportionally so app font tiers and system fontScale remain active.
-    val fieldTextStyle = baseFieldTextStyle.copy(
-        fontSize = baseFieldTextStyle.fontSize * (16f / 17f),
-        lineHeight = baseFieldTextStyle.lineHeight * (26f / 28f),
-        platformStyle = PlatformTextStyle(includeFontPadding = false),
-        // 保留首尾行的完整行高，英文输入切到中文 fallback 时不再按字形盒撑高。
-        lineHeightStyle = LineHeightStyle(
-            alignment = LineHeightStyle.Alignment.Center,
-            trim = LineHeightStyle.Trim.None,
-            mode = LineHeightStyle.Mode.Fixed,
-        ),
-    )
+    val fieldTextStyle = remember(baseFieldTextStyle) {
+        baseFieldTextStyle.copy(
+            fontSize = baseFieldTextStyle.fontSize * (16f / 17f),
+            lineHeight = baseFieldTextStyle.lineHeight * (26f / 28f),
+            platformStyle = PlatformTextStyle(includeFontPadding = false),
+            // 保留首尾行的完整行高，英文输入切到中文 fallback 时不再按字形盒撑高。
+            lineHeightStyle = LineHeightStyle(
+                alignment = LineHeightStyle.Alignment.Center,
+                trim = LineHeightStyle.Trim.None,
+                mode = LineHeightStyle.Mode.Fixed,
+            ),
+        )
+    }
     // 发送后键盘退避（用户：「抬起输入法发送时，对话框也会挡住」）：不收键盘的话 composer 悬在
     // 键盘上方、把列表尾的状态行盖在后面。发送＝这句话说完了，收键盘让整条栈落回去；「停止」
     // 不收（那一下没有发送任何文字，用户的手还在输入上）。
@@ -1440,9 +1441,8 @@ internal fun Composer(
                                 // composer out from under it.
                                 focusable = false,
                                 modifier = Modifier
-                                    .widthIn(max = popupCap(180.dp, windowWidth))
+                                    .widthIn(max = popupCap(200.dp, windowWidth))
                                     .onSizeChanged { plusWidth = it.width },
-                                contentPadding = CompactMenuContentPadding,
                                 compactMotion = true,
                             ) {
                                 MenuItemRow(
@@ -1546,9 +1546,8 @@ internal fun Composer(
                                 },
                                 focusable = false,
                                 modifier = Modifier
-                                    .widthIn(max = popupCap(180.dp, windowWidth))
+                                    .widthIn(max = popupCap(220.dp, windowWidth))
                                     .onSizeChanged { approvalWidth = it.width },
-                                contentPadding = CompactMenuContentPadding,
                                 compactMotion = true,
                             ) {
                                 ApprovalMode.entries.forEach { mode ->

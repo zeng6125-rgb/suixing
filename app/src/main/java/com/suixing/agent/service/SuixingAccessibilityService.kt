@@ -98,24 +98,33 @@ class SuixingAccessibilityService : AccessibilityService() {
     // Each of these draws itself before dispatching: the effect is the only sign the user
     // gets that the agent is touching their screen rather than sitting there.
 
-    suspend fun tap(x: Float, y: Float, durationMs: Long = 60L): Boolean {
-        TouchFx.tap(this, x, y)
-        return gesture(Path().apply { moveTo(x, y) }, durationMs)
+    suspend fun tap(x: Float, y: Float, durationMs: Long = 60L, displayId: Int = -1): Boolean {
+        // 副屏上的点击不在主屏留痕：TouchFx 画的是主屏坐标，指错屏比不画更容易误解。
+        if (displayId < 0) TouchFx.tap(this, x, y)
+        return gesture(Path().apply { moveTo(x, y) }, durationMs, displayId)
     }
 
-    suspend fun longPress(x: Float, y: Float): Boolean {
-        TouchFx.longPress(this, x, y)
-        return gesture(Path().apply { moveTo(x, y) }, 700L)
+    suspend fun longPress(x: Float, y: Float, displayId: Int = -1): Boolean {
+        if (displayId < 0) TouchFx.longPress(this, x, y)
+        return gesture(Path().apply { moveTo(x, y) }, 700L, displayId)
     }
 
-    suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300L): Boolean {
-        TouchFx.swipe(this, x1, y1, x2, y2)
+    suspend fun swipe(
+        x1: Float,
+        y1: Float,
+        x2: Float,
+        y2: Float,
+        durationMs: Long = 300L,
+        displayId: Int = -1,
+    ): Boolean {
+        if (displayId < 0) TouchFx.swipe(this, x1, y1, x2, y2)
         return gesture(
             Path().apply {
                 moveTo(x1, y1)
                 lineTo(x2, y2)
             },
             durationMs.coerceIn(60L, 5_000L),
+            displayId,
         )
     }
 
@@ -129,11 +138,14 @@ class SuixingAccessibilityService : AccessibilityService() {
      * Waiting also serialises gestures: a second one dispatched while the first is in
      * flight is rejected by the system, and now it simply cannot happen.
      */
-    private suspend fun gesture(path: Path, durationMs: Long): Boolean =
+    private suspend fun gesture(path: Path, durationMs: Long, displayId: Int = -1): Boolean =
         kotlinx.coroutines.withTimeoutOrNull(durationMs.coerceAtLeast(30L) + 2_000L) {
         suspendCancellableCoroutine { continuation ->
             val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(30L))
-            val description = GestureDescription.Builder().addStroke(stroke).build()
+            val builder = GestureDescription.Builder().addStroke(stroke)
+            // 副屏注入：-1 表示主屏，保持原路径不变；≥0 时按 displayId 投递（API 30+）。
+            if (displayId >= 0) builder.setDisplayId(displayId)
+            val description = builder.build()
             val callback = object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     if (continuation.isActive) continuation.resume(true)
@@ -344,8 +356,11 @@ class SuixingAccessibilityService : AccessibilityService() {
      * model cannot aim a swipe at empty space — scrolling a list, for instance —
      * without knowing how large the screen it is aiming at actually is.
      */
-    fun dumpScreen(maxNodes: Int = 140, maxDepth: Int = 26): String {
-        val root = rootInActiveWindow ?: return "(当前无法读取窗口内容)"
+    fun dumpScreen(maxNodes: Int = 140, maxDepth: Int = 26, displayId: Int = -1): String {
+        val root = if (displayId >= 0) windowRootOn(displayId) else rootInActiveWindow
+        if (root == null) {
+            return if (displayId >= 0) "(副屏上没有可读窗口)" else "(当前无法读取窗口内容)"
+        }
         val (width, height) = screenSize()
         val builder = StringBuilder()
         builder.append("屏幕: ").append(width).append('x').append(height).append('\n')
@@ -373,6 +388,26 @@ class SuixingAccessibilityService : AccessibilityService() {
         }
         Log.d(TAG, "dumpScreen pkg=${root.packageName} lines=${counter[0]} visits=${visits[0]} cost=${cost}ms timedOut=$timedOut visitCapped=$visitCapped")
         return builder.toString()
+    }
+
+    /**
+     * 副屏上那个窗口的根节点。
+     *
+     * `rootInActiveWindow` 只给**当前有焦点**的那一屏，副屏上的应用永远拿不到，所以副屏
+     * 走 `windows`：这是 `flagRetrieveInteractiveWindows` 打开的窗口列表，按 `displayId`
+     * 筛出目标屏、丢掉系统装饰窗口（状态栏/输入法），剩下的就是屏上的应用窗口。
+     */
+    private fun windowRootOn(displayId: Int): AccessibilityNodeInfo? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val candidates = runCatching { windows }.getOrNull().orEmpty()
+        for (window in candidates) {
+            if (window.displayId != displayId) continue
+            if (window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM) continue
+            if (window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val root = runCatching { window.root }.getOrNull() ?: continue
+            return root
+        }
+        return null
     }
 
     private fun walk(
@@ -436,7 +471,11 @@ class SuixingAccessibilityService : AccessibilityService() {
     // -------------------------------------------------------------- screenshots
 
     @RequiresApi(Build.VERSION_CODES.R)
-    suspend fun screenshotJpeg(maxWidth: Int = 1080, quality: Int = 72): ByteArray? =
+    suspend fun screenshotJpeg(
+        maxWidth: Int = 1080,
+        quality: Int = 72,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): ByteArray? =
         suspendCancellableCoroutine { continuation ->
             val callback = object : TakeScreenshotCallback {
                 override fun onSuccess(screenshot: ScreenshotResult) {
@@ -480,7 +519,7 @@ class SuixingAccessibilityService : AccessibilityService() {
                     if (continuation.isActive) continuation.resume(null)
                 }
             }
-            runCatching { takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, callback) }
+            runCatching { takeScreenshot(displayId, mainExecutor, callback) }
                 .onFailure { if (continuation.isActive) continuation.resume(null) }
         }
 

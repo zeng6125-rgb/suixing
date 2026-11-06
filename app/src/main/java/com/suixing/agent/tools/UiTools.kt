@@ -9,6 +9,7 @@ import com.suixing.agent.capability.Shell
 import com.suixing.agent.capability.ShellResult
 import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.service.SuixingAccessibilityService
+import com.suixing.agent.virtualscreen.VirtualScreenManager
 import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -189,17 +190,24 @@ class UiTools(
         val service = accessibility()
         if (service == null && !privileged()) return blocked()
 
+        // 虚拟屏开着的时候，这一整套 UI 工具就作用在那块屏上：读屏、截图、点滑都按它的
+        // displayId 走。否则 agent 会在主屏上操作，用户在浮窗里看到的却是另一块屏 ——
+        // 那正是"agent 用不了"的来源。
+        val vd = virtualDisplay()
+        fun input(command: String): String = if (vd >= 0) "input -d $vd $command" else "input $command"
+        val fx: (() -> Unit)? = if (vd >= 0) null else { { } }
+
         return when (name) {
-            "ui_dump" -> dump(service, args)
-            "ui_screenshot" -> screenshot(service, args)
+            "ui_dump" -> dump(service, args, vd)
+            "ui_screenshot" -> screenshot(service, args, vd)
             "ui_tap" -> {
                 val x = args.int("x", 0).toFloat()
                 val y = args.int("y", 0).toFloat()
                 gesture(
-                    accessibilityAction = { it.tap(x, y) },
-                    command = "input tap ${x.toInt()} ${y.toInt()}",
+                    accessibilityAction = { it.tap(x, y, displayId = vd) },
+                    command = input("tap ${x.toInt()} ${y.toInt()}"),
                     successText = "已点击 (${x.toInt()}, ${y.toInt()})",
-                    fx = { TouchFx.tap(context, x, y) },
+                    fx = if (vd >= 0) null else ({ TouchFx.tap(context, x, y) }),
                 )
             }
 
@@ -207,10 +215,10 @@ class UiTools(
                 val x = args.int("x", 0).toFloat()
                 val y = args.int("y", 0).toFloat()
                 gesture(
-                    accessibilityAction = { it.longPress(x, y) },
-                    command = "input swipe ${x.toInt()} ${y.toInt()} ${x.toInt()} ${y.toInt()} 800",
+                    accessibilityAction = { it.longPress(x, y, displayId = vd) },
+                    command = input("swipe ${x.toInt()} ${y.toInt()} ${x.toInt()} ${y.toInt()} 800"),
                     successText = "已长按 (${x.toInt()}, ${y.toInt()})",
-                    fx = { TouchFx.longPress(context, x, y) },
+                    fx = if (vd >= 0) null else ({ TouchFx.longPress(context, x, y) }),
                 )
             }
 
@@ -221,10 +229,10 @@ class UiTools(
                 val x2 = args.int("x2", 0).toFloat()
                 val y2 = args.int("y2", 0).toFloat()
                 gesture(
-                    accessibilityAction = { it.swipe(x1, y1, x2, y2, duration.toLong()) },
-                    command = "input swipe ${x1.toInt()} ${y1.toInt()} ${x2.toInt()} ${y2.toInt()} $duration",
+                    accessibilityAction = { it.swipe(x1, y1, x2, y2, duration.toLong(), displayId = vd) },
+                    command = input("swipe ${x1.toInt()} ${y1.toInt()} ${x2.toInt()} ${y2.toInt()} $duration"),
                     successText = "已滑动",
-                    fx = { TouchFx.swipe(context, x1, y1, x2, y2) },
+                    fx = if (vd >= 0) null else ({ TouchFx.swipe(context, x1, y1, x2, y2) }),
                 )
             }
 
@@ -279,7 +287,7 @@ class UiTools(
         accessibilityAction: suspend (SuixingAccessibilityService) -> Boolean,
         command: String,
         successText: String,
-        fx: () -> Unit,
+        fx: (() -> Unit)?,
     ): ToolResult {
         val service = accessibility()
         if (service != null && attemptAction { accessibilityAction(service) }) {
@@ -299,19 +307,23 @@ class UiTools(
         // fix — the fallback is used when accessibility is off, so there is not even an
         // accessibility indicator to go by. Drawn only once the shell has confirmed the
         // touch landed, so the effect never claims a tap that did not happen.
-        fx()
+        fx?.invoke()
         return ToolResult.success("$successText（经由 ${shellName()}）")
     }
 
     // ---------------------------------------------------------------- 读屏
 
-    private suspend fun dump(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+    private suspend fun dump(
+        service: SuixingAccessibilityService?,
+        args: JsonObject,
+        displayId: Int,
+    ): ToolResult {
         // 读屏也是一次 UI 操作（spec v2 §2）：回合照常开启/续期，边缘光因此亮 ~3s 后淡出。
         TouchFx.noteToolActivity(context, "ui_dump")
         val maxNodes = args.int("max_nodes", 140).coerceIn(10, 500)
         if (service != null) {
             return withContext(Dispatchers.Default) {
-                ToolResult.success(service.dumpScreen(maxNodes = maxNodes))
+                ToolResult.success(service.dumpScreen(maxNodes = maxNodes, displayId = displayId))
             }
         }
         val nodes = dumpNodes() ?: return ToolResult.failure(
@@ -327,8 +339,16 @@ class UiTools(
      */
     private fun screenHeader(): String {
         val metrics = context.resources.displayMetrics
+        val state = VirtualScreenManager.state.value
+        if (state.running && state.width > 0) {
+            return "屏幕: ${state.width}x${state.height}（虚拟屏 displayId=${state.displayId}）\n"
+        }
         return "屏幕: ${metrics.widthPixels}x${metrics.heightPixels}\n"
     }
+
+    /** 正在运行的虚拟屏 displayId；没开就是 -1，所有 UI 工具回到主屏。 */
+    private fun virtualDisplay(): Int =
+        VirtualScreenManager.state.value.let { if (it.running) it.displayId else -1 }
 
     /** Reads the view tree through `uiautomator dump`; null when it could not be read. */
     private suspend fun dumpNodes(): List<UiNode>? {
@@ -343,7 +363,11 @@ class UiTools(
         return parseUiDump(xml)
     }
 
-    private suspend fun screenshot(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+    private suspend fun screenshot(
+        service: SuixingAccessibilityService?,
+        args: JsonObject,
+        displayId: Int,
+    ): ToolResult {
         // 同上：截图也是 UI 操作（spec v2 §2）。
         TouchFx.noteToolActivity(context, "ui_screenshot")
         // 用 path 重新加载一张旧截图：出站时更早的截图会被省略（省带宽），占位里给出路径，
@@ -362,7 +386,11 @@ class UiTools(
         val quality = args.int("quality", 72).coerceIn(1, 100)
 
         if (service != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            val bytes = withContext(Dispatchers.IO) { service.screenshotJpeg(maxWidth, quality) }
+            val bytes = withContext(Dispatchers.IO) { service.screenshotJpeg(
+                maxWidth,
+                quality,
+                if (displayId >= 0) displayId else android.view.Display.DEFAULT_DISPLAY,
+            ) }
             if (bytes != null) {
                 val kept = withContext(Dispatchers.IO) { saveShot(bytes) }
                 return ToolResult.image(

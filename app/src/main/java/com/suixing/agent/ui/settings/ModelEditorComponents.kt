@@ -132,7 +132,7 @@ internal fun AddProviderDialog(onDismiss: () -> Unit, onAdd: (ProviderConfig) ->
                             shape = MaterialTheme.shapes.small,
                             color = androidx.compose.ui.graphics.Color.Transparent,
                         ) {
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 ProviderIdentity(template?.name.orEmpty())
                                 Column(Modifier.weight(1f)) {

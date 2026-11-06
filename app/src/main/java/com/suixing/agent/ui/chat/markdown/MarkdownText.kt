@@ -391,17 +391,33 @@ private fun isTableStart(lines: List<String>, index: Int): Boolean {
     val separator = lines.getOrNull(index + 1)?.trim() ?: return false
     // GFM permits optional outer pipes. What must match is the number of header
     // and delimiter cells; otherwise an ordinary pipe-containing line is prose.
-    return isTableSeparator(separator) && splitTableRow(lines[index]).size == splitTableRow(separator).size
+    if (!separator.contains('-') || !separator.contains('|')) return false
+    val cells = splitTableRow(separator)
+    return cells.isNotEmpty() && cells.all { MD_TABLE_CELL.matches(it) } &&
+        splitTableRow(lines[index]).size == cells.size
 }
 
-private fun isTableSeparator(line: String): Boolean {
-    if (!line.contains('-') || !line.contains('|')) return false
-    val cells = splitTableRow(line)
-    return cells.isNotEmpty() && cells.all { MD_TABLE_CELL.matches(it) }
+/** Trim optional outer pipes and cells without copying the whole row or an intermediate split list. */
+internal fun splitTableRow(line: String): List<String> {
+    var start = 0
+    var end = line.length
+    while (start < end && line[start].isWhitespace()) start++
+    while (end > start && line[end - 1].isWhitespace()) end--
+    if (start < end && line[start] == '|') start++
+    if (start < end && line[end - 1] == '|') end--
+    val cells = ArrayList<String>()
+    while (true) {
+        val pipe = line.indexOf('|', start)
+        val cellEnd = if (pipe >= 0 && pipe < end) pipe else end
+        var cellStart = start
+        var trimmedEnd = cellEnd
+        while (cellStart < trimmedEnd && line[cellStart].isWhitespace()) cellStart++
+        while (trimmedEnd > cellStart && line[trimmedEnd - 1].isWhitespace()) trimmedEnd--
+        cells.add(line.substring(cellStart, trimmedEnd))
+        if (cellEnd == end) return cells
+        start = cellEnd + 1
+    }
 }
-
-private fun splitTableRow(line: String): List<String> =
-    line.trim().removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
 
 // ---------------------------------------------------------------------------
 // Inline scanner. One left-to-right pass with recursive descent for nesting;
@@ -1001,16 +1017,20 @@ internal class LiveBlocks {
             lastSourceId = sourceId
             return result
         }
+        // The CR-free source is already proven above. Once CR normalization is involved,
+        // verify the normalized prefix once and share that proof with both continuation paths.
+        val keepsNormalizedPrefix = if (!sawCarriageReturn) keepsPrefix else
+            normalized.length >= text.length && (trustedAppend || normalized.startsWith(text))
         // 可信游标的两种形态（都在"同一份来源"前提下）：
         //  · 版本递增 —— 来源缓冲又追加了；
         //  · 版本不变但文本变长 —— 打字机在揭示同一份文本的更长前缀。
         // 换来源（实例不同 / 没有来源）一律回落全量校验。
         val tail = appendableTail
         val extended = if (tail != null && normalized.length > text.length &&
-            (trustedAppend || normalized.startsWith(text))
+            keepsNormalizedPrefix
         ) tail.append(normalized, text.length, checkpoint) else null
         result = if (extended != null) JoinedMarkdownBlocks(appendPrefix, listOf(extended)) else
-            parseWithPrefix(normalized, trustedAppend, checkpoint)
+            parseWithPrefix(normalized, keepsNormalizedPrefix, checkpoint)
         text = normalized
         lastVersion = appendFrom
         lastSourceId = sourceId
@@ -1019,13 +1039,13 @@ internal class LiveBlocks {
 
     private fun parseWithPrefix(
         normalized: String,
-        trustedAppend: Boolean = false,
+        keepsPreviousPrefix: Boolean = false,
         checkpoint: (() -> Unit)? = null,
     ): List<MdBlock> {
         // Verify the actual prefix, not only length/hash: both can collide after edits.
-        // 例外：`trustedAppend` 为真时前缀由来源版本保证（见 [lastVersion]），跳过这次全量比较。
+        // A trusted source or the full-prefix comparison above already proves the stable range.
         if (normalized.length < stableEnd ||
-            (!trustedAppend && !normalized.regionMatches(0, text, 0, stableEnd))
+            (!keepsPreviousPrefix && !normalized.regionMatches(0, text, 0, stableEnd))
         ) {
             stableEnd = 0
             prefixBlocks = emptyList()

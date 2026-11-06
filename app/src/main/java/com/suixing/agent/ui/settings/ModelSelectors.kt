@@ -143,7 +143,7 @@ private fun ModelDropdownMenu(
         //     收到了 14.8dp，阴影边缘也可能被裁。描边与下拉按钮自己那条 `outlineVariant` 同款。
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
-        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
         compactMotion = true,
     ) {
         // **滚动必须在卡片内容里、不能挂在 MenuCard 的 modifier 上**：那个 modifier 在
@@ -272,10 +272,10 @@ internal fun ProviderDropdown(
                         }
                     },
                     onClick = { onExpandedChange(false); onSelect(provider) },
-                    modifier = Modifier.padding(horizontal = 2.dp).clip(MaterialTheme.shapes.small)
+                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
                         .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
                         .semantics { this.selected = chosen },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 )
             }
             if (onAdd != null) {
@@ -283,7 +283,7 @@ internal fun ProviderDropdown(
                     text = { Text("添加供应商", style = SettingsStyle.controlLabel, color = colors.primary) },
                     leadingIcon = { Icon(ImageVector.vectorResource(R.drawable.ic_plus), null, Modifier.size(18.dp), tint = colors.primary) },
                     onClick = { onExpandedChange(false); onAdd() },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
                 )
             }
         }
@@ -368,10 +368,10 @@ internal fun CompactProtocolPicker(
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(value) },
-                    modifier = Modifier.padding(horizontal = 2.dp).clip(MaterialTheme.shapes.small)
+                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
                         .background(if (isChosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
                         .semantics { this.selected = isChosen },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
         }
@@ -433,10 +433,10 @@ internal fun EnabledModelDropdown(
                         }
                     },
                     onClick = { onExpandedChange(false); onPick(id) },
-                    modifier = Modifier.padding(horizontal = 2.dp).clip(MaterialTheme.shapes.small)
+                    modifier = Modifier.padding(horizontal = 6.dp).clip(MaterialTheme.shapes.small)
                         .background(if (chosen) colors.onSurface.copy(alpha = 0.06f) else androidx.compose.ui.graphics.Color.Transparent)
                         .semantics { selected = chosen },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 )
             }
         }
@@ -475,7 +475,7 @@ internal fun FetchedModelsDialog(
                             MenuRippleSurface(onClick = { onToggle(id, id !in provider.enabled) }, shape = MaterialTheme.shapes.small,
                                 color = if (id in provider.enabled) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f)
                                     else androidx.compose.ui.graphics.Color.Transparent) {
-                                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                     MenuRippleCheckbox(checked = id in provider.enabled, onCheckedChange = { onToggle(id, it) })
                                     Text(provider.displayModel(id), style = SettingsStyle.body, modifier = Modifier.weight(1f))
                                 }

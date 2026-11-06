@@ -3,7 +3,9 @@ package com.suixing.agent.ui.capability
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import com.suixing.agent.ui.components.SegmentedPill
+import com.suixing.agent.service.VirtualScreenOverlay
 import com.suixing.agent.ui.components.SettingsSwitch
+import com.suixing.agent.virtualscreen.VirtualScreenManager
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.settingsPagePadding
 import android.content.Context
@@ -41,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +71,7 @@ import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
 import com.suixing.agent.tools.TIER_SHELL
 import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.components.suixingClickable
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SectionCard
 import com.suixing.agent.ui.components.SoftIcon
@@ -78,7 +82,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-fun CapabilityScreen(onBack: () -> Unit) {
+fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
     val state by Core.capabilities.state.collectAsStateWithLifecycle()
     // **只投影本页真正读的四个字段**（issue #68 P1-C）：原来整份 AppSettings 任何字段变化
     // （改模型、改温度…）都会让整棵能力页子树重组。distinctUntilChanged 再挡一层：投影值
@@ -313,7 +317,19 @@ fun CapabilityScreen(onBack: () -> Unit) {
                         notice = "本机无法打开电池优化设置，请到系统设置里手动允许JAgent自启动。"
                     }
                 },
+                footer = {
+                    KeepScreenOnSwitch(
+                        checked = settings.keepScreenOn,
+                        onChange = { on ->
+                            scope.launch { Core.settings.update { it.copy(keepScreenOn = on) } }
+                        },
+                    )
+                },
             )
+            }
+
+            item(key = "capability-virtual", contentType = "capability-card") {
+                VirtualScreenSettingsCard()
             }
 
             item(key = "capability-9", contentType = "capability-card") {
@@ -777,6 +793,24 @@ private fun ConsoleRunningSwitch(checked: Boolean, onChange: (Boolean) -> Unit) 
     }
 }
 
+/** 屏幕常亮：只在 JAgent 前台时生效，切到后台由 MainActivity 清掉窗口标志。 */
+@Composable
+private fun KeepScreenOnSwitch(checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("使用时保持屏幕常亮", style = SettingsStyle.sectionTitle)
+            Text(
+                text = "在 JAgent 里操作时屏幕不自动熄灭；切到后台恢复系统息屏，回来按这个选择生效。" +
+                    "不改系统息屏时间，也不会阻止你主动锁屏。",
+                style = SettingsStyle.description,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        SettingsSwitch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
 /**
  * The store page for Shizuku, with the browser as the fallback for a device without a
  * market app. [CapabilityHub.openShizukuApp] launches the app itself and falls back to our
@@ -831,12 +865,13 @@ private fun requestIgnoreBatteryOptimizations(context: Context): Boolean {
  * 能力页真正依赖的设置子集（issue #68 P1-C）。
  *
  * 抽成小类型是**为了重组边界**：`AppSettings` 任何字段变化都会让这批子组件重组，
- * 而这一页只读这四个值。函数独立出来也便于断言"无关字段变化不改变投影"。
+ * 而这一页只读这几个值。函数独立出来也便于断言"无关字段变化不改变投影"。
  */
 internal data class CapabilityUiSettings(
     val preferredCapability: String = "",
     val floatingConsole: Boolean = false,
     val consoleWhileRunning: Boolean = true,
+    val keepScreenOn: Boolean = false,
     val rootCheckedAt: Long = 0L,
 )
 
@@ -845,5 +880,67 @@ internal fun capabilityUiSettings(settings: AppSettings): CapabilityUiSettings =
         preferredCapability = settings.preferredCapability,
         floatingConsole = settings.floatingConsole,
         consoleWhileRunning = settings.consoleWhileRunning,
+        keepScreenOn = settings.keepScreenOn,
         rootCheckedAt = settings.rootCheckedAt,
     )
+
+/**
+ * 虚拟屏：一块只跑自己内容的副屏 + 一层悬浮预览。
+ *
+ * 预览是**浮窗**，不是页面：开起来之后聊天照常，浮窗浮在最上层，收起浮窗屏上的应用
+ * 继续跑（见 `service/VirtualScreenOverlay`）。agent 的 UI 工具在这块屏开着时自动作用
+ * 到它上面（`tools/UiTools`），所以这个开关打开之后，对话里让 agent 点按就是在副屏上点。
+ */
+@Composable
+private fun VirtualScreenSettingsCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val state by VirtualScreenManager.state.collectAsState()
+    var previewShowing by remember { mutableStateOf(VirtualScreenOverlay.isShowing) }
+
+    SuixingCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SoftIcon(
+                ImageVector.vectorResource(R.drawable.ic_picture_in_picture_2),
+                tint = MaterialTheme.colorScheme.tertiary,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("虚拟屏", style = SettingsStyle.cardTitle)
+                Text(
+                    text = if (state.running) {
+                        "运行中 · displayId=${state.displayId}；agent 的点击、读屏、截图都作用在这块屏上。"
+                    } else {
+                        "一块只跑自己内容的副屏，不镜像主屏；建屏不需要权限，放第三方应用才需要 root。"
+                    },
+                    style = SettingsStyle.description,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (!state.running) {
+                Button(onClick = {
+                    val started = VirtualScreenManager.start(context)
+                    previewShowing = VirtualScreenOverlay.show(context, started.displayId)
+                }) { Text("开启虚拟屏") }
+            } else {
+                OutlinedButton(onClick = {
+                    previewShowing = if (previewShowing) {
+                        VirtualScreenOverlay.hide()
+                        false
+                    } else {
+                        VirtualScreenOverlay.show(context, state.displayId)
+                    }
+                }) { Text(if (previewShowing) "收起预览" else "显示预览") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = {
+                    VirtualScreenOverlay.hide()
+                    VirtualScreenManager.stop()
+                    previewShowing = false
+                }) { Text("关闭虚拟屏") }
+            }
+        }
+    }
+}

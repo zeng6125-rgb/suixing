@@ -1042,13 +1042,15 @@ internal fun ReasoningBlock(
     // Source order is also visual order. A trailing blank line owns the cursor
     // immediately after a newline, rather than moving it back onto the preceding line.
     val cursorAt = if (streaming) lines.lastIndex else -1
-    val firstLine = remember(lines) { lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty() }
+    // IncrementalLines publishes an immutable snapshot. Key by identity instead of comparing
+    // every completed line again while the last line is still growing.
+    val firstLine = remember(IdentityKey(lines)) { lines.firstOrNull { it.isNotBlank() }?.trim().orEmpty() }
     // The chain itself, shared by both shapes: a think with no text at all (the
     // endpoint reported time but no chain) must not render as an empty slab, and a
     // monster chain stays bounded at 320dp of lazy list that follows its tail while
     // the think streams.
     val chain: @Composable () -> Unit = {
-        if (lines.none { it.isNotBlank() }) {
+        if (firstLine.isEmpty()) {
             if (!streaming && text.isBlank()) Text(
                 text = "（本段无思考文本）",
                 style = thinkingStyle(),
@@ -1766,38 +1768,19 @@ internal fun TurnSummary(
     // anything already stored, so it wins.
     val context = live?.lastPromptTokens?.takeIf { it > 0 } ?: usage?.prompt ?: 0
     // A newly composed/recreated summary must not restart the run's clock.
-    val elapsedMs = if (streaming) runningElapsed?.value ?: 0L
-        else runElapsedMs.takeIf { it > 0L } ?: live?.elapsedMs ?: settled?.elapsedMs ?: 0L
-    // 标题串只在**影响它的四个量**变了才重算（每次重组都 buildList 一遍是纯浪费）。
-    val headline = remember(streaming, elapsedMs, thoughtCount, callCount) {
-        buildList {
-            if (streaming || elapsedMs > 0) add("用时 ${formatRunElapsed(elapsedMs)}")
-            if (thoughtCount > 0) add("思考 $thoughtCount 段")
-            if (callCount > 0) add("工具 $callCount 个")
-        }
-    }
-    // While a run streams the header shows the numbers that move; a settled reply shows
-    // the ones the endpoint reported.
-    // The numbers ride inside the title rather than in their own slot, so they shorten
-    // with it and the chip after them is never the thing that gets squeezed.
-    // 标题串只在输入变化时重算（每次重组 3 个 buildList + joinToString 是纯浪费）。
-    val header = remember(headline, note, streaming) {
-        buildList {
-        add(if (headline.isEmpty()) if (streaming) "正在回复" else "本轮用量" else "本轮：${headline.joinToString(" · ")}")
-        // After the numbers, before nothing else: the compression line is a fact about this
-        // turn, so it rides in the same title and folds away with the card.
-        if (note.isNotBlank()) add(note)
-        }.joinToString(" · ")
-    }
+    val settledElapsedMs = runElapsedMs.takeIf { it > 0L } ?: live?.elapsedMs ?: settled?.elapsedMs ?: 0L
     // 尾段起点只取决于 parts —— 记住它，展开判定与下面的内容用**同一个**值
     // （原来这里又算了一遍 `processTailStart(parts)`）。
     val tailStart = remember(IdentityKey(parts)) { processTailStart(parts) }
-    ProcessCard(
-        icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
-        title = header,
+    TurnSummaryProcessCard(
+        thoughtCount = thoughtCount,
+        callCount = callCount,
+        note = note,
+        streaming = streaming,
+        runningElapsed = runningElapsed,
+        settledElapsedMs = settledElapsedMs,
         expandable = parts.isNotEmpty() && tailStart > 0,
         expanded = expanded,
-        contentBottomPadding = 0.dp,
         onToggle = { reasoningExpansion.set(summarySlot(runId), !expanded) },
         // The elapsed title is the run indicator; no summary spinner (user preference).
     ) {
@@ -1889,6 +1872,47 @@ internal fun TurnSummary(
     }
 }
 
+
+/** The run clock invalidates this header card, not the summary's process/state mapping. */
+@Composable
+private fun TurnSummaryProcessCard(
+    thoughtCount: Int,
+    callCount: Int,
+    note: String,
+    streaming: Boolean,
+    runningElapsed: androidx.compose.runtime.State<Long>?,
+    settledElapsedMs: Long,
+    expandable: Boolean,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val elapsedMs = if (streaming) runningElapsed?.value ?: 0L else settledElapsedMs
+    val headline = remember(streaming, elapsedMs, thoughtCount, callCount) {
+        buildList {
+            if (streaming || elapsedMs > 0) add("用时 ${formatRunElapsed(elapsedMs)}")
+            if (thoughtCount > 0) add("思考 $thoughtCount 段")
+            if (callCount > 0) add("工具 $callCount 个")
+        }
+    }
+    // Keep the existing title, compression note and ellipsis in their shared header slot.
+    val header = remember(headline, note, streaming) {
+        buildList {
+            add(if (headline.isEmpty()) if (streaming) "正在回复" else "本轮用量"
+                else "本轮：${headline.joinToString(" · ")}")
+            if (note.isNotBlank()) add(note)
+        }.joinToString(" · ")
+    }
+    ProcessCard(
+        icon = ImageVector.vectorResource(R.drawable.ic_chart_column),
+        title = header,
+        expandable = expandable,
+        expanded = expanded,
+        contentBottomPadding = 0.dp,
+        onToggle = onToggle,
+        content = content,
+    )
+}
 
 /** One line inside [TurnSummary] is gone with the segment rows; the expanded card now
  * draws full thinking blocks and two-level tool rows instead. */

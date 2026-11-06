@@ -292,6 +292,8 @@ data class AppSettings(
      */
     val paletteMode: Int = 2,
     val themeMode: Int = 0,
+    /** Keep the display awake only while JAgent is in the foreground. */
+    val keepScreenOn: Boolean = false,
     /**
      * Off by default because most endpoints are text-only and reject any request
      * carrying an image. Turn it on for vision models.

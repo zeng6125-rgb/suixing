@@ -20,9 +20,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,7 +42,6 @@ import androidx.compose.ui.window.Popup
 import com.suixing.agent.R
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.components.MenuCard
-import com.suixing.agent.ui.components.CompactMenuContentPadding
 import com.suixing.agent.ui.components.CompletionDot
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -181,7 +182,12 @@ internal fun ConversationRow(
     val bottomInsetPx = with(density) { 72.dp.toPx() }
     var rowBottomPx by remember { mutableStateOf(0f) }
     var rowHeightPx by remember { mutableStateOf(0f) }
-    val openUp = rowBottomPx + menuHeightPx + gapPx > screenHeightPx - bottomInsetPx
+    // Position changes keep the same menu composition until its opening direction changes.
+    val openUp by remember(menuHeightPx, gapPx, screenHeightPx, bottomInsetPx) {
+        derivedStateOf(structuralEqualityPolicy()) {
+            rowBottomPx + menuHeightPx + gapPx > screenHeightPx - bottomInsetPx
+        }
+    }
     // 短按打开、长按出菜单：一行上只挂这一个手势。菜单里的每一项都走抽屉里已经有的那几条路
     // （删除仍旧进 pendingDelete 那个二次确认）。Surface(onClick) 不支持长按，所以点击交给
     // combinedClickable，Surface 只负责形状与底色；clip 是为了让水波纹跟着圆角走。
@@ -330,7 +336,6 @@ internal fun ConversationRow(
                 focusable = false,
                 // 与模型选择浮层同一底色（用户：把会话列表改成和模型列表一致）。
                 containerColor = MaterialTheme.colorScheme.surface,
-                contentPadding = CompactMenuContentPadding,
                 compactMotion = true,
             ) {
                 DrawerMenuAction("改名", iconRes = R.drawable.ic_square_pen, onClick = onRename)
@@ -354,10 +359,10 @@ internal fun ConversationRow(
 }
 
 /** 抽屉长按菜单的面板宽度：锚点与面板同宽，菜单才贴着行的右缘弹出（见 ConversationRow）。 */
-private val DrawerMenuWidth = 168.dp
+private val DrawerMenuWidth = 200.dp
 
 /**
- * 面板高度：6 个 40dp 的项 + 上下各 6dp 内边距（项之间没有额外间隔）。
+ * 面板高度：6 个 40dp 的项 + 上下各 14dp 内边距（项之间没有额外间隔）。
  * 只用来判断「下面还放得下吗」，放不下就朝上翻；项数改了这里要跟着改。
  */
-private val DrawerMenuHeight = 40.dp * 6 + 12.dp
+private val DrawerMenuHeight = 40.dp * 6 + 28.dp

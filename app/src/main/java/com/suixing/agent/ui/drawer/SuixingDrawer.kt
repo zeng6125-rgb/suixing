@@ -22,6 +22,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -123,7 +124,9 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
 
     /** Discrete, so mounting the shield does not read [progress] during composition. */
     private var homeLifecycle by mutableStateOf(drawerSettledLifecycle(initialValue))
-    val homeShieldActive: Boolean get() = homeLifecycle.shieldsHome
+    private val homeShield = derivedStateOf(structuralEqualityPolicy()) { homeLifecycle.shieldsHome }
+    // Opening, dragging, exposed and closing all keep the same shield and drawer visibility.
+    val homeShieldActive: Boolean get() = homeShield.value
 
     // Gesture ownership. All mutations below happen on the UI thread (pointer callbacks,
     // rememberCoroutineScope launches, and Compose effects). Do not call these from a background

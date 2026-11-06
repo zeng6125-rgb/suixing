@@ -175,7 +175,7 @@ private fun TerminalSessionsDialog(
             Column {
                 if (entries.isEmpty()) Text("暂无会话", style = MaterialTheme.typography.bodyMedium)
                 else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 400.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     itemsIndexed(entries, key = { _, entry -> entry.info.id }) { index, entry ->
                         val selected = entry.info.id == selectedId
                         val running = entry.info.phase == "running"
@@ -184,7 +184,7 @@ private fun TerminalSessionsDialog(
                             .semantics { this.selected = selected }
                             .clip(MaterialTheme.shapes.small)
                             .menuRippleClickable { onSelect(entry) }
-                            .padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                            .padding(start = 12.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("会话 ${index + 1} · ${entry.info.name}", maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -386,10 +386,13 @@ private fun TerminalViewport(
     val foreground = MaterialTheme.colorScheme.onSurface.toArgb()
     val background = MaterialTheme.colorScheme.background.toArgb()
     val cursor = MaterialTheme.colorScheme.primary.toArgb()
+    // Native bookkeeping is not Compose state and belongs to this view/session binding.
+    val appliedRevision = remember(session) { longArrayOf(Long.MIN_VALUE) }
     // Native TerminalView owns tap, scroll and selection; a Compose tap detector steals that stream.
     Box(modifier.padding(horizontal = 12.dp)) {
         AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->
             TerminalView(context, null).apply {
+                appliedRevision[0] = Long.MIN_VALUE
                 setTerminalViewClient(TerminalViewBridge(
                     { currentTap() }, { currentModifier == TerminalModifier.CTRL },
                     { currentModifier == TerminalModifier.ALT }, { currentConsume() }))
@@ -404,18 +407,32 @@ private fun TerminalViewport(
                 onView(this)
             }
         }, update = { terminal ->
-            if (terminal.tag != fontSize) {
+            val fontChanged = terminal.tag != fontSize
+            if (fontChanged) {
                 terminal.tag = fontSize
                 terminal.setTextSize(fontSize)
             }
             val colors = session.display.emulator.mColors.mCurrentColors
-            colors[TextStyle.COLOR_INDEX_FOREGROUND] = foreground
-            colors[TextStyle.COLOR_INDEX_BACKGROUND] = background
-            colors[TextStyle.COLOR_INDEX_CURSOR] = cursor
-            terminal.attachSession(session.display)
-            terminal.onScreenUpdated()
-            // Reading the revision here invalidates only this native viewport.
-            if (revision >= 0) terminal.invalidate()
+            val paletteChanged = colors[TextStyle.COLOR_INDEX_FOREGROUND] != foreground ||
+                colors[TextStyle.COLOR_INDEX_BACKGROUND] != background ||
+                colors[TextStyle.COLOR_INDEX_CURSOR] != cursor
+            if (paletteChanged) {
+                colors[TextStyle.COLOR_INDEX_FOREGROUND] = foreground
+                colors[TextStyle.COLOR_INDEX_BACKGROUND] = background
+                colors[TextStyle.COLOR_INDEX_CURSOR] = cursor
+            }
+            val sessionChanged = terminal.attachSession(session.display)
+            // Reading here refreshes only the AndroidView, not the toolbar or page composition.
+            val outputRevision = revision
+            val outputChanged = appliedRevision[0] != outputRevision
+            appliedRevision[0] = outputRevision
+            if (sessionChanged || outputChanged) {
+                // This also invalidates and adjusts history/selection for real terminal output.
+                terminal.onScreenUpdated()
+            } else if (fontChanged || paletteChanged) {
+                // A toolbar or palette update must not rerun output-driven scroll bookkeeping.
+                terminal.invalidate()
+            }
         }, onRelease = { it.setTerminalCursorBlinkerState(false, true) })
     }
 }

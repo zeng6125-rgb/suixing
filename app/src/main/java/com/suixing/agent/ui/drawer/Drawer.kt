@@ -774,7 +774,7 @@ internal fun DrawerMenuAction(
             .clip(MaterialTheme.shapes.small)
             .menuRippleClickable(onClick = onClick)
             .height(40.dp)
-            .padding(horizontal = 8.dp),
+            .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         iconRes?.let { res ->

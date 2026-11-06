@@ -753,7 +753,7 @@ fun SuixingApp() {
                                     )
                                 }
                             }
-                            composable("capability") { CapabilityScreen(onBack = goBack) }
+                            composable("capability") { CapabilityScreen(onBack = goBack, onOpen = push) }
                             composable("tools") { ToolsScreen(onBack = goBack) }
                             composable("about") { AboutScreen(onBack = goBack) }
                             // 内置终端：App UID 的交互式 PTY 会话（#61 PR-0 探针 + 最小会话管理）。

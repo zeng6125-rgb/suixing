@@ -75,7 +75,7 @@ internal sealed interface AppendableMarkdownTail {
                 if ('|' !in row) return null
                 val cells = if (start == lastLineStart && end == previousLength && partialCells != null) {
                     requireNotNull(partialCells)
-                } else row.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
+                } else splitTableRow(row)
                 if (newline < 0) {
                     if (additions != null) completedRows.addAll(additions)
                     lastLineStart = start
