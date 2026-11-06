@@ -173,13 +173,13 @@ class SuixingAccessibilityService : AccessibilityService() {
     // -------------------------------------------------------------- text input
 
     /** Types into the focused editable field. Works for CJK because it does not use key events. */
-    fun setText(text: String): Boolean = runCatching {
-        val node = focusedEditable() ?: return false
+    fun setText(text: String, displayId: Int = -1): Boolean = runCatching {
+        val node = focusedEditable(displayId) ?: return false
         try { setTextOn(node, text) } finally { node.recycleIfLegacy() }
     }.getOrDefault(false)
 
-    fun appendText(text: String): Boolean = runCatching {
-        val node = focusedEditable() ?: return false
+    fun appendText(text: String, displayId: Int = -1): Boolean = runCatching {
+        val node = focusedEditable(displayId) ?: return false
         try { setTextOn(node, node.text?.toString().orEmpty() + text) }
         finally { node.recycleIfLegacy() }
     }.getOrDefault(false)
@@ -197,8 +197,10 @@ class SuixingAccessibilityService : AccessibilityService() {
         } finally { node?.recycleIfLegacy() }
     }.getOrDefault(false)
 
-    private fun focusedEditable(): AccessibilityNodeInfo? {
-        val root = rootInActiveWindow ?: return null
+    private fun focusedEditable(displayId: Int = -1): AccessibilityNodeInfo? {
+        // 副屏走 `windows` 筛窗口，主屏才用 `rootInActiveWindow`（issue #80，同 findNodeByText）。
+        // 括号不能省：`else` 后面直接跟 `?:` 时，整个 if 表达式的类型会变成可空。
+        val root = (if (displayId >= 0) windowRootOn(displayId) else rootInActiveWindow) ?: return null
         var result: AccessibilityNodeInfo? = null
         try {
             val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
@@ -235,10 +237,13 @@ class SuixingAccessibilityService : AccessibilityService() {
      * content description carries [text]. Bounded so a pathological layout
      * cannot stall the agent.
      */
-    fun findNodeByText(text: String, exact: Boolean = false): AccessibilityNodeInfo? {
+    fun findNodeByText(text: String, exact: Boolean = false, displayId: Int = -1): AccessibilityNodeInfo? {
         val needle = text.trim()
         if (needle.isEmpty()) return null
-        val root = rootInActiveWindow ?: return null
+        // **副屏必须走 `windows`**：`rootInActiveWindow` 只给当前有焦点的那一屏，副屏上的
+        // 应用永远拿不到 ⇒ 按文字点击/输入在虚拟屏上从来不会命中（issue #80）。
+        // 括号不能省：`else` 后面直接跟 `?:` 时，整个 if 表达式的类型会变成可空。
+        val root = (if (displayId >= 0) windowRootOn(displayId) else rootInActiveWindow) ?: return null
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.addLast(root)
         var visited = 0
@@ -280,7 +285,7 @@ class SuixingAccessibilityService : AccessibilityService() {
     }
 
     /** Clicks the node, the nearest clickable ancestor, or its centre as a last resort. */
-    suspend fun clickNode(node: AccessibilityNodeInfo): Boolean {
+    suspend fun clickNode(node: AccessibilityNodeInfo, displayId: Int = -1): Boolean {
         val bounds = Rect().also { node.getBoundsInScreen(it) }
         var current: AccessibilityNodeInfo? = node
         try {
@@ -288,7 +293,8 @@ class SuixingAccessibilityService : AccessibilityService() {
                 if (current.isClickable) {
                     val candidate = current
                     if (runCatching { candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK) }.getOrDefault(false)) {
-                        if (bounds.width() > 0 && bounds.height() > 0) {
+                        // 触摸特效（TouchFx）画在主屏的悬浮层上，副屏的点击不该在主屏闪一下。
+                        if (displayId < 0 && bounds.width() > 0 && bounds.height() > 0) {
                             TouchFx.tap(this, bounds.centerX().toFloat(), bounds.centerY().toFloat())
                         }
                         return true
@@ -301,24 +307,24 @@ class SuixingAccessibilityService : AccessibilityService() {
             }
         } finally { if (current !== node) current?.recycleIfLegacy() }
         if (bounds.width() <= 0 || bounds.height() <= 0) return false
-        return tap(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+        return tap(bounds.centerX().toFloat(), bounds.centerY().toFloat(), displayId = displayId)
     }
 
-    suspend fun clickByText(text: String, exact: Boolean = false): Boolean {
-        val node = findNodeByText(text, exact) ?: return false
-        return try { clickNode(node) } finally { node.recycleIfLegacy() }
+    suspend fun clickByText(text: String, exact: Boolean = false, displayId: Int = -1): Boolean {
+        val node = findNodeByText(text, exact, displayId) ?: return false
+        return try { clickNode(node, displayId) } finally { node.recycleIfLegacy() }
     }
 
-    suspend fun typeIntoField(label: String, text: String): Boolean {
-        val node = findNodeByText(label, exact = false) ?: return false
-        try { clickNode(node) } finally { node.recycleIfLegacy() }
+    suspend fun typeIntoField(label: String, text: String, displayId: Int = -1): Boolean {
+        val node = findNodeByText(label, exact = false, displayId = displayId) ?: return false
+        try { clickNode(node, displayId) } finally { node.recycleIfLegacy() }
         delay(350L)
         // Clicking may replace the entire window. Query its current focused/editable node once.
-        if (setText(text)) return true
+        if (setText(text, displayId)) return true
         // 兜底（issue #56 R10）：点击没把焦点落到可编辑框上（点在 label / 容器、WebView 内、
         // 焦点异步到位）时，原本到此直接返回 false，能力比改动前更弱。现在在**重新取的树**里
         // 找同 label 节点的可编辑子树 —— 不复用点击前的旧节点，免得重犯「用旧树」那类错误。
-        val fresh = findNodeByText(label, exact = false) ?: return false
+        val fresh = findNodeByText(label, exact = false, displayId = displayId) ?: return false
         try {
             val editable = firstEditable(fresh, 0) ?: return false
             try { return setTextOn(editable, text) } finally { editable.recycleIfLegacy() }
@@ -341,6 +347,26 @@ class SuixingAccessibilityService : AccessibilityService() {
             try { node.packageName?.toString() } finally { node.recycleIfLegacy() }
         }
     }.getOrNull()
+
+    /**
+     * 副屏上最上层的那个应用。
+     *
+     * `rootInActiveWindow` 只代表**当前有焦点**的那一屏，用它问副屏会得到主屏的答案。
+     * 这里从 `windows` 里按 `displayId` 筛，取第一个非系统装饰窗口的包名 —— 与
+     * [windowRootOn] 的筛法一致，免得"读屏读到 A、问应用却答 B"。
+     */
+    fun currentPackageOn(displayId: Int): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return runCatching {
+            windows.firstOrNull { window ->
+                window.displayId == displayId &&
+                    window.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM &&
+                    window.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            }?.root?.let { root ->
+                try { root.packageName?.toString() } finally { root.recycleIfLegacy() }
+            }
+        }.getOrNull()
+    }
 
     fun screenSize(): Pair<Int, Int> {
         val metrics = resources.displayMetrics

@@ -236,11 +236,13 @@ class UiTools(
                 )
             }
 
-            "ui_click_text" -> clickText(service, args)
-            "ui_type" -> type(service, args)
-            "ui_type_into" -> typeInto(service, args)
-            "ui_key" -> key(service, args)
-            "ui_current_app" -> currentApp(service)
+            // 带 displayId：虚拟屏开着时这几个也必须作用在那块屏上，否则按文字点击/输入/按键
+            // 会落到主屏（issue #80）。
+            "ui_click_text" -> clickText(service, args, vd)
+            "ui_type" -> type(service, args, vd)
+            "ui_type_into" -> typeInto(service, args, vd)
+            "ui_key" -> key(service, args, vd)
+            "ui_current_app" -> currentApp(service, vd)
             else -> ToolResult.failure("未知工具：$name")
         }
     }
@@ -471,16 +473,27 @@ class UiTools(
 
     // ---------------------------------------------------------------- 操作
 
-    private suspend fun clickText(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+    private suspend fun clickText(service: SuixingAccessibilityService?, args: JsonObject, displayId: Int = -1): ToolResult {
         val text = args.str("text")?.trim().orEmpty()
         if (text.isEmpty()) return ToolResult.failure("缺少参数 text")
         val exact = args.bool("exact", false)
 
-        if (service != null && attemptAction { service.clickByText(text, exact) }) {
+        if (service != null && attemptAction { service.clickByText(text, exact, displayId) }) {
             return ToolResult.success("已点击「$text」")
         }
         if (!privileged()) {
             return if (service == null) blocked() else ToolResult.failure("屏幕上没有找到「$text」")
+        }
+
+        // **副屏没有 uiautomator 兜底**：`uiautomator dump` 没有 display 参数，实测会静默读主屏
+        // （`--display 3` 被忽略，dump 出来的 bounds 是主屏的 1156x2510）。在这里继续走下去，
+        // 就会按主屏坐标去点副屏上想点的地方 —— 用户看到的是"点了但没反应"甚至点错东西。
+        // 与其猜，不如把话说清楚：副屏上按文字点击只走无障碍那条路。
+        if (displayId >= 0) {
+            return ToolResult.failure(
+                "副屏上读不到界面元素，无法按文字定位「$text」。" +
+                    "可以先用 ui_dump 看副屏的界面，再用 ui_tap 按坐标点击。",
+            )
         }
 
         val nodes = dumpNodes() ?: return ToolResult.failure("读不到界面，无法按文字点击。")
@@ -495,14 +508,15 @@ class UiTools(
         return ToolResult.success("已点击「$text」（经由 ${shellName()}）")
     }
 
-    private suspend fun type(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+    private suspend fun type(service: SuixingAccessibilityService?, args: JsonObject, displayId: Int = -1): ToolResult {
         val text = args.str("text").orEmpty()
         if (text.isEmpty()) return ToolResult.failure("缺少参数 text")
 
         if (service != null) {
             val append = args.bool("append", false)
-            val ok = runCatching { if (append) service.appendText(text) else service.setText(text) }
-                .getOrDefault(false)
+            val ok = runCatching {
+                if (append) service.appendText(text, displayId) else service.setText(text, displayId)
+            }.getOrDefault(false)
             if (ok) {
                 TouchFx.noteDriving(context)
                 return ToolResult.success("已输入 ${text.length} 字")
@@ -512,6 +526,8 @@ class UiTools(
             }
         }
         if (!privileged()) return blocked()
+        // 副屏的按键注入带 `-d`（input 的 display 参数），主屏保持原样。
+        val displayArg = if (displayId >= 0) "-d $displayId " else ""
         if (text.any { it.code > 127 }) {
             return ToolResult.failure(
                 "走 ${shellName()} 的按键注入打不出中文，只有无障碍服务能直接写入输入框。" +
@@ -519,7 +535,7 @@ class UiTools(
             )
         }
         val escaped = text.replace("\\", "").replace("'", "").replace(" ", "%s")
-        val result = shell("input text '$escaped'") ?: return blocked()
+        val result = shell("input ${displayArg}text '$escaped'") ?: return blocked()
         if (!result.ok) return ToolResult.failure("输入没成功：${result.render(300)}")
         // Typing changes what is on screen, so it counts as driving the phone — it just has no
         // point to draw a ring at, which is why the light is the only sign of it.
@@ -527,7 +543,7 @@ class UiTools(
         return ToolResult.success("已通过 ${shellName()} 输入 ${text.length} 个字符")
     }
 
-    private suspend fun typeInto(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+    private suspend fun typeInto(service: SuixingAccessibilityService?, args: JsonObject, displayId: Int = -1): ToolResult {
         val label = args.str("label")?.trim().orEmpty()
         val text = args.str("text").orEmpty()
         if (label.isEmpty()) return ToolResult.failure("缺少参数 label")
@@ -540,7 +556,7 @@ class UiTools(
                     "现在可以改用 ui_click_text 点输入框 + ui_type 输入。",
             )
         }
-        val ok = attemptAction { service.typeIntoField(label, text) }
+        val ok = attemptAction { service.typeIntoField(label, text, displayId) }
         return if (ok) {
             TouchFx.noteDriving(context)
             ToolResult.success("已在「$label」输入 ${text.length} 字")
@@ -549,13 +565,16 @@ class UiTools(
         }
     }
 
-    private suspend fun key(service: SuixingAccessibilityService?, args: JsonObject): ToolResult {
+    private suspend fun key(service: SuixingAccessibilityService?, args: JsonObject, displayId: Int = -1): ToolResult {
         val name = args.str("key")?.trim()?.lowercase().orEmpty()
         // 常量复用（优化清单 tools-P2）：原来每次 ui_key 都新建这个 list。
         val supported = SUPPORTED_KEYS
         if (name !in supported) return ToolResult.failure("不支持的按键：$name")
 
-        val viaAccessibility = service != null && runCatching {
+        // **副屏只能走 shell 的 `input -d`**：`performGlobalAction`（back/home/recents）没有屏参数，
+        // 只作用于当前有焦点的屏，对副屏不可靠（见 VirtualScreenInput 的同一段说明）。所以副屏
+        // 跳过无障碍这条路，直接落到下面带 `-d` 的命令上。
+        val viaAccessibility = displayId < 0 && service != null && runCatching {
             when (name) {
                 "back" -> service.back()
                 "home" -> service.home()
@@ -571,10 +590,12 @@ class UiTools(
         if (!privileged()) {
             return if (service == null) blocked() else ToolResult.failure("按键没被系统接受")
         }
+        val displayArg = if (displayId >= 0) "-d $displayId " else ""
         val command = when (name) {
-            "back" -> "input keyevent KEYCODE_BACK"
-            "home" -> "input keyevent KEYCODE_HOME"
-            "recents" -> "input keyevent KEYCODE_APP_SWITCH"
+            "back" -> "input ${displayArg}keyevent KEYCODE_BACK"
+            "home" -> "input ${displayArg}keyevent KEYCODE_HOME"
+            "recents" -> "input ${displayArg}keyevent KEYCODE_APP_SWITCH"
+            // 状态栏展开是全局动作，没有按屏区分的语义，副屏上也只作用于主屏。
             else -> "cmd statusbar expand-notifications"
         }
         val result = shell(command) ?: return blocked()
@@ -585,7 +606,17 @@ class UiTools(
         return ToolResult.success("已发送按键 $name（经由 ${shellName()}）")
     }
 
-    private suspend fun currentApp(service: SuixingAccessibilityService?): ToolResult {
+    private suspend fun currentApp(service: SuixingAccessibilityService?, displayId: Int = -1): ToolResult {
+        // 主屏才认 `rootInActiveWindow`：它对副屏永远给主屏那套，答出来的会是错误的应用。
+        // 副屏用 windows 列表里那块屏最上层的包名。
+        if (displayId >= 0) {
+            val onScreen = service?.currentPackageOn(displayId)
+            return if (onScreen != null) {
+                ToolResult.success("当前前台应用：$onScreen")
+            } else {
+                ToolResult.failure("副屏上没有可读的窗口，可以改用 ui_dump。")
+            }
+        }
         service?.currentPackage()?.let { return ToolResult.success("当前前台应用：$it") }
         if (!privileged()) return blocked()
 
