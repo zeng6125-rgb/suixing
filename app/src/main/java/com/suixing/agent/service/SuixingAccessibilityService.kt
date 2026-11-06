@@ -199,7 +199,8 @@ class SuixingAccessibilityService : AccessibilityService() {
 
     private fun focusedEditable(displayId: Int = -1): AccessibilityNodeInfo? {
         // 副屏走 `windows` 筛窗口，主屏才用 `rootInActiveWindow`（issue #80，同 findNodeByText）。
-        val root = if (displayId >= 0) windowRootOn(displayId) else rootInActiveWindow ?: return null
+        // 括号不能省：`else` 后面直接跟 `?:` 时，整个 if 表达式的类型会变成可空。
+        val root = (if (displayId >= 0) windowRootOn(displayId) else rootInActiveWindow) ?: return null
         var result: AccessibilityNodeInfo? = null
         try {
             val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
@@ -241,7 +242,8 @@ class SuixingAccessibilityService : AccessibilityService() {
         if (needle.isEmpty()) return null
         // **副屏必须走 `windows`**：`rootInActiveWindow` 只给当前有焦点的那一屏，副屏上的
         // 应用永远拿不到 ⇒ 按文字点击/输入在虚拟屏上从来不会命中（issue #80）。
-        val root = if (displayId >= 0) windowRootOn(displayId) else rootInActiveWindow ?: return null
+        // 括号不能省：`else` 后面直接跟 `?:` 时，整个 if 表达式的类型会变成可空。
+        val root = (if (displayId >= 0) windowRootOn(displayId) else rootInActiveWindow) ?: return null
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.addLast(root)
         var visited = 0
