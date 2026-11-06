@@ -1,7 +1,5 @@
 package com.suixing.agent.ui.assistant
 
-import androidx.compose.ui.res.painterResource
-import com.suixing.agent.R
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -29,12 +27,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.AssistantAvatarStore
+import com.suixing.agent.ui.components.RoundBrandIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
  * An assistant's face, drawn in one place: the picture the user uploaded, else the persona's
- * emoji, else the app's own feather.
+ * emoji, else the delivered round brand mark.
  *
  * Every surface that shows an assistant — the chat card's header, the live bubble, the
  * assistant sheet's cards, the editor's own preview, the empty transcript's hero — calls this
@@ -54,6 +53,7 @@ fun AssistantAvatar(
     modifier: Modifier = Modifier,
     shape: Shape = CircleShape,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    running: Boolean = false,
 ) {
     val picture = rememberAssistantPicture(avatarPath)
     Box(
@@ -79,14 +79,11 @@ fun AssistantAvatar(
                 fontSize = (size.value * 0.55f).sp,
                 maxLines = 1,
             )
-            // 没有自定义形象的助手直接画**品牌位图**（`brand_mark`，与圆形版启动图标同一张脸），
-            // 而不是用代码再画一遍：几何版与位图版在眼睛形状/球的比例上是两套数，
-            // 并排看会发现不一样。用同一张位图就没有这种漂移。
-            else -> Image(
-                painter = painterResource(R.drawable.brand_mark),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
+            // Use the delivered artwork; only the current streaming card animates its brand face.
+            else -> RoundBrandIcon(
+                size = size,
                 modifier = Modifier.fillMaxSize(),
+                running = running,
             )
         }
     }
@@ -100,6 +97,7 @@ fun AssistantAvatar(
     modifier: Modifier = Modifier,
     shape: Shape = CircleShape,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    running: Boolean = false,
 ) = AssistantAvatar(
     face = assistant?.face.orEmpty(),
     avatarPath = assistant?.avatarPath.orEmpty(),
@@ -107,6 +105,7 @@ fun AssistantAvatar(
     modifier = modifier,
     shape = shape,
     containerColor = containerColor,
+    running = running,
 )
 
 /** The stored picture, or null while there is none to draw. */

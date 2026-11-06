@@ -16,10 +16,15 @@ internal class TableInlineCache(
 
     init { require(maxEntries > 0 && maxChars > 0 && maxEstimatedBytes > 0) }
 
-    fun getOrParse(source: String, caret: Boolean, parse: () -> AnnotatedString): AnnotatedString {
+    fun getOrParse(
+        source: String,
+        caret: Boolean,
+        cacheable: Boolean = true,
+        parse: () -> AnnotatedString,
+    ): AnnotatedString {
         // The active final cell already remembers its exact result at the call site. Its growing
         // prefixes are never revisited; retaining them would churn this cache and evict old cells.
-        if (caret) return parse()
+        if (caret || !cacheable) return parse()
         val key = Key(source, caret)
         entries[key]?.let { return it.result }
         val result = parse()

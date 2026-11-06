@@ -702,7 +702,7 @@ private const val CHANNEL_ID = "Suixing_console"
             setImageResource(com.suixing.agent.R.drawable.brand_mark_round)
         }
         visual.addView(ballMotionView)
-        ballMotion = BallMotion(this, ballMotionView, mainHandler)
+        ballMotion = BallMotion(this, ballMotionView, mainHandler, scope)
         ball.addView(visual)
         ballTouchFeedback = FloatBallTouchFeedback(visual).also { feedback ->
             ball.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {

@@ -119,12 +119,12 @@ internal class TerminalSessionManager(
         _entries.value.filter { it.info.phase == "running" }.mapNotNull { it.session }
             .map { session -> scope.async { session.stop() } }.awaitAll()
     }
-    suspend fun remove(id: String) {
-        _entries.value.firstOrNull { it.info.id == id }?.session?.stop()
-        mutex.withLock {
-            _entries.value = _entries.value.filterNot { it.info.id == id }
-            saveLocked()
+    suspend fun remove(id: String) = mutex.withLock {
+        check(_entries.value.none { it.info.id == id && it.info.phase == "running" }) {
+            "请先停止该终端会话，再移除记录"
         }
+        _entries.value = _entries.value.filterNot { it.info.id == id }
+        saveLocked()
     }
 
     suspend fun removeLinux(distro: LinuxDistro) = mutex.withLock {

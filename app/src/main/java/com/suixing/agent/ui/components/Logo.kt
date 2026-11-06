@@ -1,40 +1,29 @@
 package com.suixing.agent.ui.components
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.suixing.agent.R
 
 /**
- * The bot face: emerald disc with two tilted white eyes — one bitmap, shared by the home-screen
- * icon, the drawer head, the empty states, the assistant fallback avatar and the about page.
- *
- * It is a bitmap on purpose. The eyes are the artwork's own highlight pixels, and they are not
- * two copies of one shape: the right eye is narrower and sits higher than the left. Redrawing them
- * as geometry (which this composable used to do) drifted from the launcher artwork — the capsules
- * came out 43% larger in area than the reference. [R.drawable.brand_mark] is the same artwork as
- * the round launcher mipmaps, rendered at 4x so a 92dp use stays sharp.
+ * The delivered round artwork, shared by the drawer, empty states and assistant fallback.
+ * Running marks use signal-and-blink; static callers do not create an animation clock.
  */
 @Composable
 fun SuixingMark(
     size: Dp = 24.dp,
     modifier: Modifier = Modifier,
+    running: Boolean = false,
+    animateIdle: Boolean = false,
 ) {
-    Image(
-        painter = painterResource(R.drawable.brand_mark),
-        contentDescription = null,
-        modifier = modifier.size(size),
-    )
+    RoundBrandIcon(size, modifier, running, animateIdle)
 }
 
 /**
@@ -46,20 +35,21 @@ fun SuixingOrb(
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
-    Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(size)) {
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        scheme.primary.copy(alpha = 0.42f),
-                        scheme.secondary.copy(alpha = 0.14f),
-                        Color.Transparent,
-                    ),
-                    center = center,
-                    radius = this.size.minDimension / 2f,
+    Box(
+        modifier = modifier.size(size).drawWithCache {
+            val glow = Brush.radialGradient(
+                colors = listOf(
+                    scheme.primary.copy(alpha = 0.42f),
+                    scheme.secondary.copy(alpha = 0.14f),
+                    Color.Transparent,
                 ),
+                center = androidx.compose.ui.geometry.Offset(this.size.width / 2f, this.size.height / 2f),
+                radius = this.size.minDimension / 2f,
             )
-        }
-        SuixingMark(size = size * 0.52f)
+            onDrawBehind { drawCircle(brush = glow) }
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        SuixingMark(size = size * 0.52f, animateIdle = true)
     }
 }

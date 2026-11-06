@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Roles
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.MenuRippleTextButton
 
 /** A non-overlapping alternative to squeezing every reply action into a narrow row. */
 @Composable
@@ -36,7 +37,7 @@ internal fun ReplyActionsMenu(
         MenuCard(open, { open = false }, Alignment.TopStart, IntOffset.Zero, modifier = Modifier.width(220.dp)) {
             Column(Modifier.heightIn(max = cap).verticalScroll(rememberScrollState())) {
                 @Composable fun Action(label: String, action: () -> Unit) {
-                    TextButton(onClick = { open = false; action() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    MenuRippleTextButton(onClick = { open = false; action() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                         Text(label)
                     }
                 }

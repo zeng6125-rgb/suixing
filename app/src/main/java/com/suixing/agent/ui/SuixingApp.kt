@@ -37,8 +37,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -279,7 +281,9 @@ fun SuixingApp() {
     // Back and explicit drawer actions share the same close motion.
     val closeDrawer: () -> Unit = {
         switchIntents.invalidate()
-        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+        }
     }
     // 点会话 / 新对话：与点页面行不同——那是"换我在读的那一份内容"，覆盖层收掉、抽屉也收起来，
     // 用户直接落在会话里。
@@ -287,7 +291,9 @@ fun SuixingApp() {
         switchIntents.invalidate()
         // **与 `closeDrawer()`（助手 / 返回键）逐字相同**：只启动同一条
         // `animateTo(Closed, DRAWER_CLOSE_SPEC)` —— 同一帧开始、同一时长、同一曲线。
-        scope.launch { drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC) }
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            drawerState.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
+        }
         showChat()
     }
     /** Replace the source immediately; restore and reveal only the latest target. */
@@ -354,10 +360,9 @@ fun SuixingApp() {
     val openSidebar: () -> Unit = remember(scope, drawerState, switchIntents) { {
         if (routeNow == "empty") {
             switchIntents.invalidate()
-            scope.launch {
-            // 打开用 [DRAWER_OPEN_SPEC]：**同样 210ms**，但曲线是减速的，末端缓停不"生硬"
-            // （用户：「那个汉堡键动画改回去有点太生硬了」）。死区时长不变。
-            drawerState.animateTo(DrawerValue.Open, DRAWER_OPEN_SPEC)
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                // Claim the shared motion before the next frame, just like close and conversation switch.
+                drawerState.animateTo(DrawerValue.Open, DRAWER_OPEN_SPEC)
             }
         }
     } }
@@ -388,7 +393,8 @@ fun SuixingApp() {
         // （窗高 − 键盘高），两段渐变才在交界处同色。
         // 渐变终点（画布底边 = 窗高 − 键盘高）**在绘制期算**：键盘高度每帧都在变，
         // 在组合期读它等于让外壳逐帧重组（见上面 `snapshotFlow` 的说明）。
-        // `drawBehind` 的 lambda 是绘制阶段才读快照的：键盘动画期间这里既不重组也不重布局。
+        // 绘制缓存仍在 draw 阶段读键盘高度；只有终点、尺寸或主题变化才重建渐变，
+        // 抽屉/页面的其它重绘复用 Brush，键盘动画不触发外壳重组或重布局。
         val canvasTopColor = MaterialTheme.colorScheme.surface
         val canvasTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
         val screenHeightPx = with(rootDensity) {
@@ -402,15 +408,14 @@ fun SuixingApp() {
                     if (darkShell) {
                         Modifier.background(SolidColor(canvasTopColor))
                     } else {
-                        Modifier.drawBehind {
+                        Modifier.drawWithCache {
                             val endY = (screenHeightPx - heldImeState.value).coerceAtLeast(1f)
-                            drawRect(
-                                Brush.verticalGradient(
-                                    colors = listOf(canvasTopColor, canvasTint),
-                                    startY = 0f,
-                                    endY = endY,
-                                ),
+                            val gradient = Brush.verticalGradient(
+                                colors = listOf(canvasTopColor, canvasTint),
+                                startY = 0f,
+                                endY = endY,
                             )
+                            onDrawBehind { drawRect(gradient) }
                         }
                     },
                 ),
@@ -445,7 +450,17 @@ fun SuixingApp() {
             // 所以让它随抽屉进度渐变到侧边栏底色（surfaceContainerHigh）：
             // 主页四周露出的就变成"侧边栏"，与 DeepSeek 一致。
             val drawerSurfaceColor = MaterialTheme.colorScheme.surfaceContainerHigh
-            val drawerOffsetForBg = drawerState.offset
+            val closedBackgroundColor = remember(surfaceColor, drawerSurfaceColor) {
+                androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, 0f)
+            }
+            val exposedBackgroundColor = remember(surfaceColor, drawerSurfaceColor) {
+                androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, 1f)
+            }
+            val drawerProgress = drawerState.visualProgress
+            // The solid backing only changes at closed/exposed, not on every drag pixel.
+            val drawerExposed = remember(drawerProgress) {
+                derivedStateOf(structuralEqualityPolicy()) { drawerProgress.value > 0f }
+            }
             Box(
                 Modifier
                     .matchParentSize()
@@ -453,16 +468,11 @@ fun SuixingApp() {
                     // 但绘制范围仍按"画布底边 = 屏高 − IME"裁剪，键盘圆角里那圈色块不会回来。
                     .drawBehind {
                         val h = (size.height - heldImeState.value).coerceAtLeast(0f)
-                        val raw = drawerOffsetForBg.value
-                        val panelPx = DRAWER_SHEET_WIDTH.dp.toPx()
-                        val p = if (raw.isNaN() || panelPx <= 0f) 0f
-                        else (1f - (-raw / panelPx)).coerceIn(0f, 1f)
                         // **一开始滑就切换**（用户：「滑动中还是没融合，刚滑的时候一点都不融合」）。
                         // p*4 在起始阶段仍然很白（p=0.02 → 8%），所以看上去"刚滑时一点不融合"。
                         // 改成阈值：只要抽屉动了一点，底色立刻就是侧边栏色。
                         // 判 p=0 时页面完全盖住，切换看不出来；关闭动画回到 0 时同理。
-                        val bgP = if (p > 0.01f) 1f else 0f
-                        val bg = androidx.compose.ui.graphics.lerp(surfaceColor, drawerSurfaceColor, bgP)
+                        val bg = if (drawerExposed.value) exposedBackgroundColor else closedBackgroundColor
                         drawRect(color = bg, size = androidx.compose.ui.geometry.Size(size.width, h))
                     },
             )
@@ -557,40 +567,10 @@ fun SuixingApp() {
                 )
                 },
             ) {
-                // 放在 content 里而不是 drawerContent 里，是为了让它位于主页**之下**。
-                // **主页面"浮起"层**（用户：「deepseek 的主页面相当于浮起右移的，而且有点缩放，
-                // 有层次」）。自建宿主是**覆盖式**的：它自己完全不动 content，
-                // 所以位移/缩放/圆角/阴影全部由我们在这里做。
-                //
-                // 进度来自公开的 `drawerState.offset`（面板 x 位置）：关闭 ≈ −面板宽、打开 = 0。
-                //   progress = 1 − |offset| / panelWidthPx   → 0（关）… 1（开）
-                // 面板宽要拿到 px，所以先量一次（`onSizeChanged` 随便绑在下面的 Box 上）。
-                //
-                // 参数（可调）：
-                //   · 右移 = 面板宽度（300dp），主页正好让出侧边栏那一片
-                //   · **圆角恒定 = [SCREEN_CORNER_DP]**（不随进度变）：关着时它与屏幕自身的
-                //     圆角重合，所以看不出；滑开后才显出这是一块圆角面板 —— 就是用户要的
-                //     「四角从一开始就是屏幕边缘模样，屏幕边缘圆角」。
-                //     曾经写成「0 → 22dp 随进度长」，那样关着时是尖角、滑开时才长圆角，
-                //     与屏幕边缘对不上。
-                //   · 缩放 = 1.0 → 0.92（"浮起"的透视感，端点必须 1.0 起）
-                //   · 阴影不在这里，画在侧边栏右边缘（见 drawerContent 那段）。
-                //
-                // **注意**：这一层只改绘制，不改布局尺寸 —— 用 graphicsLayer 是刻意的，
-                // 布局期改宽度会让 chat 的整个测量链重排（`imePadding` 那次教训）。
-                // **不要在组合作用域里读 `drawerState.offset`**：拖动/动画期间它每帧都变，
-                // 组合期读它 = 每帧重组整棵常驻的 chat 树 —— 正是本文件 :742 与
-                // DrawerRows.kt:54 记下的那个坑。所以下面只在 `graphicsLayer {}`（绘制期）
-                // 里读：那次读取发生在节点绘制阶段，不产生组合失效。
-                //
-                // **NaN 防护是必须的**：`drawerState.offset` 在锚点初始化前是 `Float.NaN`
-                // （`NavigationDrawer.kt:243` 写明 "or Float.NaN before the offset is initialized"）。
-                // 第一版没防，`NaN / panelWidthPx` 一路传到
-                // `RoundedCornerShape((22 * progress).dp)` ⇒ 线上崩在
-                // `IllegalArgumentException: Corner size in Px can't be negative(topStart = NaN …)`
-                // （dropbox 2026-11-01 01:03:25，v608 / 0.8.587）。
+                // The panel, home transform, background and shield share one bounded progress.
+                // Read it only in the layer: chat keeps its layout and composition during motion.
+                // Home retains the accepted 300dp travel, 0.95 scale and constant screen corners.
                 val panelWidthPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
-                val offsetState = drawerState.offset
                 val homeShape = remember { RoundedCornerShape(SCREEN_CORNER_DP.dp) }
                 Box(
                     modifier = Modifier
@@ -598,12 +578,7 @@ fun SuixingApp() {
                         .graphicsLayer {
                             // 主页浮在侧边栏之上：右移 + 轻微缩放 + 恒定圆角裁剪 + 淡投影。
                             // 全部在绘制期做，不改布局尺寸，也不在组合作用域里读进度。
-                            val raw = offsetState.value
-                            val progress = if (panelWidthPx <= 0f || raw.isNaN()) {
-                                0f
-                            } else {
-                                (1f - (-raw / panelWidthPx)).coerceIn(0f, 1f)
-                            }
+                            val progress = drawerProgress.value
                             // 自建宿主只平移侧边栏本体，主页这一层得自己跟上进度，否则会露出
                             // 一块没动的内容。位移 = 面板宽 × 进度，与面板的 translationX 互补。
                             translationX = panelWidthPx * progress
@@ -624,9 +599,9 @@ fun SuixingApp() {
                             transformOrigin = TransformOrigin(0.5f, 0.5f)
                             // **恒定圆角**：与屏幕四角半径一致。关着时页面铺满屏幕，
                             // 这个圆角正好落在屏幕自身的圆角上 ⇒ 肉眼看不出；
-                            // 右移之后才显形。`clip = true` 必须开，否则圆角只影响投影不影响内容。
+                            // 移动期间同时裁剪内容；完全关闭时让窗口负责屏幕边界，聊天无需常驻圆角遮罩。
                             shape = homeShape
-                            clip = true
+                            clip = progress > 0f
                         },
                 ) {
                 // chat 常驻：NavHost 在离开一个目的地之后会把它**销毁**，pop 回来时是从零

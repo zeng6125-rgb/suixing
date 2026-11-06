@@ -419,12 +419,13 @@ internal fun ImagePreviewFrame(
                 Modifier
                     .fillMaxSize()
                     .transformable(transformable)
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = offset.x,
-                        translationY = offset.y,
-                    ),
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        val currentOffset = offset
+                        translationX = currentOffset.x
+                        translationY = currentOffset.y
+                    },
             )
         }
     }

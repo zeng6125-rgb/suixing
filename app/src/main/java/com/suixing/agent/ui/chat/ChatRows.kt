@@ -891,7 +891,9 @@ internal fun MessageRow(
         // 从回答拖到思考块/工具块就断在边界上。**只对已落地的行**加 —— 流式行的守卫见
         // AssistantRow 里 Part.Text 分支的注释（实时气泡每帧重测会闪），那一处不动。
         // 按需挂载（#27/#42③）：平时不包（重卡组合减负），长按武装后才可选中。
-        Roles.ASSISTANT -> SelectableWhenArmed {
+        Roles.ASSISTANT -> SelectableWhenArmed(
+            enabled = !reasoningExpansion.completionDeferred(row.message.runId.orEmpty()),
+        ) {
             AssistantRow(
                 // The setting hides thinking entirely; everything else keeps its place in
                 // the sequence either way.
@@ -1270,9 +1272,10 @@ internal val LocalInSelectable = androidx.compose.runtime.compositionLocalOf { f
 
 @Composable
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-internal fun SelectableWhenArmed(content: @Composable () -> Unit) {
-    if (LocalInSelectable.current) {
-        // 已经在一个容器里：只透传内容，不再嵌套第二个。
+internal fun SelectableWhenArmed(enabled: Boolean = true, content: @Composable () -> Unit) {
+    if (!enabled || LocalInSelectable.current) {
+        // A completing live row waits out the gesture before replacing its selection owner.
+        // Descendants share an existing owner instead of nesting another one.
         content()
         return
     }
@@ -1396,6 +1399,7 @@ internal fun AssistantRow(
                     face = face,
                     avatarPath = avatarPath,
                     size = 24.dp,
+                    running = streaming,
                 )
                 Spacer(Modifier.width(12.dp))
                 Text(
@@ -1450,11 +1454,10 @@ internal fun AssistantRow(
             // key(index): without it every part's remembered state was allocated by
             // position, so a new round appearing at the front moved one block's switch onto
             // its neighbour.
-            parts.forEachIndexed { index, part ->
-                // Guarded before key(index), not inside it: a non-local return out of the
-                // key group leaves that group unclosed, and Compose aborts the composition
-                // with "Start/end imbalance". Same conditions, evaluated outside the group.
-                if (index < tailStart) return@forEachIndexed
+            for (index in tailStart until parts.size) {
+                // Skip the process prefix before entering any key group, while preserving
+                // the source index that owns each part's remembered state.
+                val part = parts[index]
                 // Each part belongs to exactly one side of the process/tail boundary.
                 key(index) {
                     val last = index == parts.lastIndex
@@ -1504,7 +1507,8 @@ internal fun AssistantRow(
                         }
 
                         is Part.Text -> {
-                            AssistantProse(part, streaming, readingKey = "$processRun:text:$index",
+                            AssistantProse(part, streaming, deferSettlement = deferredCompletion,
+                                readingKey = "$processRun:text:$index",
                                 viewport = reasoningExpansion.viewport("$processRun:text:$index"))
                             if (!last) Spacer(Modifier.height(6.dp))
                         }
@@ -1625,6 +1629,7 @@ internal fun AssistantProse(
     typewriter: Boolean = true,
     readingKey: String = "",
     viewport: ReasoningViewport? = null,
+    deferSettlement: Boolean = false,
 ) {
     // History is selectable immediately. A newly mounted live block waits one frame,
     // and selection still waits for streaming and the remaining typed text to finish.
@@ -1642,24 +1647,33 @@ internal fun AssistantProse(
         startAtZero = typewriter && liveText,
         retained = viewport?.prose,
     )
-    // 只 provide 真正被读的 readingKey（MarkdownText 读它）；曾经还挂了一个
-    // 零读取点的 provider，流式每帧重组白付一层节点，已删。
-    androidx.compose.runtime.CompositionLocalProvider(
-        LocalReadingTextKey provides readingKey) {
-    // 助手回复里可以带图（用户：「助手的回复可以加上图片显示」）。只有真的出现图片语法时才
-    // 走分段渲染：纯文字的回复继续保持原来那一条 MarkdownText 路径，排版与增量解析都不变。
-    val hasImages = remember(part.text, streaming) {
-        splitImageSegments(part.text, streaming).any { it is MessageSegment.Image }
+    val renderingLive = streaming || deferSettlement
+    val sourceSegments = remember(part.text, renderingLive) {
+        if (part.text.contains("![")) {
+            val segments = splitImageSegments(part.text, renderingLive)
+            if (segments.any { it is MessageSegment.Image }) segments else emptyList()
+        } else emptyList()
     }
-    if (streaming || !selectable || shown.length < part.text.length) {
+    val hasImages = sourceSegments.isNotEmpty()
+    // The live and stored rows have different composition owners. Carry the parser along
+    // with the typewriter while a gesture holds completion, then release its source/cache.
+    val retainParser = !hasImages && (renderingLive || shown.length < part.text.length)
+    val parser = if (retainParser) viewport?.growingMarkdown() else null
+    androidx.compose.runtime.SideEffect { if (!retainParser) viewport?.releaseMarkdown() }
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalReadingTextKey provides readingKey,
+        com.suixing.agent.ui.chat.markdown.LocalRetainedLiveMarkdown provides parser,
+    ) {
+    if (renderingLive || !selectable || shown.length < part.text.length) {
         if (hasImages) {
-            ProseWithImages(shown, streaming = true, part = part)
+            ProseWithImages(shown, streaming = true, part = part,
+                preparedSegments = if (renderingLive && shown === part.text) sourceSegments else null)
         } else {
             MarkdownText(
                 text = shown,
                 // Generation can stop before the typewriter drains. Keep these changing
                 // prefixes on the incremental parser and out of the settled document cache.
-                settled = !streaming && shown.length == part.text.length,
+                settled = !renderingLive && shown.length == part.text.length,
                 cursor = false,
                 // 来源缓冲的版本：只有它单调递增时，增量解析才敢跳过前缀比较（issue #59 A1）。
                 // 打字机把 `shown` 截成前缀，来源没变 ⇒ 版本仍是同一个值，游标按"未推进"处理，
@@ -1669,7 +1683,9 @@ internal fun AssistantProse(
             )
         }
     } else if (hasImages) {
-        SelectableWhenArmed { ProseWithImages(part.text, streaming = false, part = part) }
+        SelectableWhenArmed {
+            ProseWithImages(part.text, streaming = false, part = part, preparedSegments = sourceSegments)
+        }
     } else {
         SelectableWhenArmed { MarkdownText(text = part.text) }
     }
@@ -1686,8 +1702,10 @@ private fun ProseWithImages(
     text: String,
     streaming: Boolean,
     part: Part.Text,
+    preparedSegments: List<MessageSegment>? = null,
 ) {
-    val segments = remember(text, streaming) { splitImageSegments(text, streaming) }
+    // Full source text can reuse its detection parse. Typed prefixes still parse independently.
+    val segments = preparedSegments ?: remember(text, streaming) { splitImageSegments(text, streaming) }
     Column(Modifier.fillMaxWidth()) {
         segments.forEach { segment ->
             when (segment) {

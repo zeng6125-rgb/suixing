@@ -33,8 +33,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import com.suixing.agent.ui.components.ActionMenu
+import com.suixing.agent.ui.components.ActionMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -225,8 +225,8 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                             modifier = Modifier.size(20.dp),
                         )
                     }
-                    DropdownMenu(expanded = rootMenu, onDismissRequest = { rootMenu = false }) {
-                        DropdownMenuItem(
+                    ActionMenu(expanded = rootMenu, onDismissRequest = { rootMenu = false }) {
+                        ActionMenuItem(
                             text = { Text("工作目录") },
                             onClick = {
                                 rootMenu = false
@@ -235,7 +235,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                                 notice = null
                             },
                         )
-                        DropdownMenuItem(
+                        ActionMenuItem(
                             text = {
                                 Text(if (allFilesGranted) "/sdcard" else "/sdcard（需要所有文件访问权限）")
                             },
@@ -259,7 +259,7 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                             },
                         )
                         // 插件目录没有闸门：filesDir 是应用自己的目录，文件页本来就能读。
-                        DropdownMenuItem(
+                        ActionMenuItem(
                             text = { Text("插件目录") },
                             onClick = {
                                 rootMenu = false

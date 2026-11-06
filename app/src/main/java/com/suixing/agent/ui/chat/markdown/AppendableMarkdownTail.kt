@@ -48,10 +48,14 @@ internal sealed interface AppendableMarkdownTail {
     }
     class Table(
         private val header: List<String>,
-        private var completedRows: List<List<String>>,
+        completedRows: List<List<String>>,
         private var lastLineStart: Int,
         private var partialCells: List<String>?,
     ) : AppendableMarkdownTail {
+        // Own the append-only prefix. Published results capture a fixed count, so completing
+        // another row does not copy all earlier row references or extend an older snapshot.
+        private val completedRows = ArrayList(completedRows)
+
         override fun append(source: String, previousLength: Int, checkpoint: (() -> Unit)?): MdBlock? {
             var start = lastLineStart
             var additions: ArrayList<List<String>>? = null
@@ -63,20 +67,20 @@ internal sealed interface AppendableMarkdownTail {
                     // A complete empty line ends the table; an unfinished empty final
                     // line can still grow into another row on the next publication.
                     if (newline >= 0) return null
-                    completedRows = if (additions == null) completedRows else completedRows + additions
+                    if (additions != null) completedRows.addAll(additions)
                     lastLineStart = start
                     partialCells = null
-                    return MdBlock.Table(header, completedRows)
+                    return MdBlock.Table(header, CompletedTableRows(completedRows, completedRows.size, null))
                 }
                 if ('|' !in row) return null
                 val cells = if (start == lastLineStart && end == previousLength && partialCells != null) {
                     requireNotNull(partialCells)
                 } else row.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
                 if (newline < 0) {
-                    completedRows = if (additions == null) completedRows else completedRows + additions
+                    if (additions != null) completedRows.addAll(additions)
                     lastLineStart = start
                     partialCells = cells
-                    return MdBlock.Table(header, CompletedTableRows(completedRows, cells))
+                    return MdBlock.Table(header, CompletedTableRows(completedRows, completedRows.size, cells))
                 }
                 checkpoint?.invoke()
                 val completed = additions ?: ArrayList<List<String>>().also { additions = it }
@@ -90,12 +94,13 @@ internal sealed interface AppendableMarkdownTail {
 /** A new final row does not copy or replace completed row identities. */
 private class CompletedTableRows(
     private val prefix: List<List<String>>,
-    private val last: List<String>,
+    private val completedCount: Int,
+    private val last: List<String>?,
 ) : AbstractList<List<String>>() {
-    override val size: Int get() = prefix.size + 1
+    override val size: Int get() = completedCount + if (last == null) 0 else 1
     override fun get(index: Int): List<String> {
         if (index !in 0 until size) throw IndexOutOfBoundsException("index=$index size=$size")
-        return if (index < prefix.size) prefix[index] else last
+        return if (index < completedCount) prefix[index] else requireNotNull(last)
     }
 }
 

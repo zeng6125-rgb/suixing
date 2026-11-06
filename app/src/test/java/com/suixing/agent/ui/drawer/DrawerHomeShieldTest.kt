@@ -112,5 +112,9 @@ class DrawerHomeShieldTest {
 
         state.snapTo(DrawerValue.Open)
         assertTrue(state.homeShieldActive)
+        state.progress.snapTo(1.05f)
+        assertEquals(1f, state.visualProgress.value, 0f)
+        state.progress.snapTo(-0.05f)
+        assertEquals(0f, state.visualProgress.value, 0f)
     }
 }

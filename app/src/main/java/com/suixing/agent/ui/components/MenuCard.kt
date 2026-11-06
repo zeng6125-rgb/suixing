@@ -9,10 +9,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,6 +45,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -51,6 +55,10 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.suixing.agent.R
 import kotlin.math.roundToInt
+
+/** Compact action lists keep a little space around the button outlines. */
+internal val CompactMenuContentPadding = PaddingValues(6.dp)
+
 /**
  * The app's one popup card: rounded, shadowed, and animated in and out.
  *
@@ -103,15 +111,16 @@ internal fun MenuCard(
     /**
      * 卡片内容的内边距。默认是「浮层卡片」那档（18/14）。
      *
-     * 下拉菜单要另给一档：菜单项自己还带 `DropdownMenuItem` 的 contentPadding，两档叠起来
-     * 文字会缩进太多、菜单项之间也显得松散。所以模型页那两个下拉传更小的一档。
+     * 动作列表显式使用CompactMenuContentPadding；满宽涟漪仍由外层独立绘制。
      */
     contentPadding: androidx.compose.foundation.layout.PaddingValues =
         androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 14.dp),
+    /** Small action menus settle promptly; informational cards retain their existing motion. */
+    compactMotion: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     var keepMounted by remember { mutableStateOf(visible) }
-    val motion = remember { PopupMotionState() }
+    val motion = remember(compactMotion) { PopupMotionState(compactMotion) }
     // **原点用 FloatArray，不用 State**（issue #56 R29）：它是在
     // `ShadowPopupPositionProvider.calculatePosition`（布局/定位阶段）里算出来的，
     // 写进 `mutableStateOf` 就是跨阶段回写 —— 键盘升降、内容变高都会触发一轮重组。
@@ -125,11 +134,12 @@ internal fun MenuCard(
             originXY[1] = o.pivotFractionY
         }
     }
-    LaunchedEffect(visible) {
+    LaunchedEffect(visible, motion) {
         if (visible) {
             keepMounted = true
-            // Keep real content measured before starting the shared entrance motion.
-            androidx.compose.runtime.withFrameNanos { }
+            // A new popup needs its first measurement. Reversing a visible exit reuses the
+            // mounted window and must not hold the current motion still for an extra frame.
+            if (motion.opacity.value == 0f) androidx.compose.runtime.withFrameNanos { }
             motion.show()
         } else if (keepMounted) {
             motion.hide()
@@ -176,17 +186,20 @@ internal fun MenuCard(
                 )
                 .padding(shadowMarginDp),
         ) {
-        Column(
+        Box(
             modifier = modifier
                 .popupCardSurface(containerColor, borderColor)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClick = {},
-                )
-                .padding(contentPadding),
-            content = content,
-        )
+                ),
+            propagateMinConstraints = true,
+        ) {
+            MenuRippleHost {
+                Column(Modifier.padding(contentPadding), content = content)
+            }
+        }
         }
     }
     Popup(
@@ -210,14 +223,11 @@ internal fun MenuItemRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 40.dp)
             .clip(MaterialTheme.shapes.small)
             .semantics { this.selected = selected }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = onClick,
-            )
-            .padding(vertical = 9.dp, horizontal = 4.dp),
+            .menuRippleClickable(onClick = onClick)
+            .padding(vertical = 5.dp, horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
@@ -251,6 +261,9 @@ internal fun MenuItemRow(
 @Composable
 internal fun LevelSlider(levelIndex: Int, levels: Int, onChange: (Int) -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val fillBrush = remember(scheme.primary) {
+        Brush.horizontalGradient(listOf(scheme.primary.copy(alpha = 0.55f), scheme.primary))
+    }
     val last = (levels - 1).coerceAtLeast(1)
     var width by remember { mutableStateOf(0) }
     val fraction = (levelIndex.toFloat() / last).coerceIn(0f, 1f)
@@ -294,9 +307,7 @@ internal fun LevelSlider(levelIndex: Int, levels: Int, onChange: (Int) -> Unit) 
             // progress bar rather than as a control that can be moved.
             val filled = (size.width * fraction).coerceAtLeast(trackHeight)
             drawRoundRect(
-                brush = Brush.horizontalGradient(
-                    listOf(scheme.primary.copy(alpha = 0.55f), scheme.primary),
-                ),
+                brush = fillBrush,
                 topLeft = Offset(0f, top),
                 size = Size(filled, trackHeight),
                 cornerRadius = radius,

@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -47,6 +48,7 @@ import com.suixing.agent.R
 import com.suixing.agent.ui.components.FlatPainterButton
 import com.suixing.agent.ui.components.LocalOpenSidebar
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.CompactMenuContentPadding
 import com.suixing.agent.ui.components.MenuItemRow
 import com.suixing.agent.ui.components.PressPill
 
@@ -167,8 +169,10 @@ internal fun ChatTopBar(
                 popupPositionProvider = belowCapsule,
                 // Narrow, fixed width: MenuItemRow uses fillMaxWidth(), so without this the
                 // card stretches to the popup window's full width.
-                modifier = Modifier.width(180.dp),
+                modifier = Modifier.width(168.dp),
                 focusable = false,
+                contentPadding = CompactMenuContentPadding,
+                compactMotion = true,
             ) {
                 MenuItemRow(
                     icon = ImageVector.vectorResource(R.drawable.ic_globe),

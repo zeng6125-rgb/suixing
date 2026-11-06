@@ -27,11 +27,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -99,6 +101,7 @@ import com.suixing.agent.terminal.splitTerminalOutput
 import com.suixing.agent.terminal.terminalSize
 import com.suixing.agent.ui.components.CircleActionButton
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.neutralRippleColor
 import com.suixing.agent.ui.components.suixingClickable
 import kotlinx.coroutines.launch
 
@@ -228,35 +231,38 @@ private fun KeyPill(label: String?, spoken: String, enabled: Boolean, active: Bo
     val scheme = MaterialTheme.colorScheme
     val shape = MaterialTheme.shapes.small
     val ink = if (enabled) scheme.onSurface else scheme.onSurfaceVariant.copy(alpha = 0.4f)
-    Row(
-        modifier = Modifier
-            .heightIn(min = KeyMinHeight)
-            .widthIn(min = 40.dp)
-            .clip(shape)
-            .background(if (active) scheme.primaryContainer else scheme.surface)
-            .suixingClickable(shape, enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-            .semantics { contentDescription = spoken },
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        if (label == null) {
-            Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.ic_keyboard),
-                contentDescription = null,
-                tint = ink,
-                modifier = Modifier.size(Glyph),
-            )
-        } else {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                ),
-                color = if (active) scheme.onPrimaryContainer else ink,
-                maxLines = 1,
-            )
+    // Key feedback stays neutral; the sticky modifier still uses its original selected background.
+    CompositionLocalProvider(LocalContentColor provides neutralRippleColor()) {
+        Row(
+            modifier = Modifier
+                .heightIn(min = KeyMinHeight)
+                .widthIn(min = 40.dp)
+                .clip(shape)
+                .background(if (active) scheme.primaryContainer else scheme.surface)
+                .suixingClickable(shape, enabled = enabled, role = Role.Button, onClick = onClick)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .semantics { contentDescription = spoken },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            if (label == null) {
+                Icon(
+                    imageVector = ImageVector.vectorResource(R.drawable.ic_keyboard),
+                    contentDescription = null,
+                    tint = ink,
+                    modifier = Modifier.size(Glyph),
+                )
+            } else {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                    ),
+                    color = if (active) scheme.onPrimaryContainer else ink,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }

@@ -40,6 +40,7 @@ import androidx.compose.ui.window.Popup
 import com.suixing.agent.R
 import com.suixing.agent.data.Conversation
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.CompactMenuContentPadding
 import com.suixing.agent.ui.components.CompletionDot
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -329,6 +330,8 @@ internal fun ConversationRow(
                 focusable = false,
                 // 与模型选择浮层同一底色（用户：把会话列表改成和模型列表一致）。
                 containerColor = MaterialTheme.colorScheme.surface,
+                contentPadding = CompactMenuContentPadding,
+                compactMotion = true,
             ) {
                 DrawerMenuAction("改名", iconRes = R.drawable.ic_square_pen, onClick = onRename)
                 DrawerMenuAction(
@@ -351,10 +354,10 @@ internal fun ConversationRow(
 }
 
 /** 抽屉长按菜单的面板宽度：锚点与面板同宽，菜单才贴着行的右缘弹出（见 ConversationRow）。 */
-private val DrawerMenuWidth = 200.dp
+private val DrawerMenuWidth = 168.dp
 
 /**
- * 面板高度：6 个 40dp 的项 + MenuCard 的上下各 14dp 内边距（项之间不再有外层 padding）。
+ * 面板高度：6 个 40dp 的项 + 上下各 6dp 内边距（项之间没有额外间隔）。
  * 只用来判断「下面还放得下吗」，放不下就朝上翻；项数改了这里要跟着改。
  */
-private val DrawerMenuHeight = 40.dp * 6 + 28.dp
+private val DrawerMenuHeight = 40.dp * 6 + 12.dp

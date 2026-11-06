@@ -122,11 +122,7 @@ fun AboutScreen(onBack: () -> Unit) {
             SuixingCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // 与桌面图标同一张脸（圆形版同一张品牌位图）。
-                    androidx.compose.foundation.Image(
-                        painter = androidx.compose.ui.res.painterResource(R.drawable.brand_mark),
-                        contentDescription = null,
-                        modifier = Modifier.size(44.dp),
-                    )
+                    com.suixing.agent.ui.components.SuixingMark(size = 44.dp, animateIdle = true)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text("JAgent", style = SettingsStyle.cardTitle)

@@ -20,6 +20,13 @@ class LiveTailAppendTest {
         val final = live.blocksFor(next, 3, 5).single() as MdBlock.Table
         assertEquals(parseMarkdown(next).single(), final)
         for (index in after.rows.indices) assertSame(after.rows[index], final.rows[index])
+        val completedSource = next + "\n| finished | row |\n"
+        val completed = live.blocksFor(completedSource, 4, 5).single() as MdBlock.Table
+        assertEquals(parseMarkdown(completedSource).single(), completed)
+        // Both results already reference the append-only prefix; a later completion
+        // must not grow their published row counts or replace their partial final row.
+        assertEquals(parseMarkdown(nextSource).single(), after)
+        assertEquals(parseMarkdown(next).single(), final)
         assertEquals(parseMarkdown(source).single(), before)
     }
 

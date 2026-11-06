@@ -60,6 +60,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -78,6 +79,7 @@ import com.suixing.agent.ui.assistant.AssistantAvatar
 import com.suixing.agent.ui.components.SettingsSwitch
 import com.suixing.agent.ui.components.SuixingDialog
 import com.suixing.agent.ui.components.SuixingMark
+import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.ui.drawer.drawerSections
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -351,7 +353,11 @@ internal fun Drawer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (drawerAssistant?.avatarPath.isNullOrBlank()) {
-                    SuixingMark(size = 30.dp)
+                    SuixingMark(
+                        size = 30.dp,
+                        running = runningAnimationActive && runningId.isNotEmpty(),
+                        animateIdle = runningAnimationActive,
+                    )
                 } else {
                     AssistantAvatar(assistant = drawerAssistant, size = 30.dp)
                 }
@@ -762,22 +768,13 @@ internal fun DrawerMenuAction(
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    // 缩进与「添加」弹层里那些行是**同一组数字**（`ui/chat/ChatComposer.kt:420-455` 的 MenuItemRow）：
-    // 行自己只留 4dp 左右内边距，其余空白全部由 MenuCard 自带的 18dp 提供。
-    // 左边距因此是 18 + 4 = 22dp。改之前那版是给 DropdownMenu 用的（它自带 12dp 留白）：
-    // 外层 8dp + 内层 16dp 叠成 42dp，用户看到的就是「项离左边太远」。外层 padding 已整层删掉。
-    // clip 与触感也照 MenuItemRow：shapes.small + ripple()（不再是整行胶囊），涟漪正好铺满可见形状。
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = onClick,
-            )
+            .menuRippleClickable(onClick = onClick)
             .height(40.dp)
-            .padding(horizontal = 4.dp),
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         iconRes?.let { res ->
@@ -818,10 +815,12 @@ internal fun RunningSpinner(modifier: Modifier = Modifier, animated: Boolean = t
         )
     } else null
     val arc = MaterialTheme.colorScheme.primary
+    val strokeWidth = with(LocalDensity.current) { 1.6.dp.toPx() }
+    val arcStyle = remember(strokeWidth) { Stroke(width = strokeWidth, cap = StrokeCap.Round) }
     Canvas(
         modifier = modifier.semantics { contentDescription = "正在运行" },
     ) {
-        val stroke = 1.6.dp.toPx()
+        val stroke = strokeWidth
         val diameter = size.minDimension
         // 内缩半个线宽，圆头端点才不会在 14dp 的盒子里被切掉。
         drawArc(
@@ -831,7 +830,7 @@ internal fun RunningSpinner(modifier: Modifier = Modifier, animated: Boolean = t
             useCenter = false,
             topLeft = Offset(stroke / 2f, stroke / 2f),
             size = Size(diameter - stroke, diameter - stroke),
-            style = Stroke(width = stroke, cap = StrokeCap.Round),
+            style = arcStyle,
         )
     }
 }

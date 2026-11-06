@@ -86,8 +86,12 @@ class Speaker(context: Context) {
 
     fun languageLabel(): String = _engineLabel.value
 
-    fun speak(text: String) {
-        val clean = cleanForSpeech(text)
+    fun speak(text: String) = speakPrepared(prepareText(text))
+
+    internal fun prepareText(text: String): String = cleanForSpeech(text)
+
+    /** Call after background preparation; enqueuing stays ordered with stop on the caller. */
+    internal fun speakPrepared(clean: String) {
         if (clean.isEmpty()) return
         synchronized(lock) {
             handler.removeCallbacks(idleRelease)

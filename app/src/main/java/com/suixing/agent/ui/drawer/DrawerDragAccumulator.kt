@@ -15,8 +15,11 @@ internal class DrawerDragAccumulator {
     private var active = false
     private var startProgress = 0f
     private var panelWidthPx = 1f
+    private var minOffsetPx = 0f
+    private var maxOffsetPx = 1f
     private var accumulatedPx = 0f
     private var latestProgress = 0f
+    private var cachedFrame: DrawerDragFrame? = null
 
     fun begin(progress: Float, widthPx: Float): Long {
         require(widthPx > 0f)
@@ -24,8 +27,11 @@ internal class DrawerDragAccumulator {
         active = true
         startProgress = progress.coerceIn(0f, 1f)
         panelWidthPx = widthPx
+        minOffsetPx = -startProgress * panelWidthPx
+        maxOffsetPx = (1f - startProgress) * panelWidthPx
         accumulatedPx = 0f
         latestProgress = startProgress
+        cachedFrame = null
         return generation
     }
 
@@ -35,15 +41,20 @@ internal class DrawerDragAccumulator {
      */
     fun dragBy(dragGeneration: Long, deltaPx: Float): Float? {
         if (!active || generation != dragGeneration) return null
-        val minOffsetPx = -startProgress * panelWidthPx
-        val maxOffsetPx = (1f - startProgress) * panelWidthPx
         accumulatedPx = (accumulatedPx + deltaPx).coerceIn(minOffsetPx, maxOffsetPx)
         latestProgress = startProgress + accumulatedPx / panelWidthPx
         return latestProgress
     }
 
-    fun frame(): DrawerDragFrame? =
-        if (active) DrawerDragFrame(generation, latestProgress) else null
+    fun frame(): DrawerDragFrame? {
+        if (!active) return null
+        val frame = cachedFrame
+        // Holding still can be sampled for many display frames without a new pointer position.
+        if (frame != null && frame.generation == generation &&
+            frame.progress.toRawBits() == latestProgress.toRawBits()
+        ) return frame
+        return DrawerDragFrame(generation, latestProgress).also { cachedFrame = it }
+    }
 
     fun canApply(frame: DrawerDragFrame): Boolean = active && frame.generation == generation
 
@@ -55,6 +66,7 @@ internal class DrawerDragAccumulator {
         if (!active || generation != dragGeneration) return false
         active = false
         generation++
+        cachedFrame = null
         return true
     }
 
@@ -66,6 +78,7 @@ internal class DrawerDragAccumulator {
         if (!active || generation != dragGeneration) return null
         active = false
         generation++
+        cachedFrame = null
         return DrawerDragRelease(generation, latestProgress)
     }
 }

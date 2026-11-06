@@ -20,8 +20,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import com.suixing.agent.ui.components.ActionMenu
+import com.suixing.agent.ui.components.ActionMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -228,11 +228,11 @@ fun ToolsScreen(onBack: () -> Unit) {
                             }
                             // A folder and a lone SKILL.md need different pickers, so the
                             // import button offers the choice instead of guessing.
-                            DropdownMenu(
+                            ActionMenu(
                                 expanded = skillImportMenu,
                                 onDismissRequest = { skillImportMenu = false },
                             ) {
-                                DropdownMenuItem(
+                                ActionMenuItem(
                                     text = { Text("选文件夹（批量）") },
                                     leadingIcon = {
                                         Icon(ImageVector.vectorResource(R.drawable.ic_folder_open), null, modifier = Modifier.size(20.dp))
@@ -242,7 +242,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                                         importer.launch(null)
                                     },
                                 )
-                                DropdownMenuItem(
+                                ActionMenuItem(
                                     text = { Text("选 .md 文件") },
                                     leadingIcon = {
                                         Icon(ImageVector.vectorResource(R.drawable.ic_file_text), null, modifier = Modifier.size(20.dp))
@@ -252,7 +252,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                                         fileImporter.launch(arrayOf("text/markdown", "text/plain", "*/*"))
                                     },
                                 )
-                                DropdownMenuItem(
+                                ActionMenuItem(
                                     text = { Text("从链接导入") },
                                     leadingIcon = {
                                         Icon(ImageVector.vectorResource(R.drawable.ic_download), null, modifier = Modifier.size(20.dp))

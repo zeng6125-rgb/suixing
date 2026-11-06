@@ -121,7 +121,7 @@ internal fun AddProviderDialog(onDismiss: () -> Unit, onAdd: (ProviderConfig) ->
                     Text("选择预设，或连接自己的网关", style = SettingsStyle.description,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     (providerTemplates + listOf<ProviderTemplate?>(null)).forEach { template ->
-                        Surface(
+                        com.suixing.agent.ui.components.MenuRippleSurface(
                             onClick = {
                                 name = template?.name.orEmpty()
                                 address = template?.baseUrl.orEmpty()
@@ -132,7 +132,7 @@ internal fun AddProviderDialog(onDismiss: () -> Unit, onAdd: (ProviderConfig) ->
                             shape = MaterialTheme.shapes.small,
                             color = androidx.compose.ui.graphics.Color.Transparent,
                         ) {
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically,
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 ProviderIdentity(template?.name.orEmpty())
                                 Column(Modifier.weight(1f)) {

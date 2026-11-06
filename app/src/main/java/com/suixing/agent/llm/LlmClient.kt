@@ -710,6 +710,8 @@ class LlmClient(http: OkHttpClient? = null) {
         private val text = StringBuilder()
         private val thinking = StringBuilder()
         private val calls = LinkedHashMap<Int, MutableToolCall>()
+        // Names are only replaced by non-blank values and never removed during this attempt.
+        private var hasNamedCalls = false
         /** Responses addresses its argument deltas by item id, not by list index. */
         private val callsByItem = HashMap<String, Int>()
 
@@ -753,7 +755,10 @@ class LlmClient(http: OkHttpClient? = null) {
             reserve((id?.length ?: 0) + (name?.length ?: 0) + (arguments?.length ?: 0))
             val call = calls.getOrPut(index) { MutableToolCall() }
             id?.takeIf { it.isNotBlank() }?.let { call.id = it }
-            name?.takeIf { it.isNotBlank() }?.let { call.name = it }
+            name?.takeIf { it.isNotBlank() }?.let {
+                call.name = it
+                hasNamedCalls = true
+            }
             arguments?.let { call.arguments.append(it) }
         }
 
@@ -841,7 +846,8 @@ class LlmClient(http: OkHttpClient? = null) {
                             name = block["name"].stringOrNull(),
                             // A tool with no parameters is announced as `{}` here rather than
                             // as deltas; keeping it means toTurn() has real arguments.
-                            arguments = block["input"]?.takeIf { it !is JsonNull && it.toString() != "{}" }?.toString(),
+                            arguments = block["input"]?.takeIf { it !is JsonNull }?.toString()
+                                ?.takeUnless { it == "{}" },
                         )
                     }
                     emitText(block["text"].stringOrNull(), onDelta)
@@ -917,7 +923,7 @@ class LlmClient(http: OkHttpClient? = null) {
                         ?.get("reason")).stringOrNull()
                     finishReason = if (incomplete != null) {
                         incomplete.toFinishReason()
-                    } else if (calls.values.any { it.name.isNotBlank() }) {
+                    } else if (hasToolCalls()) {
                         "tool_calls"
                     } else {
                         "stop"
@@ -953,7 +959,7 @@ class LlmClient(http: OkHttpClient? = null) {
         }
 
         /** Whether this attempt has asked for a tool yet — output the retry decision must count. */
-        fun hasToolCalls(): Boolean = calls.values.any { it.name.isNotBlank() }
+        fun hasToolCalls(): Boolean = hasNamedCalls
 
         fun toTurn(): AssistantTurn {
             // **一趟建表**（优化清单 llm-P2）：原来 `toSortedMap().values.filter{}.mapIndexed{}`
@@ -1621,7 +1627,12 @@ private fun JsonElement?.asText(): String? =
 private fun JsonElement?.textOf(): String? = when (this) {
     null -> null
     is JsonPrimitive -> contentOrNull
-    is JsonArray -> mapNotNull { it.textOf() }.joinToString("").ifEmpty { null }
+    is JsonArray -> {
+        val parts = this
+        buildString {
+            for (part in parts) part.textOf()?.let { append(it) }
+        }.ifEmpty { null }
+    }
     is JsonObject -> (this["text"] ?: this["thinking"] ?: this["content"]).textOf()
 }
 

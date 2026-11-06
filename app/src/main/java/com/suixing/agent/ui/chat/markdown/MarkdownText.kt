@@ -836,8 +836,8 @@ private data class MarkdownPalette(
     val codeFontSize: TextUnit,
 )
 
-// 原来这里还有两个 CompositionLocal（LocalGrowingMarkdown / LocalMarkdownBlockIndex），
-// 全仓**只 provide、从不 read** ⇒ 每块每次重组白付一层 provider 节点。已删。
+/** Keeps a visible prose block's incremental parse across the live-to-stored row handover. */
+internal val LocalRetainedLiveMarkdown = compositionLocalOf<LiveBlocks?> { null }
 
 @Composable
 fun MarkdownText(
@@ -874,7 +874,7 @@ fun MarkdownText(
     sourceId: Int = 0,
 ) {
     val blocks = rememberGrowingMarkdown(text, settled, appendFrom, sourceId)
-    MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor)
+    MarkdownBlocks(blocks, modifier, style, color, onUrlClick, cursor, growing = !settled)
 }
 
 /**
@@ -909,7 +909,7 @@ internal fun rememberGrowingMarkdown(
     // ambiguous block transitions fall back to the normal parser. Text measurement
     // and inline syntax in a formatted tail still have a growing-input cost.
     if (!settled) {
-        val live = remember { LiveBlocks() }
+        val live = LocalRetainedLiveMarkdown.current ?: remember { LiveBlocks() }
         return remember(text) { live.blocksFor(text, appendFrom, sourceId) }
     }
     // The live holder belongs only to the branch above. Settling forgets its source and
@@ -1273,6 +1273,8 @@ fun MarkdownBlocks(
     onUrlClick: ((String) -> Unit)? = null,
     /** The cursor belongs to the final block, including a code block or list. */
     cursor: Boolean = false,
+    /** Cache policy only: the active tail can grow even when no cursor is displayed. */
+    growing: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
     // **必须 remember**：之前这里每帧新建一个 MarkdownPalette，于是下面每个
@@ -1331,6 +1333,7 @@ fun MarkdownBlocks(
                         palette = palette,
                         onUrlClick = onUrlClick,
                         cursor = index == cursorAt,
+                        growing = growing && index == blocks.lastIndex,
                     )
                 }
             }
@@ -1380,6 +1383,7 @@ private fun MarkdownBlock(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
+    growing: Boolean = false,
 ) {
     when (block) {
         is MdBlock.Heading -> HeadingBlock(block, color, palette, onUrlClick, cursor)
@@ -1398,7 +1402,7 @@ private fun MarkdownBlock(
                 InlineText("", style, color, palette, onUrlClick, cursor = true)
             }
         }
-        is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick, cursor)
+        is MdBlock.Table -> TableBlock(block, style, color, palette, onUrlClick, cursor, growing)
     }
 }
 
@@ -1784,6 +1788,7 @@ private fun TableBlock(
     palette: MarkdownPalette,
     onUrlClick: ((String) -> Unit)?,
     cursor: Boolean = false,
+    growing: Boolean = false,
 ) {
     val readingKey = LocalReadingTextKey.current
     // Keep one current row snapshot for this keyed table block. Live parsers may publish a new
@@ -1813,6 +1818,7 @@ private fun TableBlock(
     // Capture only the cursor row, not the changing outer table snapshot. Updating the last
     // cell can then keep the row-content callback stable for all unchanged row wrappers.
     val cursorRow = if (cursor) tableRows.lastIndex else -1
+    val growingRow = if (growing && reusableRows.rows.isNotEmpty()) tableRows.lastIndex else -1
     MeasuredTable(
         rows = tableRows,
         headerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -1832,6 +1838,7 @@ private fun TableBlock(
             inlineCache = inlineCache,
             cursor = row == cursorRow,
             readingKey = readingKey?.let { if (row == 0) "$it:header" else "$it:row:${row - 1}" },
+            cacheLastCell = row != growingRow,
         )
     }
 }
@@ -1904,11 +1911,13 @@ private fun TableCells(
     inlineCache: TableInlineCache,
     cursor: Boolean = false,
     readingKey: String? = null,
+    cacheLastCell: Boolean = true,
 ) {
     cells.forEachIndexed { index, cell ->
         val caret = cursor && index == cells.lastIndex
-        val annotated = remember(cell, caret, inlineCache) {
-            inlineCache.getOrParse(cell, caret) {
+        val cacheable = cacheLastCell || index != cells.lastIndex
+        val annotated = remember(cell, caret, inlineCache, cacheable) {
+            inlineCache.getOrParse(cell, caret, cacheable) {
                 if (literalInlineSource(cell)) codeBlockAnnotatedText(cell, caret) else InlineScanner(
                     text = cell,
                     codeBackground = palette.codeBackground,

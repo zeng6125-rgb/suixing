@@ -898,6 +898,10 @@ internal class ReasoningViewport {
     private val tableChildren = HashMap<Int, ReasoningViewport>()
     fun table(index: Int): ReasoningViewport = tableChildren.getOrPut(index) { ReasoningViewport() }
     val prose = TextRevealState()
+    private var liveMarkdown: com.suixing.agent.ui.chat.markdown.LiveBlocks? = null
+    fun growingMarkdown(): com.suixing.agent.ui.chat.markdown.LiveBlocks =
+        liveMarkdown ?: com.suixing.agent.ui.chat.markdown.LiveBlocks().also { liveMarkdown = it }
+    fun releaseMarkdown() { liveMarkdown = null }
     val listState by lazy { LazyListState() }
     val scrollState by lazy { ScrollState(0) }
     var follow by mutableStateOf(true)
@@ -1863,7 +1867,7 @@ internal fun TurnSummary(
                         // column's 8dp keeps it off its neighbours.
                         // This prose already appeared in the flat tail. Reparenting
                         // it here must never replay its typewriter from an empty string.
-                        is Part.Text -> AssistantProse(part, streaming,
+                        is Part.Text -> AssistantProse(part, streaming, deferSettlement = deferredCompletion,
                             readingKey = "$runId:text:$index",
                             viewport = reasoningExpansion.viewport("$runId:text:$index"))
 

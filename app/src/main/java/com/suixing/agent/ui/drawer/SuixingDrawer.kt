@@ -16,12 +16,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -39,6 +37,7 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -103,7 +102,7 @@ internal fun drawerHomeShieldStartPx(panelWidthPx: Float, progress: Float): Floa
  * App 改不了。这里改用 `Animatable` + `detectHorizontalDragGestures`，
  * 回弹曲线由 [animateTo] 的调用方传入（与汉堡键同一条 `DRAWER_*_SPEC`，210ms）。
  *
- * 语义与 `DrawerState` 对齐的部分：`offset`（关闭 = −面板宽，打开 = 0）与 `isOpen`。
+ * `isOpen` 表示已停靠端点；所有可见层与命中遮罩共用 [visualProgress]。
  */
 @Stable
 internal class SuixingDrawerState(initialValue: DrawerValue) {
@@ -111,11 +110,8 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
     /** 0 = 关闭，1 = 完全打开。 */
     internal val progress = Animatable(if (initialValue == DrawerValue.Open) 1f else 0f)
 
-    /** 面板宽度（px），由 [SuixingDrawer] 在每帧同步。 */
-    internal var panelWidthPx by mutableFloatStateOf(1f)
-
-    /** 与 `DrawerState.offset` 同义：关闭 = −面板宽，打开 = 0。布局/绘制期读它不会触发重组。 */
-    val offset: State<Float> = derivedStateOf { -panelWidthPx * (1f - progress.value) }
+    /** One bounded progress for the panel, home transform, background and input shield. */
+    val visualProgress: State<Float> = derivedStateOf { progress.value.coerceIn(0f, 1f) }
 
     /**
      * **只在动画结束时翻转**（不是每帧读 [progress]）。
@@ -329,15 +325,20 @@ internal suspend fun runDrawerDragFrameLoop(
     sessions.collectLatest { session ->
         if (session == null) return@collectLatest
         var firstSample = true
+        var lastAppliedProgress = Float.NaN
         while (isActive(session)) {
             if (!firstSample) awaitFrame()
             firstSample = false
+            if (!isActive(session)) break
             val frame = dragAccumulator.frame()
             if (frame == null || !dragAccumulator.canApply(frame)) {
                 awaitFrame()
                 continue
             }
-            applyFrame(session, frame.progress)
+            if (frame.progress != lastAppliedProgress) {
+                applyFrame(session, frame.progress)
+                lastAppliedProgress = frame.progress
+            }
         }
     }
 }
@@ -356,7 +357,7 @@ internal fun rememberSuixingDrawerState(
  *  · 冻结层 = `awaitEachGesture` 全消费：抽屉开着时竖滑也必须吞掉（挡列表滚动），
  *    轻点算"点遮罩"。消费语义相反，合并必然破坏其中一边。
  *
- * 抽屉面板在绘制层平移；主页自己读 `state.offset` 做变换。
+ * 抽屉面板和主页在绘制层读同一个 `state.visualProgress` 做变换。
  */
 @Composable
 internal fun SuixingDrawer(
@@ -366,9 +367,6 @@ internal fun SuixingDrawer(
     content: @Composable () -> Unit,
 ) {
     val panelPx = with(LocalDensity.current) { DRAWER_SHEET_WIDTH.dp.toPx() }
-    // 等值守卫：SideEffect 每次重组都跑，值没变就别碰状态（FloatState 同值写入无开销，
-    // 但省掉这次调用让重组路径上少一次分支）。
-    SideEffect { if (state.panelWidthPx != panelPx) state.panelWidthPx = panelPx }
 
     // Pointer callbacks only update this accumulator. One frame consumer samples its latest
     // target, so high-rate input cannot queue one Animatable mutation per event.
@@ -392,7 +390,7 @@ internal fun SuixingDrawer(
     val settle: (DrawerGestureSession, DrawerValue, Float, DrawerDragRelease) -> Unit =
         remember(scope, state, panelPx) {
             { session, target, velocityPx, releaseProgress ->
-                scope.launch {
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
                     // The frame pump may not have consumed the final pointer update yet. The
                     // session check covers both that queued frame and a newer drag/external close.
                     if (!dragAccumulator.canSettle(releaseProgress) ||
@@ -496,7 +494,7 @@ internal fun SuixingDrawer(
                 .width(DRAWER_SHEET_WIDTH.dp)
                 .fillMaxHeight()
                 .graphicsLayer {
-                    translationX = -panelPx * (1f - state.progress.value)
+                    translationX = -panelPx * (1f - state.visualProgress.value)
                 },
         ) {
             drawerContent()
@@ -524,7 +522,7 @@ internal fun SuixingDrawer(
                     .fillMaxSize()
                     .offset {
                         IntOffset(
-                            drawerHomeShieldStartPx(panelPx, state.progress.value).roundToInt(),
+                            drawerHomeShieldStartPx(panelPx, state.visualProgress.value).roundToInt(),
                             0,
                         )
                     }
@@ -551,7 +549,7 @@ internal fun SuixingDrawer(
                                         change.consume()
                                         if (!isDrag) {
                                             // **轻点 = 点遮罩**：外部状态动作优先，作废旧拖拽。
-                                            scope.launch {
+                                            scope.launch(start = CoroutineStart.UNDISPATCHED) {
                                                 state.animateTo(DrawerValue.Closed, DRAWER_CLOSE_SPEC)
                                             }
                                         } else {

@@ -357,12 +357,16 @@ class DrawerGestureInteractionTest {
             val first = state.beginGesture()
             val firstGeneration = accumulator.begin(progress = 0.1f, widthPx = 200f)
             accumulator.dragBy(firstGeneration, 20f)
+            var appliedFrames = 0
             val pump = scope.launch {
                 runDrawerDragFrameLoop(
                     sessions = snapshotFlow { state.gestureSession },
                     dragAccumulator = accumulator,
                     isActive = state::isGestureActive,
-                    applyFrame = state::applyGestureFrame,
+                    applyFrame = { session, progress ->
+                        appliedFrames++
+                        state.applyGestureFrame(session, progress)
+                    },
                     awaitFrame = {
                         Snapshot.sendApplyNotifications()
                         yield()
@@ -371,6 +375,7 @@ class DrawerGestureInteractionTest {
             }
             repeat(12) { yield() }
             assertEquals(0.2f, state.progress.value, 0.0001f)
+            assertEquals("a stationary pointer must not repeat Animatable mutations", 1, appliedFrames)
 
             val second = state.beginGesture()
             val secondGeneration = accumulator.begin(progress = 0.2f, widthPx = 200f)
@@ -378,6 +383,7 @@ class DrawerGestureInteractionTest {
             Snapshot.sendApplyNotifications()
             repeat(12) { yield() }
             assertEquals(secondProgress, state.progress.value, 0.0001f)
+            assertEquals(2, appliedFrames)
 
             assertTrue(state.finishGesture(second))
             Snapshot.sendApplyNotifications()

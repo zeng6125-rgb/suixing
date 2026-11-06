@@ -5,6 +5,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -61,6 +62,8 @@ import com.suixing.agent.ui.chat.popupCap
 import com.suixing.agent.ui.chat.reasoningWire
 import com.suixing.agent.ui.components.LevelSlider
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.CompactMenuContentPadding
+import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.ui.components.REASONING_LEVELS
 import kotlinx.coroutines.delay
 
@@ -264,15 +267,13 @@ internal fun GenerationSheet(
         // composer falls by the keyboard's height under a card anchored to where it used to
         // be. See [MenuCard]'s focusable and the scrim in [Composer].
         focusable = false,
-        // One width per page. Page one is one model name and one slider, and 340dp is 94% of a
-        // 360dp screen — at that width the card read as a full-width panel rather than as
-        // something hanging off the button that opened it, so page one keeps 300dp (content
-        // 264dp after MenuCard's own 18dp padding either side). The list page is the one that
-        // needs the room: its provider and vendor headings are single names the user is reading
-        // to find a model, and 264dp of content cut the long ones at the card's edge. The 340dp
-        // that first fixed this is back, but only while the list is up.
+        // The first page caps at 300dp; the model list keeps 340dp for long provider/model names.
+        // Both retain the same anchor while using padding suited to their content.
         modifier = Modifier
             .widthIn(max = popupCap(if (picking) 340.dp else 300.dp, windowWidth)),
+        contentPadding = if (picking) CompactMenuContentPadding
+            else PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+        compactMotion = true,
     ) {
         if (!picking) {
             // Page one: one big name to tap, one slider to drag, nothing else.
@@ -293,10 +294,7 @@ internal fun GenerationSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(MaterialTheme.shapes.small)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = ripple(),
-                    ) { picking = true }
+                    .menuRippleClickable { picking = true }
                     .padding(vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -383,10 +381,7 @@ internal fun GenerationSheet(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(MaterialTheme.shapes.small)
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = ripple(),
-                                    ) { folded[owner.id] = open }
+                                    .menuRippleClickable { folded[owner.id] = open }
                                     // 4dp of side air, not none: this row clips itself to
                                     // shapes.small for its ripple, and a label sitting flush against
                                     // that edge had the descender of a name like "qwen" cut by the
@@ -462,10 +457,7 @@ internal fun GenerationSheet(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(MaterialTheme.shapes.small)
-                                        .clickable(
-                                            interactionSource = remember { MutableInteractionSource() },
-                                            indication = ripple(),
-                                        ) { onPickModel(owner, id) }
+                                        .menuRippleClickable { onPickModel(owner, id) }
                                         .padding(vertical = 8.dp, horizontal = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {

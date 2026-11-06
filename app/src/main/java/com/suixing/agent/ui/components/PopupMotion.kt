@@ -15,18 +15,23 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 /** Independent opacity keeps the card readable while its small spatial motion settles. */
-internal class PopupMotionState {
+internal class PopupMotionState(private val compact: Boolean = false) {
     val progress = Animatable(0f)
     val opacity = Animatable(0f)
+    private val enterOpacity = tween<Float>(if (compact) 90 else 100)
+    private val enterProgress = spring<Float>(
+        dampingRatio = if (compact) 1f else 0.9f,
+        stiffness = if (compact) 1000f else 850f,
+    )
 
     suspend fun show() = coroutineScope {
         // Make text readable first, then settle with a short, restrained spatial tail.
-        launch { opacity.animateTo(1f, tween(100)) }
-        progress.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 850f))
+        launch { opacity.animateTo(1f, enterOpacity) }
+        progress.animateTo(1f, enterProgress)
     }
 
-    suspend fun hide(durationMs: Int = POPUP_ANIM_MS) = coroutineScope {
-        launch { opacity.animateTo(0f, tween(durationMs.coerceAtMost(100))) }
+    suspend fun hide(durationMs: Int = if (compact) 90 else POPUP_ANIM_MS) = coroutineScope {
+        launch { opacity.animateTo(0f, tween(durationMs.coerceAtMost(if (compact) 90 else 100))) }
         progress.animateTo(0f, tween(durationMs, easing = FastOutLinearInEasing))
     }
 }

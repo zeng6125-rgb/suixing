@@ -96,6 +96,10 @@ private const val FX_TRAIL_STROKE_DP = 1.5f
 private const val FX_HALO_WIDTH_FRACTION = 0.046f
 private const val FX_HALO_BANDS = 16
 private const val FX_HALO_FALLOFF = 1.55f
+// Each band's falloff is constant; only the overall alpha changes during drawing.
+private val FX_HALO_LEVELS = FloatArray(FX_HALO_BANDS) { band ->
+    (1f - band / FX_HALO_BANDS.toFloat()).pow(FX_HALO_FALLOFF)
+}
 
 /**
  * Ceiling for the band above, in dp.
@@ -1341,6 +1345,7 @@ private class FxView(
     private var rainbowShader: SweepGradient? = null
     private val rainbowRect = RectF()
     private val rainbowMatrix = Matrix()
+    private var rainbowAppliedAt = Long.MIN_VALUE
 
     /** 回合是否亮着，由 [TouchFx] 的回合状态机开关 —— 是状态，不是有固定时长的动画。 */
     /** Where the light is heading (see [setTarget]); [drawnAlpha] chases it frame by frame. */
@@ -1602,8 +1607,7 @@ private class FxView(
         // 几何已在上面刷新，这里读到的 `edgeRect` 一定是本次屏幕尺寸对应的那个。
         glowPaint.shader = rainbow(edgeRect, now)
         for (band in 0 until FX_HALO_BANDS) {
-            val startT = band / FX_HALO_BANDS.toFloat()
-            val level = ((1f - startT).pow(FX_HALO_FALLOFF) * alpha * 255f).toInt().coerceIn(0, 255)
+            val level = (FX_HALO_LEVELS[band] * alpha * 255f).toInt().coerceIn(0, 255)
             if (level <= 0) continue
             val path = haloBandCache[band] ?: continue
             glowPaint.alpha = level
@@ -1654,10 +1658,15 @@ private class FxView(
             shader = SweepGradient(rect.centerX(), rect.centerY(), FX_RAINBOW, null)
             rainbowShader = shader
             rainbowRect.set(rect)
+            rainbowAppliedAt = Long.MIN_VALUE
         }
-        val degrees = (now % FX_HUE_PERIOD_MS).toFloat() / FX_HUE_PERIOD_MS * 360f
-        rainbowMatrix.setRotate(degrees, rect.centerX(), rect.centerY())
-        shader.setLocalMatrix(rainbowMatrix)
+        // The state glow and gesture flash share the same shader and timestamp in one draw.
+        if (rainbowAppliedAt != now) {
+            val degrees = (now % FX_HUE_PERIOD_MS).toFloat() / FX_HUE_PERIOD_MS * 360f
+            rainbowMatrix.setRotate(degrees, rect.centerX(), rect.centerY())
+            shader.setLocalMatrix(rainbowMatrix)
+            rainbowAppliedAt = now
+        }
         return shader
     }
 

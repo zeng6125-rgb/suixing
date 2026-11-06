@@ -246,11 +246,15 @@ internal fun readingCharacterOffset(text: String, offset: Int, sample: String): 
     if (sample.isNotEmpty()) {
         if (offset >= 0 && text.regionMatches(offset, sample, 0, sample.length)) return offset
         val from = (offset - 256).coerceAtLeast(0).coerceAtMost(text.length)
-        var found = text.indexOf(sample, from)
+        val lastStart = minOf(offset + 256, text.length - sample.length)
         var closest = -1
-        while (found >= 0 && found <= offset + 256) {
-            if (closest < 0 || abs(found - offset) < abs(closest - offset)) closest = found
-            found = text.indexOf(sample, found + 1)
+        // The match's start is restricted to this window. An unbounded indexOf would
+        // still scan the entire remaining reply when a nearby sample no longer exists.
+        for (candidate in from..lastStart) {
+            if (text.regionMatches(candidate, sample, 0, sample.length) &&
+                (closest < 0 || abs(candidate - offset) < abs(closest - offset))) {
+                closest = candidate
+            }
         }
         if (closest >= 0) return closest
     }

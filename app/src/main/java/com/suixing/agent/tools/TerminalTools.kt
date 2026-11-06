@@ -41,6 +41,7 @@ internal class TerminalTools(private val managerProvider: () -> TerminalSessionM
                         put("session_id", entry.info.id); put("environment", entry.info.kind)
                         put("shell", entry.info.shell); put("cwd", entry.info.cwd)
                         put("identity", "Android App UID"); put("state", entry.info.phase)
+                        entry.info.note?.let { put("startup_note", it) }
                     }.toString())
                 }
                 "terminal_list" -> ToolResult.success(JsonArray(manager.forCaller(caller).map { entry ->

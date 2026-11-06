@@ -9,16 +9,25 @@ internal class TerminalUtf8Decoder {
     private val decoder = Charsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPLACE)
         .onUnmappableCharacter(CodingErrorAction.REPLACE)
-    private var pending = ByteArray(0)
+    private var pending = EMPTY_BYTES
+    private var output = CharBuffer.allocate(0)
 
     fun decode(bytes: ByteArray, end: Boolean = false): String {
-        val input = ByteBuffer.wrap(pending + bytes)
-        val output = CharBuffer.allocate(input.remaining() + 2)
+        val input = ByteBuffer.wrap(if (pending.isEmpty()) bytes else pending + bytes)
+        val requiredChars = input.remaining() + 2
+        if (output.capacity() < requiredChars) output = CharBuffer.allocate(requiredChars)
+        output.clear()
+        // Preserve a fresh buffer's logical size when reusing a larger backing array.
+        output.limit(requiredChars)
         decoder.decode(input, output, end)
-        pending = ByteArray(input.remaining()).also { input.get(it) }
+        pending = if (input.hasRemaining()) ByteArray(input.remaining()).also { input.get(it) } else EMPTY_BYTES
         if (end) decoder.flush(output)
         output.flip()
         return output.toString()
+    }
+
+    private companion object {
+        val EMPTY_BYTES = ByteArray(0)
     }
 }
 
@@ -58,6 +67,8 @@ internal class TerminalOutputRing(private val limit: Int = 256 * 1024) {
                 bytes += size
                 start -= Character.charCount(cp)
             }
+            // The reverse scan already selected the complete tail within this byte budget.
+            return TerminalRead(text.substring(start), base + text.length, base > 0 || start > 0)
         } else if (start < text.length && Character.isLowSurrogate(text[start])) start++
         var stop = start
         var bytes = 0
@@ -68,8 +79,7 @@ internal class TerminalOutputRing(private val limit: Int = 256 * 1024) {
             bytes += size
             stop += Character.charCount(cp)
         }
-        return TerminalRead(text.substring(start, stop), base + stop,
-            if (cursor == null) base > 0 || start > 0 else cursor < base)
+        return TerminalRead(text.substring(start, stop), base + stop, cursor < base)
     }
 
     private fun utf8Size(cp: Int): Int = when {

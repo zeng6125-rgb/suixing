@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -119,8 +120,10 @@ import com.suixing.agent.R
 import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.chat.GenerationSheet
 import com.suixing.agent.ui.components.MenuCard
+import com.suixing.agent.ui.components.CompactMenuContentPadding
 import com.suixing.agent.ui.components.MENU_EXIT_MS
 import com.suixing.agent.ui.components.MenuItemRow
+import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.Goal
@@ -1437,8 +1440,10 @@ internal fun Composer(
                                 // composer out from under it.
                                 focusable = false,
                                 modifier = Modifier
-                                    .widthIn(max = popupCap(200.dp, windowWidth))
+                                    .widthIn(max = popupCap(180.dp, windowWidth))
                                     .onSizeChanged { plusWidth = it.width },
+                                contentPadding = CompactMenuContentPadding,
+                                compactMotion = true,
                             ) {
                                 MenuItemRow(
                                     icon = ImageVector.vectorResource(R.drawable.ic_image),
@@ -1541,8 +1546,10 @@ internal fun Composer(
                                 },
                                 focusable = false,
                                 modifier = Modifier
-                                    .widthIn(max = popupCap(220.dp, windowWidth))
+                                    .widthIn(max = popupCap(180.dp, windowWidth))
                                     .onSizeChanged { approvalWidth = it.width },
+                                contentPadding = CompactMenuContentPadding,
+                                compactMotion = true,
                             ) {
                                 ApprovalMode.entries.forEach { mode ->
                                     MenuItemRow(
@@ -1909,6 +1916,7 @@ private fun SlashSuggestionList(
         border = BorderStroke(1.dp, scheme.outlineVariant),
     ) {
         val transition = updateTransition(items, label = "slash-suggestions")
+        com.suixing.agent.ui.components.MenuRippleHost {
         AnimatedSlashSuggestions(transition, interactive) { shown, enabled ->
             Column(Modifier
                 .then(if (enabled) Modifier else Modifier.clearAndSetSemantics { })
@@ -1919,7 +1927,7 @@ private fun SlashSuggestionList(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = enabled) { onPick(name) }
+                            .menuRippleClickable(enabled = enabled) { onPick(name) }
                             .padding(horizontal = 12.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -1942,6 +1950,7 @@ private fun SlashSuggestionList(
                     }
                 }
             }
+        }
         }
     }
 }

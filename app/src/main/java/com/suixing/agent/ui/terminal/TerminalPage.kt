@@ -1,35 +1,38 @@
 package com.suixing.agent.ui.terminal
 
-import android.content.Context
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.suixing.agent.core.Core
 import com.suixing.agent.terminal.*
+import com.suixing.agent.ui.components.ActionMenu
+import com.suixing.agent.ui.components.ActionMenuItem
+import com.suixing.agent.ui.components.MenuRippleHost
+import com.suixing.agent.ui.components.MenuRippleTextButton
+import com.suixing.agent.ui.components.menuRippleClickable
 import com.suixing.agent.ui.components.PageTopBar
 import com.termux.terminal.TextStyle
 import com.termux.view.TerminalView
@@ -47,34 +50,66 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
     var error by remember { mutableStateOf<String?>(null) }
     var environments by remember { mutableStateOf(false) }
     var newSession by remember { mutableStateOf(false) }
+    var sessions by remember { mutableStateOf(false) }
     var closing by remember { mutableStateOf<TerminalEntry?>(null) }
+    var preparing by remember { mutableStateOf(true) }
     val current = entries.firstOrNull { it.info.id == selected } ?: entries.lastOrNull()
+    fun select(entry: TerminalEntry) {
+        selected = entry.info.id
+        manager.selectedId = selected
+        error = null
+    }
     fun open(kind: String) {
         scope.launch {
             runCatching { manager.open(kind) }.onSuccess {
-                selected = it.info.id
-                error = null
+                select(it)
             }.onFailure { error = it.message }
+        }
+    }
+    fun remove(entry: TerminalEntry) {
+        val removingCurrent = current?.info?.id == entry.info.id
+        scope.launch {
+            runCatching { manager.remove(entry.info.id) }
+                .onSuccess {
+                    if (removingCurrent) {
+                        selected = manager.entries.value.lastOrNull()?.info?.id
+                        manager.selectedId = selected
+                    }
+                }
+                .onFailure { error = it.message }
         }
     }
     LaunchedEffect(manager) {
         manager.load()
         Core.linux.load()
+        preparing = false
         if (manager.entries.value.isEmpty()) open("android")
     }
     BackHandler(onBack = onBack)
     if (newSession) AlertDialog(
         onDismissRequest = { newSession = false }, title = { Text("新建终端会话") },
         text = {
+            MenuRippleHost(horizontalOverflow = 24.dp) {
             Column {
                 Text("最多同时运行 4 个会话，退出页面后继续保留。", style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = { newSession = false; open("android") }) { Text("Android · 应用身份") }
-                for (distro in LINUX_DISTRIBUTIONS) TextButton(onClick = {
+                MenuRippleTextButton(onClick = { newSession = false; open("android") }) { Text("Android · 应用身份") }
+                for (distro in LINUX_DISTRIBUTIONS) MenuRippleTextButton(onClick = {
                     newSession = false
                     if (Core.linux.states.value[distro.id]?.available == true) open(distro.id) else environments = true
                 }) { Text(distro.title + " Linux") }
             }
+            }
         }, confirmButton = { TextButton(onClick = { newSession = false }) { Text("取消") } },
+    )
+    if (sessions) TerminalSessionsDialog(
+        entries = entries,
+        selectedId = current?.info?.id,
+        onSelect = { select(it); sessions = false },
+        onStop = { sessions = false; closing = it },
+        onRemove = { remove(it) },
+        onNew = { sessions = false; newSession = true },
+        onEnvironments = { sessions = false; environments = true },
+        onDismiss = { sessions = false },
     )
     if (environments) LinuxEnvironmentsDialog(
         onDismiss = { environments = false },
@@ -84,7 +119,7 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
             scope.launch {
                 runCatching {
                     val entry = manager.open(distro.id)
-                    selected = entry.info.id
+                    select(entry)
                     entry.session!!.write(distro.toolsCommand + "\r")
                 }.onFailure { error = it.message }
             }
@@ -99,35 +134,28 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
             }) { Text("停止") } },
             dismissButton = { TextButton(onClick = { closing = null }) { Text("取消") } })
     }
-    Scaffold(topBar = { PageTopBar(title = "终端", onBack = onBack) },
+    Scaffold(topBar = { PageTopBar(title = "终端", onBack = onBack,
+        actions = { TextButton(onClick = { sessions = true }) { Text("会话 · ${entries.size}") } }) },
         containerColor = MaterialTheme.colorScheme.background) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("应用身份", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-                TextButton(onClick = { environments = true }) { Text("Linux 环境") }
-                TextButton(onClick = { newSession = true }) { Text("＋ 新建") }
-            }
-            if (entries.size > 1) LazyRow(Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp)) {
-                items(entries, key = { it.info.id }) { entry ->
-                    TextButton(onClick = { selected = entry.info.id; manager.selectedId = selected }) {
-                        Text(entry.info.name + if (entry.info.phase == "running") " ·" else " · 已结束",
-                            color = if (entry == current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp)) }
             warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp)) }
             when {
                 current == null -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopStart) {
-                    Text("正在准备终端…", modifier = Modifier.padding(12.dp))
+                    Column(Modifier.padding(12.dp)) {
+                        Text(if (preparing) "正在准备终端…" else "暂无终端会话")
+                        if (!preparing) TextButton(onClick = { newSession = true }) { Text("新建会话") }
+                    }
                 }
                 current.session != null -> key(current.info.id) {
-                    TerminalContent(current, chatId, onStop = { closing = current }, modifier = Modifier.weight(1f))
+                    TerminalContent(current, "会话 ${entries.indexOf(current) + 1} · ${current.info.name}", chatId,
+                        onStop = { closing = current },
+                        onRemove = { remove(current) }, onError = { error = it }, modifier = Modifier.weight(1f))
                 }
                 else -> Column(Modifier.weight(1f).padding(12.dp)) {
                     Text(current.info.note ?: "会话已结束，请新建会话。")
-                    TextButton(onClick = { scope.launch { manager.remove(current.info.id) } }) { Text("移除记录") }
+                    TextButton(onClick = { remove(current) }) { Text("移除记录") }
                 }
             }
         }
@@ -135,7 +163,60 @@ fun TerminalScreen(onBack: () -> Unit, chatId: String = "") {
 }
 
 @Composable
-private fun TerminalContent(entry: TerminalEntry, chatId: String, onStop: () -> Unit, modifier: Modifier) {
+private fun TerminalSessionsDialog(
+    entries: List<TerminalEntry>, selectedId: String?, onSelect: (TerminalEntry) -> Unit,
+    onStop: (TerminalEntry) -> Unit, onRemove: (TerminalEntry) -> Unit,
+    onNew: () -> Unit, onEnvironments: () -> Unit, onDismiss: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("终端会话") },
+        text = {
+            MenuRippleHost(horizontalOverflow = 24.dp) {
+            Column {
+                if (entries.isEmpty()) Text("暂无会话", style = MaterialTheme.typography.bodyMedium)
+                else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 400.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    itemsIndexed(entries, key = { _, entry -> entry.info.id }) { index, entry ->
+                        val selected = entry.info.id == selectedId
+                        val running = entry.info.phase == "running"
+                        Row(Modifier.fillMaxWidth()
+                            .background(if (selected) scheme.primaryContainer else scheme.surface, MaterialTheme.shapes.small)
+                            .semantics { this.selected = selected }
+                            .clip(MaterialTheme.shapes.small)
+                            .menuRippleClickable { onSelect(entry) }
+                            .padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("会话 ${index + 1} · ${entry.info.name}", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.titleSmall)
+                                Text((if (selected) "当前 · " else "") + when (entry.info.phase) {
+                                    "running" -> "运行中"
+                                    "interrupted" -> "已断开"
+                                    else -> "已结束"
+                                }, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
+                            }
+                            if (running) MenuRippleTextButton(onClick = { onStop(entry) }) { Text("停止") }
+                            else MenuRippleTextButton(onClick = { onRemove(entry) }) { Text("移除") }
+                        }
+                    }
+                }
+            }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onEnvironments) { Text("Linux 环境") }
+                TextButton(onClick = onNew) { Text("新建") }
+            }
+        })
+}
+
+@Composable
+private fun TerminalContent(
+    entry: TerminalEntry, title: String, chatId: String, onStop: () -> Unit, onRemove: () -> Unit,
+    onError: (String) -> Unit, modifier: Modifier,
+) {
     val session = entry.session!!
     val status by session.status.collectAsStateWithLifecycle()
     val ended by session.ended.collectAsStateWithLifecycle()
@@ -148,10 +229,17 @@ private fun TerminalContent(entry: TerminalEntry, chatId: String, onStop: () -> 
     var view by remember { mutableStateOf<TerminalView?>(null) }
     var paste by remember { mutableStateOf<String?>(null) }
     var logEnabled by remember { mutableStateOf(session.log.enabled) }
+    var menu by remember { mutableStateOf(false) }
+    var details by remember { mutableStateOf(false) }
     fun keyboard() {
-        if (running) view?.let {
-            it.requestFocus()
-            context.getSystemService(InputMethodManager::class.java).showSoftInput(it, InputMethodManager.SHOW_IMPLICIT)
+        if (running) view?.let { terminal ->
+            // Run after a toolbar/menu click has returned focus to the native editor.
+            terminal.post {
+                if (terminal.isAttachedToWindow && terminal.requestFocus()) {
+                    context.getSystemService(InputMethodManager::class.java)
+                        .showSoftInput(terminal, InputMethodManager.SHOW_IMPLICIT)
+                }
+            }
         }
     }
     fun requestPaste() {
@@ -188,34 +276,63 @@ private fun TerminalContent(entry: TerminalEntry, chatId: String, onStop: () -> 
             }) { Text("确认粘贴") } },
             dismissButton = { TextButton(onClick = { paste = null }) { Text("取消") } })
     }
+    if (details) AlertDialog(onDismissRequest = { details = false }, title = { Text("会话信息") },
+        text = { SelectionContainer {
+            Text(listOfNotNull(
+                if (entry.info.kind == "android") "Android · 应用身份" else "Linux · 模拟 root",
+                "Shell：${session.shell}", "PID：${session.pid}",
+                if (entry.info.kind == "android") session.cwd else "/workspace → ${session.cwd}",
+                entry.info.note?.let { "启动说明：$it" },
+            ).joinToString("\n"), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+        } }, confirmButton = { TextButton(onClick = { details = false }) { Text("完成") } })
     Column(modifier.fillMaxWidth()) {
-        val kind = if (entry.info.kind == "android") "Android" else "Linux · 模拟 root"
-        Text(kind + " · " + session.shell + " · PID " + session.pid, style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 12.dp))
-        Text(if (entry.info.kind == "android") session.cwd else "/workspace → " + session.cwd,
-            fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall, maxLines = 1,
-            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 12.dp))
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { scope.launch {
-                clipboard.setText(AnnotatedString(session.transcript()))
-                Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
-            } }) { Text("复制") }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, style = MaterialTheme.typography.labelMedium, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             TextButton(enabled = running, onClick = { requestPaste() }) { Text("粘贴") }
-            TextButton(enabled = running, onClick = { session.takeOver(); scope.launch { session.interrupt() } }) { Text("中断") }
-            TextButton(onClick = { session.clearOutput() }) { Text("清屏") }
-            TextButton(enabled = running, onClick = onStop) { Text("停止") }
-            TextButton(onClick = {
-                val enable = !logEnabled
+            TextButton(enabled = running, onClick = {
+                session.takeOver()
                 scope.launch {
-                    withContext(Dispatchers.IO) { session.log.setEnabled(enable) }
-                    logEnabled = session.log.enabled
+                    runCatching { session.interrupt() }.onFailure { onError(it.message ?: "中断失败") }
                 }
-            }) { Text(if (logEnabled) "日志：开" else "日志：关") }
-            TextButton(onClick = {
-                scope.launch { withContext(Dispatchers.IO) { session.log.clear() }; logEnabled = false }
-            }) { Text("清除日志") }
+            }) { Text("中断") }
+            Box {
+                TextButton(onClick = { menu = true }) { Text("更多") }
+                ActionMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    ActionMenuItem(text = { Text("复制全部输出") }, onClick = {
+                        menu = false
+                        scope.launch {
+                            clipboard.setText(AnnotatedString(session.transcript()))
+                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                        }
+                    })
+                    ActionMenuItem(text = { Text("清屏") }, onClick = { menu = false; session.clearOutput() })
+                    TerminalControlMenu(session, chatId) { menu = false }
+                    ActionMenuItem(text = { Text(if (logEnabled) "关闭日志" else "开启日志") }, onClick = {
+                        menu = false
+                        val enable = !logEnabled
+                        scope.launch {
+                            runCatching { withContext(Dispatchers.IO) { session.log.setEnabled(enable) } }
+                                .onSuccess { logEnabled = session.log.enabled }
+                                .onFailure { onError(it.message ?: "无法切换日志") }
+                        }
+                    })
+                    ActionMenuItem(text = { Text("清除日志") }, onClick = {
+                        menu = false
+                        scope.launch {
+                            runCatching { withContext(Dispatchers.IO) { session.log.clear() } }
+                                .onSuccess { logEnabled = false }
+                                .onFailure { onError(it.message ?: "无法清除日志") }
+                        }
+                    })
+                    ActionMenuItem(text = { Text("会话信息") }, onClick = { menu = false; details = true })
+                    ActionMenuItem(text = { Text(if (running) "停止会话" else "移除记录") }, onClick = {
+                        menu = false
+                        if (running) onStop() else onRemove()
+                    })
+                }
+            }
         }
-        TerminalControl(session, chatId)
         if (!running || ended != null) Text(ended ?: sessionStatusLabel(status), style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 12.dp))
         if (historyLimited) Text("历史已达到保留上限，较早输出会被替换；开启日志可保存后续输出。",
@@ -238,18 +355,20 @@ private fun TerminalContent(entry: TerminalEntry, chatId: String, onStop: () -> 
 }
 
 @Composable
-private fun TerminalControl(session: TerminalSession, chatId: String) {
+private fun TerminalControlMenu(session: TerminalSession, chatId: String, onDismiss: () -> Unit) {
     val runs by Core.engine.runsFlow.collectAsStateWithLifecycle()
     val revision by session.policy.revision.collectAsStateWithLifecycle()
     val caller = runs[chatId]?.terminalCaller
     val allowed = remember(revision, caller) { caller != null && session.policy.allow(caller) }
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(if (allowed) "当前任务可以操作此终端" else "用户控制 · Agent 输入已暂停",
-            style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
-        if (allowed) TextButton(onClick = { session.takeOver() }) { Text("接管") }
-        else if (caller != null && session.policy.canGrant(caller))
-            TextButton(onClick = { session.policy.grantOrResume(caller) }) { Text("授权当前任务") }
-    }
+    ActionMenuItem(
+        text = { Text(if (allowed) "接管终端 · 暂停 Agent 输入"
+            else if (caller != null) "授权当前任务操作" else "用户控制 · 无运行中的任务") },
+        enabled = allowed || caller != null && session.policy.canGrant(caller),
+        onClick = {
+            onDismiss()
+            if (allowed) session.takeOver() else if (caller != null) session.policy.grantOrResume(caller)
+        },
+    )
 }
 
 @Composable
@@ -267,12 +386,16 @@ private fun TerminalViewport(
     val foreground = MaterialTheme.colorScheme.onSurface.toArgb()
     val background = MaterialTheme.colorScheme.background.toArgb()
     val cursor = MaterialTheme.colorScheme.primary.toArgb()
-    Box(modifier.pointerInput(Unit) { detectTapGestures(onTap = { currentTap() }) }.padding(horizontal = 12.dp)) {
+    // Native TerminalView owns tap, scroll and selection; a Compose tap detector steals that stream.
+    Box(modifier.padding(horizontal = 12.dp)) {
         AndroidView(modifier = Modifier.fillMaxSize(), factory = { context ->
             TerminalView(context, null).apply {
                 setTerminalViewClient(TerminalViewBridge(
                     { currentTap() }, { currentModifier == TerminalModifier.CTRL },
                     { currentModifier == TerminalModifier.ALT }, { currentConsume() }))
+                // The upstream XML supplied these flags; this view is created programmatically.
+                isFocusable = true
+                isFocusableInTouchMode = true
                 // Initializes the renderer with MONOSPACE; setTypeface requires an existing renderer.
                 setTextSize(fontSize)
                 tag = fontSize

@@ -72,6 +72,7 @@ internal fun SuixingDialog(
             color = AlertDialogDefaults.containerColor,
             tonalElevation = AlertDialogDefaults.TonalElevation,
         ) {
+            MenuRippleHost {
             Column {
                 icon?.let {
                     Box(
@@ -97,6 +98,7 @@ internal fun SuixingDialog(
                     dismissButton?.invoke(scope)
                     confirmButton(scope)
                 }
+            }
             }
         }
     }

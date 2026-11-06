@@ -62,6 +62,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -2589,11 +2591,17 @@ class ChatViewModel : ViewModel() {
                     produced.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }
                         ?.text
                         ?.let {
-                            // Remembered before speaking, because the speaker queues the
-                            // line and returns at once: the id has to be set by the time
-                            // any other screen can reach the stop button.
-                            speakingChatId = chatId
-                            Core.speaker.speak(it)
+                            val speechNavigation = navIntents.current()
+                            val speechJob = currentCoroutineContext()[Job]
+                            val speech = withContext(Dispatchers.Default) { Core.speaker.prepareText(it) }
+                            // Preparation cannot speak by itself. Recheck on Main: navigation,
+                            // stop or a replacement run makes this prepared reply obsolete.
+                            currentCoroutineContext().ensureActive()
+                            if (navIntents.isCurrent(speechNavigation) && jobs[chatId] === speechJob &&
+                                chatId !in userStopped) {
+                                speakingChatId = chatId
+                                Core.speaker.speakPrepared(speech)
+                            }
                         }
                 }
             } catch (cancellation: CancellationException) {
