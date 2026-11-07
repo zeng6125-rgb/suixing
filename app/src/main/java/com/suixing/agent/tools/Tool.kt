@@ -3,6 +3,7 @@ package com.suixing.agent.tools
 import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.CapabilityTiers
+import com.suixing.agent.data.FileActivity
 import com.suixing.agent.data.GoalStore
 import com.suixing.agent.data.JobStore
 import com.suixing.agent.data.MemoryStore
@@ -46,6 +47,8 @@ data class ToolResult(
     val imageBase64: String? = null,
     /** In-process UI payload, kept separate from the model's textual result. */
     val todoSnapshot: List<TodoItem>? = null,
+    /** Verified file operations, separate from model-authored output text. */
+    val fileActivities: List<FileActivity> = emptyList(),
 ) {
     companion object {
         fun success(output: String): ToolResult = ToolResult(true, output)
@@ -197,6 +200,7 @@ class ToolRegistry private constructor() {
         add(FileTools(context))
         add(ShellTools(context, capabilities))
         add(UiTools(context, capabilities))
+        add(VirtualScreenTools(context, capabilities))
         add(JobTools(jobs))
         add(TerminalTools { com.suixing.agent.core.Core.terminals })
         add(TodoTools(todos))

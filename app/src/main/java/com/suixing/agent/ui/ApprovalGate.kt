@@ -17,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.vectorResource
@@ -36,13 +37,17 @@ internal fun PendingApprovals(conversations: StateFlow<List<Conversation>>) {
     val pending by Core.gate.pending.collectAsStateWithLifecycle()
     val first = Core.gate.oldestPending(pending) ?: return
     val chats by conversations.collectAsStateWithLifecycle()
-    ApprovalDialog(
-        chatId = first.key,
-        toolName = first.value.toolName,
-        args = first.value.args,
-        sourceTitle = first.value.sourceTitle ?: chats.firstOrNull { it.id == first.key }?.title,
-        otherWaiting = pending.size - 1,
-    )
+    key(first.value.id) {
+        ApprovalDialog(
+            chatId = first.key,
+            toolName = first.value.toolName,
+            args = first.value.args,
+            sourceTitle = first.value.sourceTitle ?: chats.firstOrNull { it.id == first.key }?.title,
+            otherWaiting = pending.size - 1,
+            rememberDecisions = first.value.rememberDecisions,
+            requestId = first.value.id,
+        )
+    }
 }
 
 @Composable
@@ -54,12 +59,19 @@ internal fun ApprovalDialog(
     sourceTitle: String?,
     /** How many other conversations are blocked on their own prompt right now. */
     otherWaiting: Int,
+    rememberDecisions: Boolean = true,
+    requestId: String? = null,
 ) {
     // A deleted or untitled conversation still has to be named: a blank line would leave
     // the user unable to tell the card apart from the chat they are looking at.
     val from = sourceTitle?.takeIf { it.isNotBlank() } ?: "另一个会话"
+    fun resolve(approved: Boolean, always: Boolean = false) {
+        if (requestId == null || Core.gate.pending.value[chatId]?.id == requestId) {
+            Core.gate.resolve(chatId, approved, always = rememberDecisions && always, expectedRequestId = requestId)
+        }
+    }
     SuixingDialog(
-        onDismissRequest = { Core.gate.resolve(chatId, false) },
+        onDismissRequest = { resolve(false) },
         icon = { Icon(ImageVector.vectorResource(R.drawable.ic_shield_alert), contentDescription = null) },
         title = {
             Column {
@@ -115,11 +127,11 @@ internal fun ApprovalDialog(
                 )
             }
         },
-        confirmButton = { scope -> TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, true) } }) { Text("允许一次") } },
+        confirmButton = { scope -> TextButton(onClick = { scope.closeThen { resolve(true) } }) { Text("允许一次") } },
         dismissButton = { scope ->
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, true, always = true) } }) { Text("总是允许") }
-                TextButton(onClick = { scope.closeThen { Core.gate.resolve(chatId, false) } }) { Text("拒绝") }
+                if (rememberDecisions) TextButton(onClick = { scope.closeThen { resolve(true, always = true) } }) { Text("总是允许") }
+                TextButton(onClick = { scope.closeThen { resolve(false) } }) { Text("拒绝") }
             }
         },
     )

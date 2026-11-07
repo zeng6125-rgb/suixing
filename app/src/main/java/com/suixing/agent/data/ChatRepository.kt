@@ -47,7 +47,7 @@ internal fun sameSavedDraftMessages(
 
 class ChatRepository(
     private val context: Context,
-    private val onDeleted: (String) -> Unit = {},
+    private val onDeleted: suspend (String) -> Unit = {},
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val dir: File get() = File(context.filesDir, "chats").apply { if (!exists()) mkdirs() }

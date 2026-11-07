@@ -12,6 +12,8 @@ import android.os.StatFs
 import com.suixing.agent.data.MemoryStore
 import com.suixing.agent.data.UserProfileStore
 import com.suixing.agent.service.TouchFx
+import com.suixing.agent.virtualscreen.VirtualScreenControl
+import com.suixing.agent.virtualscreen.VirtualScreenManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -209,11 +211,23 @@ class SystemTools(
     private suspend fun openApp(args: JsonObject): ToolResult {
         val target = args.str("target")?.trim().orEmpty()
         if (target.isEmpty()) return ToolResult.failure("缺少参数 target")
+        // Bind the destination before lookup suspends; closing it must not redirect this call to the main screen.
+        val display = VirtualScreenManager.state.value
         // The lookup scans every installed app (queryIntentActivities + loadLabel), which is a
         // visible stall on the main thread; only the launch itself stays there.
         val found = withContext(Dispatchers.IO) { runCatching { resolveLaunchIntent(target) } }
         val intent = found.getOrElse { error ->
             return ToolResult.failure(error.message ?: "打开应用失败：${error.javaClass.simpleName}")
+        }
+        if (display.running) {
+            return try {
+                val id = VirtualScreenControl.launchIntent(context, intent, display.displayId)
+                ToolResult.success("已在虚拟屏 $id 打开 ${intent.component?.packageName ?: target}")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                ToolResult.failure(error.message ?: "虚拟屏应用启动失败")
+            }
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)

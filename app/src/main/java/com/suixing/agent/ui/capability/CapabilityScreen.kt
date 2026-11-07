@@ -3,9 +3,7 @@ package com.suixing.agent.ui.capability
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import com.suixing.agent.ui.components.SegmentedPill
-import com.suixing.agent.service.VirtualScreenOverlay
 import com.suixing.agent.ui.components.SettingsSwitch
-import com.suixing.agent.virtualscreen.VirtualScreenManager
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.settingsPagePadding
 import android.content.Context
@@ -328,9 +326,6 @@ fun CapabilityScreen(onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
             )
             }
 
-            item(key = "capability-virtual", contentType = "capability-card") {
-                VirtualScreenSettingsCard()
-            }
 
             item(key = "capability-9", contentType = "capability-card") {
                 SuixingCard {
@@ -883,64 +878,3 @@ internal fun capabilityUiSettings(settings: AppSettings): CapabilityUiSettings =
         keepScreenOn = settings.keepScreenOn,
         rootCheckedAt = settings.rootCheckedAt,
     )
-
-/**
- * 虚拟屏：一块只跑自己内容的副屏 + 一层悬浮预览。
- *
- * 预览是**浮窗**，不是页面：开起来之后聊天照常，浮窗浮在最上层，收起浮窗屏上的应用
- * 继续跑（见 `service/VirtualScreenOverlay`）。agent 的 UI 工具在这块屏开着时自动作用
- * 到它上面（`tools/UiTools`），所以这个开关打开之后，对话里让 agent 点按就是在副屏上点。
- */
-@Composable
-private fun VirtualScreenSettingsCard() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val state by VirtualScreenManager.state.collectAsState()
-    var previewShowing by remember { mutableStateOf(VirtualScreenOverlay.isShowing) }
-
-    SuixingCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SoftIcon(
-                ImageVector.vectorResource(R.drawable.ic_picture_in_picture_2),
-                tint = MaterialTheme.colorScheme.tertiary,
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("虚拟屏", style = SettingsStyle.cardTitle)
-                Text(
-                    text = if (state.running) {
-                        "运行中 · displayId=${state.displayId}；agent 的点击、读屏、截图都作用在这块屏上。"
-                    } else {
-                        "一块只跑自己内容的副屏，不镜像主屏；建屏不需要权限，放第三方应用才需要 root。"
-                    },
-                    style = SettingsStyle.description,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (!state.running) {
-                Button(onClick = {
-                    val started = VirtualScreenManager.start(context)
-                    previewShowing = VirtualScreenOverlay.show(context, started.displayId)
-                }) { Text("开启虚拟屏") }
-            } else {
-                OutlinedButton(onClick = {
-                    previewShowing = if (previewShowing) {
-                        VirtualScreenOverlay.hide()
-                        false
-                    } else {
-                        VirtualScreenOverlay.show(context, state.displayId)
-                    }
-                }) { Text(if (previewShowing) "收起预览" else "显示预览") }
-                Spacer(Modifier.width(8.dp))
-                TextButton(onClick = {
-                    VirtualScreenOverlay.hide()
-                    VirtualScreenManager.stop()
-                    previewShowing = false
-                }) { Text("关闭虚拟屏") }
-            }
-        }
-    }
-}

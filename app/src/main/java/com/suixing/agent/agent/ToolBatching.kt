@@ -29,7 +29,7 @@ internal class SharedToolExecution {
  */
 internal fun isParallelizable(toolName: String): Boolean = when (toolName) {
     // 会话式 shell：同一会话里并发提交两条命令，stdout 会互相插队。
-    "run_shell" -> false
+    "run_shell", "open_app" -> false
     // 特权写操作：安装/卸载/强停/权限授予，彼此之间有过渡状态。
     "app_action" -> false
     // 屏幕快照是读，但它读的是"当下的屏幕"，与手势并发时结果取决于时序 —— 允许并行。

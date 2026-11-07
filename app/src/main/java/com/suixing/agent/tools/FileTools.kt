@@ -2,6 +2,8 @@ package com.suixing.agent.tools
 
 import android.os.SystemClock
 import android.content.Context
+import com.suixing.agent.data.FileActivity
+import com.suixing.agent.data.FileActivityKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -9,6 +11,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.File
 import java.io.Reader
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.util.Locale
 
 /**
@@ -74,6 +78,18 @@ class FileTools(private val context: Context) : ToolGroup() {
                     ),
                 ),
                 required = listOf("path", "old_string", "new_string"),
+            ),
+        ),
+        ToolSpec(
+            "deliver_file",
+            "Deliver an existing readable file to the user as a file card. Use after generating a file with " +
+                "run_shell or another tool. Verifies the local path and size; does not modify or upload the file.",
+            Schema.objectOf(
+                properties = listOf(
+                    "path" to Schema.string("Existing file path"),
+                    "description" to Schema.string("Optional short description of the delivered file"),
+                ),
+                required = listOf("path"),
             ),
         ),
         ToolSpec(
@@ -147,6 +163,7 @@ class FileTools(private val context: Context) : ToolGroup() {
         "read_file" -> readFile(args)
         "write_file" -> writeFile(args)
         "edit_file" -> editFile(args)
+        "deliver_file" -> deliverFile(args)
         "list_dir" -> listDir(args)
         "find_files" -> findFiles(args)
         "grep_files" -> searchInFiles(args)
@@ -214,13 +231,25 @@ class FileTools(private val context: Context) : ToolGroup() {
             requireWritableUserPath(context, file)
             val content = args.str("content").orEmpty()
             val append = args.bool("append", false)
-            require(content.length <= MAX_TEXT_BYTES &&
-                content.toByteArray(Charsets.UTF_8).size.toLong() + (if (append) file.length() else 0L) <= MAX_TEXT_BYTES) {
+            require(content.length <= MAX_TEXT_BYTES) { "写入后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限" }
+            val contentBytes = content.toByteArray(Charsets.UTF_8)
+            require(contentBytes.size.toLong() + (if (append) file.length() else 0L) <= MAX_TEXT_BYTES) {
                 "写入后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限"
             }
+            val existed = file.exists()
+            val before = if (content.length <= ACTIVITY_TEXT_LIMIT) {
+                if (existed) readActivityText(file) else ""
+            } else null
             file.parentFile?.mkdirs()
-            if (append) file.appendText(content) else file.writeText(content)
-            ToolResult.success("已${if (append) "追加" else "写入"} ${content.length} 字 → ${file.absolutePath}")
+            if (append) file.appendBytes(contentBytes) else file.writeBytes(contentBytes)
+            val after = if (!append) content else before?.takeIf {
+                it.length.toLong() + content.length <= ACTIVITY_TEXT_LIMIT
+            }?.let { it + content }
+            val counts = activityLineCounts(before, after)
+            ToolResult(true, "已${if (append) "追加" else "写入"} ${content.length} 字 → ${file.absolutePath}",
+                fileActivities = listOf(FileActivity(file.absolutePath,
+                    if (existed) FileActivityKind.MODIFIED else FileActivityKind.CREATED,
+                    addedLines = counts?.first, removedLines = counts?.second, sizeBytes = file.length())))
         } catch (error: Exception) {
             ToolResult.failure("写入失败：${error.message ?: error.javaClass.simpleName}")
         }
@@ -278,23 +307,49 @@ class FileTools(private val context: Context) : ToolGroup() {
             val changed = if (replaceAll) text.replace(old, new) else {
                 text.substring(0, hits.first()) + new + text.substring(hits.first() + old.length)
             }
-            require(changed.length <= MAX_TEXT_BYTES && changed.toByteArray(Charsets.UTF_8).size <= MAX_TEXT_BYTES) {
+            require(changed.length <= MAX_TEXT_BYTES) { "修改后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限" }
+            val changedBytes = changed.toByteArray(Charsets.UTF_8)
+            require(changedBytes.size <= MAX_TEXT_BYTES) {
                 "修改后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限"
             }
-            file.writeText(changed)
+            file.writeBytes(changedBytes)
+            val oldLines = old.lines()
+            val newLines = new.lines()
             val preview = buildString {
-                appendLine("- ${old.lines().first()}")
-                appendLine("+ ${new.lines().first()}")
-                if (old.lines().size > 1 || new.lines().size > 1) {
-                    appendLine("（共替换 ${old.lines().size} 行 → ${new.lines().size} 行）")
+                appendLine("- ${oldLines.first()}")
+                appendLine("+ ${newLines.first()}")
+                if (oldLines.size > 1 || newLines.size > 1) {
+                    appendLine("（共替换 ${oldLines.size} 行 → ${newLines.size} 行）")
                 }
             }.trim()
-            ToolResult.success(
+            val counts = activityLineCounts(text, changed)
+            ToolResult(true,
                 "已修改 ${file.absolutePath}（第 ${lineOf(text, hits.first())} 行，替换 ${hits.size} 处）：\n$preview" +
                     "\nrevision=${revisionOf(changed)}",
+                fileActivities = listOf(FileActivity(file.absolutePath, FileActivityKind.MODIFIED,
+                    addedLines = counts?.first, removedLines = counts?.second, sizeBytes = file.length())),
             )
         } catch (error: Exception) {
             ToolResult.failure("修改失败：${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    private suspend fun deliverFile(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        try {
+            val path = args.str("path")
+            if (path.isNullOrBlank()) return@withContext ToolResult.failure("缺少参数 path")
+            val file = resolve(path)
+            if (!file.exists()) return@withContext ToolResult.failure("文件不存在：${file.absolutePath}")
+            if (!file.isFile) return@withContext ToolResult.failure("不是普通文件：${file.absolutePath}")
+            if (!file.canRead()) return@withContext ToolResult.failure("文件不可读：${file.absolutePath}")
+            // Opening verifies access without reading the delivered payload into memory.
+            file.inputStream().use { }
+            val size = file.length()
+            ToolResult(true, "已交付 ${file.absolutePath}（${humanSize(size)}）",
+                fileActivities = listOf(FileActivity(file.absolutePath, FileActivityKind.DELIVERED,
+                    sizeBytes = size, description = args.str("description").orEmpty().trim().take(500))))
+        } catch (error: Exception) {
+            ToolResult.failure("交付失败：${error.message ?: error.javaClass.simpleName}")
         }
     }
 
@@ -707,6 +762,88 @@ internal fun forEachLogicalLine(reader: Reader, onChar: (Char) -> Unit = {}, lin
         }
     }
     line(current.toString())
+}
+
+private const val ACTIVITY_TEXT_LIMIT = 128 * 1024
+private const val ACTIVITY_LINE_LIMIT = 4_000
+
+/** Best effort only: a statistics read must never turn an otherwise valid write into a failure. */
+private fun readActivityText(file: File): String? = try {
+    val size = file.length()
+    if (size > ACTIVITY_TEXT_LIMIT) null else file.inputStream().use { input ->
+        // The extra byte detects growth between the size check and reading. No unbounded readText.
+        val bytes = ByteArray((size + 1L).coerceAtMost(ACTIVITY_TEXT_LIMIT + 1L).toInt())
+        var count = 0
+        while (count < bytes.size) {
+            val read = input.read(bytes, count, bytes.size - count)
+            if (read < 0) break
+            if (read == 0) continue
+            count += read
+        }
+        if (count > ACTIVITY_TEXT_LIMIT || input.read() >= 0) null else {
+            Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes, 0, count)).toString().takeUnless { '\u0000' in it }
+        }
+    }
+} catch (_: Exception) { null }
+
+/**
+ * Exact counts for the replaced block after removing identical leading/trailing logical lines.
+ * These are per-operation replacement counts, not a minimal Git diff or the run's net changes.
+ * Line ranges keep the original strings and compare in place instead of allocating a string per line.
+ */
+private fun activityLineCounts(before: String?, after: String?): Pair<Int, Int>? {
+    if (before == null || after == null || before.length > ACTIVITY_TEXT_LIMIT || after.length > ACTIVITY_TEXT_LIMIT ||
+        '\u0000' in before || '\u0000' in after) return null
+    if (before == after) return 0 to 0
+    val oldEnds = activityLineEnds(before) ?: return null
+    val newEnds = activityLineEnds(after) ?: return null
+    fun equalLine(oldIndex: Int, newIndex: Int): Boolean {
+        val oldStart = if (oldIndex == 0) 0 else oldEnds[oldIndex - 1]
+        val newStart = if (newIndex == 0) 0 else newEnds[newIndex - 1]
+        val length = oldEnds[oldIndex] - oldStart
+        return length == newEnds[newIndex] - newStart && before.regionMatches(oldStart, after, newStart, length)
+    }
+    var first = 0
+    while (first < oldEnds.size && first < newEnds.size && equalLine(first, first)) first++
+    var oldLast = oldEnds.size
+    var newLast = newEnds.size
+    while (oldLast > first && newLast > first && equalLine(oldLast - 1, newLast - 1)) {
+        oldLast--
+        newLast--
+    }
+    return (newLast - first) to (oldLast - first)
+}
+
+/** CR, LF and CRLF end a line; a terminating newline does not invent an extra empty line. */
+private fun activityLineEnds(text: String): IntArray? {
+    if (text.isEmpty()) return IntArray(0)
+    fun scan(onEnd: (Int) -> Unit): Boolean {
+        var count = 0
+        var index = 0
+        var lastEnd = 0
+        while (index < text.length) {
+            val char = text[index++]
+            if (char == '\r' || char == '\n') {
+                if (char == '\r' && index < text.length && text[index] == '\n') index++
+                if (++count > ACTIVITY_LINE_LIMIT) return false
+                onEnd(index)
+                lastEnd = index
+            }
+        }
+        if (lastEnd < text.length) {
+            if (++count > ACTIVITY_LINE_LIMIT) return false
+            onEnd(text.length)
+        }
+        return true
+    }
+    var count = 0
+    if (!scan { count++ }) return null
+    val ends = IntArray(count)
+    var at = 0
+    scan { ends[at++] = it }
+    return ends
 }
 
 internal fun humanSize(bytes: Long): String = when {

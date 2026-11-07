@@ -3,6 +3,9 @@ package com.suixing.agent.agent
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.data.AppSettings
+import com.suixing.agent.data.ChildRunConfig
+import com.suixing.agent.data.SubagentLaunchOptions
+import com.suixing.agent.data.resolveSubagentConfig
 import com.suixing.agent.data.STEER_IMMEDIATE
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ContextCheckpoint
@@ -20,7 +23,6 @@ import com.suixing.agent.data.TranscriptRedaction
 import com.suixing.agent.data.StoredToolCall
 import com.suixing.agent.data.Tps
 import com.suixing.agent.data.WireSanitize
-import com.suixing.agent.data.forSubagentModel
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.FINISH_CUT
 import com.suixing.agent.llm.LlmClient
@@ -214,7 +216,8 @@ class ApprovalGate(
     private val settings: SettingsRepository? = null,
     private val scope: CoroutineScope? = null,
 ) {
-    data class Request(val id: String, val toolName: String, val args: String, val sequence: Long = 0, val sourceTitle: String? = null)
+    data class Request(val id: String, val toolName: String, val args: String, val sequence: Long = 0,
+        val sourceTitle: String? = null, val rememberDecisions: Boolean = true)
 
     private val requestSequence = AtomicLong()
 
@@ -223,12 +226,13 @@ class ApprovalGate(
         requests.entries.minByOrNull { it.value.sequence }
 
     private data class Decision(val approved: Boolean, val always: Boolean)
+    private data class Waiter(val requestId: String, val deferred: CompletableDeferred<Decision>)
 
     private val _pending = MutableStateFlow<Map<String, Request>>(emptyMap())
     val pending: StateFlow<Map<String, Request>> = _pending.asStateFlow()
 
     /** One waiter per run: two conversations asking at once must not overwrite each other. */
-    private val waiters = ConcurrentHashMap<String, CompletableDeferred<Decision>>()
+    private val waiters = ConcurrentHashMap<String, Waiter>()
 
     private val alwaysAllowed = ConcurrentHashMap.newKeySet<String>()
 
@@ -258,34 +262,39 @@ class ApprovalGate(
         }
     }
 
-    suspend fun request(chatId: String, toolName: String, args: String, mode: ApprovalMode, sourceTitle: String? = null): Boolean {
+    suspend fun request(chatId: String, toolName: String, args: String, mode: ApprovalMode,
+        sourceTitle: String? = null, rememberDecisions: Boolean = true): Boolean {
         when (mode) {
             ApprovalMode.AUTO -> return true
             ApprovalMode.DENY -> return false
             ApprovalMode.ASK -> Unit
         }
         if (alwaysDenied.contains(toolName)) return false
-        if (alwaysAllowed.contains(toolName)) return true
+        if (rememberDecisions && alwaysAllowed.contains(toolName)) return true
         val id = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<Decision>()
-        waiters[chatId] = deferred
-        val request = Request(id, toolName, args, requestSequence.incrementAndGet(), sourceTitle)
+        val waiter = Waiter(id, deferred)
+        waiters[chatId] = waiter
+        val request = Request(id, toolName, args, requestSequence.incrementAndGet(), sourceTitle, rememberDecisions)
         _pending.update { it + (chatId to request) }
         // 取消/异常时也要摘掉门，否则这个会话的审批门永久残留（issue #54 A-7）。
         val decision = try {
             deferred.await()
         } finally {
-            waiters.remove(chatId)
-            _pending.update { it - chatId }
+            waiters.remove(chatId, waiter)
+            _pending.update { if (it[chatId]?.id == id) it - chatId else it }
         }
-        if (decision.always) {
+        if (rememberDecisions && decision.always) {
             if (decision.approved) rememberAlways(toolName) else rememberDenied(toolName)
         }
         return decision.approved
     }
 
-    fun resolve(chatId: String, approved: Boolean, always: Boolean = false) {
-        waiters[chatId]?.complete(Decision(approved, always))
+    fun resolve(chatId: String, approved: Boolean, always: Boolean = false, expectedRequestId: String? = null) {
+        val waiter = waiters[chatId] ?: return
+        if (expectedRequestId == null || waiter.requestId == expectedRequestId) {
+            waiter.deferred.complete(Decision(approved, always))
+        }
     }
 
     /**
@@ -295,7 +304,7 @@ class ApprovalGate(
      * prompts stay up: stopping A must not answer B's question for the user.
      */
     fun cancelPending(chatId: String) {
-        waiters.remove(chatId)?.complete(Decision(false, false))
+        waiters.remove(chatId)?.deferred?.complete(Decision(false, false))
         _pending.update { it - chatId }
     }
 
@@ -427,6 +436,7 @@ class AgentEngine(
     private val approvalSourceTitle: String? = null,
     /** Durable objective shared with the chat UI. */
     private val goals: GoalStore? = null,
+    private val childConfig: ChildRunConfig? = null,
 ) {
 
     private val runs = MutableStateFlow<Map<String, RunHandle>>(emptyMap())
@@ -439,7 +449,20 @@ class AgentEngine(
     val runsFlow: StateFlow<Map<String, RunHandle>> = runs.asStateFlow()
     private val childStates = MutableStateFlow<Map<String, List<SubagentSnapshot>>>(emptyMap())
     internal val subagentsFlow = childStates.asStateFlow()
+    private val subagentReadyChats = MutableStateFlow<Set<String>>(emptySet())
+    internal val subagentAvailabilityFlow = subagentReadyChats.asStateFlow()
     internal fun cancelSubagent(chatId: String, id: String): Boolean = runs.value[chatId]?.cancelSubagent(id) ?: false
+    internal fun canCreateSubagent(chatId: String): Boolean =
+        chatId in subagentReadyChats.value && runs.value[chatId]?.hasSubagentPool() == true
+    internal fun previewSubagent(chatId: String, options: SubagentLaunchOptions): ChildRunConfig =
+        (runs.value[chatId] ?: error("请先启动主任务，再创建子任务。")).previewSubagent(options)
+    internal fun createSubagent(
+        chatId: String,
+        task: String,
+        context: String = "",
+        name: String = "",
+        options: SubagentLaunchOptions = SubagentLaunchOptions(),
+    ): SubagentSnapshot = (runs.value[chatId] ?: error("主任务已结束。")).createSubagent(task, context, name, options)
 
     /**
      * Per-conversation state that outlives its run.
@@ -770,10 +793,28 @@ class AgentEngine(
         internal val terminalCaller = com.suixing.agent.terminal.TerminalCaller(chatId, UUID.randomUUID().toString())
         private val _state = MutableStateFlow<RunState>(RunState.Idle)
         private val completionReported = AtomicBoolean(false)
+        private val cancellationReported = AtomicBoolean(false)
         @Volatile private var subagents: SubagentPool? = null
+        private val childParentRunId = UUID.randomUUID().toString()
         private val goalRun = goals?.let(::GoalRun)
         private val compactionRetry = CompactionRetryGate()
+        private val ledger = RunLedger(settings.maxToolRounds)
+        private var toolStep = 0
         internal fun cancelSubagent(id: String): Boolean = subagents?.cancel(id) ?: false
+        internal fun hasSubagentPool(): Boolean = subagents != null && !cancelled.get()
+        internal fun previewSubagent(options: SubagentLaunchOptions): ChildRunConfig =
+            (subagents ?: error("当前主任务未启用子任务。")).preview(options)
+        internal fun createSubagent(task: String, context: String, name: String, options: SubagentLaunchOptions): SubagentSnapshot =
+            (subagents ?: error("当前主任务未启用子任务。")).spawn(task, context, name, options = options)
+        private suspend fun awaitSubagentsBeforeFinish() {
+            val pool = subagents ?: return
+            subagentReadyChats.update { it - chatId }
+            if (pool.snapshots().any { it.status == SubagentStatus.QUEUED || it.status == SubagentStatus.RUNNING }) {
+                liveLine = "等待子任务完成…"
+                publish(RunState.Running(stats().copy(note = "等待子任务完成")))
+            }
+            pool.sealAndWait()
+        }
 
         /** This conversation's state, from the moment it starts to long after it ends. */
         val state: StateFlow<RunState> = _state.asStateFlow()
@@ -1209,7 +1250,8 @@ class AgentEngine(
             )
             return true
         }
-        fun finishGoal(): List<StoredMessage> {
+        suspend fun finishGoal(): List<StoredMessage> {
+            awaitSubagentsBeforeFinish()
             onEvent(AgentEvent.Finished(""))
             publish(RunState.Done(stats()))
             return produced
@@ -1324,6 +1366,7 @@ class AgentEngine(
                 toolOk = result.ok,
                 toolCallId = call.id,
                 imageBase64 = result.imageBase64,
+                fileActivities = if (result.ok) result.fileActivities else emptyList(),
             )
             produced += stored
             onEvent(AgentEvent.ToolMessage(stored))
@@ -1347,6 +1390,13 @@ class AgentEngine(
                 "✗ ${call.name}"
             }
             onEvent(AgentEvent.ToolFinished(call.name, result.ok, output, result.todoSnapshot))
+            // Only committed outcomes count; hashing large arguments/results must stay off Main.
+            val step = ++toolStep
+            withContext(Dispatchers.Default) {
+                val args = runCatching { parseToolArguments(call.arguments) }
+                    .getOrNull() ?: JsonObject(mapOf("_invalid_arguments" to JsonPrimitive(call.arguments)))
+                ledger.record(step, call.name, args, result)
+            }
         }
 
         try {
@@ -1355,63 +1405,14 @@ class AgentEngine(
             // JSON 解析，`breakTools` 的 parameters.toString() 是全量序列化 —— 都不该在 Main。
             val delegationAllowed = settings.subagentsEnabled && settings.approvalMode != ApprovalMode.DENY &&
                 !registry.isHidden("spawn_agent")
-            if (delegationAllowed) {
-                subagents = SubagentPool(CoroutineScope(currentCoroutineContext() + Dispatchers.Default),
-                    parallelism = settings.subagentParallelism,
-                    onChanged = { states -> childStates.update { it + (chatId to states) } }) { task ->
-                    SUBAGENT_EXECUTION_SLOTS.withPermit {
-                        val child = AgentEngine(
-                            llm = llm,
-                            approvalSourceTitle = "$title · 子任务：${task.name}",
-                        )
-                        // A sibling cancellation relay can abort blocking HTTP/shell work as soon
-                        // as a parent stop or timeout cancels this task, rather than waiting for IO.
-                        val relay = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
-                            try { awaitCancellation() } finally { child.cancel(task.id) }
-                        }
-                        try {
-                            var failure: String? = null
-                            val childSettings = settings.forSubagentModel().copy(subagentsEnabled = false, autoProfile = false,
-                                // **子任务继承父任务的步数上限，不再另设天花板**（issue #79）。
-                                //
-                                // 原来写的是 `if (max > 0) minOf(max, 12) else 12`：
-                                //  · 父任务「不限制」(0) ⇒ 子任务被钉死在 12 轮，**比父任务还弱**；
-                                //  · 父任务设 50 ⇒ minOf(50,12) = 12，用户的设置被静默砍掉；
-                                //  · 只有 ≤12 时用户的值才真的生效。
-                                // 三种输入里两种违背用户意图，而第一种最反直觉：用户明确关掉了
-                                // 上限，子任务却比开着上限时更容易半途失败。
-                                //
-                                // 也考虑过「另设一个子任务天花板」（比如 30 轮）避免子任务无限跑：
-                                // 但父任务的 `timeoutMs`（默认 180s、最长 600s）已经是时间上的兜底，
-                                // 再叠一个步数硬顶只会让「父任务跑得动、子任务跑不动」这个割裂继续存在。
-                                // 真要收敛资源，应该让父任务把预算显式传下来，而不是在这里写死一个数。
-                                maxToolRounds = settings.maxToolRounds,
-                                systemPrompt = settings.systemPrompt + "\n\n" + CHILD_AGENT_INSTRUCTIONS)
-                            val input = buildString {
-                                append("Task:\n").append(task.task)
-                                if (task.context.isNotBlank()) append("\n\nRelevant context:\n").append(task.context)
-                                if (goalText.isNotBlank()) append("\n\nParent objective:\n").append(goalText)
-                            }
-                            val messages = child.startRun(chatId = task.id, title = task.name,
-                                history = listOf(StoredMessage(id = UUID.randomUUID().toString(), role = Roles.USER, text = input)),
-                                settings = childSettings,
-                                registry = registry.excluding(SUBAGENT_TOOL_NAMES + GOAL_TOOL_NAMES + setOf("todo_read", "todo_write")),
-                                capabilities = capabilities, skills = skills, memory = memory, profile = profile, gate = gate,
-                                onEvent = { event -> if (event is AgentEvent.Failed) failure = event.message })
-                            failure?.let { error(it) }
-                            messages.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }?.text
-                                ?: "子任务结束，未返回文字结果。"
-                        } finally { relay.cancel() }
-                    }
-                }
-            }
             val frozenTable = withContext(Dispatchers.Default) {
                 val delegationSpecs = if (delegationAllowed) SUBAGENT_SPECS.filterNot { registry.isHidden(it.name) } else emptyList()
                 val builtinSpecs = registry.all().map { it.spec } +
                     listOf(COMPRESS_CONTEXT_SPEC).filterNot { registry.isHidden(it.name) } + delegationSpecs
                 val pluginSpecs = PluginRuntime.enabledPlugins()
-                val toolSpecs = builtinSpecs +
+                val toolSpecs = (builtinSpecs +
                     PluginRuntime.toolSpecs(pluginSpecs, builtinSpecs.map { it.name }.toSet()).filterNot { registry.isHidden(it.name) }
+                    ).filter { childConfig == null || it.name in childConfig.allowedTools }
                 ToolTable(
                     pluginSpecs,
                     toolSpecs,
@@ -1419,6 +1420,51 @@ class AgentEngine(
                         it.name.length + it.description.length + it.parameters.toString().length
                     } / 4,
                 )
+            }
+            if (delegationAllowed) {
+                val excluded = SUBAGENT_TOOL_NAMES + GOAL_TOOL_NAMES +
+                    setOf("todo_read", "todo_write", "create_assistant", "get_session_status")
+                val childCatalogue = frozenTable.specs.mapTo(HashSet()) { it.name } - excluded
+                subagents = SubagentPool(CoroutineScope(currentCoroutineContext() + Dispatchers.Default),
+                    parallelism = settings.subagentParallelism,
+                    resolveConfig = { options -> settings.resolveSubagentConfig(options, childCatalogue) },
+                    onCreated = { task -> SubagentRecords.create(chatId, childParentRunId, task, task.config) },
+                    onStatusChanged = { task, snapshot -> SubagentRecords.update(task.id, snapshot.status, snapshot.result) },
+                    onTerminated = { task -> SubagentRecords.terminated(task.id) },
+                    onChanged = { snapshots -> childStates.update { it + (chatId to snapshots) } }) { task ->
+                    SUBAGENT_EXECUTION_SLOTS.withPermit {
+                        val child = AgentEngine(llm = llm,
+                            approvalSourceTitle = "$title · 子任务：${task.name}", childConfig = task.config)
+                        val relay = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
+                            try { awaitCancellation() } finally { child.cancel(task.id) }
+                        }
+                        try {
+                            var failure: String? = null
+                            val childSettings = task.resolvedSettings.copy(subagentsEnabled = false, autoProfile = false,
+                                systemPrompt = task.resolvedSettings.systemPrompt + "\n\n" + CHILD_AGENT_INSTRUCTIONS)
+                            val input = buildString {
+                                append("Task:\n").append(task.task)
+                                if (task.context.isNotBlank()) append("\n\nRelevant context:\n").append(task.context)
+                                if (goalText.isNotBlank()) append("\n\nParent objective:\n").append(goalText)
+                            }
+                            val history = listOf(StoredMessage(id = task.id + "_input", role = Roles.USER, text = input))
+                            val childRegistry = registry.excluding(excluded + (registry.names().toSet() - task.config.allowedTools.toSet()))
+                            SubagentRecords.complete(task.id, history)
+                            val messages = child.startRun(chatId = task.id, title = task.name,
+                                history = history, settings = childSettings, registry = childRegistry,
+                                capabilities = capabilities, skills = skills, memory = memory, profile = profile, gate = gate,
+                                onEvent = { event ->
+                                    SubagentRecords.onEvent(task.id, event)
+                                    if (event is AgentEvent.Failed) failure = event.message
+                                })
+                            SubagentRecords.complete(task.id, history + messages)
+                            failure?.let { error(it) }
+                            messages.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }?.text
+                                ?: "子任务结束，未返回文字结果。"
+                        } finally { relay.cancel() }
+                    }
+                }
+                subagentReadyChats.update { it + chatId }
             }
             suspend fun executeDirectTools(): Boolean {
                 // User-invoked tools use the same approval, execution and transcript path as
@@ -1450,6 +1496,7 @@ class AgentEngine(
                     }
                     commitTool(outcome)
                     if (!outcome.result.ok) {
+                        awaitSubagentsBeforeFinish()
                         onEvent(AgentEvent.Finished(""))
                         publish(RunState.Done(stats()))
                         return false
@@ -1520,6 +1567,12 @@ class AgentEngine(
                 if (cancelled.get()) {
                     finishCancelled(onEvent, streamed, reasoning, openCalls)
                     return produced
+                }
+
+                // All results in the previous tool batch have landed. Append at the request tail
+                // rather than between an assistant's tool calls and their responses.
+                ledger.warning()?.let { warning ->
+                    wire += ChatMessage.user("[工具执行记录]\n${ledger.brief()}\n$warning")
                 }
 
                 // Measured here, where the wire for this round is final: steering has landed
@@ -1747,6 +1800,7 @@ class AgentEngine(
                         onEvent(AgentEvent.Failed(message))
                         publish(RunState.Failed(message))
                     } else {
+                        awaitSubagentsBeforeFinish()
                         onEvent(AgentEvent.Finished(turn.text))
                         publish(RunState.Done(stats()))
                     }
@@ -1894,13 +1948,19 @@ class AgentEngine(
             // rebuilt: the original rides along as the cause, so nothing about it is lost.
             throw if (retriesThisRound > 0) LlmException(message, error) else error
         } finally {
-            withContext(NonCancellable) { subagents?.close() }
+            withContext(NonCancellable) {
+                if (subagents != null) {
+                    subagents?.close()
+                    SubagentRecords.flush(chatId)
+                }
+            }
             if (goalRun != null && goalRun.id.isNotEmpty()) {
                 withContext(NonCancellable + Dispatchers.IO) {
                     runCatching { goalRun.pauseOnExit(cancelled.get()) }
                 }
             }
             subagents = null
+            subagentReadyChats.update { it - chatId }
             childStates.update { it - chatId }
             inFlight = null
             // Nothing is published here. The run has already said how it ended, and that
@@ -1957,7 +2017,9 @@ class AgentEngine(
         reasoning: CharSequence = "",
         unanswered: List<StoredToolCall> = emptyList(),
     ) {
-        emitPartial(onEvent, partial, reasoning)
+        // Cancellation can cross both runLoop and execute; keep one transcript and one end event.
+        if (!cancellationReported.compareAndSet(false, true)) return
+        emitPartial(onEvent, partial, reasoning, note = ledger.summary().takeIf { it.isNotBlank() })
         // A call the model asked for and the stop arrived before: the transcript keeps the request,
         // so something has to answer it. Without a result the card drew empty, which reads as a tool
         // that returned nothing rather than as one that never ran — and the next run's replay would
@@ -2003,15 +2065,22 @@ class AgentEngine(
      * [reasoning] travels with it for the same reason [partial] does: a stop used to keep the answer
      * and throw the thinking away, so the card came back with an empty chain-of-thought block.
      */
-    private fun emitPartial(onEvent: (AgentEvent) -> Unit, partial: CharSequence, reasoning: CharSequence) {
-        if (partial.isBlank() && reasoning.isBlank()) return
+    private fun emitPartial(
+        onEvent: (AgentEvent) -> Unit,
+        partial: CharSequence,
+        reasoning: CharSequence,
+        note: String? = null,
+    ) {
+        if (partial.isBlank() && reasoning.isBlank() && note.isNullOrBlank()) return
+        val noteAsText = partial.isBlank() && reasoning.isBlank()
         onEvent(
             AgentEvent.AssistantMessage(
                 StoredMessage(
                     id = UUID.randomUUID().toString(),
                     role = Roles.ASSISTANT,
-                    text = partial.toString(),
+                    text = if (noteAsText) note.orEmpty() else partial.toString(),
                     reasoning = reasoning.toString().takeIf { it.isNotBlank() },
+                    traceNote = note?.takeUnless { noteAsText },
                 ),
             ),
         )
@@ -2530,6 +2599,9 @@ class AgentEngine(
         } catch (failure: IllegalArgumentException) {
             return ToolOutcome(call, ToolResult.failure("工具参数不是合法 JSON 对象，请重新生成调用"), 0, argsPreview)
         }
+        childConfig?.denialReason(call.name, args)?.let { reason ->
+            return ToolOutcome(call, ToolResult.failure(reason), 0, argsPreview)
+        }
         if (registry.isHidden(call.name)) return ToolOutcome(call,
             ToolResult.failure("当前人设已禁用此工具"), 0, argsPreview)
         val startsGoal = call.name == "goal_resume" ||
@@ -2645,7 +2717,8 @@ class AgentEngine(
                 // 「总是允许」照旧。要守卫插件真拦人，把审批档设成「每次询问」。
                 val mode = settings.approvalMode
                 val approvalArgs = if (call.name == "terminal_write") call.arguments else argsPreview
-                if (!gate.request(chatId, call.name, approvalArgs, mode, approvalSourceTitle)) {
+                if (!gate.request(chatId, call.name, approvalArgs, mode, approvalSourceTitle,
+                        rememberDecisions = childConfig == null)) {
                     ToolResult.failure("用户拒绝了这次调用。")
                 } else {
                     val startedAt = System.currentTimeMillis()
@@ -2706,7 +2779,8 @@ class AgentEngine(
             "\n\nFor substantial independent tasks, you may use spawn_agent to work in parallel. " +
                 "Keep simple work local. Pass only relevant context: children do not inherit this conversation. " +
                 "Use wait_agents to collect results, verify them, and cancel unneeded children. " +
-                "Children are cancelled when this run ends; never finish while required results are outstanding.")
+                "Normal completion waits for accepted children; stopping the parent cancels them. " +
+                "Use wait_agents before finishing while required results are outstanding.")
         // 接线点 A（HOST-DEV §5）：让模型知道插件工具也能调，命名与内置一致。
         // 这句是**固定文案**：插件列表是实时变的，而 systemPrompt() 不是 suspend（读盘要 suspend），
         // 所以不在这里读插件；没有启用插件时多说一句也无害（模型看不到那个名字就不会去调）。

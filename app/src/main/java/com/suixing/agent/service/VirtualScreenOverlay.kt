@@ -6,23 +6,31 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.SystemClock
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import com.suixing.agent.virtualscreen.VirtualScreenInput
 import com.suixing.agent.virtualscreen.VirtualScreenManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /**
  * 虚拟屏的**悬浮预览窗**。
@@ -46,8 +54,8 @@ object VirtualScreenOverlay {
     private const val HEADER_DP = 26
     private const val EDGE_DP = 10
 
-    /** 拖过这个距离就算滑动，否则算点击：与系统触摸滑动的常规阈值同量级。 */
-    private const val SWIPE_SLOP_DP = 8
+    /** One gesture may run while at most two more wait; old windows never keep an input queue. */
+    private const val INPUT_QUEUE_SIZE = 2
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -57,18 +65,37 @@ object VirtualScreenOverlay {
     private var image: ImageView? = null
     private var title: TextView? = null
     private var frames: Job? = null
+    private var inputs: Job? = null
+    private var inputQueue: Channel<ManualGesture>? = null
+    private var dragHost: View? = null
+    private var dragFrame: Runnable? = null
+    private var inputNotice: Toast? = null
+    private var lastInputNoticeAt = 0L
+
+    private enum class GestureKind { Tap, LongPress, Swipe }
+    private data class ManualGesture(
+        val kind: GestureKind,
+        val x1: Float,
+        val y1: Float,
+        val x2: Float,
+        val y2: Float,
+        val durationMs: Long,
+    )
 
     @Volatile
     private var displayId = -1
 
-    val isShowing: Boolean get() = root != null
+    private val _visibility = MutableStateFlow(false)
+    val visibility = _visibility.asStateFlow()
+    val isShowing: Boolean get() = _visibility.value
 
-    /** 显示（或重新显示）预览窗；屏还没建就先建。返回是否成功挂上窗口。 */
+    /** 显示（或重新显示）当前副屏的预览窗，成功挂载后才启预览取帧。 */
     fun show(context: Context, displayIdValue: Int = VirtualScreenManager.state.value.displayId): Boolean {
-        if (isShowing) return true
-        if (displayIdValue < 0) return false
-        displayId = displayIdValue
-        VirtualScreenManager.setPreviewEnabled(true)
+        val state = VirtualScreenManager.state.value
+        if (!state.running || displayIdValue < 0 || state.displayId != displayIdValue) return false
+        // addView may return before the first attach; a repeated open must reuse that pending window.
+        if (isShowing && displayIdValue == displayId && root != null) return true
+        if (root != null || isShowing) hide()
 
         val app = context.applicationContext
         // 无障碍服务是系统信任宿主：用它当 Context 建出来的窗口在被其他应用盖住后仍在。
@@ -78,17 +105,20 @@ object VirtualScreenOverlay {
         } else {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         }
-        val windowManager = host.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val windowManager = host.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
             ?: return false
 
-        val state = VirtualScreenManager.state.value
         val metrics = app.resources.displayMetrics
-        val widthPx = (metrics.widthPixels * WIDTH_RATIO).toInt().coerceAtLeast(dp(app, 120))
-        val heightPx = if (state.width > 0 && state.height > 0) {
-            (widthPx.toFloat() * state.height / state.width).toInt()
-        } else {
-            (widthPx * 2f).toInt()
-        }
+        val headerPx = dp(app, HEADER_DP)
+        val edgePx = dp(app, EDGE_DP)
+        val availableWidth = (metrics.widthPixels - edgePx * 2).coerceAtLeast(1)
+        val availableHeight = (metrics.heightPixels - edgePx * 2 - headerPx).coerceAtLeast(1)
+        val preferredWidth = (metrics.widthPixels * WIDTH_RATIO).roundToInt()
+            .coerceAtLeast(dp(app, 120)).coerceAtMost(availableWidth)
+        val scale = minOf(preferredWidth.toFloat() / state.width, availableHeight.toFloat() / state.height)
+        val widthPx = (state.width * scale).roundToInt().coerceIn(1, availableWidth)
+        val pictureHeight = (state.height * scale).roundToInt().coerceIn(1, availableHeight)
+        val heightPx = pictureHeight + headerPx
 
         val container = FrameLayout(host).apply {
             background = GradientDrawable().apply {
@@ -109,21 +139,26 @@ object VirtualScreenOverlay {
         val picture = ImageView(host).apply {
             scaleType = ImageView.ScaleType.FIT_XY
             setBackgroundColor(Color.WHITE)
+            contentDescription = "虚拟屏预览"
         }
-        attachInput(picture, app)
+        attachInput(picture, container, displayIdValue, app)
+        container.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = Unit
+            override fun onViewDetachedFromWindow(view: View) { clearWindow(container) }
+        })
 
         container.addView(
             picture,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
-            ).apply { topMargin = dp(app, HEADER_DP) },
+            ).apply { topMargin = headerPx },
         )
         container.addView(
             header,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                dp(app, HEADER_DP),
+                headerPx,
             ),
         )
 
@@ -137,39 +172,67 @@ object VirtualScreenOverlay {
             android.graphics.PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = metrics.widthPixels - widthPx - dp(app, EDGE_DP)
+            x = metrics.widthPixels - widthPx - edgePx
             y = (metrics.heightPixels * 0.22f).toInt()
+                .coerceIn(edgePx, (metrics.heightPixels - heightPx - edgePx).coerceAtLeast(edgePx))
         }
 
         val added = runCatching { windowManager.addView(container, layoutParams) }
-        if (added.isFailure) return false
+        if (added.isFailure) {
+            VirtualScreenManager.setPreviewEnabled(false)
+            return false
+        }
 
         root = container
         manager = windowManager
         params = layoutParams
         image = picture
         title = header.findViewWithTag<TextView>("title")
-        drag(header, app)
+        displayId = displayIdValue
+        _visibility.value = true
+        drag(header, container, app)
+        startInputs(container, displayIdValue, app)
 
         frames?.cancel()
         frames = scope.launch {
-            VirtualScreenManager.frame.collect { bitmap -> picture.setImageBitmap(bitmap) }
+            VirtualScreenManager.frame.collect { bitmap ->
+                if (root === container) picture.setImageBitmap(bitmap)
+            }
         }
+        VirtualScreenManager.setPreviewEnabled(true)
         return true
     }
 
     /** 收起预览窗。**不停止**虚拟屏：屏上的应用继续跑，再 [show] 就接着看。 */
     fun hide() {
+        val container = root
+        val windowManager = manager
+        clearWindow(container)
+        if (container != null) runCatching { windowManager?.removeView(container) }
+    }
+
+    private fun clearWindow(container: FrameLayout?) {
+        if (root !== container) return
         frames?.cancel()
         frames = null
-        val container = root ?: return
-        runCatching { manager?.removeView(container) }
+        inputQueue?.cancel()
+        inputQueue = null
+        inputs?.cancel()
+        inputs = null
+        dragFrame?.let { dragHost?.removeCallbacks(it) }
+        dragHost = null
+        dragFrame = null
+        image?.setImageDrawable(null)
+        inputNotice?.cancel()
+        inputNotice = null
         root = null
         manager = null
         params = null
         image = null
         title = null
         displayId = -1
+        _visibility.value = false
+        VirtualScreenManager.setPreviewEnabled(false)
     }
 
     /** 虚拟屏本身被关掉时连同窗口一起收干净。 */
@@ -179,28 +242,63 @@ object VirtualScreenOverlay {
 
     /** 标题栏跟着手指走，并把窗口限制在屏幕内，免得拖出边界再也抓不回来。 */
     @SuppressLint("ClickableViewAccessibility")
-    private fun drag(header: View, app: Context) {
+    private fun drag(header: View, container: FrameLayout, app: Context) {
         var downX = 0f
         var downY = 0f
         var startX = 0
         var startY = 0
+        var pendingX = 0
+        var pendingY = 0
+        var posted = false
+        var held = false
+        val update = Runnable {
+            posted = false
+            if (root === container) {
+                params?.let { layoutParams ->
+                    if (layoutParams.x != pendingX || layoutParams.y != pendingY) {
+                        layoutParams.x = pendingX
+                        layoutParams.y = pendingY
+                        runCatching { manager?.updateViewLayout(container, layoutParams) }
+                    }
+                }
+            }
+        }
+        dragHost = header
+        dragFrame = update
+        fun move(event: MotionEvent, layoutParams: WindowManager.LayoutParams) {
+            val metrics = app.resources.displayMetrics
+            pendingX = (startX + (event.rawX - downX)).roundToInt()
+                .coerceIn(0, (metrics.widthPixels - layoutParams.width).coerceAtLeast(0))
+            pendingY = (startY + (event.rawY - downY)).roundToInt()
+                .coerceIn(0, (metrics.heightPixels - layoutParams.height).coerceAtLeast(0))
+            if (!posted && (pendingX != layoutParams.x || pendingY != layoutParams.y)) {
+                posted = true
+                header.postOnAnimation(update)
+            }
+        }
         header.setOnTouchListener { _, event ->
+            if (root !== container) return@setOnTouchListener false
             val layoutParams = params ?: return@setOnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.rawX
                     downY = event.rawY
-                    startX = layoutParams.x
-                    startY = layoutParams.y
+                    startX = if (posted) pendingX else layoutParams.x
+                    startY = if (posted) pendingY else layoutParams.y
+                    held = true
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val metrics = app.resources.displayMetrics
-                    layoutParams.x = (startX + (event.rawX - downX)).toInt()
-                        .coerceIn(0, (metrics.widthPixels - layoutParams.width).coerceAtLeast(0))
-                    layoutParams.y = (startY + (event.rawY - downY)).toInt()
-                        .coerceIn(0, (metrics.heightPixels - layoutParams.height).coerceAtLeast(0))
-                    runCatching { root?.let { view -> manager?.updateViewLayout(view, layoutParams) } }
+                    if (held) move(event, layoutParams)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (held) move(event, layoutParams)
+                    held = false
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> {
+                    held = false
                     true
                 }
                 else -> false
@@ -211,49 +309,122 @@ object VirtualScreenOverlay {
     /**
      * 画面区域的触摸换算成虚拟屏坐标后注入。
      *
-     * 视图里的 y 要减掉标题栏；虚拟屏坐标按 `虚拟屏尺寸 / 视图尺寸` 缩放。滑动的方向与
-     * 距离按两点的差值投递，交给系统自己算惯性。
+     * MotionEvent 已是图片局部坐标，按 `虚拟屏尺寸 / 图片尺寸` 缩放。
+     * 松手后串行投递点击、长按或滑动；滑动保留用户实际时长。
      */
     @SuppressLint("ClickableViewAccessibility")
-    private fun attachInput(picture: ImageView, app: Context) {
+    private fun attachInput(picture: ImageView, container: FrameLayout, expectedId: Int, app: Context) {
         var downX = 0f
         var downY = 0f
         var downAt = 0L
+        var held = false
+        var moved = false
+        val slop = ViewConfiguration.get(app).scaledTouchSlop.toFloat()
+        val slopSquared = slop * slop
+        fun beyondSlop(x: Float, y: Float): Boolean {
+            val dx = x - downX
+            val dy = y - downY
+            return dx * dx + dy * dy > slopSquared
+        }
         picture.setOnTouchListener { view, event ->
+            if (!currentWindow(container, expectedId)) return@setOnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
                     downY = event.y
-                    downAt = System.currentTimeMillis()
+                    downAt = event.eventTime
+                    held = true
+                    moved = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (held && beyondSlop(event.x, event.y)) moved = true
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> {
+                    held = false
                     true
                 }
                 MotionEvent.ACTION_UP -> {
+                    if (!held) return@setOnTouchListener true
+                    held = false
                     val state = VirtualScreenManager.state.value
-                    val id = displayId
-                    if (id < 0 || state.width <= 0 || state.height <= 0 || view.width <= 0) {
+                    if (state.width <= 0 || state.height <= 0 || view.width <= 0 || view.height <= 0) {
+                        return@setOnTouchListener true
+                    }
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                        inputFailed(app, "副屏触摸需要 Android 11 或更新版本。")
+                        return@setOnTouchListener true
+                    }
+                    if (!VirtualScreenInput.accessibilityReady()) {
+                        inputFailed(app, "操作虚拟屏需要先开启无障碍服务。")
                         return@setOnTouchListener true
                     }
                     val scaleX = state.width.toFloat() / view.width
                     val scaleY = state.height.toFloat() / view.height
-                    val x1 = downX * scaleX
-                    val y1 = downY * scaleY
-                    val x2 = event.x * scaleX
-                    val y2 = event.y * scaleY
-                    val slop = dp(app, SWIPE_SLOP_DP)
-                    val far = hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) > slop
-                    scope.launch {
-                        if (far) {
-                            val duration = (System.currentTimeMillis() - downAt).coerceIn(80L, 800L)
-                            VirtualScreenInput.swipe(id, x1, y1, x2, y2)
-                        } else {
-                            VirtualScreenInput.tap(id, x1, y1)
-                        }
+                    val far = beyondSlop(event.x, event.y)
+                    // Moving out and returning is not a tap or a stationary long press.
+                    if (moved && !far) return@setOnTouchListener true
+                    val duration = (event.eventTime - downAt).coerceAtLeast(1L)
+                    val kind = when {
+                        far -> GestureKind.Swipe
+                        duration >= ViewConfiguration.getLongPressTimeout() -> GestureKind.LongPress
+                        else -> GestureKind.Tap
+                    }
+                    val gesture = ManualGesture(kind,
+                        (downX * scaleX).coerceIn(0f, (state.width - 1).toFloat()),
+                        (downY * scaleY).coerceIn(0f, (state.height - 1).toFloat()),
+                        (event.x * scaleX).coerceIn(0f, (state.width - 1).toFloat()),
+                        (event.y * scaleY).coerceIn(0f, (state.height - 1).toFloat()),
+                        duration,
+                    )
+                    if (inputQueue?.trySend(gesture)?.isSuccess != true) {
+                        inputFailed(app, "操作较快，请稍后再试。")
                     }
                     true
                 }
                 else -> false
             }
         }
+    }
+
+    private fun currentWindow(container: FrameLayout, expectedId: Int): Boolean {
+        val state = VirtualScreenManager.state.value
+        return root === container && isShowing && container.isAttachedToWindow &&
+            displayId == expectedId && state.running && state.displayId == expectedId
+    }
+
+    private fun startInputs(container: FrameLayout, expectedId: Int, app: Context) {
+        val queue = Channel<ManualGesture>(INPUT_QUEUE_SIZE)
+        inputQueue = queue
+        inputs = scope.launch {
+            for (gesture in queue) {
+                if (!currentWindow(container, expectedId)) break
+                val success = try {
+                    when (gesture.kind) {
+                        GestureKind.Tap -> VirtualScreenInput.tap(expectedId, gesture.x1, gesture.y1)
+                        GestureKind.LongPress -> VirtualScreenInput.longPress(expectedId, gesture.x1, gesture.y1)
+                        GestureKind.Swipe -> VirtualScreenInput.swipe(expectedId, gesture.x1, gesture.y1,
+                            gesture.x2, gesture.y2, gesture.durationMs.coerceIn(60L, 5_000L))
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
+                }
+                if (!success && currentWindow(container, expectedId)) {
+                    inputFailed(app, "虚拟屏操作未完成，请检查无障碍状态后重试。")
+                }
+            }
+        }
+    }
+
+    private fun inputFailed(app: Context, message: String) {
+        val now = SystemClock.uptimeMillis()
+        if (inputNotice != null && now - lastInputNoticeAt < 1_500L) return
+        lastInputNoticeAt = now
+        inputNotice?.cancel()
+        inputNotice = Toast.makeText(app, message, Toast.LENGTH_SHORT).also { it.show() }
     }
 
     /** 标题：一个「虚拟屏」标签 + 收起 + 关闭。收起只是收起窗，关闭才停这块屏。 */
@@ -273,11 +444,11 @@ object VirtualScreenOverlay {
             maxLines = 1
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val hide = action(host, app, "－") { hide() }
+        val hide = action(host, app, "－") { hide() }.apply { contentDescription = "收起虚拟屏预览" }
         val close = action(host, app, "×") {
             hide()
             VirtualScreenManager.stop()
-        }
+        }.apply { contentDescription = "关闭虚拟屏" }
         header.addView(label)
         header.addView(hide)
         header.addView(close)

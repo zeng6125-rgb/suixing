@@ -3,6 +3,7 @@ package com.suixing.agent.core
 import android.content.Context
 import com.suixing.agent.agent.AgentEngine
 import com.suixing.agent.agent.ApprovalGate
+import com.suixing.agent.agent.SubagentRecords
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.Shell
 import com.suixing.agent.data.ChatRepository
@@ -163,6 +164,7 @@ object Core {
             chats = ChatRepository(appContext, onDeleted = { id ->
                 conversationReads.forget(id)
                 conversationViewports.forget(id)
+                SubagentRecords.delete(id)
             })
             memory = MemoryStore(appContext)
             profile = UserProfileStore(appContext)

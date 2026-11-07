@@ -578,7 +578,7 @@ private fun copyToClipboard(context: Context, text: String): Boolean =
         clipboard.setPrimaryClip(ClipData.newPlainText("Suixing", text))
     }.isSuccess
 
-private suspend fun readPreview(file: File): String {
+internal suspend fun readPreview(file: File): String {
     if (file.length() > MAX_PREVIEW_BYTES) return "（文件超过 ${humanSize(MAX_PREVIEW_BYTES)}，不在预览范围内）"
     return try {
         val bytes = file.inputStream().use { boundedPreviewBytes(it, MAX_PREVIEW_BYTES.toInt()) }

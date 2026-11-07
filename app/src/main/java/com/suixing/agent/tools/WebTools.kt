@@ -1,6 +1,8 @@
 package com.suixing.agent.tools
 
 import com.suixing.agent.llm.readCancellable
+import com.suixing.agent.data.FileActivity
+import com.suixing.agent.data.FileActivityKind
 import com.suixing.agent.data.SettingsRepository
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
@@ -182,7 +184,9 @@ private suspend fun fetch(args: JsonObject): ToolResult {
                         part.delete()
                         throw error
                     }
-                    ToolResult.success("Saved to ${target.absolutePath} (${humanSize(target.length())})")
+                    val size = target.length()
+                    ToolResult(true, "Saved to ${target.absolutePath} (${humanSize(size)})",
+                        fileActivities = listOf(FileActivity(target.absolutePath, FileActivityKind.DOWNLOADED, sizeBytes = size)))
                 }
             }.getOrElse { error ->
                 ToolResult.failure("Download failed: ${error.message ?: error::class.java.simpleName}")

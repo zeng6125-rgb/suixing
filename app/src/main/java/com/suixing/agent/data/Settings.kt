@@ -236,6 +236,9 @@ data class AppSettings(
     val subagentParallelism: Int = 2,
     /** Absent means the child follows the parent run's already-resolved model. */
     val subagentModel: SubagentModelSelection? = null,
+    /** Saved child choices; every launch resolves them into its own immutable run snapshot. */
+    val subagentProfiles: List<SubagentProfile> = emptyList(),
+    val defaultSubagentProfileId: String = "",
     /**
      * 插话落在哪里。0 排队：等这一轮模型说完，在下一轮请求前注入，模型把它当成
      * 「用户在我干活时说的」；1 立即：掐断在途的流，让模型马上看到这句话——代价是
@@ -842,6 +845,7 @@ fun AppSettings.forAssistant(assistant: Assistant?): AppSettings {
     val provider = providers.firstOrNull { it.id == assistant.providerId }
     val own = provider?.takeIf { it.ownSampling }
     return copy(
+        activeAssistantId = assistant.id,
         systemPrompt = assistant.systemPrompt.ifBlank { systemPrompt },
         model = assistant.model.ifBlank { model },
         baseUrl = provider?.baseUrl?.ifBlank { null } ?: baseUrl,

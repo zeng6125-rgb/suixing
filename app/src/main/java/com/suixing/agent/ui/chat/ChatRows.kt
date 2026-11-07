@@ -76,6 +76,7 @@ import com.suixing.agent.agent.StreamStats
 import com.suixing.agent.ui.components.MenuCard
 import com.suixing.agent.data.Assistant
 import com.suixing.agent.data.ContextCheckpoint
+import com.suixing.agent.data.FileActivity
 import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.data.Tps
@@ -126,6 +127,7 @@ internal data class ChatRow(
      * 120Hz 滚动时每个可见项每帧都在重算。
      */
     val usage: Usage? by lazy { Usage.of(rounds) }
+    val fileActivities: List<FileActivity> by lazy { fileActivitiesFor(parts, rounds) }
 }
 
 /**
@@ -922,6 +924,7 @@ internal fun MessageRow(
                 followReasoning = followReasoning,
                 bubbleMaxWidth = bubbleMaxWidth,
                 reasoningExpansion = reasoningExpansion,
+                fileActivities = row.fileActivities,
                 onBranch = onBranch,
                 onRegenerate = onRegenerate,
                 onEdit = onEdit,
@@ -947,6 +950,7 @@ internal fun MessageRow(
                 avatarPath = assistantAvatarPath,
                 bubbleMaxWidth = bubbleMaxWidth,
                 reasoningExpansion = reasoningExpansion,
+                fileActivities = row.fileActivities,
             )
         }
     }
@@ -1360,10 +1364,15 @@ internal fun AssistantRow(
     card: Boolean = true,
     /** 外观 → 扁平样式下的左右内边距；卡片模式忽略它（用卡片自己的 16dp）。 */
     flatPad: Dp = 0.dp,
+    /** Confirmed file changes/deliveries; live rows derive these solely from tool messages. */
+    fileActivities: List<FileActivity>? = null,
     onBranch: (String, String) -> Unit = { _, _ -> },
     onRegenerate: () -> Unit = {},
     onEdit: (StoredMessage) -> Unit = {},
 ) {
+    val gatheredFiles = fileActivities ?: remember(IdentityKey(parts)) { fileActivitiesFor(parts) }
+    // Text-only streaming deltas keep the small, unchanged metadata list's identity.
+    val files = remember(gatheredFiles) { gatheredFiles }
     val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
     if (streaming) reasoningExpansion.protectRun(processRun)
     val deferredCompletion by remember(reasoningExpansion, processRun) {
@@ -1594,30 +1603,36 @@ internal fun AssistantRow(
     //   卡片：圆角 + surfaceContainerLow 底色 + 1dp 描边（细线代替阴影，长对话保持平）
     //   扁平：什么都不画，正文直接落在页面上
     // 宽度上限（bubbleMaxWidth）两边都保留，所以「气泡宽度」这个设置在新样式下仍然有效。
-    if (card) {
-        Surface(
-            // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
-            // constraint, or the inner fill would win and the card could never narrow.
-            modifier = Modifier
-                .widthIn(max = bubbleMaxWidth)
-                .fillMaxWidth(),
-            shape = BubbleShape,
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
-            // the outline is what separates a near-white card from a white canvas in light
-            // mode, where the two surfaces are 8% apart.
-            // 每帧新建 BorderStroke ⇒ remember 住（颜色变才重建；颜色在组合期先读）。
-            border = run {
-                val outline = MaterialTheme.colorScheme.outlineVariant
-                remember(outline) { BorderStroke(1.dp, outline) }
-            },
-        ) { cardBody() }
-    } else {
-        Box(
-            Modifier
-                .widthIn(max = bubbleMaxWidth)
-                .fillMaxWidth(),
-        ) { cardBody() }
+    Column(Modifier.widthIn(max = bubbleMaxWidth).fillMaxWidth()) {
+        if (card) {
+            Surface(
+                // 外观 → 气泡宽度 first, then fillMaxWidth: the cap has to be the outer
+                // constraint, or the inner fill would win and the card could never narrow.
+                modifier = Modifier
+                    .widthIn(max = bubbleMaxWidth)
+                    .fillMaxWidth(),
+                shape = BubbleShape,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                // A hairline instead of a shadow: elevation 0 keeps a long transcript flat, and
+                // the outline is what separates a near-white card from a white canvas in light
+                // mode, where the two surfaces are 8% apart.
+                // 每帧新建 BorderStroke ⇒ remember 住（颜色变才重建；颜色在组合期先读）。
+                border = run {
+                    val outline = MaterialTheme.colorScheme.outlineVariant
+                    remember(outline) { BorderStroke(1.dp, outline) }
+                },
+            ) { cardBody() }
+        } else {
+            Box(
+                Modifier
+                    .widthIn(max = bubbleMaxWidth)
+                    .fillMaxWidth(),
+            ) { cardBody() }
+        }
+        if (files.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            ChatFileActivity(files)
+        }
     }
 }
 

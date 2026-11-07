@@ -23,8 +23,9 @@ import java.io.File
  *
  * There are two ways in and the tools use whichever is available:
  *  - the accessibility service, which is instant and can write CJK into fields;
- *  - `input` / `screencap` / `uiautomator` through Shizuku or root, which covers
- *    the same ground when accessibility is off (except CJK typing).
+ *  - Shizuku or root provides main-screen `uiautomator` / `screencap` and coordinate
+ *    input. Virtual-screen element reads and text-based clicks require accessibility;
+ *    `uiautomator` cannot select a virtual display. Shell typing only supports ASCII.
  *
  * Every call says which route it took, so a failure is explainable instead of silent.
  */
@@ -59,7 +60,9 @@ class UiTools(
             "ui_dump",
             "Read the interactive elements on the current screen (text, description, centre " +
                 "coordinates, whether it is clickable). This is the first way to understand a screen — " +
-                "faster and cheaper in tokens than a screenshot.",
+                "faster and cheaper in tokens than a screenshot. On the main screen, Shizuku/root " +
+                "can read elements when accessibility is off; virtual-screen elements require accessibility. " +
+                "Without it, use ui_screenshot or ui_virtual_screen screenshot, then coordinate-based ui_tap.",
             Schema.objectOf(
                 properties = listOf(
                     "max_nodes" to Schema.integer("Maximum nodes to return, default 140", default = 140, minimum = 10, maximum = 500),
@@ -118,7 +121,8 @@ class UiTools(
         ),
         ToolSpec(
             "ui_click_text",
-            "Click by the text or content description on screen (more reliable than coordinates).",
+            "Click by the text or content description on screen (more reliable than coordinates). " +
+                "On the virtual screen this requires accessibility; without it, use a screenshot and ui_tap coordinates.",
             Schema.objectOf(
                 properties = listOf(
                     "text" to Schema.string("Text or description to click"),
@@ -153,7 +157,7 @@ class UiTools(
         ),
         ToolSpec(
             "ui_key",
-            "Send a system key: back, home, recents, notifications.",
+            "Send a system key: back, home, recents, notifications. Notifications are unavailable on the virtual screen.",
             Schema.objectOf(
                 properties = listOf(
                     "key" to Schema.string(
@@ -166,7 +170,7 @@ class UiTools(
         ),
         ToolSpec(
             "ui_current_app",
-            "Show the package name of the app currently in the foreground.",
+            "Show the package name of the app currently in the foreground. Virtual-screen app identification requires accessibility.",
             Schema.objectOf(emptyList()),
         ),
         ToolSpec(
@@ -320,18 +324,31 @@ class UiTools(
         args: JsonObject,
         displayId: Int,
     ): ToolResult {
+        virtualTargetFailure(displayId)?.let { return it }
+        if (displayId >= 0 && service == null) {
+            return ToolResult.failure(
+                "副屏读取界面元素需要 JAgent 无障碍服务，uiautomator 只能读取主屏。" +
+                    "请在权限页开启无障碍；也可用 ui_screenshot 或 ui_virtual_screen screenshot 看副屏画面，" +
+                    "再用 ui_tap / ui_swipe 按坐标操作。",
+            )
+        }
         // 读屏也是一次 UI 操作（spec v2 §2）：回合照常开启/续期，边缘光因此亮 ~3s 后淡出。
-        TouchFx.noteToolActivity(context, "ui_dump")
+        if (displayId < 0) TouchFx.noteToolActivity(context, "ui_dump")
         val maxNodes = args.int("max_nodes", 140).coerceIn(10, 500)
         if (service != null) {
-            return withContext(Dispatchers.Default) {
-                ToolResult.success(service.dumpScreen(maxNodes = maxNodes, displayId = displayId))
+            val content = withContext(Dispatchers.Default) {
+                service.dumpScreen(maxNodes = maxNodes, displayId = displayId)
             }
+            virtualTargetFailure(displayId)?.let { return it }
+            return ToolResult.success(content)
         }
+        val metrics = context.resources.displayMetrics
+        // uiautomator has no display selector: this tree and its header always describe the main screen.
+        val header = screenHeader(metrics.widthPixels, metrics.heightPixels, -1, "uiautomator")
         val nodes = dumpNodes() ?: return ToolResult.failure(
             "${shellName()} 读界面失败，可以改用 ui_screenshot 看屏幕。",
         )
-        return ToolResult.success(screenHeader() + renderUiNodes(nodes.take(maxNodes), nodes.size > maxNodes))
+        return ToolResult.success(header + renderUiNodes(nodes.take(maxNodes), nodes.size > maxNodes))
     }
 
     /**
@@ -339,20 +356,20 @@ class UiTools(
      * dump: without it the model cannot aim a swipe at empty space, which is how one
      * scrolls a list.
      */
-    private fun screenHeader(): String {
-        val metrics = context.resources.displayMetrics
-        val state = VirtualScreenManager.state.value
-        if (state.running && state.width > 0) {
-            return "屏幕: ${state.width}x${state.height}（虚拟屏 displayId=${state.displayId}）\n"
-        }
-        return "屏幕: ${metrics.widthPixels}x${metrics.heightPixels}\n"
-    }
+    private fun screenHeader(width: Int, height: Int, displayId: Int, source: String): String =
+        "屏幕: ${width}x${height}（" +
+            (if (displayId >= 0) "虚拟屏 displayId=$displayId" else "主屏") + "，$source）\n"
 
     /** 正在运行的虚拟屏 displayId；没开就是 -1，所有 UI 工具回到主屏。 */
     private fun virtualDisplay(): Int =
         VirtualScreenManager.state.value.let { if (it.running) it.displayId else -1 }
 
-    /** Reads the view tree through `uiautomator dump`; null when it could not be read. */
+    private fun virtualTargetFailure(displayId: Int): ToolResult? =
+        if (displayId >= 0 && virtualDisplay() != displayId) {
+            ToolResult.failure("虚拟屏已关闭或变更，请重新查询屏幕后再操作。")
+        } else null
+
+    /** Reads the main-screen tree through `uiautomator dump`; callers must reject virtual displays. */
     private suspend fun dumpNodes(): List<UiNode>? {
         val file = scratch("ui.xml")
         withContext(Dispatchers.IO) { runCatching { file.delete() } }
@@ -371,7 +388,7 @@ class UiTools(
         displayId: Int,
     ): ToolResult {
         // 同上：截图也是 UI 操作（spec v2 §2）。
-        TouchFx.noteToolActivity(context, "ui_screenshot")
+        if (displayId < 0) TouchFx.noteToolActivity(context, "ui_screenshot")
         // 用 path 重新加载一张旧截图：出站时更早的截图会被省略（省带宽），占位里给出路径，
         // 模型需要再看一眼时用它把原图重新挂回 wire —— 不必重新截图、也不必让用户重做界面。
         args.str("path")?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
@@ -387,6 +404,27 @@ class UiTools(
         val maxWidth = args.int("max_width", 1080).coerceIn(320, 2160)
         val quality = args.int("quality", 72).coerceIn(1, 100)
 
+        // 虚拟屏优先：直接取副屏 ImageReader 的最新一帧。不依赖窗口焦点与系统截图冷却，
+        // 副屏上没有前台窗口时也拿得到画面（Eta / Mika 的截图同样建在 ImageReader 上）。
+        if (displayId >= 0) {
+            val fromScreen = VirtualScreenManager.latestJpeg(maxWidth, quality, displayId)
+            if (fromScreen != null) {
+                val kept = withContext(Dispatchers.IO) { saveShot(fromScreen) }
+                if (virtualDisplay() != displayId) {
+                    return ToolResult.failure("虚拟屏已关闭或变更，请重新查询屏幕后再截图。")
+                }
+                return ToolResult.image(
+                    "已从虚拟屏 $displayId 取帧（${fromScreen.size / 1024} KB）" +
+                        (kept?.let { "，原图：${it.absolutePath}（重看用 ui_screenshot path=$it）" } ?: "") +
+                        "，图片随下一条消息一起提供。",
+                    Base64.encodeToString(fromScreen, Base64.NO_WRAP),
+                )
+            }
+            if (virtualDisplay() != displayId) {
+                return ToolResult.failure("虚拟屏已关闭或变更，请重新查询屏幕后再截图。")
+            }
+        }
+
         if (service != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             val bytes = withContext(Dispatchers.IO) { service.screenshotJpeg(
                 maxWidth,
@@ -395,6 +433,9 @@ class UiTools(
             ) }
             if (bytes != null) {
                 val kept = withContext(Dispatchers.IO) { saveShot(bytes) }
+                if (displayId >= 0 && virtualDisplay() != displayId) {
+                    return ToolResult.failure("虚拟屏已关闭或变更，请重新查询屏幕后再截图。")
+                }
                 return ToolResult.image(
                     "已截图（${bytes.size / 1024} KB）" +
                         (kept?.let { "，原图：${it.absolutePath}（重看用 ui_screenshot path=$it）" } ?: "") +
@@ -402,6 +443,12 @@ class UiTools(
                     Base64.encodeToString(bytes, Base64.NO_WRAP),
                 )
             }
+        }
+        if (displayId >= 0) {
+            if (virtualDisplay() != displayId) {
+                return ToolResult.failure("虚拟屏已关闭或变更，请重新查询屏幕后再截图。")
+            }
+            return ToolResult.failure("暂时没有可用的虚拟屏截图，请等待副屏取帧后重试。")
         }
         if (!privileged()) {
             return if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
@@ -478,11 +525,11 @@ class UiTools(
         if (text.isEmpty()) return ToolResult.failure("缺少参数 text")
         val exact = args.bool("exact", false)
 
-        if (service != null && attemptAction { service.clickByText(text, exact, displayId) }) {
+        virtualTargetFailure(displayId)?.let { return it }
+        val clicked = service != null && attemptAction { service.clickByText(text, exact, displayId) }
+        virtualTargetFailure(displayId)?.let { return it }
+        if (clicked) {
             return ToolResult.success("已点击「$text」")
-        }
-        if (!privileged()) {
-            return if (service == null) blocked() else ToolResult.failure("屏幕上没有找到「$text」")
         }
 
         // **副屏没有 uiautomator 兜底**：`uiautomator dump` 没有 display 参数，实测会静默读主屏
@@ -490,10 +537,15 @@ class UiTools(
         // 就会按主屏坐标去点副屏上想点的地方 —— 用户看到的是"点了但没反应"甚至点错东西。
         // 与其猜，不如把话说清楚：副屏上按文字点击只走无障碍那条路。
         if (displayId >= 0) {
+            val reason = if (service == null) "副屏按文字点击需要开启 JAgent 无障碍服务。"
+                else "副屏上未找到「$text」或无法读取目标窗口。"
             return ToolResult.failure(
-                "副屏上读不到界面元素，无法按文字定位「$text」。" +
-                    "可以先用 ui_dump 看副屏的界面，再用 ui_tap 按坐标点击。",
+                reason + "请在权限页确认无障碍已开启；也可用 ui_screenshot 或 ui_virtual_screen screenshot 看画面，" +
+                    "再用 ui_tap 按坐标点击。",
             )
+        }
+        if (!privileged()) {
+            return if (service == null) blocked() else ToolResult.failure("屏幕上没有找到「$text」")
         }
 
         val nodes = dumpNodes() ?: return ToolResult.failure("读不到界面，无法按文字点击。")
@@ -550,13 +602,19 @@ class UiTools(
         // Same check as type(): an empty text would otherwise "succeed" while writing nothing.
         if (text.isEmpty()) return ToolResult.failure("缺少参数 text")
 
+        virtualTargetFailure(displayId)?.let { return it }
         if (service == null) {
+            val guidance = if (displayId >= 0) {
+                "请在权限页开启无障碍；也可用副屏截图与 ui_tap 坐标定位，再用 ui_type 输入（shell 通道只支持 ASCII）。"
+            } else {
+                "现在可以改用 ui_click_text 点输入框 + ui_type 输入。"
+            }
             return ToolResult.failure(
-                "ui_type_into 需要无障碍服务：它要先点中输入框再写入内容。" +
-                    "现在可以改用 ui_click_text 点输入框 + ui_type 输入。",
+                "ui_type_into 需要无障碍服务：它要先点中输入框再写入内容。" + guidance,
             )
         }
         val ok = attemptAction { service.typeIntoField(label, text, displayId) }
+        virtualTargetFailure(displayId)?.let { return it }
         return if (ok) {
             TouchFx.noteDriving(context)
             ToolResult.success("已在「$label」输入 ${text.length} 字")
@@ -570,6 +628,9 @@ class UiTools(
         // 常量复用（优化清单 tools-P2）：原来每次 ui_key 都新建这个 list。
         val supported = SUPPORTED_KEYS
         if (name !in supported) return ToolResult.failure("不支持的按键：$name")
+        if (displayId >= 0 && name == "notifications") {
+            return ToolResult.failure("虚拟屏没有独立通知栏，不能发送 notifications；该操作会展开主屏通知栏。")
+        }
 
         // **副屏只能走 shell 的 `input -d`**：`performGlobalAction`（back/home/recents）没有屏参数，
         // 只作用于当前有焦点的屏，对副屏不可靠（见 VirtualScreenInput 的同一段说明）。所以副屏
@@ -610,11 +671,18 @@ class UiTools(
         // 主屏才认 `rootInActiveWindow`：它对副屏永远给主屏那套，答出来的会是错误的应用。
         // 副屏用 windows 列表里那块屏最上层的包名。
         if (displayId >= 0) {
-            val onScreen = service?.currentPackageOn(displayId)
+            virtualTargetFailure(displayId)?.let { return it }
+            if (service == null) {
+                return ToolResult.failure(
+                    "副屏前台应用识别需要 JAgent 无障碍服务。请在权限页开启；也可用副屏截图确认当前画面。",
+                )
+            }
+            val onScreen = service.currentPackageOn(displayId)
+            virtualTargetFailure(displayId)?.let { return it }
             return if (onScreen != null) {
                 ToolResult.success("当前前台应用：$onScreen")
             } else {
-                ToolResult.failure("副屏上没有可读的窗口，可以改用 ui_dump。")
+                ToolResult.failure("副屏上没有可读的窗口，可以改用副屏截图确认当前画面。")
             }
         }
         service?.currentPackage()?.let { return ToolResult.success("当前前台应用：$it") }

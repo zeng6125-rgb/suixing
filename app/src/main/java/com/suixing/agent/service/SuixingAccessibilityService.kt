@@ -11,6 +11,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
 import android.view.Display
@@ -352,17 +353,13 @@ class SuixingAccessibilityService : AccessibilityService() {
      * 副屏上最上层的那个应用。
      *
      * `rootInActiveWindow` 只代表**当前有焦点**的那一屏，用它问副屏会得到主屏的答案。
-     * 这里从 `windows` 里按 `displayId` 筛，取第一个非系统装饰窗口的包名 —— 与
+     * 这里复用指定屏的根窗口，取第一个非系统装饰窗口的包名 —— 与
      * [windowRootOn] 的筛法一致，免得"读屏读到 A、问应用却答 B"。
      */
     fun currentPackageOn(displayId: Int): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return runCatching {
-            windows.firstOrNull { window ->
-                window.displayId == displayId &&
-                    window.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM &&
-                    window.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
-            }?.root?.let { root ->
+            windowRootOn(displayId)?.let { root ->
                 try { root.packageName?.toString() } finally { root.recycleIfLegacy() }
             }
         }.getOrNull()
@@ -387,9 +384,24 @@ class SuixingAccessibilityService : AccessibilityService() {
         if (root == null) {
             return if (displayId >= 0) "(副屏上没有可读窗口)" else "(当前无法读取窗口内容)"
         }
-        val (width, height) = screenSize()
+        val size = if (displayId >= 0) {
+            runCatching {
+                val display = getSystemService(DisplayManager::class.java)?.getDisplay(displayId)
+                    ?: return@runCatching null
+                val metrics = createDisplayContext(display).resources.displayMetrics
+                metrics.widthPixels to metrics.heightPixels
+            }.getOrNull()
+        } else screenSize()
+        if (size == null) {
+            root.recycleIfLegacy()
+            return "(副屏已关闭或无法读取其尺寸)"
+        }
+        val (width, height) = size
         val builder = StringBuilder()
-        builder.append("屏幕: ").append(width).append('x').append(height).append('\n')
+        builder.append("屏幕: ").append(width).append('x').append(height)
+        if (displayId >= 0) builder.append("（虚拟屏 displayId=").append(displayId).append("，无障碍）")
+        else builder.append("（主屏，无障碍）")
+        builder.append('\n')
         val windowBounds = Rect().also { root.getBoundsInScreen(it) }
         builder.append("活动窗口 bounds=(").append(windowBounds.left).append(',').append(windowBounds.top)
             .append(',').append(windowBounds.right).append(',').append(windowBounds.bottom).append(")；坐标为屏幕绝对坐标\n")
@@ -420,12 +432,12 @@ class SuixingAccessibilityService : AccessibilityService() {
      * 副屏上那个窗口的根节点。
      *
      * `rootInActiveWindow` 只给**当前有焦点**的那一屏，副屏上的应用永远拿不到，所以副屏
-     * 走 `windows`：这是 `flagRetrieveInteractiveWindows` 打开的窗口列表，按 `displayId`
+     * 走 `windowsOnAllDisplays`：`windows` 仅包含默认屏；这里按 `displayId`
      * 筛出目标屏、丢掉系统装饰窗口（状态栏/输入法），剩下的就是屏上的应用窗口。
      */
     private fun windowRootOn(displayId: Int): AccessibilityNodeInfo? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        val candidates = runCatching { windows }.getOrNull().orEmpty()
+        val candidates = runCatching { windowsOnAllDisplays.get(displayId) }.getOrNull().orEmpty()
         for (window in candidates) {
             if (window.displayId != displayId) continue
             if (window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM) continue

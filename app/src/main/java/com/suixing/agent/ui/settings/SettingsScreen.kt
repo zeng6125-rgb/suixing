@@ -243,7 +243,7 @@ private fun SettingsRoot(
             SettingsGroupRow("对话配置", "输入、运行、失败重试与显示") {
                 openNow.value(SettingsPage.CONVERSATION.route)
             },
-            SettingsGroupRow(SettingsPage.SUBAGENT.title, "任务委派与并行数") {
+            SettingsGroupRow(SettingsPage.SUBAGENT.title, "模板、助手、模型、工具与任务委派") {
                 openNow.value(SettingsPage.SUBAGENT.route)
             },
             SettingsGroupRow("外观", "主题、配色与排版") {
@@ -254,6 +254,9 @@ private fun SettingsRoot(
     val connectionRows = remember {
         listOf(
             // 权限不是这一页的子页：能力清单是一份用户管理的清单，不是一组开关。
+            SettingsGroupRow("UI自动化", "虚拟屏、预览与边缘光") {
+                openNow.value(com.suixing.agent.ui.automation.UI_AUTOMATION_ROUTE)
+            },
             SettingsGroupRow("权限", "无障碍、Shizuku、root 与悬浮窗") {
                 openNow.value("capability")
             },
@@ -1777,7 +1780,7 @@ private fun SubagentSettingsPage(onBack: () -> Unit) {
             if (stored.subagentsEnabled) item {
                 LabeledSlider(
                     label = "子任务并行数 $parallelism",
-                    hint = "每轮最多创建 6 个子任务。父任务结束或停止时，未完成的子任务会一同取消。",
+                    hint = "每轮最多创建 6 个子任务。父任务正常结束前会等待子任务；停止父任务时一同取消。",
                     value = parallelism.toFloat(),
                     range = 1f..3f,
                     steps = 1,
@@ -1841,6 +1844,8 @@ private fun SubagentSettingsPage(onBack: () -> Unit) {
                     )
                 }
             }
+            item { SectionHeader("子任务模板") }
+            item { SubagentProfilesCard(stored) }
         }
     }
 }
@@ -1959,43 +1964,6 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                     )
                 }
             }
-            item {
-                LabeledBlock(
-                    label = "边缘光",
-                    hint = "agent 在操作这台手机时，屏幕四周亮起一圈彩虹光。关掉只是不显示，" +
-                        "自动化、自动返回与诊断日志全都照旧。**这是总开关**：关掉之后一律不显示。",
-                ) {
-                    SegmentedPill(
-                        options = listOf("开", "关"),
-                        selectedIndex = if (stored.edgeLight) 0 else 1,
-                        onSelect = { index -> scope.persist { it.copy(edgeLight = index == 0) } },
-                    )
-                }
-            }
-            item {
-                // **不独立**（用户 2026-10-23）：只有边缘光总开关开着时这一项才起作用。
-                // 总开关关掉时置灰，但值仍然保留 —— 重新打开边缘光时它还是原来的选择。
-                LabeledBlock(
-                    label = "前台显示",
-                    hint = if (stored.edgeLight) {
-                        "关掉之后：JAgent自己在前台时不显示边缘光，退到后台操作别的 app 照常显示。"
-                    } else {
-                        "边缘光已关闭，这一项暂不生效。"
-                    },
-                ) {
-                    SegmentedPill(
-                        options = listOf("开", "关"),
-                        selectedIndex = if (stored.edgeLightInForeground) 0 else 1,
-                        onSelect = { index ->
-                            // 总开关关着时不动这个值（不独立 = 不起作用，而不是被重置）。
-                            if (stored.edgeLight) {
-                                scope.persist { it.copy(edgeLightInForeground = index == 0) }
-                            }
-                        },
-                        modifier = if (stored.edgeLight) Modifier else Modifier.alpha(0.38f),
-                    )
-                }
-            }
             // 思考块与「看到什么」的六项搬到了「对话配置」页：它们是对话内容的显示方式，不是
             // 主题/排版。字段与存储没动。
             item {
@@ -2029,11 +1997,9 @@ private fun AppearanceSettingsPage(onBack: () -> Unit) {
                                 fontScale = defaults.fontScale,
                                 bubbleWidth = defaults.bubbleWidth,
                                 cornerScale = defaults.cornerScale,
-                                // 这一页现在是八项：提示条时长、打字机效果与边缘光也在「恢复默认外观」里，
-                                // 否则按了恢复却留着上一轮的设置，用户会以为按钮坏了。
+                                // 只重置此页管理的外观参数；边缘光由 UI自动化页管理。
                                 bannerSeconds = defaults.bannerSeconds,
                                 typewriter = defaults.typewriter,
-                                edgeLight = defaults.edgeLight,
                             )
                         }
                     },
