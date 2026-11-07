@@ -255,7 +255,13 @@ fun SegmentedPill(
     val visibleIndex by remember(options, selectedIndex) {
         derivedStateOf { dragPosition?.roundToInt() ?: selectedIndex }
     }
-    val showHighlight by remember { derivedStateOf { dragPosition != null || selectedIndex >= 0 } }
+    // `selectedIndex` is a non-State capture. Keep it as a remember key so a transition
+    // from "nothing selected" (-1) to a selected option can reveal the highlight immediately;
+    // without the key this derived state keeps the first composition's value forever whenever
+    // `dragPosition` is null.
+    val showHighlight by remember(selectedIndex) {
+        derivedStateOf { dragPosition != null || selectedIndex >= 0 }
+    }
     Box(
         modifier.fillMaxWidth().selectableGroup()
             .pointerInput(options, selectedIndex, rtl) {

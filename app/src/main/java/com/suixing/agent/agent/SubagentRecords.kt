@@ -1,6 +1,7 @@
 package com.suixing.agent.agent
 
 import android.util.AtomicFile
+import androidx.compose.runtime.Immutable
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.ChildRunConfig
 import com.suixing.agent.data.StoredMessage
@@ -20,8 +21,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -30,6 +29,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+@Immutable
 @Serializable
 internal data class ChildRunRecord(
     val id: String,
@@ -53,6 +53,7 @@ internal data class ChildRunRecord(
     val saveError: String = "",
 )
 
+@Immutable
 internal data class ChildRunSummary(
     val id: String,
     val parentChatId: String,
@@ -97,13 +98,21 @@ internal object SubagentRecords {
     private val parentFileLocks = ConcurrentHashMap<String, Mutex>()
     private val summaryLock = Any()
     private val summaryValues = LinkedHashMap<String, ChildRunSummary>()
-    private val summaryState = MutableStateFlow<List<ChildRunSummary>>(emptyList())
+    private val summariesByChat = LinkedHashMap<String, LinkedHashMap<String, ChildRunSummary>>()
+    /**
+     * Summaries are consumed by one parent chat at a time. Keeping one flow per parent avoids
+     * rebuilding and filtering the complete cross-chat list whenever an unrelated child changes.
+     */
+    private val summaryFlows = ConcurrentHashMap<String, MutableStateFlow<List<ChildRunSummary>>>()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private const val COMPLETED_CACHE_SIZE = 6
     private val missingRecord = MutableStateFlow<ChildRunRecord?>(null).asStateFlow()
 
-    fun summaries(chatId: String): Flow<List<ChildRunSummary>> =
-        summaryState.map { all -> all.filter { it.parentChatId == chatId } }.distinctUntilChanged()
+    fun summaries(chatId: String): Flow<List<ChildRunSummary>> = synchronized(summaryLock) {
+        summaryFlows.computeIfAbsent(chatId) {
+            MutableStateFlow(summariesForChatLocked(chatId))
+        }.asStateFlow()
+    }
 
     fun record(id: String): StateFlow<ChildRunRecord?> {
         val flow = synchronized(summaryLock) {
@@ -239,7 +248,8 @@ internal object SubagentRecords {
                 flowWatchers.remove(id)?.cancel()
                 flows.remove(id)?.value = null
             }
-            summaryState.value = summaryValues.values.sortedBy { it.createdAt }
+            summariesByChat.remove(chatId)
+            summaryFlows.remove(chatId)?.value = emptyList()
             matching
         }
         removed.forEach { entry -> synchronized(entry.lock) {
@@ -338,10 +348,33 @@ internal object SubagentRecords {
             value.result.take(240), value.config, value.createdAt, value.updatedAt)
         synchronized(summaryLock) {
             if (value.parentChatId in deletedChats) return
+            // Tool status updates and repeated terminal events can arrive with identical
+            // user-visible metadata. Avoid allocating/sorting/emitting when the summary did not
+            // actually change; the selected record has its own throttled stream for live text.
+            if (summaryValues[value.id]?.sameVisibleContentAs(summary) == true) {
+                // Keep bookkeeping current without invalidating a UI that cannot observe this
+                // timestamp-only change.
+                summaryValues[value.id] = summary
+                summariesByChat.getOrPut(value.parentChatId) { LinkedHashMap() }[value.id] = summary
+                return
+            }
             summaryValues[value.id] = summary
-            summaryState.value = summaryValues.values.sortedBy { it.createdAt }
+            summariesByChat.getOrPut(value.parentChatId) { LinkedHashMap() }[value.id] = summary
+            summaryFlows[value.parentChatId]?.value = summariesForChatLocked(value.parentChatId)
         }
     }
+
+    /** `updatedAt` is bookkeeping; it must not turn an identical UI summary into a new emission. */
+    private fun ChildRunSummary.sameVisibleContentAs(other: ChildRunSummary): Boolean =
+        id == other.id && parentChatId == other.parentChatId && parentRunId == other.parentRunId &&
+            name == other.name && status == other.status && result == other.result &&
+            config == other.config && createdAt == other.createdAt
+
+    /** Must be called while holding [summaryLock]. */
+    private fun summariesForChatLocked(chatId: String): List<ChildRunSummary> =
+        summariesByChat[chatId].orEmpty().values.asSequence()
+            .sortedBy { it.createdAt }
+            .toList()
 
     private fun saveSoon(entry: Entry) {
         synchronized(entry.lock) {

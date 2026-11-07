@@ -149,6 +149,12 @@ private fun SubagentRecordPage(chatId: String, id: String) {
             value.messages.sumOf { it.cachedTokens.toLong() },
         )
     }
+    // Live text/reasoning publishes arrive on a throttled cadence while the message list usually
+    // stays unchanged. Cache this transcript-wide predicate with the same list identity so a long
+    // child history is not scanned on every live update.
+    val hasAssistantText = remember(value.messages) {
+        value.messages.any { it.role == Roles.ASSISTANT && it.text.isNotBlank() }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         state = rememberLazyListState(),
@@ -204,7 +210,7 @@ private fun SubagentRecordPage(chatId: String, id: String) {
                 ToolDetail(ToolLine(value.currentTool, value.currentToolArgs, done = false, ok = true, elapsedMs = 0), maxHeight = 320.dp)
             }
         }
-        if (value.status == SubagentStatus.COMPLETED && value.result.isNotBlank() && value.messages.none { it.role == Roles.ASSISTANT && it.text.isNotBlank() }) {
+        if (value.status == SubagentStatus.COMPLETED && value.result.isNotBlank() && !hasAssistantText) {
             item(key = "result") { SelectionContainer { MarkdownText(value.result) } }
         }
     }
