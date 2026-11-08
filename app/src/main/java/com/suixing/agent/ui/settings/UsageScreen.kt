@@ -38,6 +38,8 @@ private data class UsageViewData(
     val heatmap: UsageWindow, val all: UsageBucket,
 )
 
+private const val COLLAPSED_MODEL_COUNT = 5
+
 @Composable
 fun UsageScreen(onBack: () -> Unit) {
     var data by remember { mutableStateOf<UsageViewData?>(null) }
@@ -45,6 +47,7 @@ fun UsageScreen(onBack: () -> Unit) {
     var loading by remember { mutableStateOf(true) }
     var reload by remember { mutableIntStateOf(0) }
     var range by rememberSaveable { mutableIntStateOf(30) }
+    var modelsExpanded by rememberSaveable(range) { mutableStateOf(false) }
     var inspectedModel by remember { mutableStateOf<ModelUsage?>(null) }
     LaunchedEffect(reload) {
         loading = true
@@ -119,8 +122,17 @@ fun UsageScreen(onBack: () -> Unit) {
                     Text("这段时间没有已记录的模型响应。", style = SettingsStyle.description,
                         color = scheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
                 }
-                items(window.models, key = { "model:${it.model}" }, contentType = { "model-usage" }) { model ->
+                val visibleModels = if (modelsExpanded) window.models else window.models.take(COLLAPSED_MODEL_COUNT)
+                items(visibleModels, key = { "model:${it.model}" }, contentType = { "model-usage" }) { model ->
                     UsageModelBar(model, window.usage.tokens.total, onClick = { inspectedModel = model })
+                }
+                if (window.models.size > COLLAPSED_MODEL_COUNT) item(key = "models-toggle") {
+                    TextButton(onClick = { modelsExpanded = !modelsExpanded }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (modelsExpanded) "收起" else "展开全部 ${window.models.size} 个模型")
+                        Spacer(Modifier.width(4.dp))
+                        Icon(ImageVector.vectorResource(if (modelsExpanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
+                            contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
                 }
                 item(key = "all-time") {
                     SuixingCard {

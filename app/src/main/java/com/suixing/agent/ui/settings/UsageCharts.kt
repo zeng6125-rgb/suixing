@@ -49,39 +49,49 @@ internal fun UsageHeatmap(days: List<DayUsage>) {
     var selected by rememberSaveable(days.firstOrNull()?.date) { mutableStateOf(days.lastOrNull()?.date.orEmpty()) }
     val current = days.firstOrNull { it.date == selected } ?: days.lastOrNull()
     val lineHeight = MaterialTheme.typography.labelSmall.lineHeight
-    val cellHeight = with(LocalDensity.current) { lineHeight.toDp() }.coerceAtLeast(16.dp)
+    val headerHeight = with(LocalDensity.current) { lineHeight.toDp() }.coerceAtLeast(16.dp)
     val palette = listOf(scheme.surfaceContainerHighest, scheme.primary.copy(alpha = .22f),
         scheme.primary.copy(alpha = .45f), scheme.primary.copy(alpha = .7f), scheme.primary)
     SuixingCard {
         Text("活动热力图", style = SettingsStyle.cardTitle)
         Text("近 90 个自然日 · 按已报告 tokens 着色", style = SettingsStyle.description, color = scheme.onSurfaceVariant)
         Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Spacer(Modifier.height(cellHeight))
-                listOf("一", "", "三", "", "五", "", "日").forEach { label ->
-                    Box(Modifier.width(18.dp).height(cellHeight), contentAlignment = Alignment.Center) {
-                        Text(label, style = SettingsStyle.badge, color = scheme.onSurfaceVariant)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val gap = 4.dp
+            val labelWidth = 18.dp
+            // Round once in pixels so every week uses the same square, including the last column.
+            val cellSize = with(LocalDensity.current) {
+                if (weeks.isEmpty()) 16.dp else
+                    ((constraints.maxWidth - labelWidth.roundToPx() - gap.roundToPx() * weeks.size) / weeks.size)
+                        .coerceAtLeast(0).toDp()
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Spacer(Modifier.height(headerHeight))
+                    listOf("一", "", "三", "", "五", "", "日").forEach { label ->
+                        Box(Modifier.width(labelWidth).height(cellSize), contentAlignment = Alignment.Center) {
+                            Text(label, style = SettingsStyle.badge, color = scheme.onSurfaceVariant)
+                        }
                     }
                 }
-            }
-            weeks.forEachIndexed { index, week ->
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    val first = week.filterNotNull().firstOrNull()?.date?.let(LocalDate::parse)
-                    Text(if (first != null && (index == 0 || first.dayOfMonth <= 7)) first.monthValue.toString() else "",
-                        modifier = Modifier.height(cellHeight), style = SettingsStyle.badge,
-                        color = scheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Clip)
-                    week.forEach { day ->
-                        val shape = RoundedCornerShape(3.dp)
-                        val level = usageHeatLevel(day?.tokens?.total ?: 0, peak)
-                        Box(Modifier.fillMaxWidth().height(cellHeight)
-                            .background(if (day == null) Color.Transparent else palette[level], shape)
-                            .then(if (day == null) Modifier else Modifier
-                                .border(if (day.date == selected) 2.dp else 1.dp,
-                                    if (day.date == selected) scheme.onSurface else if (day.unreported > 0 && day.reported == 0L)
-                                        scheme.primary else Color.Transparent, shape)
-                                .clickable { selected = day.date }
-                                .semantics { contentDescription = "${day.date}，已报告 ${day.tokens.total} tokens，${day.unreported} 次未报告用量" }))
+                weeks.forEachIndexed { index, week ->
+                    Column(Modifier.width(cellSize), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        val first = week.filterNotNull().firstOrNull()?.date?.let(LocalDate::parse)
+                        Text(if (first != null && (index == 0 || first.dayOfMonth <= 7)) first.monthValue.toString() else "",
+                            modifier = Modifier.height(headerHeight), style = SettingsStyle.badge,
+                            color = scheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Clip)
+                        week.forEach { day ->
+                            val shape = RoundedCornerShape(3.dp)
+                            val level = usageHeatLevel(day?.tokens?.total ?: 0, peak)
+                            Box(Modifier.size(cellSize)
+                                .background(if (day == null) Color.Transparent else palette[level], shape)
+                                .then(if (day == null) Modifier else Modifier
+                                    .border(if (day.date == selected) 2.dp else 1.dp,
+                                        if (day.date == selected) scheme.onSurface else if (day.unreported > 0 && day.reported == 0L)
+                                            scheme.primary else Color.Transparent, shape)
+                                    .clickable { selected = day.date }
+                                    .semantics { contentDescription = "${day.date}，已报告 ${day.tokens.total} tokens，${day.unreported} 次未报告用量" }))
+                        }
                     }
                 }
             }
