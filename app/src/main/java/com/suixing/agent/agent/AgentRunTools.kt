@@ -16,6 +16,7 @@ import com.suixing.agent.tools.TIER_NONE
 import com.suixing.agent.tools.TIER_ROOT
 import com.suixing.agent.tools.ToolRegistry
 import com.suixing.agent.tools.ToolResult
+import com.suixing.agent.tools.FileCancellationSink
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -267,7 +268,10 @@ internal suspend fun AgentRun.executeOneTool(
                 // （Main）继续发事件、写回写，所以 `ToolStarted` → `ToolFinished` 的次序、
                 // 以及 `onEvent` 的线程假设全部不变。
                 runCatching {
-                    withContext(Dispatchers.IO + terminalCaller) {
+                    withContext(Dispatchers.IO + terminalCaller + FileCancellationSink { changes ->
+                        val interrupted = changes.attach(ToolResult.failure("工具已中断；已验证的文件变更仍予保留"))
+                        interruptedFileTools[call.id] = ToolOutcome(call, interrupted, System.currentTimeMillis() - startedAt, argsPreview)
+                    }) {
                         SHARED_TOOL_EXECUTION.run(call.name) { runner(args) }
                     }
                 }.getOrElse { error ->

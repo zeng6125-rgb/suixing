@@ -570,7 +570,7 @@ class UiTools(
                 if (append) service.appendText(text, displayId) else service.setText(text, displayId)
             }.getOrDefault(false)
             if (ok) {
-                TouchFx.noteDriving(context)
+                if (displayId < 0) TouchFx.noteDriving(context)
                 return ToolResult.success("已输入 ${text.length} 字")
             }
             if (!privileged()) {
@@ -591,7 +591,7 @@ class UiTools(
         if (!result.ok) return ToolResult.failure("输入没成功：${result.render(300)}")
         // Typing changes what is on screen, so it counts as driving the phone — it just has no
         // point to draw a ring at, which is why the light is the only sign of it.
-        TouchFx.noteDriving(context)
+        if (displayId < 0) TouchFx.noteDriving(context)
         return ToolResult.success("已通过 ${shellName()} 输入 ${text.length} 个字符")
     }
 
@@ -616,7 +616,7 @@ class UiTools(
         val ok = attemptAction { service.typeIntoField(label, text, displayId) }
         virtualTargetFailure(displayId)?.let { return it }
         return if (ok) {
-            TouchFx.noteDriving(context)
+            if (displayId < 0) TouchFx.noteDriving(context)
             ToolResult.success("已在「$label」输入 ${text.length} 字")
         } else {
             ToolResult.failure("没有找到「$label」，可以先 ui_dump 看界面元素。")
@@ -663,7 +663,7 @@ class UiTools(
         if (!result.ok) return ToolResult.failure("按键没成功：${result.render(300)}")
         // A key press changes the screen, so it is driving; the flash stays the shell's business,
         // where the two keys that hand the phone to another app are the ones worth flashing for.
-        TouchFx.noteDriving(context)
+        if (displayId < 0) TouchFx.noteDriving(context)
         return ToolResult.success("已发送按键 $name（经由 ${shellName()}）")
     }
 

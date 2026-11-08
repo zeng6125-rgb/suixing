@@ -21,6 +21,8 @@ class ChatScroll internal constructor(
     var stickToBottom by mutableStateOf(initialFollowing)
     internal var allowBottomResume by mutableStateOf(true)
     internal var restoring by mutableStateOf(true)
+    /** Event identity for late selection cleanup; not observed by composition. */
+    internal var latestRequestGeneration = 0L
     val atBottom by derivedStateOf { !listState.canScrollForward }
     internal suspend fun toBottom() = listState.pinToBottom()
 }

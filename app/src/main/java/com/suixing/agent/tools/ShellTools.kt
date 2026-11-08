@@ -83,6 +83,7 @@ class ShellTools(
             Schema.objectOf(
                 properties = listOf(
                     "command" to Schema.string("Command to run, e.g. ls -l /sdcard/Download"),
+                    "observe_paths" to Schema.arrayOf("Optional files/directories to observe for actual file changes; use for destinations outside the app workspace. Bounded scan; unreadable or very large scopes may be incomplete.", Schema.string("Absolute file or directory path")),
                     "shell" to Schema.string(
                         "Shell used by the app tier: auto (bundled bash when present) | bash | sh (system toybox).",
                         enumValues = listOf("auto", "bash", "sh"),
@@ -172,35 +173,39 @@ class ShellTools(
         drawInputFx(command, tool = toolName)
         if (mode == "root") capabilities.ensureRootProbed()
         val chosen = shellChannel(mode, capabilities.shellTier())
-        // The local selector is strict for the native Bash entry. Root has its own bundled-Bash
-        // route; Shizuku remains a system shell, and neither is selected by runBash.
-        val result: ShellResult = when (chosen) {
-            "root" -> Shell.root(command)
-            "shizuku" -> Shell.shizuku(command)
-            else -> Shell.local(command, shell = shell)
-        }
-        // **bundledBash() 只探一次**（优化清单 tools-P2）：它是 NativeLib 目录上的 file.exists 探测，
-        // 原来在同一次调用里最多探两次。
-        val bundled = Shell.bundledBash() != null
-        val label = when (chosen) {
-            // root 档现在也走随包 bash（见 Shell.root），前缀照实标出来：没接上时仍写 root。
-            "root" -> if (bundled) "root+bash" else "root"
-            "shizuku" -> "shizuku(shell)"
-            else -> if (chosen == "local" && bundled && shell != "sh") {
-                "local(app)+bash"
-            } else {
-                "local(app)"
+        val explicit = (args["observe_paths"] as? kotlinx.serialization.json.JsonArray).orEmpty()
+            .mapNotNull { (it as? JsonPrimitive)?.content?.takeIf { value -> java.io.File(value).isAbsolute }?.let { value -> java.io.File(value) } }
+        return@withContext observeFileChanges(fileObservationRoots(runCatching { workspaceDir(context) }.getOrNull(), command, explicit)) {
+            // The local selector is strict for the native Bash entry. Root has its own bundled-Bash
+            // route; Shizuku remains a system shell, and neither is selected by runBash.
+            val result: ShellResult = when (chosen) {
+                "root" -> Shell.root(command)
+                "shizuku" -> Shell.shizuku(command)
+                else -> Shell.local(command, shell = shell)
             }
-        }
-        val prefix = "[$label] exit=${result.exitCode}\n"
-        if (result.ok) {
-            // **写系统状态要读回核验**（issue #44 第一项）：`exit=0` 不等于生效 ——
-            // SELinux 拒绝、namespace 写错（system/secure/global）、wrong user 都可能静默失败。
-            // 模型看到 success 就继续下一步，要等几轮后才暴露。
-            val verify = verifySettingWrite(command, chosen, localShell = shell)
-            ToolResult.success(prefix + result.render() + (verify ?: ""))
-        } else {
-            ToolResult.failure(prefix + result.render())
+            // **bundledBash() 只探一次**（优化清单 tools-P2）：它是 NativeLib 目录上的 file.exists 探测，
+            // 原来在同一次调用里最多探两次。
+            val bundled = Shell.bundledBash() != null
+            val label = when (chosen) {
+                // root 档现在也走随包 bash（见 Shell.root），前缀照实标出来：没接上时仍写 root。
+                "root" -> if (bundled) "root+bash" else "root"
+                "shizuku" -> "shizuku(shell)"
+                else -> if (chosen == "local" && bundled && shell != "sh") {
+                    "local(app)+bash"
+                } else {
+                    "local(app)"
+                }
+            }
+            val prefix = "[$label] exit=${result.exitCode}\n"
+            if (result.ok) {
+                // **写系统状态要读回核验**（issue #44 第一项）：`exit=0` 不等于生效 ——
+                // SELinux 拒绝、namespace 写错（system/secure/global）、wrong user 都可能静默失败。
+                // 模型看到 success 就继续下一步，要等几轮后才暴露。
+                val verify = verifySettingWrite(command, chosen, localShell = shell)
+                ToolResult.success(prefix + result.render() + (verify ?: ""))
+            } else {
+                ToolResult.failure(prefix + result.render())
+            }
         }
     }
 

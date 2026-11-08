@@ -6,9 +6,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -25,6 +22,7 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.PageTopBarAction
 import kotlinx.coroutines.launch
 
 /**
@@ -51,12 +49,16 @@ fun ExtensionScreen(onBack: () -> Unit) {
                 // 页面第一张卡已经把这层意思说清了。
                 onBack = onBack,
                 actions = {
-                    IconButton(onClick = { memoryRefresh++ }) {
-                        Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), contentDescription = "刷新", modifier = Modifier.size(20.dp))
-                    }
-                    IconButton(onClick = { memoryNew++ }) {
-                        Icon(ImageVector.vectorResource(R.drawable.ic_plus), contentDescription = "新增记忆", modifier = Modifier.size(20.dp))
-                    }
+                    PageTopBarAction(
+                        icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                        contentDescription = "刷新",
+                        onClick = { memoryRefresh++ },
+                    )
+                    PageTopBarAction(
+                        icon = ImageVector.vectorResource(R.drawable.ic_plus),
+                        contentDescription = "新增记忆",
+                        onClick = { memoryNew++ },
+                    )
                 },
             )
             MemorySection(

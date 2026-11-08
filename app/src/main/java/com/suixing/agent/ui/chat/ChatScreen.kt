@@ -244,14 +244,15 @@ fun ChatScreen(
         settings.bubbleWidthFraction
 
     fun jumpToLatest() {
+        scroll.latestRequestGeneration++
         viewport.followOverride = true
-        scope.launch {
-            scroll.allowBottomResume = true
-            scroll.stickToBottom = true
-            if (itemCount > 0) {
-                scroll.toBottom()
-            }
-        }
+        transcript.navigationJob[0]?.cancel()
+        scroll.allowBottomResume = true
+        scroll.stickToBottom = true
+        // A click is an explicit navigation request, independent of the auto-follow
+        // preference. Submit it synchronously; do not queue behind an old scroll job.
+        if (viewport.presented) scroll.restoring = false
+        transcriptPosition.requestLatest()
     }
 
     // 顶部提示条已移除，这里不再需要倒计时收起它的定时器（失败原因画在转录里的红色回执卡上）。
@@ -317,6 +318,14 @@ fun ChatScreen(
                 state, settings, actions, inputBindings, dialogs, contextReadout, subagentUi,
                 slashTools, latestUserAt, scope, snackbarHostState, scroll, itemCount, imePxState,
                 onOpenSettings, ::jumpToLatest, onHeightChanged = { composerH = it },
+            )
+            JumpToLatestButton(
+                scroll = scroll,
+                loading = state.loading,
+                composerHeight = { composerH },
+                imePxState = imePxState,
+                navBarPx = navBarPx,
+                onClick = ::jumpToLatest,
             )
         }
         ChatInlineOverlays(state, settings, dialogs, inputBindings, composerH, onOpenSettings)

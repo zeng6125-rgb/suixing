@@ -45,9 +45,12 @@ internal class TerminalSession(
         val written: CompletableDeferred<Unit>, val ownerJob: Job?)
     private val writes = Channel<Input>(32)
     private val chunks = Channel<ByteArray>(8)
+    private data class PtySize(val columns: Int, val rows: Int)
+    private val resizes = Channel<PtySize>(Channel.CONFLATED)
     private var reader: Job? = null
     private var processor: Job? = null
     private var writer: Job? = null
+    private var resizer: Job? = null
     private var dirty = false
     private var lastPublished = 0L
     private var frame: Job? = null
@@ -64,11 +67,9 @@ internal class TerminalSession(
             scope.launch { runCatching { writeBytes(bytes) } }
         }
         override fun resize(columns: Int, rows: Int) {
-            scope.launch(Dispatchers.IO) {
-                synchronized(nativeLock) {
-                    if (!closing.get()) runCatching { TerminalNative.nativeResize(masterFd, columns, rows) }
-                }
-            }
+            // Keyboard animation may request many sizes. One worker preserves order,
+            // keeping only the newest pending size instead of racing independent IO jobs.
+            resizes.trySend(PtySize(columns, rows))
         }
         override fun copy(text: String) { onCopy?.invoke(text) }
         override fun paste() { onPaste?.invoke() }
@@ -77,7 +78,15 @@ internal class TerminalSession(
     fun start() {
         check(_status.value == SessionStatus.STARTING)
         _status.value = SessionStatus.RUNNING
+        resizer = scope.launch(Dispatchers.IO) {
+            for (size in resizes) synchronized(nativeLock) {
+                if (!closing.get()) runCatching {
+                    TerminalNative.nativeResize(masterFd, size.columns, size.rows)
+                }
+            }
+        }
         processor = scope.launch(Dispatchers.Main.immediate) {
+            var sliceStarted = android.os.SystemClock.uptimeMillis()
             for (bytes in chunks) {
                 display.emulator.append(bytes, bytes.size)
                 if (display.isHistoryFull) _historyLimited.value = true
@@ -87,6 +96,12 @@ internal class TerminalSession(
                 else if (frame?.isActive != true) frame = scope.launch {
                     delay(32 - (now - lastPublished))
                     if (dirty) publish(android.os.SystemClock.uptimeMillis())
+                }
+                // A busy PTY can keep the channel perpetually ready. Yield a bounded
+                // Main-thread slice so input and display frames can run between chunks.
+                if (now - sliceStarted >= 4L) {
+                    yield()
+                    sliceStarted = android.os.SystemClock.uptimeMillis()
                 }
             }
             publish(android.os.SystemClock.uptimeMillis())
@@ -173,6 +188,7 @@ internal class TerminalSession(
             return@withContext
         }
         writes.close()
+        resizes.close()
         try {
             if (force) {
                 synchronized(nativeLock) { runCatching { TerminalNative.nativeSignalGroup(pid, SIGTERM) } }
@@ -184,6 +200,7 @@ internal class TerminalSession(
             processor?.join()
             frame?.cancelAndJoin()
             writer?.cancelAndJoin()
+            resizer?.cancelAndJoin()
             while (true) {
                 val pending = writes.tryReceive().getOrNull() ?: break
                 pending.written.completeExceptionally(IllegalStateException("终端会话已停止"))

@@ -28,6 +28,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.core.Core
 import com.suixing.agent.ui.theme.AppearancePalette
+import com.suixing.agent.virtualscreen.VirtualScreenManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -189,7 +190,30 @@ object TouchFx {
      * Volatile：设置收集协程写（主线程），[apply] 读（主线程）。
      */
     @Volatile
-    private var edgeLightOn = true
+    private var edgeLightOn = false
+    private var edgeSettingsReady = false
+    private var edgePreferenceToken = 0L
+    private var pendingMasterDisable: Long? = null
+    private var pendingForegroundDisable: Long? = null
+
+    /** Main-thread UI intent: suppress before an asynchronous preference write can complete. */
+    fun suppressEdgeForPreferenceChange(foregroundOnly: Boolean): Long {
+        val token = ++edgePreferenceToken
+        if (foregroundOnly) pendingForegroundDisable = token else pendingMasterDisable = token
+        if (!foregroundOnly || foreground()) view?.setEdgeEnabled(false)
+        return token
+    }
+
+    /** A failed/cancelled write may undo only its own pending suppression. */
+    fun cancelEdgePreferenceChange(token: Long) {
+        if (pendingMasterDisable == token) pendingMasterDisable = null
+        if (pendingForegroundDisable == token) pendingForegroundDisable = null
+        apply("settings-write-not-saved")
+    }
+
+    private fun edgeAllowed(inForeground: Boolean): Boolean = edgeSettingsReady &&
+        pendingMasterDisable == null && (!inForeground || pendingForegroundDisable == null) &&
+        edgeLightVisible(edgeLightOn, edgeLightInForeground, inForeground)
 
     /**
      * 边缘光在**前台是否显示**（`AppSettings.edgeLightInForeground`，默认开 = 保持 issue #6）。
@@ -235,13 +259,21 @@ object TouchFx {
                 Core.settings.flow.collect { s ->
                     // 边缘光跟当前配色的 primary，不再留一套固定墨绿。
                     fxBrandColor = brandColorFor(s.themeMode, s.paletteMode)
-                    val changed = edgeLightOn != s.edgeLight ||
+                    val changed = !edgeSettingsReady || edgeLightOn != s.edgeLight ||
                         edgeLightInForeground != s.edgeLightInForeground
                     edgeLightOn = s.edgeLight
                     edgeLightInForeground = s.edgeLightInForeground
+                    if (!s.edgeLight) pendingMasterDisable = null
+                    if (!s.edgeLightInForeground) pendingForegroundDisable = null
+                    edgeSettingsReady = true
                     if (changed) apply("settings")
                 }
             }.onFailure { error ->
+                // Unknown preferences must never briefly enable a saved-disabled effect.
+                edgeSettingsReady = false
+                edgeLightOn = false
+                view?.setEdgeEnabled(false)
+                watchingSettings = false
                 appContext?.let {
                     trace(it, "entry=settings-collect-failed ${error.javaClass.simpleName}: ${error.message}")
                 }
@@ -435,6 +467,13 @@ object TouchFx {
      * `"ui_screenshot"`）。
      */
     fun noteToolActivity(context: Context, tool: String, detail: String? = null) {
+        // These tools follow the active virtual display. Their main-screen feedback
+        // must be decided at the actual dispatch site, where the target is known.
+        if (VirtualScreenManager.state.value.running &&
+            (tool.startsWith("ui_") || tool == "open_app")) {
+            trace(context, "entry=neutral screen=virtual tool=$tool")
+            return
+        }
         val triggers = tool in FX_UI_EPISODE_TOOLS ||
             shellToolDrivesUi(tool, detail)
         if (triggers) {
@@ -617,7 +656,8 @@ object TouchFx {
         // 亮不亮只看这一轮驱动过屏幕的 run 还活不活着，前台/后台一视同仁。
         // `inForeground` 仍然照常传给 [traceLight]，日志里的 `fg=self|other` 不丢。
         // 外观页的开关是最后一道门：关掉只是不显示，驱动判定与自动返回照旧。
-        val target = if (sessionAlive && edgeLightVisible(edgeLightOn, edgeLightInForeground, inForeground)) {
+        val edgeEnabled = edgeAllowed(inForeground)
+        val target = if (sessionAlive && edgeEnabled) {
             FX_ALPHA_HOT
         } else {
             0f
@@ -625,6 +665,8 @@ object TouchFx {
         traceLight(app, reason, target, sessionAlive, running, now, inForeground)
         // 目标值而不是开关：view 自己逐帧缓动逼近，所以亮起/熄灭都是斜坡，不会「啪」地闪。
         val fx = (if (target > 0f) overlay(app) else view)
+        // Explicitly disabling the feature clears both the breath and any in-flight flash.
+        fx?.setEdgeEnabled(edgeEnabled)
         fx?.setTarget(target)
         // **停摆兜底**（issue #7）：窗口脱离窗口树之后 `postInvalidateDelayed` 不再排帧，
         // `onDraw` 停摆、`drawnAlpha` 冻在最后一帧 —— 日志里 `target=0.0 alpha=1.0` 挂几分钟就是它。
@@ -808,7 +850,9 @@ object TouchFx {
     private fun post(context: Context, entry: String, block: (FxView) -> Unit) {
         val app = context.applicationContext
         main.post {
+            watchSettings()
             val fx = overlay(app)
+            fx?.setEdgeEnabled(edgeAllowed(foreground()))
             trace(app, entry)
             if (fx != null) block(fx)
         }
@@ -882,7 +926,7 @@ object TouchFx {
         // 总开关关掉时**一律不显示**（用户 2026-10-23）：`onDraw` 里的边光只看
         // `edgeStart`，不看总开关，所以这里必须拦 —— 否则关掉之后每次 UI 操作
         // 还会闪 350ms。前台开关同理。
-        if (!edgeLightVisible(edgeLightOn, edgeLightInForeground, foreground())) return
+        if (!edgeAllowed(foreground())) return
         val now = SystemClock.uptimeMillis()
         if (now - lastEdgeFlashAt < FX_EDGE_THROTTLE_MS) return
         lastEdgeFlashAt = now

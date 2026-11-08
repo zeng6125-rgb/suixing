@@ -9,9 +9,8 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.Measurable
 import androidx.compose.ui.layout.MeasureResult
 import androidx.compose.ui.layout.MeasureScope
-import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.onPlaced
-import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.node.LayoutAwareModifierNode
 import androidx.compose.ui.node.LayoutModifierNode
 import androidx.compose.ui.node.ModifierNodeElement
@@ -30,9 +29,12 @@ internal val LocalReadingRowKey = compositionLocalOf<String?> { null }
 internal class TranscriptPosition(private val list: LazyListState) {
     var following: () -> Boolean = { false }
     var reading: () -> Boolean = { false }
+    var latestStillWanted: () -> Boolean = { true }
+    private var latestRequested = false
     private var invalidate: (() -> Unit)? = null
     private var top = 0f
     private var bottom = 0f
+    private var viewportCoordinates: LayoutCoordinates? = null
     private val regions = LinkedHashMap<Any, TextRegion>()
     private val visibleRows = HashSet<Any>()
     private var anchor: ReadingPoint? = null
@@ -66,22 +68,41 @@ internal class TranscriptPosition(private val list: LazyListState) {
         android.os.SystemClock.uptimeMillis() >= userChangeUntil
 
     fun attach(invalidate: () -> Unit) { this.invalidate = invalidate }
+    /** Explicit clicks survive scroll cancellation and a tail that has not been measured yet. */
+    fun requestLatest() {
+        latestRequested = true
+        anchor = null
+        lastRepair = null
+        captureAfterPlacement = false
+        val count = list.layoutInfo.totalItemsCount
+        if (count > 0) list.requestScrollToItem(count - 1, TRANSCRIPT_END_OFFSET)
+        invalidate?.invoke()
+    }
+
     fun detach() {
         invalidate = null
+        viewportCoordinates = null
         regions.clear()
         visibleRows.clear()
         anchor = null
         captureAfterPlacement = false
+        latestRequested = false
     }
 
     fun viewportPlaced(coordinates: LayoutCoordinates) {
         val layout = list.layoutInfo
-        val viewportY = coordinates.positionInRoot().y
-        top = viewportY + layout.beforeContentPadding
-        bottom = viewportY + layout.viewportSize.height - layout.afterContentPadding
-        if (following()) {
+        viewportCoordinates = coordinates
+        // Reading and scroll offsets use the list's own pixels. Whole-home translation/scale
+        // must never look like text growth and trigger a compensating scroll.
+        top = layout.beforeContentPadding.toFloat()
+        bottom = (layout.viewportSize.height - layout.afterContentPadding).toFloat()
+        if (latestRequested && !latestStillWanted()) latestRequested = false
+        if (latestRequested || following()) {
             anchor = null
             lastRepair = null
+            if (latestRequested && layout.totalItemsCount > 0 && !list.canScrollForward) {
+                latestRequested = false
+            }
             if (list.canScrollForward && layout.totalItemsCount > 0) {
                 list.requestScrollToItem(layout.totalItemsCount - 1, TRANSCRIPT_END_OFFSET)
                 // requestScrollToItem's snapshot notification alone may be delivered
@@ -120,7 +141,10 @@ internal class TranscriptPosition(private val list: LazyListState) {
                 lastRepair = null
                 unreadableAt = null
             }
-            invalidate?.invoke()
+            // While a press/fling owns scrolling there is no anchor repair to perform.
+            // Reading's next idle transition requests the required placement once.
+            // A follow-only idle transition still needs one pass if text grew meanwhile.
+            if (following() && list.canScrollForward) invalidate?.invoke()
             return
         }
         // Reading resumed. Repair only if the list never moved; otherwise re-capture fresh.
@@ -146,6 +170,7 @@ internal class TranscriptPosition(private val list: LazyListState) {
     }
 
     private fun capture() {
+        val viewport = viewportCoordinates?.takeIf { it.isAttached } ?: return
         val probe = top + 24f
         visibleRows.clear()
         for (item in list.layoutInfo.visibleItemsInfo) visibleRows.add(item.key)
@@ -153,10 +178,9 @@ internal class TranscriptPosition(private val list: LazyListState) {
         var nearestDistance = Float.POSITIVE_INFINITY
         for (candidate in regions.values) {
             if (candidate.rowKey !in visibleRows || !candidate.coordinates.isAttached) continue
-            val bounds = candidate.coordinates.boundsInRoot()
+            val bounds = viewport.localBoundingBoxOf(candidate.coordinates, clipBounds = true)
             if (bounds.height <= 0f || bounds.top >= bottom || bounds.bottom <= top) continue
-            val y = candidate.coordinates.positionInRoot().y
-            val distance = if (probe >= y && probe <= y + candidate.coordinates.size.height) 0f else abs(y - probe)
+            val distance = if (probe >= bounds.top && probe <= bounds.bottom) 0f else abs(bounds.top - probe)
             if (distance < nearestDistance) {
                 nearest = candidate
                 nearestDistance = distance
@@ -166,12 +190,12 @@ internal class TranscriptPosition(private val list: LazyListState) {
         val region = nearest ?: return
         val result = region.layout() ?: return
         if (result.lineCount == 0) return
-        val y = region.coordinates.positionInRoot().y
-        val line = result.getLineForVerticalPosition((probe - y).coerceAtLeast(0f))
+        val textProbe = region.coordinates.localPositionOf(viewport, Offset(0f, probe))
+        val line = result.getLineForVerticalPosition(textProbe.y.coerceAtLeast(0f))
         val offset = result.getLineStart(line)
         val text = result.layoutInput.text.text
         anchor = ReadingPoint(region.key, offset, text.substring(offset, (offset + 32).coerceAtMost(text.length)),
-            y + result.getLineTop(line))
+            viewport.localPositionOf(region.coordinates, Offset(0f, result.getLineTop(line))).y)
     }
 
     fun textPlaced(key: Any, rowKey: String, coordinates: LayoutCoordinates, layout: () -> TextLayoutResult?) {
@@ -190,6 +214,7 @@ internal class TranscriptPosition(private val list: LazyListState) {
     /** Resolve a single anchor only after every descendant has its final position. */
     fun contentPlaced() {
         if (!canRead()) return
+        val viewport = viewportCoordinates?.takeIf { it.isAttached } ?: return
         if (captureAfterPlacement) {
             // The owner calls here only after child.place() has placed all descendants.
             // Establish the new point without repairing against a pre-navigation Y.
@@ -216,7 +241,8 @@ internal class TranscriptPosition(private val list: LazyListState) {
             lastRepair = null
             return
         }
-        val y = coordinates.positionInRoot().y + textLayout.getLineTop(textLayout.getLineForOffset(offset))
+        val lineTop = textLayout.getLineTop(textLayout.getLineForOffset(offset))
+        val y = viewport.localPositionOf(coordinates, Offset(0f, lineTop)).y
         val delta = (y - point.y).roundToInt()
         if (delta == 0) { lastRepair = null; return }
         // The first lazy item may change after prepend. Use this pass's current

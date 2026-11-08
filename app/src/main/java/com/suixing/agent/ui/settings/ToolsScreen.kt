@@ -60,6 +60,7 @@ import com.suixing.agent.tools.virtualTool
 import com.suixing.agent.ui.extension.SkillUrlImportDialog
 import com.suixing.agent.ui.components.EmptyState
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.PageTopBarAction
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.StatusPill
 import com.suixing.agent.ui.components.SuixingCard
@@ -191,7 +192,9 @@ fun ToolsScreen(onBack: () -> Unit) {
                     // 工具页与插件页没有可刷新的东西：工具那栏跟着 MCP 状态与能力状态自己变，
                     // 插件页现在只有一个说明（还没有可装卸的东西）。
                     if (tab == 1 || tab == 2) {
-                        IconButton(
+                        PageTopBarAction(
+                            icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                            contentDescription = "刷新",
                             onClick = {
                                 if (tab == 1) {
                                     skillRefresh++
@@ -202,11 +205,11 @@ fun ToolsScreen(onBack: () -> Unit) {
                                     }
                                 }
                             },
-                        ) {
-                            Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), contentDescription = "刷新", modifier = Modifier.size(20.dp))
-                        }
+                        )
                         Box {
-                            IconButton(
+                            PageTopBarAction(
+                                icon = ImageVector.vectorResource(if (tab == 1) R.drawable.ic_download else R.drawable.ic_plus),
+                                contentDescription = if (tab == 1) "导入技能" else "添加服务器",
                                 onClick = {
                                     if (tab == 1) {
                                         skillImportMenu = true
@@ -215,17 +218,7 @@ fun ToolsScreen(onBack: () -> Unit) {
                                         mcpEditorOpen = true
                                     }
                                 },
-                            ) {
-                                Icon(
-                                    imageVector = if (tab == 1) {
-                                        ImageVector.vectorResource(R.drawable.ic_download)
-                                    } else {
-                                        ImageVector.vectorResource(R.drawable.ic_plus)
-                                    },
-                                    contentDescription = if (tab == 1) "导入技能" else "添加服务器",
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            }
+                            )
                             // A folder and a lone SKILL.md need different pickers, so the
                             // import button offers the choice instead of guessing.
                             ActionMenu(

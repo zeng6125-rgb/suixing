@@ -113,6 +113,7 @@ internal class AgentRun(
     internal val steerMode: Int = settings.steerMode
 
     internal val cancelled = AtomicBoolean(false)
+    internal val interruptedFileTools = java.util.concurrent.ConcurrentHashMap<String, ToolOutcome>()
 
     /** The call currently on the wire; cancelling it is what stops this run's stream. */
     @Volatile

@@ -52,8 +52,12 @@ internal fun rememberChatEarlierPaging(
                     put(liveRowKey(state.conversationId, state.liveRunId), itemCount - 1)
                 }
             }
-            earlierPageTarget(listState.layoutInfo.visibleItemsInfo, incomingIndices)?.let { target ->
-                listState.requestScrollToItem(target.index, target.scrollOffset)
+            // Disk paging can finish after the reader has explicitly returned to latest.
+            // Preserve history only while reading; the old request must not pull them back.
+            if (!scroll.stickToBottom) {
+                earlierPageTarget(listState.layoutInfo.visibleItemsInfo, incomingIndices)?.let { target ->
+                    listState.requestScrollToItem(target.index, target.scrollOffset)
+                }
             }
             earlierReveal = null
             loadingEarlier = false

@@ -502,6 +502,7 @@ fun SuixingApp() {
                 drawerContent = {
                     // 侧边栏本体：宿主按 progress 平移这一层，才有跟手/回弹动画。
                     val drawerVisible = drawerState.homeShieldActive && route == "empty"
+                    val drawerMoving = drawerState.isMoving
                     val drawerLifecycle = com.suixing.agent.ui.chat.rememberChatUiLifecycleOwner(drawerVisible)
                     // Pause high-rate list updates, while retaining the header/avatar's normal preload.
                     val drawerConversations by chat.conversations.collectAsStateWithLifecycle(
@@ -513,7 +514,8 @@ fun SuixingApp() {
                     conversations = drawerConversations,
                     activeId = activeConversationId,
                     runningId = runningIds,
-                    runningAnimationActive = drawerVisible,
+                    runningAnimationActive = drawerVisible && !drawerMoving,
+                    panelMoving = drawerMoving,
                     onNew = {
                         switchIntents.invalidate()
                         chat.newConversation()

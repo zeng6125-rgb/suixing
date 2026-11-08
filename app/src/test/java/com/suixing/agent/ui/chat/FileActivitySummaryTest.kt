@@ -11,6 +11,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FileActivitySummaryTest {
+    @Test fun deletionAfterAWriteKeepsTheLatestUnavailableStateAndCumulativeCounts() {
+        val path = "/sdcard/temporary.txt"
+        val created = message("create", FileActivity(path, FileActivityKind.CREATED, addedLines = 2, removedLines = 0))
+        val deleted = message("delete", FileActivity(path, FileActivityKind.DELETED, addedLines = 0, removedLines = 2))
+        val result = fileActivitiesFor(emptyList(), listOf(created, deleted)).single()
+        assertEquals(FileActivityKind.DELETED, result.kind)
+        assertEquals(2, result.addedLines)
+        assertEquals(2, result.removedLines)
+    }
+
+    @Test fun moveRetainsTheOriginalPathAndDoesNotEraseEarlierReplacementCounts() {
+        val path = "/sdcard/new.txt"
+        val edit = message("edit", FileActivity(path, FileActivityKind.MODIFIED, addedLines = 2, removedLines = 1))
+        val move = message("move", FileActivity(path, FileActivityKind.MOVED, previousPath = "/sdcard/old.txt"))
+        val later = message("later", FileActivity(path, FileActivityKind.MODIFIED, addedLines = 3, removedLines = 1))
+        val result = fileActivitiesFor(emptyList(), listOf(edit, move, later)).single()
+        assertEquals("/sdcard/old.txt", result.previousPath)
+        assertEquals(5, result.addedLines)
+        assertEquals(2, result.removedLines)
+    }
+
+    @Test fun movingAPreviouslyCreatedFileRemovesItsStaleSourceCard() {
+        val created = message("create", FileActivity("/sdcard/old.txt", FileActivityKind.CREATED, addedLines = 2, removedLines = 0))
+        val move = message("move", FileActivity("/sdcard/new.txt", FileActivityKind.MOVED, previousPath = "/sdcard/old.txt"))
+        val result = fileActivitiesFor(emptyList(), listOf(created, move)).single()
+        assertEquals("/sdcard/new.txt", result.path)
+        assertEquals("/sdcard/old.txt", result.previousPath)
+        assertEquals(2, result.addedLines)
+    }
+
     @Test fun aRunningReplyHasNoFileOrActionFooter() {
         assertEquals(emptyList<ReplyFooterSection>(), replyFooterSections(streaming = true, fileCount = 1, hasActions = true))
     }

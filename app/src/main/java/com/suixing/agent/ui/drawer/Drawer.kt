@@ -10,6 +10,8 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -64,11 +66,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.suixing.agent.R
 import com.suixing.agent.core.Core
@@ -129,6 +131,14 @@ internal val DRAWER_CLOSE_SPEC: androidx.compose.animation.core.FiniteAnimationS
 /** Opening shares the same spring; gestures additionally carry their release velocity. */
 internal val DRAWER_OPEN_SPEC: androidx.compose.animation.core.FiniteAnimationSpec<Float> =
     DRAWER_SPEC
+
+// Match Foundation 1.12.1's default item-placement spring when the panel is stationary.
+private val DrawerRowPlacementSpec = spring<IntOffset>(
+    stiffness = 400f,
+    visibilityThreshold = IntOffset.VisibilityThreshold,
+)
+// Keep animateItem's modifier node mounted; null would remove/recreate it at motion boundaries.
+private val DrawerRowImmediatePlacementSpec = snap<IntOffset>()
 /**
  * The left drawer: conversations on top, everything else at the bottom.
  *
@@ -139,7 +149,7 @@ internal val DRAWER_OPEN_SPEC: androidx.compose.animation.core.FiniteAnimationSp
  */
 @Composable
 internal fun Drawer(
-    /** 抽屉是否开着（= drawerState.isOpen）：只用来在拉开时收起键盘。 */
+    /** Settled state used only to clear drawer interaction modes after closing. */
     open: Boolean,
     route: String,
     conversations: List<Conversation>,
@@ -156,6 +166,7 @@ internal fun Drawer(
     onNavigate: (String) -> Unit,
     onAssistants: () -> Unit,
     runningAnimationActive: Boolean = true,
+    panelMoving: Boolean = false,
 ) {
     val unreadCompleted by Core.conversationReads.unread.collectAsStateWithLifecycle()
     // 左上角的标识跟着**当前助手**走：设置过头像就画头像，没头像仍画「JAgent」标。
@@ -244,15 +255,10 @@ internal fun Drawer(
             ).show()
         }
     }
-    val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(open) {
-        if (open) {
-            // Five 56dp rows plus the head do not fit above the keyboard on a short
-            // screen, and the list column can only shrink to zero — the bottom rows,
-            // 设置 included, would sit off-screen with nothing able to scroll them.
-            // Dropping the keyboard gives the panel the height it was laid out for.
-            keyboard?.hide()
-        } else {
+        // Drawer motion transforms the home layer without changing its keyboard or viewport.
+        // Hiding IME here used to resize/re-anchor chat after the opening animation had settled.
+        if (!open) {
             // 抽屉一关，排序模式就失效：它是一次性模式，不该跨次拉开残留
             // （用户：「进行了长按等其它操作（例如关闭侧边栏），自动退出拖动模式」）。
             sortMode = false
@@ -504,11 +510,12 @@ internal fun Drawer(
                             }
                         }
                     }
+                    val rowRunning = conversation.id in runningIdNow.value
                     ConversationRow(
                         conversation = conversation,
                         selected = conversation.id == activeIdNow.value,
-                        running = conversation.id in runningIdNow.value,
-                        runningAnimationActive = runningAnimationNow.value,
+                        running = rowRunning,
+                        runningAnimationActive = rowRunning && runningAnimationNow.value,
                         completedUnread = conversation.id in unreadCompleted,
                         menuOpen = menuFor == conversation.id,
                         sortMode = sortMode,
@@ -584,7 +591,11 @@ internal fun Drawer(
                     items(sections.pinned, key = { it.id }, contentType = { "conversation" }) { // 只保留位移动画。
 drawerRow(
                         it,
-                        Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null),
+                        Modifier.animateItem(
+                            fadeInSpec = null,
+                            placementSpec = if (panelMoving) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
+                            fadeOutSpec = null,
+                        ),
                     ) }
                     if (sections.normal.isNotEmpty()) {
                         item(key = "drawer-section-divider") {
@@ -598,7 +609,11 @@ drawerRow(
                 items(sections.normal, key = { it.id }, contentType = { "conversation" }) { // 只保留位移动画。
 drawerRow(
                         it,
-                        Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null),
+                        Modifier.animateItem(
+                            fadeInSpec = null,
+                            placementSpec = if (panelMoving) DrawerRowImmediatePlacementSpec else DrawerRowPlacementSpec,
+                            fadeOutSpec = null,
+                        ),
                     ) }
             }
 

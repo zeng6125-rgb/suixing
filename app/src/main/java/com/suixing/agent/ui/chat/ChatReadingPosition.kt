@@ -35,6 +35,7 @@ internal fun rememberChatReadingPosition(
     SideEffect {
         transcriptPosition.following = { followPositionNow.value() }
         transcriptPosition.reading = { readingPositionNow.value() }
+        transcriptPosition.latestStillWanted = { scroll.stickToBottom }
     }
     // Install before composing rows: a first derived read must observe these snapshot inputs,
     // rather than caching the initial callback's constant false until an unrelated change.

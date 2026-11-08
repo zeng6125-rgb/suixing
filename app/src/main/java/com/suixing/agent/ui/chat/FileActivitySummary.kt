@@ -15,7 +15,8 @@ internal fun fileActivitiesFor(
         if (message.fileActivities.isEmpty() || !seen.add(message.id)) return
         for (activity in message.fileActivities) {
             if (activity.path.isBlank()) continue
-            val previous = byPath[activity.path]
+            val movedFrom = activity.previousPath?.takeIf { activity.kind == FileActivityKind.MOVED }?.let(byPath::remove)
+            val previous = byPath[activity.path] ?: movedFrom
             byPath[activity.path] = if (previous == null) activity else mergeFileActivity(previous, activity)
         }
     }
@@ -48,7 +49,7 @@ internal fun fileActivityCanCollapse(fileCount: Int): Boolean = fileCount >= 1
 internal fun fileActivityInitiallyExpanded(activities: List<FileActivity>): Boolean = false
 
 private fun mergeFileActivity(previous: FileActivity, next: FileActivity): FileActivity {
-    fun FileActivity.isChange() = kind == FileActivityKind.CREATED || kind == FileActivityKind.MODIFIED
+    fun FileActivity.isChange() = kind == FileActivityKind.CREATED || kind == FileActivityKind.MODIFIED || kind == FileActivityKind.DELETED
     fun total(first: Int?, second: Int?): Int? =
         if (first == null || second == null) null else (first.toLong() + second).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     val added = when {
@@ -62,12 +63,17 @@ private fun mergeFileActivity(previous: FileActivity, next: FileActivity): FileA
         else -> total(previous.removedLines, next.removedLines)
     }
     val kind = when {
+        next.kind == FileActivityKind.DELETED -> next.kind
+        next.kind == FileActivityKind.MOVED -> if (previous.isChange()) previous.kind else next.kind
+        previous.kind == FileActivityKind.DELETED && next.isChange() -> next.kind
+        previous.kind == FileActivityKind.MOVED -> if (next.isChange()) next.kind else previous.kind
         previous.kind == FileActivityKind.CREATED || next.kind == FileActivityKind.CREATED -> FileActivityKind.CREATED
         previous.isChange() || next.isChange() -> FileActivityKind.MODIFIED
         previous.kind == FileActivityKind.DOWNLOADED || next.kind == FileActivityKind.DOWNLOADED -> FileActivityKind.DOWNLOADED
         else -> FileActivityKind.DELIVERED
     }
-    return previous.copy(kind = kind, addedLines = added, removedLines = removed,
-        sizeBytes = next.sizeBytes ?: previous.sizeBytes,
-        description = next.description.ifBlank { previous.description })
+    return previous.copy(path = next.path, kind = kind, addedLines = added, removedLines = removed,
+        sizeBytes = if (next.kind == FileActivityKind.DELETED) null else next.sizeBytes ?: previous.sizeBytes,
+        description = next.description.ifBlank { previous.description },
+        previousPath = next.previousPath ?: previous.previousPath)
 }

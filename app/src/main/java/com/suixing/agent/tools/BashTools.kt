@@ -15,7 +15,8 @@ class BashTools(private val shellTools: ShellTools) : ToolGroup() {
                 "Returns stdout, stderr and exit code; commands have a 45-second limit. " +
                 "Use terminal tools for interactive sessions.",
             Schema.objectOf(
-                properties = listOf("command" to Schema.string("Bash command to execute")),
+                properties = listOf("command" to Schema.string("Bash command to execute"),
+                    "observe_paths" to Schema.arrayOf("Optional absolute files/directories to observe outside the app workspace; bounded filesystem verification, no inference from stdout.", Schema.string("Absolute path"))),
                 required = listOf("command"),
             ),
         ),

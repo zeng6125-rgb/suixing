@@ -203,6 +203,8 @@ private fun ChatFileActivityEntry(
                 FileActivityKind.MODIFIED -> "已修改"
                 FileActivityKind.DOWNLOADED -> "已下载"
                 FileActivityKind.DELIVERED -> "可查看"
+                FileActivityKind.DELETED -> "已删除"
+                FileActivityKind.MOVED -> "已移动"
             })
             file.addedLines?.let { add("+$it") }
             file.removedLines?.let { add("−$it") }
@@ -211,13 +213,17 @@ private fun ChatFileActivityEntry(
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(file.path, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        file.previousPath?.let { Text("原路径：$it", style = MaterialTheme.typography.labelSmall, maxLines = 1,
+            overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (file.description.isNotBlank()) Text(file.description, style = SettingsStyle.description,
             modifier = Modifier.padding(top = 4.dp), maxLines = 3, overflow = TextOverflow.Ellipsis)
         if (busy) Text("正在准备文件…", style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-            MenuRippleTextButton(onClick = onPreview, enabled = enabled) { Text("预览", style = MaterialTheme.typography.labelMedium) }
-            MenuRippleTextButton(onClick = onOpen, enabled = enabled) { Text("打开", style = MaterialTheme.typography.labelMedium) }
-            MenuRippleTextButton(onClick = onShare, enabled = enabled) { Text("分享", style = MaterialTheme.typography.labelMedium) }
+            if (file.kind != FileActivityKind.DELETED) {
+                MenuRippleTextButton(onClick = onPreview, enabled = enabled) { Text("预览", style = MaterialTheme.typography.labelMedium) }
+                MenuRippleTextButton(onClick = onOpen, enabled = enabled) { Text("打开", style = MaterialTheme.typography.labelMedium) }
+                MenuRippleTextButton(onClick = onShare, enabled = enabled) { Text("分享", style = MaterialTheme.typography.labelMedium) }
+            }
             MenuRippleTextButton(onClick = onCopy) { Text("复制路径", style = MaterialTheme.typography.labelMedium) }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -258,7 +264,7 @@ private fun ChatFilePreviewDialog(preview: LocalFilePreview, onDismiss: () -> Un
 }
 
 private fun fileCardTotals(files: List<FileActivity>): FileCardTotals {
-    val changes = files.filter { it.kind == FileActivityKind.CREATED || it.kind == FileActivityKind.MODIFIED }
+    val changes = files.filter { it.kind == FileActivityKind.CREATED || it.kind == FileActivityKind.MODIFIED || it.kind == FileActivityKind.DELETED || it.kind == FileActivityKind.MOVED }
     val downloaded = files.count { it.kind == FileActivityKind.DOWNLOADED }
     val title = when {
         changes.size == files.size -> "${files.size} 个文件已更改"

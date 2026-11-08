@@ -22,6 +22,7 @@ import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.*
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.PageTopBarAction
 import com.suixing.agent.ui.components.SegmentedPill
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SuixingCard
@@ -67,9 +68,12 @@ fun UsageScreen(onBack: () -> Unit) {
     Scaffold(
         containerColor = scheme.background, contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = { PageTopBar(title = "用量", onBack = onBack, actions = {
-            IconButton(onClick = { reload++ }, enabled = !loading) {
-                Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), "刷新用量")
-            }
+            PageTopBarAction(
+                icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                contentDescription = "刷新用量",
+                onClick = { reload++ },
+                enabled = !loading,
+            )
         }) },
     ) { padding ->
         val current = data

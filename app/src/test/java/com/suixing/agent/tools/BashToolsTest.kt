@@ -66,7 +66,7 @@ class BashToolsTest {
         val tool = registry.find("bash")!!
         assertEquals(TIER_NONE, tool.tier)
         assertEquals("Shell", registry.groupOf("bash"))
-        assertEquals(setOf("command"), tool.spec.parameters["properties"]!!.jsonObject.keys)
+        assertEquals(setOf("command", "observe_paths"), tool.spec.parameters["properties"]!!.jsonObject.keys)
         assertEquals(listOf("command"), tool.spec.parameters["required"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertTrue(registry.promptSummary().contains("- bash:"))
         assertTrue(toolCopyZh("bash", "fallback").contains("原生 Bash"))

@@ -216,7 +216,8 @@ internal suspend fun AgentRun.runLoop(
             toolOk = result.ok,
             toolCallId = call.id,
             imageBase64 = result.imageBase64,
-            fileActivities = if (result.ok) result.fileActivities else emptyList(),
+            // A failed later step does not undo mutations independently verified by the tool.
+            fileActivities = result.fileActivities,
         )
         produced += stored
         onEvent(AgentEvent.ToolMessage(stored))
@@ -692,6 +693,11 @@ internal suspend fun AgentRun.runLoop(
             }
         }
     } catch (cancellation: CancellationException) {
+        if (interruptedFileTools.isNotEmpty()) {
+            withContext(NonCancellable) {
+                for (call in openCalls) interruptedFileTools.remove(call.id)?.let { commitTool(it) }
+            }
+        }
         inFlight?.cancel()
         // Two different things land here. A stop the user asked for cancels this run's own
         // job while the caller is still alive, and that caller has every right to the messages

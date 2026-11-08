@@ -176,6 +176,7 @@ private suspend fun fetch(args: JsonObject): ToolResult {
                                 "File exceeds ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB; deleted",
                             )
                         }
+                        FileMutationObservation.noteIndependentMutation(target)
                         if (!part.renameTo(target)) {
                             part.delete()
                             return@readCancellable ToolResult.failure("Download failed: cannot write ${target.absolutePath}")

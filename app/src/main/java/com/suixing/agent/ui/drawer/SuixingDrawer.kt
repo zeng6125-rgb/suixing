@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
@@ -30,13 +29,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import kotlin.math.abs
-import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.currentCoroutineContext
@@ -124,6 +121,11 @@ internal class SuixingDrawerState(initialValue: DrawerValue) {
 
     /** Discrete, so mounting the shield does not read [progress] during composition. */
     private var homeLifecycle by mutableStateOf(drawerSettledLifecycle(initialValue))
+    private val moving = derivedStateOf(structuralEqualityPolicy()) {
+        homeLifecycle == DrawerHomeLifecycle.Opening || homeLifecycle == DrawerHomeLifecycle.Closing ||
+            homeLifecycle == DrawerHomeLifecycle.Dragging
+    }
+    val isMoving: Boolean get() = moving.value
     private val homeShield = derivedStateOf(structuralEqualityPolicy()) { homeLifecycle.shieldsHome }
     // Opening, dragging, exposed and closing all keep the same shield and drawer visibility.
     val homeShieldActive: Boolean get() = homeShield.value
@@ -335,7 +337,8 @@ internal suspend fun runDrawerDragFrameLoop(
             if (!isActive(session)) break
             val frame = dragAccumulator.frame()
             if (frame == null || !dragAccumulator.canApply(frame)) {
-                awaitFrame()
+                // The next iteration already waits for the next frame. Waiting here too
+                // could skip a display frame when a gesture handoff has no valid sample yet.
                 continue
             }
             if (frame.progress != lastAppliedProgress) {
@@ -518,16 +521,13 @@ internal fun SuixingDrawer(
         // 右沿随进度移动（关闭 0，打开 300dp）。不能写成固定的 `padding(start = 300.dp)`：
         // 开合动画中面板右沿在 0..300dp 之间，而主页也同步右移，固定 300dp 会把
         // 面板右沿到 300dp 之间那段仍然活着的主页露出来（半开时整整 150dp 可点）。
-        // 进度在布局回调里读，避免每帧重组整棵宿主。
+        // Move only the shield's layer, without re-placing its pointer subtree every frame.
         if (state.homeShieldActive) {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .offset {
-                        IntOffset(
-                            drawerHomeShieldStartPx(panelPx, state.visualProgress.value).roundToInt(),
-                            0,
-                        )
+                    .graphicsLayer {
+                        translationX = drawerHomeShieldStartPx(panelPx, state.visualProgress.value)
                     }
                     // **一个手势处理器，不要拆成两个 detector**：
                     // `detectHorizontalDragGestures` 与 `detectTapGestures` 各自独立消费指针，

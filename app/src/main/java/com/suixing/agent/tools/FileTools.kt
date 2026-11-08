@@ -241,6 +241,7 @@ class FileTools(private val context: Context) : ToolGroup() {
                 if (existed) readActivityText(file) else ""
             } else null
             file.parentFile?.mkdirs()
+            FileMutationObservation.noteIndependentMutation(file)
             if (append) file.appendBytes(contentBytes) else file.writeBytes(contentBytes)
             val after = if (!append) content else before?.takeIf {
                 it.length.toLong() + content.length <= ACTIVITY_TEXT_LIMIT
@@ -312,6 +313,7 @@ class FileTools(private val context: Context) : ToolGroup() {
             require(changedBytes.size <= MAX_TEXT_BYTES) {
                 "修改后的文本超过 ${humanSize(MAX_TEXT_BYTES)} 上限"
             }
+            FileMutationObservation.noteIndependentMutation(file)
             file.writeBytes(changedBytes)
             val oldLines = old.lines()
             val newLines = new.lines()
@@ -793,7 +795,7 @@ private fun readActivityText(file: File): String? = try {
  * These are per-operation replacement counts, not a minimal Git diff or the run's net changes.
  * Line ranges keep the original strings and compare in place instead of allocating a string per line.
  */
-private fun activityLineCounts(before: String?, after: String?): Pair<Int, Int>? {
+internal fun activityLineCounts(before: String?, after: String?): Pair<Int, Int>? {
     if (before == null || after == null || before.length > ACTIVITY_TEXT_LIMIT || after.length > ACTIVITY_TEXT_LIMIT ||
         '\u0000' in before || '\u0000' in after) return null
     if (before == after) return 0 to 0

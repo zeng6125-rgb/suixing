@@ -76,6 +76,97 @@ class AgentWorkflowVerificationTest {
         it.add(BashTools(ShellTools(mockk<Context>(relaxed = true), capabilities)))
     }
 
+    @Test fun `failed tool outcome preserves independently verified file mutations`() = runBlocking {
+        val activity = com.suixing.agent.data.FileActivity("/sdcard/partial.txt",
+            com.suixing.agent.data.FileActivityKind.CREATED, addedLines = 1, removedLines = 0)
+        val rounds = AtomicInteger()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (rounds.incrementAndGet() == 1) AssistantTurn("", listOf(ToolCallRequest("partial", "echo", "{}")), "tool_calls")
+                else AssistantTurn("one step failed after writing", emptyList(), "stop")
+            }
+        }
+        val events = mutableListOf<AgentEvent>()
+        val produced = run(AgentEngine(llm = client), registry(execute = {
+            ToolResult(false, "later step failed", fileActivities = listOf(activity))
+        }), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false), events = { events += it })
+        val tool = produced.single { it.toolName == "echo" }
+        assertEquals(false, tool.toolOk)
+        assertEquals(listOf(activity), tool.fileActivities)
+        assertEquals(listOf(activity), events.filterIsInstance<AgentEvent.ToolMessage>().single().message.fileActivities)
+    }
+
+    @Test fun `main run shell and bash report actual files even when a later command fails`() = runBlocking {
+        val folder = java.nio.file.Files.createTempDirectory("main-shell-files").toFile()
+        mockkObject(Shell, TouchFx)
+        try {
+            val workspace = java.io.File(folder, "workspace").apply { mkdirs() }
+            val context = mockk<Context>()
+            every { context.getExternalFilesDir(null) } returns workspace
+            every { capabilities.shellTier() } returns ShellTier.SHIZUKU
+            every { Shell.bundledBash() } returns "/native/libbash.so"
+            every { TouchFx.traceCall(any(), tool = any(), detail = any(), matched = any()) } just Runs
+            val created = java.io.File(workspace, "from-script.txt")
+            val edited = java.io.File(workspace, "edited.txt").apply { writeText("before\n") }
+            coEvery { Shell.local("run arbitrary script", "auto", null) } answers {
+                created.writeText("made by script\n")
+                ShellResult(true, "", "", 0)
+            }
+            coEvery { Shell.local("edit then fail", "bash", null) } answers {
+                edited.writeText("after\nextra\n")
+                ShellResult(false, "", "later command failed", 1)
+            }
+            val tools = registry().also { it.add(ShellTools(context, capabilities)); it.add(BashTools(ShellTools(context, capabilities))) }
+            val rounds = AtomicInteger()
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    when (rounds.incrementAndGet()) {
+                        1 -> AssistantTurn("", listOf(ToolCallRequest("shell", "run_shell", """{"command":"run arbitrary script","mode":"local"}""")), "tool_calls")
+                        2 -> AssistantTurn("", listOf(ToolCallRequest("bash", "bash", """{"command":"edit then fail"}""")), "tool_calls")
+                        else -> AssistantTurn("done", emptyList(), "stop")
+                    }
+                }
+            }
+            val messages = run(AgentEngine(llm = client), tools, AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false))
+            assertEquals(listOf(created.canonicalPath, edited.canonicalPath), messages.flatMap { it.fileActivities }.map { it.path })
+            assertEquals(false, messages.single { it.toolName == "bash" }.toolOk)
+            assertEquals(com.suixing.agent.data.FileActivityKind.MODIFIED, messages.single { it.toolName == "bash" }.fileActivities.single().kind)
+        } finally { unmockkObject(Shell, TouchFx); folder.deleteRecursively() }
+    }
+
+    @Test fun `stopping main bash retains a verified mutation in the cancellation transcript`() = runBlocking {
+        val folder = java.nio.file.Files.createTempDirectory("cancel-shell-files").toFile()
+        val started = CompletableDeferred<Unit>()
+        mockkObject(Shell, TouchFx)
+        try {
+            val context = mockk<Context>()
+            every { context.getExternalFilesDir(null) } returns folder
+            every { capabilities.shellTier() } returns ShellTier.LOCAL
+            every { Shell.bundledBash() } returns "/native/libbash.so"
+            every { TouchFx.traceCall(any(), tool = any(), detail = any(), matched = any()) } just Runs
+            val target = java.io.File(folder, "written-before-stop.txt")
+            coEvery { Shell.local("write and wait", "bash", null) } coAnswers {
+                target.writeText("already written\n")
+                started.complete(Unit)
+                awaitCancellation()
+            }
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                    AssistantTurn("", listOf(ToolCallRequest("bash", "bash", """{"command":"write and wait"}""")), "tool_calls")
+            }
+            val events = CopyOnWriteArrayList<AgentEvent>()
+            val engine = AgentEngine(llm = client)
+            val running = async(Dispatchers.Default) { run(engine, registry().also { it.add(BashTools(ShellTools(context, capabilities))) },
+                AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, toolParallel = 1), events = { events += it }) }
+            withTimeout(5000) { started.await() }
+            assertTrue(engine.cancel("verification"))
+            withTimeout(5000) { running.await() }
+            val activity = events.filterIsInstance<AgentEvent.ToolMessage>().flatMap { it.message.fileActivities }.single()
+            assertEquals(target.canonicalPath, activity.path)
+            assertEquals(com.suixing.agent.data.FileActivityKind.CREATED, activity.kind)
+        } finally { unmockkObject(Shell, TouchFx); folder.deleteRecursively() }
+    }
+
     @Test fun `parent and child execute native bash without Shizuku and return child evidence to the parent`() = runBlocking {
         mockkObject(Shell, TouchFx)
         val release = CompletableDeferred<Unit>()

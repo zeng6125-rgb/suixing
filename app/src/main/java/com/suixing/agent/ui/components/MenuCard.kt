@@ -114,8 +114,7 @@ internal fun MenuCard(
     compactMotion: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    var keepMounted by remember { mutableStateOf(visible) }
-    val motion = remember(compactMotion) { PopupMotionState(compactMotion) }
+    val motion = rememberMountedPopupMotion(visible, compactMotion) ?: return
     // **原点用 FloatArray，不用 State**（issue #56 R29）：它是在
     // `ShadowPopupPositionProvider.calculatePosition`（布局/定位阶段）里算出来的，
     // 写进 `mutableStateOf` 就是跨阶段回写 —— 键盘升降、内容变高都会触发一轮重组。
@@ -129,20 +128,6 @@ internal fun MenuCard(
             originXY[1] = o.pivotFractionY
         }
     }
-    LaunchedEffect(visible, motion) {
-        if (visible) {
-            keepMounted = true
-            // A new popup needs its first measurement. Reversing a visible exit reuses the
-            // mounted window and must not hold the current motion still for an extra frame.
-            if (motion.opacity.value == 0f) androidx.compose.runtime.withFrameNanos { }
-            motion.show()
-        } else if (keepMounted) {
-            motion.hide()
-            keepMounted = false
-        }
-    }
-    // A re-open reverses the current animation, rather than jumping back to scale zero.
-    if (!visible && !keepMounted) return
     // **自带遮罩**：focus-less 的 Popup 窗口看不到外部点击与 BACK，没有这层就"点哪都关不掉"。
     // 放在卡片 Popup 之前组合 —— 窗口按组合顺序叠，先组合的在下面。
     if (visible && scrim) {
@@ -203,6 +188,27 @@ internal fun MenuCard(
         properties = PopupProperties(focusable = focusable, clippingEnabled = false),
         content = cardBody,
     )
+}
+
+/** Closed lazy rows retain only the lifetime flag, not animation objects or an idle effect. */
+@Composable
+internal fun rememberMountedPopupMotion(visible: Boolean, compactMotion: Boolean): PopupMotionState? {
+    var keepMounted by remember { mutableStateOf(visible) }
+    if (!visible && !keepMounted) return null
+    val motion = remember(compactMotion) { PopupMotionState(compactMotion) }
+    LaunchedEffect(visible, motion) {
+        if (visible) {
+            keepMounted = true
+            // A new popup needs its first measurement. Reversing an exit keeps its motion
+            // and window, so it must not wait for another first measurement.
+            if (motion.opacity.value == 0f) androidx.compose.runtime.withFrameNanos { }
+            motion.show()
+        } else if (keepMounted) {
+            motion.hide()
+            keepMounted = false
+        }
+    }
+    return motion
 }
 
 /** One row of a popup menu: icon, label, and the whole row as the target. */

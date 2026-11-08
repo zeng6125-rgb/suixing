@@ -1,11 +1,17 @@
 package com.suixing.agent.ui.chat
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
@@ -13,17 +19,20 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.suixing.agent.R
 import com.suixing.agent.data.AppSettings
-import com.suixing.agent.ui.components.CircleActionButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
@@ -73,13 +82,13 @@ internal fun BoxScope.ChatComposerPanel(
         }
     }
     Box(
-        Modifier
+        modifier = Modifier
             .align(Alignment.BottomCenter)
             // IME 在**放置阶段**读取（offset 的 lambda 属于布局/放置，不属于组合），
             // 键盘高度每帧变化只移动输入框的位置：不改约束、不重测 Scaffold、
             // 不重组那个 60 参数的 Composer。输入框自己内部还有一段
             // `(navbar − ime)` 的让位（ChatComposer.kt:941），两处不重复扣。
-            .offset { androidx.compose.ui.unit.IntOffset(0, -imePxState.value) },
+            .offset { IntOffset(0, -imePxState.value) },
     ) {
         ComposerDraftText(actions, state.conversationId) { input ->
         val goal by actions.goal.collectAsStateWithLifecycle()
@@ -199,19 +208,10 @@ internal fun BoxScope.ChatComposerPanel(
             },
             onOpenSettings = onOpenSettings,
             jumpToLatest = rememberStableCallback0 { jumpToLatest() },
-            // 按钮已移到 composer 之外（见下），这里只保留参数以免动调用链。
+            // The floating button is hosted directly by ChatScreen's viewport.
             showJump = false,
             onHeightChanged = rememberStableCallback1(onHeightChanged),
             // 底锚：键盘起落改的是列表底 padding，index0 就在底边上 ⇒ 一个滚动都不需要。
-        )
-        // 「回到最新」浮钮：**画在 composer 之外**（兄弟节点），高度不参与 composer 的
-        // 测量 ⇒ 它出现/消失不会改底部让位、不会把转录顶上去（用户报的「往上滑一点点就
-        // 跳」）。位置：composer 顶再往上 12dp，右边缘 40dp 离屏边（与回合导航条留 12dp 气）。
-        // 「回到最新」浮钮自己订阅 atBottom（见 [JumpToLatestButton] 的说明）。
-        JumpToLatestButton(
-            scroll = scroll,
-            loading = state.loading,
-            onClick = { jumpToLatest() },
         )
         }
     }
@@ -224,28 +224,51 @@ internal fun BoxScope.ChatComposerPanel(
  * 一枚按钮。抽成独立组合后，`atBottom` 翻转的失效范围只剩它自己。
  */
 @Composable
-private fun BoxScope.JumpToLatestButton(
+internal fun BoxScope.JumpToLatestButton(
     scroll: ChatScroll,
     loading: Boolean,
+    composerHeight: () -> Dp,
+    imePxState: State<Int>,
+    navBarPx: Int,
     onClick: () -> Unit,
 ) {
     if (scroll.atBottom || loading) return
-    CircleActionButton(
-        icon = ImageVector.vectorResource(R.drawable.ic_arrow_down),
-        contentDescription = "回到最新",
-        onClick = onClick,
-        size = 44.dp,
-        containerColor = MaterialTheme.colorScheme.surface,
-        // 与浮层卡片同一套阴影（用户：「参考浮层卡片的阴影效果」）：
-        // PopupStyle.kt 的规格是 elevation 10dp + ambient/spot 同为 18% 黑，
-        // 扩散大、浓度低、没有方向性 —— 比默认 elevation 阴影（偏灰、发脏）高级。
-        shadowElevation = 10.dp,
-        shadowColor = Color.Black.copy(alpha = 0.18f),
-        iconSize = 20.dp,
-        modifier = Modifier
-            .align(Alignment.TopEnd)
-            // 跟着按钮直径走（44 + 12 = 56dp），否则缩小后离 composer 会多出 4dp 空隙。
-            .offset(y = -(44.dp + 12.dp))
-            .padding(end = 24.dp),
-    )
+    // A direct child of the chat viewport, above the composer and rail. This is a
+    // real 48dp button; its painted disc is a separate, non-interactive sibling.
+    Box(
+        Modifier
+            .align(Alignment.BottomEnd)
+            .zIndex(1f)
+            .offset {
+                val ime = imePxState.value
+                val navigationPad = (navBarPx - ime).coerceAtLeast(0)
+                // onHeightChanged is inside Composer's padding: its reported height
+                // excludes both the 6dp top and COMPOSER_BOTTOM_PAD below the pill.
+                val composerOuterHeight = composerHeight().roundToPx() +
+                    6.dp.roundToPx() + COMPOSER_BOTTOM_PAD.roundToPx()
+                // Former top = composerTop - 56dp; a 48dp target ends 8dp above it.
+                IntOffset(0, -ime - navigationPad - composerOuterHeight +
+                    48.dp.roundToPx() - 56.dp.roundToPx())
+            }
+            .padding(end = 24.dp)
+            .size(48.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(44.dp)
+                .shadow(10.dp, CircleShape, ambientColor = Color.Black.copy(alpha = 0.18f),
+                    spotColor = Color.Black.copy(alpha = 0.18f))
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surface),
+        )
+        IconButton(onClick = onClick, modifier = Modifier.fillMaxSize()) {
+            Icon(
+                ImageVector.vectorResource(R.drawable.ic_arrow_down),
+                contentDescription = "回到最新",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
 }

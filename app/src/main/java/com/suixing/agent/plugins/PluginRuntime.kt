@@ -5,6 +5,9 @@ import com.suixing.agent.core.Core
 import com.suixing.agent.llm.readCancellable
 import com.suixing.agent.tools.ToolResult
 import com.suixing.agent.tools.ToolSpec
+import com.suixing.agent.tools.fileObservationRoots
+import com.suixing.agent.tools.observeFileChanges
+import com.suixing.agent.tools.workspaceDir
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -160,7 +163,14 @@ object PluginRuntime {
                 name = name,
                 description = decl.description,
                 // schema 透传前先归一化（见 [normalizeSchema]）。
-                parameters = normalizeSchema(decl.parameters),
+                parameters = normalizeSchema(decl.parameters).let { schema ->
+                    if (decl.exec.type != "shell" || (schema["properties"] as? JsonObject)?.containsKey("observe_paths") == true) schema else {
+                        val properties = (schema["properties"] as? JsonObject).orEmpty()
+                        JsonObject(schema + ("properties" to JsonObject(properties + ("observe_paths" to com.suixing.agent.tools.Schema.arrayOf(
+                            "Optional absolute files/directories outside the plugin cwd/workspace to observe for actual file mutations; bounded verification.",
+                            com.suixing.agent.tools.Schema.string("Absolute path"))))))
+                    }
+                },
             )
         }
         // Preserve duplicate resolution above, but make the wire catalog independent of disk order.
@@ -329,7 +339,9 @@ object PluginRuntime {
         }
         return when (decl.exec.type) {
             "http" -> http(spec, decl, vars)
-            "shell" -> shell(spec, decl, vars, dir)
+            "shell" -> shell(spec, decl, vars, dir, (args["observe_paths"] as? JsonArray).orEmpty().mapNotNull {
+                (it as? JsonPrimitive)?.content?.let(::File)?.takeIf { file -> file.isAbsolute }
+            })
             // 校验器在安装时就拒了这两种以外的 type（EXEC_TYPE_UNSUPPORTED）；能走到这里说明
             // 目录是手拷进去的、没过安装校验 —— 所以这是一条真实的失败，不是兜底。
             else -> ToolResult.failure("exec.type=「${decl.exec.type}」v1 不支持（只有 http / shell）")
@@ -395,6 +407,7 @@ object PluginRuntime {
         decl: ToolDecl,
         vars: Map<String, String>,
         dir: File,
+        observePaths: List<File>,
     ): ToolResult {
         val exec = decl.exec
         if (exec.command.isNullOrBlank()) {
@@ -414,34 +427,36 @@ object PluginRuntime {
         // **工作目录交给 ProcessBuilder**（Shell.local 的 cwd 参数），不再拼 `cd X &&`：
         // 少一层命令拼接，命令本身直接进 shell。
         val workDir = java.io.File(cwd.trim().trim('\'').trim('"'))
-        val result = try {
-            withTimeout(exec.timeoutSeconds.coerceIn(1, 600) * 1000L) {
-                if (exec.needsRoot) {
-                    // root 通道没有 cwd 参数，仍用 cd 前缀（su 起的是另一棵进程树）。
-                    Shell.root("cd $cwd && $command")
-                } else {
-                    // 插件清单可以声明解释器：`sh` 直接走系统 sh（跳过"先试 bash 被 seccomp
-                    // 杀掉再回退"的那一次），缺省仍是 auto = 双接口（先 bash、失败退 sh）。
-                    Shell.local(
-                        command,
-                        shell = exec.shell?.trim()?.lowercase().orEmpty().ifBlank { "auto" },
-                        cwd = workDir,
-                    )
+        return observeFileChanges(fileObservationRoots(runCatching { workspaceDir(Core.appContext) }.getOrNull(), command, observePaths, workDir)) {
+            val result = try {
+                withTimeout(exec.timeoutSeconds.coerceIn(1, 600) * 1000L) {
+                    if (exec.needsRoot) {
+                        // root 通道没有 cwd 参数，仍用 cd 前缀（su 起的是另一棵进程树）。
+                        Shell.root("cd $cwd && $command")
+                    } else {
+                        // 插件清单可以声明解释器：`sh` 直接走系统 sh（跳过"先试 bash 被 seccomp
+                        // 杀掉再回退"的那一次），缺省仍是 auto = 双接口（先 bash、失败退 sh）。
+                        Shell.local(
+                            command,
+                            shell = exec.shell?.trim()?.lowercase().orEmpty().ifBlank { "auto" },
+                            cwd = workDir,
+                        )
+                    }
                 }
+            } catch (timeout: TimeoutCancellationException) {
+                // 必须在这里翻成普通失败：TimeoutCancellationException 也是 CancellationException，
+                // 抛上去会被引擎当成「用户点了停止」，整轮 run 就没了。
+                return@observeFileChanges ToolResult.failure("[$label] 命令超时（${exec.timeoutSeconds}s）已终止")
             }
-        } catch (timeout: TimeoutCancellationException) {
-            // 必须在这里翻成普通失败：TimeoutCancellationException 也是 CancellationException，
-            // 抛上去会被引擎当成「用户点了停止」，整轮 run 就没了。
-            return ToolResult.failure("[$label] 命令超时（${exec.timeoutSeconds}s）已终止")
-        }
-        val limit = (exec.response?.maxChars ?: DEFAULT_MAX_CHARS).coerceAtLeast(100)
-        val prefix = "[$label] exit=${result.exitCode}\n"
-        // render() 自己带截断标记，所以这里只给它一个上限，不自己再截一次。
-        val rendered = result.render(limit)
-        return if (result.ok) {
-            ToolResult.success(prefix + rendered)
-        } else {
-            ToolResult.failure(prefix + rendered)
+            val limit = (exec.response?.maxChars ?: DEFAULT_MAX_CHARS).coerceAtLeast(100)
+            val prefix = "[$label] exit=${result.exitCode}\n"
+            // render() 自己带截断标记，所以这里只给它一个上限，不自己再截一次。
+            val rendered = result.render(limit)
+            if (result.ok) {
+                ToolResult.success(prefix + rendered)
+            } else {
+                ToolResult.failure(prefix + rendered)
+            }
         }
     }
 

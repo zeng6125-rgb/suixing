@@ -42,6 +42,7 @@ import com.suixing.agent.R
 import com.suixing.agent.core.Core
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.service.VirtualScreenOverlay
+import com.suixing.agent.service.TouchFx
 import com.suixing.agent.ui.components.CompactOutlinedTextField
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SettingRow
@@ -85,14 +86,18 @@ fun UiAutomationScreen(onBack: () -> Unit, onOpen: (String) -> Unit) {
     }
 }
 
+private fun VirtualScreenManager.State.forStatusCard() =
+    copy(lastFrameAt = if (lastFrameAt > 0L) 1L else 0L)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun VirtualScreenCard() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val state by remember {
-        VirtualScreenManager.state.map { it.copy(lastFrameAt = 0L) }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = VirtualScreenManager.state.value.copy(lastFrameAt = 0L))
+        // Only first-frame readiness affects this card, not the continuously changing timestamp.
+        VirtualScreenManager.state.map { it.forStatusCard() }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = VirtualScreenManager.state.value.forStatusCard())
     val previewVisible by VirtualScreenOverlay.visibility.collectAsStateWithLifecycle()
     val displayedId = state.displayId
     val displayedPreview = previewVisible
@@ -154,10 +159,16 @@ private fun VirtualScreenCard() {
         AutomationCardHeader(
             title = "虚拟屏",
             icon = R.drawable.ic_picture_in_picture_2,
-            subtitle = if (state.running) "分辨率 ${state.width} × ${state.height}" else "让 Agent 在独立屏幕里操作应用。",
+            subtitle = if (state.running) {
+                val frameStatus = if (state.lastFrameAt > 0L) "画面已就绪" else "等待应用画面"
+                "分辨率 ${state.width} × ${state.height} · $frameStatus"
+            } else "让 Agent 在独立屏幕里操作应用。",
             trailing = {
-                StatusPill(text = if (state.running) "运行中" else "未开启",
-                    tone = if (state.running) Tone.OK else Tone.OFF)
+                StatusPill(text = when {
+                    !state.running -> "未开启"
+                    state.lastFrameAt == 0L -> "等待画面"
+                    else -> "运行中"
+                }, tone = if (state.running && state.lastFrameAt > 0L) Tone.OK else Tone.OFF)
             },
         )
         Spacer(Modifier.height(SettingsStyle.FieldGap))
@@ -287,17 +298,30 @@ private fun EdgeLightCard() {
         Core.settings.flow.map<AppSettings, Pair<Boolean, Boolean>?> { it.edgeLight to it.edgeLightInForeground }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = null)
     val scope = rememberCoroutineScope()
+    fun saveEdgePreference(on: Boolean, foregroundOnly: Boolean) {
+        val suppression = if (!on) TouchFx.suppressEdgeForPreferenceChange(foregroundOnly) else null
+        scope.launch {
+            var saved = false
+            try {
+                saved = Core.settings.update {
+                    if (foregroundOnly) it.copy(edgeLightInForeground = on) else it.copy(edgeLight = on)
+                }
+            } finally {
+                if (!saved && suppression != null) TouchFx.cancelEdgePreferenceChange(suppression)
+            }
+        }
+    }
     SuixingCard {
         AutomationCardHeader(title = "边缘光", icon = R.drawable.ic_stat_spark,
             subtitle = if (settings == null) "正在读取设置…" else "Agent 操作手机时的边缘提示。")
         Spacer(Modifier.height(SettingsStyle.FieldGap))
         SettingRow(title = "显示边缘光", control = {
             SettingsSwitch(checked = settings?.first == true, enabled = settings != null,
-                onCheckedChange = { on -> scope.launch { Core.settings.update { it.copy(edgeLight = on) } } })
+                onCheckedChange = { on -> saveEdgePreference(on, foregroundOnly = false) })
         })
         SettingRow(title = "在 JAgent 前台显示", subtitle = "总开关关闭时不生效。", control = {
             SettingsSwitch(checked = settings?.second == true, enabled = settings?.first == true,
-                onCheckedChange = { on -> scope.launch { Core.settings.update { it.copy(edgeLightInForeground = on) } } })
+                onCheckedChange = { on -> saveEdgePreference(on, foregroundOnly = true) })
         })
     }
 }

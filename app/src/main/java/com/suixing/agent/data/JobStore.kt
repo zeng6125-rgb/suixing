@@ -7,6 +7,9 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import com.suixing.agent.tools.FileMutationObservation
+import com.suixing.agent.tools.ObservedFileChanges
+import com.suixing.agent.tools.fileObservationRoots
 
 const val JOB_RUNNING = "running"
 const val JOB_DONE = "done"
@@ -42,18 +45,23 @@ data class JobStatus(
  * starts empty on every launch. The logs stay on disk under `filesDir/jobs`, which is what
  * makes a forgotten job's output still worth reading.
  */
-class JobStore(private val dir: File, private val scope: CoroutineScope) {
+class JobStore(private val dir: File, private val scope: CoroutineScope,
+    private val startProcess: (String, File) -> Process = { command, log ->
+        ProcessBuilder("sh", "-c", command).redirectErrorStream(true).redirectOutput(log).start()
+    },
+    private val observationRoots: () -> List<File> = { emptyList() }) {
 
-    private class Job(val info: JobInfo, @Volatile var process: Process?) {
+    private class Job(val info: JobInfo, @Volatile var process: Process?, val ownerChatId: String?) {
         @Volatile
         var exitCode: Int? = null
+        var fileChanges: ObservedFileChanges? = null
     }
 
     private val jobs = LinkedHashMap<String, Job>()
 
     private val lock = Any()
 
-    fun start(command: String, label: String): JobInfo {
+    fun start(command: String, label: String, observePaths: List<File> = emptyList(), ownerChatId: String? = null): JobInfo {
         dir.mkdirs()
         pruneLogs()
         val id = UUID.randomUUID().toString().substring(0, 8)
@@ -61,10 +69,9 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
         // stderr is merged into stdout on purpose: a job's failure is usually explained by
         // the two interleaved, and separate files would make `job_output` guess which one
         // the caller meant.
-        val process = ProcessBuilder("sh", "-c", command)
-            .redirectErrorStream(true)
-            .redirectOutput(log)
-            .start()
+        val observation = FileMutationObservation.begin(fileObservationRoots(null, command, observationRoots() + observePaths))
+        val process = try { startProcess(command, log) }
+            catch (error: Throwable) { observation.abandon(); throw error }
         val info = JobInfo(
             id = id,
             label = label.ifBlank { command.take(60) },
@@ -72,13 +79,20 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
             startedAt = System.currentTimeMillis(),
             logPath = log.absolutePath,
         )
-        val job = Job(info, process)
+        val job = Job(info, process, ownerChatId)
         synchronized(lock) { jobs[id] = job }
         // One IO watcher on the app scope outlives the run that started the process.
         scope.launch(Dispatchers.IO) {
             try {
-                job.exitCode = process.waitFor()
+                val exitCode = process.waitFor()
+                val changes = observation.finish()
+                synchronized(lock) { job.fileChanges = changes }
+                job.exitCode = exitCode
             } finally {
+                if (job.exitCode == null) {
+                    val changes = observation.finish()
+                    synchronized(lock) { job.fileChanges = changes }
+                }
                 runCatching { process.inputStream.close() }
                 runCatching { process.errorStream.close() }
                 runCatching { process.outputStream.close() }
@@ -96,6 +110,12 @@ class JobStore(private val dir: File, private val scope: CoroutineScope) {
             }
         }
         return info
+    }
+
+    /** A completed job's observations are delivered once, independent of repeated log reads. */
+    internal fun takeFileChanges(ids: List<String>, ownerChatId: String? = null): ObservedFileChanges = synchronized(lock) {
+        val changes = ids.distinct().mapNotNull { jobs[it]?.takeIf { it.ownerChatId == ownerChatId }?.let { job -> job.fileChanges.also { job.fileChanges = null } } }
+        ObservedFileChanges(changes.flatMap { it.activities }, changes.map { it.notice }.filter { it.isNotEmpty() }.distinct().joinToString("；"))
     }
 
     fun list(): List<JobStatus> = synchronized(lock) { jobs.values.toList() }.map { job ->

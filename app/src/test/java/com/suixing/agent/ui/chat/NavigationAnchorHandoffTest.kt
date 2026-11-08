@@ -33,6 +33,9 @@ class NavigationAnchorHandoffTest {
     private var textY = 100f
     private var reading = true
     private var following = false
+    private var homeY = 0f
+    private var homeScale = 1f
+    private lateinit var viewport: LayoutCoordinates
 
     @Before fun setUp() {
         mockkStatic(SystemClock::class)
@@ -51,13 +54,25 @@ class NavigationAnchorHandoffTest {
         every { list.firstVisibleItemIndex } returns 2
         every { list.firstVisibleItemScrollOffset } returns 100
         every { list.requestScrollToItem(any(), any()) } just Runs
-        val root = mockk<LayoutCoordinates>()
-        every { root.positionInRoot() } returns Offset.Zero
+        val root = mockk<LayoutCoordinates>().also { viewport = it }
+        every { root.isAttached } returns true
+        every { root.positionInRoot() } answers { Offset(0f, homeY) }
         val coordinates = mockk<LayoutCoordinates>()
         every { coordinates.isAttached } returns true
         every { coordinates.size } returns IntSize(200, 500)
-        every { coordinates.positionInRoot() } answers { Offset(0f, textY) }
-        every { coordinates.boundsInRoot() } answers { Rect(0f, textY, 200f, textY + 500f) }
+        every { coordinates.positionInRoot() } answers { Offset(0f, homeY + textY * homeScale) }
+        every { coordinates.boundsInRoot() } answers {
+            Rect(0f, homeY + textY * homeScale, 200f * homeScale, homeY + (textY + 500f) * homeScale)
+        }
+        every { root.localPositionOf(coordinates, any()) } answers {
+            val point = Offset(secondArg<Long>())
+            Offset(point.x, textY + point.y)
+        }
+        every { coordinates.localPositionOf(root, any()) } answers {
+            val point = Offset(secondArg<Long>())
+            Offset(point.x, point.y - textY)
+        }
+        every { root.localBoundingBoxOf(coordinates, any()) } answers { Rect(0f, textY, 200f, textY + 500f) }
         val text = mockk<TextLayoutResult>()
         val input = mockk<TextLayoutInput>()
         every { input.text } returns AnnotatedString("the text being read")
@@ -109,6 +124,31 @@ class NavigationAnchorHandoffTest {
     @Test fun `normal reading interaction still captures immediately`() {
         owner.interactionChanged()
         textY = 120f
+        owner.contentPlaced()
+        verify(exactly = 1) { list.requestScrollToItem(2, 120) }
+    }
+
+    @Test fun `drawer layer translation and scale do not repair an unchanged reading position`() {
+        homeY = 180f
+        homeScale = .95f
+        owner.viewportPlaced(viewport)
+        owner.contentPlaced()
+        verify(exactly = 0) { list.requestScrollToItem(any(), any()) }
+
+        homeY = 0f
+        homeScale = 1f
+        owner.viewportPlaced(viewport)
+        owner.contentPlaced()
+        verify(exactly = 0) { list.requestScrollToItem(any(), any()) }
+    }
+
+    @Test fun `real text growth while home is scaled repairs in viewport pixels`() {
+        homeY = 180f
+        homeScale = .95f
+        owner.viewportPlaced(viewport)
+        owner.rebaseAfterNavigation()
+        owner.contentPlaced()
+        textY += 20f
         owner.contentPlaced()
         verify(exactly = 1) { list.requestScrollToItem(2, 120) }
     }

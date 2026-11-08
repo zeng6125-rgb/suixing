@@ -123,6 +123,7 @@ internal fun rememberChatSelectionGuard(
         //  · 不判断 `pressMoved` —— 选区扩展也是手指移动，那种情况同样需要纠。
         val lockKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
         val lockOffset = listState.firstVisibleItemScrollOffset
+        val latestRequestGeneration = scroll.latestRequestGeneration
         try {
             while (pressGuardOn) {
                 if (!pressed && SystemClock.uptimeMillis() - pressUpAt >= LONG_PRESS_SETTLE_MS) {
@@ -133,7 +134,9 @@ internal fun rememberChatSelectionGuard(
         } finally {
             // 按下到抬手后 400ms 内，如果列表位置被推走
             // （选区重排造成，手指没动），就关掉追底 —— 而不是把位置纠回去（0.8.242 的教训）。
-            if (lockKey != null) {
+            // A later explicit latest click owns the position, even when this older
+            // selection's settling window has not finished yet.
+            if (lockKey != null && latestRequestGeneration == scroll.latestRequestGeneration) {
                 val target = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == lockKey }
                 when {
                     target == null -> Unit

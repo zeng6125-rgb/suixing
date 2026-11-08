@@ -4,6 +4,8 @@ import com.suixing.agent.data.JOB_RUNNING
 import com.suixing.agent.data.JobStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import com.suixing.agent.terminal.TerminalCaller
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -32,6 +34,7 @@ class JobTools(private val jobs: JobStore) : ToolGroup() {
             Schema.objectOf(
                 properties = listOf(
                     "command" to Schema.string("Command to run, e.g. `curl -o /sdcard/a.zip https://…`"),
+                    "observe_paths" to Schema.arrayOf("Optional absolute destinations outside the app workspace to observe; actual changes are returned once by job_output/job_list after completion.", Schema.string("Absolute path")),
                     "label" to Schema.string("Short name for this job, so it is recognisable in job_list"),
                 ),
                 required = listOf("command"),
@@ -87,7 +90,10 @@ class JobTools(private val jobs: JobStore) : ToolGroup() {
         val command = args.str("command")?.trim().orEmpty()
         if (command.isEmpty()) return@withContext ToolResult.failure("Missing argument: command")
         val label = args.str("label")?.trim().orEmpty()
-        val info = jobs.start(command, label)
+        val observePaths = (args["observe_paths"] as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull {
+            (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { value -> java.io.File(value) }?.takeIf { file -> file.isAbsolute }
+        }
+        val info = jobs.start(command, label, observePaths, currentCoroutineContext()[TerminalCaller]?.chatId)
         ToolResult.success(
             "Started background job ${info.id} (${info.label}).\n" +
                 "It keeps running after this turn ends: read output with job_output, stop it with " +
@@ -103,7 +109,7 @@ class JobTools(private val jobs: JobStore) : ToolGroup() {
             val tail = if (job.lastLine.isBlank()) "" else " | last: ${job.lastLine}"
             "- ${job.info.id} [${job.status}] ${seconds(job.elapsedMs)}$exit  ${job.info.label}$tail"
         }
-        ToolResult.success("${all.size} background job(s):\n$text")
+        jobs.takeFileChanges(all.map { it.info.id }, currentCoroutineContext()[TerminalCaller]?.chatId).attach(ToolResult.success("${all.size} background job(s):\n$text"))
     }
 
     private suspend fun output(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
@@ -120,14 +126,14 @@ class JobTools(private val jobs: JobStore) : ToolGroup() {
             "[${status.status}] ${seconds(status.elapsedMs)}$exit\n"
         }
         if (text.isBlank()) {
-            return@withContext ToolResult.success(
+            return@withContext jobs.takeFileChanges(listOf(id), currentCoroutineContext()[TerminalCaller]?.chatId).attach(ToolResult.success(
                 "$head(no output yet; continue from since=${jobs.logLength(id)} next time)",
-            )
+            ))
         }
         val next = jobs.logLength(id)
-        ToolResult.success(
+        jobs.takeFileChanges(listOf(id), currentCoroutineContext()[TerminalCaller]?.chatId).attach(ToolResult.success(
             "$head$text\n\n(log is $next bytes; pass since=$next next time to get only what is new)",
-        )
+        ))
     }
 
     private suspend fun kill(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {

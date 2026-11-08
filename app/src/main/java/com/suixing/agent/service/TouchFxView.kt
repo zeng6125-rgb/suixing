@@ -112,6 +112,7 @@ internal class FxView(
     /** 回合是否亮着，由 [TouchFx] 的回合状态机开关 —— 是状态，不是有固定时长的动画。 */
     /** Where the light is heading (see [setTarget]); [drawnAlpha] chases it frame by frame. */
     private var targetAlpha = 0f
+    private var edgeEnabled = false
     private var litStart = SystemClock.uptimeMillis()
 
     /**
@@ -134,8 +135,19 @@ internal class FxView(
      * Idempotent, and re-aiming does not restart anything — a run that keeps operating the phone
      * simply stays at the same target, so a burst of actions cannot make it flicker.
      */
+    fun setEdgeEnabled(enabled: Boolean) {
+        if (edgeEnabled == enabled) return
+        edgeEnabled = enabled
+        if (!enabled) {
+            targetAlpha = 0f
+            drawnAlpha = 0f
+            edgeStart = 0L
+            invalidate()
+        }
+    }
+
     fun setTarget(value: Float) {
-        val next = value.coerceIn(0f, 1f)
+        val next = if (edgeEnabled) value.coerceIn(0f, 1f) else 0f
         // **短路必须看两个值**（issue #7）：只看 target 时，一旦出现「target 已经是 0、drawnAlpha
         // 还冻在 1.0」（窗口停摆的那段），之后每次 apply 都在这里 return，再也没有任何一帧去
         // 把它降下来 —— 灯就那么亮着几分钟。
@@ -173,6 +185,7 @@ internal class FxView(
     }
 
     fun flashEdge() {
+        if (!edgeEnabled) return
         edgeStart = SystemClock.uptimeMillis()
         invalidate()
     }
@@ -236,8 +249,8 @@ internal class FxView(
             (drawnAlpha - FX_FADE_STEP).coerceAtLeast(aim)
         }
         // Under the flash, so an action still reads as brighter than the state it happened in.
-        if (drawnAlpha > 0f) drawGlow(canvas, drawnAlpha, now)
-        if (edgeElapsed < FX_EDGE_DURATION_MS) drawEdge(canvas, edgeElapsed, now)
+        if (edgeEnabled && drawnAlpha > 0f) drawGlow(canvas, drawnAlpha, now)
+        if (edgeEnabled && edgeElapsed < FX_EDGE_DURATION_MS) drawEdge(canvas, edgeElapsed, now)
 
         val animating = rings.isNotEmpty() || trails.isNotEmpty() || edgeElapsed < FX_EDGE_DURATION_MS
         when {

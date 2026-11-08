@@ -171,7 +171,7 @@ object Core {
             capabilities = CapabilityHub(appContext, settings, beforeInitialProbe = startup::awaitMaintenance)
             skills = SkillStore(appContext)
             speaker = Speaker(appContext)
-            jobs = JobStore(File(appContext.filesDir, "jobs"), appScope)
+            jobs = JobStore(File(appContext.filesDir, "jobs"), appScope) { listOf(com.suixing.agent.tools.workspaceDir(appContext)) }
             linux = com.suixing.agent.terminal.LinuxInstaller(appContext, appScope)
             terminals = com.suixing.agent.terminal.TerminalSessionManager(appContext, appScope, linux)
             todos = TodoStore(File(appContext.filesDir, "todos.json"))

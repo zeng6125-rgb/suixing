@@ -4,7 +4,7 @@ import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
 
 @Serializable
-enum class FileActivityKind { CREATED, MODIFIED, DOWNLOADED, DELIVERED }
+enum class FileActivityKind { CREATED, MODIFIED, DOWNLOADED, DELIVERED, DELETED, MOVED }
 
 /** Verified file metadata for conversation cards; never retains file contents or a diff. */
 @Immutable
@@ -18,4 +18,6 @@ data class FileActivity(
     val sizeBytes: Long? = null,
     /** Optional agent-written caption, not a source of filesystem or change statistics. */
     val description: String = "",
+    /** Verified original location of a move; absent from older transcripts. */
+    val previousPath: String? = null,
 )

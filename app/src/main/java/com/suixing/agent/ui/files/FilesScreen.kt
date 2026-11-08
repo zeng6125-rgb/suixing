@@ -64,6 +64,7 @@ import com.suixing.agent.capability.allFilesAccessIntents
 import com.suixing.agent.tools.humanSize
 import com.suixing.agent.tools.workspaceDir
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.PageTopBarAction
 import com.suixing.agent.ui.components.RowChevron
 import com.suixing.agent.ui.components.SettingRow
 import com.suixing.agent.ui.components.SoftIcon
@@ -218,13 +219,11 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                 // 三态之后循环按钮必须用文案说明"下一次点会去哪"，而其中一支还带权限闸门（/sdcard），
                 // 一个按钮承担不了这些。菜单把三个根一次列全，被闸门挡住的那支也能就地说明。
                 Box {
-                    IconButton(onClick = { rootMenu = true }) {
-                        Icon(
-                            ImageVector.vectorResource(R.drawable.ic_folder_open),
-                            contentDescription = "切换目录根（当前：$rootLabel）",
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
+                    PageTopBarAction(
+                        icon = ImageVector.vectorResource(R.drawable.ic_folder_open),
+                        contentDescription = "切换目录根（当前：$rootLabel）",
+                        onClick = { rootMenu = true },
+                    )
                     ActionMenu(expanded = rootMenu, onDismissRequest = { rootMenu = false }) {
                         ActionMenuItem(
                             text = { Text("工作目录") },
@@ -273,19 +272,21 @@ fun FilesScreen(onBack: () -> Unit, onReference: (File) -> Unit) {
                         )
                     }
                 }
-                IconButton(onClick = { reload++ }) {
-                    Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), contentDescription = "刷新", modifier = Modifier.size(20.dp))
-                }
+                PageTopBarAction(
+                    icon = ImageVector.vectorResource(R.drawable.ic_rotate_cw),
+                    contentDescription = "刷新",
+                    onClick = { reload++ },
+                )
                 if (current != root) {
                     // 夹在当前根之内：/sdcard 的上一级是 /storage/emulated，走出去之后面包屑就
                     // 不是一条祖先链了。
-                    IconButton(
+                    PageTopBarAction(
+                        icon = ImageVector.vectorResource(R.drawable.ic_arrow_up),
+                        contentDescription = "上一级",
                         onClick = {
                             current = parentDirectory ?: root
                         },
-                    ) {
-                        Icon(ImageVector.vectorResource(R.drawable.ic_arrow_up), contentDescription = "上一级", modifier = Modifier.size(20.dp))
-                    }
+                    )
                 }
             },
         )

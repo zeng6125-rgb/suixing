@@ -66,6 +66,17 @@ class ChatStoreTest {
         assertEquals(2, meta.turnCount)
     }
 
+    @Test fun `observed shell deletion and move metadata survive append and reload`() {
+        val messages = listOf(StoredMessage("shell-files", Roles.TOOL, toolName = "run_shell", toolOk = false,
+            fileActivities = listOf(
+                FileActivity("/sdcard/gone.txt", FileActivityKind.DELETED, addedLines = 0, removedLines = 2),
+                FileActivity("/sdcard/new.txt", FileActivityKind.MOVED, sizeBytes = 10, previousPath = "/sdcard/old.txt"))))
+        val meta = store.append(emptyMeta(), messages)
+        assertEquals(messages, ChatStore(folder.root).all(meta))
+        val legacy = kotlinx.serialization.json.Json.decodeFromString(StoredMessage.serializer(), """{"id":"legacy","role":"tool","toolName":"write_file"}""")
+        assertTrue(legacy.fileActivities.isEmpty())
+    }
+
     @Test
     fun `a save appends only the new messages, not the transcript`() {
         val before = seed(2)

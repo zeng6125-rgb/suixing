@@ -44,6 +44,7 @@ object VirtualScreenManager {
 
     /** 预览刷新间隔：约 6fps，够看出画面在动。 */
     private const val PREVIEW_INTERVAL_MS = 160L
+    private const val FRAME_STATUS_INTERVAL_MS = 1_000L
 
     /**
      * 副屏密度：与像素乘同一个 [SCALE]，让 dp 与主屏一致（issue #80）。
@@ -68,6 +69,7 @@ object VirtualScreenManager {
     private var reader: ImageReader? = null
     private var thread: HandlerThread? = null
     private var lastPreviewStamp = 0L
+    private var lastFrameStatusStamp = 0L
 
     /** 全尺寸帧与它的真实（未含行填充）宽高，读写都在 [frameLock] 下。 */
     private val frameLock = Any()
@@ -149,6 +151,7 @@ object VirtualScreenManager {
         reader = imageReader
         thread = handlerThread
         lastPreviewStamp = 0L
+        lastFrameStatusStamp = 0L
         val next = State(running = true, displayId = displayId, width = width, height = height)
         _state.value = next
         imageReader.setOnImageAvailableListener({ r -> onFrame(r) }, Handler(handlerThread.looper))
@@ -181,6 +184,7 @@ object VirtualScreenManager {
         reader = null
         thread = null
         lastPreviewStamp = 0L
+        lastFrameStatusStamp = 0L
         synchronized(frameLock) {
             fullFrame?.recycle()
             fullFrame = null
@@ -309,12 +313,17 @@ object VirtualScreenManager {
                 }
                 fullWidth = image.width
                 fullHeight = image.height
+                // Frame readiness belongs to the display, not to its optional preview.
+                // Publish the first frame immediately, then bound metadata updates to 1 Hz.
+                if (_state.value.lastFrameAt == 0L || now - lastFrameStatusStamp >= FRAME_STATUS_INTERVAL_MS) {
+                    lastFrameStatusStamp = now
+                    _state.value = _state.value.copy(lastFrameAt = System.currentTimeMillis())
+                }
                 if (!previewEnabled || now - lastPreviewStamp < PREVIEW_INTERVAL_MS) return@synchronized
                 val preview = createPreview(target, image.width, image.height) ?: return@synchronized
                 // Publish under the same lock as stop(), so a late frame cannot restore the preview.
                 lastPreviewStamp = now
                 _frame.value = preview
-                _state.value = _state.value.copy(lastFrameAt = System.currentTimeMillis())
             }
         } catch (error: Throwable) {
             // 一帧坏了不影响后面的帧：丢掉这次，等下一帧。
