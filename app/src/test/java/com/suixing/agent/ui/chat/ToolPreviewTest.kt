@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ToolPreviewTest {
+    @Test fun nativeBashArgumentsUseTheSameCredentialSafePreview() {
+        val raw = """{"command":"curl -H 'Authorization: Bearer private-token' https://example.test"}"""
+        val preview = toolArgumentPreview("bash", raw)!!
+        assertFalse(preview.contains("private-token"))
+        assertTrue(preview.contains("example.test"))
+        assertTrue(raw.contains("private-token"))
+    }
+
     @Test fun masksNestedCredentialsAndBearerHeaderWithoutChangingArguments() {
         val raw = """{"headers":{"Authorization":"Bearer abc123"},"api_key":"secret-key","path":"/workspace/project"}"""
         val preview = toolArgumentPreview("run_shell", raw)!!

@@ -62,6 +62,7 @@ internal fun ChatTopBar(
     onNew: () -> Unit,
     onOpenBrowser: () -> Unit,
     onOpenTerminal: () -> Unit,
+    onViewSubagents: (() -> Unit)? = null,
     /** 标题胶囊右侧的入口；null 不画。 */
     contextEntry: (@Composable RowScope.() -> Unit)? = null,
 ) {
@@ -180,6 +181,13 @@ internal fun ChatTopBar(
                         onOpenBrowser()
                     },
                 )
+                onViewSubagents?.let { view ->
+                    MenuItemRow(
+                        icon = ImageVector.vectorResource(R.drawable.ic_bot),
+                        label = "查看子智能体",
+                        onClick = { menuOpen = false; view() },
+                    )
+                }
                 MenuItemRow(
                     icon = ImageVector.vectorResource(R.drawable.ic_terminal),
                     label = "打开终端",

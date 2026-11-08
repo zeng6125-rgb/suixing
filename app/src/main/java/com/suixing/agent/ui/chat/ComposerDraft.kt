@@ -10,13 +10,13 @@ import kotlinx.coroutines.flow.map
 /** Typing invalidates this composer scope instead of the transcript and app shell. */
 @Composable
 internal fun ComposerDraftText(
-    viewModel: ChatViewModel,
+    actions: ChatScreenActions,
     conversationId: String,
     content: @Composable (String) -> Unit,
 ) {
-    val textFlow = remember(viewModel, conversationId) {
-        viewModel.drafts.map { it[conversationId]?.text.orEmpty() }.distinctUntilChanged()
+    val textFlow = remember(actions, conversationId) {
+        actions.drafts.map { it[conversationId]?.text.orEmpty() }.distinctUntilChanged()
     }
-    val text by textFlow.collectAsStateWithLifecycle(initialValue = viewModel.draftFor(conversationId).text)
+    val text by textFlow.collectAsStateWithLifecycle(initialValue = actions.draftFor(conversationId).text)
     content(text)
 }

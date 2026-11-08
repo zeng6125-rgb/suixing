@@ -7,11 +7,42 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class SubagentsTest {
+    @Test fun `terminal results report once and explicit collection leaves no automatic duplicates`() = runBlocking {
+        val pool = SubagentPool(this) { if (it.task == "bad") error("failure") else "ok" }
+        try {
+            val first = pool.spawn("good").id
+            val second = pool.spawn("bad").id
+            pool.waitFor(timeoutMs = 2000)
+            assertEquals(listOf(first, second), pool.unreportedResults().map { it.id })
+            val collected = pool.execute("wait_agents", JsonObject(mapOf("ids" to JsonArray(listOf(JsonPrimitive(first))))))
+            assertTrue(collected.ok)
+            assertTrue(collected.output.contains("ok"))
+            assertEquals(listOf(second), pool.unreportedResults().map { it.id })
+            pool.execute("list_agents", JsonObject(emptyMap()))
+            assertTrue(pool.unreportedResults().isEmpty())
+        } finally { pool.close() }
+    }
+
+    @Test fun `result integration can reopen admission for a follow-up child`() = runBlocking {
+        val pool = SubagentPool(this) { it.task }
+        try {
+            pool.spawn("first")
+            pool.sealAndWait()
+            assertThrows(IllegalStateException::class.java) { pool.spawn("too early") }
+            pool.resumeAdmission()
+            val next = pool.spawn("follow-up").id
+            assertEquals("follow-up", pool.waitFor(listOf(next), 2000).single().result)
+        } finally { pool.close() }
+    }
+
     @Test fun `parallel work is bounded and results retain requested order and isolated inputs`() = runBlocking {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()

@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -74,8 +75,9 @@ private data class FileCardTotals(val title: String, val lineSummary: String?)
 internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier = Modifier) {
     if (activities.isEmpty()) return
     val totals = remember(IdentityKey(activities)) { fileCardTotals(activities) }
-    var expanded by rememberSaveable {
-        mutableStateOf(activities.any { it.kind == FileActivityKind.DELIVERED || it.kind == FileActivityKind.DOWNLOADED })
+    val collapsible = fileActivityCanCollapse(activities.size)
+    var expanded by rememberSaveable(collapsible) {
+        mutableStateOf(fileActivityInitiallyExpanded(activities))
     }
     var preview by remember { mutableStateOf<LocalFilePreview?>(null) }
     var busyPath by remember { mutableStateOf<String?>(null) }
@@ -117,12 +119,7 @@ internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier
     val shape = MaterialTheme.shapes.medium
     val outline = MaterialTheme.colorScheme.outlineVariant
     Column(modifier.fillMaxWidth()) {
-        MenuRippleSurface(
-            onClick = { expanded = !expanded },
-            shape = shape,
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            modifier = Modifier.fillMaxWidth().border(1.dp, outline, shape),
-        ) {
+        val header: @Composable () -> Unit = {
             Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(ImageVector.vectorResource(R.drawable.ic_file), contentDescription = null,
                     modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -133,14 +130,24 @@ internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier
                         Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                Spacer(Modifier.width(8.dp))
-                Icon(ImageVector.vectorResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
-                    contentDescription = if (expanded) "收起文件" else "展开文件", modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (collapsible) {
+                    Spacer(Modifier.width(8.dp))
+                    Icon(ImageVector.vectorResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down),
+                        contentDescription = if (expanded) "收起文件" else "展开文件", modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
+        val headerModifier = Modifier.fillMaxWidth().border(1.dp, outline, shape)
+        if (collapsible) {
+            MenuRippleSurface(onClick = { expanded = !expanded }, shape = shape,
+                color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = headerModifier, content = header)
+        } else {
+            Surface(shape = shape, color = MaterialTheme.colorScheme.surfaceContainerLow,
+                modifier = headerModifier, content = header)
+        }
         AnimatedVisibility(
-            visible = expanded,
+            visible = !collapsible || expanded,
             enter = expandVertically(tween(180)) + fadeIn(tween(120)),
             exit = shrinkVertically(tween(140)) + fadeOut(tween(100)),
         ) {
@@ -156,7 +163,7 @@ internal fun ChatFileActivity(activities: List<FileActivity>, modifier: Modifier
                         onShare = { act(file.path, FileCardAction.SHARE) },
                         onCopy = { copyPath(file.path) })
                 }
-                if (totals.lineSummary != null) item(key = "line-count-note") {
+                if (totals.lineSummary != null) item(key = "line-count-note", contentType = "file-count-note") {
                     Text("多次编辑的替换行数累计显示", modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

@@ -29,7 +29,7 @@ internal fun ChatMessageRowHost(
     providerOfModel: Map<String, ProviderConfig>,
     reasoningExpansion: ReasoningExpansion,
     rowDocuments: RowMarkdownCache,
-    viewModel: ChatViewModel,
+    actions: ChatScreenActions,
     onEdit: (StoredMessage) -> Unit,
 ) {
     // One placeable per item: the list's own 16dp spacing applies
@@ -81,11 +81,11 @@ internal fun ChatMessageRowHost(
         }
         // 稳定引用（issue #5）：每次重组新建 lambda ⇒ `MessageRow` 的 equals
         // 恒为 false ⇒ Compose 的跳过优化失效，每个可见项每帧都重组。
-        val onBranch = remember(viewModel) {
-            { turnId: String, runId: String -> viewModel.switchBranch(turnId, runId) }
+        val onBranch = remember(actions) {
+            { turnId: String, runId: String -> actions.switchBranch(turnId, runId) }
         }
-        val onRegenerate = remember(viewModel) {
-            { viewModel.regenerate() }
+        val onRegenerate = remember(actions) {
+            { actions.regenerate() }
         }
         // 「提供方 / 模型」也按模型缓存：原来每帧每个可见项都新建一个 String。
         // **第二个键必须包 IdentityKey**（`providerOfModel` 是普通 Map）：

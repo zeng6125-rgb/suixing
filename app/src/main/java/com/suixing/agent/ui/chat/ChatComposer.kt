@@ -900,7 +900,7 @@ internal fun Composer(
      * transcript (the caller adds the strip under it and its own 12dp of air).
      */
     onHeightChanged: (Dp) -> Unit,
-    subagentChatId: String? = null,
+    subagentQueue: @Composable () -> Unit = {},
     /** Called once the stack has been placed for this frame: the caller's follow pin rides it. */
 ) {
     // 每 120ms 重组的只有这一个环（含时间读数），不拖别人。
@@ -1132,6 +1132,7 @@ internal fun Composer(
             // 排队 turns first: they are the ones that have not gone anywhere yet, so they sit
             // closest to the field they will be sent from. Without this row the user pressed 插话
             // again and again — the line left the field with nothing on screen to show for it.
+            subagentQueue()
             if (pendingTurns.isNotEmpty()) {
                 Column(
                     modifier = Modifier
@@ -1571,7 +1572,6 @@ internal fun Composer(
                                 )
                             }
                         }
-                        subagentChatId?.let { SubagentStatusAction(it) }
                     }
                     val compactControls = windowWidth < 360.dp || density.fontScale >= 1.3f || settings.fontScale >= 3
                     if (compactControls) {

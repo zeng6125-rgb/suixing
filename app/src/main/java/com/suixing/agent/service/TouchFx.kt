@@ -182,10 +182,14 @@ private val FX_UI_EPISODE_TOOLS = setOf(
     "open_app", "app_action",
 )
 
-/** `run_shell` 里真正碰 UI 的命令才触发：只读命令（ls/cat/dumpsys 读）一律中性。 */
+/** Shell commands only drive the UI when they actually contain a screen operation. */
 private val FX_SHELL_UI_RE = Regex(
     """\binput\s+(tap|swipe|text|keyevent|drag|roll)|\bam\s+start\b""",
 )
+
+internal fun shellToolDrivesUi(tool: String, detail: String?): Boolean =
+    (tool == "run_shell" || tool == "bash") &&
+        detail?.let { FX_SHELL_UI_RE.containsMatchIn(it) } == true
 
 /**
  * How far the drawn brightness moves toward its target per frame.
@@ -633,7 +637,7 @@ object TouchFx {
      */
     fun noteToolActivity(context: Context, tool: String, detail: String? = null) {
         val triggers = tool in FX_UI_EPISODE_TOOLS ||
-            (tool == "run_shell" && detail?.let { FX_SHELL_UI_RE.containsMatchIn(it) } == true)
+            shellToolDrivesUi(tool, detail)
         if (triggers) {
             // **读屏也要登记成"驱动"**（issue #2）：改判据之后灯由 [drivingIds] 决定，
             // 只 arm 不登记的话，一轮只做 ui_dump / ui_screenshot 的任务永远点不亮

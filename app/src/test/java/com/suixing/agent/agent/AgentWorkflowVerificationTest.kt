@@ -1,7 +1,11 @@
 package com.suixing.agent.agent
 
+import android.content.Context
 import com.suixing.agent.capability.CapabilityHub
 import com.suixing.agent.capability.CapabilityState
+import com.suixing.agent.capability.Shell
+import com.suixing.agent.capability.ShellResult
+import com.suixing.agent.capability.ShellTier
 import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ChildRunConfig
@@ -13,15 +17,23 @@ import com.suixing.agent.llm.AssistantTurn
 import com.suixing.agent.llm.ChatMessage
 import com.suixing.agent.llm.LlmClient
 import com.suixing.agent.llm.ToolCallRequest
+import com.suixing.agent.service.TouchFx
 import com.suixing.agent.skills.Skill
 import com.suixing.agent.skills.SkillStore
+import com.suixing.agent.tools.BashTools
+import com.suixing.agent.tools.ShellTools
 import com.suixing.agent.tools.ToolGroup
 import com.suixing.agent.tools.ToolRegistry
 import com.suixing.agent.tools.ToolResult
 import com.suixing.agent.tools.ToolSpec
+import io.mockk.Runs
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -56,9 +68,95 @@ class AgentWorkflowVerificationTest {
         }
 
     private suspend fun run(engine: AgentEngine, registry: ToolRegistry, settings: AppSettings,
-        events: (AgentEvent) -> Unit = {}): List<StoredMessage> =
+        events: (AgentEvent) -> Unit = {}, runId: String = java.util.UUID.randomUUID().toString()): List<StoredMessage> =
         engine.startRun("verification", "Verification", emptyList(), settings, registry,
-            capabilities, skills, memory, profile, ApprovalGate(), events)
+            capabilities, skills, memory, profile, ApprovalGate(), events, runId = runId)
+
+    private fun nativeBashRegistry(): ToolRegistry = registry().also {
+        it.add(BashTools(ShellTools(mockk<Context>(relaxed = true), capabilities)))
+    }
+
+    @Test fun `parent and child execute native bash without Shizuku and return child evidence to the parent`() = runBlocking {
+        mockkObject(Shell, TouchFx)
+        val release = CompletableDeferred<Unit>()
+        try {
+            every { capabilities.shellTier() } returns ShellTier.LOCAL
+            every { Shell.bundledBash() } returns "/native/libbash.so"
+            every { TouchFx.traceCall(any(), tool = any(), detail = any(), matched = any()) } just Runs
+            coEvery { Shell.local("printf parent", "bash", null) } returns ShellResult(true, "native-parent-output", "", 0)
+            coEvery { Shell.local("printf child", "bash", null) } returns ShellResult(true, "native-child-output", "", 0)
+            val parentRounds = AtomicInteger()
+            val childRounds = AtomicInteger()
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    assertTrue(thirdArg<List<ToolSpec>>().any { it.name == "bash" })
+                    if (firstArg<AppSettings>().subagentsEnabled) {
+                        when (parentRounds.incrementAndGet()) {
+                            1 -> AssistantTurn("", listOf(ToolCallRequest("parent-bash", "bash", """{"command":"printf parent"}""")), "tool_calls")
+                            2 -> {
+                                assertTrue(secondArg<List<ChatMessage>>().last { it.role == "tool" }.text.contains("native-parent-output"))
+                                AssistantTurn("", listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"run the child Bash command"}""")), "tool_calls")
+                            }
+                            3 -> {
+                                release.complete(Unit)
+                                AssistantTurn("premature answer", emptyList(), "stop")
+                            }
+                            else -> {
+                                val feedback = secondArg<List<ChatMessage>>().last { it.role == "tool" }.text
+                                assertTrue(feedback.contains("native-child-output"))
+                                AssistantTurn("parent integrated native Bash evidence", emptyList(), "stop")
+                            }
+                        }
+                    } else if (childRounds.incrementAndGet() == 1) {
+                        AssistantTurn("", listOf(ToolCallRequest("child-bash", "bash", """{"command":"printf child"}""")), "tool_calls")
+                    } else {
+                        release.await()
+                        assertTrue(secondArg<List<ChatMessage>>().last { it.role == "tool" }.text.contains("native-child-output"))
+                        AssistantTurn("child done: native-child-output", emptyList(), "stop")
+                    }
+                }
+            }
+            val result = withTimeout(10_000) {
+                run(AgentEngine(llm = client), nativeBashRegistry(),
+                    AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true))
+            }
+            assertEquals("parent integrated native Bash evidence", result.last().text)
+            assertEquals(4, parentRounds.get())
+            assertEquals(2, childRounds.get())
+            coVerify(exactly = 1) { Shell.local("printf parent", "bash", null) }
+            coVerify(exactly = 1) { Shell.local("printf child", "bash", null) }
+            coVerify(exactly = 0) { Shell.root(any()) }
+            coVerify(exactly = 0) { Shell.shizuku(any()) }
+        } finally {
+            release.complete(Unit)
+            unmockkObject(Shell, TouchFx)
+        }
+    }
+
+    @Test fun `native bash still obeys the engine approval gate before starting a process`() = runBlocking {
+        mockkObject(Shell)
+        try {
+            val rounds = AtomicInteger()
+            val client = mockk<LlmClient> {
+                coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                    if (rounds.incrementAndGet() == 1) {
+                        AssistantTurn("", listOf(ToolCallRequest("bash", "bash", """{"command":"printf denied"}""")), "tool_calls")
+                    } else {
+                        assertTrue(secondArg<List<ChatMessage>>().last { it.role == "tool" }.text.contains("用户拒绝"))
+                        AssistantTurn("Bash was not executed", emptyList(), "stop")
+                    }
+                }
+            }
+            val result = withTimeout(10_000) {
+                run(AgentEngine(llm = client), nativeBashRegistry(),
+                    AppSettings(approvalMode = ApprovalMode.DENY, subagentsEnabled = false))
+            }
+            assertEquals("Bash was not executed", result.last().text)
+            coVerify(exactly = 0) { Shell.local(any(), any(), any()) }
+        } finally {
+            unmockkObject(Shell)
+        }
+    }
 
     @Test fun `a repeated parallel tool batch is fully answered before warning and the loop still finishes`() = runBlocking {
         val rounds = AtomicInteger()
@@ -89,6 +187,25 @@ class AgentWorkflowVerificationTest {
         assertEquals("finished after warning", result.last().text)
         assertEquals(1, events.filterIsInstance<AgentEvent.Finished>().size)
         assertTrue(events.none { it is AgentEvent.Failed })
+    }
+
+    @Test fun `tool round exhaustion keeps committed results and reports one failed terminal state`() = runBlocking {
+        val rounds = AtomicInteger()
+        val events = CopyOnWriteArrayList<AgentEvent>()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                rounds.incrementAndGet()
+                AssistantTurn("working", listOf(ToolCallRequest("call", "echo", "{}")), "tool_calls")
+            }
+        }
+        val engine = AgentEngine(llm = client)
+        val result = run(engine, registry(),
+            AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = false, maxToolRounds = 1), events::add)
+        assertEquals(1, rounds.get())
+        assertEquals(listOf("assistant", "tool"), result.map { it.role })
+        assertEquals(1, events.filterIsInstance<AgentEvent.Failed>().size)
+        assertTrue(events.none { it is AgentEvent.Finished })
+        assertEquals(RunState.Failed("已达到最大工具轮数（1），任务未完成。"), engine.stateOf("verification").value)
     }
 
     @Test fun `stopping after a committed tool emits one visible summary and retains the partial text`() = runBlocking {
@@ -150,7 +267,7 @@ class AgentWorkflowVerificationTest {
         assertEquals(listOf("status"), actions)
     }
 
-    @Test fun `normal parent completion waits for an accepted child even without an explicit wait tool`() = runBlocking {
+    @Test fun `normal parent completion collects child output and asks the parent to integrate it without an explicit wait tool`() = runBlocking {
         val childStarted = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         val parentRounds = AtomicInteger()
@@ -159,7 +276,16 @@ class AgentWorkflowVerificationTest {
                 if (firstArg<AppSettings>().subagentsEnabled) {
                     if (parentRounds.incrementAndGet() == 1) AssistantTurn("",
                         listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"independent"}""")), "tool_calls")
-                    else AssistantTurn("parent answer", emptyList(), "stop")
+                    else if (parentRounds.get() == 2) AssistantTurn("parent answer before child", emptyList(), "stop")
+                    else {
+                        val wire = secondArg<List<ChatMessage>>()
+                        assertTrue("预算耗尽后的汇总不能继续提供工具", thirdArg<List<ToolSpec>>().isEmpty())
+                        val feedback = wire.last { it.role == "tool" }
+                        assertTrue(feedback.text.contains("child answer"))
+                        assertTrue(feedback.text.contains("completed"))
+                        assertEquals("wait_agents", wire.last { it.toolCalls.isNotEmpty() }.toolCalls.single().name)
+                        AssistantTurn("parent integrated child answer", emptyList(), "stop")
+                    }
                 } else {
                     childStarted.complete(Unit)
                     release.await()
@@ -169,10 +295,13 @@ class AgentWorkflowVerificationTest {
         }
         val engine = AgentEngine(llm = client)
         val running = async(Dispatchers.Default) {
-            run(engine, registry(), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true))
+            run(engine, registry(), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true, maxToolRounds = 2),
+                runId = "bound-parent-run")
         }
         try {
             withTimeout(5_000) { childStarted.await() }
+            val childId = engine.subagentsFlow.value.getValue("verification").single().id
+            assertEquals("bound-parent-run", SubagentRecords.record(childId).value?.parentRunId)
             withTimeout(5_000) {
                 engine.runsFlow.value.getValue("verification").state.first {
                     it is RunState.Running && it.stats.note == "等待子任务完成"
@@ -181,7 +310,152 @@ class AgentWorkflowVerificationTest {
             assertFalse(running.isCompleted)
             assertFalse(engine.canCreateSubagent("verification"))
             release.complete(Unit)
-            assertEquals("parent answer", withTimeout(5_000) { running.await() }.last().text)
+            val result = withTimeout(5_000) { running.await() }
+            assertEquals("parent integrated child answer", result.last().text)
+            assertEquals(3, parentRounds.get())
+            assertTrue(result.any { it.toolName == "wait_agents" && it.toolOutput.orEmpty().contains("child answer") })
         } finally { release.complete(Unit); running.cancel() }
+    }
+
+    @Test fun `completed child reports at a tool boundary once while the parent continues working`() = runBlocking {
+        val childStarted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val parentRounds = AtomicInteger()
+        lateinit var engine: AgentEngine
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (firstArg<AppSettings>().subagentsEnabled) {
+                    when (parentRounds.incrementAndGet()) {
+                        1 -> AssistantTurn("", listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"independent"}""")), "tool_calls")
+                        2 -> {
+                            childStarted.await()
+                            release.complete(Unit)
+                            withTimeout(5_000) {
+                                engine.subagentsFlow.first { children -> children["verification"]?.singleOrNull()?.status == SubagentStatus.COMPLETED }
+                            }
+                            AssistantTurn("", listOf(ToolCallRequest("work", "echo", "{}")), "tool_calls")
+                        }
+                        3 -> {
+                            val wire = secondArg<List<ChatMessage>>()
+                            assertTrue(wire.last { it.role == "tool" }.text.contains("independent finding"))
+                            assertEquals(listOf("tool", "assistant", "tool"), wire.takeLast(3).map { it.role })
+                            AssistantTurn("", listOf(ToolCallRequest("more-work", "echo", "{}")), "tool_calls")
+                        }
+                        else -> {
+                            val wire = secondArg<List<ChatMessage>>()
+                            assertEquals(1, wire.count { it.role == "tool" && it.text.contains("independent finding") })
+                            AssistantTurn("integrated after more work", emptyList(), "stop")
+                        }
+                    }
+                } else {
+                    childStarted.complete(Unit)
+                    release.await()
+                    AssistantTurn("independent finding", emptyList(), "stop")
+                }
+            }
+        }
+        engine = AgentEngine(llm = client)
+        try {
+            val result = withTimeout(10_000) {
+                run(engine, registry(), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true))
+            }
+            assertEquals("integrated after more work", result.last().text)
+            assertEquals(4, parentRounds.get())
+        } finally { release.complete(Unit) }
+    }
+
+    @Test fun `failed child is returned to the parent before its final summary`() = runBlocking {
+        val parentRounds = AtomicInteger()
+        val release = CompletableDeferred<Unit>()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (firstArg<AppSettings>().subagentsEnabled) {
+                    when (parentRounds.incrementAndGet()) {
+                        1 -> AssistantTurn("", listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"unavailable resource"}""")), "tool_calls")
+                        2 -> {
+                            release.complete(Unit)
+                            AssistantTurn("premature answer", emptyList(), "stop")
+                        }
+                        else -> {
+                            val feedback = secondArg<List<ChatMessage>>().last { it.role == "tool" }.text
+                            assertTrue(feedback.contains("failed"))
+                            assertTrue(feedback.contains("child resource unavailable"))
+                            AssistantTurn("parent reports the child failure", emptyList(), "stop")
+                        }
+                    }
+                } else {
+                    release.await()
+                    error("child resource unavailable")
+                }
+            }
+        }
+        try {
+            val result = withTimeout(10_000) {
+                run(AgentEngine(llm = client), registry(), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true))
+            }
+            assertEquals("parent reports the child failure", result.last().text)
+            assertEquals(3, parentRounds.get())
+        } finally { release.complete(Unit) }
+    }
+
+    @Test fun `a cancelled child is reported to the parent without cancelling its own run`() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val parentRounds = AtomicInteger()
+        lateinit var engine: AgentEngine
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (firstArg<AppSettings>().subagentsEnabled) {
+                    when (parentRounds.incrementAndGet()) {
+                        1 -> AssistantTurn("", listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"cancel this child"}""")), "tool_calls")
+                        2 -> {
+                            started.await()
+                            val child = engine.subagentsFlow.value.getValue("verification").single()
+                            assertTrue(engine.cancelSubagent("verification", child.id))
+                            AssistantTurn("premature answer", emptyList(), "stop")
+                        }
+                        else -> {
+                            val feedback = secondArg<List<ChatMessage>>().last { it.role == "tool" }.text
+                            assertTrue(feedback.contains("cancelled"))
+                            AssistantTurn("parent explains the child cancellation", emptyList(), "stop")
+                        }
+                    }
+                } else {
+                    started.complete(Unit)
+                    awaitCancellation()
+                }
+            }
+        }
+        engine = AgentEngine(llm = client)
+        val result = withTimeout(10_000) {
+            run(engine, registry(), AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true))
+        }
+        assertEquals("parent explains the child cancellation", result.last().text)
+        assertEquals(3, parentRounds.get())
+    }
+
+    @Test fun `spawning on the last tool round still collects the child for a tool-free final summary`() = runBlocking {
+        val parentRounds = AtomicInteger()
+        val events = CopyOnWriteArrayList<AgentEvent>()
+        val client = mockk<LlmClient> {
+            coEvery { complete(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (firstArg<AppSettings>().subagentsEnabled) {
+                    if (parentRounds.incrementAndGet() == 1) AssistantTurn("",
+                        listOf(ToolCallRequest("spawn", "spawn_agent", """{"task":"last round child"}""")), "tool_calls")
+                    else {
+                        assertTrue(thirdArg<List<ToolSpec>>().isEmpty())
+                        assertTrue(secondArg<List<ChatMessage>>().last { it.role == "tool" }.text.contains("last round finding"))
+                        AssistantTurn("final summary with child evidence", emptyList(), "stop")
+                    }
+                } else AssistantTurn("last round finding", emptyList(), "stop")
+            }
+        }
+        val result = withTimeout(10_000) {
+            run(AgentEngine(llm = client), registry(),
+                AppSettings(approvalMode = ApprovalMode.AUTO, subagentsEnabled = true, maxToolRounds = 1), events::add)
+        }
+        assertEquals(2, parentRounds.get())
+        assertEquals("final summary with child evidence", result.last().text)
+        assertEquals(1, events.filterIsInstance<AgentEvent.Finished>().size)
+        assertTrue(events.none { it is AgentEvent.Failed })
     }
 }

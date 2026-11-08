@@ -34,8 +34,8 @@ class ToolBatchingTest {
 
     @Test
     fun `shell 与特权写操作串行`() {
-        val groups = batchGroups(listOf("run_shell", "app_action", "read_file"), parallel = 4)
-        assertEquals(listOf(listOf(0), listOf(1), listOf(2)), groups)
+        val groups = batchGroups(listOf("run_shell", "bash", "app_action", "read_file"), parallel = 4)
+        assertEquals(listOf(listOf(0), listOf(1), listOf(2), listOf(3)), groups)
     }
 
     @Test
@@ -46,6 +46,7 @@ class ToolBatchingTest {
         assertFalse(isParallelizable("ui_tap"))
         assertFalse(isParallelizable("ui_long_press"))
         assertFalse(isParallelizable("run_shell"))
+        assertFalse(isParallelizable("bash"))
         assertFalse(isParallelizable("app_action"))
     }
 

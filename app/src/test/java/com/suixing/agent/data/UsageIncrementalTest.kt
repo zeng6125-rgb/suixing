@@ -69,7 +69,7 @@ class UsageIncrementalTest {
     }
 
     @Test
-    fun `the byte watermark stops after the last priced message`() {
+    fun `the watermark observes unreported responses once without inventing tokens`() {
         // 最后一条没计价（token 全 0 ⇒ usageKnown 为假）⇒ 它的字节水位不能推进，
         // 否则它永远不会被计入。
         val endOffsets = listOf(100L, 200L, 300L)
@@ -82,8 +82,9 @@ class UsageIncrementalTest {
         )
         val after = accumulateSlices(UsageSnapshot(), listOf(slice), utc)
         val usage = after.chats.getValue("c1")
-        assertEquals("两条已计价的消息都算进去", 2, usage.scanned)
-        assertEquals("水位停在最后一条已计价消息之后", 200L, usage.scannedBytes)
+        assertEquals("三条响应均已观察", 3, usage.scanned)
+        assertEquals("迟到用量通过日志换代重算", 300L, usage.scannedBytes)
+        assertEquals(1L, after.coverage.unreported)
         assertEquals("代数要记下来", 3, usage.scannedGen)
         assertEquals("只有已计价的计入总额", 5 + 7, usage.days.getValue("2026-03-01").total)
     }
@@ -168,13 +169,13 @@ class UsageIncrementalTest {
         val afterSecond = usage.refresh()
         val usage2 = afterSecond.chats.getValue("c1")
         assertEquals("代数要更新", genAfter, usage2.scannedGen)
-        assertEquals("旧世代的字节水位必须丢掉", 0L, usage2.scannedBytes)
+        assertTrue("水位来自完整重扫的新世代", usage2.scannedBytes > 0L)
         assertTrue("丢掉水位是为了下次从头读", bytesBefore > 0L)
         // 总额不能翻倍。改写后 count 水位**不回退**（既有语义：水位只前进），
         // 所以这份会话的合计保持改写前那个 —— 但绝不能是两份。
         assertEquals(
             "总额不能因为读了两次而翻倍",
-            12,
+            18,
             usage2.days.getValue("2026-03-01").total,
         )
     }

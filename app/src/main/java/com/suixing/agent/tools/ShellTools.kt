@@ -9,6 +9,7 @@ import com.suixing.agent.service.TouchFx
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * `input tap X Y` and friends, when the agent drives another app through the shell
@@ -157,16 +158,22 @@ class ShellTools(
         else -> ToolResult.failure("未知工具：$name")
     }
 
-    private suspend fun runShell(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+    /** Pin both selectors so the native entry cannot inherit auto privileges or silently choose sh. */
+    internal suspend fun runBash(args: JsonObject): ToolResult = runShell(
+        JsonObject(args + mapOf("mode" to JsonPrimitive("local"), "shell" to JsonPrimitive("bash"))),
+        toolName = "bash",
+    )
+
+    private suspend fun runShell(args: JsonObject, toolName: String = "run_shell"): ToolResult = withContext(Dispatchers.IO) {
         val command = args.str("command")?.trim().orEmpty()
         if (command.isEmpty()) return@withContext ToolResult.failure("缺少参数 command")
         val mode = args.str("mode")?.trim()?.lowercase() ?: "auto"
         val shell = args.str("shell")?.trim()?.lowercase() ?: "auto"
-        drawInputFx(command, tool = "run_shell")
+        drawInputFx(command, tool = toolName)
         if (mode == "root") capabilities.ensureRootProbed()
         val chosen = shellChannel(mode, capabilities.shellTier())
-        // shell 只在 local 档有意义：root/shizuku 用的是系统里的 sh（那两个身份本来就能跑任何
-        // 系统命令）；local 档默认优先用随包分发的静态 bash（见 Shell.local）。
+        // The local selector is strict for the native Bash entry. Root has its own bundled-Bash
+        // route; Shizuku remains a system shell, and neither is selected by runBash.
         val result: ShellResult = when (chosen) {
             "root" -> Shell.root(command)
             "shizuku" -> Shell.shizuku(command)
@@ -190,7 +197,7 @@ class ShellTools(
             // **写系统状态要读回核验**（issue #44 第一项）：`exit=0` 不等于生效 ——
             // SELinux 拒绝、namespace 写错（system/secure/global）、wrong user 都可能静默失败。
             // 模型看到 success 就继续下一步，要等几轮后才暴露。
-            val verify = verifySettingWrite(command, chosen)
+            val verify = verifySettingWrite(command, chosen, localShell = shell)
             ToolResult.success(prefix + result.render() + (verify ?: ""))
         } else {
             ToolResult.failure(prefix + result.render())
@@ -203,14 +210,14 @@ class ShellTools(
      * 读回走**同一档位**（root 写就 root 读）：换身份读会读不到或读到别人的值，误报成"未生效"。
      * 不匹配写命令时返回 null（读命令、普通命令不加任何东西，避免噪音）。
      */
-    private suspend fun verifySettingWrite(command: String, chosen: String): String? {
+    private suspend fun verifySettingWrite(command: String, chosen: String, localShell: String): String? {
         val write = parseSettingWrite(command) ?: return null
         val getCmd = "settings get ${write.ns} ${write.key}"
         val actual = runCatching {
             val r = when (chosen) {
                 "root" -> Shell.root(getCmd)
                 "shizuku" -> Shell.shizuku(getCmd)
-                else -> Shell.local(getCmd)
+                else -> Shell.local(getCmd, shell = localShell)
             }
             r.takeIf { it.ok }?.stdout?.trim()?.trim('"')
         }.getOrElse { error ->

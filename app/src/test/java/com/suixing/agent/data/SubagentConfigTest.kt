@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SubagentConfigTest {
-    private val catalogue = setOf("read_file", "write_file", "run_shell", "ui_virtual_screen")
+    private val catalogue = setOf("read_file", "write_file", "run_shell", "bash", "ui_virtual_screen")
     private val parentProvider = ProviderConfig(id = "parent", baseUrl = "https://parent.example/v1",
         apiKey = "parent-secret", enabled = listOf("parent-model", "assistant-model"))
     private val childProvider = ProviderConfig(id = "child", baseUrl = "https://child.example/v1",
@@ -25,6 +25,16 @@ class SubagentConfigTest {
         activeAssistantId = "parent-assistant", requestHeaders = mapOf("X-Parent" to "parent-header-secret"))
 
     private fun args(raw: String) = Json.parseToJsonElement(raw) as JsonObject
+
+    @Test fun `native bash is subject to the effective child tool whitelist`() {
+        val parent = parentSettings()
+        val allowed = parent.resolveSubagentConfig(SubagentLaunchOptions(allowedTools = listOf("bash")), catalogue).config
+        assertEquals(listOf("bash"), allowed.allowedTools)
+        assertNull(allowed.denialReason("bash", args("""{"command":"printf native"}""")))
+        assertNotNull(allowed.denialReason("run_shell", JsonObject(emptyMap())))
+        val denied = parent.resolveSubagentConfig(SubagentLaunchOptions(allowedTools = listOf("read_file")), catalogue).config
+        assertNotNull(denied.denialReason("bash", args("""{"command":"printf native"}""")))
+    }
 
     @Test
     fun `parent catalogue template launch and assistant restrictions all constrain execution`() {

@@ -1,245 +1,192 @@
 package com.suixing.agent.ui.settings
 
-import com.suixing.agent.ui.components.SettingsStyle
-import com.suixing.agent.ui.components.SettingSectionTitle
-import com.suixing.agent.ui.components.settingsPagePadding
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.BorderStroke
+import com.suixing.agent.R
 import com.suixing.agent.core.Core
-import com.suixing.agent.data.DayUsage
-import com.suixing.agent.data.ModelUsage
-import com.suixing.agent.data.TokenTally
-import com.suixing.agent.data.byDayOf
-import com.suixing.agent.data.byModelOf
+import com.suixing.agent.data.*
 import com.suixing.agent.ui.components.PageTopBar
+import com.suixing.agent.ui.components.SegmentedPill
+import com.suixing.agent.ui.components.SettingsStyle
+import com.suixing.agent.ui.components.SuixingCard
+import com.suixing.agent.ui.components.SuixingDialog
+import com.suixing.agent.ui.components.settingsPagePadding
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.text.NumberFormat
+import java.time.LocalDate
 
-/**
- * Where the tokens went: three headline cards, a 30-day bar chart, per-model subtotals.
- *
- * [Core.usage] is the process-wide store; [com.suixing.agent.data.UsageStore.refresh] is
- * watermark-incremental, so opening the page is a safe place to fold in whatever the
- * chats have grown since the last look.
- */
+private data class UsageViewData(
+    val snapshot: UsageSnapshot, val windows: Map<Int, UsageWindow>,
+    val heatmap: UsageWindow, val all: UsageBucket,
+)
+
 @Composable
 fun UsageScreen(onBack: () -> Unit) {
-    val store = Core.usage
-    var days by remember { mutableStateOf<List<DayUsage>>(emptyList()) }
-    var models by remember { mutableStateOf<List<ModelUsage>>(emptyList()) }
-    var totals by remember { mutableStateOf(TokenTally()) }
-    var longestTurn by remember { mutableStateOf(0L) }
-    var conversations by remember { mutableStateOf(0) }
-    // 首帧 days/models 还是空表：没有这一位就会先说「还没有用量记录」再冒数据。
-    var loaded by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        // **失败不能静默**（issue #41）：原来没有 catch，refresh() 一抛异常就永远
-        // `loaded = false`，页面停在"还没有用量记录"且没有任何线索。
-        val (snapshot, byDay, byModel) = withContext(Dispatchers.IO) {
-            val refreshed = runCatching { store.refresh() }
-                .onFailure {
-                    if (it is CancellationException) throw it
-                    android.util.Log.w("suixing-usage", "refresh failed", it)
-                }
-                .getOrDefault(com.suixing.agent.data.UsageSnapshot())
-            // 日期/模型投影都要排序完整累计表，随后才截取最近30天。与刷新一起在后台
-            // 计算，并固定到同一份返回快照，避免转场中主线程排序和跨快照读数混用。
-            Triple(refreshed, byDayOf(refreshed, 30), byModelOf(refreshed))
-        }
-        days = byDay
-        models = byModel
-        totals = snapshot.totals
-        val chats = Core.chats.conversations.value
-        conversations = chats.size
-        // One run — one engine pass — is what one bubble on the chat screen reports, and it
-        // is the unit this card is named after. Context is cumulative, so only the run's
-        // newest round knows the real prompt size: the prompt is not summed, the output is
-        // (the same reading as ChatScreen's Usage.of). Rounds written before branching carry
-        // no run id, and each of those is its own group — matching the chat bubble's merge
-        // guard (ChatScreen.kt:1148, `run.isNotEmpty()`). Folding them into one BASE_RUN
-        // group instead would add every old reply in a chat up as though it were one run.
-        // Every chat's every message is walked here — the heaviest step on this page, so it
-        // stays off the main thread like the store refresh above.
-        longestTurn = withContext(Dispatchers.IO) {
-            // 列表只带 meta（#30），单轮数据从 sessionTotals 拿（meta 里缓存，backfill 才读盘）。
-            chats.maxOfOrNull { chat ->
-                Core.chats.sessionTotals(chat.id)?.longestTurnTokens ?: 0L
-            } ?: 0L
-        }
-        loaded = true
+    var data by remember { mutableStateOf<UsageViewData?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var reload by remember { mutableIntStateOf(0) }
+    var range by rememberSaveable { mutableIntStateOf(30) }
+    var inspectedModel by remember { mutableStateOf<ModelUsage?>(null) }
+    LaunchedEffect(reload) {
+        loading = true
+        error = null
+        try {
+            val fresh = Core.usage.refresh()
+            data = withContext(Dispatchers.Default) {
+                val today = LocalDate.now()
+                UsageViewData(fresh, listOf(7, 30, 90).associateWith { usageWindow(fresh, it, today) },
+                    usageWindow(fresh, 90, today), fresh.coverage)
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { error = failure.message ?: "用量读取失败，请重试。" }
+        finally { loading = false }
     }
     val scheme = MaterialTheme.colorScheme
     Scaffold(
-        containerColor = scheme.background,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { PageTopBar(title = "用量", onBack = onBack) },
+        containerColor = scheme.background, contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = { PageTopBar(title = "用量", onBack = onBack, actions = {
+            IconButton(onClick = { reload++ }, enabled = !loading) {
+                Icon(ImageVector.vectorResource(R.drawable.ic_rotate_cw), "刷新用量")
+            }
+        }) },
     ) { padding ->
+        val current = data
         LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-            contentPadding = settingsPagePadding(),
+            modifier = Modifier.fillMaxSize().padding(padding), contentPadding = settingsPagePadding(),
             verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
         ) {
-            item {
-                // 三个标题是常量；三个数值各要一次 String.format（`compact`）。都记在 item 的
-                // remember 里，滚动/重组不再逐次重排格式化 —— 输出的字符串一个字节都没变。
-                val statTitles = remember { listOf("累计 tokens", "会话数", "最长单轮") }
-                val statValues = remember(totals.total, conversations, longestTurn) {
-                    listOf(compact(totals.total), "$conversations", compact(longestTurn))
+            if (error != null) item(key = "error") {
+                SuixingCard {
+                    Text(if (current == null) "无法读取用量" else "刷新失败，当前显示上次结果",
+                        style = SettingsStyle.cardTitle, color = scheme.error)
+                    Text(error.orEmpty(), style = SettingsStyle.description)
+                    TextButton(onClick = { reload++ }, enabled = !loading) { Text("重试") }
                 }
-                StatCards(titles = statTitles, values = statValues)
             }
-            // #41 真问题 5：三个地方各显示一个数，用户没法知道口径差在哪 —— 这里一行说明
-            // 「为什么用量页的数字看起来比网关后台大」：prompt 是按**每次请求**全量累加的，
-            // 一轮工具循环 = 十几次请求，而缓存命中的部分网关按约 1/10 计费。
-            item {
-                Text(
-                    text = "tokens 按每次请求全量累加（一轮工具循环 ≈ 十几次请求）；" +
-                        "缓存命中的部分网关按约 1/10 计费 —— 这里的数字和账单金额不是一回事。",
-                    style = SettingsStyle.badge,
-                    color = scheme.onSurfaceVariant,
-                )
-            }
-            item {
-                SectionTitle("近 30 天")
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.large,
-                    color = scheme.surfaceContainer,
-                    // 与 SuixingCard / 任务行 / 定时页同一张卡：shapes.large + 1dp outlineVariant。
-                    border = BorderStroke(1.dp, scheme.outlineVariant),
-                ) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (loaded && days.isEmpty()) {
-                            Text(
-                                text = "还没有用量记录",
-                                style = SettingsStyle.description,
-                                color = scheme.onSurfaceVariant,
-                            )
-                        }
-                        // 峰值与每一行的数值字符串只跟 days 走：remember 一次，别跟着重组重算
-                        // （compact 里是一次 String.format）。
-                        val peak = remember(days) { days.maxOfOrNull { it.tokens.total } ?: 0L }
-                        val dayLabels = remember(days) { days.map { compact(it.tokens.total) } }
-                        days.forEachIndexed { index, day ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    // drop 而不是 substring(5)：date 是磁盘缓存 usage.json 的 map key，
-                                    // 解码时不校验格式，短于 6 字符的 key 会让 substring 在组合期抛。
-                                    text = day.date.drop(5),
-                                    style = SettingsStyle.badge,
-                                    color = scheme.onSurfaceVariant,
-                                    modifier = Modifier.width(44.dp),
-                                )
-                                Box(
-                                    Modifier
-                                        .weight(1f)
-                                        .heightIn(min = 10.dp),
-                                    contentAlignment = Alignment.CenterStart,
-                                ) {
-                                    Box(
-                                        Modifier
-                                            .fillMaxWidth(fraction = if (peak > 0) (day.tokens.total.toFloat() / peak).coerceIn(0.02f, 1f) else 0.02f)
-                                            .height(10.dp)
-                                            .background(scheme.primary, RoundedCornerShape(5.dp)),
-                                    )
-                                }
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = dayLabels[index],
-                                    style = SettingsStyle.badge,
-                                    color = scheme.onSurfaceVariant,
-                                    modifier = Modifier.width(52.dp),
-                                )
-                            }
-                        }
+            if (current == null) {
+                if (loading) item(key = "loading") {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Text("正在汇总用量…", style = SettingsStyle.body)
                     }
                 }
-            }
-            item {
-                SectionTitle("按模型")
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.large,
-                    color = scheme.surfaceContainer,
-                    border = BorderStroke(1.dp, scheme.outlineVariant),
-                ) {
-                    val modelTotals = remember(models) { models.map { compact(it.tokens.total) } }
-                    if (models.size > 12) {
-                        LazyColumn(
-                            modifier = Modifier.heightIn(max = 480.dp),
-                            contentPadding = PaddingValues(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            itemsIndexed(models, key = { _, model -> model.model }, contentType = { _, _ -> "model-usage" }) { index, model ->
-                                ModelUsageRow(model, modelTotals[index])
-                            }
-                        }
-                    } else {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (loaded && models.isEmpty()) {
-                                Text("还没有用量记录", style = SettingsStyle.description, color = scheme.onSurfaceVariant)
-                            }
-                            models.forEachIndexed { index, model -> ModelUsageRow(model, modelTotals[index]) }
-                        }
+            } else {
+                val window = current.windows.getValue(range)
+                if (current.snapshot.issues.isNotEmpty()) item(key = "partial") {
+                    Text("部分记录未能刷新，统计可能不完整。可点右上角刷新重试。",
+                        color = scheme.error, style = SettingsStyle.description)
+                }
+                item(key = "range") {
+                    SegmentedPill(listOf("近 7 天", "近 30 天", "近 90 天"),
+                        listOf(7, 30, 90).indexOf(range), { range = listOf(7, 30, 90)[it] })
+                }
+                item(key = "summary") {
+                    UsageSummary(window, range)
+                }
+                item(key = "heatmap") {
+                    UsageHeatmap(current.heatmap.days)
+                }
+                item(key = "daily-chart") {
+                    UsageDailyChart(window.days, range)
+                }
+                item(key = "models-title") {
+                    Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("模型用量", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        Text("近 ${range} 天", style = SettingsStyle.metadata, color = scheme.onSurfaceVariant)
+                    }
+                }
+                if (window.models.isEmpty()) item(key = "empty-models") {
+                    Text("这段时间没有已记录的模型响应。", style = SettingsStyle.description,
+                        color = scheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                }
+                items(window.models, key = { "model:${it.model}" }, contentType = { "model-usage" }) { model ->
+                    UsageModelBar(model, window.usage.tokens.total, onClick = { inspectedModel = model })
+                }
+                item(key = "all-time") {
+                    SuixingCard {
+                        Text("全部保留记录", style = SettingsStyle.cardTitle)
+                        Text("${usageExact(current.all.tokens.total)} tokens · ${usageExact(current.all.requests)} 次已记录响应",
+                            style = SettingsStyle.body)
+                        val children = current.snapshot.chats.keys.count { it.startsWith("child/") }
+                        Text("包含 ${current.snapshot.chats.size - children} 个主会话、${children} 个子对话。删除对话后相应统计会移除。",
+                            style = SettingsStyle.description, color = scheme.onSurfaceVariant)
+                        Text("按已保存的模型响应累计输入与输出；缓存、推理单独展示，不重复加进总量。未保存或未上报的用量无法还原，计费以服务商账单为准。",
+                            style = SettingsStyle.description, color = scheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp))
                     }
                 }
             }
         }
     }
-}
-
-@Composable
-private fun ModelUsageRow(model: ModelUsage, total: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(model.model, style = SettingsStyle.body, modifier = Modifier.weight(1f))
-        Text(total, style = SettingsStyle.metadata, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    inspectedModel?.let { model ->
+        SuixingDialog(onDismissRequest = { inspectedModel = null }, title = { Text(model.model) },
+            text = { UsageBreakdown(model.tokens, model.reported, model.unreported) },
+            confirmButton = { dialog -> TextButton(onClick = { dialog.closeThen { inspectedModel = null } }) { Text("关闭") } })
     }
 }
 
 @Composable
-private fun SectionTitle(text: String) {
-    SettingSectionTitle(text)
+private fun UsageSummary(window: UsageWindow, range: Int) {
+    val usage = window.usage
+    SuixingCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("近 ${range} 天已报告用量", style = SettingsStyle.metadata, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.weight(1f))
+            Text("${window.days.count { it.reported + it.unreported > 0 }} 天有活动", style = SettingsStyle.metadata)
+        }
+        Text(compact(usage.tokens.total), style = MaterialTheme.typography.headlineLarge)
+        Text("${usageExact(usage.tokens.total)} tokens", style = SettingsStyle.description,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(12.dp))
+        val titles = remember { listOf("输入", "输出", "已记录响应") }
+        val values = remember(usage) { listOf(compact(usage.tokens.prompt), compact(usage.tokens.completion), compact(usage.requests)) }
+        StatCards(titles, values)
+        if (usage.unreported > 0) Text("其中 ${usageExact(usage.unreported)} 次响应未报告用量，以上 tokens 仅为已报告部分。",
+            style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 10.dp))
+        UsageBreakdown(usage.tokens, usage.reported, usage.unreported, compact = true)
+    }
 }
 
+@Composable
+internal fun UsageBreakdown(tokens: TokenTally, reported: Long, unreported: Long, compact: Boolean = false) {
+    val labels = listOf("输入", "输出", "缓存输入（单列）", "推理（单列）", "已报告用量", "未报告用量")
+    val values = remember(tokens, reported, unreported) {
+        listOf(tokens.prompt, tokens.completion, tokens.cached, tokens.reasoning, reported, unreported).map { usageExact(it) }
+    }
+    Column(Modifier.fillMaxWidth().padding(top = if (compact) 10.dp else 0.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        labels.forEachIndexed { index, label ->
+            Row(Modifier.fillMaxWidth()) {
+                Text(label, modifier = Modifier.weight(1f), style = SettingsStyle.description,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(values[index], style = SettingsStyle.description)
+            }
+        }
+    }
+}
+
+internal fun usageExact(value: Long): String = NumberFormat.getIntegerInstance().format(value)
 /** 数值字号的下限：再小就不如让用户去别处看完整数字，但三张卡的数值都必须单行放下。 */
 private const val MIN_STAT_VALUE_SP = 13f
 
@@ -357,7 +304,7 @@ private fun StatCard(
 }
 
 /** `1234567` → `1.2M`; `12345` → `12.3k`; small numbers stay as they are. */
-private fun compact(value: Long): String = when {
+internal fun compact(value: Long): String = when {
     value >= 1_000_000 -> String.format(java.util.Locale.US, "%.1fM", value / 1_000_000.0)
     value >= 1_000 -> String.format(java.util.Locale.US, "%.1fk", value / 1_000.0)
     else -> "$value"

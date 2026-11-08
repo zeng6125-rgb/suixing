@@ -1,29 +1,27 @@
 package com.suixing.agent.ui.chat
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.SaveableStateHolder
+import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -32,188 +30,216 @@ import com.suixing.agent.agent.ChildRunSummary
 import com.suixing.agent.agent.SubagentRecords
 import com.suixing.agent.agent.SubagentStatus
 import com.suixing.agent.core.Core
+import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ChildRunConfig
 import com.suixing.agent.data.Roles
-import com.suixing.agent.data.StoredMessage
 import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SettingsStyle
-import com.suixing.agent.ui.components.SuixingCard
-import com.suixing.agent.ui.chat.markdown.MarkdownText
+import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
-private data class SubagentUsage(val input: Long, val output: Long, val reasoning: Long, val cached: Long)
-
-/** Viewing a child is independent from the parent chat and never changes its assistant or run. */
+/** Viewing a child opens its ordinary transcript directly; switching stays in the header menu. */
 @Composable
 internal fun SubagentRunViewer(
-    chatId: String,
-    summaries: List<ChildRunSummary>,
-    selectedId: String?,
-    onSelect: (String?) -> Unit,
-    canCreate: Boolean,
-    readingState: SaveableStateHolder,
-    onCreate: () -> Unit,
-    onClose: () -> Unit,
+    chatId: String, summaries: List<ChildRunSummary>, selectedId: String?,
+    onSelect: (String?) -> Unit, readingState: SaveableStateHolder, onClose: () -> Unit,
 ) {
-    val selected = summaries.firstOrNull { it.id == selectedId }
+    val selected = summaries.firstOrNull { it.id == selectedId } ?: summaries.lastOrNull()
+    var switching by remember { mutableStateOf(false) }
+    var details by remember(selected?.id) { mutableStateOf(false) }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        BackHandler(onBack = onClose)
         Scaffold(
-            modifier = Modifier.fillMaxSize(),
-            containerColor = MaterialTheme.colorScheme.background,
-            topBar = { PageTopBar(title = selected?.name ?: "子任务", onBack = onClose) },
+            modifier = Modifier.fillMaxSize(), containerColor = MaterialTheme.colorScheme.background,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            topBar = {
+                PageTopBar(title = selected?.name ?: "子智能体", onBack = onClose, actions = {
+                    if (summaries.size > 1) Box {
+                        TextButton(onClick = { switching = true }) { Text("切换") }
+                        DropdownMenu(expanded = switching, onDismissRequest = { switching = false }) {
+                            summaries.forEach { child ->
+                                DropdownMenuItem(text = { Text("${child.name} · ${subagentStatusLabel(child.status)}") },
+                                    onClick = { switching = false; onSelect(child.id) })
+                            }
+                        }
+                    }
+                    if (selected != null) TextButton(onClick = { details = true }) { Text("详情") }
+                })
+            },
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = SettingsStyle.PageMargin),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    item(key = "overview") {
-                        FilterChip(selected = selectedId == null, onClick = { onSelect(null) }, label = { Text("总览") })
-                    }
-                    items(summaries, key = { it.id }) { task ->
-                        FilterChip(selected = selectedId == task.id, onClick = { onSelect(task.id) }, label = { Text(task.name) })
-                    }
-                }
-                if (selectedId == null) {
-                    readingState.SaveableStateProvider("overview") {
-                        SubagentOverview(chatId, summaries, canCreate, onCreate, onSelect)
-                    }
-                } else {
-                    readingState.SaveableStateProvider("child:$selectedId") {
-                        SubagentRecordPage(chatId, selectedId)
-                    }
+                if (selected == null) Text("当前会话还没有子智能体记录。",
+                    modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else readingState.SaveableStateProvider("child:${selected.id}") {
+                    SubagentConversation(chatId, selected.id, details, onDismissDetails = { details = false })
                 }
             }
         }
     }
 }
 
-@Composable
-private fun SubagentOverview(
-    chatId: String,
-    summaries: List<ChildRunSummary>,
-    canCreate: Boolean,
-    onCreate: () -> Unit,
-    onSelect: (String?) -> Unit,
-) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        state = rememberLazyListState(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(SettingsStyle.PageMargin),
-        verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
-    ) {
-        item(key = "controls") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onCreate, enabled = canCreate) { Text("创建子任务") }
-            }
-            if (!canCreate) Text("父任务未运行时，可查看已保留的子任务记录。", style = SettingsStyle.description,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (summaries.isEmpty()) item(key = "empty") {
-            Text("还没有子任务。创建时可指定助手、模型、权限与工具。", style = SettingsStyle.body)
-        }
-        items(summaries, key = { it.id }, contentType = { "child-summary" }) { task ->
-            SuixingCard(onClick = { onSelect(task.id) }) {
-                Text(task.name, style = SettingsStyle.cardTitle)
-                Text(subagentStatusLabel(task.status), style = SettingsStyle.description,
-                    color = if (task.status == SubagentStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("${task.config.assistantName} · ${task.config.model}", style = SettingsStyle.description,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { onSelect(task.id) }) { Text("查看完整过程") }
-                    if (task.status.isActive()) TextButton(onClick = { Core.engine.cancelSubagent(chatId, task.id) }) { Text("取消") }
-                }
-            }
-        }
-    }
-}
+private val ExpansionSaver = mapSaver<androidx.compose.runtime.snapshots.SnapshotStateMap<String, Boolean>>(
+    save = { it.toMap() },
+    restore = { values -> mutableStateMapOf<String, Boolean>().apply {
+        values.forEach { (key, value) -> put(key, value as Boolean) }
+    } },
+)
 
-/** This is the only per-token record subscription; hidden children update no Compose tree. */
+/** Only the selected child subscribes to token updates; reading state belongs to that child. */
 @Composable
-private fun SubagentRecordPage(chatId: String, id: String) {
+private fun SubagentConversation(chatId: String, id: String, details: Boolean, onDismissDetails: () -> Unit) {
     val record by remember(id) { SubagentRecords.record(id) }.collectAsStateWithLifecycle()
     val approval by remember(id) { Core.gate.pending.map { it[id] }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = Core.gate.pending.value[id])
+    val settings by remember { Core.settings.flow.distinctUntilChanged { a, b -> a.sameForChat(b) } }
+        .collectAsStateWithLifecycle(initialValue = AppSettings())
     val value = record
     if (value == null) {
-        Text("正在读取子任务记录…", modifier = Modifier.padding(SettingsStyle.PageMargin), style = SettingsStyle.body)
+        Text("正在读取对话…", Modifier.padding(SettingsStyle.PageMargin))
         return
     }
-    val usage = remember(value.messages) {
-        if (value.messages.none { it.usageKnown }) null else SubagentUsage(
-            value.messages.sumOf { it.promptTokens.toLong() },
-            value.messages.sumOf { it.completionTokens.toLong() },
-            value.messages.sumOf { it.reasoningTokens.toLong() },
-            value.messages.sumOf { it.cachedTokens.toLong() },
-        )
+    val history = remember(IdentityKey(value.messages)) { subagentHistory(value.messages) }
+    val rows = remember(value, IdentityKey(history)) { subagentTranscript(value, history) }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val atBottom by remember(listState) { derivedStateOf { !listState.canScrollForward } }
+    var followLatest by rememberSaveable { mutableStateOf(true) }
+    val expanded = rememberSaveable(saver = ExpansionSaver) { mutableStateMapOf<String, Boolean>() }
+    val expansion = remember(id) { ReasoningExpansion(id, expanded) }
+    val position = remember(listState) { TranscriptPosition(listState) }
+    var pressed by remember { mutableStateOf(false) }
+    val followNow = rememberUpdatedState {
+        followLatest && settings.autoFollow && !pressed && !listState.isScrollInProgress
     }
-    // Live text/reasoning publishes arrive on a throttled cadence while the message list usually
-    // stays unchanged. Cache this transcript-wide predicate with the same list identity so a long
-    // child history is not scanned on every live update.
-    val hasAssistantText = remember(value.messages) {
-        value.messages.any { it.role == Roles.ASSISTANT && it.text.isNotBlank() }
+    SideEffect {
+        position.following = { followNow.value() }
+        position.reading = { !followLatest && !pressed && !listState.isScrollInProgress }
     }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        state = rememberLazyListState(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(SettingsStyle.PageMargin),
-        verticalArrangement = Arrangement.spacedBy(SettingsStyle.SectionGap),
-    ) {
-        item(key = "config") {
-            SuixingCard {
-                Text(subagentStatusLabel(value.status), style = SettingsStyle.cardTitle)
-                SubagentEffectiveConfig(value.config)
-                Text(usage?.let { "已报告用量：输入 ${it.input} · 输出 ${it.output} · 推理 ${it.reasoning} · 缓存 ${it.cached}" } ?: "用量：—",
-                    style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (value.saveError.isNotBlank()) Text(value.saveError, style = SettingsStyle.description,
-                    color = MaterialTheme.colorScheme.error)
-                if (value.statusLine.isNotBlank()) Text(value.statusLine, style = SettingsStyle.description,
+    val assistant = settings.assistant(value.config.assistantId)
+    val bubbleWidth = LocalConfiguration.current.screenWidthDp.dp * settings.bubbleWidthFraction
+    LaunchedEffect(listState) {
+        // The initial unmeasured list reports canScrollForward=false. It must not overwrite
+        // a restored child's saved reading mode before the first layout.
+        var scrolled = false
+        snapshotFlow { listState.isScrollInProgress }.distinctUntilChanged().collect { scrolling ->
+            if (scrolling) {
+                scrolled = true
+                followLatest = false
+            } else if (scrolled) {
+                followLatest = !listState.canScrollForward
+                scrolled = false
+            }
+        }
+    }
+    LaunchedEffect(position) {
+        snapshotFlow { Triple(followLatest, pressed, listState.isScrollInProgress) }
+            .collect { position.interactionChanged() }
+    }
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        CompositionLocalProvider(LocalChatReadOnly provides true, LocalTranscriptPosition provides position) {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth().transcriptPosition(position)
+                    .pointerInput(id) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            pressed = true
+                            try {
+                                do {
+                                    val event = awaitPointerEvent(PointerEventPass.Final)
+                                } while (event.changes.any { it.pressed })
+                            } finally { pressed = false }
+                        }
+                    }, state = listState,
+                contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                itemsIndexed(rows, key = { index, row ->
+                    if (row.message.role == Roles.USER || row.message.role == Roles.SYSTEM) row.message.id else "$id:reply:$index"
+                }, contentType = { _, row -> if (row.message.role == Roles.USER) "user" else "reply" }) { index, row ->
+                    val reply = row.message.role == Roles.ASSISTANT || row.message.role == Roles.TOOL
+                    val streaming = reply && index == rows.lastIndex && value.status.isActive()
+                    CompositionLocalProvider(LocalReadingRowKey provides "$id:$index") {
+                        Column {
+                            if (settings.showTimestamps && row.showTimeLabel) {
+                                TimeLabel(row.message.timestamp)
+                                Spacer(Modifier.height(12.dp))
+                            }
+                            if (reply) {
+                                val parts = remember(IdentityKey(row.parts), settings.showReasoning) {
+                                    if (settings.showReasoning) row.parts else row.parts.filterNot { it is Part.Thinking }
+                                }
+                                SelectableWhenArmed(enabled = !streaming && !expansion.completionDeferred(id)) {
+                                AssistantRow(
+                                    parts = parts, streaming = streaming, name = value.config.assistantName,
+                                    face = assistant?.face.orEmpty(), avatarPath = assistant?.avatarPath.orEmpty(),
+                                    runningTool = value.currentTool.takeIf { streaming && it.isNotBlank() },
+                                    message = row.message, runId = id, usage = row.usage,
+                                    engineLabel = value.config.model, expandTools = settings.expandTools,
+                                    expandReasoning = settings.expandReasoning, reasoningMaxHeight = settings.reasoningHeight.dp,
+                                    followReasoning = settings.followReasoning, bubbleMaxWidth = bubbleWidth,
+                                    reasoningExpansion = expansion, card = settings.assistantCard,
+                                    flatPad = settings.flatPaddingDp.dp, fileActivities = row.fileActivities,
+                                )
+                                }
+                            } else MessageRow(
+                                row = row, assistantName = value.config.assistantName,
+                                showReasoning = settings.showReasoning, expandTools = settings.expandTools,
+                                reasoningMaxHeight = settings.reasoningHeight.dp, bubbleMaxWidth = bubbleWidth,
+                                contextWindow = 0, reasoningExpansion = expansion,
+                                onBranch = { _, _ -> }, onRegenerate = {}, onEdit = {},
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (value.status.isActive() || approval != null || value.saveError.isNotBlank() || value.statusLine.isNotBlank() || !atBottom) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                if (value.saveError.isNotBlank()) Text(value.saveError, color = MaterialTheme.colorScheme.error)
+                if (value.statusLine.isNotBlank()) Text(value.statusLine, style = MaterialTheme.typography.bodySmall,
                     color = if (value.status == SubagentStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                value.result.takeIf {
-                    (value.status == SubagentStatus.FAILED || value.status == SubagentStatus.CANCELLED) &&
-                        it.isNotBlank() && it.trim() != value.statusLine.trim() &&
-                        (value.status != SubagentStatus.CANCELLED || it.trim() != "子任务已取消")
-                }?.let { detail ->
-                    SelectionContainer {
-                        Text(detail, style = SettingsStyle.description,
-                            color = if (value.status == SubagentStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
                 approval?.let { request ->
-                    Text("等待审批：${request.toolName}", style = SettingsStyle.body)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = {
-                            Core.gate.resolve(id, true, expectedRequestId = request.id)
-                        }) { Text("允许一次") }
-                        TextButton(onClick = {
-                            Core.gate.resolve(id, false, expectedRequestId = request.id)
-                        }) { Text("拒绝") }
+                    Text("等待审批：${request.toolName}", style = MaterialTheme.typography.bodyMedium)
+                    Row {
+                        TextButton(onClick = { Core.gate.resolve(id, true, expectedRequestId = request.id) }) { Text("允许一次") }
+                        TextButton(onClick = { Core.gate.resolve(id, false, expectedRequestId = request.id) }) { Text("拒绝") }
                     }
                 }
-                if (value.status.isActive()) TextButton(onClick = { Core.engine.cancelSubagent(chatId, id) }) { Text("取消此子任务") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(subagentStatusLabel(value.status), modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!atBottom) TextButton(onClick = {
+                        scope.launch {
+                            listState.pinToBottom()
+                            followLatest = true
+                            position.rebaseAfterNavigation()
+                        }
+                    }) { Text("最新") }
+                    if (value.status.isActive()) TextButton(onClick = { Core.engine.cancelSubagent(chatId, id) }) { Text("停止") }
+                }
             }
-        }
-        items(value.messages, key = { it.id }, contentType = { it.role }) { message ->
-            SubagentStoredMessage(message)
-        }
-        if (value.liveReasoning.isNotBlank()) item(key = "live-reasoning") {
-            SubagentReasoning(value.liveReasoning, streaming = value.status.isActive())
-        }
-        if (value.liveText.isNotBlank()) item(key = "live-text") {
-            SelectionContainer { MarkdownText(value.liveText, settled = !value.status.isActive()) }
-        }
-        if (value.currentTool.isNotBlank()) item(key = "current-tool") {
-            SuixingCard {
-                Text("执行工具：${value.currentTool}", style = SettingsStyle.body)
-                ToolDetail(ToolLine(value.currentTool, value.currentToolArgs, done = false, ok = true, elapsedMs = 0), maxHeight = 320.dp)
-            }
-        }
-        if (value.status == SubagentStatus.COMPLETED && value.result.isNotBlank() && !hasAssistantText) {
-            item(key = "result") { SelectionContainer { MarkdownText(value.result) } }
         }
     }
+    if (details) SuixingDialog(
+        onDismissRequest = onDismissDetails, title = { Text("对话详情") },
+        text = {
+            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState())) {
+                Text(subagentStatusLabel(value.status), style = MaterialTheme.typography.titleMedium)
+                if ((value.status == SubagentStatus.FAILED || value.status == SubagentStatus.CANCELLED) && value.result.isNotBlank()) {
+                    SelectionContainer { Text(value.result, style = MaterialTheme.typography.bodySmall,
+                        color = if (value.status == SubagentStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+                SubagentEffectiveConfig(value.config)
+                if (value.context.isNotBlank()) {
+                    Text("主代理提供的上下文", style = MaterialTheme.typography.titleSmall)
+                    SelectionContainer { Text(value.context, style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+        },
+        confirmButton = { dialog -> TextButton(onClick = { dialog.closeThen(onDismissDetails) }) { Text("关闭") } },
+    )
 }
 
 @Composable
@@ -233,41 +259,6 @@ internal fun SubagentEffectiveConfig(config: ChildRunConfig) {
                 Text("$tool：${actions.joinToString("、")}", style = SettingsStyle.description)
             }
         }
-    }
-}
-
-@Composable
-private fun SubagentStoredMessage(message: StoredMessage) {
-    SuixingCard {
-        Text(when (message.role) { Roles.USER -> "任务输入"; Roles.TOOL -> "工具：${message.toolName.orEmpty()}"; else -> "助手" },
-            style = SettingsStyle.metadata, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (message.role == Roles.TOOL) {
-            ToolDetail(ToolLine.of(message), maxHeight = 360.dp)
-        } else {
-            message.reasoning?.takeIf { it.isNotBlank() }?.let { SubagentReasoning(it, streaming = false) }
-            if (message.text.isNotBlank()) SelectionContainer { MarkdownText(message.text) }
-            message.toolCalls.forEach { call ->
-                Text("请求工具：${call.name}", style = SettingsStyle.description)
-                ToolDetail(ToolLine(call.name, call.arguments, done = false, ok = true, elapsedMs = 0), maxHeight = 240.dp)
-            }
-            if (message.imageCount > 0) message.allImages.forEach { ImageBlock(it) }
-        }
-        message.traceNote?.takeIf { it.isNotBlank() }?.let {
-            Text(it, style = SettingsStyle.description, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (message.fileActivities.isNotEmpty()) {
-            val files = remember(message.fileActivities) { fileActivitiesFor(emptyList(), listOf(message)) }
-            ChatFileActivity(files)
-        }
-    }
-}
-
-@Composable
-private fun SubagentReasoning(text: String, streaming: Boolean) {
-    var expanded by rememberSaveable { mutableStateOf(true) }
-    Column {
-        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起思考" else "查看思考") }
-        if (expanded) SelectionContainer { MarkdownText(text, settled = !streaming, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 

@@ -66,6 +66,9 @@ internal data class ChildRunSummary(
     val updatedAt: Long,
 )
 
+internal data class ChildUsageSource(val key: String, val stamp: String, val messages: List<StoredMessage>?)
+internal data class ChildUsageRead(val sources: List<ChildUsageSource>, val issues: List<String>)
+
 /** Persistent independent child conversations. Only the selected record emits token progress. */
 internal object SubagentRecords {
     private class Entry(initial: ChildRunRecord, val flow: MutableStateFlow<ChildRunRecord?>,
@@ -76,6 +79,8 @@ internal object SubagentRecords {
         val messages = LinkedHashMap<String, StoredMessage>().apply { initial.messages.forEach { put(it.id, it) } }
         var cachedMessages: List<StoredMessage> = messages.values.toList()
         var messagesChanged = false
+        var transcriptVersion = 0L
+        val usageIdentity = java.util.UUID.randomUUID().toString()
         val text = StringBuilder(initial.liveText)
         val reasoning = StringBuilder(initial.liveReasoning)
         var publishedAt = 0L
@@ -162,12 +167,14 @@ internal object SubagentRecords {
                 is AgentEvent.AssistantMessage -> {
                     entry.messages[event.message.id] = event.message
                     entry.messagesChanged = true
+                    entry.transcriptVersion++
                     entry.text.setLength(0)
                     entry.reasoning.setLength(0)
                 }
                 is AgentEvent.ToolMessage -> {
                     entry.messages[event.message.id] = event.message
                     entry.messagesChanged = true
+                    entry.transcriptVersion++
                 }
                 is AgentEvent.ToolStarted -> entry.value = entry.value.copy(
                     currentTool = event.name,
@@ -180,6 +187,7 @@ internal object SubagentRecords {
                     entry.messages[event.id] = StoredMessage(
                         id = event.id, role = "user", text = event.text, imagesBase64 = event.imagesBase64, steer = true)
                     entry.messagesChanged = true
+                    entry.transcriptVersion++
                 }
                 is AgentEvent.Retrying -> entry.value = entry.value.copy(statusLine = "正在重试：${event.reason}")
                 AgentEvent.RoundRestarted -> { entry.text.setLength(0); entry.reasoning.setLength(0) }
@@ -197,7 +205,10 @@ internal object SubagentRecords {
         synchronized(entry.lock) {
             if (!retained(entry)) return
             messages.forEach { entry.messages[it.id] = it }
-            if (messages.isNotEmpty()) entry.messagesChanged = true
+            if (messages.isNotEmpty()) {
+                entry.messagesChanged = true
+                entry.transcriptVersion++
+            }
             entry.text.setLength(0)
             entry.reasoning.setLength(0)
             entry.dirty = true
@@ -507,10 +518,53 @@ internal object SubagentRecords {
         }
     }.getOrNull()
 
-    private fun parentDirectory(chatId: String): File {
+    /** Read committed child messages without mounting their UI flows or flushing their files. */
+    suspend fun usageSources(filesDir: File, parentIds: Set<String>, stamps: Map<String, String>): ChildUsageRead =
+        withContext(Dispatchers.IO) {
+            val sources = LinkedHashMap<String, ChildUsageSource>()
+            val issues = mutableListOf<String>()
+            parentIds.forEach { parentId ->
+                val directory = parentDirectory(parentId, filesDir)
+                val files = directory.listFiles { file -> file.extension == "json" }
+                if (files == null && directory.exists()) {
+                    issues += "部分子对话未能刷新，已保留此前统计。"
+                    stamps.filterKeys { it.startsWith("child/$parentId/") }.forEach { (key, stamp) ->
+                        sources[key] = ChildUsageSource(key, stamp, null)
+                    }
+                }
+                files.orEmpty().forEach { file ->
+                    val id = file.nameWithoutExtension
+                    if (entries.containsKey(id) || parentId in deletedChats) return@forEach
+                    val key = "child/$parentId/$id"
+                    val stamp = "disk:${file.length()}:${file.lastModified()}"
+                    if (stamps[key] == stamp) sources[key] = ChildUsageSource(key, stamp, null)
+                    else {
+                        val record = parentFileLock(parentId).withLock { readRecord(file) }
+                        if (record?.id == id && record.parentChatId == parentId) {
+                            sources[key] = ChildUsageSource(key, stamp, record.messages)
+                        } else {
+                            sources[key] = ChildUsageSource(key, stamps[key].orEmpty(), null)
+                            issues += "部分子对话无法读取，统计可能不完整。"
+                        }
+                    }
+                }
+            }
+            entries.values.forEach { entry -> synchronized(entry.lock) {
+                val parent = entry.value.parentChatId
+                if (parent in parentIds && retained(entry)) {
+                    val key = "child/$parent/${entry.value.id}"
+                    val stamp = "live:${entry.usageIdentity}:${entry.transcriptVersion}"
+                    sources[key] = ChildUsageSource(key, stamp,
+                        if (stamps[key] == stamp) null else snapshot(entry).messages)
+                }
+            } }
+            ChildUsageRead(sources.values.toList(), issues.distinct())
+        }
+
+    private fun parentDirectory(chatId: String, filesDir: File = Core.appContext.filesDir): File {
         val key = MessageDigest.getInstance("SHA-256").digest(chatId.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
-        return File(Core.appContext.filesDir, "subagent_records/$key")
+        return File(filesDir, "subagent_records/$key")
     }
 
     private fun parentFileLock(chatId: String): Mutex = parentFileLocks.computeIfAbsent(chatId) { Mutex() }

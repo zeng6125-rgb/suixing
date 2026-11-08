@@ -198,7 +198,9 @@ class ToolRegistry private constructor() {
     ) : this() {
         add(SystemTools(context, memory, profile))
         add(FileTools(context))
-        add(ShellTools(context, capabilities))
+        val shellTools = ShellTools(context, capabilities)
+        add(shellTools)
+        add(BashTools(shellTools))
         add(UiTools(context, capabilities))
         add(VirtualScreenTools(context, capabilities))
         add(JobTools(jobs))

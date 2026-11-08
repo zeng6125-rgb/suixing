@@ -8,6 +8,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedToolExecutionTest {
+    @Test fun `native bash shares the device barrier across parent and child engines`() = runBlocking {
+        val shared = SharedToolExecution()
+        val release = CompletableDeferred<Unit>()
+        val first = async(start = CoroutineStart.UNDISPATCHED) { shared.run("bash") { release.await() } }
+        var shellStarted = false
+        val second = async(start = CoroutineStart.UNDISPATCHED) { shared.run("run_shell") { shellStarted = true } }
+        assertFalse(shellStarted)
+        assertEquals("read", shared.run("read_file") { "read" })
+        release.complete(Unit)
+        first.await()
+        second.await()
+        assertTrue(shellStarted)
+    }
+
     @Test fun `device mutations queue across engines but independent reads continue`() = runBlocking {
         val shared = SharedToolExecution()
         val release = CompletableDeferred<Unit>()

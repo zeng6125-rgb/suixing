@@ -20,6 +20,7 @@ private val TOOL_COPY_ZH: Map<String, String> = mapOf(
     "grep_files" to "在文件内容里搜索（应用内，不起进程）",
     // Shell
     "run_shell" to "执行 shell 命令（自带 GNU bash）",
+    "bash" to "执行原生 Bash 命令（应用权限，不自动提权）",
     "app_action" to "对已装应用做特权操作",
     // 界面操作
     "ui_dump" to "读取当前界面的控件树",

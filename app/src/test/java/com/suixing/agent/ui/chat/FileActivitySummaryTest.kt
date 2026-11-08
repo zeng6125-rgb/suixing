@@ -6,9 +6,68 @@ import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FileActivitySummaryTest {
+    @Test fun aRunningReplyHasNoFileOrActionFooter() {
+        assertEquals(emptyList<ReplyFooterSection>(), replyFooterSections(streaming = true, fileCount = 1, hasActions = true))
+    }
+
+    @Test fun completedFilesAreRenderedBeforeTheReplyActions() {
+        assertEquals(listOf(ReplyFooterSection.FILE_ACTIVITY, ReplyFooterSection.ACTIONS),
+            replyFooterSections(streaming = false, fileCount = 2, hasActions = true))
+    }
+
+    @Test fun fileChangesRemainVisibleWithoutProseOrActionButtons() {
+        assertEquals(listOf(ReplyFooterSection.FILE_ACTIVITY),
+            replyFooterSections(streaming = false, fileCount = 1, hasActions = false))
+    }
+
+    @Test fun repliesWithoutFilesKeepOnlyTheirExistingActions() {
+        assertEquals(listOf(ReplyFooterSection.ACTIONS),
+            replyFooterSections(streaming = false, fileCount = 0, hasActions = true))
+        assertEquals(emptyList<ReplyFooterSection>(),
+            replyFooterSections(streaming = false, fileCount = 0, hasActions = false))
+    }
+
+    @Test fun oneChangedFileIsVisibleWithoutACollapseControl() {
+        val files = listOf(FileActivity("/sdcard/one.txt", FileActivityKind.MODIFIED))
+        assertFalse(fileActivityCanCollapse(files.size))
+        assertTrue(fileActivityInitiallyExpanded(files))
+    }
+
+    @Test fun twoOrMoreFilesCanCollapseAndStartCollapsedEvenWhenDelivered() {
+        val files = listOf(
+            FileActivity("/sdcard/one.txt", FileActivityKind.DELIVERED),
+            FileActivity("/sdcard/two.txt", FileActivityKind.DOWNLOADED),
+        )
+        assertTrue(fileActivityCanCollapse(files.size))
+        assertFalse(fileActivityInitiallyExpanded(files))
+        assertTrue(fileActivityCanCollapse(3))
+    }
+
+    @Test fun repeatedEditsOfOnePathAreNotTreatedAsMultipleFiles() {
+        val one = message("first", FileActivity("/sdcard/one.txt", FileActivityKind.MODIFIED, addedLines = 1, removedLines = 0))
+        val two = message("second", FileActivity("/sdcard/one.txt", FileActivityKind.MODIFIED, addedLines = 2, removedLines = 0))
+        val files = fileActivitiesFor(emptyList(), listOf(one, two))
+        assertEquals(1, files.size)
+        assertFalse(fileActivityCanCollapse(files.size))
+        assertEquals(3, files.single().addedLines)
+    }
+
+    @Test fun zeroOrUnknownLineCountsDoNotHideConfirmedFileChanges() {
+        listOf(
+            FileActivity("/sdcard/unknown.bin", FileActivityKind.MODIFIED),
+            FileActivity("/sdcard/zero.txt", FileActivityKind.CREATED, addedLines = 0, removedLines = 0),
+        ).forEach { file ->
+            val files = fileActivitiesFor(emptyList(), listOf(message(file.path, file)))
+            assertEquals(listOf(ReplyFooterSection.FILE_ACTIVITY),
+                replyFooterSections(streaming = false, fileCount = files.size, hasActions = false))
+        }
+    }
+
     private fun message(id: String, activity: FileActivity): StoredMessage = StoredMessage(
         id = id, role = Roles.TOOL, toolName = "file_tool", toolOk = true, fileActivities = listOf(activity),
     )

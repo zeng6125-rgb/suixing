@@ -18,7 +18,7 @@ internal class SharedToolExecution {
  *
  *  · **GUI 手势**（`ui_tap` / `ui_swipe` / `ui_long_press` / `ui_type` / `ui_key`…）：
  *    它们改的是同一块屏幕、同一个前台状态。两个手势并发 = 一个按在另一个刚滑走的位置上。
- *  · **会话式 Shell / 特权写操作**（`run_shell` / `app_action`）：同一个 shell 会话里并发提交
+ *  · **会话式 Shell / 特权写操作**（`run_shell` / `bash` / `app_action`）：同一个 shell 会话里并发提交
  *    两条命令，输出会互相穿插；特权写操作还可能在彼此的过渡状态里读到中间值。
  *
  * 纯读类（`read_file` / `grep` / `device_info` / `ui_dump`…）仍然可以并行 —— 这正是 #36 里
@@ -29,7 +29,7 @@ internal class SharedToolExecution {
  */
 internal fun isParallelizable(toolName: String): Boolean = when (toolName) {
     // 会话式 shell：同一会话里并发提交两条命令，stdout 会互相插队。
-    "run_shell", "open_app" -> false
+    "run_shell", "bash", "open_app" -> false
     // 特权写操作：安装/卸载/强停/权限授予，彼此之间有过渡状态。
     "app_action" -> false
     // 屏幕快照是读，但它读的是"当下的屏幕"，与手势并发时结果取决于时序 —— 允许并行。

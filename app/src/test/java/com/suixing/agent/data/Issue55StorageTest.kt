@@ -68,13 +68,16 @@ class Issue55StorageTest {
         assertTrue(earlier.atStart)
     }
 
-    @Test fun `unpriced incremental tail retains its known generation byte watermark`() {
+    @Test fun `non assistant tail advances the watermark without adding model usage`() {
         val priced = StoredMessage(id = "a", role = Roles.ASSISTANT, promptTokens = 10)
         val initial = accumulateSlices(UsageSnapshot(), listOf(UsageSlice("chat", listOf(priced), 0, listOf(200L), 3)))
         val unpriced = StoredMessage(id = "tool", role = Roles.TOOL)
         val after = accumulateSlices(initial, listOf(UsageSlice("chat", listOf(unpriced), 1, listOf(300L), 3)))
-        assertEquals(200L, after.chats.getValue("chat").scannedBytes)
-        assertEquals(initial, accumulateSlices(after, listOf(UsageSlice("chat", emptyList(), 1, emptyList(), 3))))
+        assertEquals(300L, after.chats.getValue("chat").scannedBytes)
+        assertEquals(initial.totals, after.totals)
+        assertEquals(1L, after.coverage.reported)
+        assertEquals(0L, after.coverage.unreported)
+        assertEquals(after, accumulateSlices(after, listOf(UsageSlice("chat", emptyList(), 2, emptyList(), 3))))
     }
 
     @Test fun `live message payload is reused across ticks and recoverable after repository recreation`() = runBlocking {

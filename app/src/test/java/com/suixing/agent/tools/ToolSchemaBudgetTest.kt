@@ -42,6 +42,7 @@ class ToolSchemaBudgetTest {
         "SystemTools" to SystemTools(context, mockk<MemoryStore>(relaxed = true), mockk<UserProfileStore>(relaxed = true)),
         "FileTools" to FileTools(context),
         "ShellTools" to ShellTools(context, mockk<CapabilityHub>(relaxed = true)),
+        "BashTools" to BashTools(ShellTools(context, mockk<CapabilityHub>(relaxed = true))),
         "UiTools" to UiTools(context, mockk<CapabilityHub>(relaxed = true)),
         "JobTools" to JobTools(mockk(relaxed = true)),
         "TodoTools" to TodoTools(mockk<TodoStore>(relaxed = true)),

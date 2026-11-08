@@ -92,6 +92,7 @@ internal class SubagentPool(
     private val slots = Semaphore(parallelism.coerceIn(1, 3))
     private val lock = Any()
     private val entries = LinkedHashMap<String, Entry>()
+    private val reportedResults = HashSet<String>()
     private var closed = false
     private var sealed = false
 
@@ -153,6 +154,11 @@ internal class SubagentPool(
     }
 
     fun snapshots(): List<SubagentSnapshot> = synchronized(lock) { entries.values.map { it.snapshot } }
+    fun unreportedResults(): List<SubagentSnapshot> = synchronized(lock) {
+        entries.values.map { it.snapshot }.filter {
+            it.status != SubagentStatus.QUEUED && it.status != SubagentStatus.RUNNING && it.id !in reportedResults
+        }
+    }
     private fun changed() = synchronized(lock) { onChanged(entries.values.map { it.snapshot }) }
     private fun update(entry: Entry, status: SubagentStatus, result: String = "") {
         synchronized(lock) {
@@ -195,12 +201,17 @@ internal class SubagentPool(
         completions.awaitAll()
     }
 
+    /** Result integration may require more work, including another child. */
+    fun resumeAdmission() = synchronized(lock) {
+        if (!closed && supervisor.isActive) sealed = false
+    }
+
     suspend fun close() {
         val completions = synchronized(lock) { closed = true; sealed = true; entries.values.map { it.completion } }
         supervisor.cancel()
         supervisor.join()
         completions.awaitAll()
-        synchronized(lock) { entries.clear() }
+        synchronized(lock) { entries.clear(); reportedResults.clear() }
         changed()
     }
 
@@ -224,7 +235,7 @@ internal class SubagentPool(
                 }
                 else -> error("未知子任务工具")
             }
-            ToolResult.success(JsonArray(values.map { snapshot -> buildJsonObject {
+            val result = ToolResult.success(JsonArray(values.map { snapshot -> buildJsonObject {
                 put("id", snapshot.id); put("name", snapshot.name)
                 put("status", snapshot.status.name.lowercase())
                 snapshot.config?.let { config ->
@@ -234,6 +245,11 @@ internal class SubagentPool(
                 }
                 if (snapshot.result.isNotBlank()) put("result", snapshot.result)
             } }).toString())
+            synchronized(lock) {
+                values.filter { it.status != SubagentStatus.QUEUED && it.status != SubagentStatus.RUNNING }
+                    .forEach { reportedResults += it.id }
+            }
+            result
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { ToolResult.failure(failure.message ?: "子任务操作失败") }
     }

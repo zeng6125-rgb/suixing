@@ -43,12 +43,13 @@ internal fun ReplyActionsMenu(
                 }
                 val subject = if (message.role == Roles.USER) "消息" else "回复"
                 Action("复制" + subject) { copy(message.text) }
-                Action("修改" + subject) { onEdit(message) }
-                if (branch?.canRegenerate == true) Action("重新回答", onRegenerate)
-                if (branch != null && branch.index > 0) Action("上一个回答") {
+                val readOnly = LocalChatReadOnly.current
+                if (!readOnly) Action("修改" + subject) { onEdit(message) }
+                if (!readOnly && branch?.canRegenerate == true) Action("重新回答", onRegenerate)
+                if (!readOnly && branch != null && branch.index > 0) Action("上一个回答") {
                     onBranch(branch.turnId, branch.runs[branch.index - 1])
                 }
-                if (branch != null && branch.index < branch.runs.lastIndex) Action("下一个回答") {
+                if (!readOnly && branch != null && branch.index < branch.runs.lastIndex) Action("下一个回答") {
                     onBranch(branch.turnId, branch.runs[branch.index + 1])
                 }
             }

@@ -118,7 +118,7 @@ private class NearbyPreparation(
 @Composable
 internal fun BindConversationViewport(
     viewport: ConversationViewport,
-    viewModel: ChatViewModel,
+    actions: ChatScreenActions,
     scroll: ChatScroll,
     rows: List<ChatRow>,
     keys: List<String>,
@@ -181,8 +181,8 @@ internal fun BindConversationViewport(
             }
         }
     }
-    DisposableEffect(viewport, owner, viewModel) {
-        viewModel.bindViewport(viewport.conversationId, capture)
+    DisposableEffect(viewport, owner, actions) {
+        actions.bindViewport(viewport.conversationId, capture)
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) capture()
         }
@@ -190,21 +190,21 @@ internal fun BindConversationViewport(
         onDispose {
             capture()
             owner.lifecycle.removeObserver(observer)
-            viewModel.unbindViewport(capture)
+            actions.unbindViewport(capture)
         }
     }
 
     LaunchedEffect(viewport, storageReady) {
         if (!storageReady || viewport.conversationId.isBlank()) return@LaunchedEffect
         scroll.restoring = true
-        viewModel.state.first { !it.loading && it.conversationId == viewport.conversationId }
+        actions.state.first { !it.loading && it.conversationId == viewport.conversationId }
         val bookmark = viewport.bookmark
         // A cold tail may not include a saved historical message. Read earlier pages without
         // ever displaying an intermediate/default position. Existing repository guards apply.
         if (bookmark != null && !bookmark.followLatest) {
             while (true) {
                 if (viewport.followOverride) break
-                val state = viewModel.state.value
+                val state = actions.state.value
                 if (state.conversationId != viewport.conversationId) return@LaunchedEffect
                 val found = state.messages.any { it.id == bookmark.messageId ||
                     bookmark.runId != null && it.runId == bookmark.runId || it.id in bookmark.nearbyMessageIds }
@@ -212,7 +212,7 @@ internal fun BindConversationViewport(
                     bookmark.runId == state.liveRunId || state.messages.isEmpty() ||
                     state.messageCount in 1..state.messages.size) break
                 val added = suspendCancellableCoroutine { continuation ->
-                    val accepted = viewModel.loadEarlier(onComplete = { result ->
+                    val accepted = actions.loadEarlier(onComplete = { result ->
                         if (continuation.isActive) continuation.resume(result)
                     })
                     if (!accepted && continuation.isActive) continuation.resume(false)
@@ -221,14 +221,14 @@ internal fun BindConversationViewport(
             }
         }
         // The derived row projection commits with the screen; wait for that exact source revision.
-        snapshotFlow { revisionNow.value }.first { it == viewModel.screenState.value.messagesRevision }
+        snapshotFlow { revisionNow.value }.first { it == actions.screenState.value.messagesRevision }
         var target = bookmarkRow(bookmark, keysNow.value, rowsNow.value)
         val center = if (target >= 0) target else rowsNow.value.lastIndex
         prepareNow.value(openingViewportRows(rowsNow.value, center))
         // Parsing suspends: structural rows or a live/status prefix may have changed meanwhile.
-        snapshotFlow { revisionNow.value }.first { it == viewModel.screenState.value.messagesRevision }
+        snapshotFlow { revisionNow.value }.first { it == actions.screenState.value.messagesRevision }
         target = bookmarkRow(bookmark, keysNow.value, rowsNow.value)
-        val liveKey = bookmark?.rowKey?.takeIf { it == liveRowKey(viewport.conversationId, viewModel.state.value.liveRunId) }
+        val liveKey = bookmark?.rowKey?.takeIf { it == liveRowKey(viewport.conversationId, actions.state.value.liveRunId) }
         val following = viewport.followOverride || bookmark == null || bookmark.followLatest ||
             target < 0 && liveKey == null
         val index = when {
@@ -245,7 +245,7 @@ internal fun BindConversationViewport(
         val beforeLayout = viewport.listState.layoutInfo
         viewport.listState.requestScrollToItem(index, offset)
         viewport.prepared = true
-        if (rowsNow.value.isNotEmpty() || viewModel.state.value.runningHere) {
+        if (rowsNow.value.isNotEmpty() || actions.state.value.runningHere) {
             snapshotFlow { viewport.listState.layoutInfo }.first {
                 it !== beforeLayout && it.totalItemsCount > 0 && it.visibleItemsInfo.isNotEmpty()
             }
@@ -285,7 +285,7 @@ internal fun BindConversationViewport(
         var acknowledged = false
         viewport.entrance.animateTo(1f, tween(ConversationEntrance.DURATION_MS, easing = ConversationEntrance.EASING)) {
             if (!acknowledged && value > 0f) {
-                viewModel.presentViewport(viewport.conversationId)
+                actions.presentViewport(viewport.conversationId)
                 acknowledged = true
             }
         }

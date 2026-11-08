@@ -26,6 +26,26 @@ internal fun fileActivitiesFor(
     return byPath.values.toList()
 }
 
+internal enum class ReplyFooterSection { FILE_ACTIVITY, ACTIONS }
+
+private val footerFiles = listOf(ReplyFooterSection.FILE_ACTIVITY)
+private val footerActions = listOf(ReplyFooterSection.ACTIONS)
+private val footerBoth = listOf(ReplyFooterSection.FILE_ACTIVITY, ReplyFooterSection.ACTIONS)
+
+/** Shared by the rendered footer and its state/order regressions. */
+internal fun replyFooterSections(streaming: Boolean, fileCount: Int, hasActions: Boolean): List<ReplyFooterSection> = when {
+    streaming -> emptyList()
+    fileCount > 0 && hasActions -> footerBoth
+    fileCount > 0 -> footerFiles
+    hasActions -> footerActions
+    else -> emptyList()
+}
+
+internal fun fileActivityCanCollapse(fileCount: Int): Boolean = fileCount >= 2
+
+internal fun fileActivityInitiallyExpanded(activities: List<FileActivity>): Boolean =
+    activities.size == 1
+
 private fun mergeFileActivity(previous: FileActivity, next: FileActivity): FileActivity {
     fun FileActivity.isChange() = kind == FileActivityKind.CREATED || kind == FileActivityKind.MODIFIED
     fun total(first: Int?, second: Int?): Int? =

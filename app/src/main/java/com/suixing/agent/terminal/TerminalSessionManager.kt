@@ -2,7 +2,6 @@ package com.suixing.agent.terminal
 
 import android.content.Context
 import android.util.AtomicFile
-import com.suixing.agent.service.TerminalForegroundService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,8 +34,9 @@ internal class TerminalSessionManager(
     private val context: Context,
     appScope: CoroutineScope,
     private val linux: LinuxInstaller,
+    private val runtime: TerminalSessionRuntime = AndroidTerminalSessionRuntime,
 ) {
-    private val scope = CoroutineScope(SupervisorJob(appScope.coroutineContext[Job]) + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(SupervisorJob(appScope.coroutineContext[Job]) + runtime.main)
     private val mutex = Mutex()
     private val _entries = MutableStateFlow<List<TerminalEntry>>(emptyList())
     val entries = _entries.asStateFlow()
@@ -52,7 +52,7 @@ internal class TerminalSessionManager(
     suspend fun load() = mutex.withLock { loadLocked() }
     private suspend fun loadLocked() {
         if (loaded) return
-        _entries.value = withContext(Dispatchers.IO) {
+        _entries.value = withContext(runtime.io) {
             runCatching {
                 json.decodeFromString<List<TerminalInfo>>(metadata.openRead().use { it.readBytes().toString(Charsets.UTF_8) })
                     .takeLast(16).map { info ->
@@ -68,40 +68,59 @@ internal class TerminalSessionManager(
       withContext(NonCancellable) {
         loadLocked()
         check(_entries.value.count { it.info.phase == "running" } < 4) { "最多同时运行 4 个终端会话，请先停止一个" }
-        val plan = if (kind == "android") androidTerminalLaunch(context) else {
+        val plan = if (kind == "android") runtime.androidPlan(context) else {
             linux.load()
             linux.launch(kind)
         }
-        val native = withContext(Dispatchers.IO) {
-            TerminalNative.nativeOpenProcess(plan.argv.toTypedArray(),
-                plan.environment.map { (key, value) -> "$key=$value" }.toTypedArray(), plan.cwd, 80, 24)
-        }
-        val id = UUID.randomUUID().toString()
-        val info = TerminalInfo(id, plan.label, kind, plan.label, plan.cwd, native[1].toInt(),
-            ownerChatId = caller?.chatId, note = plan.note)
-        val session = withContext(Dispatchers.Main.immediate) {
-            TerminalSession(id, native[0].toInt(), native[1].toInt(), plan, TerminalPolicy(caller?.chatId),
-                scope, TerminalLog(logs, id)) { code, failure ->
-                scope.launch {
-                    mutex.withLock {
-                        _entries.value = _entries.value.map { entry ->
-                            if (entry.info.id == id) entry.copy(info = entry.info.copy(phase = "exited",
-                                pid = null, exitCode = code, note = failure ?: entry.info.note)) else entry
+        val native = withContext(runtime.io) { runtime.openProcess(plan) }
+        val retained = _entries.value
+        val previousSelectedId = selectedId
+        var ownedSession: TerminalSession? = null
+        var publishedId: String? = null
+        try {
+            val id = UUID.randomUUID().toString()
+            val info = TerminalInfo(id, plan.label, kind, plan.label, plan.cwd, native[1].toInt(),
+                ownerChatId = caller?.chatId, note = plan.note)
+            val session = withContext(runtime.main) {
+                runtime.createSession(id, native[0].toInt(), native[1].toInt(), plan, TerminalPolicy(caller?.chatId),
+                    scope, TerminalLog(logs, id)) { code, failure ->
+                    scope.launch {
+                        mutex.withLock {
+                            _entries.value = _entries.value.map { entry ->
+                                if (entry.info.id == id) entry.copy(info = entry.info.copy(phase = "exited",
+                                    pid = null, exitCode = code, note = failure ?: entry.info.note)) else entry
+                            }
+                            saveLocked()
                         }
-                        saveLocked()
                     }
                 }
             }
+            ownedSession = session
+            val entry = TerminalEntry(info, session)
+            publishedId = id
+            _entries.value = (retained.filter { it.info.phase == "running" } +
+                retained.filter { it.info.phase != "running" }.takeLast(11) + entry).distinctBy { it.info.id }
+            selectedId = id
+            withContext(runtime.main) { session.start() }
+            _backgroundWarning.value = runtime.ensureForeground(context)
+            saveLocked()
+            entry
+        } catch (failure: Throwable) {
+            if (publishedId != null) {
+                _entries.value = retained
+                // A different selection made while startup suspended still belongs to the user.
+                if (selectedId == publishedId) selectedId = previousSelectedId
+            }
+            withContext(NonCancellable + runtime.io) {
+                try {
+                    val owner = ownedSession
+                    if (owner == null) runtime.releaseUnclaimed(native) else owner.stop()
+                } catch (cleanup: Throwable) {
+                    if (cleanup !== failure) failure.addSuppressed(cleanup)
+                }
+            }
+            throw failure
         }
-        val entry = TerminalEntry(info, session)
-        val retained = _entries.value
-        _entries.value = (retained.filter { it.info.phase == "running" } +
-            retained.filter { it.info.phase != "running" }.takeLast(11) + entry).distinctBy { it.info.id }
-        selectedId = id
-        withContext(Dispatchers.Main.immediate) { session.start() }
-        _backgroundWarning.value = TerminalForegroundService.ensure(context)
-        saveLocked()
-        entry
       }
     }
 
@@ -134,7 +153,7 @@ internal class TerminalSessionManager(
         linux.remove(distro)
     }
 
-    private suspend fun saveLocked() = withContext(Dispatchers.IO) {
+    private suspend fun saveLocked() = withContext(runtime.io) {
         val bytes = json.encodeToString(_entries.value.map { it.info }).toByteArray()
         runCatching {
             val stream = metadata.startWrite()

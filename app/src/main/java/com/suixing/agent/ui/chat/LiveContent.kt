@@ -60,16 +60,16 @@ internal class LivePartProjection(private val runId: String) {
 /** The token stream subscribes inside the live item; the stored transcript remains skippable. */
 @Composable
 internal fun LiveMessageParts(
-    viewModel: ChatViewModel,
+    actions: ChatScreenActions,
     chatId: String,
     runId: String,
     showReasoning: Boolean,
     content: @Composable (List<Part>) -> Unit,
 ) {
-    val flow = remember(viewModel, chatId, runId) {
-        viewModel.liveContent.filter { it.chatId == chatId && it.runId == runId }
+    val flow = remember(actions, chatId, runId) {
+        actions.liveContent.filter { it.chatId == chatId && it.runId == runId }
     }
-    val live by flow.collectAsStateWithLifecycle(initialValue = viewModel.currentLiveContent())
+    val live by flow.collectAsStateWithLifecycle(initialValue = actions.currentLiveContent())
     val projection = remember(chatId, runId) { LivePartProjection(runId) }
     val source = if (live.chatId == chatId && live.runId == runId) live.parts else emptyList()
     content(projection.project(source, showReasoning))

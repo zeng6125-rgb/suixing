@@ -10,6 +10,10 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
+import java.time.LocalDate
+import com.suixing.agent.agent.SubagentRecords
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
 
 /**
  * The four token buckets the endpoint reports per assistant message, summed. Long
@@ -24,10 +28,10 @@ data class TokenTally(
     val cached: Long = 0,
 ) {
     operator fun plus(message: StoredMessage): TokenTally = TokenTally(
-        prompt = prompt + message.promptTokens,
-        completion = completion + message.completionTokens,
-        reasoning = reasoning + message.reasoningTokens,
-        cached = cached + message.cachedTokens,
+        prompt = prompt + message.promptTokens.coerceAtLeast(0),
+        completion = completion + message.completionTokens.coerceAtLeast(0),
+        reasoning = reasoning + message.reasoningTokens.coerceAtLeast(0),
+        cached = cached + message.cachedTokens.coerceAtLeast(0),
     )
 
     operator fun plus(other: TokenTally): TokenTally = TokenTally(
@@ -45,6 +49,8 @@ data class TokenTally(
 data class DayUsage(
     val date: String,
     val tokens: TokenTally = TokenTally(),
+    val reported: Long = 0,
+    val unreported: Long = 0,
 )
 
 /** One model's share of the total. */
@@ -52,7 +58,21 @@ data class DayUsage(
 data class ModelUsage(
     val model: String,
     val tokens: TokenTally = TokenTally(),
+    val reported: Long = 0,
+    val unreported: Long = 0,
 )
+
+/** Counts describe requests, including requests for which the endpoint reported no tokens. */
+@Serializable
+data class UsageBucket(
+    val tokens: TokenTally = TokenTally(),
+    val reported: Long = 0,
+    val unreported: Long = 0,
+) {
+    val requests: Long get() = reported + unreported
+    operator fun plus(other: UsageBucket) = UsageBucket(tokens + other.tokens,
+        reported + other.reported, unreported + other.unreported)
+}
 
 /**
  * One chat's own contribution to the roll-up: the days and models it spent on, plus
@@ -91,6 +111,8 @@ data class ChatUsage(
      * -1 = "the watermark is not from a log at all" (the old single-file format).
      */
     val scannedGen: Int = -1,
+    val dailyModels: Map<String, Map<String, UsageBucket>> = emptyMap(),
+    val sourceStamp: String = "",
 )
 
 /**
@@ -107,9 +129,11 @@ data class UsageSnapshot(
     // accumulateSlices 重建时显式写入当前版本。
     val schemaVersion: Int = 0,
     val chats: Map<String, ChatUsage> = emptyMap(),
+    val zoneId: String = "",
+    @kotlinx.serialization.Transient val issues: List<String> = emptyList(),
 ) {
     companion object {
-        const val SCHEMA_VERSION = 2
+        const val SCHEMA_VERSION = 3
     }
     @kotlinx.serialization.Transient
     private val aggregate: Lazy<UsageAggregate> = lazy {
@@ -125,6 +149,12 @@ data class UsageSnapshot(
     val days: Map<String, TokenTally> get() = aggregate.value.days
     val models: Map<String, TokenTally> get() = aggregate.value.models
     val totals: TokenTally get() = aggregate.value.totals
+
+    val coverage: UsageBucket by lazy {
+        chats.values.fold(UsageBucket()) { sum, chat ->
+            chat.dailyModels.values.fold(sum) { dailySum, models -> models.values.fold(dailySum) { acc, bucket -> acc + bucket } }
+        }
+    }
 
 }
 
@@ -157,16 +187,29 @@ class UsageStore(private val context: Context) {
      */
     suspend fun refresh(): UsageSnapshot = withContext(Dispatchers.IO) {
         refreshLock.withLock {
-            val cache = readCache()
+            val zone = ZoneId.systemDefault()
+            val loaded = readCache()
+            val cache = if (loaded.zoneId.isNotBlank() && loaded.zoneId != zone.id) UsageSnapshot() else loaded
+            val issues = mutableListOf<String>()
             // **目录只扫一次**：原来 loadSlices 与这里各 listFiles 一遍同一个目录。
             // 盘上仍有的会话（meta 在即算）：retainAll 的「确认删除」依据（issue #41 真问题 3）
-            val metaFiles = File(chatsDir, STORE_DIR).listFiles { f -> f.name.endsWith(META_SUFFIX) }
-                ?: emptyArray()
+            val directory = File(chatsDir, STORE_DIR)
+            val metaFiles = directory.listFiles { f -> f.name.endsWith(META_SUFFIX) }
+                ?: if (!directory.exists()) emptyArray() else throw IOException("无法读取会话目录，请重试。")
             val onDisk = metaFiles.mapTo(mutableSetOf()) { it.name.removeSuffix(META_SUFFIX) }
-            val slices = loadSlices(cache, metaFiles)
+            val slices = loadSlices(cache, metaFiles, issues).toMutableList()
+            val children = SubagentRecords.usageSources(context.filesDir, onDisk,
+                cache.chats.mapValues { it.value.sourceStamp })
+            issues += children.issues
+            children.sources.forEach { child ->
+                onDisk += child.key
+                child.messages?.let { messages ->
+                    slices += UsageSlice(child.key, messages, 0, null, -2, child.stamp)
+                }
+            }
             // 显式打上当前版本：cache 若刚被版本校验丢弃，这里就是"重建一次"的落点。
-            val next = accumulateSlices(cache, slices, onDiskIds = onDisk)
-                .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION)
+            val next = accumulateSlices(cache, slices, zone, onDiskIds = onDisk)
+                .copy(schemaVersion = UsageSnapshot.SCHEMA_VERSION, zoneId = zone.id, issues = issues)
             // **没有变化就不重写缓存**（优化清单 data-P2）：`writeCache` 会把整份快照
             // prettyPrint 成 JSON 再落盘；定时刷新时绝大多数次扫描都没有新消息。
             // 比较的是值相等（data class），结果与"总是写"完全一致 —— 只是少一次写盘。
@@ -185,21 +228,21 @@ class UsageStore(private val context: Context) {
     fun byModel(): List<ModelUsage> = byModelOf(snapshot)
 
     /** 每个会话**尚未计数**的那部分（#30）：只从上次数到的字节偏移续读、只解析新增。 */
-    private fun loadSlices(snapshot: UsageSnapshot, metaFiles: Array<File>): List<UsageSlice> {
+    private fun loadSlices(snapshot: UsageSnapshot, metaFiles: Array<File>, issues: MutableList<String>): List<UsageSlice> {
         val out = ArrayList<UsageSlice>()
         // 旧格式 `<id>.json` 已随 #40 删除（loadConversations 全量解析路径是死代码，一并删了），
         // 这里只扫 store 的 meta；增量续扫见下面的 slicedFrom。
         metaFiles.forEach { file ->
                 val id = file.name.removeSuffix(META_SUFFIX)
                 runCatching {
-                    val meta = store.readMeta(id) ?: return@runCatching
+                    val meta = store.readMeta(id) ?: throw IOException("无法读取会话信息")
                     val previous = snapshot.chats[id]
                     // **Incremental**: same generation and a byte watermark ⇒ only the
                     // bytes after the last counted message. A different generation means
                     // the log was rewritten, so the old offset points nowhere ⇒ start over.
                     val resumable = previous != null &&
                         previous.scannedGen == meta.gen &&
-                        previous.scannedBytes > 0
+                        previous.scannedBytes > 0 && previous.scannedBytes <= meta.logBytes && previous.scanned <= meta.messageCount
                     val sliced = if (resumable) {
                         store.slicedFrom(meta, previous.scannedBytes)
                     } else {
@@ -213,6 +256,9 @@ class UsageStore(private val context: Context) {
                         endOffsets = sliced.map { it.endOffset },
                         gen = meta.gen,
                     )
+                }.onFailure {
+                    if (it is CancellationException) throw it
+                    issues += "有会话未能刷新，已保留此前统计。"
                 }
             }
         return out
@@ -274,6 +320,7 @@ internal data class UsageSlice(
     val baseIndex: Int,
     val endOffsets: List<Long>?,
     val gen: Int,
+    val sourceStamp: String = "",
 )
 
 internal fun accumulate(
@@ -311,60 +358,40 @@ internal fun accumulateSlices(
     chats.keys.retainAll((slices.mapTo(mutableSetOf<String>()) { it.id }) + onDiskIds)
 
     for (slice in slices) {
-        val previous = chats[slice.id] ?: ChatUsage()
-        val messages = slice.messages
-        // The watermark is an absolute index; the slice may start later than 0.
-        val start = previous.scanned.coerceIn(slice.baseIndex, slice.baseIndex + messages.size)
-        val tail = messages.subList(start - slice.baseIndex, messages.size)
-        // Only up to the newest *priced* message: the newest turn may still be mid-flight
-        // with its usage not attached yet, and it has to be re-read once it is priced.
-        val lastPriced = tail.indexOfLast { it.usageKnown }
-        if (lastPriced < 0) {
-            // Nothing priced to add. Record a clamped position (a transcript that somehow
-            // shrank is never re-counted from the top), but do not invent an entry for a
-            // chat that has never contributed anything.
-            // 字节水位**可能来自上一个世代**（日志被改写过）⇒ 丢掉它。
-            // 留着的话，下一次扫描的"可续读"判断会拿旧偏移去读新文件 —— 那个偏移
-            // 在新世代里指的是别的位置。（可续读还要代数相同，所以现在读不到；
-            // 但把不用的水位留着是雷，丢掉最省心。）
-            val fixed = previous.copy(
-                scanned = start,
-                scannedBytes = if (slice.endOffsets != null && slice.gen != previous.scannedGen) 0L else previous.scannedBytes,
-                scannedGen = if (slice.endOffsets != null) slice.gen else previous.scannedGen,
-            )
-            if (fixed != previous) chats[slice.id] = fixed
-            continue
-        }
-
+        val cached = chats[slice.id] ?: ChatUsage()
+        // Rewrites replace a conversation's contribution. Keeping its old count watermark
+        // silently retained edited/deleted tokens and skipped newly priced messages.
+        val rebuild = slice.baseIndex == 0 && (slice.gen != cached.scannedGen ||
+            slice.gen < 0 || cached.scanned > slice.messages.size)
+        val previous = if (rebuild) ChatUsage() else cached
+        val start = previous.scanned.coerceIn(slice.baseIndex, slice.baseIndex + slice.messages.size)
         val days = previous.days.toMutableMap()
         val models = previous.models.toMutableMap()
+        val dailyModels = previous.dailyModels.toMutableMap()
         var newest = previous.scannedUpTo
-        for (message in tail.subList(0, lastPriced + 1)) {
-            // usageKnown filters out messages the endpoint never priced, so a chat full
-            // of unknown-cost turns does not fabricate zero rows.
-            if (!message.usageKnown) continue
-            val key = dayKey(message.timestamp, zone)
-            days[key] = (days[key] ?: TokenTally()) + message
-            // Per-message, not per-chat: a chat that switched persona mid-way splits
-            // its spend across the models that actually answered.
+        for (message in slice.messages.drop(start - slice.baseIndex)) {
+            if (message.role != Roles.ASSISTANT) continue
+            val date = dayKey(message.timestamp, zone)
             val model = message.model.ifBlank { UNKNOWN_MODEL_LABEL }
-            models[model] = (models[model] ?: TokenTally()) + message
-            if (message.timestamp > newest) newest = message.timestamp
+            val known = message.usageKnown
+            val bucket = UsageBucket(if (known) TokenTally() + message else TokenTally(),
+                reported = if (known) 1 else 0, unreported = if (known) 0 else 1)
+            val byModel = dailyModels[date].orEmpty().toMutableMap()
+            byModel[model] = (byModel[model] ?: UsageBucket()) + bucket
+            dailyModels[date] = byModel
+            if (known) {
+                days[date] = (days[date] ?: TokenTally()) + bucket.tokens
+                models[model] = (models[model] ?: TokenTally()) + bucket.tokens
+            }
+            newest = maxOf(newest, message.timestamp)
         }
-        // The watermark advances past everything that was priced, so the next scan starts
-        // here and the unpriced tail is looked at again.
-        // The byte watermark advances to the end of the **last counted** message — the
-        // unpriced tail after it is looked at again next time (same rule as the count
-        // watermark above it).
-        val countedIndex = start - slice.baseIndex + lastPriced
-        val endBytes = slice.endOffsets?.getOrNull(countedIndex)
+        // Every committed assistant response is observed once, including unreported usage.
+        // Attaching usage later rewrites ChatStore's generation, which triggers a full rebuild.
         chats[slice.id] = ChatUsage(
-            days = days,
-            models = models,
-            scanned = start + lastPriced + 1,
-            scannedUpTo = newest,
-            scannedBytes = endBytes ?: previous.scannedBytes,
-            scannedGen = if (slice.endOffsets != null) slice.gen else previous.scannedGen,
+            days = days, models = models, dailyModels = dailyModels,
+            scanned = slice.baseIndex + slice.messages.size, scannedUpTo = newest,
+            scannedBytes = slice.endOffsets?.lastOrNull() ?: previous.scannedBytes,
+            scannedGen = slice.gen, sourceStamp = slice.sourceStamp,
         )
     }
     return UsageSnapshot(chats = chats)
@@ -385,3 +412,29 @@ internal fun byModelOf(snapshot: UsageSnapshot): List<ModelUsage> =
     snapshot.models.entries
         .sortedByDescending { it.value.total }
         .map { (model, tally) -> ModelUsage(model, tally) }
+
+data class UsageWindow(val days: List<DayUsage>, val models: List<ModelUsage>, val usage: UsageBucket)
+
+/** Calendar days, including gaps; all charts and totals use exactly the same inclusive range. */
+fun usageWindow(snapshot: UsageSnapshot, count: Int, end: LocalDate = LocalDate.now()): UsageWindow {
+    require(count in 1..366)
+    val dates = (count - 1 downTo 0).map { end.minusDays(it.toLong()).toString() }
+    val dateSet = dates.toHashSet()
+    val daily = mutableMapOf<String, UsageBucket>()
+    val models = mutableMapOf<String, UsageBucket>()
+    snapshot.chats.values.forEach { chat ->
+        chat.dailyModels.forEach { (date, byModel) ->
+            if (date in dateSet) byModel.forEach { (model, bucket) ->
+                daily[date] = (daily[date] ?: UsageBucket()) + bucket
+                models[model] = (models[model] ?: UsageBucket()) + bucket
+            }
+        }
+    }
+    val days = dates.map { date ->
+        val bucket = daily[date] ?: UsageBucket()
+        DayUsage(date, bucket.tokens, bucket.reported, bucket.unreported)
+    }
+    return UsageWindow(days, models.entries.sortedWith(compareByDescending<Map.Entry<String, UsageBucket>> { it.value.tokens.total }
+        .thenBy { it.key }).map { (model, bucket) -> ModelUsage(model, bucket.tokens, bucket.reported, bucket.unreported) },
+        daily.values.fold(UsageBucket()) { sum, bucket -> sum + bucket })
+}

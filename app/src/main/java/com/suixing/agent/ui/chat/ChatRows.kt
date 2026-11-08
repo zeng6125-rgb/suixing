@@ -95,6 +95,9 @@ import java.util.Locale
 
 // 模型层：气泡分组、分页、圆环读数、待办行、跳转轨窗口、附件。纯函数，单测覆盖。
 
+/** Bound child conversations share the renderer, while their parent owns all input. */
+internal val LocalChatReadOnly = compositionLocalOf { false }
+
 /**
  * One bubble of the transcript: the message that owns it, the parts of the reply in the
  * order they arrived, and whether it opens a new time bucket.
@@ -1040,7 +1043,9 @@ internal fun MessageActions(message: StoredMessage, onEdit: (StoredMessage) -> U
         TinyAction(ImageVector.vectorResource(R.drawable.ic_copy), "复制") {
             copy(message.text)
         }
-        TinyAction(ImageVector.vectorResource(R.drawable.ic_square_pen), "修改") { onEdit(message) }
+        if (!LocalChatReadOnly.current) {
+            TinyAction(ImageVector.vectorResource(R.drawable.ic_square_pen), "修改") { onEdit(message) }
+        }
     }
 }
 
@@ -1364,15 +1369,19 @@ internal fun AssistantRow(
     card: Boolean = true,
     /** 外观 → 扁平样式下的左右内边距；卡片模式忽略它（用卡片自己的 16dp）。 */
     flatPad: Dp = 0.dp,
-    /** Confirmed file changes/deliveries; live rows derive these solely from tool messages. */
+    /** Confirmed file changes/deliveries, shown only after the whole reply has finished. */
     fileActivities: List<FileActivity>? = null,
     onBranch: (String, String) -> Unit = { _, _ -> },
     onRegenerate: () -> Unit = {},
     onEdit: (StoredMessage) -> Unit = {},
 ) {
-    val gatheredFiles = fileActivities ?: remember(IdentityKey(parts)) { fileActivitiesFor(parts) }
-    // Text-only streaming deltas keep the small, unchanged metadata list's identity.
-    val files = remember(gatheredFiles) { gatheredFiles }
+    val files = if (streaming) {
+        // No footer during the run; do not repeatedly fold invisible tool metadata on token updates.
+        emptyList()
+    } else {
+        val gatheredFiles = fileActivities ?: remember(IdentityKey(parts)) { fileActivitiesFor(parts) }
+        remember(gatheredFiles) { gatheredFiles }
+    }
     val processRun = runId.ifBlank { message?.id ?: "unkeyed" }
     if (streaming) reasoningExpansion.protectRun(processRun)
     val deferredCompletion by remember(reasoningExpansion, processRun) {
@@ -1551,52 +1560,53 @@ internal fun AssistantRow(
                     }
                 }
             }
-            if (message != null && !streaming) {
-                // The last block carries no trailing spacer of its own, so the air
-                // above this row is its own 10dp.
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    // **内边距提到整行**：原来只有 [MessageActions] 那组自带
-                    // `padding(top = 2.dp, start = 2.dp)`，于是「复制/修改」比「重新回答」
-                    // 和「回答切换箭头」低了 2dp、右了 2dp（用户：「重新回答和前面两个没有对齐」）。
-                    // 放到行上，整行四个元素共用同一个基准。
-                    modifier = Modifier.padding(top = 2.dp, start = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // **动作在左、数据在右**（用户：「复制和修改回复的icon移至左侧，如果是最
-                    // 新一轮会有个重新回答的话则加在其后面，用时和用量贴右」）。
-                    // 顺序：复制 · 修改 · 重新回答（有才画）· 回答切换箭头 —— 箭头放在最后，
-                    // 因为它是「这是第几个回答」的导航，跟在同组动作末尾比夹在中间稳。
-                    if (LocalAccessibleChatActions.current || LocalConfiguration.current.screenWidthDp < 360 || LocalDensity.current.fontScale >= 1.3f) {
-                        ReplyActionsMenu(message, branch, onEdit, onRegenerate, onBranch)
-                    } else {
-                    MessageActions(message = message, onEdit = onEdit)
-                    // 盒间一律 1dp：图标贴盒左以后，盒右内部那 11dp + 这里 1dp = **图标间距 12dp**。
-                    if (branch?.canRegenerate == true) {
+            AssistantReplyFooter(
+                activities = files,
+                streaming = streaming,
+                actions = if (message == null) null else { {
+                    Row(
+                        // **内边距提到整行**：原来只有 [MessageActions] 那组自带
+                        // `padding(top = 2.dp, start = 2.dp)`，于是「复制/修改」比「重新回答」
+                        // 和「回答切换箭头」低了 2dp、右了 2dp（用户：「重新回答和前面两个没有对齐」）。
+                        // 放到行上，整行四个元素共用同一个基准。
+                        modifier = Modifier.padding(top = 2.dp, start = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // **动作在左、数据在右**（用户：「复制和修改回复的icon移至左侧，如果是最
+                        // 新一轮会有个重新回答的话则加在其后面，用时和用量贴右」）。
+                        // 顺序：复制 · 修改 · 重新回答（有才画）· 回答切换箭头 —— 箭头放在最后，
+                        // 因为它是「这是第几个回答」的导航，跟在同组动作末尾比夹在中间稳。
+                        if (LocalAccessibleChatActions.current || LocalConfiguration.current.screenWidthDp < 360 || LocalDensity.current.fontScale >= 1.3f) {
+                            ReplyActionsMenu(message, branch, onEdit, onRegenerate, onBranch)
+                        } else {
+                        MessageActions(message = message, onEdit = onEdit)
+                        // 盒间一律 1dp：图标贴盒左以后，盒右内部那 11dp + 这里 1dp = **图标间距 12dp**。
+                        if (!LocalChatReadOnly.current && branch?.canRegenerate == true) {
+                            Spacer(Modifier.width(1.dp))
+                            RegenerateAction(onRegenerate = onRegenerate)
+                        }
                         Spacer(Modifier.width(1.dp))
-                        RegenerateAction(onRegenerate = onRegenerate)
+                        if (!LocalChatReadOnly.current) ActionBar(branch = branch, onBranch = onBranch)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        // The round's clock and cost, pinned to the right edge: they are two
+                        // questions about the answer, read as one group.
+                        TurnMetrics(
+                            // The run's own clock when we have it: one round's call is not what
+                            // the status line counted while the answer was arriving.
+                            elapsedMs = if (runElapsedMs > 0) runElapsedMs else message.elapsedMs,
+                            firstTokenMs = message.firstTokenMs,
+                            promptTokens = message.promptTokens,
+                            completionTokens = message.completionTokens,
+                            cachedTokens = message.cachedTokens,
+                            engineLabel = engineLabel,
+                            // 官方口径 TPS：usage 是这个 run 所有轮的聚合（Σcompletion、ΣdecodeMs），
+                            // perSecond 已按 decodeMs 算好。null（端点没报 usage）就不画那一行。
+                            tps = usage?.perSecond ?: 0.0,
+                        )
                     }
-                    Spacer(Modifier.width(1.dp))
-                    ActionBar(branch = branch, onBranch = onBranch)
-                    }
-                    Spacer(Modifier.weight(1f))
-                    // The round's clock and cost, pinned to the right edge: they are two
-                    // questions about the answer, read as one group.
-                    TurnMetrics(
-                        // The run's own clock when we have it: one round's call is not what
-                        // the status line counted while the answer was arriving.
-                        elapsedMs = if (runElapsedMs > 0) runElapsedMs else message.elapsedMs,
-                        firstTokenMs = message.firstTokenMs,
-                        promptTokens = message.promptTokens,
-                        completionTokens = message.completionTokens,
-                        cachedTokens = message.cachedTokens,
-                        engineLabel = engineLabel,
-                        // 官方口径 TPS：usage 是这个 run 所有轮的聚合（Σcompletion、ΣdecodeMs），
-                        // perSecond 已按 decodeMs 算好。null（端点没报 usage）就不画那一行。
-                        tps = usage?.perSecond ?: 0.0,
-                    )
-                }
-            }
+                } },
+            )
         }
     }
     // 外观 → 助手回复样式。两种模式共用上面那份内容，只有外层容器不同：
@@ -1628,10 +1638,6 @@ internal fun AssistantRow(
                     .widthIn(max = bubbleMaxWidth)
                     .fillMaxWidth(),
             ) { cardBody() }
-        }
-        if (files.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            ChatFileActivity(files)
         }
     }
 }

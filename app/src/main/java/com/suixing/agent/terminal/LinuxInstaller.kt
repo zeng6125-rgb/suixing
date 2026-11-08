@@ -72,7 +72,9 @@ internal class LinuxInstaller(private val context: Context, private val scope: C
 
     fun install(distro: LinuxDistro) {
         if (!operation.tryLock()) return
-        installation = scope.launch(Dispatchers.IO) {
+        // Publish the job and its completion owner before dispatch. A cancelled lazy job
+        // never enters the body, so the body's finally cannot be the mutex owner.
+        val pending = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             val target = File(directory, distro.id)
             val staging = File(directory, "." + distro.id + "-install")
             val backup = File(directory, "." + distro.id + "-old")
@@ -154,9 +156,11 @@ internal class LinuxInstaller(private val context: Context, private val scope: C
                 update(LinuxPhase.FAILED, message = error.message ?: error.javaClass.simpleName)
             } finally {
                 withContext(NonCancellable) { runCatching { deleteLinuxTree(staging.toPath()) } }
-                operation.unlock()
             }
         }
+        installation = pending
+        pending.invokeOnCompletion { operation.unlock() }
+        pending.start()
     }
 
     fun cancel() { installation?.cancel(); activeCall?.cancel() }

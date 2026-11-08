@@ -69,6 +69,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
 import okhttp3.Call
 import java.io.File
 import java.io.IOException
@@ -79,85 +80,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.cancellation.CancellationException
-
-/** Everything the UI needs to render while the agent is working. */
-sealed interface AgentEvent {
-    data class TextDelta(val text: String) : AgentEvent
-
-    /** The model's thinking, when the endpoint streams it apart from the answer. */
-    data class ReasoningDelta(val text: String) : AgentEvent
-
-    data class AssistantMessage(val message: StoredMessage) : AgentEvent
-
-    data class ToolStarted(val name: String, val args: String) : AgentEvent
-
-    data class ToolMessage(val message: StoredMessage) : AgentEvent
-
-    data class ToolFinished(
-        val name: String,
-        val ok: Boolean,
-        val output: String,
-        val todoSnapshot: List<TodoItem>? = null,
-    ) : AgentEvent
-
-    data class Failed(val message: String) : AgentEvent
-
-    data class Finished(val text: String) : AgentEvent
-
-    /**
-     * One line the user slipped in has just been written into the prompt, in this order.
-     *
-     * The UI needs this to know a queued line was actually read: until it lands the line is still
-     * retractable and belongs nowhere in the transcript, and after it the bubble is history.
-     */
-    data class Steered(
-        val id: String,
-        val text: String,
-        /**
-         * The picture that came with the line, when there was one.
-         *
-         * It travels because the bubble the user sees is built from this event: without it the
-         * transcript would show a steer that silently lost its attachment, while the model had
-         * been sent it.
-         */
-        val imagesBase64: List<String> = emptyList(),
-    ) : AgentEvent
-
-    /**
-     * An attempt failed and the same request is going out again in [delayMs].
-     *
-     * The run is still Running — it has not stopped, it is waiting — so the screen needs to say so:
-     * a run that goes quiet for the length of a retry delay reads as one that ended, which is how
-     * 「发出去，几秒之后就停止」 was reported while the requests were in fact being retried.
-     */
-    data class Retrying(
-        /** Which attempt failed (1 = the first try). */
-        val attempt: Int,
-        /** How many retries the settings allow. */
-        val maxAttempts: Int,
-        val delayMs: Long,
-        /** Short and user-facing: why the attempt is being repeated. */
-        val reason: String,
-        /** The HTTP status that failed; null for a transport failure. For the trace, not the UI. */
-        val code: Int? = null,
-    ) : AgentEvent
-
-    /**
-     * 这一轮作废重来：已经流到屏幕上的内容不算数了。
-     *
-     * 只在"收到内容之后流断了、还能重试"时发出（[LlmClient][com.suixing.agent.llm.LlmClient] 的
-     * `onRestart`）。界面收到它就把本段 live parts 撤掉，否则重发的那一轮会把同一段开头再画一遍。
-     */
-    data object RoundRestarted : AgentEvent
-
-    /**
-     * 压缩摘要正在生成（true＝开始，false＝结束）。
-     *
-     * 没有它，压缩那几秒里状态行停在上一句（「正在调用 xxx」），看着像卡住 —— 用户要求
-     * run 中的压缩也要在状态行里说「正在压缩上下文」。
-     */
-    data class Compressing(val on: Boolean) : AgentEvent
-}
 
 /**
  * One line the user slipped in, waiting for the model's next turn.
@@ -199,227 +121,6 @@ private data class ToolOutcome(
     /** 给审批与事件用的参数预览（截断过的）。 */
     val argsPreview: String,
 )
-
-/**
- * Holds a tool call until the user answers. In ASK mode the agent coroutine
- * parks on a [CompletableDeferred], so the run resumes the moment the user taps
- * approve or reject in the UI.
- *
- * The mode arrives per call from the settings snapshot the run started with, so switching it
- * while a run is in flight does not change that run — the next one obeys the new mode. (The
- * composer's picker tells the user the same thing.)
- *
- * 「总是允许」 and 「总是拒绝」 are written to settings rather than kept in a field,
- * because a decision that evaporates on restart is not a memory, it is a nuisance.
- */
-class ApprovalGate(
-    private val settings: SettingsRepository? = null,
-    private val scope: CoroutineScope? = null,
-) {
-    data class Request(val id: String, val toolName: String, val args: String, val sequence: Long = 0,
-        val sourceTitle: String? = null, val rememberDecisions: Boolean = true)
-
-    private val requestSequence = AtomicLong()
-
-    /** Oldest requested approval wins, independently of the map implementation. */
-    fun oldestPending(requests: Map<String, Request>): Map.Entry<String, Request>? =
-        requests.entries.minByOrNull { it.value.sequence }
-
-    private data class Decision(val approved: Boolean, val always: Boolean)
-    private data class Waiter(val requestId: String, val deferred: CompletableDeferred<Decision>)
-
-    private val _pending = MutableStateFlow<Map<String, Request>>(emptyMap())
-    val pending: StateFlow<Map<String, Request>> = _pending.asStateFlow()
-
-    /** One waiter per run: two conversations asking at once must not overwrite each other. */
-    private val waiters = ConcurrentHashMap<String, Waiter>()
-
-    private val alwaysAllowed = ConcurrentHashMap.newKeySet<String>()
-
-    private val alwaysDenied = ConcurrentHashMap.newKeySet<String>()
-
-    private val _alwaysAllowed = MutableStateFlow<Set<String>>(emptySet())
-
-    private val _alwaysDenied = MutableStateFlow<Set<String>>(emptySet())
-
-    /** The tools the user said 「总是允许」 to, for the settings list. */
-    val alwaysAllowedTools: StateFlow<Set<String>> = _alwaysAllowed.asStateFlow()
-
-    /** The tools the user said 「总是拒绝」 to, for the settings list. */
-    val alwaysDeniedTools: StateFlow<Set<String>> = _alwaysDenied.asStateFlow()
-
-    init {
-        scope?.launch {
-            val saved = runCatching { settings?.current() }.getOrNull() ?: return@launch
-            alwaysAllowed.addAll(saved.alwaysAllowedTools)
-            alwaysDenied.addAll(saved.alwaysDeniedTools)
-            // A tool the user both allowed and denied at some point resolves to the
-            // refusal: the deny list only ever grows by an explicit tap, so it is the
-            // more deliberate of the two answers.
-            alwaysAllowed.removeAll(alwaysDenied)
-            _alwaysAllowed.value = alwaysAllowed.toSet()
-            _alwaysDenied.value = alwaysDenied.toSet()
-        }
-    }
-
-    suspend fun request(chatId: String, toolName: String, args: String, mode: ApprovalMode,
-        sourceTitle: String? = null, rememberDecisions: Boolean = true): Boolean {
-        when (mode) {
-            ApprovalMode.AUTO -> return true
-            ApprovalMode.DENY -> return false
-            ApprovalMode.ASK -> Unit
-        }
-        if (alwaysDenied.contains(toolName)) return false
-        if (rememberDecisions && alwaysAllowed.contains(toolName)) return true
-        val id = UUID.randomUUID().toString()
-        val deferred = CompletableDeferred<Decision>()
-        val waiter = Waiter(id, deferred)
-        waiters[chatId] = waiter
-        val request = Request(id, toolName, args, requestSequence.incrementAndGet(), sourceTitle, rememberDecisions)
-        _pending.update { it + (chatId to request) }
-        // 取消/异常时也要摘掉门，否则这个会话的审批门永久残留（issue #54 A-7）。
-        val decision = try {
-            deferred.await()
-        } finally {
-            waiters.remove(chatId, waiter)
-            _pending.update { if (it[chatId]?.id == id) it - chatId else it }
-        }
-        if (rememberDecisions && decision.always) {
-            if (decision.approved) rememberAlways(toolName) else rememberDenied(toolName)
-        }
-        return decision.approved
-    }
-
-    fun resolve(chatId: String, approved: Boolean, always: Boolean = false, expectedRequestId: String? = null) {
-        val waiter = waiters[chatId] ?: return
-        if (expectedRequestId == null || waiter.requestId == expectedRequestId) {
-            waiter.deferred.complete(Decision(approved, always))
-        }
-    }
-
-    /**
-     * Used when the user stops one run while its prompt is on screen. The state is
-     * cleared here rather than in [request] because a cancelled coroutine never
-     * resumes, which would otherwise leave the dialog on screen forever. Other runs'
-     * prompts stay up: stopping A must not answer B's question for the user.
-     */
-    fun cancelPending(chatId: String) {
-        waiters.remove(chatId)?.deferred?.complete(Decision(false, false))
-        _pending.update { it - chatId }
-    }
-
-    /** Forgets every remembered tool. */
-    fun forgetAlways() {
-        alwaysAllowed.clear()
-        _alwaysAllowed.value = emptySet()
-        persist()
-    }
-
-    /** Forgets one remembered tool, from the settings list. */
-    fun forgetAlways(toolName: String) {
-        if (!alwaysAllowed.remove(toolName)) return
-        _alwaysAllowed.value = alwaysAllowed.toSet()
-        persist()
-    }
-
-    /** Forgets every tool the user answered 「总是拒绝」 to. */
-    fun forgetDenied() {
-        alwaysDenied.clear()
-        _alwaysDenied.value = emptySet()
-        persist()
-    }
-
-    /** Forgets one refused tool, from the settings list. */
-    fun forgetDenied(toolName: String) {
-        if (!alwaysDenied.remove(toolName)) return
-        _alwaysDenied.value = alwaysDenied.toSet()
-        persist()
-    }
-
-    private fun rememberAlways(toolName: String) {
-        alwaysDenied.remove(toolName)
-        _alwaysDenied.value = alwaysDenied.toSet()
-        if (!alwaysAllowed.add(toolName)) return
-        _alwaysAllowed.value = alwaysAllowed.toSet()
-        persist()
-    }
-
-    private fun rememberDenied(toolName: String) {
-        alwaysAllowed.remove(toolName)
-        _alwaysAllowed.value = alwaysAllowed.toSet()
-        if (!alwaysDenied.add(toolName)) return
-        _alwaysDenied.value = alwaysDenied.toSet()
-        persist()
-    }
-
-    private fun persist() {
-        val repository = settings ?: return
-        val allowed = alwaysAllowed.sorted()
-        val denied = alwaysDenied.sorted()
-        (scope ?: return).launch {
-            runCatching { repository.update { it.copy(alwaysAllowedTools = allowed, alwaysDeniedTools = denied) } }
-        }
-    }
-}
-
-/**
- * How fast a run is going, in the only unit a streaming UI can show live.
- *
- * The token counts are estimates: the exact numbers only exist on the server and
- * arrive once, with the last chunk. Counting decoded text instead means the speed
- * readout moves while the model is still talking, which is the whole point of it.
- */
-data class StreamStats(
-    val tokensOut: Int,
-    val thinkingTokens: Int,
-    val elapsedMs: Long,
-    val tokPerSec: Float,
-    /**
-     * The prompt size the endpoint itself reported for the last round; 0 until it
-     * reports one. This is the only honest measure of 「上下文用了多少」 — counting
-     * the wire's characters would be a guess, and this number is handed to us.
-     */
-    val lastPromptTokens: Int = 0,
-    /**
-     * **当前这一轮请求**的实际大小（端点报过的真实值 + 自上次上报以来的增量估算）。
-     *
-     * 与 [lastPromptTokens]（上一轮上报值）的区别：wire 每轮在长，而 lastPromptTokens 要等本轮
-     * usage 回来才更新 —— 显示层拿它当「现在多大」会在轮内停在旧值、轮末跳一下。这个字段在
-     * 每轮请求定型时（wire 最终、工具表拼完）刷新，轮内稳定、跨轮单调，显示不再一会大一会小
-     * （用户报的「上下文窗口一会大一会小」）。首轮还没有任何端点读数时它是 chars 估算。
-     */
-    val currentPrompt: Int = 0,
-    /**
-     * Where the prompt goes, split three ways, for the breakdown bar in the UI.
-     *
-     * Estimated from characters, so the three do not have to add up to [lastPromptTokens]:
-     * one is counted and the other is reported. They are still worth having, because the
-     * question the bar answers — 「是历史太长，还是工具太多」 — only needs proportions.
-     */
-    val breakSystem: Int = 0,
-    val breakTools: Int = 0,
-    val breakHistory: Int = 0,
-    /**
-     * One line about the run that is not a statistic, e.g. that the context was just
-     * compressed. It rides here rather than in a new event because this flow is
-     * already the live channel both the chat screen and the floating console read.
-     */
-    val note: String = "",
-)
-
-/** What the engine is doing right now, for anything outside the chat screen. */
-sealed interface RunState {
-    data object Idle : RunState
-
-    /** Emitted continuously while a run streams. */
-    data class Running(val stats: StreamStats) : RunState
-
-    data class Done(val stats: StreamStats) : RunState
-
-    data class Cancelled(val stats: StreamStats) : RunState
-
-    data class Failed(val message: String) : RunState
-}
 
 /**
  * The agent loop: send the conversation to the model, execute whatever tools it asks
@@ -661,6 +362,7 @@ class AgentEngine(
         checkpoints: List<ContextCheckpoint> = emptyList(),
         onCheckpoint: (ContextCheckpoint) -> Unit = {},
         initialTool: ToolCallRequest? = null,
+        runId: String = UUID.randomUUID().toString(),
     ): List<StoredMessage> {
         // Check and register in one critical section: two coroutines starting the same
         // conversation (a double tap, or an isRunning check preempted before start) would
@@ -670,7 +372,7 @@ class AgentEngine(
             if (existing != null) {
                 null
             } else {
-                val created = RunHandle(chatId, title, settings)
+                val created = RunHandle(chatId, title, settings, runId)
                 runs.update { it + (chatId to created) }
                 created
             }
@@ -789,13 +491,13 @@ class AgentEngine(
         val chatId: String,
         val title: String,
         settings: AppSettings,
+        private val childParentRunId: String = UUID.randomUUID().toString(),
     ) {
         internal val terminalCaller = com.suixing.agent.terminal.TerminalCaller(chatId, UUID.randomUUID().toString())
         private val _state = MutableStateFlow<RunState>(RunState.Idle)
         private val completionReported = AtomicBoolean(false)
         private val cancellationReported = AtomicBoolean(false)
         @Volatile private var subagents: SubagentPool? = null
-        private val childParentRunId = UUID.randomUUID().toString()
         private val goalRun = goals?.let(::GoalRun)
         private val compactionRetry = CompactionRetryGate()
         private val ledger = RunLedger(settings.maxToolRounds)
@@ -1217,6 +919,11 @@ class AgentEngine(
         publish(RunState.Running(stats()))
 
         val produced = mutableListOf<StoredMessage>()
+        val exitPolicy = createExitPolicy(onEvent)
+        fun finish(exit: LoopExit): List<StoredMessage> {
+            exitPolicy.finish(exit)
+            return produced
+        }
         val wire = PromptMessages()
         // Which stored message each stretch of the wire came from. The wire has no ids of its own,
         // and a compression has to be able to name the messages it folded away — a checkpoint that
@@ -1239,6 +946,7 @@ class AgentEngine(
         var goalText = goalStore?.let { withContext(Dispatchers.IO) { it.read().objectiveFor(chatId) } }.orEmpty()
         var goalMode = false
         var goalClosing = false
+        var subagentSummaryOnly = false
         fun beginGoalSummary(goal: Goal?): Boolean {
             if (goal?.status != GoalStatus.COMPLETED && goal?.status != GoalStatus.BLOCKED) return false
             goalClosing = true
@@ -1252,9 +960,7 @@ class AgentEngine(
         }
         suspend fun finishGoal(): List<StoredMessage> {
             awaitSubagentsBeforeFinish()
-            onEvent(AgentEvent.Finished(""))
-            publish(RunState.Done(stats()))
-            return produced
+            return finish(LoopExit.GoalStopped)
         }
         val skillCatalog = withContext(Dispatchers.Default) {
             if (readable) skills.catalog(skills.listHeaders()) else ""
@@ -1399,6 +1105,31 @@ class AgentEngine(
             }
         }
 
+        suspend fun deliverSubagentResults(): Boolean {
+            val pool = subagents ?: return false
+            val completed = pool.unreportedResults()
+            if (completed.isEmpty()) return false
+            val arguments = JsonObject(mapOf("ids" to JsonArray(completed.map { JsonPrimitive(it.id) }))).toString()
+            val call = ToolCallRequest(UUID.randomUUID().toString(), "wait_agents", arguments)
+            // Use the same persisted tool-call/result pair as an explicit wait. This keeps
+            // provider replay valid and gives the parent the evidence before its next request.
+            val assistant = StoredMessage(
+                id = UUID.randomUUID().toString(), role = Roles.ASSISTANT,
+                toolCalls = listOf(StoredToolCall(call.id, call.name, arguments)),
+            )
+            produced += assistant
+            onEvent(AgentEvent.AssistantMessage(assistant))
+            val from = wire.size
+            wire += ChatMessage.assistant("", listOf(call))
+            spans += WireSpan(assistant.id, from, wire.size)
+            openCalls = assistant.toolCalls
+            onEvent(AgentEvent.ToolStarted(call.name, arguments))
+            val started = System.currentTimeMillis()
+            val result = withContext(Dispatchers.Default) { pool.execute(call.name, parseToolArguments(arguments)) }
+            commitTool(ToolOutcome(call, result, System.currentTimeMillis() - started, arguments))
+            return true
+        }
+
         try {
             // **工具目录在 run 开始时定一次**（issue #44 第三项，见循环内的说明）。
             // 放 Default 上拼：`enabledPlugins()` 在 TTL 过期时扫目录 + 逐插件 readText +
@@ -1422,57 +1153,18 @@ class AgentEngine(
                 )
             }
             if (delegationAllowed) {
-                val excluded = SUBAGENT_TOOL_NAMES + GOAL_TOOL_NAMES +
-                    setOf("todo_read", "todo_write", "create_assistant", "get_session_status")
-                val childCatalogue = frozenTable.specs.mapTo(HashSet()) { it.name } - excluded
-                subagents = SubagentPool(CoroutineScope(currentCoroutineContext() + Dispatchers.Default),
-                    parallelism = settings.subagentParallelism,
-                    resolveConfig = { options -> settings.resolveSubagentConfig(options, childCatalogue) },
-                    onCreated = { task -> SubagentRecords.create(chatId, childParentRunId, task, task.config) },
-                    onStatusChanged = { task, snapshot -> SubagentRecords.update(task.id, snapshot.status, snapshot.result) },
-                    onTerminated = { task -> SubagentRecords.terminated(task.id) },
-                    onChanged = { snapshots -> childStates.update { it + (chatId to snapshots) } }) { task ->
-                    SUBAGENT_EXECUTION_SLOTS.withPermit {
-                        val child = AgentEngine(llm = llm,
-                            approvalSourceTitle = "$title · 子任务：${task.name}", childConfig = task.config)
-                        val relay = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
-                            try { awaitCancellation() } finally { child.cancel(task.id) }
-                        }
-                        try {
-                            var failure: String? = null
-                            val childSettings = task.resolvedSettings.copy(subagentsEnabled = false, autoProfile = false,
-                                systemPrompt = task.resolvedSettings.systemPrompt + "\n\n" + CHILD_AGENT_INSTRUCTIONS)
-                            val input = buildString {
-                                append("Task:\n").append(task.task)
-                                if (task.context.isNotBlank()) append("\n\nRelevant context:\n").append(task.context)
-                                if (goalText.isNotBlank()) append("\n\nParent objective:\n").append(goalText)
-                            }
-                            val history = listOf(StoredMessage(id = task.id + "_input", role = Roles.USER, text = input))
-                            val childRegistry = registry.excluding(excluded + (registry.names().toSet() - task.config.allowedTools.toSet()))
-                            SubagentRecords.complete(task.id, history)
-                            val messages = child.startRun(chatId = task.id, title = task.name,
-                                history = history, settings = childSettings, registry = childRegistry,
-                                capabilities = capabilities, skills = skills, memory = memory, profile = profile, gate = gate,
-                                onEvent = { event ->
-                                    SubagentRecords.onEvent(task.id, event)
-                                    if (event is AgentEvent.Failed) failure = event.message
-                                })
-                            SubagentRecords.complete(task.id, history + messages)
-                            failure?.let { error(it) }
-                            messages.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }?.text
-                                ?: "子任务结束，未返回文字结果。"
-                        } finally { relay.cancel() }
-                    }
-                }
+                subagents = createSubagentPool(
+                    settings, frozenTable.specs, registry, capabilities, skills, memory, profile, gate,
+                    parentGoalText = { goalText },
+                )
                 subagentReadyChats.update { it + chatId }
             }
-            suspend fun executeDirectTools(): Boolean {
+            suspend fun executeDirectTools(): LoopExit? {
                 // User-invoked tools use the same approval, execution and transcript path as
                 // model tools. They run before complete(), never as a lossy bottom notice.
                 while (directTools.isNotEmpty()) {
                     if (cancelled.get()) {
-                        finishCancelled(onEvent, streamed, reasoning, openCalls)
-                        return false
+                        return LoopExit.Cancelled(streamed, reasoning, openCalls)
                     }
                     val queued = directTools.removeFirst()
                     queued.steer?.let { appendSteer(it, wire, spans, onEvent, settings) }
@@ -1491,30 +1183,32 @@ class AgentEngine(
                     openCalls = assistant.toolCalls
                     val outcome = executeOneTool(call, registry, frozenTable.plugins, frozenTable.hooks,
                         capabilities, gate, settings, chatId, onEvent, userInvoked = true) ?: run {
-                        finishCancelled(onEvent, streamed, reasoning, openCalls)
-                        return false
+                        return LoopExit.Cancelled(streamed, reasoning, openCalls)
                     }
                     commitTool(outcome)
                     if (!outcome.result.ok) {
                         awaitSubagentsBeforeFinish()
-                        onEvent(AgentEvent.Finished(""))
-                        publish(RunState.Done(stats()))
-                        return false
+                        return LoopExit.DirectToolRejected
                     }
                 }
-                return true
+                return null
             }
             initialTool?.let { directTools.addLast(QueuedDirectTool(it)) }
             while (true) {
-                if (!goalClosing && roundLimit > 0 && round >= roundLimit) {
-                    if (goalRun != null && goalRun.id.isNotEmpty()) {
-                        goalRun.block("已达到设置中的最大工具轮数（$roundLimit），可以继续")
-                        return finishGoal()
+                if (!goalClosing && !subagentSummaryOnly && roundLimit > 0 && round >= roundLimit) {
+                    if (subagents?.snapshots()?.isNotEmpty() == true) {
+                        awaitSubagentsBeforeFinish()
+                        deliverSubagentResults()
+                        subagentSummaryOnly = true
+                        wire += ChatMessage.user("工具轮数预算已用尽。请根据已返回的子任务结果汇总答复，说明未完成或失败项，不再执行工具。")
                     }
-                    val message = "已达到最大工具轮数（$roundLimit），任务未完成。"
-                    onEvent(AgentEvent.Failed(message))
-                    publish(RunState.Failed(message))
-                    return produced
+                    if (!subagentSummaryOnly) {
+                        if (goalRun != null && goalRun.id.isNotEmpty()) {
+                            goalRun.block("已达到设置中的最大工具轮数（$roundLimit），可以继续")
+                            return finishGoal()
+                        }
+                        return finish(LoopExit.StepLimit(roundLimit))
+                    }
                 }
                 round++
                 // Emptied at the top of the round rather than next to the call: by the time the
@@ -1527,9 +1221,13 @@ class AgentEngine(
                 // Steering lands here, on the boundary between two model turns: the
                 // model has finished the previous turn and has not been asked for the
                 // next one, which is the only moment the wire can be edited safely.
-                if (!goalClosing && directTools.isEmpty()) drainSteering(wire, spans, onEvent, settings)
-                if (!goalClosing && !executeDirectTools()) return produced
-                val updatedGoalMode = !goalClosing && goalRun != null && goalRun.id.isNotEmpty()
+                if (!goalClosing && !subagentSummaryOnly && directTools.isEmpty()) drainSteering(wire, spans, onEvent, settings)
+                if (!goalClosing && !subagentSummaryOnly) {
+                    executeDirectTools()?.let { return finish(it) }
+                }
+                // All preceding tool responses are committed before child results join the wire.
+                deliverSubagentResults()
+                val updatedGoalMode = !goalClosing && !subagentSummaryOnly && goalRun != null && goalRun.id.isNotEmpty()
                 val objective = if (updatedGoalMode) goalRun.beforeRequest() else goalStore?.read()
                 if (updatedGoalMode && objective?.status != GoalStatus.ACTIVE) {
                     if (beginGoalSummary(objective)) continue
@@ -1565,8 +1263,7 @@ class AgentEngine(
                 lastRetryReason = ""
                 cutNote = null
                 if (cancelled.get()) {
-                    finishCancelled(onEvent, streamed, reasoning, openCalls)
-                    return produced
+                    return finish(LoopExit.Cancelled(streamed, reasoning, openCalls))
                 }
 
                 // All results in the previous tool batch have landed. Append at the request tail
@@ -1584,14 +1281,10 @@ class AgentEngine(
                 // 现在目录在 run 开始时定一次（见循环外的 frozenTable），这里直接复用。
                 // 代价：插件热插拔的粒度从"下一个请求"变成"下一次 run"—— 这是刻意的取舍，
                 // 缓存前缀的稳定性比"中途装个插件立刻能用"更值钱。
-                val pluginSpecs = frozenTable.plugins
-                val toolSpecs = if (goalClosing) emptyList() else frozenTable.specs
-                // Hooks follow the same frozen plugin snapshot as the tool catalog. Flatten once
-                // on Default; each invocation still evaluates every applicable hook.
-                val hooks = frozenTable.hooks
+                val toolSpecs = if (goalClosing || subagentSummaryOnly) emptyList() else frozenTable.specs
                 // The frozen table's estimate is computed once on Default, including
                 // JSON serialization. No signature allocation or schema work per round.
-                breakTools = if (goalClosing) 0 else frozenTable.estimatedTokens
+                breakTools = if (goalClosing || subagentSummaryOnly) 0 else frozenTable.estimatedTokens
                 // 三个数字都来自同一份 wire：一次遍历算完，别为每个数字各扫一遍
                 // （大会话每轮要扫几十万字符，而这三处原本是三次独立的全量遍历）。
                 // **这一遍扫描也放后台**（issue #36 同类）：几十万字符的遍历不该占着主线程，
@@ -1674,8 +1367,7 @@ class AgentEngine(
                     // Cancelling a call surfaces as an IOException on the reading
                     // thread. It is a stop, not a failure, so it is reported as one.
                     if (cancelled.get()) {
-                            finishCancelled(onEvent, streamed, reasoning, openCalls)
-                        return produced
+                            return finish(LoopExit.Cancelled(streamed, reasoning, openCalls))
                     }
                     // An immediate steer aborts the stream the same way, but nothing is
                     // wrong: this round is abandoned so the next one can carry the line.
@@ -1693,8 +1385,7 @@ class AgentEngine(
                 // still being serialised — so nothing reads the flag, and this round would stream
                 // to the end and report the whole run as Done.
                 if (cancelled.get()) {
-                    finishCancelled(onEvent, streamed, reasoning, openCalls)
-                    return produced
+                    return finish(LoopExit.Cancelled(streamed, reasoning, openCalls))
                 }
                 val elapsed = System.currentTimeMillis() - turnStartedAt
                 val firstTokenMs = if (firstChunkAt > 0L) firstChunkAt - turnStartedAt else 0L
@@ -1762,7 +1453,7 @@ class AgentEngine(
                     // 消息上的过程留痕（[StoredMessage.traceNote]），画成过程块。
                     cutNote = "连接中断，这一轮的回答可能不完整"
                 }
-                if (goalClosing || turn.toolCalls.isEmpty()) {
+                if (goalClosing || subagentSummaryOnly || turn.toolCalls.isEmpty()) {
                     val assistant = StoredMessage(
                         id = UUID.randomUUID().toString(),
                         role = Roles.ASSISTANT,
@@ -1783,8 +1474,8 @@ class AgentEngine(
                     // the last one, so the run takes one more pass to read it. Finishing here
                     // instead would leave a steer bubble on screen that the model never saw, with
                     // nothing telling the user it went nowhere.
-                    if (!goalClosing && drainSteering(wire, spans, onEvent, settings) > 0) continue
-                    if (!goalClosing && goalRun != null && goalRun.id.isNotEmpty()) {
+                    if (!goalClosing && !subagentSummaryOnly && drainSteering(wire, spans, onEvent, settings) > 0) continue
+                    if (!goalClosing && !subagentSummaryOnly && goalRun != null && goalRun.id.isNotEmpty()) {
                         if (!goalRun.continueAfterPlainReply()) {
                             if (beginGoalSummary(goalRun.snapshot())) continue
                             return finishGoal()
@@ -1796,15 +1487,23 @@ class AgentEngine(
                         continue
                     }
                     if (goalClosing && turn.text.isBlank()) {
-                        val message = "目标运行已停止，但模型没有返回总结正文。"
-                        onEvent(AgentEvent.Failed(message))
-                        publish(RunState.Failed(message))
+                        return finish(LoopExit.MissingGoalSummary)
                     } else {
                         awaitSubagentsBeforeFinish()
-                        onEvent(AgentEvent.Finished(turn.text))
-                        publish(RunState.Done(stats()))
+                        if (deliverSubagentResults()) {
+                            // Allow result synthesis at the budget boundary without granting
+                            // another tool round or silently throwing away accepted child work.
+                            subagentSummaryOnly = roundLimit > 0 && round >= roundLimit
+                            if (subagentSummaryOnly) {
+                                wire += ChatMessage.user("工具轮数预算已用尽。请根据已返回的子任务结果汇总答复，说明未完成或失败项，不再执行工具。")
+                            } else if (!goalClosing && !cancelled.get()) {
+                                subagents?.resumeAdmission()
+                                subagentReadyChats.update { it + chatId }
+                            }
+                            continue
+                        }
+                        return finish(LoopExit.Done(turn.text))
                     }
-                    return produced
                 }
                 val assistant = StoredMessage(
                     id = UUID.randomUUID().toString(),
@@ -1835,75 +1534,10 @@ class AgentEngine(
                 reasoning = StringBuilder()
                 openCalls = assistant.toolCalls
 
-                // 并行度（对话配置「工具并行数」）：1＝串行，就是今天的行为，语义一字不改；
-                // N>1 时一轮内最多 N 条工具**同时**执行，但结果仍按模型请求的顺序回写 wire ——
-                // 端点对 tool 消息的顺序敏感，乱序会让下一轮读到错配的结果。
-                // **只在 AUTO 档生效**：ASK 档的授权弹窗每个会话只有一个待决位（ApprovalGate 的
-                // waiters 按 chatId 单槽），两条调用同时求授权会互相覆盖、死等；ASK 强制串行。
-                val parallel = if (settings.approvalMode == ApprovalMode.AUTO &&
-                    turn.toolCalls.none { it.name in GOAL_TOOL_NAMES }
-                ) {
-                    settings.toolParallel.coerceAtLeast(1)
-                } else {
-                    1
-                }
-                if (parallel <= 1) {
-                    for (call in turn.toolCalls) {
-                        // Checked before every call, not after the batch: a stop means the
-                        // tools the model asked for in the same breath do not run either.
-                        if (cancelled.get()) {
-                            finishCancelled(onEvent, streamed, reasoning, openCalls)
-                            return produced
-                        }
-                        val outcome = if (call.name == "goal_update" && turn.toolCalls.size > 1) {
-                            ToolOutcome(call, ToolResult.failure("Call goal_update by itself, after the other tools have returned."),
-                                0, call.arguments.take(600))
-                        } else {
-                            executeOneTool(
-                                call, registry, pluginSpecs, hooks, capabilities, gate, settings, chatId, onEvent,
-                            ) ?: run {
-                                finishCancelled(onEvent, streamed, reasoning, openCalls)
-                                return produced
-                            }
-                        }
-                        commitTool(outcome)
-                    }
-                } else {
-                    // 分块并发：一块最多 parallel 条同时跑（async 全部起飞），块内按原顺序 await 并
-                    // 回写，再放下一块。块与块之间是一道屏障 —— 换来的是「顺序回写」这条硬约束的
-                    // 简单实现，且取消检查落在每块开头与每条执行的开头。coroutineScope 保证块里的
-                    // async 都收干净才往下走（含异常路径）。
-                    // **不可并行的工具自成一组**（GUI 手势 / 会话式 shell / 特权写操作）：
-                    // 它们改的是同一块屏幕或同一个 shell 会话，并发提交会互相踩。纯读类照旧
-                    // 并行 —— 分块宽度不变，只是把这些调用前后切开了（见 ToolBatching.kt）。
-                    val groups = batchGroups(turn.toolCalls.map { it.name }, parallel)
-                    for (chunk in groups.map { g -> g.map { turn.toolCalls[it] } }) {
-                        if (cancelled.get()) {
-                            finishCancelled(onEvent, streamed, reasoning, openCalls)
-                            return produced
-                        }
-                        val outcomes = coroutineScope {
-                            val deferreds = chunk.map { call ->
-                                // **指定 IO**（#36 C）：`async` 不带 dispatcher 会继承 runLoop 的
-                                // Main —— 所谓「并行」实际是「在 Main 上交错排队」。gate（ConcurrentHashMap
-                                // + StateFlow）与 TouchFx（内部 Handler post Main）都线程安全，可整体下放。
-                                async(Dispatchers.IO) {
-                                    executeOneTool(
-                                        call, registry, pluginSpecs, hooks, capabilities, gate, settings, chatId, onEvent,
-                                    )
-                                }
-                            }
-                            deferreds.map { it.await() }
-                        }
-                        for (outcome in outcomes) {
-                            if (outcome == null) {
-                                // 这条在执行开头看到取消：收尾，同块其余的 await 已返回或已取消。
-                                finishCancelled(onEvent, streamed, reasoning, openCalls)
-                                return produced
-                            }
-                            commitTool(outcome)
-                        }
-                    }
+                if (!executeToolRequests(
+                        turn.toolCalls, settings, registry, frozenTable, capabilities, gate, onEvent, ::commitTool,
+                    )) {
+                    return finish(LoopExit.Cancelled(streamed, reasoning, openCalls))
                 }
                 if (goalRun != null && goalRun.id.isNotEmpty()) {
                     val goal = goalRun.snapshot()
@@ -1921,16 +1555,12 @@ class AgentEngine(
             // would kill the finally of whoever merely asked for a run. A cancellation that came
             // from the caller's own scope is the other thing entirely and still travels as one.
             if (cancelled.get() && caller?.isCancelled != true) {
-                finishCancelled(onEvent, streamed, reasoning, openCalls)
-                return produced
+                return finish(LoopExit.Cancelled(streamed, reasoning, openCalls))
             }
             // The caller's scope is gone: the stream still has to be taken down, the paragraph
             // that already arrived still has to be kept, and the state still has to say what
             // happened — by hand, because this branch rethrows.
-            emitPartial(onEvent, streamed, reasoning)
-            unansweredToolMessages(onEvent, openCalls)
-            publish(RunState.Cancelled(stats()))
-            throw cancellation
+            return finish(LoopExit.CallerCancelled(cancellation, streamed, reasoning, openCalls))
         } catch (error: Throwable) {
             // Cutting the wire makes OkHttp throw IOException("Canceled"), so a run the user
             // stopped lands here rather than in the CancellationException branch above. It is
@@ -1938,15 +1568,9 @@ class AgentEngine(
             // screen for a button the user just pressed, and the caller would be handed a
             // throwable it turns into one too.
             if (cancelled.get()) {
-                finishCancelled(onEvent, streamed, reasoning, openCalls)
-                return produced
+                return finish(LoopExit.Cancelled(streamed, reasoning, openCalls))
             }
-            val message = (error.message ?: error::class.java.simpleName) + retryNote(retriesThisRound)
-            publish(RunState.Failed(message))
-            // The chat screen shows the *thrown* error's message, so the note has to travel with it
-            // too — otherwise the number only ever appears in the console. Wrapped rather than
-            // rebuilt: the original rides along as the cause, so nothing about it is lost.
-            throw if (retriesThisRound > 0) LlmException(message, error) else error
+            return finish(LoopExit.Failed(error, retriesThisRound))
         } finally {
             withContext(NonCancellable) {
                 if (subagents != null) {
@@ -1968,18 +1592,146 @@ class AgentEngine(
         }
     }
 
-    /**
-     * 「（已重试 N 次）」 for a failure that used up its retries, empty otherwise.
-     *
-     * A user who waited through two retries is owed the number: without it the same error reads
-     * like the first attempt failed, and the retry setting looks like it did nothing.
-     */
-    private fun retryNote(retries: Int): String = if (retries > 0) "（已重试 $retries 次）" else ""
+    /** Create children on this run's job; the parent objective stays a live provider. */
+    private suspend fun createSubagentPool(
+        settings: AppSettings,
+        specs: List<ToolSpec>,
+        registry: ToolRegistry,
+        capabilities: CapabilityHub,
+        skills: SkillStore,
+        memory: MemoryStore,
+        profile: UserProfileStore,
+        gate: ApprovalGate,
+        parentGoalText: () -> String,
+    ): SubagentPool {
+        val excluded = SUBAGENT_TOOL_NAMES + GOAL_TOOL_NAMES +
+            setOf("todo_read", "todo_write", "create_assistant", "get_session_status")
+        val childCatalogue = specs.mapTo(HashSet()) { it.name } - excluded
+        return SubagentPool(CoroutineScope(currentCoroutineContext() + Dispatchers.Default),
+            parallelism = settings.subagentParallelism,
+            resolveConfig = { options -> settings.resolveSubagentConfig(options, childCatalogue) },
+            onCreated = { task -> SubagentRecords.create(chatId, childParentRunId, task, task.config) },
+            onStatusChanged = { task, snapshot -> SubagentRecords.update(task.id, snapshot.status, snapshot.result) },
+            onTerminated = { task -> SubagentRecords.terminated(task.id) },
+            onChanged = { snapshots -> childStates.update { it + (chatId to snapshots) } }) { task ->
+            SUBAGENT_EXECUTION_SLOTS.withPermit {
+                val child = AgentEngine(llm = llm,
+                    approvalSourceTitle = "$title · 子任务：${task.name}", childConfig = task.config)
+                val relay = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
+                    try { awaitCancellation() } finally { child.cancel(task.id) }
+                }
+                try {
+                    var failure: String? = null
+                    val childSettings = task.resolvedSettings.copy(subagentsEnabled = false, autoProfile = false,
+                        systemPrompt = task.resolvedSettings.systemPrompt + "\n\n" + CHILD_AGENT_INSTRUCTIONS)
+                    val input = buildString {
+                        append("Task:\n").append(task.task)
+                        if (task.context.isNotBlank()) append("\n\nRelevant context:\n").append(task.context)
+                        if (parentGoalText().isNotBlank()) append("\n\nParent objective:\n").append(parentGoalText())
+                    }
+                    val history = listOf(StoredMessage(id = task.id + "_input", role = Roles.USER, text = input))
+                    val childRegistry = registry.excluding(excluded + (registry.names().toSet() - task.config.allowedTools.toSet()))
+                    SubagentRecords.complete(task.id, history)
+                    val messages = child.startRun(chatId = task.id, title = task.name,
+                        history = history, settings = childSettings, registry = childRegistry,
+                        capabilities = capabilities, skills = skills, memory = memory, profile = profile, gate = gate,
+                        onEvent = { event ->
+                            SubagentRecords.onEvent(task.id, event)
+                            if (event is AgentEvent.Failed) failure = event.message
+                        })
+                    SubagentRecords.complete(task.id, history + messages)
+                    failure?.let { error(it) }
+                    messages.lastOrNull { it.role == Roles.ASSISTANT && it.text.isNotBlank() }?.text
+                        ?: "子任务结束，未返回文字结果。"
+                } finally { relay.cancel() }
+            }
+        }
+    }
+
+    /** Execute in request order; only the caller's commit function mutates its wire/transcript. */
+    private suspend fun executeToolRequests(
+        calls: List<ToolCallRequest>,
+        settings: AppSettings,
+        registry: ToolRegistry,
+        table: ToolTable,
+        capabilities: CapabilityHub,
+        gate: ApprovalGate,
+        onEvent: (AgentEvent) -> Unit,
+        commit: suspend (ToolOutcome) -> Unit,
+    ): Boolean {
+        // 并行度（对话配置「工具并行数」）：1＝串行，就是今天的行为，语义一字不改；
+        // N>1 时一轮内最多 N 条工具**同时**执行，但结果仍按模型请求的顺序回写 wire ——
+        // 端点对 tool 消息的顺序敏感，乱序会让下一轮读到错配的结果。
+        // **只在 AUTO 档生效**：ASK 档的授权弹窗每个会话只有一个待决位（ApprovalGate 的
+        // waiters 按 chatId 单槽），两条调用同时求授权会互相覆盖、死等；ASK 强制串行。
+        val parallel = if (settings.approvalMode == ApprovalMode.AUTO &&
+            calls.none { it.name in GOAL_TOOL_NAMES }
+        ) {
+            settings.toolParallel.coerceAtLeast(1)
+        } else {
+            1
+        }
+        if (parallel <= 1) {
+            for (call in calls) {
+                // Checked before every call, not after the batch: a stop means the
+                // tools the model asked for in the same breath do not run either.
+                if (cancelled.get()) {
+                    return false
+                }
+                val outcome = if (call.name == "goal_update" && calls.size > 1) {
+                    ToolOutcome(call, ToolResult.failure("Call goal_update by itself, after the other tools have returned."),
+                        0, call.arguments.take(600))
+                } else {
+                    executeOneTool(
+                        call, registry, table.plugins, table.hooks, capabilities, gate, settings, chatId, onEvent,
+                    ) ?: run {
+                        return false
+                    }
+                }
+                commit(outcome)
+            }
+        } else {
+            // 分块并发：一块最多 parallel 条同时跑（async 全部起飞），块内按原顺序 await 并
+            // 回写，再放下一块。块与块之间是一道屏障 —— 换来的是「顺序回写」这条硬约束的
+            // 简单实现，且取消检查落在每块开头与每条执行的开头。coroutineScope 保证块里的
+            // async 都收干净才往下走（含异常路径）。
+            // **不可并行的工具自成一组**（GUI 手势 / 会话式 shell / 特权写操作）：
+            // 它们改的是同一块屏幕或同一个 shell 会话，并发提交会互相踩。纯读类照旧
+            // 并行 —— 分块宽度不变，只是把这些调用前后切开了（见 ToolBatching.kt）。
+            val groups = batchGroups(calls.map { it.name }, parallel)
+            for (chunk in groups.map { g -> g.map { calls[it] } }) {
+                if (cancelled.get()) {
+                    return false
+                }
+                val outcomes = coroutineScope {
+                    val deferreds = chunk.map { call ->
+                        // **指定 IO**（#36 C）：`async` 不带 dispatcher 会继承 runLoop 的
+                        // Main —— 所谓「并行」实际是「在 Main 上交错排队」。gate（ConcurrentHashMap
+                        // + StateFlow）与 TouchFx（内部 Handler post Main）都线程安全，可整体下放。
+                        async(Dispatchers.IO) {
+                            executeOneTool(
+                                call, registry, table.plugins, table.hooks, capabilities, gate, settings, chatId, onEvent,
+                            )
+                        }
+                    }
+                    deferreds.map { it.await() }
+                }
+                for (outcome in outcomes) {
+                    if (outcome == null) {
+                        // 这条在执行开头看到取消：收尾，同块其余的 await 已返回或已取消。
+                        return false
+                    }
+                    commit(outcome)
+                }
+            }
+        }
+        return true
+    }
 
     /**
      * 这一轮**成功**、但中途重试过时，留在消息上的那条过程记录。
      *
-     * 与 [retryNote] 的分工：那条是失败回执的一部分（「已重试 2 次」说明为什么这轮这么久），
+     * 与 [LoopExitPolicy] 的分工：终态策略保留失败回执的「已重试 2 次」，说明为什么这轮这么久，
      * 这条是**成功**的过程块（用户：「重试成功要在过程态中留痕……整轮成功就不要有错误提示卡片」）。
      * 没有重试就返回 null —— 不留空块。
      */
@@ -2017,17 +1769,28 @@ class AgentEngine(
         reasoning: CharSequence = "",
         unanswered: List<StoredToolCall> = emptyList(),
     ) {
-        // Cancellation can cross both runLoop and execute; keep one transcript and one end event.
-        if (!cancellationReported.compareAndSet(false, true)) return
-        emitPartial(onEvent, partial, reasoning, note = ledger.summary().takeIf { it.isNotBlank() })
-        // A call the model asked for and the stop arrived before: the transcript keeps the request,
-        // so something has to answer it. Without a result the card drew empty, which reads as a tool
-        // that returned nothing rather than as one that never ran — and the next run's replay would
-        // drop the whole assistant turn for being unanswered.
-        unansweredToolMessages(onEvent, unanswered)
-        onEvent(AgentEvent.Finished(""))
-        publish(RunState.Cancelled(stats()))
+        createExitPolicy(onEvent).finish(LoopExit.Cancelled(partial, reasoning, unanswered))
     }
+
+    /** Shared by the running loop and the registration-before-start cancellation race. */
+    private fun createExitPolicy(onEvent: (AgentEvent) -> Unit): LoopExitPolicy = LoopExitPolicy(
+        onEvent = onEvent,
+        publish = ::publish,
+        stats = ::stats,
+        prepareCancelled = { exit ->
+            // A stop can cross both runLoop and execute; commit its transcript only once.
+            if (cancellationReported.compareAndSet(false, true)) {
+                emitPartial(onEvent, exit.partial, exit.reasoning, note = ledger.summary().takeIf { it.isNotBlank() })
+                unansweredToolMessages(onEvent, exit.unanswered)
+                true
+            } else false
+        },
+        prepareCallerCancellation = { exit ->
+            // Scope cancellation must still preserve streamed content and answer open tool calls.
+            emitPartial(onEvent, exit.partial, exit.reasoning)
+            unansweredToolMessages(onEvent, exit.unanswered)
+        },
+    )
 
     /**
      * Answers, in the transcript, the tool calls a stop left hanging.
@@ -2779,7 +2542,9 @@ class AgentEngine(
             "\n\nFor substantial independent tasks, you may use spawn_agent to work in parallel. " +
                 "Keep simple work local. Pass only relevant context: children do not inherit this conversation. " +
                 "Use wait_agents to collect results, verify them, and cancel unneeded children. " +
-                "Normal completion waits for accepted children; stopping the parent cancels them. " +
+                "Completed child results may also arrive automatically as wait_agents responses between rounds. " +
+                "Read them as evidence, verify and integrate them into your final reply. " +
+                "Normal completion waits for accepted children and resumes you with unread results; stopping the parent cancels them. " +
                 "Use wait_agents before finishing while required results are outstanding.")
         // 接线点 A（HOST-DEV §5）：让模型知道插件工具也能调，命名与内置一致。
         // 这句是**固定文案**：插件列表是实时变的，而 systemPrompt() 不是 suspend（读盘要 suspend），
