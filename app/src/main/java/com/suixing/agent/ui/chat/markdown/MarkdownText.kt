@@ -110,35 +110,8 @@ sealed interface MdBlock {
 
 // Every pattern is compiled once, here. Building a Regex per line leaks native
 // ICU buffers and has aborted the process before, so never move these inward.
-private val MD_FENCE = Regex("`{3,}\\s*([^`\\s]*)")
 
-/**
- * A closing fence is a line of nothing but backticks. The opening test is just as
- * strict, so a fence the model wrote on the same line as its content (```echo x)
- * cannot pair with a stray closing fence somewhere below and swallow the reply
- * into an empty code box.
- */
-private val MD_FENCE_CLOSE = Regex("^`{3,}\\s*$")
-private val MD_HEADING = Regex("(#{1,6})\\s+(.*)")
-private val MD_RULE = Regex("\\s*([-*_])(\\s*\\1){2,}\\s*")
-private val MD_BULLET = Regex("(\\s*)[-*+]\\s+(.*)")
-private val MD_ORDERED = Regex("(\\s*)(\\d+)[.)]\\s+(.*)")
-private val MD_TABLE_CELL = Regex(":?-+:?")
-
-/** U+2009. Inline code has no padding of its own, so this is what gives it any. */
-private const val THIN = "\u2009"
-private const val FENCE = "```"
-
-/** Nesting depth from a list marker's leading whitespace: two spaces or one tab per level. */
-private fun indentDepth(whitespace: String): Int {
-    var spaces = 0
-    whitespace.forEach { spaces += if (it == '\t') 2 else 1 }
-    // Capped: a line indented by a screen's width is a formatting accident, and past four
-    // levels the text is too narrow to read anyway.
-    return (spaces / 2).coerceIn(0, MAX_LIST_DEPTH)
-}
-
-private const val MAX_LIST_DEPTH = 4
+internal const val MAX_LIST_DEPTH = 4
 
 /**
  * The largest marker a list may start at.
@@ -147,7 +120,7 @@ private const val MAX_LIST_DEPTH = 4
  * and a wider number would push the item text off its own row. It also keeps `start + index`
  * inside an Int for a source that wrote an absurd number.
  */
-private const val MAX_LIST_START = 9999
+internal const val MAX_LIST_START = 9999
 
 /**
  * The literal number a list marker carried, ready to be a [MdBlock.Bullet.start].
@@ -1956,4 +1929,3 @@ private fun TableCells(
         }
     }
 }
-

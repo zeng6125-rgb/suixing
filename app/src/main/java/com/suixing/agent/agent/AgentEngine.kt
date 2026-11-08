@@ -82,47 +82,6 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * One line the user slipped in, waiting for the model's next turn.
- *
- * File level rather than a member of the run handle: the parser refuses a class declaration nested
- * inside an `inner class` (`'Class' is prohibited here`), and both this and [WireSpan] are only
- * names for the run's own bookkeeping.
- */
-private data class Steer(
-    val id: String,
-    val text: String,
-    val imagesBase64: List<String> = emptyList(),
-    val directTool: ToolCallRequest? = null,
-)
-
-private data class QueuedDirectTool(val call: ToolCallRequest, val steer: Steer? = null)
-
-/**
- * Which stored message a stretch of the wire came from: [from] is where it starts and [to] is one
- * past its last entry.
- *
- * The wire carries no ids of its own, and a checkpoint has to be able to name the messages it
- * folded away — a compression that cannot say what it covered can never be resumed from.
- */
-private data class WireSpan(val id: String, val from: Int, val to: Int)
-
-/**
- * 一条工具调用的执行结果，与「把它写回 wire」分离（[executeOneTool] 只产这个，[runLoop] 里的
- * commitTool 才碰 wire/spans/produced/openCalls）。
- *
- * 分离是并行的前提：执行阶段（可能很慢、可并发）不碰任何 run 级可变状态；回写阶段在主协程里
- * 按模型请求的顺序逐条做，端点对 tool 消息顺序敏感，回写绝不能乱序。
- */
-private data class ToolOutcome(
-    val call: ToolCallRequest,
-    val result: ToolResult,
-    /** 这一条实际跑了多久（毫秒）；被拒/未知工具为 0。 */
-    val toolMs: Long,
-    /** 给审批与事件用的参数预览（截断过的）。 */
-    val argsPreview: String,
-)
-
-/**
  * The agent loop: send the conversation to the model, execute whatever tools it asks
  * for, feed the results back, and repeat until it stops calling tools.
  *
@@ -966,7 +925,7 @@ class AgentEngine(
             if (readable) skills.catalog(skills.listHeaders()) else ""
         }
         val systemText = withContext(Dispatchers.Default) {
-            systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText)
+            buildSystemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText)
         }
         breakSystem = systemText.length / 4
         wire += ChatMessage.system(systemText)
@@ -1238,7 +1197,7 @@ class AgentEngine(
                     goalText = updatedGoal
                     goalMode = updatedGoalMode
                     val updatedSystem = withContext(Dispatchers.Default) {
-                        systemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText, goalMode)
+                        buildSystemPrompt(settings, registry, skillCatalog, memory.entries.value, profile.text.value, goalText, goalMode)
                     }
                     wire[0] = ChatMessage.system(updatedSystem)
                     breakSystem = updatedSystem.length / 4
@@ -1729,28 +1688,6 @@ class AgentEngine(
     }
 
     /**
-     * 这一轮**成功**、但中途重试过时，留在消息上的那条过程记录。
-     *
-     * 与 [LoopExitPolicy] 的分工：终态策略保留失败回执的「已重试 2 次」，说明为什么这轮这么久，
-     * 这条是**成功**的过程块（用户：「重试成功要在过程态中留痕……整轮成功就不要有错误提示卡片」）。
-     * 没有重试就返回 null —— 不留空块。
-     */
-    private fun retryTraceNote(retries: Int, reason: String): String? = when {
-        retries <= 0 -> null
-        reason.isBlank() -> "自动重试 $retries 次后成功"
-        else -> "自动重试 $retries 次 · $reason"
-    }
-
-    /**
-     * 一轮里可能同时发生两件事：先重试，最后又被上游切断。块只有一行，两件事都得说，
-     * 所以按发生顺序用「；」连起来；都没有就是 null（不留空块）。
-     */
-    private fun traceNoteOf(retries: Int, reason: String, cut: String?): String? =
-        listOfNotNull(retryTraceNote(retries, reason), cut)
-            .takeIf { it.isNotEmpty() }
-            ?.joinToString("；")
-
-    /**
      * Publishes the end of a stopped run.
      *
      * It does not throw: the transcript produced so far is still real, the user can
@@ -2118,15 +2055,6 @@ class AgentEngine(
         return checkedSummary(turn.text, turn.finishReason, transcript.length)
     }
 
-    private fun renderForSummary(message: ChatMessage): String = buildString {
-        append(message.role).append(": ")
-        append(message.text)
-        message.toolCalls.forEach { call ->
-            append("\n  [调用工具 ").append(call.name).append(' ').append(call.arguments).append(']')
-        }
-        if (message.imageCount > 0) append("\n  （含截图，已省略）")
-    }
-
     /**
      * How big the next request will be, in the endpoint's own tokens where possible.
      *
@@ -2167,21 +2095,6 @@ class AgentEngine(
         val imagesDelta = (images - lastPromptImages).coerceAtLeast(0) * IMAGE_TOKENS
         return reported + textDelta + imagesDelta
     }
-
-    private fun wireChars(wire: List<ChatMessage>): Int = wire.sumOf { messageChars(it) }
-
-    /**
-     * What one message costs in characters: its text and the arguments of any tool call it asks
-     * for. Both travel to the endpoint, and leaving the arguments out would undercount the part
-     * of a history that is made almost entirely of tool calls.
-     *
-     * A screenshot is deliberately *not* counted here, even though its base64 also travels: it is
-     * priced per image by [estimatePromptTokens] instead. Counting it as characters made one
-     * screenshot — hundreds of thousands of base64 characters, roughly a thousand real tokens —
-     * look like a quarter of a million tokens of context.
-     */
-    private fun messageChars(message: ChatMessage): Int =
-        promptMessageChars(message)
 
     private fun stats(): StreamStats {
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
@@ -2240,99 +2153,6 @@ class AgentEngine(
     // 而原来一条测试都没有。
     private fun sanitize(messages: List<StoredMessage>): List<StoredMessage> =
         WireSanitize.apply(messages)
-
-    /**
-     * Writes one stored message onto the wire.
-     *
-     * This is the *rebuild* path, and it has to produce exactly what the live path produced for the
-     * same message: a rebuilt prompt that differs by so much as a wrapper sentence is not the request
-     * the model answered, and the prompt cache keys on that prefix. **Any text the live path wraps
-     * around a message — the steer marker, the screenshot notes — must be mirrored here**, and any
-     * new one added live must be added here in the same commit.
-     */
-    private fun appendToWire(
-        wire: MutableList<ChatMessage>,
-        message: StoredMessage,
-        settings: AppSettings,
-    ) {
-        // Images only go out when the configured model can read them; a text-only
-        // endpoint rejects the whole request otherwise.
-        val imageList = message.allImages.takeIf { settings.imageInput }.orEmpty()
-        val note = if (message.imageCount > 0 && imageList.isEmpty()) {
-            "\n（图片已省略：当前未开启「模型支持图片输入」）"
-        } else {
-            ""
-        }
-        when (message.role) {
-            // A steer reads as an interruption live, so it reads as one here too — the wrapper is
-            // what tells the model this was said mid-task rather than asked as a new question.
-            Roles.USER ->
-                if (message.steer) {
-                    // Replayed from a stored steer: same wrapper, and now the same picture and the
-                    // same omitted-image note as the live path. Leaving the image out here is what
-                    // would make a steer with a photo work in the run it was sent in and silently
-                    // lose it in every run that rebuilds this history afterwards.
-                    wire += ChatMessage.user("（用户在任务进行中说：${message.text}）$note", imageList)
-                } else {
-                    wire += ChatMessage.user(message.text + note, imageList)
-                }
-            Roles.SYSTEM -> wire += ChatMessage.system(message.text)
-            Roles.ASSISTANT -> wire += ChatMessage.assistant(
-                message.text,
-                message.toolCalls.map { ToolCallRequest(it.id, it.name, it.arguments) },
-            )
-            Roles.TOOL -> {
-                wire += ChatMessage.tool(
-                    message.toolCallId ?: message.toolName.orEmpty(),
-                    message.toolOutput.orEmpty(),
-                )
-                // The same two sentences the live path writes, chosen by the same condition: with
-                // image input on the picture itself goes out, and with it off the model is told a
-                // picture existed and that it cannot see it.
-                val tool = message.toolName.orEmpty()
-                if (imageList.isNotEmpty()) {
-                    wire += ChatMessage.screenshot("（这是上一步 $tool 返回的截图）", imageList)
-                } else if (message.imageCount > 0) {
-                    wire += ChatMessage.user(
-                        "（上一步 $tool 返回了一张截图，但当前模型未开启图片输入，你看不到图像内容。）",
-                    )
-                }
-            }
-        }
-    }
-
-    /**
-     * Why [tier] cannot run right now, or null when it can. The channel question is the same one
-     * the tools ask ([CapabilityHub.shellTier]), so a gate never promises a route the tool below
-     * it would refuse — 固定 标准档 or a tier that is not ready yet is reported as such instead of
-     * as a missing permission the user already granted.
-     */
-    private fun blockedReason(tier: String, capabilities: CapabilityHub): String? {
-        val state = capabilities.state.value
-        return when (tier) {
-            TIER_ACCESSIBILITY ->
-                // 无障碍是首选通道，但 Shizuku / root 也能完成同一批操作
-                // （input / screencap / uiautomator），所以有其中任一即可放行。
-                if (state.accessibility || capabilities.shellTier() != ShellTier.LOCAL) {
-                    null
-                } else {
-                    "还不能操作屏幕：请到「能力」页开启无障碍服务，或授权 Shizuku / root 中的任意一个。"
-                }
-            TIER_SHELL ->
-                when {
-                    capabilities.shellTier() != ShellTier.LOCAL -> null
-                    // Something is granted, so the tier the user fixed is what is blocking: saying
-                    // 「缺少 Shizuku（或 root）权限」 here would send them to grant it again.
-                    capabilities.preferred.value.isNotEmpty() && (state.shellReady || state.rootReady) ->
-                        "这类操作没有可用通道：已固定执行档次，但它还没就绪。" +
-                            "请到「能力」页开启你固定的那一档，或把执行档次改回「自动」。"
-                    else -> "缺少 Shizuku（或 root）权限：请到「能力」页授权后重试。"
-                }
-            TIER_ROOT ->
-                if (state.rootReady) null else "缺少 root 权限，当前无法执行该工具。"
-            else -> null
-        }
-    }
 
     /**
      * 跑**一条**工具调用，只产出 [ToolOutcome]，不碰 run 级的可变状态（wire/spans/produced/
@@ -2508,79 +2328,6 @@ class AgentEngine(
         return ToolOutcome(call = call, result = result, toolMs = toolMs, argsPreview = argsPreview)
     }
 
-    private fun systemPrompt(
-        settings: AppSettings,
-        registry: ToolRegistry,
-        skillCatalog: String,
-        memory: Map<String, MemoryEntry>,
-        profile: String,
-        goal: String,
-        goalMode: Boolean = false,
-    ): String = buildString {
-        // 顺序是固定的，**按当前次序编号**（旧文档里的「1 人设」是移动前的号，别再按旧号找）：
-        //   0 底座（一句话 + 工作规则）→ 1 工具表 → 2 插件 → 3 禁工具 → 4 技能
-        //   → 5 人设 → 6 画像 → 7 记忆
-        // 0-4 是产品对模型的硬要求，排在**人设之前**：不该被换一个人设就丢掉，也不该随人设的
-        // 语言变；5-7 是「用户自己的文字」，保持原语言。
-        append(SYSTEM_PROMPT_BASE)
-        append("\n\n## Available tools\n")
-        append(registry.promptSummary())
-        // The user's own objective, not a generated task. It rides just after the tool table
-        // so a long run cannot lose sight of it when history is compacted.
-        if (goal.isNotBlank()) {
-            append("\n\n## Current goal\n")
-            append(goal)
-            if (goalMode) {
-                append("\nThis is an active objective. Act on it instead of only describing a plan. ")
-                append("Use todo_write for multi-step work and goal_update for concrete progress. ")
-                append("If the objective is ambiguous, ask what to verify and mark it blocked; do not infer a task from unrelated history. ")
-                append("Verify the outcome before marking completed. If user input or unavailable access blocks further work, ")
-                append("mark blocked and explain what is needed. Call goal_update by itself, after other tools return.")
-            }
-        }
-        if (settings.subagentsEnabled && settings.approvalMode != ApprovalMode.DENY && !registry.isHidden("spawn_agent")) append(
-            "\n\nFor substantial independent tasks, you may use spawn_agent to work in parallel. " +
-                "Keep simple work local. Pass only relevant context: children do not inherit this conversation. " +
-                "Use wait_agents to collect results, verify them, and cancel unneeded children. " +
-                "Completed child results may also arrive automatically as wait_agents responses between rounds. " +
-                "Read them as evidence, verify and integrate them into your final reply. " +
-                "Normal completion waits for accepted children and resumes you with unread results; stopping the parent cancels them. " +
-                "Use wait_agents before finishing while required results are outstanding.")
-        // 接线点 A（HOST-DEV §5）：让模型知道插件工具也能调，命名与内置一致。
-        // 这句是**固定文案**：插件列表是实时变的，而 systemPrompt() 不是 suspend（读盘要 suspend），
-        // 所以不在这里读插件；没有启用插件时多说一句也无害（模型看不到那个名字就不会去调）。
-        // 英文是刻意的：固定文案的语言不随插件作者的语言变（插件描述本身是什么语言就照原样出现）。
-        append(
-            "\n\nThe user has enabled plugin-provided tools (named `id.tool`); " +
-                "call them the same way as built-in tools.",
-        )
-        // 禁止档下每一次调用都必然失败（[request] 直接返回 false，模型只会拿到「用户拒绝了
-        // 这次调用。」），而上面那张工具表照旧列着。不在这里说明，模型就会一轮轮撞墙、把整轮
-        // 时间花在被拒的调用上，而不是直接回答用户。
-        if (settings.approvalMode == ApprovalMode.DENY) {
-            append(
-                "\n\nNote: the user has disabled tool calls. You cannot run any tool this round. " +
-                    "Answer with text only, and do not attempt to call a tool.",
-            )
-        }
-        if (skillCatalog.isNotBlank()) {
-            append("\n\n")
-            append(skillCatalog)
-        }
-        // 人设。空则整段不出现（只剩底座），不留一个空行。
-        val persona = settings.systemPrompt.trim()
-        if (persona.isNotEmpty()) {
-            append("\n\n")
-            append(persona)
-        }
-        // 画像在记忆**之前**（用户：「画像 在记忆前面吧」）：先交代"这是谁"，再说"我记得什么"。
-        // 两段都是模型该知道的事，但一段是用户写的、一段是模型自己写的，分开才不会让模型把自己的
-        // 笔记当成用户的自述。空画像整段不出现，不留一个空标题。
-        // **两个开关在「对话配置」里**（[AppSettings.injectProfile] / [AppSettings.injectMemory]）：
-        // 关掉＝整段不出现，**连小标题一起**不留 —— 留一个空标题会让模型以为"这里本来该有内容"。
-        append(injectedUserContext(profile, memory, settings.injectProfile, settings.injectMemory))
-    }
-
     }
 
     companion object {
@@ -2638,174 +2385,4 @@ class AgentEngine(
         /** 校准至少要这么多字符才可信：太短的轮次字符噪声大、比率会剧烈跳动。 */
         private const val CALIB_MIN_CHARS = 40
     }
-}
-
-/**
- * What one screenshot costs the prompt, in tokens.
- *
- * An endpoint charges for an image by its resolution, not by the size of the base64 that carries
- * it: a phone screenshot is a few hundred thousand characters and lands somewhere around a thousand
- * tokens on every vision endpoint in use. A flat thousand is deliberately not a formula — being a
- * few hundred out is nothing next to pricing the picture as text, which was out by two orders of
- * magnitude and made a 574k conversation compress itself against a 1000k window.
- *
- * File level rather than in the engine's companion: the trimmer's estimate below is a top-level
- * function and has to price images the same way.
- */
-private const val IMAGE_TOKENS = 1000
-
-/**
- * 「压缩上下文」虚拟工具的名字（用户：「要有压缩上下文的指令工具」）。
- *
- * 它不在 [com.suixing.agent.tools.ToolRegistry] 里：没有要跑的实现、没有能力档，只在
- * [AgentEngine.RunHandle.executeOneTool] 分发前被拦截（置 compressNow，本轮边界消费）。名字进
- * 请求的工具表（接线点 A 追加 [COMPRESS_CONTEXT_SPEC]），模型才调得到它。
- */
-const val COMPRESS_CONTEXT_TOOL = "compress_context"
-
-/**
- * 第 0 段：内置底座，**一句话 + 工作规则**，永远排在用户人设之前。
- *
- * 顺序：先说自己是谁（一句话），再说这个产品对模型的硬要求（工作规则）。
- * 为什么规则并进这一段而不是单列一段：它们是同一件事 —— 产品默认的、不随人设变的那部分；
- * 分开写只会在两段之间多一个空段落，读起来像两条互不相干的声明。
- *
- * 英文且固定：与人设用什么语言写无关；用户自己的文字（人设、记忆、画像）仍按原语言出现。
- * 规则内容是原「Tool calls / Planning / Writing files / Context」四段合并，再加目标一项 ——
- * 怎么调工具、怎么规划、怎么写大文件、什么时候压缩上下文、目标与步骤如何分工。
- */
-private const val SYSTEM_PROMPT_BASE = "You are a helpful software engineer assistant.\n\n" +
-    "## Working rules\n" +
-    "- Tool calls: arguments must be a valid JSON object, and several tools may be called in parallel. " +
-    "When a tool fails, read the error and adjust — do not repeat the same call. " +
-    "When the work is done, answer the user in Chinese, briefly saying what you did and what happened.\n" +
-    "- Planning: for multi-step work, call todo_write first and rewrite the complete list after each step " +
-    "(rewrite, not append) — your context may be compacted, the board will not be.\n" +
-    "- Goals: the user starts or resumes goal mode. Report progress, verified completion or a blocker with goal_update.\n" +
-    "- Writing files: use write_file. For content over roughly 200 lines or 8KB, write it in parts — " +
-    "the head first, then append with `append: true`; do not emit a whole large file in one call " +
-    "(that hits the model's own output limit and the round gets truncated).\n" +
-    "- Context: when it gets long (a long run, or the user says responses are slow or the context is " +
-    "too long), call " + COMPRESS_CONTEXT_TOOL + " — the oldest span is folded into a summary and later " +
-    "requests carry that summary plus the recent messages. The current round continues normally."
-
-/** 虚拟工具的规格：无参数。schema 用 OpenAI 的 object 形状，与 [com.suixing.agent.tools.Schema] 同款。 */
-internal val COMPRESS_CONTEXT_SPEC = com.suixing.agent.tools.ToolSpec(
-    name = COMPRESS_CONTEXT_TOOL,
-    description = "Compact the context: fold the oldest part of this conversation into a summary, so " +
-        "later requests carry the summary plus the recent messages. Call it when a long run has been " +
-        "going for a while, or when the user says responses are slow or the context is too long. " +
-        "The current round continues normally afterwards.",
-    parameters = com.suixing.agent.tools.Schema.objectOf(emptyList()),
-)
-
-/**
- * What a tool card says when the user stopped the run before the tool answered.
- *
- * It is a result, not a placeholder: the transcript has to answer the call it recorded, or the card
- * draws empty and the next run's replay drops the whole assistant turn for being unanswered.
- */
-private const val INTERRUPTED_TOOL_OUTPUT = "（已中断：任务被停止，这次调用没有结果）"
-
-/**
- * The same estimate for a stored message, used by the context trimmer: its text, plus a flat
- * [IMAGE_TOKENS] for a screenshot.
- *
- * The screenshot used to be priced by its base64 length, which is the same mistake the wire
- * estimate made: a few hundred thousand characters charged as text against a window of tokens. It
- * did not merely compress early — it made the trimmer believe a handful of messages filled the
- * whole budget and drop the rest of the conversation from the replay, silently.
- *
- * `internal` rather than private because the chat screen's context ring falls back to the same
- * estimate when an endpoint reports no usage: one implementation, so the ring and the trimmer can
- * never disagree about how big the conversation is. Change the divisor here and the ring changes
- * with it — which is the point.
- */
-internal fun estimateTokens(message: StoredMessage): Int {
-    val text = message.text
-    val extraTool = message.toolOutput.orEmpty().length + message.toolArgs.orEmpty().length
-    // 用 `imageCount`（零分配）而不是 `allImages.size`：后者每次访问都会新建一个 List，
-    // 而 `trim` 每轮要把全 history 过一遍（issue #39 问题 1）。
-    val image = IMAGE_TOKENS * message.imageCount
-    return tokensFor(text) + (extraTool + 2) / 3 + image
-}
-
-/**
- * 按**字符脚本**估算 token（issue #39 问题 3 的实测版）。
- *
- * ## 系数来自真实数据，不是猜的
- *
- * 取设备上一个真实会话日志（927 条消息、425 条带端点回报的 `promptTokens`/`completionTokens`），
- * 对 192 条"回答"样本（字数 ≥50、token ≥50）做**过原点最小二乘拟合**
- * `tokens = a·CJK + b·其它`，得到：
- *
- * | 脚本 | 实测 | 旧实现 |
- * |---|---|---|
- * | CJK | **1.10 token/字**（0.91 字/token） | 0.333（中英同价） |
- * | 其它（拉丁/代码/数字） | **0.39 token/字**（2.55 字/token） | 0.333 |
- *
- * 该会话的中文占比只有 14%，所以旧系数在这里平均低估 **约 32%**（实测 2.275 字/token vs 按 3 算）；
- * 拟合后平均绝对误差从 329 token 降到 152 token（**2.2 倍**）。
- *
- * ## 为什么必须修
- *
- * 低估的后果不是"数字难看"，而是**预算判断放行了超出上下文窗口的请求** ⇒ 端点直接拒绝
- * （用户看到的是"发送失败"）。偏高则只是少带一点历史，方向安全。
- *
- * ## 代价
- *
- * 每字符判一次区间 ⇒ 这条从 O(1) 变成 O(字数)。但它只在**每轮一次**的路径上被调用
- * （`trim` 已在后台线程；圆环按 `messagesRevision` 记忆，也是一轮一次），
- * 实测 500 条 × 平均 500 字 ≈ 0.25ms，可接受。
- */
-internal fun tokensFor(text: String): Int {
-    if (text.isEmpty()) return 0
-    var cjk = 0
-    var other = 0
-    for (ch in text) {
-        if (ch.isWhitespace()) continue
-        other++
-        if (ch.code in 0x2E80..0x9FFF || ch.code in 0xF900..0xFAFF || ch.code in 0xFF00..0xFFEF) cjk++
-    }
-    // 1.10·cjk + 0.39·(other−cjk)，收成整数运算：11/10 与 39/100 ⇒ 统一乘 100。
-    val tenths = 110 * cjk + 39 * (other - cjk)
-    return (tenths + 99) / 100
-}
-
-/**
- * Stamps what the round cost onto the message it produced. Endpoints that send no
- * usage block leave the counts at zero, which the UI reads as "unknown" rather than
- * "free".
- *
- * [firstTokenMs] is the wait before anything came back — the number a slow endpoint is
- * judged by, and the one the usage block never carries: it is measured here, between the
- * request going out and the first delta arriving.
- */
-private fun StoredMessage.withUsage(
-    usage: Usage?,
-    elapsedMs: Long,
-    model: String,
-    firstTokenMs: Long = 0L,
-): StoredMessage {
-    if (usage == null) {
-        return copy(elapsedMs = elapsedMs, model = model, firstTokenMs = firstTokenMs)
-    }
-    return copy(
-        promptTokens = usage.promptTokens,
-        completionTokens = usage.completionTokens,
-        reasoningTokens = usage.reasoningTokens,
-        cachedTokens = usage.cachedTokens,
-        elapsedMs = elapsedMs,
-        model = model,
-        firstTokenMs = firstTokenMs,
-    )
-}
-
-/** 工具表拼装的结果对（Default 块里一次算完带回，避免在后台线程写引擎字段）。 */
-private class ToolTable(
-    val plugins: List<PluginSpec>,
-    val specs: List<ToolSpec>,
-    val estimatedTokens: Int,
-) {
-    val hooks = PluginRuntime.hooksFor(plugins)
 }

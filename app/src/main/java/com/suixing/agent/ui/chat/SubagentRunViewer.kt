@@ -16,6 +16,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.vectorResource
+import com.suixing.agent.R
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
@@ -34,14 +37,20 @@ import com.suixing.agent.data.AppSettings
 import com.suixing.agent.data.ApprovalMode
 import com.suixing.agent.data.ChildRunConfig
 import com.suixing.agent.data.Roles
-import com.suixing.agent.ui.components.PageTopBar
 import com.suixing.agent.ui.components.SettingsStyle
 import com.suixing.agent.ui.components.SuixingDialog
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-/** Viewing a child opens its ordinary transcript directly; switching stays in the header menu. */
+/**
+ * 查看子智能体：一个**弹窗**，不是第三个页面。
+ *
+ * 之前这里是 `Dialog + fillMaxSize + Scaffold + PageTopBar`，实际整屏铺开——顶栏、返回箭头
+ * 和独立页面一模一样，站在别的页面旁边就成了另一种风格。现在换成和项目其它弹窗同一套外形
+ * （`AlertDialogDefaults` 的圆角与容器色），标题栏只放名字、状态和三个动作，正文交给下面
+ * 现成的子对话渲染复用。
+ */
 @Composable
 internal fun SubagentRunViewer(
     chatId: String, summaries: List<ChildRunSummary>, selectedId: String?,
@@ -50,31 +59,70 @@ internal fun SubagentRunViewer(
     val selected = summaries.firstOrNull { it.id == selectedId } ?: summaries.lastOrNull()
     var switching by remember { mutableStateOf(false) }
     var details by remember(selected?.id) { mutableStateOf(false) }
+    val maxHeight = (LocalConfiguration.current.screenHeightDp.dp * 0.82f)
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         BackHandler(onBack = onClose)
-        Scaffold(
-            modifier = Modifier.fillMaxSize(), containerColor = MaterialTheme.colorScheme.background,
-            contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            topBar = {
-                PageTopBar(title = selected?.name ?: "子智能体", onBack = onClose, actions = {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.92f).widthIn(max = 520.dp).heightIn(max = maxHeight),
+            shape = AlertDialogDefaults.shape,
+            color = AlertDialogDefaults.containerColor,
+            tonalElevation = AlertDialogDefaults.TonalElevation,
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(52.dp).padding(start = 16.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = selected?.name ?: "子智能体",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        selected?.let { child ->
+                            Text(
+                                text = "子智能体 · ${subagentStatusLabel(child.status)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (child.status.isActive()) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                     if (summaries.size > 1) Box {
                         TextButton(onClick = { switching = true }) { Text("切换") }
                         DropdownMenu(expanded = switching, onDismissRequest = { switching = false }) {
                             summaries.forEach { child ->
-                                DropdownMenuItem(text = { Text("${child.name} · ${subagentStatusLabel(child.status)}") },
-                                    onClick = { switching = false; onSelect(child.id) })
+                                DropdownMenuItem(
+                                    text = { Text("${child.name} · ${subagentStatusLabel(child.status)}") },
+                                    onClick = { switching = false; onSelect(child.id) },
+                                )
                             }
                         }
                     }
                     if (selected != null) TextButton(onClick = { details = true }) { Text("详情") }
-                })
-            },
-        ) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding)) {
-                if (selected == null) Text("当前会话还没有子智能体记录。",
-                    modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else readingState.SaveableStateProvider("child:${selected.id}") {
-                    SubagentConversation(chatId, selected.id, details, onDismissDetails = { details = false })
+                    IconButton(onClick = onClose) {
+                        Icon(
+                            imageVector = ImageVector.vectorResource(R.drawable.ic_x),
+                            contentDescription = "关闭",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                if (selected == null) {
+                    Text(
+                        "当前会话还没有子智能体记录。",
+                        modifier = Modifier.padding(16.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else readingState.SaveableStateProvider("child:${selected.id}") {
+                    SubagentConversation(
+                        chatId, selected.id, details,
+                        onDismissDetails = { details = false },
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
         }
@@ -90,7 +138,13 @@ private val ExpansionSaver = mapSaver<androidx.compose.runtime.snapshots.Snapsho
 
 /** Only the selected child subscribes to token updates; reading state belongs to that child. */
 @Composable
-private fun SubagentConversation(chatId: String, id: String, details: Boolean, onDismissDetails: () -> Unit) {
+private fun SubagentConversation(
+    chatId: String,
+    id: String,
+    details: Boolean,
+    onDismissDetails: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val record by remember(id) { SubagentRecords.record(id) }.collectAsStateWithLifecycle()
     val approval by remember(id) { Core.gate.pending.map { it[id] }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = Core.gate.pending.value[id])
@@ -138,7 +192,7 @@ private fun SubagentConversation(chatId: String, id: String, details: Boolean, o
         snapshotFlow { Triple(followLatest, pressed, listState.isScrollInProgress) }
             .collect { position.interactionChanged() }
     }
-    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+    Column(modifier.fillMaxWidth().fillMaxHeight()) {
         CompositionLocalProvider(LocalChatReadOnly provides true, LocalTranscriptPosition provides position) {
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth().transcriptPosition(position)

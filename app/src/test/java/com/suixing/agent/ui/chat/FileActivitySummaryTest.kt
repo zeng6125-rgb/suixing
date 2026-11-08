@@ -32,10 +32,11 @@ class FileActivitySummaryTest {
             replyFooterSections(streaming = false, fileCount = 0, hasActions = false))
     }
 
-    @Test fun oneChangedFileIsVisibleWithoutACollapseControl() {
+    @Test fun oneChangedFileAlsoStartsCollapsed() {
+        // 单个文件同样是「收尾信息」：默认只显示一行摘要，点开才看文件与按钮。
         val files = listOf(FileActivity("/sdcard/one.txt", FileActivityKind.MODIFIED))
-        assertFalse(fileActivityCanCollapse(files.size))
-        assertTrue(fileActivityInitiallyExpanded(files))
+        assertTrue(fileActivityCanCollapse(files.size))
+        assertFalse(fileActivityInitiallyExpanded(files))
     }
 
     @Test fun twoOrMoreFilesCanCollapseAndStartCollapsedEvenWhenDelivered() {
@@ -53,7 +54,7 @@ class FileActivitySummaryTest {
         val two = message("second", FileActivity("/sdcard/one.txt", FileActivityKind.MODIFIED, addedLines = 2, removedLines = 0))
         val files = fileActivitiesFor(emptyList(), listOf(one, two))
         assertEquals(1, files.size)
-        assertFalse(fileActivityCanCollapse(files.size))
+        assertTrue(fileActivityCanCollapse(files.size))
         assertEquals(3, files.single().addedLines)
     }
 

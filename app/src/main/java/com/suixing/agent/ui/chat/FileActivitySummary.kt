@@ -41,10 +41,11 @@ internal fun replyFooterSections(streaming: Boolean, fileCount: Int, hasActions:
     else -> emptyList()
 }
 
-internal fun fileActivityCanCollapse(fileCount: Int): Boolean = fileCount >= 2
+/** 单个文件也能收：卡片默认只给一行摘要，点开才看得到文件与按钮。 */
+internal fun fileActivityCanCollapse(fileCount: Int): Boolean = fileCount >= 1
 
-internal fun fileActivityInitiallyExpanded(activities: List<FileActivity>): Boolean =
-    activities.size == 1
+/** 一律默认收起：文件改动是收尾信息，不该把正文往下顶。 */
+internal fun fileActivityInitiallyExpanded(activities: List<FileActivity>): Boolean = false
 
 private fun mergeFileActivity(previous: FileActivity, next: FileActivity): FileActivity {
     fun FileActivity.isChange() = kind == FileActivityKind.CREATED || kind == FileActivityKind.MODIFIED
