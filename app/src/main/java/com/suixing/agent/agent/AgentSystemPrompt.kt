@@ -9,7 +9,7 @@ import com.suixing.agent.tools.ToolRegistry
  * 「压缩上下文」虚拟工具的名字（用户：「要有压缩上下文的指令工具」）。
  *
  * 它不在 [com.suixing.agent.tools.ToolRegistry] 里：没有要跑的实现、没有能力档，只在
- * [AgentEngine.RunHandle.executeOneTool] 分发前被拦截（置 compressNow，本轮边界消费）。名字进
+ * [AgentRun.executeOneTool] 分发前被拦截（置 compressNow，本轮边界消费）。名字进
  * 请求的工具表（接线点 A 追加 [COMPRESS_CONTEXT_SPEC]），模型才调得到它。
  */
 const val COMPRESS_CONTEXT_TOOL = "compress_context"

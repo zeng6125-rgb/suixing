@@ -10,17 +10,12 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.PixelFormat
-import android.graphics.Point
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
-import android.text.InputType
-import android.text.TextUtils
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -28,12 +23,10 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.compose.ui.graphics.toArgb
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
@@ -42,29 +35,16 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.suixing.agent.MainActivity
 import com.suixing.agent.R
 import com.suixing.agent.agent.AgentEngine
-import com.suixing.agent.agent.AgentEvent
-import com.suixing.agent.agent.RunState
 import com.suixing.agent.core.Core
-import com.suixing.agent.data.Conversation
-import com.suixing.agent.data.Roles
 import com.suixing.agent.data.StoredMessage
-import com.suixing.agent.data.withConversationApproval
-import com.suixing.agent.ui.theme.AppearancePalette
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.UUID
 import java.util.concurrent.Executors
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /**
  * A floating console for the run that is in progress: a ball that expands into a
@@ -87,45 +67,45 @@ class FloatConsoleService : Service() {
 
     companion object {
         /** 自停复核延迟：覆盖 AgentForegroundService 启动 FCS → startRun 注册之间的挂起点。 */
-private const val STOP_CHECK_MS = 1500L
+        private const val STOP_CHECK_MS = 1500L
 
-private const val CHANNEL_ID = "Suixing_console"
+        private const val CHANNEL_ID = "Suixing_console"
         private const val NOTIFICATION_ID = 1202
 
         /** The order the settings screen offers: follow the system, light, dark. */
-        private const val THEME_SYSTEM = 0
-        private const val THEME_DARK = 2
+        internal const val THEME_SYSTEM = 0
+        internal const val THEME_DARK = 2
 
         /**
          * The floating ball is the delivered icon artwork itself: the motion frames carry
          * their own cream rounded-square tile, so no coloured disc is drawn behind them.
          */
         /** The face loops play at this size inside the existing touch target. */
-        private const val BALL_SIZE_DP = 42
-        private const val TOUCH_TARGET_DP = 48
+        internal const val BALL_SIZE_DP = 42
+        internal const val TOUCH_TARGET_DP = 48
 
         /** The panel's width: the default, and the range the resize handle may drag it through. */
-        private const val PANEL_DEFAULT_DP = 268
-        private const val PANEL_MIN_DP = 200
-        private const val PANEL_MAX_DP = 420
+        internal const val PANEL_DEFAULT_DP = 268
+        internal const val PANEL_MIN_DP = 200
+        internal const val PANEL_MAX_DP = 420
 
         /**
          * 面板高度的可拖范围（dp）。用户拖过手柄后，面板从「随内容自适应」切成这个固定高度，
          * 内部主体包在 ScrollView 里 —— 拖得比内容矮也能滚到 stop / 发送，不会裁掉。
          * 0（默认）＝自适应，不写死高度，idle 时保持紧凑。
          */
-        private const val PANEL_MIN_HEIGHT_DP = 160
-        private const val PANEL_MAX_HEIGHT_DP = 640
+        internal const val PANEL_MIN_HEIGHT_DP = 160
+        internal const val PANEL_MAX_HEIGHT_DP = 640
 
         /** How much of a message the panel's summary keeps, per line. */
         /** 每条消息在悬浮窗里最多截多少字（内容区可滚后放宽，长答也能看个大概）。 */
-        private const val MESSAGE_PREVIEW_CHARS = 160
+        internal const val MESSAGE_PREVIEW_CHARS = 160
 
         /** 悬浮窗最多回显最近几条会话消息（内容区可滚，用户拖高就能看全这几条）。 */
-        private const val RECENT_MESSAGE_COUNT = 6
+        internal const val RECENT_MESSAGE_COUNT = 6
 
         /** The engine publishes a running tool as 「🔧 name…」 on [AgentEngine.RunHandle.liveLine]. */
-        private const val TOOL_LIVE_PREFIX = "🔧 "
+        internal const val TOOL_LIVE_PREFIX = "🔧 "
 
         /** 诊断日志：用户报「球不出现」时，这一个文件就能分辨三种完全不同的原因。 */
         private const val CONSOLE_TRACE_FILE = "console-trace.log"
@@ -182,7 +162,7 @@ private const val CHANNEL_ID = "Suixing_console"
     }
 
     /** The overlay's colours, taken from the app's own theme so it does not look foreign. */
-    private class Palette(
+    internal class Palette(
         val surface: Int,
         val field: Int,
         val ink: Int,
@@ -192,64 +172,64 @@ private const val CHANNEL_ID = "Suixing_console"
         val stroke: Int,
     )
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** The trace file is written from its own thread: a log must never hold up a frame. */
     private val traceWorker = Executors.newSingleThreadExecutor()
 
-    private lateinit var palette: Palette
-    private lateinit var windowManager: WindowManager
-    private lateinit var params: WindowManager.LayoutParams
+    internal lateinit var palette: Palette
+    internal lateinit var windowManager: WindowManager
+    internal lateinit var params: WindowManager.LayoutParams
 
     /** Which kind of overlay window is up: accessibility (preferred) or application. */
     private var windowType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-    private lateinit var root: LinearLayout
-    private lateinit var panel: LinearLayout
-    private lateinit var ballMotionView: ImageView
-    private lateinit var stateText: TextView
-    private lateinit var liveText: TextView
-    private lateinit var statsText: TextView
-    private lateinit var conversationText: TextView
+    internal lateinit var root: LinearLayout
+    internal lateinit var panel: LinearLayout
+    internal lateinit var ballMotionView: ImageView
+    internal lateinit var stateText: TextView
+    internal lateinit var liveText: TextView
+    internal lateinit var statsText: TextView
+    internal lateinit var conversationText: TextView
     /** 尾部读取闸门与最近一次结果（issue #69 P1-A）：同内容重复发射不再读盘。 */
-    private val tailGate = TailReadGate()
-    private var tailCache: List<com.suixing.agent.data.StoredMessage> = emptyList()
+    internal val tailGate = TailReadGate()
+    internal var tailCache: List<com.suixing.agent.data.StoredMessage> = emptyList()
 
-    private lateinit var recentText: TextView
+    internal lateinit var recentText: TextView
 
     /** 会话内容的可滚容器：手柄纵向拖动改的就是它的高度（用户拖高＝多看内容）。 */
-    private lateinit var contentScroll: ScrollView
-    private lateinit var steerInput: EditText
-    private lateinit var sendButton: TextView
-    private lateinit var stopArea: LinearLayout
-    private lateinit var feedbackText: TextView
+    internal lateinit var contentScroll: ScrollView
+    internal lateinit var steerInput: EditText
+    internal lateinit var sendButton: TextView
+    internal lateinit var stopArea: LinearLayout
+    internal lateinit var feedbackText: TextView
 
     /** 底部动作行的「停止」按钮：单 run 时显示在「回到对话」右侧，多 run 时隐藏（改走标题行）。 */
-    private lateinit var stopButton: TextView
+    internal lateinit var stopButton: TextView
 
     private var initializing = false
-    private var settingsLoaded = false
-    private var attached = false
-    private lateinit var ballMotion: BallMotion
-    private var stopAreaKey: List<Triple<String, Long, String>>? = null
-    private var conversationRenderRevision = 0L
+    internal var settingsLoaded = false
+    internal var attached = false
+    internal lateinit var ballMotion: BallMotion
+    internal var stopAreaKey: List<Triple<String, Long, String>>? = null
+    internal var conversationRenderRevision = 0L
 
     private var touchStartX = 0f
     private var touchStartY = 0f
     private var windowStartX = 0
     private var windowStartY = 0
-    private lateinit var ballTouchFeedback: FloatBallTouchFeedback
+    internal lateinit var ballTouchFeedback: FloatBallTouchFeedback
 
     /** The resize gesture: where the finger went down, and how wide the panel was then. */
-    private var resizeStartX = 0f
-    private var resizeStartWidth = 0
+    internal var resizeStartX = 0f
+    internal var resizeStartWidth = 0
 
     /** 同一手柄的纵向分量：落点与当时的高（0＝自适应模式下从当前实测高度起算）。 */
-    private var resizeStartY = 0f
-    private var resizeStartHeight = 0
-    private var resizeMinWidth = 0
-    private var resizeMaxWidth = 0
-    private var resizeMinHeight = 0
-    private var resizeMaxHeight = 0
+    internal var resizeStartY = 0f
+    internal var resizeStartHeight = 0
+    internal var resizeMinWidth = 0
+    internal var resizeMaxWidth = 0
+    internal var resizeMinHeight = 0
+    internal var resizeMaxHeight = 0
 
     /**
      * The three settings this service reads synchronously, kept as one readable copy.
@@ -259,14 +239,14 @@ private const val CHANNEL_ID = "Suixing_console"
      * The collector in [observeRun] is the only writer and it writes on every change, so this copy
      * is never more than one emission behind.
      */
-    private data class ConsoleSettings(
+    internal data class ConsoleSettings(
         val resident: Boolean = false,
         val whileRunning: Boolean = true,
         val widthDp: Int = 0,
         val heightDp: Int = 0,
     )
 
-    private var consoleSettings = ConsoleSettings()
+    internal var consoleSettings = ConsoleSettings()
 
     // **自停要延迟并复核**（issue #56 R2）。FCS 由 AgentForegroundService 在
     // `engine.startRun()` **之前**启动，中间隔着 saveSession()/settings.current() 等挂起点；
@@ -274,7 +254,7 @@ private const val CHANNEL_ID = "Suixing_console"
     // ⇒ `running == false` 且默认 `resident == false` ⇒ 立刻 stopSelf()，而整轮 run
     // 期间没有任何补启路径（MainActivity 那处要回前台才触发）⇒ 悬浮球整轮不出现。
     // 这里改成「延迟 + 复核」：运行态在延迟内注册进来就撤销这次自停。
-    private val mainHandler = Handler(Looper.getMainLooper())
+    internal val mainHandler = Handler(Looper.getMainLooper())
     private var stopCheckPosted = false
     private val stopCheck = Runnable {
         stopCheckPosted = false
@@ -503,7 +483,7 @@ private const val CHANNEL_ID = "Suixing_console"
      * Read from the synchronous copy of the settings rather than from `current()`, which is
      * suspending and cannot be awaited from a lifecycle callback or a touch listener.
      */
-    private fun refreshVisibility() {
+    internal fun refreshVisibility() {
         val settings = consoleSettings
         val lifecycle = ProcessLifecycleOwner.get().lifecycle.currentState
         val foreground = lifecycle.isAtLeast(Lifecycle.State.STARTED)
@@ -540,7 +520,7 @@ private const val CHANNEL_ID = "Suixing_console"
      * four of its inputs, and a refused window prints the exception. Keep it small, it is written
      * from a phone.
      */
-    private fun trace(line: String) {
+    internal fun trace(line: String) {
         val at = System.currentTimeMillis()
         val zone = java.time.ZoneId.systemDefault()
         val accessibility = SuixingAccessibilityService.instance() != null
@@ -566,435 +546,9 @@ private const val CHANNEL_ID = "Suixing_console"
     }
 
 
-    /**
-     * The panel's width: whatever the user last dragged it to, or 268dp, and never wider than the
-     * window it floats in.
-     *
-     * A fixed 268dp is 74% of a 360dp screen and 100% of nothing at all in split screen, where the
-     * window can be 300dp wide: the card then ran off the right edge and its own text was cut.
-     */
-    private fun panelWidth(): Int = minOf(
-        dp(consoleSettings.widthDp.takeIf { it > 0 } ?: PANEL_DEFAULT_DP),
-        windowWidthPx() - dp(24),
-    ).coerceAtLeast(panelMinWidth())
-
-    /** The panel's width, re-applied whenever the stored one changes under it. */
-    private fun applyPanelWidth() {
-        (panel.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
-            val width = panelWidth()
-            if (layout.width == width) return
-            layout.width = width
-            panel.layoutParams = layout
-        }
-    }
-
-    private fun panelMinWidth(): Int = dp(PANEL_MIN_DP)
-
-    /** The widest the handle may drag: the ceiling, or the window, whichever is smaller. */
-    private fun panelMaxWidth(): Int =
-        minOf(dp(PANEL_MAX_DP), windowWidthPx() - dp(24)).coerceAtLeast(panelMinWidth())
-
-    /**
-     * 内容区高度：用户拖过就是那个固定值（夹在窗口高内），没拖过（0）就是 WRAP_CONTENT 随内容
-     * 自适应 —— 面板默认保持紧凑，只有用户主动拖高才写死。
-     */
-    private fun contentHeightPx(): Int {
-        val stored = consoleSettings.heightDp
-        return if (stored <= 0) {
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        } else {
-            dp(stored).coerceIn(contentMinHeight(), contentMaxHeight())
-        }
-    }
-
-    /** The content area's height, re-applied whenever the stored one changes under it. */
-    private fun applyPanelHeight() {
-        (contentScroll.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
-            val height = contentHeightPx()
-            if (layout.height == height) return
-            layout.height = height
-            contentScroll.layoutParams = layout
-        }
-    }
-
-    private fun contentMinHeight(): Int = dp(PANEL_MIN_HEIGHT_DP)
-
-    /** The tallest the handle may drag: the ceiling, or the window, whichever is smaller. */
-    private fun contentMaxHeight(): Int =
-        minOf(dp(PANEL_MAX_HEIGHT_DP), windowHeightPx() - dp(24)).coerceAtLeast(contentMinHeight())
-
-    /** The height of the window the console floats in, in px — see [windowWidthPx]. */
-    @Suppress("DEPRECATION")
-    private fun windowHeightPx(): Int {
-        val manager = getSystemService(WindowManager::class.java)
-            ?: return resources.displayMetrics.heightPixels
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val height = runCatching { manager.currentWindowMetrics.bounds.height() }.getOrDefault(0)
-            if (height > 0) return height
-        }
-        // 与 [windowWidthPx] 保持同一套回退（issue #56 R16）：分屏下 `displayMetrics` 给的是
-        // 应用窗口尺寸而不是真实屏高，少一级回退会让夹位算在错误的坐标系里。
-        val point = Point()
-        manager.defaultDisplay?.getRealSize(point)
-        return point.y.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
-    }
-
-    /**
-     * The width of the window the console floats in, in px — not the display's own.
-     *
-     * `resources.displayMetrics` reports the whole screen, so in split screen it hands the panel a
-     * width the window does not have. `currentWindowMetrics` is the window's own bounds, which is
-     * what a width cap has to be measured against; below R that call does not exist and the
-     * display's real size is the best answer available.
-     */
-    @Suppress("DEPRECATION")
-    private fun windowWidthPx(): Int {
-        val manager = getSystemService(WindowManager::class.java)
-            ?: return resources.displayMetrics.widthPixels
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val width = runCatching { manager.currentWindowMetrics.bounds.width() }.getOrDefault(0)
-            if (width > 0) return width
-        }
-        val point = Point()
-        manager.defaultDisplay?.getRealSize(point)
-        return point.x.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
-    }
-
-    /**
-     * Keeps the window inside the window's own width.
-     *
-     * The panel is a child of the same window as the ball, so the window may not start closer to
-     * the right edge than the panel is wide — dragged further right, the panel simply left the
-     * screen and its buttons were cut in half. [extraWidth] carries the panel's intended width for
-     * the moment it becomes visible, when this window has not been measured with it yet.
-     */
-    private fun clampX(extraWidth: Int = 0) {
-        val width = maxOf(root.width, extraWidth, dp(TOUCH_TARGET_DP))
-        params.x = boundedOverlayOffset(params.x, windowWidthPx(), width)
-        clampY()
-    }
-
-    private fun clampY() {
-        // Keep the ball and the expanded panel reachable after a drag or configuration change.
-        val height = if (panel.visibility == View.VISIBLE) {
-            maxOf(root.height, dp(TOUCH_TARGET_DP))
-        } else {
-            dp(TOUCH_TARGET_DP)
-        }
-        params.y = boundedOverlayOffset(params.y, windowHeightPx(), height)
-    }
-
-    /** A 42dp eye-animated ball inside a 48dp touch target. Run state chooses the loop. */
-    private fun buildBall(): FrameLayout {
-        resetBallTouchFeedback()
-        val size = dp(BALL_SIZE_DP)
-        val ball = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(TOUCH_TARGET_DP), dp(TOUCH_TARGET_DP))
-            setOnTouchListener { view, event -> onBallTouch(view, event) }
-        }
-        val visual = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
-            // 静态与四组动效使用同一个圆盘轮廓，透明区域直接露出壁纸。
-        }
-        ballMotionView = ImageView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(size, size)
-            scaleType = ImageView.ScaleType.FIT_XY
-            setImageResource(com.suixing.agent.R.drawable.brand_mark_round)
-        }
-        visual.addView(ballMotionView)
-        ballMotion = BallMotion(this, ballMotionView, mainHandler, scope)
-        ball.addView(visual)
-        ballTouchFeedback = FloatBallTouchFeedback(visual).also { feedback ->
-            ball.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-                override fun onViewAttachedToWindow(view: View) = Unit
-                override fun onViewDetachedFromWindow(view: View) = feedback.reset()
-            })
-        }
-        return ball
-    }
-
-    private fun resetBallTouchFeedback() {
+    internal fun resetBallTouchFeedback() {
         if (::ballTouchFeedback.isInitialized) ballTouchFeedback.reset()
     }
-
-    private fun buildPanel(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        visibility = View.GONE
-        background = GradientDrawable().apply {
-            cornerRadius = dp(20).toFloat()
-            setColor(palette.surface)
-            setStroke(dp(1), palette.stroke)
-        }
-        setPadding(dp(16), dp(14), dp(16), dp(14))
-        layoutParams = LinearLayout.LayoutParams(panelWidth(), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            topMargin = dp(8)
-        }
-
-        addView(
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(
-                    TextView(context).apply {
-                        text = "JAgent控制台"
-                        setTextColor(palette.accent)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    },
-                )
-                addView(collapseButton())
-            },
-        )
-
-        stateText = TextView(context).apply {
-            setTextColor(palette.ink)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            text = "空闲"
-        }
-        addView(stateText)
-
-        // One line, always: it changes many times a second, and a box that grows and
-        // shrinks with every delta is unreadable.
-        liveText = TextView(context).apply {
-            setTextColor(palette.muted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(2), 0, 0)
-        }
-        addView(liveText)
-
-        statsText = TextView(context).apply {
-            setTextColor(palette.muted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(4), 0, dp(10))
-        }
-        addView(statsText)
-
-        // 能看：which conversation this panel is talking about, and its last line or two. Without
-        // the name the box below would write into a chat the user cannot see; without the lines
-        // the panel could only ever say what the run is doing, never what was asked.
-        conversationText = TextView(context).apply {
-            setTextColor(palette.accent)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(2), 0, 0)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        }
-        addView(conversationText)
-
-        recentText = TextView(context).apply {
-            setTextColor(palette.muted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            // 顶部留 6dp：截图里内容首行紧贴会话名、像被裁掉半行，就是这里没有呼吸空间。
-            setPadding(0, dp(6), 0, dp(8))
-            // 不再 maxLines=2：内容现在包在可滚容器里，用户拖高面板就能多看 —— 这正是「悬浮窗
-            // 最主要的是显示内容给用户」要的效果。行数交给高度，而不是写死两行截断。
-        }
-        // 会话内容包进 ScrollView：默认随内容自适应（WRAP_CONTENT），用户拖手柄纵向把它固定成
-        // 某个高度，内容超出就滚 —— 拖矮也不会把下面的输入框/停止按钮顶出去（它们在这个滚动容器
-        // 之外）。这就是「高度可调」的落点，也是原注释里「固定高度会裁掉 stop 行」那个顾虑的正解。
-        contentScroll = ScrollView(context).apply {
-            isFillViewport = true
-            addView(
-                recentText,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                contentHeightPx(),
-            )
-        }
-        addView(contentScroll)
-
-        steerInput = EditText(context).apply {
-            // Neutral on purpose: this one box both steers a run and opens the next turn.
-            hint = "说一句…"
-            setHintTextColor(palette.muted)
-            setTextColor(palette.ink)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            maxLines = 3
-            background = GradientDrawable().apply {
-                cornerRadius = dp(12).toFloat()
-                setColor(palette.field)
-            }
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        addView(
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(steerInput)
-                // One button for both cases, labelled by the run state: 「插话」 into the run in
-                // flight, 「发送」 when nothing is running. See [sendFromPanel].
-                sendButton = actionButton("发送", accent = true) { sendFromPanel() }
-                addView(sendButton)
-            },
-        )
-
-        // 底部动作行：「回到对话」居左、「停止」居右，**同一行对齐**（截图反馈：原来「回到对话」
-        // 独占一行、停止孤悬在下一行右下角，中间一大块死空间）。单 run 时停止按钮就落在这行右侧；
-        // 多 run 时这行只留「回到对话」，带标题的停止行进上面的 [stopArea]。
-        stopArea = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
-        addView(stopArea)
-        addView(
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(actionButton("回到对话") { openChat() })
-                addView(
-                    View(context).apply {
-                        layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-                    },
-                )
-                stopButton = actionButton("停止", accent = true) {
-                    // 单 run 时这枚就是那个停止键：停最新的那个 run（与面板跟随的是同一个）。
-                    Core.engine.newestRun()?.let { stopRun(it) }
-                }
-                stopButton.visibility = View.GONE
-                addView(stopButton)
-            },
-        )
-        // The panel's other lines are rewritten from the run's state on every change, so the
-        // confirmation of a stop needs a line of its own to still be there when the run it
-        // named has already left the list.
-        feedbackText = TextView(context).apply {
-            setTextColor(palette.muted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(6), 0, 0)
-            visibility = View.GONE
-        }
-        addView(feedbackText)
-        // Last, so it reads as the panel's own corner: the handle that says 「this card can be
-        // dragged wider」 without a label.
-        addView(resizeHandle())
-    }
-
-    /**
-     * The panel's resize handle: drag sideways to widen or narrow the card.
-     *
-     * 二维（0.8.108 起）：横向拖改宽度，纵向拖改内容区高度。高度落在 [contentScroll] 这个可滚
-     * 容器上，拖矮也不会裁掉输入框/停止按钮（它们在容器之外）—— 所以「固定高度会裁掉 stop 行」
-     * 那个老顾虑不再成立，用户要的「能调高度」就落在这里。默认（没拖过）高度仍随内容自适应。
-     */
-    private fun resizeHandle(): View = View(this).apply {
-        background = GradientDrawable().apply {
-            cornerRadius = dp(2).toFloat()
-            setColor(palette.muted)
-        }
-        layoutParams = LinearLayout.LayoutParams(dp(30), dp(4)).apply {
-            gravity = Gravity.END
-            topMargin = dp(10)
-        }
-        setOnTouchListener { _, event -> onResizeTouch(event) }
-    }
-
-    /**
-     * The drag itself: the finger's own delta is what changes the width, so the handle keeps up
-     * with the gesture instead of jumping to where it points.
-     *
-     * The last width is written to the settings on the lift, not on every frame — a save per move
-     * would have the console writing a JSON file sixty times a second.
-     */
-    private fun onResizeTouch(event: MotionEvent): Boolean = when (event.actionMasked) {
-        MotionEvent.ACTION_DOWN -> {
-            resizeStartX = event.rawX
-            resizeStartWidth = panel.width
-            resizeStartY = event.rawY
-            // 从自适应起步时，用当前实测高度当锚点，这样第一下拖动是连续的、不会跳。
-            resizeStartHeight = contentScroll.height
-            resizeMinWidth = panelMinWidth()
-            resizeMaxWidth = panelMaxWidth()
-            resizeMinHeight = contentMinHeight()
-            resizeMaxHeight = contentMaxHeight()
-            true
-        }
-
-        MotionEvent.ACTION_MOVE -> {
-            val width = (resizeStartWidth + (event.rawX - resizeStartX)).toInt()
-                .coerceIn(resizeMinWidth, resizeMaxWidth)
-            (panel.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
-                layout.width = width
-                panel.layoutParams = layout
-            }
-            // 纵向：手柄在底部，手指往下拖＝要看更多内容＝内容区变高。夹在 [min,max] 内。
-            val height = (resizeStartHeight + (event.rawY - resizeStartY)).toInt()
-                .coerceIn(resizeMinHeight, resizeMaxHeight)
-            (contentScroll.layoutParams as? LinearLayout.LayoutParams)?.let { layout ->
-                layout.height = height
-                contentScroll.layoutParams = layout
-            }
-            true
-        }
-
-        MotionEvent.ACTION_UP -> {
-            rememberPanelWidth(panel.width)
-            rememberPanelHeight()
-            // A wider panel may no longer fit where a narrower one did, so the window is pulled
-            // back inside the screen with the width it just got.
-            clampX(panelWidth())
-            if (attached) runCatching { windowManager.updateViewLayout(root, params) }
-            true
-        }
-
-        else -> false
-    }
-
-    /** Remembers the dragged width in dp, so a density change cannot resize the card on its own. */
-    private fun rememberPanelWidth(px: Int) {
-        val widthDp = (px / resources.displayMetrics.density).roundToInt()
-        Core.appScope.launch {
-            Core.settings.update { it.copy(consoleWidthDp = widthDp.coerceIn(PANEL_MIN_DP, PANEL_MAX_DP)) }
-        }
-    }
-
-    /**
-     * Remembers the dragged content height in dp, same reason as the width.
-     *
-     * 存的是 [contentScroll] 的高度；重启后 [contentHeightPx] 把它读回来，面板保持用户拖的高度。
-     */
-    private fun rememberPanelHeight() {
-        val heightDp = (contentScroll.height / resources.displayMetrics.density).roundToInt()
-        Core.appScope.launch {
-            Core.settings.update {
-                it.copy(consoleHeightDp = heightDp.coerceIn(PANEL_MIN_HEIGHT_DP, PANEL_MAX_HEIGHT_DP))
-            }
-        }
-    }
-
-    private fun collapseButton(): TextView = TextView(this).apply {
-        text = "收起"
-        setTextColor(palette.muted)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        setPadding(dp(8), 0, 0, 0)
-        setOnClickListener { setExpanded(false) }
-    }
-
-    private fun actionButton(label: String, accent: Boolean = false, onClick: () -> Unit): TextView =
-        TextView(this).apply {
-            text = label
-            setTextColor(if (accent) palette.onAccent else palette.ink)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                cornerRadius = dp(12).toFloat()
-                setColor(if (accent) palette.accent else palette.field)
-            }
-            setPadding(dp(14), dp(9), dp(14), dp(9))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(8) }
-            setOnClickListener { onClick() }
-        }
 
     /**
      * Dragging moves the window; a touch that does not move opens the panel.
@@ -1003,7 +557,7 @@ private const val CHANNEL_ID = "Suixing_console"
      * handle for each gesture is worse than one that guesses: the system's own touch
      * slop decides which of the two the user meant.
      */
-    private fun onBallTouch(view: View, event: MotionEvent): Boolean = when (event.actionMasked) {
+    internal fun onBallTouch(view: View, event: MotionEvent): Boolean = when (event.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
             touchStartX = event.rawX
             touchStartY = event.rawY
@@ -1053,407 +607,10 @@ private const val CHANNEL_ID = "Suixing_console"
         else -> false
     }
 
-    /**
-     * Expanding makes the window focusable, which is the only way an overlay's text
-     * field can receive typing; collapsing hands the keyboard back to the app behind.
-     */
-    private fun setExpanded(expanded: Boolean) {
-        panel.visibility = if (expanded) View.VISIBLE else View.GONE
-        // Expanding widens this window to the panel's width, so the ball's own position can now be
-        // too far right for it: pulled back before the layout that would hang the card off-screen.
-        if (expanded) {
-            // Also the moment to re-measure: a rotation or a split-screen resize changes the window
-            // the card has to fit in, and this width was decided when the panel was built.
-            (panel.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
-                lp.width = panelWidth()
-                panel.layoutParams = lp
-            }
-            // **夹位要等布局跑完**（issue #56 R9）：刚把 panel 置 VISIBLE、宽度刚改，
-            // `clampY` 读到的 `root.height` 还是收起态的 44dp ⇒ 靠近底部展开时按过期高度
-            // 算出的 Y 会把面板吊在屏幕外。放到 post 里，等新测量结果出来再夹一次。
-            clampX(panelWidth())
-            root.post {
-                if (attached) {
-                    clampX(panelWidth())
-                    runCatching { windowManager.updateViewLayout(root, params) }
-                }
-            }
-        }
-        val flags = params.flags
-        params.flags = if (expanded) {
-            flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-        } else {
-            flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        }
-        params.softInputMode = if (expanded) {
-            // ADJUST_RESIZE is deprecated for activities in favour of WindowInsets, but
-            // an overlay window is not an activity and has no decor to fit: this is
-            // still the only way to keep the input box above the keyboard.
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
-        } else {
-            WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
-        }
-        if (attached) runCatching { windowManager.updateViewLayout(root, params) }
-        if (!expanded) hideKeyboard()
-    }
-
     // ------------------------------------------------------------------ 状态
 
-    /**
-     * Mirrors the engine's run state into the panel, and keeps the panel's own two lines current.
-     *
-     * The state comes from [Core.engine] rather than from anything local, so the panel
-     * and the chat screen can never tell two different stories about the same run.
-     */
-    private fun observeRun() {
-        scope.launch {
-            var lastChatId: String? = null
-            // The console follows whichever run started last; the map re-emits on every
-            // start/stop, so a newer run takes the panel over and an ended one hands it
-            // back to the previous run or hides the panel when none is left.
-            Core.engine.runsFlow
-                .collectLatest { runs ->
-                    // The panel follows whichever run started last; the map re-emits on every
-                    // start/stop, so a newer run takes the panel over and an ended one hands it
-                    // back to the previous run or hides the panel when none is left. The stop
-                    // area, unlike the panel, shows every run in flight.
-                    val orderedRuns = runs.values.sortedByDescending { it.startedAt }
-                    val handle = orderedRuns.firstOrNull()
-                    if (handle != null) lastChatId = handle.chatId
-                    renderStopArea(orderedRuns)
-                    renderConversation()
-                    refreshVisibility()
-                    val stateFlow = lastChatId?.let { Core.engine.stateOf(it) }
-                    var wasRunning = false
-                    suspend fun renderState(state: RunState) {
-                    // **相同文本不重设**（issue #56 R26）：根布局与这些 TextView 都是
-                    // WRAP_CONTENT，`TextView.setText` 对相同字符串没有可靠短路，会走
-                    // checkForRelayout() ⇒ requestLayout()+invalidate()。状态流 8Hz 抖动时
-                    // 内容常常没变，却每秒 8 次整窗 measure/layout/draw。
-                    stateText.setTextIfChanged(consoleStatus(state, handle))
-                    showStats(state.detail())
-                    // The live line is re-read on every state, and the engine ticks its state
-                    // while a run is in flight, so this stays current without a second stream.
-                    // 空时整行收起：截图里「正在执行」与会话名之间那条空白带，就是空的 liveText
-                    // 仍占着一行行高。有内容才显示。
-                    val live = if (state is RunState.Running) handle?.liveLine.orEmpty() else ""
-                    liveText.setTextIfChanged(live)
-                    liveText.visibility = if (live.isBlank()) View.GONE else View.VISIBLE
-                    // One button, two meanings, decided by the same question the label answers:
-                    // while something is running a line typed here joins that run, and with
-                    // nothing running it opens the conversation's next turn. The chat composer
-                    // reads the same way, so the two never disagree about what a tap will do.
-                    sendButton.setTextIfChanged(if (state is RunState.Running) "插话" else "发送")
-                    val running = state is RunState.Running
-                    ballMotion.setRunning(running)
-                    // Sparks fly in once on the leading edge of a run, not on every 8Hz tick.
-                    if (running && !wasRunning) ballMotion.playRunStart()
-                    wasRunning = running
-                    }
-                    if (stateFlow == null) renderState(RunState.Idle)
-                    else stateFlow.collect { renderState(it) }
-                }
-        }
-        // Which conversation the panel is talking about: the list re-emits on every save, so the
-        // title, the last lines and a rename all land without polling.
-        scope.launch {
-            Core.chats.conversations.collectLatest { renderConversation() }
-        }
-        // Both visibility switches live in the settings: a flip has to be felt at once, or the
-        // ball would sit there disagreeing with the switch that turned it off. This collector is
-        // also the only writer of [consoleSettings] — the synchronous copy everything else reads.
-        scope.launch {
-            Core.settings.flow.collect { stored ->
-                settingsLoaded = true
-                consoleSettings = ConsoleSettings(
-                    resident = stored.floatingConsole,
-                    whileRunning = stored.consoleWhileRunning,
-                    widthDp = stored.consoleWidthDp,
-                    heightDp = stored.consoleHeightDp,
-                )
-                trace("settings resident=${stored.floatingConsole} whileRunning=${stored.consoleWhileRunning} width=${stored.consoleWidthDp} height=${stored.consoleHeightDp}")
-                applyPanelWidth()
-                applyPanelHeight()
-                refreshVisibility()
-            }
-        }
-    }
-
-    /**
-     * The run's own title, except while a `ui_*` tool is on screen.
-     *
-     * 「正在操作手机」 is what the user wants to read when the agent is the one driving, and the
-     * tool's own name says nothing about that. Read off the live line the engine already publishes
-     * (`🔧 name…`), so nothing new has to be plumbed through for it.
-     */
-    private fun consoleStatus(state: RunState, handle: AgentEngine.RunHandle?): String {
-        val live = handle?.liveLine.orEmpty()
-        if (state is RunState.Running && live.startsWith(TOOL_LIVE_PREFIX)) {
-            val tool = live.removePrefix(TOOL_LIVE_PREFIX).trimEnd('…')
-            if (tool.startsWith("ui_")) return "正在操作手机（$tool）"
-        }
-        return state.title()
-    }
-
-    /**
-     * The conversation the panel is showing, and its last one or two lines.
-     *
-     * The one running wins over the one used last, because that is the chat a steer typed here
-     * would land in: the panel must name the conversation its own box writes to, or the user would
-     * be typing into a chat they cannot see. With nothing running it falls back to the top of the
-     * list, which is the conversation the app itself would open.
-     */
-    /**
-     * 设置第三行的文案；空串时把这一行整个收起（GONE），而不是留一条空行。
-     *
-     * Running/Done 时 [detail] 返回空 ⇒ 这行消失，那一格空间让给 [liveText]（正在生成的内容）与
-     * [contentScroll]（会话内容）—— 就是用户要的「悬浮窗最主要显示内容，不刷统计」。瞬态反馈
-     * （已发送/已插话/发送失败）非空，照常显示。
-     */
-    private fun showStats(text: String) {
-        statsText.setTextIfChanged(text)
-        val wanted = if (text.isBlank()) View.GONE else View.VISIBLE
-        if (statsText.visibility != wanted) statsText.visibility = wanted
-    }
-
-    /**
-     * 内容没变就不碰 TextView。
-     *
-     * 面板里的文本控件都是 `WRAP_CONTENT`，根 `params` 也是 —— `setText` 即使字符串相同
-     * 也没有可靠短路，会触发 `checkForRelayout()` 进而整窗 measure/layout（issue #56 R26）。
-     */
-    private fun TextView.setTextIfChanged(next: CharSequence) {
-        if (!text.contentEquals(next)) text = next
-    }
-
-    /**
-     * **改成挂起**（#30）：正文要按需从磁盘读（列表只带 meta）。
-     * 两个调用点都在协程里（`collectLatest`），所以这里挂起是安全的；
-     * 读的是**尾部**而不是全文 —— 悬浮窗只回显最近几条，没必要把 30MB 拉进内存。
-     */
-    private suspend fun renderConversation() {
-        val revision = ++conversationRenderRevision
-        val conversations = Core.chats.conversations.value
-        val running = Core.engine.newestRun()?.chatId
-        val conversation: Conversation? =
-            conversations.firstOrNull { it.id == running } ?: conversations.firstOrNull()
-        if (conversation == null) {
-            conversationText.text = "还没有会话"
-            recentText.text = "在下面的输入框里说一句，就会开一个新会话"
-            return
-        }
-        conversationText.text = conversation.title.ifBlank { "新会话" }
-        // 只留有正文的行：工具消息（role=TOOL、text=""）与失败回执等以前会显示成一条空的
-        // 「JAgent：」，占位却没内容。内容区可滚后回显最近 6 条，拖高就能多看。
-        // **正文要自己读**（#30）：列表只带 meta。用 runBlocking 拉全文会很糟，
-        // 所以这里只在后台线程取；renderConversation 由 UI 线程调用，改为 post 一次。
-        // 只取尾部几条就够回显；`readTail` 给的是「最近 N 轮」，比全文小一个数量级。
-        val recentMessages = conversation.messages.ifEmpty {
-            // **同键不重读**（issue #69 P1-A）：列表会因标题/其它会话的新消息而频繁发射，
-            // 那些都与本会话正文无关。只有会话/条数/更新时间变了才读一次尾部。
-            if (tailGate.shouldRead(conversation)) {
-                tailCache = runCatching { Core.chats.readTail(conversation.id)?.messages }
-                    .getOrNull().orEmpty()
-            }
-            tailCache
-        }
-        kotlinx.coroutines.currentCoroutineContext().ensureActive()
-        if (revision != conversationRenderRevision) return
-        val recent = recentMessages
-            .filter { it.text.isNotBlank() }
-            .takeLast(RECENT_MESSAGE_COUNT)
-        recentText.text = if (recent.isEmpty()) {
-            "这个会话还没有消息"
-        } else {
-            recent.joinToString("\n\n") { message ->
-                val speaker = if (message.role == Roles.USER) "你：" else "JAgent："
-                speaker + message.text.replace('\n', ' ').trim().take(MESSAGE_PREVIEW_CHARS)
-            }
-        }
-    }
-
-    /**
-     * Rebuilt whenever a run starts or ends.
-     *
-     * One run needs no label: there is nothing to disambiguate, so the button is the same one
-     * the console has always had. Two or more get a row each, titled, because a single button
-     * could only ever stop whichever run happened to be newest — not the one the user was
-     * looking at.
-     */
-    private fun renderStopArea(handles: List<AgentEngine.RunHandle>) {
-        val key = handles.map { Triple(it.chatId, it.startedAt, titleOf(it)) }
-        if (key == stopAreaKey) return
-        stopAreaKey = key
-        stopArea.removeAllViews()
-        if (handles.size <= 1) {
-            // 单 run（或没有）：停止键就落在底部动作行「回到对话」的右侧（[stopButton]），
-            // 不再单独占一行 —— 截图里那行孤悬右下角的停止按钮和它上面的死空间就是这么来的。
-            stopArea.visibility = View.GONE
-            stopButton.visibility = if (handles.isEmpty()) View.GONE else View.VISIBLE
-            return
-        }
-        // 两个以上：每个 run 一条带标题的行（一个按钮猜不出用户想停哪个），底部那枚隐藏。
-        stopArea.visibility = View.VISIBLE
-        stopButton.visibility = View.GONE
-        for (handle in handles) {
-            stopArea.addView(
-                LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(
-                        TextView(context).apply {
-                            text = titleOf(handle)
-                            setTextColor(palette.ink)
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                            maxLines = 1
-                            ellipsize = TextUtils.TruncateAt.END
-                            layoutParams = LinearLayout.LayoutParams(
-                                0,
-                                LinearLayout.LayoutParams.WRAP_CONTENT,
-                                1f,
-                            )
-                        },
-                    )
-                    addView(actionButton("停止", accent = true) { stopRun(handle) })
-                },
-            )
-        }
-    }
-
-    private fun stopRun(handle: AgentEngine.RunHandle) {
-        val stopped = Core.engine.cancel(handle.chatId)
-        // Named, so a stop aimed at one of several runs says which one it hit — and on its own
-        // line, because the run it names is about to leave the list and take its row with it.
-        feedbackText.text = if (stopped) "已请求停止：${titleOf(handle)}" else "这个任务已经结束了"
-        feedbackText.visibility = View.VISIBLE
-    }
-
-    /**
-     * The conversation's own title, so a rename is reflected; the title the run started with, for
-     * a conversation the list has not caught up with; then a short id, which is at least
-     * something the user can match against the chat list.
-     */
-    private fun titleOf(handle: AgentEngine.RunHandle): String {
-        val current = Core.chats.conversations.value.firstOrNull { it.id == handle.chatId }?.title
-        return current?.takeIf { it.isNotBlank() }
-            ?: handle.title.takeIf { it.isNotBlank() }
-            ?: "会话 ${handle.chatId.take(6)}"
-    }
-
-    /**
-     * The panel's box: 能发 — a line typed here reaches the conversation the panel names.
-     *
-     * Two cases, one button. A run in flight gets the line as a steer, which is what the console
-     * has always done. With nothing running the line becomes that conversation's next turn, and
-     * that goes through [Core.engine]'s own [AgentEngine.startRun] with the app's registry, gate
-     * and stores — the same call the chat screen makes, not a second sending path that could start
-     * a run the chat screen cannot see or stop.
-     */
-    private fun sendFromPanel() {
-        val text = steerInput.text.toString().trim()
-        if (text.isEmpty()) return
-        val handle = Core.engine.newestRun()
-        if (handle != null) {
-            // The line needs an id of its own: the engine's queue is keyed by it, and the console
-            // has no way to retract or promote what it says, so nothing else ever reads this one.
-            val queued = Core.engine.steer(handle.chatId, UUID.randomUUID().toString(), text)
-            if (queued) {
-                steerInput.setText("")
-                showStats("已插话，模型下一轮就能看到")
-                hideKeyboard()
-            } else {
-                showStats("这句话没有发出：任务刚好结束了")
-            }
-            return
-        }
-        steerInput.setText("")
-        hideKeyboard()
-        showStats("已发送，正在等回答…")
-        val chatId = Core.chats.conversations.value.firstOrNull()?.id
-        // On the app's own scope, not the service's: the answer outlives the panel being collapsed
-        // or the console being taken down, and the run has to keep writing its transcript.
-        Core.appScope.launch {
-            // A run that fails throws, and this scope has no handler of its own: unguarded, one
-            // refused endpoint would take the process down with the question already saved.
-            runCatching { startRunFor(chatId, text) }.onFailure { error ->
-                // 失败必须说出来：输入框已经被清空，用户只能靠这一行知道消息没发出去。
-                val reason = error.message ?: error::class.java.simpleName
-                scope.launch { showStats("发送失败：$reason") }
-            }
-        }
-    }
-
-    /**
-     * Starts the conversation's next turn and saves what it produced.
-     *
-     * The shape is the reminder path's, for the same reason: with no chat screen collecting the
-     * run's events, the messages the engine emits on its way out are the only copy of the answer
-     * there is — so they are gathered here and merged with what the run returned.
-     */
-    private suspend fun startRunFor(chatId: String?, text: String) {
-        val conversation = Core.chats.conversations.value.firstOrNull { it.id == chatId }
-            ?: Core.chats.create(text.take(18))
-        val title = conversation.title.ifBlank { text.take(18) }
-        val question = StoredMessage(id = UUID.randomUUID().toString(), role = Roles.USER, text = text)
-        // **历史要自己读**（#30）：`conversations` 只带 meta，`conversation.messages` 是空的。
-        // 悬浮窗发起的这一轮同样要把完整历史交给引擎，否则模型只能看到这一句问题。
-        val full = if (conversation.messages.isEmpty()) {
-            Core.chats.readAll(conversation.id)
-        } else {
-            conversation.messages
-        }
-        val history = full + question
-        // The question is saved before the run: a run that is refused, stopped or killed still
-        // leaves the user's own line in the transcript to look at.
-        Core.chats.save(conversation.copy(title = title, messages = history))
-        val emitted = mutableListOf<StoredMessage>()
-        try {
-            val produced = Core.engine.startRun(
-                chatId = conversation.id,
-                title = title,
-                history = history,
-                settings = Core.settings.current().withConversationApproval(conversation.approvalMode),
-                registry = Core.tools,
-                capabilities = Core.capabilities,
-                skills = Core.skills,
-                memory = Core.memory,
-                profile = Core.profile,
-                gate = Core.gate,
-                onEvent = { event ->
-                    when (event) {
-                        is AgentEvent.AssistantMessage -> emitted += event.message
-                        is AgentEvent.ToolMessage -> emitted += event.message
-                        else -> Unit
-                    }
-                },
-            )
-            // Invariant: `emitted` is `produced` in the same order, plus what the engine emits
-            // while ending a stopped run. A short `emitted` falls back to `produced` rather than
-            // saving a transcript with the wrong messages in it.
-            val transcript = if (emitted.size >= produced.size) {
-                produced + emitted.drop(produced.size)
-            } else {
-                produced
-            }
-            withContext(NonCancellable) {
-                Core.chats.save(conversation.copy(title = title, messages = history + transcript))
-            }
-        } catch (cancellation: CancellationException) {
-            // Stopping the run cancels this coroutine, and a cancelled coroutine refuses to
-            // suspend: the save has to run under NonCancellable or the answer the user waited for
-            // would be lost with the process still holding it. Rethrown, because swallowing it
-            // here would turn a stop into a normal ending.
-            withContext(NonCancellable) {
-                Core.chats.save(conversation.copy(title = title, messages = history + emitted))
-            }
-            throw cancellation
-        }
-    }
-
     /** The panel covers the chat screen, so it also has to be able to get back to it. */
-    private fun openChat() {
+    internal fun openChat() {
         val intent = Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pending = PendingIntent.getActivity(
@@ -1465,38 +622,11 @@ private const val CHANNEL_ID = "Suixing_console"
         runCatching { pending.send() }
     }
 
-    private fun hideKeyboard() {
+    internal fun hideKeyboard() {
         val manager = getSystemService(InputMethodManager::class.java) ?: return
         runCatching { manager.hideSoftInputFromWindow(steerInput.windowToken, 0) }
     }
 
-    /**
-     * 悬浮面板的颜色整份取自当前配色，不再写死一套墨绿：会话行、完成/运行标记和悬浮球
-     * 跟的是同一个 primary，切到 JAgent 配色（陶土橙）或 Codex 时一起变。
-     */
-    private fun paletteFor(themeMode: Int, paletteMode: Int): Palette {
-        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
-        val dark = themeMode == THEME_DARK || (themeMode == THEME_SYSTEM && night)
-        val scheme = AppearancePalette.fromId(paletteMode).scheme(dark)
-        fun Int.withAlpha(alpha: Float): Int =
-            (this and 0x00FFFFFF) or ((alpha * 255).toInt() shl 24)
-        return Palette(
-            surface = scheme.background.toArgb().withAlpha(0.95f),
-            field = scheme.surfaceContainer.toArgb(),
-            ink = scheme.onSurface.toArgb(),
-            muted = scheme.onSurface.toArgb().withAlpha(0.55f),
-            accent = scheme.primary.toArgb(),
-            onAccent = scheme.onPrimary.toArgb(),
-            stroke = scheme.outline.toArgb().withAlpha(0.2f),
-        )
-    }
-
-    private fun dp(value: Int): Int = TypedValue.applyDimension(
-        TypedValue.COMPLEX_UNIT_DIP,
-        value.toFloat(),
-        resources.displayMetrics,
-    ).toInt()
 
     // ------------------------------------------------------------ 前台服务
 
@@ -1541,28 +671,4 @@ private const val CHANNEL_ID = "Suixing_console"
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
     }
-}
-
-/** One line for the panel's headline. */
-private fun RunState.title(): String = when (this) {
-    is RunState.Idle -> "空闲"
-    is RunState.Running -> "正在执行"
-    is RunState.Done -> "已完成"
-    is RunState.Cancelled -> "已停止"
-    is RunState.Failed -> "失败"
-}
-
-/**
- * The second line: what went wrong, or a short idle note.
- *
- * 悬浮窗**不再刷 token/tps 统计**（用户：「悬浮窗不用显示这些，最主要的是显示内容给用户」）。
- * 那些数字属于聊天页的统计卡与圆环；悬浮窗这一行只保留真正有用的话——失败原因、中断、空闲提示。
- * Running/Done 时返回空串，[statsText] 随之隐藏，把空间让给 liveText（正在生成的内容）。
- */
-private fun RunState.detail(): String = when (this) {
-    is RunState.Idle -> "没有进行中的任务"
-    is RunState.Running -> ""
-    is RunState.Done -> ""
-    is RunState.Cancelled -> "已中断"
-    is RunState.Failed -> message
 }
